@@ -2,118 +2,157 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.express as px
-import re
+from datetime import datetime, timedelta
 
-# --- 1. THE BRAIN: DATA PERSISTENCE ---
-# This ensures your uploads stick even when you switch tabs
-if 'master_portfolio' not in st.session_state:
-    # Initial seed data from your latest CSV analysis
-    st.session_state.master_portfolio = {
-        'NVDA': 35.5022, 'NFLX': 21.3325, 'AAPL': 16.0975, 'VOO': 5.6809, 
-        'QQQ': 2.7495, 'META': 2.3024, 'AMD': 3.2234, 'WMT': 13.5583
+# --- 1. CONFIG & THEME ---
+st.set_page_config(page_title="Wealth Architect Pro", layout="wide", page_icon="📈")
+
+st.markdown("""
+    <style>
+    .main { background-color: #0f172a; color: white; }
+    div[data-testid="stMetric"] { background-color: #1e293b; border: 1px solid #334155; padding: 15px; border-radius: 12px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
+    .stTabs [data-baseweb="tab"] { background-color: #1e293b; border-radius: 4px 4px 0 0; padding: 10px 20px; color: white; }
+    .stTabs [aria-selected="true"] { background-color: #3b82f6 !important; }
+    </style>
+    """, unsafe_allow_html=True)
+
+# --- 2. DATA CORE (MIRRORING YOUR RECENT ACTIVITY) ---
+if 'portfolio' not in st.session_state:
+    # Based on your CSV: Adding Ticker, Qty, and mocked Purchase Date for Tax Logic
+    st.session_state.portfolio = {
+        'NVDA': {'qty': 35.50, 'cost': 120.50, 'date': '2025-06-15'},
+        'NFLX': {'qty': 21.33, 'cost': 580.00, 'date': '2024-11-10'}, # Long Term
+        'AAPL': {'qty': 16.10, 'cost': 175.20, 'date': '2025-08-20'},
+        'VOO':  {'qty': 5.68,  'cost': 450.00, 'date': '2025-01-05'},
+        'AMD':  {'qty': 3.22,  'cost': 160.00, 'date': '2025-12-01'},
+        'META': {'qty': 2.30,  'cost': 480.00, 'date': '2024-03-12'}, # Long Term
+        'WMT':  {'qty': 13.56, 'cost': 60.00,  'date': '2025-02-15'}
     }
-if 'upload_history' not in st.session_state:
-    st.session_state.upload_history = ["Initial Setup - March 2026"]
 
-# --- 2. THE ENGINE: LIVE PRICE & RSI ---
-def fetch_live_data(ticker, qty):
+# --- 3. ANALYTICS ENGINE ---
+def get_analysis(ticker, data):
     try:
-        data = yf.download(ticker.replace('.', '-'), period="1y", interval="1d", progress=False)
-        if data.empty: return None
-        close = data['Close'][ticker] if isinstance(data.columns, pd.MultiIndex) else data['Close']
+        ytick = ticker.replace('.', '-')
+        df_live = yf.download(ytick, period="1y", interval="1d", progress=False)
+        close = df_live['Close'][ytick] if isinstance(df_live.columns, pd.MultiIndex) else df_live['Close']
         curr = float(close.iloc[-1])
-        # RSI Math
+        
+        # RSI & Tax Calculation
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
         rsi = 100 - (100 / (1 + (gain / loss).iloc[-1]))
         
+        buy_date = datetime.strptime(data['date'], '%Y-%m-%d')
+        is_long = (datetime.now() - buy_date).days > 365
+        lt_date = buy_date + timedelta(days=366)
+        
+        # Recommendations
         status = "HOLD"
         if rsi < 35: status = "🔥 STRONG BUY"
         elif rsi > 75: status = "💰 TAKE PROFITS"
-        elif curr < close.rolling(200).mean().iloc[-1]: status = "⚠️ SELL/TRIM"
-        
-        return {"Price": curr, "Value": curr * qty, "RSI": round(rsi, 1), "Status": status}
+        elif curr < close.rolling(200).mean().iloc[-1]: status = "⚠️ TRIM"
+
+        return {
+            "Price": curr, "Value": curr * data['qty'], "P/L": (curr - data['cost']) * data['qty'],
+            "RSI": round(rsi, 1), "Status": status, "Tax": "Long" if is_long else "Short",
+            "LT_Date": lt_date.strftime('%Y-%m-%d')
+        }
     except: return None
 
-# --- 3. THE INTERFACE: JSX MIRROR ---
-st.set_page_config(page_title="Wealth Architect AI", layout="wide")
+# --- 4. UI TABS (JSX MIRROR) ---
+st.title("🛡️ Wealth Architect AI v3.0")
+t1, t2, t3, t4, t5 = st.tabs(["Dashboard", "Portfolio", "Recommendations", "Tax Playbook", "Activity"])
 
-# Custom Dark Mode Styling
-st.markdown("""
-    <style>
-    .main { background-color: #0f172a; }
-    div[data-testid="stMetric"] { background-color: #1e293b; border: 1px solid #334155; padding: 15px; border-radius: 10px; }
-    </style>
-    """, unsafe_allow_html=True)
-
-st.title("🛡️ Wealth Architect AI")
-
-# TABS MIRRORING YOUR JSX FILE
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💼 My Portfolio", "🎯 Recommendations", "📜 History & Upload"])
+# GLOBAL DATA FETCH
+if st.button("🔄 REFRESH LIVE MARKET DATA"):
+    with st.spinner("Analyzing Portfolio..."):
+        results = []
+        for t, d in st.session_state.portfolio.items():
+            res = get_analysis(t, d)
+            if res:
+                res.update({"Ticker": t, "Shares": d['qty'], "Avg Cost": d['cost']})
+                results.append(res)
+        st.session_state.current_df = pd.DataFrame(results)
 
 # --- TAB 1: DASHBOARD ---
-with tab1:
-    if st.button("🚀 SYNC LIVE MARKET DATA"):
-        with st.spinner("Fetching Wall Street Prices..."):
-            rows = []
-            for t, q in st.session_state.master_portfolio.items():
-                s = fetch_live_data(t, q)
-                if s: rows.append({"Ticker": t, "Value": s['Value'], "Status": s['Status'], "RSI": s['RSI']})
-            
-            df = pd.DataFrame(rows)
-            total = df['Value'].sum()
-            
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Total Net Worth", f"${total:,.2f}")
-            c2.metric("Bi-Weekly Deposit", "$900.00")
-            c3.metric("Status", "Fully Optimized" if "SELL" not in df['Status'].values else "Action Required")
-            
-            col_a, col_b = st.columns([2,1])
-            with col_a:
-                st.plotly_chart(px.bar(df, x="Ticker", y="Value", color="Status", template="plotly_dark"), use_container_width=True)
-            with col_b:
-                st.plotly_chart(px.pie(df, values='Value', names='Ticker', hole=0.4, template="plotly_dark"), use_container_width=True)
+with t1:
+    if 'current_df' in st.session_state:
+        df = st.session_state.current_df
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Total Value", f"${df['Value'].sum():,.2f}")
+        c2.metric("Total Gain/Loss", f"${df['P/L'].sum():,.2f}", f"{((df['Value'].sum()/sum(d['qty']*d['cost'] for d in st.session_state.portfolio.values())-1)*100):.2f}%")
+        c3.metric("Next $900 Deposit", "April 3, 2026")
+        c4.metric("Market Sentiment", "Bullish" if df['RSI'].mean() < 60 else "Overextended")
+        
+        col_left, col_right = st.columns([2,1])
+        with col_left:
+            st.plotly_chart(px.line(df, x="Ticker", y="RSI", title="Relative Strength Index (Momentum)", template="plotly_dark"), use_container_width=True)
+        with col_right:
+            st.plotly_chart(px.pie(df, values='Value', names='Ticker', title="Asset Allocation", hole=0.5, template="plotly_dark"), use_container_width=True)
+    else:
+        st.info("Hit 'Refresh' to load Dashboard data.")
 
 # --- TAB 2: PORTFOLIO ---
-with tab2:
-    st.subheader("Your Real-Time Holdings")
-    if 'rows' in locals() or 'df' in locals():
-        st.dataframe(df, use_container_width=True, hide_index=True)
-    else:
-        st.info("Click 'Sync' on the Dashboard to see live values.")
+with t2:
+    if 'current_df' in st.session_state:
+        st.subheader("Holdings Analysis")
+        # Direct Mirror of JSX Columns
+        display_df = st.session_state.current_df[['Ticker', 'Shares', 'Avg Cost', 'Price', 'Value', 'P/L', 'RSI', 'Tax']]
+        st.dataframe(display_df.style.map(
+            lambda x: "color: #4ade80" if "Long" in str(x) or (isinstance(x, (int, float)) and x > 0) else ("color: #f87171" if "Short" in str(x) or (isinstance(x, (int, float)) and x < 0) else ""),
+            subset=['Tax', 'P/L']
+        ), use_container_width=True, hide_index=True)
 
-# --- TAB 3: RECOMMENDATIONS ($900 STRATEGY) ---
-with tab3:
-    st.subheader("The $900 Bi-Weekly Deployment Plan")
-    if 'df' in locals():
-        # Find lowest RSI for the $900 buy
-        best_buy = df.sort_values(by="RSI").iloc[0]
-        st.success(f"**AI PICK:** Deploy your $900 into **{best_buy['Ticker']}**")
-        st.write(f"This asset is currently at an RSI of {best_buy['RSI']}, indicating it is the best value in your current list.")
+# --- TAB 3: RECOMMENDATIONS ---
+with t3:
+    if 'current_df' in st.session_state:
+        df = st.session_state.current_df
+        st.subheader("🎯 $900 Bi-Weekly Deployment")
+        best = df.sort_values(by="RSI").iloc[0]
+        st.success(f"**NEXT BUY (Apr 3):** Allocate the $900 to **{best['Ticker']}**.")
+        st.write(f"**Reasoning:** Lowest RSI ({best['RSI']}) indicates highest recovery potential.")
         
         st.divider()
-        st.write("### Sell/Trim Alerts")
-        trims = df[df['Status'].str.contains("SELL|PROFITS")]
+        st.subheader("✂️ Suggested Trims")
+        trims = df[df['Status'] == "⚠️ TRIM"]
         if not trims.empty:
-            st.warning("The following assets are overextended or in a downtrend:")
-            st.table(trims[['Ticker', 'Status']])
+            for _, row in trims.iterrows():
+                st.warning(f"**TRIM {row['Ticker']}:** Sell ~10% to lock in profits or mitigate loss. RSI is currently {row['RSI']}.")
         else:
-            st.write("✅ No urgent trims needed. All assets showing healthy momentum.")
+            st.write("No urgent trims required today.")
 
-# --- TAB 4: HISTORY & UPLOAD ---
-with tab4:
-    st.subheader("Robinhood Integration")
-    uploaded_file = st.file_uploader("Upload 'account_activity.csv' to update holdings", type="csv")
+# --- TAB 4: TAX PLAYBOOK ---
+with t4:
+    if 'current_df' in st.session_state:
+        df = st.session_state.current_df
+        st.subheader("Tax Efficiency Engine")
+        
+        st.write("### Upcoming Long-Term Transitions")
+        st.write("Selling after these dates will cut your tax bill by ~50%:")
+        transitions = df[df['Tax'] == 'Short'][['Ticker', 'LT_Date']].sort_values(by='LT_Date')
+        st.table(transitions)
+        
+        c_st, c_lt = st.columns(2)
+        st_val = df[df['Tax'] == 'Short']['Value'].sum()
+        lt_val = df[df['Tax'] == 'Long']['Value'].sum()
+        c_st.metric("Short-Term Exposure", f"${st_val:,.2f}")
+        c_lt.metric("Long-Term (Tax Safe)", f"${lt_val:,.2f}")
+
+# --- TAB 5: ACTIVITY & HISTORY ---
+with t5:
+    st.subheader("Transaction & Deposit History")
     
-    if uploaded_file:
-        # Simple Parser Logic
-        new_df = pd.read_csv(uploaded_file, on_bad_lines='skip', engine='python')
-        # Logic to extract tickers/shares would go here
-        st.session_state.upload_history.append(f"Uploaded {uploaded_file.name} at {datetime.now().strftime('%Y-%m-%d')}")
-        st.success("Portfolio Updated! Navigate back to Dashboard and hit Sync.")
+    # Bi-Weekly Scheduler Logic
+    st.write("### Upcoming $900 Deposits (2026)")
+    start_date = datetime(2026, 4, 3)
+    schedule = []
+    for i in range(10):
+        dep_date = start_date + timedelta(days=i*14)
+        schedule.append({"Date": dep_date.strftime('%Y-%m-%d'), "Amount": "$900.00", "Status": "Scheduled"})
+    st.table(pd.DataFrame(schedule))
     
     st.divider()
-    st.write("### Update History")
-    for item in st.session_state.upload_history[::-1]:
-        st.text(f"• {item}")
+    st.subheader("Robinhood CSV Sync")
+    st.file_uploader("Upload newest Account Activity to sync holdings", type="csv")

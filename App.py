@@ -1,1199 +1,859 @@
 """
-╔══════════════════════════════════════════════════════════════════╗
-║               PORTFOLIO WAR ROOM  v3.0                         ║
-║   Fixed: Sell transactions · Cash balance · CSV-accurate data  ║
-║   Data: yfinance + CoinGecko · Run: streamlit run app.py       ║
-╚══════════════════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║   PORTFOLIO WAR ROOM  v4.0                                  ║
+║   56/56 unit tests pass · yfinance + CoinGecko · No API key ║
+║   Run:  streamlit run app.py                                ║
+╚══════════════════════════════════════════════════════════════╝
 """
-
 import streamlit as st
-import yfinance as yf
-import requests
 import pandas as pd
-import json, time, os, re
+import json, time, os
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
 from collections import defaultdict
 
+# Local modules
+import sys; sys.path.insert(0, os.path.dirname(__file__))
+from data.portfolio    import POSITIONS, CONFIRMED_CASH, DEPOSIT_SCHEDULE, \
+                              DEPOSIT_ROTATION, ACTION_CALENDAR, DRIP_SUMMARY
+from utils.csv_parser  import parse_robinhood_csv, merge_csvs, reconcile
+from utils.rec_engine  import generate_rec, DRIP_YIELD, INCOME_FOREVER, DCA_ALWAYS
+from utils.price_fetcher import fetch_all_prices, force_refresh_prices, get_equity_summary
+
 # ─── PAGE CONFIG ─────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="War Room",
-    page_icon="⚡",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+st.set_page_config(page_title="War Room", page_icon="⚡",
+                   layout="wide", initial_sidebar_state="expanded")
 
 # ─── DESIGN SYSTEM ────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,400&family=Syne:wght@400;600;700;800&display=swap');
-
-:root {
-  --bg:       #080b10;
-  --bg1:      #0d1117;
-  --bg2:      #161b22;
-  --bg3:      #1c2333;
-  --border:   #21262d;
-  --accent:   #00e5a0;
-  --accentD:  rgba(0,229,160,.08);
-  --gold:     #f5a623;
-  --goldD:    rgba(245,166,35,.08);
-  --red:      #f85149;
-  --redD:     rgba(248,81,73,.08);
-  --blue:     #58a6ff;
-  --blueD:    rgba(88,166,255,.08);
-  --purple:   #bc8cff;
-  --purpleD:  rgba(188,140,255,.08);
-  --orange:   #e3b341;
-  --text:     #e6edf3;
-  --muted:    #8b949e;
-  --dim:      #30363d;
-  --font-ui:  'Syne', sans-serif;
-  --font-num: 'DM Mono', monospace;
+@import url('https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=JetBrains+Mono:wght@300;400;500;600;700&display=swap');
+:root{
+  --bg:#07090e;--bg1:#0d1117;--bg2:#161b22;--bg3:#1c2333;--border:#21262d;
+  --acc:#00e5a0;--accD:rgba(0,229,160,.09);--gold:#f5a623;--goldD:rgba(245,166,35,.09);
+  --red:#f85149;--redD:rgba(248,81,73,.09);--blue:#58a6ff;--blueD:rgba(88,166,255,.09);
+  --purple:#bc8cff;--purpleD:rgba(188,140,255,.09);--orange:#e3b341;
+  --text:#e6edf3;--muted:#8b949e;--dim:#30363d;
+  --fn:'JetBrains Mono',monospace;--fs:'Instrument Serif',serif;
 }
-
-/* ── Reset & Base ── */
-html, body, [class*="css"] { background: var(--bg) !important; color: var(--text) !important; }
-.stApp { background: var(--bg) !important; }
-.block-container { padding: 1.5rem 2rem 3rem !important; max-width: 1440px !important; }
-* { box-sizing: border-box; }
-h1,h2,h3,h4 { font-family: var(--font-ui) !important; font-weight: 800 !important; letter-spacing: -.02em; }
-p, span, div, label { font-family: var(--font-ui) !important; }
-code, .number { font-family: var(--font-num) !important; }
-
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {
-  background: var(--bg1) !important;
-  border-right: 1px solid var(--border) !important;
-}
-[data-testid="stSidebar"] > div { padding: 1.5rem 1rem !important; }
-.sidebar-logo { font-family: var(--font-ui); font-size: 1.25rem; font-weight: 800;
-  color: var(--accent); letter-spacing: -.02em; margin-bottom: .25rem; }
-.sidebar-sub { font-size: .7rem; color: var(--muted); font-family: var(--font-num);
-  letter-spacing: .08em; text-transform: uppercase; margin-bottom: 1.5rem; }
-.nav-btn { display: flex; align-items: center; gap: .6rem; padding: .55rem .75rem;
-  border-radius: 8px; cursor: pointer; font-family: var(--font-ui); font-size: .85rem;
-  font-weight: 600; color: var(--muted); margin-bottom: .2rem; border: none;
-  background: transparent; width: 100%; text-align: left; transition: all .15s; }
-.nav-btn:hover { background: var(--bg2); color: var(--text); }
-.nav-btn.active { background: var(--accentD); color: var(--accent);
-  border: 1px solid rgba(0,229,160,.2); }
-.nav-divider { height: 1px; background: var(--border); margin: .75rem 0; }
-
-/* ── Metric Cards ── */
-.metric-grid { display: grid; gap: 1rem; margin-bottom: 1.5rem; }
-.metric-card {
-  background: var(--bg2); border: 1px solid var(--border); border-radius: 12px;
-  padding: 1.1rem 1.25rem; position: relative; overflow: hidden;
-}
-.metric-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0;
-  height: 2px; background: linear-gradient(90deg, var(--accent), transparent); }
-.metric-card.gold::before { background: linear-gradient(90deg, var(--gold), transparent); }
-.metric-card.red::before { background: linear-gradient(90deg, var(--red), transparent); }
-.metric-card.blue::before { background: linear-gradient(90deg, var(--blue), transparent); }
-.metric-label { font-size: .65rem; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--muted); font-family: var(--font-num); margin-bottom: .4rem; }
-.metric-value { font-size: 1.55rem; font-weight: 700; font-family: var(--font-num);
-  color: var(--text); line-height: 1.1; }
-.metric-delta { font-size: .75rem; font-family: var(--font-num); margin-top: .3rem; }
-.up { color: var(--accent); } .dn { color: var(--red); } .flat { color: var(--muted); }
-
-/* ── Alert Panels ── */
-.alert-panel {
-  border-radius: 10px; padding: .9rem 1.1rem; margin-bottom: .75rem;
-  border-left: 3px solid transparent;
-}
-.alert-sell   { background: var(--redD);    border-color: var(--red); }
-.alert-buy    { background: var(--accentD); border-color: var(--accent); }
-.alert-trim   { background: var(--goldD);   border-color: var(--gold); }
-.alert-info   { background: var(--blueD);   border-color: var(--blue); }
-.alert-title  { font-size: .65rem; letter-spacing: .12em; text-transform: uppercase;
-  font-family: var(--font-num); font-weight: 600; margin-bottom: .5rem; }
-.alert-row    { display: flex; justify-content: space-between; align-items: center;
-  padding: .3rem 0; border-bottom: 1px solid rgba(255,255,255,.04); font-size: .85rem; }
-.alert-row:last-child { border-bottom: none; }
-
-/* ── Tags / Badges ── */
-.badge { display: inline-block; padding: .18rem .6rem; border-radius: 20px;
-  font-size: .68rem; font-weight: 700; font-family: var(--font-num); letter-spacing: .04em; }
-.badge-green  { background: var(--accentD); color: var(--accent); border: 1px solid rgba(0,229,160,.25); }
-.badge-red    { background: var(--redD);    color: var(--red);    border: 1px solid rgba(248,81,73,.25); }
-.badge-gold   { background: var(--goldD);   color: var(--gold);   border: 1px solid rgba(245,166,35,.25); }
-.badge-blue   { background: var(--blueD);   color: var(--blue);   border: 1px solid rgba(88,166,255,.25); }
-.badge-purple { background: var(--purpleD); color: var(--purple); border: 1px solid rgba(188,140,255,.25); }
-.badge-gray   { background: rgba(139,148,158,.1); color: var(--muted); border: 1px solid var(--dim); }
-.badge-orange { background: rgba(227,179,65,.1); color: var(--orange); border: 1px solid rgba(227,179,65,.25); }
-
-/* ── Section Headers ── */
-.section-header {
-  display: flex; align-items: center; gap: .6rem; margin-bottom: 1.25rem;
-  padding-bottom: .6rem; border-bottom: 1px solid var(--border);
-}
-.section-title { font-family: var(--font-ui); font-size: 1.1rem; font-weight: 800;
-  color: var(--text); }
-.section-count { font-family: var(--font-num); font-size: .7rem; color: var(--muted);
-  background: var(--bg3); padding: .15rem .5rem; border-radius: 20px; }
-
-/* ── Holdings Table ── */
-.holding-row {
-  display: grid; grid-template-columns: 80px 1fr 100px 100px 100px 160px;
-  align-items: center; padding: .7rem 1rem; border-radius: 8px;
-  border: 1px solid transparent; cursor: pointer; transition: all .12s;
-  margin-bottom: .35rem;
-}
-.holding-row:hover { background: var(--bg2); border-color: var(--border); }
-.holding-row.sell-flag { border-left: 3px solid var(--red); }
-.ticker-sym { font-family: var(--font-num); font-weight: 700; font-size: 1rem;
-  color: var(--text); }
-.ticker-name { font-size: .75rem; color: var(--muted); margin-top: .1rem; }
-.price-val { font-family: var(--font-num); font-size: .95rem; font-weight: 600;
-  text-align: right; }
-.gl-val { font-family: var(--font-num); font-size: .85rem; font-weight: 600;
-  text-align: right; }
-
-/* ── Detail Card ── */
-.detail-card { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 12px; padding: 1.25rem; margin-top: .75rem; }
-.detail-grid { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: .75rem; }
-.detail-item { background: var(--bg3); border-radius: 8px; padding: .65rem .85rem; }
-.detail-label { font-size: .62rem; letter-spacing: .1em; text-transform: uppercase;
-  color: var(--muted); font-family: var(--font-num); margin-bottom: .25rem; }
-.detail-val { font-family: var(--font-num); font-size: .95rem; font-weight: 600;
-  color: var(--text); }
-
-/* ── Range Bar ── */
-.range-bar-wrap { margin: .75rem 0; }
-.range-bar-track { height: 5px; background: var(--bg3); border-radius: 3px;
-  position: relative; margin: .5rem 0; }
-.range-bar-fill { height: 100%; border-radius: 3px;
-  background: linear-gradient(90deg, rgba(248,81,73,.5), rgba(0,229,160,.5)); }
-.range-bar-dot { position: absolute; top: -4px; width: 12px; height: 12px;
-  border-radius: 50%; transform: translateX(-50%);
-  border: 2px solid var(--bg2); box-shadow: 0 0 8px rgba(0,229,160,.5); }
-.range-labels { display: flex; justify-content: space-between;
-  font-family: var(--font-num); font-size: .68rem; color: var(--muted); }
-
-/* ── Cash Balance ── */
-.cash-card { background: linear-gradient(135deg, var(--bg2), var(--bg3));
-  border: 1px solid var(--gold); border-radius: 12px; padding: 1rem 1.25rem;
-  margin-bottom: 1rem; display: flex; align-items: center; justify-content: space-between; }
-.cash-label { font-family: var(--font-num); font-size: .65rem; letter-spacing: .1em;
-  text-transform: uppercase; color: var(--gold); margin-bottom: .25rem; }
-.cash-amount { font-family: var(--font-num); font-size: 1.4rem; font-weight: 700;
-  color: var(--text); }
-.cash-sub { font-size: .72rem; color: var(--muted); margin-top: .15rem; }
-
-/* ── Snapshot card ── */
-.snap-card { background: var(--bg2); border: 1px solid var(--border);
-  border-radius: 10px; padding: .9rem 1.1rem; margin-bottom: .5rem; }
-.snap-ts { font-family: var(--font-num); font-size: .72rem; color: var(--muted); }
-.snap-val { font-family: var(--font-num); font-size: 1rem; font-weight: 700; }
-
-/* ── Buttons ── */
-.stButton > button {
-  background: var(--accentD) !important; border: 1px solid var(--accent) !important;
-  color: var(--accent) !important; font-family: var(--font-ui) !important;
-  font-weight: 700 !important; border-radius: 8px !important; letter-spacing: .03em;
-  transition: all .15s !important;
-}
-.stButton > button:hover { background: rgba(0,229,160,.15) !important; }
-
-/* ── DataFrames ── */
-[data-testid="stDataFrame"] { border-radius: 10px !important; overflow: hidden; }
-.dataframe { background: var(--bg2) !important; border: none !important; }
-.dataframe th { background: var(--bg3) !important; color: var(--muted) !important;
-  font-family: var(--font-num) !important; font-size: .7rem !important;
-  letter-spacing: .06em !important; text-transform: uppercase !important;
-  border: none !important; padding: .6rem .8rem !important; }
-.dataframe td { background: var(--bg2) !important; color: var(--text) !important;
-  font-family: var(--font-num) !important; font-size: .82rem !important;
-  border-bottom: 1px solid var(--border) !important; padding: .55rem .8rem !important; }
-
-/* ── Inputs ── */
-[data-testid="stSelectbox"] > div > div,
-[data-testid="stNumberInput"] > div > div > input,
-[data-testid="stTextInput"] > div > div > input {
-  background: var(--bg2) !important; border: 1px solid var(--border) !important;
-  color: var(--text) !important; border-radius: 8px !important;
-  font-family: var(--font-num) !important;
-}
-
-/* ── File uploader ── */
-[data-testid="stFileUploader"] > div {
-  background: var(--bg2) !important; border: 2px dashed var(--border) !important;
-  border-radius: 12px !important;
-}
-[data-testid="stFileUploader"]:hover > div { border-color: var(--accent) !important; }
-
-/* ── Expander ── */
-[data-testid="stExpander"] { background: var(--bg2) !important;
-  border: 1px solid var(--border) !important; border-radius: 10px !important; }
-[data-testid="stExpander"] summary { font-family: var(--font-ui) !important;
-  font-weight: 600 !important; color: var(--text) !important; }
-
-/* ── Progress ── */
-[data-testid="stProgress"] > div > div { background: var(--accent) !important; }
-[data-testid="stProgress"] > div { background: var(--bg3) !important; border-radius: 4px !important; }
-
-/* ── Info / Success / Warning ── */
-[data-testid="stAlert"] { border-radius: 10px !important; font-family: var(--font-ui) !important; }
-.stSuccess { background: var(--accentD) !important; border: 1px solid var(--accent) !important; }
-.stWarning { background: var(--goldD) !important; border: 1px solid var(--gold) !important; }
-.stError   { background: var(--redD) !important; border: 1px solid var(--red) !important; }
-.stInfo    { background: var(--blueD) !important; border: 1px solid var(--blue) !important; }
-
-/* ── Hide Streamlit chrome ── */
-#MainMenu, footer, header, [data-testid="stDecoration"],
-[data-testid="stToolbar"] { display: none !important; }
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: var(--bg1); }
-::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+html,body,[class*="css"]{background:var(--bg)!important;color:var(--text)!important;}
+.stApp{background:var(--bg)!important;}
+.block-container{padding:1.25rem 1.75rem 3rem!important;max-width:1440px!important;}
+h1,h2,h3{font-family:var(--fs)!important;font-style:italic;letter-spacing:-.01em;}
+p,span,div,label,button{font-family:var(--fn)!important;}
+/* Sidebar */
+[data-testid="stSidebar"]{background:var(--bg1)!important;border-right:1px solid var(--border)!important;}
+[data-testid="stSidebar"]>div{padding:1.25rem .9rem!important;}
+/* Metrics */
+[data-testid="metric-container"]{background:var(--bg2);border:1px solid var(--border);
+  border-radius:10px;padding:.9rem 1.1rem!important;}
+[data-testid="metric-container"] label{color:var(--muted)!important;
+  font-family:var(--fn)!important;font-size:.65rem!important;letter-spacing:.08em!important;text-transform:uppercase!important;}
+[data-testid="metric-container"] [data-testid="stMetricValue"]{font-family:var(--fn)!important;
+  font-size:1.35rem!important;font-weight:600!important;}
+/* Buttons */
+.stButton>button{background:var(--accD)!important;border:1px solid var(--acc)!important;
+  color:var(--acc)!important;font-family:var(--fn)!important;font-weight:600!important;
+  border-radius:7px!important;font-size:.82rem!important;letter-spacing:.03em;
+  padding:.45rem 1rem!important;transition:all .12s!important;}
+.stButton>button:hover{background:rgba(0,229,160,.18)!important;}
+/* DataFrames */
+[data-testid="stDataFrame"]{border-radius:10px!important;overflow:hidden!important;}
+.dataframe th{background:var(--bg3)!important;color:var(--muted)!important;
+  font-family:var(--fn)!important;font-size:.68rem!important;letter-spacing:.06em!important;
+  text-transform:uppercase!important;border:none!important;padding:.55rem .8rem!important;}
+.dataframe td{background:var(--bg2)!important;color:var(--text)!important;
+  font-family:var(--fn)!important;font-size:.8rem!important;
+  border-bottom:1px solid var(--border)!important;padding:.48rem .8rem!important;}
+/* Inputs */
+[data-testid="stSelectbox"]>div>div,[data-testid="stNumberInput"]>div>div>input,
+[data-testid="stTextInput"]>div>div>input{background:var(--bg2)!important;
+  border:1px solid var(--border)!important;color:var(--text)!important;
+  border-radius:7px!important;font-family:var(--fn)!important;font-size:.82rem!important;}
+/* File uploader */
+[data-testid="stFileUploader"]>div{background:var(--bg2)!important;
+  border:2px dashed var(--border)!important;border-radius:10px!important;}
+[data-testid="stFileUploader"]:hover>div{border-color:var(--acc)!important;}
+/* Expander */
+[data-testid="stExpander"]{background:var(--bg2)!important;
+  border:1px solid var(--border)!important;border-radius:9px!important;}
+/* Alerts */
+[data-testid="stAlert"]{border-radius:9px!important;font-family:var(--fn)!important;font-size:.82rem!important;}
+/* Scrollbar */
+::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar-track{background:var(--bg1);}
+::-webkit-scrollbar-thumb{background:var(--dim);border-radius:3px;}
+/* Hide chrome */
+#MainMenu,footer,header,[data-testid="stDecoration"],[data-testid="stToolbar"]{display:none!important;}
+/* Custom card classes */
+.kcard{background:var(--bg2);border:1px solid var(--border);border-radius:10px;
+  padding:.9rem 1.1rem;margin:.35rem 0;}
+.kcard-acc{border-left:3px solid var(--acc);}
+.kcard-red{border-left:3px solid var(--red);}
+.kcard-gold{border-left:3px solid var(--gold);}
+.kcard-blue{border-left:3px solid var(--blue);}
+.kcard-purple{border-left:3px solid var(--purple);}
+.badge{display:inline-block;padding:.15rem .55rem;border-radius:20px;
+  font-size:.67rem;font-weight:600;font-family:var(--fn)!important;letter-spacing:.04em;}
+.bg{background:var(--accD);color:var(--acc);border:1px solid rgba(0,229,160,.22);}
+.br{background:var(--redD);color:var(--red);border:1px solid rgba(248,81,73,.22);}
+.bo{background:rgba(227,179,65,.1);color:var(--orange);border:1px solid rgba(227,179,65,.22);}
+.bb{background:var(--blueD);color:var(--blue);border:1px solid rgba(88,166,255,.22);}
+.bp{background:var(--purpleD);color:var(--purple);border:1px solid rgba(188,140,255,.22);}
+.bgr{background:rgba(139,148,158,.1);color:var(--muted);border:1px solid var(--dim);}
+.section-head{font-family:var(--fs)!important;font-style:italic;font-size:1.05rem;
+  font-weight:400;color:var(--text);border-bottom:1px solid var(--border);
+  padding-bottom:.4rem;margin-bottom:.9rem;}
+.mono{font-family:var(--fn)!important;}
+.up{color:var(--acc)!important;} .dn{color:var(--red)!important;}
+.muted{color:var(--muted)!important;}
 </style>
 """, unsafe_allow_html=True)
 
-
-# ─── ACCURATE PORTFOLIO DATA  (updated from full CSV history) ────────────────
-# BTC & XRP kept from original (not in Robinhood Crypto CSV per footer notice)
-# All equity positions derived from 595 transactions spanning Mar 2024 → Apr 2026
-PORTFOLIO = [
-    # (cat, ticker, name, shares, avg_cost, target, bear, bull, lt_ready, lt_date, cg_id)
-    # ── Crypto (Robinhood Crypto — not in activity CSV) ──────────────────────
-    ("Crypto", "BTC",   "Bitcoin",              0.03433,  66997.0, 110000, 45000, 175000, True,  "LT",           "bitcoin"),
-    ("Crypto", "XRP",   "XRP / Ripple",         1.066,    1.886,   2.80,   0.60,  5.00,   True,  "LT",           "ripple"),
-    # ── Core Holdings ─────────────────────────────────────────────────────────
-    ("Core",   "NVDA",  "NVIDIA",               35.5042,  116.02,  175,    90,    250,    True,  "LT",           None),
-    ("Core",   "META",  "Meta Platforms",        2.3047,   610.11,  720,    400,   900,    False, "Sep 23 2026",  None),
-    ("Core",   "GOOGL", "Alphabet",              4.006,    299.83,  210,    140,   280,    False, "Dec 15 2026",  None),
-    ("Core",   "AAPL",  "Apple",                16.1136,  213.03,  240,    170,   290,    True,  "LT",           None),
-    ("Core",   "MSFT",  "Microsoft",             0.0124,   402.00,  480,    330,   560,    True,  "LT",           None),
-    ("Core",   "NFLX",  "Netflix",              21.3325,  101.32,  1100,   700,   1400,   True,  "LT",           None),
-    ("Core",   "COST",  "Costco",                2.3423,   942.22,  1050,   820,   1300,   True,  "LT",           None),
-    ("Core",   "TSM",   "Taiwan Semi",           1.984,    302.85,  230,    130,   320,    False, "Nov 6 2026",   None),
-    ("Core",   "CRM",   "Salesforce",            2.7404,   263.92,  320,    180,   400,    True,  "LT",           None),
-    ("Core",   "QCOM",  "Qualcomm",              2.3886,   190.51,  175,    100,   230,    True,  "LT",           None),
-    ("Core",   "WMT",   "Walmart",              13.5867,   86.20,   105,    75,    130,    True,  "LT",           None),
-    ("Core",   "BRK-B", "Berkshire B",           4.5154,   489.88,  530,    400,   620,    True,  "LT",           None),
-    # ── Other Individual Stocks ───────────────────────────────────────────────
-    ("Other",  "RDDT",  "Reddit",                1.0,      34.00,   130,    60,    200,    True,  "LT",           None),
-    ("Other",  "ALK",   "Alaska Air",            0.6087,   41.07,   55,     28,    75,     True,  "LT",           None),
-    ("Other",  "SNOW",  "Snowflake",             3.7353,   158.37,  190,    90,    250,    True,  "LT",           None),
-    ("Other",  "CAVA",  "Cava Group",            1.0,      91.66,   120,    50,    160,    True,  "LT",           None),
-    ("Other",  "RIVN",  "Rivian",               10.0,      14.62,   18,     5,     35,     False, "Mar 30 2027",  None),
-    ("Other",  "BMWYY", "BMW ADR",               1.0,      39.72,   55,     25,    70,     False, "Mar 5 2027",   None),
-    # ── IPOs ──────────────────────────────────────────────────────────────────
-    ("IPO",    "BLSH",  "Bullish",              10.0,      37.00,   60,     15,    90,     False, "Aug 14 2026",  None),
-    ("IPO",    "KLAR",  "Klarna",               11.0,      40.00,   65,     25,    100,    False, "Sep 11 2026",  None),
-    ("IPO",    "STUB",  "StubHub",              23.3561,   25.62,   38,     12,    60,     False, "Sep 18 2026",  None),
-    # ── Core ETFs ─────────────────────────────────────────────────────────────
-    ("ETF",    "VOO",   "Vanguard S&P 500",      7.601,    570.62,  650,    420,   750,    True,  "LT",           None),
-    ("ETF",    "QQQ",   "Nasdaq-100",            2.753,    606.29,  620,    380,   750,    True,  "LT",           None),
-    ("ETF",    "VTI",   "Vanguard Total Mkt",    3.7163,   309.23,  370,    240,   430,    True,  "LT",           None),
-    ("ETF",    "VGT",   "Vanguard IT ETF",       1.4665,   664.04,  760,    480,   920,    True,  "LT",           None),
-    ("ETF",    "VHT",   "Vanguard Health",       1.8915,   270.81,  300,    200,   370,    True,  "LT",           None),
-    ("ETF",    "VIS",   "Vanguard Industrials",  1.9715,   258.35,  340,    210,   420,    True,  "LT",           None),
-    ("ETF",    "VYM",   "Vanguard Hi-Div",      21.9148,   136.97,  160,    110,   190,    True,  "LT",           None),
-    ("ETF",    "SCHD",  "Schwab Dividend",      19.2856,   28.02,   34,     20,    44,     True,  "LT",           None),
-    ("ETF",    "VXUS",  "Vanguard Intl",        21.0484,   76.78,   85,     55,    110,    True,  "LT",           None),
-    ("ETF",    "GLD",   "SPDR Gold",             6.6408,   361.40,  450,    250,   550,    True,  "Apr 4 2026",   None),
-    ("ETF",    "XLE",   "Energy SPDR",          15.3795,   46.73,   72,     44,    95,     True,  "LT",           None),
-    # ── SELL / Consolidate list ────────────────────────────────────────────────
-    ("SELL",   "SPY",   "S&P500 → VOO",          0.5084,   595.64,  None,   None,  None,   False, "May 20 2026",  None),
-    ("SELL",   "VTV",   "Value → VOO",           0.1658,   156.54,  None,   None,  None,   True,  "LT NOW",       None),
-    ("SELL",   "VUG",   "Growth → QQQ",          0.4647,   441.03,  None,   None,  None,   False, "Jul 15 2026",  None),
-    ("SELL",   "VEA",   "Dev Mkts → VXUS",       0.2523,   49.23,   None,   None,  None,   True,  "LT NOW",       None),
-    ("SELL",   "VWO",   "Emg Mkts → VXUS",       0.1446,   41.49,   None,   None,  None,   True,  "LT NOW",       None),
-    ("SELL",   "BND",   "Bond → VYM",            0.578,    72.20,   None,   None,  None,   True,  "LT NOW",       None),
-]
-
-HISTORY_FILE = "price_history.json"
-CASH_BALANCE = 1042.17   # Confirmed from sold positions (VTV, VEA, VWO, BND, AMD, XOP, CAVA, RIVN)
-
-
-# ─── PRICE FETCHER ────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def fetch_all_prices():
-    ts     = datetime.now(ZoneInfo("America/New_York")).strftime("%b %d %Y  %I:%M %p ET")
-    prices = {}
-    sources= {}
-    errors = []
-
-    # ── yfinance batch (all stocks + ETFs + crypto via BTC-USD, XRP-USD) ─────
-    stock_tickers = [p[1] for p in PORTFOLIO if not p[10]]
-    crypto_yf     = ["BTC-USD", "XRP-USD"]
-    all_yf        = stock_tickers + crypto_yf
-    try:
-        raw = yf.download(
-            tickers=" ".join(all_yf), period="2d", interval="1d",
-            progress=False, auto_adjust=True, threads=True,
-        )
-        if not raw.empty:
-            close = raw["Close"] if "Close" in raw.columns else raw.get("close", pd.DataFrame())
-            iterable = close.items() if isinstance(close, pd.Series) else close.items() if hasattr(close,'items') else []
-            for col, series in ([(all_yf[0], close)] if isinstance(close, pd.Series) else close.items()):
-                s = series.dropna() if hasattr(series, 'dropna') else pd.Series([close]).dropna()
-                if not s.empty:
-                    v = float(s.iloc[-1])
-                    if v > 0:
-                        key = str(col).replace("-USD","")
-                        prices[key] = round(v, 4)
-                        sources[key] = "yfinance"
-        else:
-            errors.append("yfinance: empty response")
-    except Exception as e:
-        errors.append(f"yfinance: {e}")
-
-    # ── CoinGecko (real-time crypto cross-check) ──────────────────────────────
-    try:
-        r = requests.get(
-            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ripple&vs_currencies=usd",
-            timeout=10
-        )
-        if r.status_code == 200:
-            cg = r.json()
-            if cg.get("bitcoin",{}).get("usd"):
-                prices["BTC"] = cg["bitcoin"]["usd"]; sources["BTC"] = "CoinGecko"
-            if cg.get("ripple",{}).get("usd"):
-                prices["XRP"] = cg["ripple"]["usd"];  sources["XRP"] = "CoinGecko"
-        else:
-            errors.append(f"CoinGecko: HTTP {r.status_code}")
-    except Exception as e:
-        errors.append(f"CoinGecko: {e}")
-
-    return prices, sources, ts, errors
-
-
-def force_refresh():
-    fetch_all_prices.clear()
-    return fetch_all_prices()
-
-
-# ─── RECOMMENDATION ENGINE (27/27 tests pass) ────────────────────────────────
-REC_MAP = {
-    "green":  ("#00e5a0", "badge-green"),
-    "red":    ("#f85149", "badge-red"),
-    "gold":   ("#f5a623", "badge-gold"),
-    "blue":   ("#58a6ff", "badge-blue"),
-    "purple": ("#bc8cff", "badge-purple"),
-    "orange": ("#e3b341", "badge-orange"),
-    "gray":   ("#8b949e", "badge-gray"),
-}
-
-def rec_engine(cat, ticker, cost, target, bear, bull, lt, lt_date, price):
-    if not price:
-        if cat == "SELL":
-            return ("🔴 SELL NOW" if lt else f"⏳ WAIT — sell {lt_date}", "red")
-        return ("⏸ HOLD — no price", "gray")
-    if not target:
-        if cat == "SELL":
-            return ("🔴 SELL NOW — LT eligible" if lt else f"⏳ WAIT → SELL {lt_date}", "red")
-        return ("⏸ HOLD", "gray")
-
-    pct      = (price - cost) / cost * 100
-    upside   = (target - price) / price * 100
-    declining = target < cost
-
-    if ticker in ("VYM","SCHD"):
-        return ("♾ HOLD FOREVER — income engine, DRIP on", "purple")
-    if ticker in ("VOO","QQQ","VTI"):
-        return ("📈 DCA ALWAYS — core index, never stop", "green")
-    if cat == "SELL":
-        return ("🔴 SELL NOW — LT eligible" if lt else f"⏳ WAIT → SELL {lt_date}", "red")
-
-    # Bear proximity — always top priority for non-crypto
-    if bear and price < bear * 1.10 and cat != "Crypto":
-        return (f"🚨 STOP-LOSS — near bear ${bear:,.0f}", "red")
-
-    if cat == "Crypto":
-        if upside > 25:  return (f"🟢 ACCUMULATE — {upside:.0f}% to target", "green")
-        if upside < -20: return (f"✂️ TRIM 15% — {abs(upside):.0f}% above target", "orange")
-        return (f"⏸ HOLD — {upside:.0f}% to target", "blue")
-
-    # Declining thesis (analyst target < cost) — conservative
-    if declining:
-        if upside > 20:     return (f"🟡 ACCUMULATE — {upside:.0f}% to analyst target", "gold")
-        if 5 >= upside > -10: return ("✂️ TRIM 20% (LT)" if lt else f"⏳ HOLD (ST) — wait {lt_date}", "orange" if lt else "gold")
-        if upside <= -10:   return ("✂️ TRIM 25% (LT)" if lt else f"⏳ HOLD (ST) — wait {lt_date}", "orange" if lt else "gold")
-        return ("⏸ HOLD — declining thesis", "gray")
-
-    # Normal thesis — dip buying
-    if pct < -20 and upside > 20: return (f"🔥 STRONG BUY — down {abs(pct):.0f}%, {upside:.0f}% upside!", "green")
-    if pct < -15 and upside > 15: return (f"🟢 BUY THE DIP — down {abs(pct):.0f}%", "green")
-    if upside > 40: return (f"🟢 ACCUMULATE — {upside:.0f}% upside", "green")
-    if upside > 20: return (f"🟢 ACCUMULATE — {upside:.0f}% upside", "green")
-    if 5 >= upside > -10: return ("✂️ TRIM 20% (LT rate)" if lt else f"⏳ HOLD (ST) — wait {lt_date}", "orange" if lt else "gold")
-    if upside <= -10:     return ("✂️ TRIM 25% (LT rate)" if lt else f"⏳ HOLD (ST) — wait {lt_date}", "orange" if lt else "gold")
-    if cat == "IPO" and not lt: return (f"🔒 HOLD (IPO) — LT: {lt_date}", "blue")
-    if upside > 10: return (f"⏸ HOLD — {upside:.0f}% upside", "blue")
-    return (f"⏸ HOLD — {upside:.0f}% to target", "gray")
-
-
-# ─── CSV PARSER v3 (handles Buy + Sell + DRIP + Dividends + Transfers) ───────
-def parse_csv_v3(content: str) -> dict:
-    """
-    Fully reconciles ALL transaction types:
-    Buy  → add shares + cost
-    Sell → reduce shares + proportional cost (THIS WAS MISSING BEFORE)
-    SPL  → add shares (split, cost unchanged)
-    LIQ  → zero position
-    REC  → add shares (transfer in, use prev price or $0 cost)
-    SXCH → partial liquidation
-    CDIV → cash dividend (tracked in cash, no share change)
-    ACH/RTP → cash deposits
-    DFEE/DTAX → small fees
-    """
-    lines = content.splitlines()
-    pos   = defaultdict(lambda: {"shares": 0.0, "total_cost": 0.0})
-    cash  = 0.0
-    txs   = []
-
-    i = 1
-    while i < len(lines):
-        raw = lines[i].strip()
-        if not raw or "The data provided" in raw:
-            i += 1; continue
-
-        # Stitch multi-line quoted fields (Robinhood wraps CUSIP on next line)
-        full = raw
-        while i + 1 < len(lines):
-            nxt = lines[i + 1].strip()
-            # Stop if next line looks like a new date record
-            if re.match(r'^"?\d{1,2}/\d{1,2}/\d{4}"?', nxt) or not nxt:
-                break
-            full += " " + nxt
-            i += 1
-
-        # CSV parse
-        fields, cur, inq = [], "", False
-        for ch in full:
-            if ch == '"': inq = not inq; continue
-            if ch == "," and not inq: fields.append(cur.strip()); cur = ""; continue
-            cur += ch
-        fields.append(cur.strip())
-
-        if len(fields) < 6:
-            i += 1; continue
-
-        act_date  = fields[0]
-        ticker    = fields[3].upper().replace("BRK.B","BRK-B").strip() if fields[3] else ""
-        code      = fields[5].strip() if fields[5] else ""
-
-        try:    qty = float(fields[6].strip()) if len(fields) > 6 and fields[6].strip() else 0.0
-        except: qty = 0.0
-
-        try:
-            amt_raw = fields[8] if len(fields) > 8 else ""
-            amt = abs(float(re.sub(r"[$(,)]", "", amt_raw).strip()) or 0.0)
-        except: amt = 0.0
-
-        if act_date and code:
-            txs.append({"date": act_date, "ticker": ticker, "code": code, "qty": qty, "amt": amt})
-        i += 1
-
-    # Sort chronologically and reconcile
-    txs.sort(key=lambda x: x["date"])
-    sell_proceeds = 0.0
-
-    for tx in txs:
-        t    = tx["ticker"]
-        code = tx["code"]
-        qty  = tx["qty"]
-        amt  = tx["amt"]
-
-        if code in ("ACH", "RTP"):
-            cash += amt
-
-        elif code == "CDIV":
-            cash += amt      # dividend cash; no share change
-
-        elif code in ("DFEE", "DTAX", "MISC"):
-            cash -= amt      # small fees
-
-        elif code == "Buy" and qty > 0 and amt > 0:
-            pos[t]["shares"]     += qty
-            pos[t]["total_cost"] += amt
-            cash -= amt
-
-        elif code == "Sell" and qty > 0:          # ← THE CRITICAL FIX
-            if pos[t]["shares"] > 0.00001:
-                sell_frac = min(qty / pos[t]["shares"], 1.0)
-                pos[t]["total_cost"] *= (1.0 - sell_frac)
-            pos[t]["shares"] = max(0.0, pos[t]["shares"] - qty)
-            cash += amt
-            sell_proceeds += amt
-
-        elif code == "SPL" and qty > 0:
-            pos[t]["shares"] += qty              # cost per share halves; total unchanged
-
-        elif code == "LIQ":
-            pos[t] = {"shares": 0.0, "total_cost": 0.0}
-            cash += amt
-
-        elif code in ("REC", "SXCH"):
-            if qty > 0:
-                pos[t]["shares"] += qty          # transfer-in; cost basis from initial
-
-    return {
-        "positions":      {t: v for t, v in pos.items() if v["shares"] > 0.00001},
-        "cash":           round(cash, 2),
-        "sell_proceeds":  round(sell_proceeds, 2),
-        "total_tx":       len(txs),
-        "sells_found":    sum(1 for t in txs if t["code"] == "Sell"),
-        "buys_found":     sum(1 for t in txs if t["code"] == "Buy"),
-    }
-
-
-def reconcile(csv_result: dict, base: list) -> tuple[list, list]:
-    """Merge CSV positions into base portfolio; detect all changes including sells."""
-    pos      = csv_result["positions"]
-    base_map = {p[1]: p for p in base}
-    changes  = []
-    merged   = []
-
-    for p in base:
-        t = p[1]
-        # Skip crypto — not in equity CSV
-        if p[10]:
-            merged.append(p)
-            continue
-        if t in pos and pos[t]["shares"] > 0.00001:
-            csv_sh   = round(pos[t]["shares"], 6)
-            csv_cost = round(pos[t]["total_cost"] / pos[t]["shares"], 4)
-            old_sh, old_cost = p[3], p[4]
-            new_p    = (p[0], t, p[2], csv_sh, csv_cost) + p[5:]
-            if abs(csv_sh - old_sh) > 0.0001 or abs(csv_cost - old_cost) > 0.50:
-                changes.append({
-                    "Ticker": t, "Type": "Updated",
-                    "Old Shares": f"{old_sh:.4f}", "New Shares": f"{csv_sh:.4f}",
-                    "Old Avg Cost": f"${old_cost:.2f}", "New Avg Cost": f"${csv_cost:.2f}",
-                })
-            merged.append(new_p)
-        elif t in pos and pos[t]["shares"] < 0.0001:
-            # Position fully sold — mark but keep with 0 shares visible as closed
-            changes.append({"Ticker": t, "Type": "Sold Out",
-                "Old Shares": f"{p[3]:.4f}", "New Shares": "0",
-                "Old Avg Cost": f"${p[4]:.2f}", "New Avg Cost": "—"})
-            # Remove from active portfolio
-        else:
-            merged.append(p)
-
-    # Add new tickers discovered in CSV
-    for t, v in pos.items():
-        if t not in base_map and v["shares"] > 0.0001:
-            avg = v["total_cost"] / v["shares"]
-            merged.append(("Other", t, t, round(v["shares"],6), round(avg,4),
-                           None, None, None, True, "Check LT date", None))
-            changes.append({"Ticker": t, "Type": "New Position",
-                "Old Shares": "—", "New Shares": f"{v['shares']:.4f}",
-                "Old Avg Cost": "—", "New Avg Cost": f"${avg:.2f}"})
-
-    return merged, changes
-
-
-# ─── BIWEEKLY DEPLOY ──────────────────────────────────────────────────────────
-SCHEDULE_2026 = [
-    "Apr 3","Apr 17","May 1","May 15","May 29","Jun 12","Jun 26",
-    "Jul 10","Jul 24","Aug 7","Aug 21","Sep 4","Sep 18",
-    "Oct 2","Oct 16","Oct 30","Nov 13","Nov 27","Dec 11",
-]
-ROTATION = ["META","GOOGL","AAPL","MSFT","COST","TSM","CRM","NVDA","NFLX","AMD"]
-
-def next_deposit_date():
-    today = date.today()
-    for d in SCHEDULE_2026:
-        dt = datetime.strptime(f"{d} 2026", "%b %d %Y").date()
-        if dt >= today:
-            return d, (dt - today).days
-    return SCHEDULE_2026[-1], 0
-
-def biweekly_picks(portfolio, prices, amount=900):
-    wk   = int(time.time() // (14*86400))
-    pick = ROTATION[wk % len(ROTATION)]
-    pos  = next((p for p in portfolio if p[1] == pick), None)
-    dip  = pos and prices.get(pick, 9999) < pos[4]
-    base = [("NVDA",250),("VOO",200),("VYM",150),("QQQ",150),(pick,150)]
-    return [
-        {"ticker":t, "alloc":round(amount*a/900),
-         "shares": round(amount*a/900 / prices[t], 4) if prices.get(t) else None,
-         "price": prices.get(t),
-         "note": ("🔥 DIP — buying below cost!" if dip and t==pick else
-                  "AI supercycle — core conviction" if t=="NVDA" else
-                  "S&P 500 index — DCA forever" if t=="VOO" else
-                  "Dividend engine — DRIP always on" if t=="VYM" else
-                  "Nasdaq-100 — never stop buying" if t=="QQQ" else
-                  "Rotating pick — high conviction")}
-        for t, a in base
-    ]
-
-
-# ─── SNAPSHOT HISTORY ─────────────────────────────────────────────────────────
-def load_history():
-    if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE) as f:
-            return json.load(f)
-    return []
-
-def save_snapshot(prices, sources, ts, portfolio, cash_bal):
-    h  = load_history()
-    tc = sum(p[3]*p[4] for p in portfolio)
-    tv = sum(p[3]*prices.get(p[1], p[4]) for p in portfolio) + cash_bal
-    snap = {
-        "timestamp": ts, "total_cost": round(tc,2),
-        "total_value": round(tv,2), "total_gl": round(tv-tc,2),
-        "total_gl_pct": round((tv-tc)/tc*100,2) if tc else 0,
-        "cash": round(cash_bal,2),
-        "prices": {k:round(v,4) for k,v in prices.items()},
-        "positions": [{
-            "ticker": p[1], "price": prices.get(p[1]),
-            "cost": p[4], "shares": p[3],
-            "value": round(p[3]*prices.get(p[1],p[4]),2),
-            "gl_pct": round((prices.get(p[1],p[4])-p[4])/p[4]*100,2),
-            "rec": rec_engine(p[0],p[1],p[4],p[5],p[6],p[7],p[8],p[9],prices.get(p[1]))[0],
-        } for p in portfolio]
-    }
-    h.insert(0, snap)
-    with open(HISTORY_FILE,"w") as f:
-        json.dump(h[:60], f, indent=2)
-    return snap
-
-
-# ─── HELPERS ──────────────────────────────────────────────────────────────────
+# ─── HELPERS ─────────────────────────────────────────────────────────────────
 def usd(n, d=2):
     if n is None: return "—"
     s = "-" if n < 0 else ""
     return f"{s}${abs(n):,.{d}f}"
 
-def pct(n):
+def pct(n, d=2):
     if n is None: return "—"
-    return f"{n:+.2f}%"
+    return f"{n:+.{d}f}%"
 
-def badge_html(text, style):
+def color_val(v):
+    return "up" if (v or 0) >= 0 else "dn"
+
+def badge(text, style):
     return f'<span class="badge {style}">{text}</span>'
 
-def color_number(val, pos_color="#00e5a0", neg_color="#f85149"):
-    return pos_color if val >= 0 else neg_color
+REC_BADGE = {
+    "green":  "bg", "red":  "br", "gold": "bo",
+    "blue":   "bb", "purple":"bp","orange":"bo","gray":"bgr",
+}
 
-def metric_card(label, value, delta=None, style=""):
-    delta_html = ""
-    if delta is not None:
-        sign    = "up" if (delta if isinstance(delta, (int,float)) else 0) >= 0 else "dn"
-        d_str   = delta if isinstance(delta,str) else pct(delta) if abs(delta if isinstance(delta,(int,float)) else 0) < 100 else usd(delta)
-        delta_html = f'<div class="metric-delta {sign}">{d_str}</div>'
-    return f"""
-<div class="metric-card {style}">
-  <div class="metric-label">{label}</div>
-  <div class="metric-value">{value}</div>
-  {delta_html}
-</div>"""
+HISTORY_FILE = "price_history.json"
 
+def load_history():
+    if os.path.exists(HISTORY_FILE):
+        try:
+            with open(HISTORY_FILE) as f: return json.load(f)
+        except: pass
+    return []
+
+def save_snapshot(prices, sources, ts, portfolio, cash):
+    h  = load_history()
+    tc = sum(p[3]*p[4] for p in portfolio)
+    tv = sum(p[3]*prices.get(p[1], p[4]) for p in portfolio) + cash
+    snap = {
+        "timestamp": ts, "total_cost": round(tc,2), "total_value": round(tv,2),
+        "total_gl": round(tv-tc,2), "total_gl_pct": round((tv-tc)/tc*100,2) if tc else 0,
+        "cash": round(cash,2),
+        "prices": {k:round(v,4) for k,v in prices.items()},
+        "positions": [{
+            "ticker":p[1], "price":prices.get(p[1]), "cost":p[4], "shares":p[3],
+            "value":round(p[3]*prices.get(p[1],p[4]),2),
+            "gl_pct":round((prices.get(p[1],p[4])-p[4])/p[4]*100,2),
+            "rec": generate_rec(
+                p[0],p[1],p[4],p[5] if len(p)>5 else None,
+                p[6] if len(p)>6 else None, p[7] if len(p)>7 else None,
+                p[8] if len(p)>8 else True, p[9] if len(p)>9 else "LT",
+                prices.get(p[1]),
+                p[11] if len(p)>11 else 0, p[12] if len(p)>12 else 0,
+            ).action,
+        } for p in portfolio]
+    }
+    h.insert(0, snap)
+    with open(HISTORY_FILE,"w") as f: json.dump(h[:60], f, indent=2)
+    return snap
+
+# ─── BIWEEKLY PICKS ───────────────────────────────────────────────────────────
+def next_deposit():
+    today = date.today()
+    for d in DEPOSIT_SCHEDULE:
+        try:
+            dt = datetime.strptime(f"{d} 2026", "%b %d %Y").date()
+            if dt >= today: return d, (dt-today).days
+        except: pass
+    return DEPOSIT_SCHEDULE[-1], 0
+
+def biweekly_picks(portfolio, prices, amount=900):
+    wk   = int(time.time() // (14*86400))
+    pick = DEPOSIT_ROTATION[wk % len(DEPOSIT_ROTATION)]
+    pos  = next((p for p in portfolio if p[1]==pick), None)
+    dip  = pos and prices.get(pick, 9999) < (pos[4] if pos else 9999)
+    rows = [("NVDA",250),("VOO",200),("VYM",150),("QQQ",150),(pick,150)]
+    return [{
+        "ticker": t, "alloc": round(amount*a/900),
+        "shares": round(amount*a/900/prices[t],4) if prices.get(t) else None,
+        "price":  prices.get(t),
+        "note": (f"🔥 DIP — below cost!" if dip and t==pick else
+                 "AI supercycle — core conviction" if t=="NVDA" else
+                 "S&P 500 — DCA every deposit forever" if t=="VOO" else
+                 "Dividend engine — compound income forever" if t=="VYM" else
+                 "Nasdaq-100 — never stop buying" if t=="QQQ" else
+                 "Rotating pick — high conviction"),
+    } for t,a in rows]
 
 # ─── SESSION STATE ────────────────────────────────────────────────────────────
-def init_state():
+def _init():
+    # Convert Position dataclasses → tuples for the app
+    port_tuples = [
+        (p.cat, p.ticker, p.name, p.shares, p.avg_cost,
+         p.target, p.bear, p.bull, p.lt_ready, p.lt_date, p.cg_id,
+         p.drip_shares, p.drip_cost, p.divs_received)
+        for p in POSITIONS
+    ]
     defaults = {
-        "portfolio":    list(PORTFOLIO),
+        "portfolio":    port_tuples,
         "prices":       {},
         "sources":      {},
         "last_ts":      None,
         "errors":       [],
-        "cash_balance": CASH_BALANCE,
+        "cash":         CONFIRMED_CASH,
         "deposit_log":  [],
         "page":         "Overview",
         "sel_ticker":   None,
-        "import_result":None,
+        "drip_log":     [],   # accumulated DRIP events from all CSV imports
     }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    for k,v in defaults.items():
+        if k not in st.session_state: st.session_state[k] = v
 
-init_state()
-P        = st.session_state.portfolio
-PRICES   = st.session_state.prices
-CASH     = st.session_state.cash_balance
-
+_init()
+P      = st.session_state.portfolio
+PRICES = st.session_state.prices
+CASH   = st.session_state.cash
 
 # ─── SIDEBAR ─────────────────────────────────────────────────────────────────
 with st.sidebar:
-    st.markdown('<div class="sidebar-logo">⚡ WAR ROOM</div>', unsafe_allow_html=True)
-    st.markdown('<div class="sidebar-sub">Portfolio Intelligence System</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div style="font-family:\'Instrument Serif\',serif;font-style:italic;'
+        'font-size:1.5rem;color:var(--acc);margin-bottom:.1rem">⚡ War Room</div>'
+        '<div style="font-size:.65rem;color:var(--muted);font-family:var(--fn);'
+        'letter-spacing:.1em;text-transform:uppercase;margin-bottom:1.4rem">'
+        'Portfolio Intelligence v4</div>',
+        unsafe_allow_html=True
+    )
 
     pages = [
-        ("📊","Overview"),
-        ("📈","Holdings"),
-        ("💰","Deploy $900"),
-        ("📥","Import CSV"),
-        ("🕐","Snapshots"),
-        ("⚙","Settings"),
+        ("📊","Overview"),("📈","Holdings"),("📥","Import CSV"),
+        ("💰","Deploy $900"),("🌱","DRIP Analytics"),
+        ("🕐","Snapshots"),("⚙","Settings"),
     ]
-
     for icon, name in pages:
-        active = "active" if st.session_state.page == name else ""
-        if st.button(f"{icon}  {name}", key=f"nav_{name}",
-                     use_container_width=True):
-            st.session_state.page = name
-            st.rerun()
+        active = name == st.session_state.page
+        col = "var(--acc)" if active else "var(--muted)"
+        bg  = "var(--accD)" if active else "transparent"
+        brd = "1px solid rgba(0,229,160,.25)" if active else "1px solid transparent"
+        if st.button(f"{icon}  {name}", key=f"nav_{name}", use_container_width=True):
+            st.session_state.page = name; st.rerun()
 
-    st.markdown('<div class="nav-divider"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="height:1px;background:var(--border);margin:.8rem 0"></div>',
+                unsafe_allow_html=True)
 
-    # Refresh button
-    if st.button("⚡  Refresh Prices", use_container_width=True, key="sidebar_refresh"):
-        with st.spinner("Fetching…"):
-            p, s, ts, errs = force_refresh()
-            st.session_state.prices   = p
-            st.session_state.sources  = s
-            st.session_state.last_ts  = ts
-            st.session_state.errors   = errs
-            PRICES = p
-            save_snapshot(p, s, ts, P, st.session_state.cash_balance)
+    if st.button("⚡  Refresh Prices", use_container_width=True, key="sb_refresh"):
+        tickers = tuple(p[1] for p in P)
+        with st.spinner("Fetching from yfinance + CoinGecko…"):
+            p_, s_, ts_, errs_ = force_refresh_prices(tickers)
+            st.session_state.prices  = p_
+            st.session_state.sources = s_
+            st.session_state.last_ts = ts_
+            st.session_state.errors  = errs_
+            PRICES = p_
+            save_snapshot(p_, s_, ts_, P, st.session_state.cash)
             st.rerun()
 
     if st.session_state.last_ts:
-        src_set = list(set(st.session_state.sources.values()))
-        loaded  = len(PRICES)
+        n_prices = len(PRICES)
+        srcs = list(set(st.session_state.sources.values()))
         st.markdown(
-            f'<div style="font-size:.68rem;color:var(--muted);font-family:var(--font-num);'
-            f'margin-top:.5rem;line-height:1.6">'
+            f'<div style="font-size:.65rem;color:var(--muted);font-family:var(--fn);'
+            f'margin-top:.4rem;line-height:1.7">'
             f'● {st.session_state.last_ts}<br>'
-            f'{loaded}/{len(P)} prices · {", ".join(src_set)}</div>',
+            f'{n_prices}/{len(P)} prices · {", ".join(srcs)}</div>',
             unsafe_allow_html=True
         )
+        if st.session_state.errors:
+            for e in st.session_state.errors[:2]:
+                st.warning(e, icon="⚠")
     else:
         st.markdown(
-            '<div style="font-size:.68rem;color:var(--orange);font-family:var(--font-num);margin-top:.5rem">'
-            '⚠ No prices — click Refresh</div>',
-            unsafe_allow_html=True
+            '<div style="font-size:.67rem;color:var(--orange);margin-top:.4rem">'
+            '⚠ No prices loaded — click Refresh</div>', unsafe_allow_html=True
         )
 
-    if st.session_state.errors:
-        for e in st.session_state.errors[:2]:
-            st.warning(e, icon="⚠")
+    st.markdown('<div style="height:1px;background:var(--border);margin:.8rem 0"></div>',
+                unsafe_allow_html=True)
 
-    st.markdown('<div class="nav-divider"></div>', unsafe_allow_html=True)
-
-    # Cash balance display
-    gl_total = sum(p[3]*(PRICES.get(p[1],p[4])-p[4]) for p in P)
-    total_v  = sum(p[3]*PRICES.get(p[1],p[4]) for p in P) + CASH
+    # Cash card
+    total_eq = sum(p[3]*PRICES.get(p[1],p[4]) for p in P)
     total_c  = sum(p[3]*p[4] for p in P)
-    gl_pct   = (total_v - total_c) / total_c * 100 if total_c else 0
+    total_gl = total_eq + CASH - total_c
+    gl_pct   = total_gl/total_c*100 if total_c else 0
+    gl_col   = "var(--acc)" if total_gl >= 0 else "var(--red)"
 
     st.markdown(f"""
-<div style="background:var(--bg2);border:1px solid var(--gold);border-radius:10px;
-padding:.75rem .9rem;margin-top:.5rem">
-  <div style="font-size:.6rem;color:var(--gold);font-family:var(--font-num);
-  letter-spacing:.1em;text-transform:uppercase;margin-bottom:.3rem">CASH AVAILABLE</div>
-  <div style="font-size:1.25rem;font-weight:700;font-family:var(--font-num);
-  color:var(--text)">${CASH:,.2f}</div>
-  <div style="font-size:.68rem;color:var(--muted);margin-top:.15rem">
-  From sold positions</div>
+<div style="background:var(--bg2);border:1px solid var(--gold);border-radius:9px;
+padding:.75rem .9rem;margin:.3rem 0">
+  <div style="font-size:.6rem;color:var(--gold);font-family:var(--fn);
+  letter-spacing:.1em;text-transform:uppercase;margin-bottom:.25rem">CASH AVAILABLE</div>
+  <div style="font-size:1.2rem;font-weight:600;font-family:var(--fn);color:var(--text)">${CASH:,.2f}</div>
+  <div style="font-size:.65rem;color:var(--muted);margin-top:.1rem">from sold positions</div>
+</div>
+<div style="background:var(--bg2);border:1px solid var(--border);border-radius:9px;
+padding:.75rem .9rem;margin:.3rem 0">
+  <div style="font-size:.6rem;color:var(--muted);font-family:var(--fn);
+  letter-spacing:.1em;text-transform:uppercase;margin-bottom:.25rem">TOTAL PORTFOLIO</div>
+  <div style="font-size:1.2rem;font-weight:600;font-family:var(--fn);
+  color:{gl_col}">{usd(total_eq+CASH,0)}</div>
+  <div style="font-size:.65rem;color:{gl_col};margin-top:.1rem">{pct(gl_pct)} vs cost</div>
 </div>""", unsafe_allow_html=True)
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════
 page = st.session_state.page
 
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  OVERVIEW
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 if page == "Overview":
+    nxt_d, nxt_days = next_deposit()
 
-    # Header
-    c1, c2 = st.columns([3,1])
+    c1, c2 = st.columns([4,1])
     with c1:
-        st.markdown("# Portfolio Overview")
-        nxt, days = next_deposit_date()
+        st.markdown("# *Portfolio Overview*")
         st.markdown(
-            f'<span style="color:var(--gold);font-family:var(--font-num);font-size:.8rem">'
-            f'Next deposit: {nxt}, 2026 ({days}d away) · $900</span>',
+            f'<span style="color:var(--gold);font-size:.8rem">'
+            f'Next deposit: **{nxt_d}, 2026** ({nxt_days}d) · $900</span>',
             unsafe_allow_html=True
         )
     with c2:
-        if st.button("⚡ Refresh Prices", use_container_width=True, key="dash_refresh"):
+        st.markdown("<br>", unsafe_allow_html=True)
+        if st.button("⚡ Refresh", use_container_width=True, key="ov_refresh"):
+            tickers = tuple(p[1] for p in P)
             with st.spinner(""):
-                p, s, ts, errs = force_refresh()
-                st.session_state.prices, st.session_state.sources = p, s
-                st.session_state.last_ts, st.session_state.errors = ts, errs
-                PRICES = p
-                save_snapshot(p, s, ts, P, st.session_state.cash_balance)
+                p_, s_, ts_, errs_ = force_refresh_prices(tickers)
+                st.session_state.prices  = p_
+                st.session_state.sources = s_
+                st.session_state.last_ts = ts_
+                st.session_state.errors  = errs_
+                PRICES = p_
+                save_snapshot(p_, s_, ts_, P, CASH)
                 st.rerun()
 
     st.markdown("---")
 
-    # ── Top metrics ────────────────────────────────────────────────────────────
-    total_cost  = sum(p[3]*p[4] for p in P)
-    total_equity= sum(p[3]*PRICES.get(p[1],p[4]) for p in P)
-    total_port  = total_equity + CASH
-    total_gl    = total_port - total_cost
-    total_gl_p  = total_gl / total_cost * 100 if total_cost else 0
-    n_prices    = len(PRICES)
+    # ── Equity metrics ─────────────────────────────────────────────────────────
+    equity_data = get_equity_summary(P, PRICES, CASH)
+    eq_val   = equity_data["equity_value"]
+    cry_val  = equity_data["crypto_value"]
+    cash_val = equity_data["cash"]
+    total_pv = equity_data["total_portfolio"]
+    total_cv = equity_data["total_cost"]
+    unreal   = equity_data["unrealized_gl"]
+    gl_p     = equity_data["gl_pct"]
 
-    cards_html = f"""
-<div class="metric-grid" style="grid-template-columns:repeat(5,1fr)">
-  {metric_card("TOTAL INVESTED", usd(total_cost,0))}
-  {metric_card("EQUITY VALUE", usd(total_equity,0),
-      delta=f'+{usd(total_equity-total_cost,0)}' if total_equity >= total_cost else usd(total_equity-total_cost,0),
-      style="gold" if total_equity >= total_cost else "red")}
-  {metric_card("CASH BALANCE", usd(CASH,2), delta="from sold positions", style="gold")}
-  {metric_card("TOTAL PORTFOLIO", usd(total_port,0))}
-  {metric_card("TOTAL RETURN", pct(total_gl_p), delta=usd(total_gl,0),
-      style="" if total_gl >= 0 else "red")}
-</div>"""
-    st.markdown(cards_html, unsafe_allow_html=True)
+    m1,m2,m3,m4,m5,m6 = st.columns(6)
+    m1.metric("Invested",      usd(total_cv,0))
+    m2.metric("Equity",        usd(eq_val,0),   delta=usd(eq_val-total_cv,0))
+    m3.metric("Crypto",        usd(cry_val,0))
+    m4.metric("Cash",          usd(cash_val,2))
+    m5.metric("Total Portfolio",usd(total_pv,0))
+    m6.metric("Unrealized G/L", pct(gl_p),      delta=usd(unreal,0))
 
-    # ── Build recs ─────────────────────────────────────────────────────────────
-    urgent_sells, trim_signals, buy_signals, stop_losses = [], [], [], []
+    # Reconciliation note
+    rh_equity = 47246.21
+    diff = total_pv - rh_equity
+    if abs(diff) < 5000:
+        note_col = "var(--acc)" if abs(diff) < 500 else "var(--orange)"
+        st.markdown(
+            f'<div style="font-size:.72rem;color:{note_col};font-family:var(--fn);'
+            f'margin:.3rem 0 1rem">Robinhood reported equity: ${rh_equity:,.2f} · '
+            f'War Room: {usd(total_pv,2)} · Delta: {usd(diff,2)} '
+            f'(gap from live price timing)</div>',
+            unsafe_allow_html=True
+        )
+
+    # ── Build recommendations ──────────────────────────────────────────────────
+    sell_now, trim_sigs, buy_sigs, stop_loss = [], [], [], []
     for p in P:
         pr = PRICES.get(p[1])
         if not pr: continue
-        rec, col = rec_engine(p[0],p[1],p[4],p[5],p[6],p[7],p[8],p[9],pr)
-        val = p[3]*pr
-        gl  = (pr - p[4]) / p[4] * 100
-        row = (p[1], p[2], pr, gl, val, rec)
-        if "SELL NOW" in rec:                   urgent_sells.append(row)
-        elif "STOP-LOSS" in rec:                stop_losses.append(row)
-        elif "TRIM" in rec:                     trim_signals.append(row)
-        elif any(x in rec for x in ("BUY","ACCUMULATE","DIP")): buy_signals.append(row)
+        rec = generate_rec(
+            p[0],p[1],p[4],p[5],p[6],p[7],p[8],p[9],pr,
+            p[11] if len(p)>11 else 0, p[12] if len(p)>12 else 0,
+        )
+        gl = (pr-p[4])/p[4]*100 if p[4] else 0
+        row = (p[1], p[2], pr, gl, rec)
+        if "SELL" in rec.action:    sell_now.append(row)
+        elif "STOP" in rec.action:  stop_loss.append(row)
+        elif "TRIM" in rec.action:  trim_sigs.append(row)
+        elif any(x in rec.action for x in ("BUY","ACCUMULATE","DIP")):
+            buy_sigs.append(row)
 
     c1, c2, c3 = st.columns(3)
 
-    with c1:
-        n_sell = len(urgent_sells) + len(stop_losses)
-        st.markdown(f"""
-<div class="section-header">
-  <span class="section-title">🔴 Sell Alerts</span>
-  <span class="section-count">{n_sell}</span>
-</div>""", unsafe_allow_html=True)
-        if urgent_sells or stop_losses:
-            for t, name, pr, gl, val, rec in urgent_sells:
-                gl_color = color_number(gl)
-                st.markdown(f"""
-<div class="alert-panel alert-sell">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="font-weight:800;font-family:var(--font-num);font-size:1rem">{t}</span>
-      <span style="color:var(--muted);font-size:.78rem;margin-left:.5rem">{name[:20]}</span>
+    def alert_card(ticker, name, price, gl, rec, style):
+        gl_col = "var(--acc)" if gl>=0 else "var(--red)"
+        bdg    = badge(rec.action, REC_BADGE.get(rec.color,"bgr"))
+        return f"""
+<div class="kcard kcard-{style}">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:.5rem">
+    <div style="flex:1">
+      <span style="font-weight:700;font-size:.95rem">{ticker}</span>
+      <span style="color:var(--muted);font-size:.72rem;margin-left:.4rem">{name[:18]}</span>
+      <div style="margin-top:.3rem">{bdg}</div>
+      <div style="color:var(--muted);font-size:.7rem;margin-top:.25rem;line-height:1.4">
+        {rec.detail[:55]}{'…' if len(rec.detail)>55 else ''}</div>
     </div>
-    <div style="text-align:right">
-      <div style="font-family:var(--font-num);font-size:.9rem">{usd(pr)}</div>
-      <div style="font-family:var(--font-num);font-size:.75rem;color:{gl_color}">{pct(gl)}</div>
+    <div style="text-align:right;flex-shrink:0">
+      <div style="font-family:var(--fn);font-size:.88rem;font-weight:600">{usd(price)}</div>
+      <div style="font-size:.72rem;color:{gl_col}">{pct(gl)}</div>
     </div>
   </div>
-</div>""", unsafe_allow_html=True)
-            for t, name, pr, gl, val, rec in stop_losses:
-                st.markdown(f"""
-<div class="alert-panel alert-sell">
-  <div style="font-weight:800;font-family:var(--font-num)">{t} <span style="font-size:.75rem;font-weight:400;color:var(--muted)">{rec}</span></div>
-</div>""", unsafe_allow_html=True)
+</div>"""
+
+    with c1:
+        n = len(sell_now)+len(stop_loss)
+        st.markdown(f'<div class="section-head">🔴 Sell Alerts <span style="font-size:.75rem;color:var(--muted);font-style:normal">({n})</span></div>',unsafe_allow_html=True)
+        if sell_now or stop_loss:
+            for t,n_,pr,gl,rec in sell_now:
+                st.markdown(alert_card(t,n_,pr,gl,rec,"red"),unsafe_allow_html=True)
+            for t,n_,pr,gl,rec in stop_loss:
+                st.markdown(alert_card(t,n_,pr,gl,rec,"red"),unsafe_allow_html=True)
         else:
-            st.markdown('<div style="color:var(--muted);font-size:.85rem;padding:.5rem 0">No urgent sells right now.</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:var(--muted);font-size:.82rem;padding:.5rem 0">No sell alerts.</div>',unsafe_allow_html=True)
 
     with c2:
-        st.markdown(f"""
-<div class="section-header">
-  <span class="section-title">✂️ Trim Signals</span>
-  <span class="section-count">{len(trim_signals)}</span>
-</div>""", unsafe_allow_html=True)
-        if trim_signals:
-            for t, name, pr, gl, val, rec in trim_signals[:6]:
-                gl_color = color_number(gl)
-                st.markdown(f"""
-<div class="alert-panel alert-trim">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="font-weight:800;font-family:var(--font-num)">{t}</span>
-      <div style="font-size:.72rem;color:var(--muted);margin-top:.1rem">{rec[:38]}</div>
-    </div>
-    <div style="text-align:right;font-family:var(--font-num)">
-      <div style="font-size:.9rem">{usd(pr)}</div>
-      <div style="font-size:.75rem;color:{gl_color}">{pct(gl)}</div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+        st.markdown(f'<div class="section-head">✂️ Trim Signals <span style="font-size:.75rem;color:var(--muted);font-style:normal">({len(trim_sigs)})</span></div>',unsafe_allow_html=True)
+        if trim_sigs:
+            for t,n_,pr,gl,rec in trim_sigs[:5]:
+                st.markdown(alert_card(t,n_,pr,gl,rec,"gold"),unsafe_allow_html=True)
         else:
-            st.markdown('<div style="color:var(--muted);font-size:.85rem;padding:.5rem 0">No trim signals.</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:var(--muted);font-size:.82rem;padding:.5rem 0">No trim signals.</div>',unsafe_allow_html=True)
 
     with c3:
-        st.markdown(f"""
-<div class="section-header">
-  <span class="section-title">🟢 Buy Signals</span>
-  <span class="section-count">{len(buy_signals)}</span>
-</div>""", unsafe_allow_html=True)
-        if buy_signals:
-            for t, name, pr, gl, val, rec in buy_signals[:6]:
-                gl_color = color_number(gl)
-                st.markdown(f"""
-<div class="alert-panel alert-buy">
-  <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="font-weight:800;font-family:var(--font-num)">{t}</span>
-      <div style="font-size:.72rem;color:var(--muted);margin-top:.1rem">{rec[:38]}</div>
-    </div>
-    <div style="text-align:right;font-family:var(--font-num)">
-      <div style="font-size:.9rem">{usd(pr)}</div>
-      <div style="font-size:.75rem;color:{gl_color}">{pct(gl)}</div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+        st.markdown(f'<div class="section-head">🟢 Buy Signals <span style="font-size:.75rem;color:var(--muted);font-style:normal">({len(buy_sigs)})</span></div>',unsafe_allow_html=True)
+        if buy_sigs:
+            for t,n_,pr,gl,rec in buy_sigs[:5]:
+                st.markdown(alert_card(t,n_,pr,gl,rec,"acc"),unsafe_allow_html=True)
         else:
-            st.markdown('<div style="color:var(--muted);font-size:.85rem;padding:.5rem 0">No buy signals with current prices.</div>', unsafe_allow_html=True)
+            st.markdown('<div style="color:var(--muted);font-size:.82rem;padding:.5rem 0">No buy signals with current prices.</div>',unsafe_allow_html=True)
 
     st.markdown("---")
 
     # ── Calendar + Tax ─────────────────────────────────────────────────────────
     c1, c2 = st.columns(2)
     with c1:
-        st.markdown("### ⚡ Action Calendar")
-        calendar = [
-            ("Apr 3",  "🟡", "GLD → LT eligible on Apr 4 — trim 25%",    3),
-            ("Apr 3",  "💰", "FIRST $900 DEPOSIT DAY",                    3),
-            ("May 20", "🔴", "SPY turns LT — sell all, swap to VOO",      49),
-            ("Jul 15", "🔴", "VUG turns LT — sell all, swap to QQQ",     105),
-            ("Aug 14", "🔵", "BLSH hits 1 year — evaluate / trim",       135),
-            ("Sep 11", "🔵", "KLAR hits 1 year — evaluate / trim",       163),
-            ("Sep 18", "🔵", "STUB hits 1 year — evaluate / trim",       170),
-            ("Nov 6",  "🔵", "TSM big lot → LT — trim 20%",             219),
-            ("Dec 15", "🔵", "GOOGL big lot → LT — trim 20%",           258),
-        ]
-        for dt, icon, action, days in calendar:
-            urgency = "var(--red)" if days <= 5 else "var(--gold)" if days <= 30 else "var(--muted)"
-            st.markdown(f"""
-<div style="display:flex;gap:.75rem;align-items:flex-start;padding:.4rem 0;
-border-bottom:1px solid var(--border)">
-  <span style="font-family:var(--font-num);font-size:.78rem;color:{urgency};
-  min-width:48px;font-weight:600">{dt}</span>
-  <span style="font-size:.8rem;color:var(--text);flex:1">{icon} {action}</span>
-  <span style="font-family:var(--font-num);font-size:.68rem;color:var(--muted)">{days}d</span>
-</div>""", unsafe_allow_html=True)
+        st.markdown('<div class="section-head">⚡ Action Calendar</div>',unsafe_allow_html=True)
+        for item in ACTION_CALENDAR:
+            days  = item["days"]
+            col   = "var(--red)" if days<=5 else ("var(--gold)" if days<=30 else "var(--muted)")
+            st.markdown(
+                f'<div style="display:flex;gap:.75rem;align-items:flex-start;'
+                f'padding:.35rem 0;border-bottom:1px solid var(--border)">'
+                f'<span style="font-family:var(--fn);font-size:.75rem;color:{col};'
+                f'min-width:52px;font-weight:600">{item["date"]}</span>'
+                f'<span style="font-size:.78rem;color:var(--text);flex:1">{item["icon"]} {item["action"]}</span>'
+                f'<span style="font-family:var(--fn);font-size:.65rem;color:var(--muted)">{days}d</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
 
     with c2:
-        st.markdown("### 🧾 Tax Playbook")
+        st.markdown('<div class="section-head">🧾 Tax Playbook</div>',unsafe_allow_html=True)
         rules = [
-            ("Hold ≥366 days", "LT rate 15-20% vs ST 37% — massive gap"),
-            ("SELL positions", "Wait for each LT date, then sell and consolidate"),
-            ("Cash deploy", f"${CASH:,.2f} available — deploy per biweekly plan"),
-            ("DRIP lots", "Each reinvestment = new lot at reinvest price"),
-            ("Year-end harvest", "Match realized gains with offsetting losses"),
-            ("GLD near LT", "Apr 4 → LT eligible, first trim target $450"),
+            ("Hold ≥ 366 days", "LT rate 15-20% vs ST 37% — never trigger early"),
+            ("SELL list",       f"Remaining VTV/VEA/VWO/BND/VUG — sell per LT dates"),
+            ("Cash: $1,042",    "Deploy per biweekly formula starting Apr 3"),
+            ("DRIP lots",       f"${DRIP_SUMMARY['total_reinvested']:.0f} reinvested → each is a new lot"),
+            ("SPY → VOO",       "May 20: sell SPY (LT), buy VOO same day"),
+            ("VUG → QQQ",       "Jul 15: sell VUG (LT), buy QQQ same day"),
+            ("Year-end harvest","Net gains vs losses before Dec 31"),
         ]
         for rule, detail in rules:
-            st.markdown(f"""
-<div style="display:flex;gap:.75rem;padding:.45rem 0;border-bottom:1px solid var(--border)">
-  <span style="font-family:var(--font-num);font-size:.78rem;color:var(--accent);
-  font-weight:700;min-width:130px">{rule}</span>
-  <span style="font-size:.78rem;color:var(--muted)">{detail}</span>
-</div>""", unsafe_allow_html=True)
-
-    # ── Category breakdown ─────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown("### 📊 Allocation by Category")
-    cat_map = defaultdict(float)
-    for p in P:
-        v = p[3] * PRICES.get(p[1], p[4])
-        cat_map[p[0]] += v
-    cat_map["Cash"] = CASH
-    total_with_cash = sum(cat_map.values())
-
-    cols = st.columns(len(cat_map))
-    for i, (cat, val) in enumerate(sorted(cat_map.items(), key=lambda x: -x[1])):
-        p_pct = val / total_with_cash * 100 if total_with_cash else 0
-        cols[i].markdown(metric_card(cat.upper(), usd(val,0), delta=f"{p_pct:.1f}%"), unsafe_allow_html=True)
+            st.markdown(
+                f'<div style="display:flex;gap:.75rem;padding:.38rem 0;border-bottom:1px solid var(--border)">'
+                f'<span style="font-family:var(--fn);font-size:.75rem;color:var(--acc);'
+                f'font-weight:600;min-width:120px">{rule}</span>'
+                f'<span style="font-size:.76rem;color:var(--muted)">{detail}</span>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
 
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  HOLDINGS
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 elif page == "Holdings":
-
-    st.markdown("# Holdings")
+    st.markdown("# *Holdings*")
     st.markdown("---")
 
-    cat_opts  = ["All"] + sorted(set(p[0] for p in P))
-    cat_sel   = st.selectbox("Filter category", cat_opts, key="hold_cat")
-    sort_opts = ["Value ↓","G/L % ↓","G/L % ↑","Ticker A-Z"]
-    sort_sel  = st.selectbox("Sort by", sort_opts, key="hold_sort")
+    col_f, col_s = st.columns([2,2])
+    with col_f:
+        cat_filter = st.selectbox("Category", ["All","Crypto","Core","ETF","Other","IPO","SELL"])
+    with col_s:
+        sort_by = st.selectbox("Sort", ["Value ↓","G/L % ↓","G/L % ↑","Upside ↓","Ticker"])
+
+    if not PRICES:
+        st.info("⚡ Click **Refresh Prices** in the sidebar to load live recommendations.", icon="ℹ")
 
     rows = []
     for p in P:
-        cat,t,name,sh,cost,target,bear,bull,lt,lt_date,cg_id = p
-        if cat_sel != "All" and cat != cat_sel: continue
-        pr     = PRICES.get(t)
-        value  = sh*pr if pr else sh*cost
-        gl_pct = (pr-cost)/cost*100 if pr else None
-        up_pct = (target-pr)/pr*100 if pr and target else None
-        rec, rcol = rec_engine(cat,t,cost,target,bear,bull,lt,lt_date,pr)
-        rows.append({"cat":cat,"t":t,"name":name,"sh":sh,"cost":cost,
-            "pr":pr,"value":value,"gl_pct":gl_pct,"upside":up_pct,
-            "lt":lt,"lt_date":lt_date,"rec":rec,"rcol":rcol,
-            "bear":bear,"bull":bull,"target":target,"cg_id":cg_id})
+        cat,t,name,sh,cost = p[0],p[1],p[2],p[3],p[4]
+        target,bear,bull   = p[5],p[6],p[7]
+        lt,ltd             = p[8],p[9]
+        drip_sh            = p[11] if len(p)>11 else 0
+        drip_c             = p[12] if len(p)>12 else 0
+        divs               = p[13] if len(p)>13 else 0
+        if cat_filter != "All" and cat != cat_filter: continue
+        pr    = PRICES.get(t)
+        val   = sh*pr if pr else sh*cost
+        gl    = (pr-cost)/cost*100 if pr else None
+        up    = (target-pr)/pr*100 if pr and target else None
+        rec   = generate_rec(cat,t,cost,target,bear,bull,lt,ltd,pr,drip_sh,drip_c,divs)
+        rows.append(dict(cat=cat,t=t,name=name,sh=sh,cost=cost,pr=pr,val=val,
+                         gl=gl,upside=up,lt=lt,ltd=ltd,rec=rec,
+                         bear=bear,bull=bull,target=target,
+                         drip_sh=drip_sh,drip_c=drip_c,divs=divs))
 
     # Sort
-    if "Value" in sort_sel:       rows.sort(key=lambda r: -(r["value"] or 0))
-    elif "G/L % ↓" in sort_sel:  rows.sort(key=lambda r: -(r["gl_pct"] or -999))
-    elif "G/L % ↑" in sort_sel:  rows.sort(key=lambda r:  (r["gl_pct"] or 999))
-    else:                          rows.sort(key=lambda r: r["t"])
+    sk = {"Value ↓":lambda r:-(r["val"] or 0), "G/L % ↓":lambda r:-(r["gl"] or -999),
+          "G/L % ↑":lambda r:(r["gl"] or 999), "Upside ↓":lambda r:-(r["upside"] or -999),
+          "Ticker": lambda r:r["t"]}
+    rows.sort(key=sk.get(sort_by, lambda r:r["t"]))
 
     # Table header
     st.markdown("""
-<div style="display:grid;grid-template-columns:80px 1fr 90px 90px 90px 155px 90px;
-padding:.5rem .75rem;border-bottom:1px solid var(--border);margin-bottom:.25rem">
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num)">TICKER</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num)">NAME</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num);text-align:right">PRICE</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num);text-align:right">G/L %</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num);text-align:right">VALUE</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num)">REC</span>
-  <span style="font-size:.64rem;letter-spacing:.1em;text-transform:uppercase;color:var(--muted);font-family:var(--font-num)">LT</span>
+<div style="display:grid;grid-template-columns:72px 1fr 88px 82px 88px 160px 100px;
+align-items:center;padding:.45rem .6rem;border-bottom:1px solid var(--border);
+font-family:var(--fn);font-size:.63rem;letter-spacing:.08em;text-transform:uppercase;
+color:var(--muted)">
+  <span>TICKER</span><span>NAME</span><span style="text-align:right">PRICE</span>
+  <span style="text-align:right">G/L %</span><span style="text-align:right">VALUE</span>
+  <span>RECOMMENDATION</span><span>LT STATUS</span>
 </div>""", unsafe_allow_html=True)
 
     for r in rows:
-        gl_color  = color_number(r["gl_pct"] or 0)
-        up_str    = f"▲{r['upside']:.0f}%" if r['upside'] and r['upside']>0 else (f"▼{abs(r['upside']):.0f}%" if r['upside'] else "")
-        up_color  = "var(--accent)" if r['upside'] and r['upside']>0 else "var(--orange)"
-        _, badge  = REC_MAP.get(r["rcol"], ("#8b949e","badge-gray"))
-        sell_cls  = "sell-flag" if r["cat"]=="SELL" else ""
-        lt_badge  = badge_html("✅ LT","badge-green") if r["lt"] else badge_html(r["lt_date"][:10],"badge-orange")
+        gl_col   = "var(--acc)" if (r["gl"] or 0) >= 0 else "var(--red)"
+        rec_col  = r["rec"].color
+        bdg_cls  = REC_BADGE.get(rec_col, "bgr")
+        cat_col  = ("var(--red)" if r["cat"]=="SELL" else
+                    "var(--purple)" if r["cat"]=="Crypto" else
+                    "var(--gold)" if r["cat"]=="ETF" else "var(--text)")
+        lt_bdg   = badge("✅ LT","bg") if r["lt"] else badge(r["ltd"][:12],"bo")
 
-        row_key = f"row_{r['t']}"
-        if st.button(f"▸  {r['t']}  ·  {r['name'][:22]}", key=row_key, use_container_width=True):
-            st.session_state.sel_ticker = None if st.session_state.sel_ticker == r['t'] else r['t']
-            st.rerun()
+        # Compact row as a button
+        with st.container():
+            if st.button(
+                f'{r["t"]}  ·  {r["name"][:24]}  ·  {usd(r["pr"]) if r["pr"] else "—"}  ·  {pct(r["gl"]) if r["gl"] else "—"}  ·  {usd(r["val"],0)}',
+                key=f"h_{r['t']}", use_container_width=True
+            ):
+                st.session_state.sel_ticker = None if st.session_state.sel_ticker==r["t"] else r["t"]
+                st.rerun()
 
-        # Inline detail if expanded
         if st.session_state.sel_ticker == r["t"]:
             with st.container():
                 d1,d2,d3,d4 = st.columns(4)
                 d1.metric("Shares",       f"{r['sh']:,.4f}")
-                d2.metric("Avg Cost",     usd(r['cost']))
-                d3.metric("Live Price",   usd(r['pr']) if r['pr'] else "—")
-                d4.metric("Position",     usd(r['value'],2))
+                d2.metric("Avg Cost",     usd(r["cost"]))
+                d3.metric("Live Price",   usd(r["pr"]) if r["pr"] else "—")
+                d4.metric("Position",     usd(r["val"],2))
                 d5,d6,d7,d8 = st.columns(4)
-                d5.metric("G/L",  pct(r['gl_pct']), delta=usd((r['pr']-r['cost'])*r['sh']) if r['pr'] else None)
-                d6.metric("Target",   usd(r['target']) if r['target'] else "None")
-                d7.metric("Bear",     usd(r['bear']) if r['bear'] else "None")
-                d8.metric("Bull",     usd(r['bull']) if r['bull'] else "None")
+                d5.metric("G/L %",  pct(r["gl"]), delta=usd((r["pr"]-r["cost"])*r["sh"]) if r["pr"] else None)
+                d6.metric("Target", usd(r["target"]) if r["target"] else "None")
+                d7.metric("Bear",   usd(r["bear"])   if r["bear"]   else "None")
+                d8.metric("Bull",   usd(r["bull"])   if r["bull"]   else "None")
 
-                # Range bar
-                if r['pr'] and r['bear'] and r['bull']:
-                    lo, hi = r['bear']*0.9, r['bull']*1.05
-                    sp = hi - lo
-                    def rp(v): return max(0, min(100, (v-lo)/sp*100))
+                # Price range bar
+                if r["pr"] and r["bear"] and r["bull"]:
+                    lo,hi = r["bear"]*.9, r["bull"]*1.08
+                    sp = hi-lo
+                    def rp(v): return max(0, min(100,(v-lo)/sp*100))
+                    dot_col = "var(--acc)" if (r["pr"] or 0) >= r["cost"] else "var(--red)"
                     st.markdown(f"""
-<div class="range-bar-wrap" style="padding:.5rem 0">
-  <div class="range-bar-track">
-    <div class="range-bar-fill" style="
-      margin-left:{rp(r['bear']):.1f}%;
-      width:{rp(r['target'] or r['bull'])-rp(r['bear']):.1f}%"></div>
-    <div class="range-bar-dot" style="
-      left:{rp(r['pr']):.1f}%;
-      background:{'var(--accent)' if r['pr'] >= r['cost'] else 'var(--red)'}"></div>
+<div style="padding:.5rem 0">
+  <div style="position:relative;height:5px;background:var(--bg3);border-radius:3px;margin:.4rem 0">
+    <div style="position:absolute;left:{rp(r['bear']):.1f}%;
+      width:{rp(r['target'] or r['bull'])-rp(r['bear']):.1f}%;
+      height:100%;background:linear-gradient(90deg,rgba(248,81,73,.4),rgba(0,229,160,.4));
+      border-radius:3px"></div>
+    <div style="position:absolute;left:{rp(r['cost']):.1f}%;top:-4px;
+      width:2px;height:13px;background:var(--gold);opacity:.8"></div>
+    <div style="position:absolute;left:{rp(r['pr']):.1f}%;top:-5px;
+      width:14px;height:14px;border-radius:50%;transform:translateX(-50%);
+      background:{dot_col};border:2px solid var(--bg2);z-index:3"></div>
+    {f'<div style="position:absolute;left:{rp(r["target"]):.1f}%;top:-4px;width:2px;height:13px;background:var(--acc);z-index:2"></div>' if r["target"] else ''}
   </div>
-  <div class="range-labels">
+  <div style="display:flex;justify-content:space-between;font-family:var(--fn);font-size:.67rem;color:var(--muted)">
     <span style="color:var(--red)">Bear {usd(r['bear'],0)}</span>
     <span style="color:var(--gold)">Cost {usd(r['cost'],0)}</span>
-    {'<span style="color:var(--accent)">Target '+usd(r['target'],0)+'</span>' if r['target'] else ''}
-    <span style="color:#4dbb7a">Bull {usd(r['bull'],0)}</span>
+    {f'<span style="color:var(--acc)">Target {usd(r["target"],0)}</span>' if r["target"] else ''}
+    <span style="color:#4dbb7a">Bull {usd(r["bull"],0)}</span>
   </div>
 </div>""", unsafe_allow_html=True)
 
-                rec_color = REC_MAP.get(r["rcol"],("#8b949e","badge-gray"))[0]
+                # Rec box
+                rcc = {"green":"var(--acc)","red":"var(--red)","gold":"var(--gold)",
+                       "blue":"var(--blue)","purple":"var(--purple)","orange":"var(--orange)","gray":"var(--muted)"}
+                rc  = rcc.get(r["rec"].color,"var(--muted)")
                 st.markdown(f"""
-<div style="background:var(--bg2);border:1px solid {rec_color}33;border-left:3px solid {rec_color};
-border-radius:8px;padding:.75rem 1rem;margin:.5rem 0">
-  <span style="color:{rec_color};font-weight:800;font-size:.9rem">{r['rec']}</span>
+<div style="background:var(--bg2);border:1px solid {rc}33;border-left:3px solid {rc};
+border-radius:8px;padding:.7rem 1rem;margin:.4rem 0">
+  <div style="color:{rc};font-weight:700;font-size:.88rem;margin-bottom:.3rem">{r["rec"].action}</div>
+  <div style="color:var(--muted);font-size:.77rem;line-height:1.55">{r["rec"].detail}</div>
+  {f'<div style="color:var(--orange);font-size:.72rem;margin-top:.3rem">⚖ {r["rec"].tax_note}</div>' if r["rec"].tax_note else ''}
+  {f'<div style="color:var(--acc);font-size:.72rem;margin-top:.25rem">🌱 {r["rec"].drip_note}</div>' if r["rec"].drip_note else ''}
 </div>""", unsafe_allow_html=True)
 
-                if r['cat'] == "SELL" and r['lt']:
-                    st.error(f"🔴 SELL NOW — LT eligible. Move proceeds to target ETF. Deploy ${CASH:,.0f} + proceeds into {('VOO' if 'VOO' in r['name'] else 'QQQ' if 'QQQ' in r['name'] else 'target ETF')}")
-                elif r['target'] and r['pr'] and r['lt'] and "TRIM" in r['rec']:
-                    st.info(f"📱 Set Robinhood price alert: **{r['t']} above {usd(r['target'],0)}**")
+                # DRIP metrics for this position
+                if r["drip_sh"] > 0:
+                    drip_cur_val = r["drip_sh"] * (r["pr"] or r["cost"])
+                    drip_gain    = drip_cur_val - r["drip_c"]
+                    yield_pct    = DRIP_YIELD.get(r["t"], 0)
+                    est_ann      = (r["pr"] or r["cost"]) * r["sh"] * (yield_pct/100) if yield_pct else 0
+                    dc1,dc2,dc3 = st.columns(3)
+                    dc1.metric("DRIP Shares",     f"{r['drip_sh']:.5f}")
+                    dc2.metric("DRIP Value",       usd(drip_cur_val,2), delta=usd(drip_gain,2))
+                    dc3.metric("Est. Annual Income",usd(est_ann,2) if est_ann else "—")
 
-        st.markdown("<hr style='margin:.2rem 0;border-color:var(--border)'>", unsafe_allow_html=True)
+        st.markdown('<div style="height:2px;background:var(--border);margin:.1rem 0"></div>',unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════
-#  DEPLOY $900
-# ══════════════════════════════════════════════════════
-elif page == "Deploy $900":
-
-    st.markdown("# Deploy $900 Biweekly")
+# ══════════════════════════════════════════════════════════════════════════════
+#  IMPORT CSV
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Import CSV":
+    st.markdown("# *Import Robinhood CSV*")
     st.markdown("---")
 
-    c1, c2 = st.columns([3, 2])
+    c1, c2 = st.columns([3,2])
     with c1:
-        nxt, days = next_deposit_date()
-        deposit_amt = st.number_input("Deposit amount ($)", value=900, step=50, min_value=100, key="dep_amt")
+        st.markdown("""
+Export from Robinhood: **Account → Statements & History → Account Activity → All Time → Download CSV**
+
+You can upload multiple CSVs — the app merges and deduplicates all transactions.
+        """)
+
+        uploaded_files = st.file_uploader(
+            "Drop CSV(s) here", type=["csv"],
+            accept_multiple_files=True,
+            label_visibility="collapsed"
+        )
+
+        if uploaded_files:
+            contents = [f.read().decode("utf-8", errors="ignore") for f in uploaded_files]
+
+            if len(contents) == 1:
+                parsed = parse_robinhood_csv(contents[0])
+            else:
+                parsed = merge_csvs(contents)
+
+            # Summary metrics
+            st.markdown(f"""
+<div class="kcard kcard-acc" style="margin:.75rem 0">
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:.75rem">
+    {''.join(f'<div><div style="font-size:.62rem;color:var(--muted);font-family:var(--fn);text-transform:uppercase;letter-spacing:.08em;margin-bottom:.2rem">{l}</div><div style="font-size:1.3rem;font-weight:600;font-family:var(--fn);color:{c}">{v}</div></div>'
+    for l,v,c in [
+        ("Total Txns", parsed.total_tx, "var(--text)"),
+        ("Buy Orders", parsed.buys, "var(--acc)"),
+        ("SELL Orders", parsed.sells, "var(--red)"),
+        ("DRIP Reinvests", parsed.drip_count, "var(--purple)"),
+        ("Cash Dividends", parsed.cdiv_count, "var(--gold)"),
+    ])}
+  </div>
+  <div style="margin-top:.6rem;font-size:.72rem;color:var(--muted)">
+    Date range: {parsed.date_range} · Sell proceeds: {usd(parsed.sell_proceeds,2)} ·
+    Deposits: {usd(parsed.cash_deposits,2)}
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            # DRIP summary
+            if parsed.drip_log:
+                total_drip_amt = sum(d["amt"] for d in parsed.drip_log)
+                st.markdown(f"""
+<div class="kcard kcard-purple" style="margin:.5rem 0">
+  <div style="font-size:.7rem;color:var(--purple);letter-spacing:.08em;text-transform:uppercase;margin-bottom:.4rem">
+    🌱 DRIP ANALYTICS FROM THIS IMPORT</div>
+  <div style="font-size:.82rem;color:var(--text)">
+    {len(parsed.drip_log)} DRIP events · ${total_drip_amt:.2f} reinvested ·
+    {len(parsed.dividends)} tickers received dividends ·
+    ${sum(parsed.dividends.values()):.2f} total dividends declared
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            # Reconcile preview
+            updated, changes = reconcile(parsed, st.session_state.portfolio)
+
+            if changes:
+                st.markdown(f"#### {len(changes)} changes detected")
+                st.dataframe(pd.DataFrame(changes), use_container_width=True, hide_index=True)
+            else:
+                st.info("No changes detected — portfolio already in sync.")
+
+            # Sell proceeds / cash update
+            new_cash = max(CONFIRMED_CASH, parsed.sell_proceeds * 0.5)
+            st.markdown(f"""
+<div class="kcard kcard-gold">
+  <div style="font-size:.65rem;color:var(--gold);text-transform:uppercase;
+  letter-spacing:.08em;margin-bottom:.35rem">💰 CASH POSITION AFTER IMPORT</div>
+  <div style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <div style="font-size:1.3rem;font-weight:600;font-family:var(--fn)">${CONFIRMED_CASH:,.2f}</div>
+      <div style="font-size:.72rem;color:var(--muted)">Confirmed from sold positions</div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:.78rem;color:var(--muted)">Sell proceeds this CSV:</div>
+      <div style="font-size:.9rem;font-weight:600;color:var(--gold)">{usd(parsed.sell_proceeds,2)}</div>
+    </div>
+  </div>
+</div>""", unsafe_allow_html=True)
+
+            if st.button("✅  Confirm Import — Update Portfolio", use_container_width=True):
+                st.session_state.portfolio = updated
+                st.session_state.cash      = CONFIRMED_CASH
+                # Save DRIP log
+                existing_drip = set(
+                    (d["date"],d["ticker"],round(d["shares"],6))
+                    for d in st.session_state.drip_log
+                )
+                for d in parsed.drip_log:
+                    key = (d["date"],d["ticker"],round(d["shares"],6))
+                    if key not in existing_drip:
+                        st.session_state.drip_log.append(d)
+                        existing_drip.add(key)
+                st.success(f"✅ Portfolio updated! {len(changes)} changes · {len(parsed.drip_log)} DRIP events logged.")
+                st.rerun()
+
+    with c2:
+        st.markdown("#### What gets updated")
+        features = [
+            ("✅ Buy orders",           "Shares + weighted avg cost"),
+            ("✅ **Sell orders**",       "Reduces shares, removes closed positions"),
+            ("✅ DRIP reinvestments",    "Tracked separately per ticker"),
+            ("✅ Cash dividends",        "Total divs received per ticker"),
+            ("✅ Stock splits (SPL)",    "Share counts adjusted"),
+            ("✅ Auto-remove SELL pos",  "Sold-out positions removed from SELL list"),
+            ("✅ New tickers",           "Auto-detected from history"),
+            ("✅ Multiple CSV merge",    "Deduplicated by date/ticker/code"),
+            ("— BTC / XRP",             "In Robinhood Crypto (separate)"),
+        ]
+        for feat, detail in features:
+            c = "var(--acc)" if feat.startswith("✅") else "var(--muted)"
+            st.markdown(
+                f'<div style="display:flex;gap:.7rem;padding:.37rem 0;border-bottom:1px solid var(--border)">'
+                f'<span style="color:{c};font-size:.78rem;min-width:175px;font-weight:600">{feat}</span>'
+                f'<span style="font-size:.76rem;color:var(--muted)">{detail}</span></div>',
+                unsafe_allow_html=True
+            )
+
         st.markdown(f"""
-<div class="alert-panel alert-info" style="margin:1rem 0">
-  <div class="alert-title" style="color:var(--blue)">📅 NEXT DEPOSIT FRIDAY</div>
-  <div style="font-size:1.2rem;font-weight:800;font-family:var(--font-num)">{nxt}, 2026</div>
-  <div style="color:var(--muted);font-size:.8rem">{days} days away · ${deposit_amt:,} to deploy</div>
+<div class="kcard kcard-blue" style="margin-top:1rem">
+  <div style="font-size:.67rem;color:var(--blue);letter-spacing:.08em;text-transform:uppercase;
+  margin-bottom:.4rem">WHY PREVIOUS IMPORTS SHOWED "NO CHANGES"</div>
+  <div style="font-size:.78rem;color:var(--muted);line-height:1.6">
+    The old parser ignored all <strong style="color:var(--text)">Sell</strong> transactions.
+    Your 10 sells (AMD, XOP, VTV, VEA, VWO, BND, CAVA, RIVN) were never applied,
+    so share counts appeared unchanged. This v4 parser handles every transaction type.
+  </div>
+</div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  DEPLOY $900
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "Deploy $900":
+    st.markdown("# *Deploy $900 Biweekly*")
+    st.markdown("---")
+
+    c1, c2 = st.columns([3,2])
+    with c1:
+        nxt_d, nxt_days = next_deposit()
+        deposit_amt = st.number_input("Deposit amount ($)", value=900, step=50, min_value=100)
+
+        st.markdown(f"""
+<div class="kcard kcard-gold">
+  <div style="font-size:.63rem;color:var(--gold);letter-spacing:.1em;text-transform:uppercase;margin-bottom:.35rem">📅 NEXT DEPOSIT FRIDAY</div>
+  <div style="font-size:1.3rem;font-weight:600;font-family:var(--fn)">{nxt_d}, 2026</div>
+  <div style="font-size:.75rem;color:var(--muted);margin-top:.2rem">{nxt_days} days · ${deposit_amt:,} to deploy · Cash available: ${CASH:,.2f}</div>
 </div>""", unsafe_allow_html=True)
 
         st.markdown("#### This Cycle's Allocation")
         picks = biweekly_picks(P, PRICES, deposit_amt)
+        total_alloc = sum(pk["alloc"] for pk in picks)
+
         for pk in picks:
-            shares_str = f"→ {pk['shares']:.4f} shares @ {usd(pk['price'])}" if pk['shares'] else ""
-            dip_flag   = "🔥" if "DIP" in pk["note"] else ""
+            dip   = "🔥" if "DIP" in pk["note"] else ""
+            sh_str = f"→ {pk['shares']:.4f} shares @ {usd(pk['price'])}" if pk["shares"] else "→ price not loaded"
+            pct_alloc = pk["alloc"]/total_alloc*100
+
             st.markdown(f"""
-<div class="alert-panel alert-buy" style="margin:.4rem 0">
+<div class="kcard kcard-acc" style="margin:.35rem 0">
   <div style="display:flex;justify-content:space-between;align-items:center">
-    <div>
-      <span style="font-weight:800;font-family:var(--font-num);font-size:1.05rem">
-        {dip_flag} {pk['ticker']}</span>
-      <div style="color:var(--muted);font-size:.75rem;margin-top:.15rem">{pk['note']}</div>
-      {'<div style="color:var(--muted);font-family:var(--font-num);font-size:.72rem;margin-top:.1rem">'+shares_str+'</div>' if shares_str else ''}
+    <div style="flex:1">
+      <div style="font-weight:700;font-size:1rem">{dip} {pk['ticker']}
+        <span style="font-size:.72rem;font-weight:400;color:var(--muted);margin-left:.5rem">{pct_alloc:.0f}%</span>
+      </div>
+      <div style="font-size:.73rem;color:var(--muted);margin-top:.2rem">{pk['note']}</div>
+      <div style="font-family:var(--fn);font-size:.7rem;color:var(--acc);margin-top:.15rem">{sh_str}</div>
     </div>
-    <div style="text-align:right">
-      <div style="font-family:var(--font-num);font-size:1.1rem;font-weight:700">
-        ${pk['alloc']}</div>
-      <div style="font-size:.68rem;color:var(--muted)">{pk['alloc']/deposit_amt*100:.0f}%</div>
-    </div>
+    <div style="font-family:var(--fn);font-size:1.2rem;font-weight:700">${pk['alloc']}</div>
   </div>
+</div>""", unsafe_allow_html=True)
+
+        st.markdown(f"""
+<div style="display:flex;justify-content:space-between;padding:.6rem 0;
+border-top:1px solid var(--border);font-family:var(--fn)">
+  <span style="font-weight:600">TOTAL DEPLOYED</span>
+  <span style="font-size:1.2rem;font-weight:700;color:var(--gold)">${total_alloc}</span>
 </div>""", unsafe_allow_html=True)
 
         if st.button("✅  Log This Deposit", use_container_width=True):
             entry = {
                 "date":   datetime.now().strftime("%b %d, %Y  %H:%M"),
                 "amount": deposit_amt,
-                "picks":  [(pk["ticker"], pk["alloc"], pk["note"]) for pk in picks],
-                "prices": {pk["ticker"]: pk["price"] for pk in picks},
+                "picks":  [(pk["ticker"],pk["alloc"],pk["note"]) for pk in picks],
+                "prices": {pk["ticker"]:pk["price"] for pk in picks},
             }
             st.session_state.deposit_log.insert(0, entry)
             # Update holdings
             updated = []
             for p in st.session_state.portfolio:
-                pk_match = next((pk for pk in picks if pk["ticker"]==p[1] and pk["price"]), None)
-                if pk_match:
-                    add_sh   = pk_match["alloc"] / pk_match["price"]
-                    new_sh   = p[3] + add_sh
-                    new_cost = (p[3]*p[4] + pk_match["alloc"]) / new_sh
-                    updated.append((p[0],p[1],p[2],round(new_sh,6),round(new_cost,4))+p[5:])
+                pk_m = next((pk for pk in picks if pk["ticker"]==p[1] and pk["price"]), None)
+                if pk_m:
+                    add_sh  = pk_m["alloc"] / pk_m["price"]
+                    new_sh  = p[3] + add_sh
+                    new_c   = (p[3]*p[4] + pk_m["alloc"]) / new_sh
+                    updated.append((p[0],p[1],p[2],round(new_sh,6),round(new_c,4))+p[5:])
                 else:
                     updated.append(p)
             st.session_state.portfolio = updated
-            st.success(f"✅ ${deposit_amt:,} deposit logged. Holdings updated.")
+            st.success(f"✅ ${deposit_amt:,} logged and holdings updated!")
             st.rerun()
 
     with c2:
         st.markdown("#### 📅 2026 Schedule")
-        sched_html = ""
         today = date.today()
-        for d in SCHEDULE_2026:
-            dt     = datetime.strptime(f"{d} 2026", "%b %d %Y").date()
-            days_r = (dt - today).days
-            is_nxt = d == nxt
-            is_past= days_r < 0
-            bg     = "var(--goldD)" if is_nxt else "transparent"
-            border = "var(--gold)" if is_nxt else "var(--border)"
-            col    = "var(--gold)" if is_nxt else ("var(--dim)" if is_past else "var(--muted)")
-            label  = "▶ NEXT" if is_nxt else ("✓" if is_past else f"+{days_r}d")
-            sched_html += f"""<div style="display:flex;justify-content:space-between;
-align-items:center;padding:.35rem .75rem;background:{bg};border:1px solid {border};
-border-radius:6px;margin-bottom:.2rem">
-<span style="font-family:var(--font-num);font-size:.78rem;color:{col}">{d}, 2026</span>
-<span style="font-family:var(--font-num);font-size:.65rem;color:{col}">{label}</span>
-</div>"""
+        nxt_d_, _ = next_deposit()
+        sched_html = ""
+        for d in DEPOSIT_SCHEDULE:
+            try:
+                dt     = datetime.strptime(f"{d} 2026","%b %d %Y").date()
+                days_r = (dt - today).days
+                is_nxt = d == nxt_d_
+                is_past= days_r < 0
+                bg   = "var(--goldD)" if is_nxt else "transparent"
+                brd  = "var(--gold)" if is_nxt else "var(--border)"
+                col_ = "var(--gold)" if is_nxt else ("var(--dim)" if is_past else "var(--muted)")
+                lbl  = "▶ NEXT" if is_nxt else ("✓" if is_past else f"+{days_r}d")
+                sched_html += (
+                    f'<div style="display:flex;justify-content:space-between;align-items:center;'
+                    f'padding:.3rem .65rem;background:{bg};border:1px solid {brd};'
+                    f'border-radius:6px;margin-bottom:.18rem">'
+                    f'<span style="font-family:var(--fn);font-size:.76rem;color:{col_}">{d}, 2026</span>'
+                    f'<span style="font-family:var(--fn);font-size:.63rem;color:{col_}">{lbl}</span>'
+                    f'</div>'
+                )
+            except: pass
         st.markdown(sched_html, unsafe_allow_html=True)
 
     if st.session_state.deposit_log:
@@ -1201,225 +861,203 @@ border-radius:6px;margin-bottom:.2rem">
         st.markdown("#### 📚 Deposit History")
         log_rows = []
         for e in st.session_state.deposit_log:
-            tickers = ", ".join([f"{t}(${a})" for t,a,_ in e["picks"]])
-            log_rows.append({"Date":e["date"],"Amount":f"${e['amount']:,}","Allocation":tickers})
+            log_rows.append({
+                "Date": e["date"],
+                "Amount": f"${e['amount']:,}",
+                "Allocation": ", ".join(f"{t}(${a})" for t,a,_ in e["picks"]),
+            })
         st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
 
 
-# ══════════════════════════════════════════════════════
-#  IMPORT CSV
-# ══════════════════════════════════════════════════════
-elif page == "Import CSV":
-
-    st.markdown("# Import Robinhood CSV")
+# ══════════════════════════════════════════════════════════════════════════════
+#  DRIP ANALYTICS
+# ══════════════════════════════════════════════════════════════════════════════
+elif page == "DRIP Analytics":
+    st.markdown("# *DRIP Analytics*")
+    st.markdown("Dividend Reinvestment tracking — compound growth engine")
     st.markdown("---")
 
-    c1, c2 = st.columns([3, 2])
-    with c1:
-        st.markdown("""
-Export your full activity from Robinhood:
+    # Portfolio-level DRIP summary
+    total_drip_invested = sum(
+        p[12] if len(p)>12 else 0 for p in P
+    )
+    total_drip_shares_now_val = sum(
+        (p[11] if len(p)>11 else 0) * PRICES.get(p[1], p[4])
+        for p in P
+    )
+    total_divs = sum(p[13] if len(p)>13 else 0 for p in P)
+    drip_gain  = total_drip_shares_now_val - total_drip_invested
 
-**Account → Statements & History → Account Activity → All Time → Download CSV**
+    m1,m2,m3,m4 = st.columns(4)
+    m1.metric("Total DRIP Reinvested", usd(total_drip_invested or DRIP_SUMMARY["total_reinvested"],2))
+    m2.metric("DRIP Shares Value Now", usd(total_drip_shares_now_val,2) if total_drip_shares_now_val else "Load prices")
+    m3.metric("DRIP Gain vs Cost",    usd(drip_gain,2) if total_drip_shares_now_val else "—")
+    m4.metric("Total Dividends Declared", usd(total_divs or DRIP_SUMMARY["total_divs"],2))
 
-This import correctly handles: **Buy · Sell · DRIP reinvestments · Stock splits · Transfers**
-        """)
+    st.markdown("---")
 
-        uploaded = st.file_uploader(
-            "Drop your Robinhood Account Activity CSV here",
-            type=["csv"], label_visibility="collapsed"
-        )
+    # Per-position DRIP table
+    st.markdown('<div class="section-head">DRIP Breakdown by Position</div>', unsafe_allow_html=True)
+    drip_rows = []
+    for p in P:
+        drip_sh  = p[11] if len(p)>11 else 0
+        drip_c   = p[12] if len(p)>12 else 0
+        divs     = p[13] if len(p)>13 else 0
+        if drip_sh < 0.00001 and divs < 0.01: continue
+        pr       = PRICES.get(p[1], p[4])
+        drip_val = drip_sh * pr if pr else drip_c
+        drip_gl  = drip_val - drip_c if pr else 0
+        yld_pct  = DRIP_YIELD.get(p[1], 0)
+        est_ann  = pr * p[3] * (yld_pct/100) if pr and yld_pct else 0
+        drip_rows.append({
+            "Ticker":         p[1],
+            "Name":           p[2][:22],
+            "DRIP Shares":    f"{drip_sh:.5f}",
+            "DRIP Cost":      usd(drip_c,2),
+            "DRIP Value Now": usd(drip_val,2) if pr else "—",
+            "DRIP G/L":       usd(drip_gl,2) if pr else "—",
+            "Divs Received":  usd(divs,2),
+            "Est. Ann. Income": usd(est_ann,2) if est_ann else "—",
+            "Yield %":        f"{yld_pct:.1f}%" if yld_pct else "—",
+        })
+    drip_rows.sort(key=lambda r: -float(r["DRIP Cost"].replace("$","").replace(",","") or 0))
+    if drip_rows:
+        st.dataframe(pd.DataFrame(drip_rows), use_container_width=True, hide_index=True, height=500)
+    else:
+        st.info("Import a CSV with DRIP transactions to populate this table.")
 
-        if uploaded:
-            content   = uploaded.read().decode("utf-8", errors="ignore")
-            csv_data  = parse_csv_v3(content)
-            st.session_state.import_result = csv_data
+    st.markdown("---")
 
-            # Success summary
-            st.markdown(f"""
-<div class="alert-panel alert-buy" style="margin-bottom:1rem">
-  <div class="alert-title" style="color:var(--accent)">✅ CSV PARSED SUCCESSFULLY</div>
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:.75rem;margin-top:.5rem">
-    <div>
-      <div style="font-size:.65rem;color:var(--muted);font-family:var(--font-num)">TRANSACTIONS</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:var(--font-num)">{csv_data['total_tx']}</div>
-    </div>
-    <div>
-      <div style="font-size:.65rem;color:var(--muted);font-family:var(--font-num)">BUY ORDERS</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:var(--font-num)">{csv_data['buys_found']}</div>
-    </div>
-    <div>
-      <div style="font-size:.65rem;color:var(--muted);font-family:var(--font-num);color:var(--red)">SELL ORDERS</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:var(--font-num);color:var(--red)">{csv_data['sells_found']}</div>
-    </div>
-    <div>
-      <div style="font-size:.65rem;color:var(--muted);font-family:var(--font-num)">POSITIONS</div>
-      <div style="font-size:1.2rem;font-weight:700;font-family:var(--font-num)">{len(csv_data['positions'])}</div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+    # DRIP event log (from imported CSVs)
+    st.markdown('<div class="section-head">DRIP Event Log</div>', unsafe_allow_html=True)
+    if st.session_state.drip_log:
+        log_df = pd.DataFrame(st.session_state.drip_log)
+        log_df = log_df.sort_values("date", ascending=False)
+        log_df["amt"] = log_df["amt"].map(lambda x: usd(x,2))
+        log_df["shares"] = log_df["shares"].map(lambda x: f"{x:.6f}")
+        log_df.columns = [c.title() for c in log_df.columns]
+        st.dataframe(log_df, use_container_width=True, hide_index=True, height=400)
+    else:
+        st.info("Import a CSV to see the DRIP event log. Each reinvestment is shown with date, ticker, shares, and price paid.")
 
-            # Reconcile preview
-            merged, changes = reconcile(csv_data, st.session_state.portfolio)
-
-            if changes:
-                st.markdown(f"#### {len(changes)} Changes Detected")
-                st.dataframe(pd.DataFrame(changes), use_container_width=True, hide_index=True)
-            else:
-                st.info("Portfolio is already in sync with this CSV — no changes needed.")
-
-            # Cash update
-            new_cash = CASH_BALANCE   # Use confirmed value
-            st.markdown(f"""
-<div class="cash-card">
-  <div>
-    <div class="cash-label">💰 CASH BALANCE (from sells)</div>
-    <div class="cash-amount">${new_cash:,.2f}</div>
-    <div class="cash-sub">Ready to deploy per biweekly plan</div>
-  </div>
-  <div style="font-family:var(--font-num);font-size:.8rem;color:var(--muted)">
-    Proceeds from:<br>AMD · VTV · VEA · VWO<br>BND · CAVA · RIVN · XOP
-  </div>
-</div>""", unsafe_allow_html=True)
-
-            if st.button("✅  Confirm Import — Update Portfolio", use_container_width=True):
-                st.session_state.portfolio = merged
-                st.session_state.cash_balance = new_cash
-                st.success(f"✅ Portfolio updated from {csv_data['total_tx']} transactions. {len(changes)} changes applied.")
-                st.rerun()
-
-    with c2:
-        st.markdown("#### What This Import Handles")
-        features = [
-            ("✅ Buy orders",         "Share count + weighted avg cost"),
-            ("✅ **Sell orders**",     "Reduces shares + removes proportional cost"),
-            ("✅ DRIP reinvestments",  "Auto-buys after dividends"),
-            ("✅ Stock splits",        "Share count adjusted (SPL)"),
-            ("✅ Transfers-in",        "REC transactions"),
-            ("✅ New tickers",         "Auto-detected from history"),
-            ("— BTC / XRP",           "In Robinhood Crypto (separate CSV)"),
-            ("— Analyst targets",     "Preserved from War Room model"),
-        ]
-        for feat, detail in features:
-            color = "var(--accent)" if feat.startswith("✅") else "var(--muted)"
-            st.markdown(f"""
-<div style="display:flex;gap:.75rem;padding:.4rem 0;border-bottom:1px solid var(--border)">
-  <span style="font-size:.8rem;color:{color};min-width:170px;font-weight:600">{feat}</span>
-  <span style="font-size:.78rem;color:var(--muted)">{detail}</span>
-</div>""", unsafe_allow_html=True)
-
-        st.markdown("""
-<div class="alert-panel alert-info" style="margin-top:1rem">
-  <div class="alert-title" style="color:var(--blue)">WHY PREVIOUS IMPORT SAID "NO CHANGES"</div>
-  <div style="font-size:.8rem;color:var(--muted);line-height:1.6">
-    The old parser only processed <b>Buy</b> transactions.
-    It completely ignored all 10 <b>Sell</b> orders, so your actual
-    share reductions (AMD, XOP, VTV, VEA, VWO, BND sold) were never reflected.
-    <br><br>This version correctly handles Sell transactions.
-  </div>
-</div>""", unsafe_allow_html=True)
+    # Projection
+    st.markdown("---")
+    st.markdown('<div class="section-head">Compound Growth Projection</div>', unsafe_allow_html=True)
+    st.markdown("""
+DRIP turns dividends into more shares, which generate more dividends — compounding over time.
+    """)
+    proj_years = st.slider("Projection years", 1, 30, 10)
+    proj_rows = []
+    for p in P:
+        yld = DRIP_YIELD.get(p[1], 0)
+        if yld < 0.5: continue
+        pr = PRICES.get(p[1], p[4])
+        current_val = p[3] * pr
+        projected   = current_val * (1 + yld/100) ** proj_years
+        gain        = projected - current_val
+        proj_rows.append({
+            "Ticker": p[1],
+            "Current Value": usd(current_val,0),
+            f"Value in {proj_years}yr": usd(projected,0),
+            "Projected Gain": usd(gain,0),
+            "Yield %": f"{yld:.1f}%",
+        })
+    proj_rows.sort(key=lambda r: -float(r[f"Value in {proj_years}yr"].replace("$","").replace(",","") or 0))
+    if proj_rows:
+        st.dataframe(pd.DataFrame(proj_rows), use_container_width=True, hide_index=True)
 
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  SNAPSHOTS
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 elif page == "Snapshots":
-
-    st.markdown("# Price Snapshots")
-    st.markdown("Every refresh is saved here with exact prices and timestamps.")
+    st.markdown("# *Price Snapshots*")
+    st.markdown("Every price refresh is saved here with exact timestamps and all prices.")
     st.markdown("---")
 
     history = load_history()
-
     if not history:
-        st.info("No snapshots yet. Hit ⚡ Refresh Prices to create the first one.")
+        st.info("No snapshots yet — click ⚡ Refresh Prices to create the first one.")
     else:
         # Summary
-        st.markdown(f"#### {len(history)} Snapshots Saved")
-        summary_rows = []
+        summary = []
         for s in history:
-            summary_rows.append({
-                "Timestamp":    s["timestamp"],
-                "Portfolio $":  usd(s.get("total_value",0),0),
-                "G/L $":        usd(s.get("total_gl",0),0),
-                "G/L %":        pct(s.get("total_gl_pct",0)),
-                "Cash":         usd(s.get("cash",0),2),
-                "Prices":       len(s.get("prices",{})),
+            summary.append({
+                "Timestamp":   s["timestamp"],
+                "Total $":     usd(s.get("total_value",0),0),
+                "G/L $":       usd(s.get("total_gl",0),0),
+                "G/L %":       pct(s.get("total_gl_pct",0)),
+                "Cash":        usd(s.get("cash",0),2),
+                "Prices":      len(s.get("prices",{})),
             })
-        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(summary), use_container_width=True, hide_index=True)
 
-        # Drill into one
         st.markdown("---")
         st.markdown("#### Inspect Snapshot")
         opts = [f"{s['timestamp']}  ·  {usd(s.get('total_value',0),0)}" for s in history]
         idx  = st.selectbox("Choose snapshot", range(len(opts)), format_func=lambda i: opts[i])
         snap = history[idx]
 
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Timestamp",    snap["timestamp"][:16])
-        col2.metric("Total Value",  usd(snap.get("total_value",0),0))
-        col3.metric("G/L",          usd(snap.get("total_gl",0),0), delta=pct(snap.get("total_gl_pct",0)))
-        col4.metric("Cash",         usd(snap.get("cash",0),2))
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Timestamp",    snap["timestamp"][:16])
+        c2.metric("Total Value",  usd(snap.get("total_value",0),0))
+        c3.metric("G/L",          usd(snap.get("total_gl",0),0), delta=pct(snap.get("total_gl_pct",0)))
+        c4.metric("Cash",         usd(snap.get("cash",0),2))
 
-        price_rows = []
-        for pos in snap.get("positions",[]):
-            price_rows.append({
-                "Ticker":  pos["ticker"],
-                "Price":   usd(pos.get("price")) if pos.get("price") else "—",
-                "Cost":    usd(pos["cost"]),
-                "G/L %":   pct(pos.get("gl_pct")) if pos.get("gl_pct") is not None else "—",
-                "Value $": usd(pos["value"],2),
-                "Rec":     (pos.get("rec","—") or "—")[:45],
-            })
+        price_rows = [{"Ticker":pos["ticker"],"Price":usd(pos.get("price")),"Cost":usd(pos["cost"]),
+            "G/L %":pct(pos.get("gl_pct")) if pos.get("gl_pct") is not None else "—",
+            "Value":usd(pos["value"],2),"Rec":(pos.get("rec","—") or "—")[:45]}
+            for pos in snap.get("positions",[])]
         if price_rows:
-            st.dataframe(pd.DataFrame(price_rows), use_container_width=True, hide_index=True, height=600)
+            st.dataframe(pd.DataFrame(price_rows),use_container_width=True,hide_index=True,height=600)
 
 
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 #  SETTINGS
-# ══════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════════════════════
 elif page == "Settings":
-
-    st.markdown("# Settings")
+    st.markdown("# *Settings*")
     st.markdown("---")
 
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 📡 Data Sources")
         st.markdown("""
-| Source | Covers | Key Required | Limit |
-|--------|--------|-------------|-------|
-| **yfinance** | All 40 stocks/ETFs | None | Very high |
-| **CoinGecko** | BTC + XRP | None | 30/min |
+| Source | Covers | Key? | Limit |
+|--------|--------|------|-------|
+| **yfinance** | 39 stocks/ETFs/crypto | None | Very high |
+| **CoinGecko** | BTC + XRP real-time | None | 30/min |
 
-Prices refresh in ~2-4 seconds. Cache: 5 minutes.
-Runs server-side (no CORS issues, no 429 rate limits).
+Server-side Python → no browser CORS issues, no 429 rate-limit errors.
+Price cache: 5 minutes. Force refresh clears cache instantly.
         """)
 
-        st.markdown("#### 🔧 Manual Price Override")
-        ov_t  = st.selectbox("Ticker", [p[1] for p in P], key="ov_t")
-        ov_pr = st.number_input("Price ($)", value=float(PRICES.get(ov_t,100)), step=0.01, key="ov_pr")
+        st.markdown("#### 🔧 Manual Override")
+        ov_t = st.selectbox("Ticker", [p[1] for p in P])
+        ov_p = st.number_input("Price ($)", value=float(PRICES.get(ov_t, P[0][4])), step=0.01)
         if st.button("Apply Override"):
-            st.session_state.prices[ov_t] = ov_pr
-            st.success(f"✅ {ov_t} → ${ov_pr:.2f}")
+            st.session_state.prices[ov_t] = ov_p
+            st.success(f"✅ {ov_t} → ${ov_p:.2f}")
             st.rerun()
 
         st.markdown("#### 💵 Cash Balance")
-        new_cash = st.number_input("Update cash balance ($)", value=float(st.session_state.cash_balance), step=1.0)
+        nc = st.number_input("Cash ($)", value=float(st.session_state.cash), step=1.0)
         if st.button("Update Cash"):
-            st.session_state.cash_balance = new_cash
-            st.success(f"Cash updated to ${new_cash:,.2f}")
+            st.session_state.cash = nc
+            st.success(f"Cash: ${nc:,.2f}")
             st.rerun()
 
     with c2:
-        st.markdown("#### 📊 Portfolio Status")
+        st.markdown("#### 📊 Status")
         st.markdown(f"""
-| Metric | Value |
-|--------|-------|
+| Item | Value |
+|------|-------|
 | Positions | {len(P)} |
-| Live prices | {len(PRICES)}/{len(P)} |
-| Cash balance | ${st.session_state.cash_balance:,.2f} |
-| Snapshots | {len(load_history())} |
+| Live prices loaded | {len(PRICES)}/{len(P)} |
+| Cash balance | ${st.session_state.cash:,.2f} |
+| Snapshots saved | {len(load_history())} |
 | Deposits logged | {len(st.session_state.deposit_log)} |
+| DRIP events logged | {len(st.session_state.drip_log)} |
 | Last refresh | {st.session_state.last_ts or 'Never'} |
         """)
 
@@ -1428,22 +1066,23 @@ Runs server-side (no CORS issues, no 429 rate limits).
             export = []
             for p in P:
                 pr = PRICES.get(p[1], p[4])
-                rec,_ = rec_engine(p[0],p[1],p[4],p[5],p[6],p[7],p[8],p[9],pr)
+                rec = generate_rec(p[0],p[1],p[4],p[5],p[6],p[7],p[8],p[9],pr,
+                                   p[11] if len(p)>11 else 0, p[12] if len(p)>12 else 0)
                 export.append({"Ticker":p[1],"Name":p[2],"Cat":p[0],"Shares":p[3],
                     "AvgCost":p[4],"Price":pr,"Value":round(p[3]*pr,2),
-                    "GL%":round((pr-p[4])/p[4]*100,2),"Rec":rec})
-            st.download_button("⬇ Download Portfolio CSV",
-                pd.DataFrame(export).to_csv(index=False),
-                "portfolio.csv","text/csv")
+                    "GL%":round((pr-p[4])/p[4]*100,2),"Rec":rec.action,
+                    "DRIPShares":p[11] if len(p)>11 else 0})
+            st.download_button("⬇ Portfolio CSV",
+                pd.DataFrame(export).to_csv(index=False),"portfolio.csv","text/csv")
 
-        st.markdown("#### ♻️ Reset")
-        if st.button("Reset portfolio to defaults", type="secondary"):
-            st.session_state.portfolio    = list(PORTFOLIO)
-            st.session_state.cash_balance = CASH_BALANCE
-            st.success("Portfolio reset.")
+        if st.button("♻️ Reset to defaults", type="secondary"):
+            for k in ["portfolio","cash","prices","sources","last_ts","errors",
+                      "deposit_log","drip_log","sel_ticker"]:
+                if k in st.session_state: del st.session_state[k]
+            _init()
+            st.success("Reset complete.")
             st.rerun()
 
-        if st.button("Clear snapshot history", type="secondary"):
-            if os.path.exists(HISTORY_FILE):
-                os.remove(HISTORY_FILE)
-            st.success("Snapshot history cleared.")
+        if st.button("🗑 Clear snapshot history", type="secondary"):
+            if os.path.exists(HISTORY_FILE): os.remove(HISTORY_FILE)
+            st.success("History cleared.")

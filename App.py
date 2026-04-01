@@ -1,7 +1,6 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta # Technical Analysis library
 from datetime import datetime
 
 # --- APP CONFIG ---
@@ -9,22 +8,37 @@ st.set_page_config(page_title="Hedge Fund Manager Pro", layout="wide")
 st.title("📈 Global Alpha: Portfolio & Recommendation Engine")
 
 # --- 1. DATA CORE: HOLDINGS FROM YOUR ROBINHOOD ---
-# Based on your CSV analysis
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = {
         'NFLX': 21.33, 'GLD': 6.64, 'AMD': 3.22, 'BRK-B': 4.51, 
         'SNOW': 3.73, 'KLAR': 11.0, 'RIVN': 10.0, 'CAVA': 1.0
     }
 
+# --- CUSTOM RSI CALCULATOR ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
 # --- 2. LIVE PRICE & RECOMMENDATION ENGINE ---
 def get_live_advice(ticker, qty):
     try:
         data = yf.download(ticker, period="1y", interval="1d", progress=False)
-        current_price = data['Close'].iloc[-1]
         
-        # Technical Indicators
-        rsi = ta.rsi(data['Close'], length=14).iloc[-1]
-        sma_50 = data['Close'].rolling(window=50).mean().iloc[-1]
+        # Extract scalar values correctly
+        if isinstance(data.columns, pd.MultiIndex):
+            close_series = data['Close'][ticker]
+        else:
+            close_series = data['Close']
+            
+        current_price = float(close_series.iloc[-1])
+        
+        # Technical Indicators natively in pandas
+        rsi_series = calculate_rsi(close_series, 14)
+        rsi = float(rsi_series.iloc[-1])
+        sma_50 = float(close_series.rolling(window=50).mean().iloc[-1])
         
         # Recommendation Logic
         value = current_price * qty
@@ -33,22 +47,18 @@ def get_live_advice(ticker, qty):
         
         if rsi < 35:
             action = "🔥 STRONG BUY (Oversold)"
-            color = "#00FF00" # Bright Green
         elif current_price < sma_50 * 0.90:
             action = "⚠️ TRIM / STOP LOSS"
-            color = "#FF4B4B" # Red
         elif rsi > 70:
             action = "💰 TAKE PROFITS (Overbought)"
-            color = "#FFA500" # Orange
             
         return {
             "Price": round(current_price, 2),
             "Value": round(value, 2),
             "RSI": round(rsi, 2),
-            "Advice": action,
-            "Color": color
+            "Advice": action
         }
-    except:
+    except Exception as e:
         return None
 
 # --- 3. UI: THE DASHBOARD ---
@@ -75,24 +85,28 @@ if st.button('🔄 REFRESH LIVE PRICES & RE-CALCULATE'):
                 })
                 total_val += stats['Value']
 
-    df = pd.DataFrame(rows)
-    
-    # KPIs
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Total Net Worth", f"${total_val:,.22}")
-    c2.metric("Cash for April 3rd", f"${deposit_amount}")
-    
-    # Display Table with Highlighting
-    st.table(df)
-    
-    # Smart $900 Allocation Plan
-    st.subheader("🎯 Bi-Weekly Allocation Plan (Friday, April 3rd)")
-    best_buy = df.sort_values(by="RSI (14d)").iloc[0]
-    st.success(f"Strategy: Deploy the $900 into **{best_buy['Ticker']}**. It has the lowest RSI ({best_buy['RSI (14d)']}), indicating the highest growth potential for this cycle.")
+    if rows:
+        df = pd.DataFrame(rows)
+        
+        # KPIs
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total Net Worth", f"${total_val:,.2f}")
+        c2.metric("Cash for April 3rd", f"${deposit_amount}")
+        
+        # Display Table with Highlighting
+        st.dataframe(df.style.applymap(
+            lambda x: "background-color: #d4edda; color: green" if "BUY" in str(x) else 
+                      ("background-color: #f8d7da; color: red" if "TRIM" in str(x) else ""), 
+            subset=['AI RECOMMENDATION']
+        ), use_container_width=True)
+        
+        # Smart $900 Allocation Plan
+        st.subheader("🎯 Bi-Weekly Allocation Plan (Friday, April 3rd)")
+        best_buy = df.sort_values(by="RSI (14d)").iloc[0]
+        st.success(f"Strategy: Deploy the $900 into **{best_buy['Ticker']}**. It has the lowest RSI ({best_buy['RSI (14d)']}), indicating the highest growth potential for this cycle.")
+    else:
+        st.error("Failed to fetch market data. Please try again.")
 
-# --- 4. ROBINHOOD SYNC SIMULATOR ---
-with st.expander("Update Holdings (Manual or CSV Upload)"):
-    uploaded_file = st.file_uploader("Upload new Robinhood Activity CSV")
-    if uploaded_file:
-        st.write("File detected. Re-indexing portfolio...")
-        # (Logic to parse CSV and update st.session_state.portfolio goes here)
+# --- 4. PORTFOLIO UPDATES ---
+with st.expander("Update Holdings"):
+    st.info("To update your holdings, modify the dictionary at the top of your App.py file in GitHub, or we can build a CSV upload feature here later.")

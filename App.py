@@ -7,135 +7,128 @@ from datetime import datetime
 # --- SETTINGS & STYLE ---
 st.set_page_config(page_title="Wealth Architect AI", page_icon="🚀", layout="wide")
 
-# Custom CSS to mirror your JSX look
+# Corrected CSS logic
 st.markdown("""
     <style>
     .main { background-color: #0f172a; color: white; }
-    .stMetric { background-color: #1e293b; padding: 15px; border-radius: 10px; border: 1px solid #334155; }
+    div[data-testid="stMetric"] { 
+        background-color: #1e293b; 
+        padding: 20px; 
+        border-radius: 12px; 
+        border: 1px solid #334155;
+    }
     .stDataFrame { border: 1px solid #334155; border-radius: 10px; }
-    div[data-testid="stExpander"] { background-color: #1e293b; border: 1px solid #334155; }
     </style>
-    """, unsafe_allow_value=True)
+    """, unsafe_allow_html=True)
 
-# --- 1. DATA CORE: YOUR ACTUAL HOLDINGS ---
-# Extracted from your Robinhood CSV
+# --- 1. DATA CORE: YOUR FULL ROBINHOOD PORTFOLIO ---
 if 'portfolio' not in st.session_state:
     st.session_state.portfolio = {
-        'NVDA': 35.50, 'NFLX': 21.33, 'AAPL': 16.10, 'VOO': 5.68, 
-        'QQQ': 2.75, 'META': 2.30, 'AMD': 3.22, 'SCHD': 8.71,
-        'WMT': 13.56, 'GLD': 6.64, 'GOOGL': 4.00, 'SNOW': 3.73,
-        'RIVN': 10.0, 'CAVA': 1.0, 'RDDT': 1.0
+        'NVDA': 35.5022, 'NFLX': 21.3325, 'AAPL': 16.0975, 'WMT': 13.5583,
+        'KLAR': 11.0, 'STUB': 23.3561, 'RIVN': 10.0, 'BLSH': 10.0,
+        'SCHD': 8.7081, 'GLD': 6.6408, 'VOO': 5.6809, 'BRK-B': 4.5154,
+        'GOOGL': 4.0033, 'SNOW': 3.7353, 'AMD': 3.2234, 'QQQ': 2.7495,
+        'META': 2.3024, 'VTI': 1.9418, 'VHT': 1.8845, 'VYM': 20.4402,
+        'VXUS': 19.7126, 'XLE': 15.2826, 'TSM': 1.3801, 'CAVA': 1.0,
+        'RDDT': 1.0, 'BMWYY': 1.0, 'ALK': 0.6087
     }
 
-# --- CUSTOM ENGINE: TECHNICAL ANALYSIS ---
+# --- CUSTOM ANALYTICS ENGINE ---
 def get_live_metrics(ticker, qty):
     try:
-        # Clean ticker for yfinance
         ytick = ticker.replace('.', '-')
         data = yf.download(ytick, period="1y", interval="1d", progress=False)
-        
         if data.empty: return None
         
-        # Handle multi-index if necessary
-        if isinstance(data.columns, pd.MultiIndex): close = data['Close'][ytick]
-        else: close = data['Close']
-            
+        # Pull close price
+        close = data['Close'][ytick] if isinstance(data.columns, pd.MultiIndex) else data['Close']
         current_price = float(close.iloc[-1])
         
-        # RSI Calculation (Relative Strength Index)
+        # Calculate RSI (14-day)
         delta = close.diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         rsi = 100 - (100 / (1 + rs.iloc[-1]))
         
-        # SMAs
-        sma50 = close.rolling(window=50).mean().iloc[-1]
-        sma200 = close.rolling(window=200).mean().iloc[-1]
-        
-        # Logic for Advice
+        # Simple Recommendation Logic
         advice = "HOLD"
-        if rsi < 32: advice = "🔥 BUY (Oversold)"
-        elif rsi > 75: advice = "💰 TAKE PROFITS"
-        elif current_price < sma200: advice = "⚠️ TRIM / TAX-LOSS"
-        elif current_price > sma50: advice = "✅ ACCUMULATE"
+        if rsi < 35: advice = "🔥 BUY (Oversold)"
+        elif rsi > 70: advice = "💰 TRIM (Overbought)"
+        elif current_price > close.rolling(window=50).mean().iloc[-1]: advice = "✅ ACCUMULATE"
         
         return {
             "Price": current_price,
             "Value": current_price * qty,
             "RSI": round(rsi, 1),
-            "SMA50": round(sma50, 2),
-            "Advice": advice
+            "Status": advice
         }
     except:
         return None
 
-# --- HEADER SECTION ---
-st.title("🛡️ Wealth Architect AI v2.0")
-st.subheader("Professional Portfolio Management & Prediction Engine")
+# --- HEADER & KPI CARDS ---
+st.title("🛡️ Wealth Architect AI")
+st.write("Live Portfolio Dashboard & $900 Bi-Weekly Strategy")
 
-# --- SUMMARY CARDS (Mirroring JSX) ---
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 
-# Data Fetching Logic
-if st.button('🔄 REFRESH ALL LIVE DATA'):
+# Force a data fetch on start/button
+if st.button('🔄 REFRESH PORTFOLIO & FETCH LIVE PRICES'):
     rows = []
     total_val = 0
-    with st.spinner('Syncing with Global Markets...'):
+    with st.spinner('Accessing Market Data...'):
         for t, q in st.session_state.portfolio.items():
             stats = get_live_metrics(t, q)
             if stats:
                 rows.append({
-                    "Ticker": t, "Shares": q, "Price": stats['Price'],
-                    "Value": stats['Value'], "RSI": stats['RSI'], "Status": stats['Advice']
+                    "Asset": t, "Shares": q, "Price": f"${stats['Price']:,.2f}",
+                    "Total Value": stats['Value'], "RSI": stats['RSI'], "Action": stats['Status']
                 })
                 total_val += stats['Value']
         
     df = pd.DataFrame(rows)
     
-    # Update Metrics
-    c1.metric("Total Portfolio Value", f"${total_val:,.2f}", delta="Live")
-    c2.metric("Next Deposit (April 3rd)", "$900.00", delta="Scheduled")
-    c3.metric("Account Efficiency", "98.4%", delta="Optimal")
+    # KPI Fill
+    c1.metric("Net Portfolio Value", f"${total_val:,.2f}")
+    c2.metric("Next Deposit", "$900.00", "April 3")
+    c3.metric("Asset Count", len(df))
+    c4.metric("Risk Profile", "Aggressive Growth")
 
-    # --- VISUALS ---
-    col_left, col_right = st.columns([2, 1])
-    
-    with col_left:
-        st.write("### Live Market Insight")
-        # Fixed formatting for newer pandas versions
+    st.divider()
+
+    # --- MAIN CONTENT ---
+    col_table, col_chart = st.columns([2, 1])
+
+    with col_table:
+        st.subheader("📋 Live Holdings & AI Recommendations")
+        # Fix: using .map() for modern pandas compatibility
         st.dataframe(df.style.map(
-            lambda x: "background-color: #166534; color: #4ade80" if "BUY" in str(x) or "ACCUMULATE" in str(x) else 
-                      ("background-color: #7f1d1d; color: #f87171" if "TRIM" in str(x) or "PROFITS" in str(x) else ""), 
-            subset=['Status']
-        ), use_container_width=True)
+            lambda x: "background-color: #064e3b; color: #34d399" if "BUY" in str(x) or "ACCUMULATE" in str(x) else 
+                      ("background-color: #7f1d1d; color: #f87171" if "TRIM" in str(x) else ""), 
+            subset=['Action']
+        ), use_container_width=True, hide_index=True)
 
-    with col_right:
-        st.write("### Allocation Weight")
-        fig = px.pie(df, values='Value', names='Ticker', hole=.4, template="plotly_dark")
-        fig.update_layout(margin=dict(l=0, r=0, b=0, t=0))
+    with col_chart:
+        st.subheader("📊 Allocation")
+        fig = px.pie(df, values='Total Value', names='Asset', hole=.4, template="plotly_dark")
+        fig.update_layout(showlegend=False, margin=dict(l=0, r=0, b=0, t=0))
         st.plotly_chart(fig, use_container_width=True)
 
-    # --- THE $900 STRATEGY SECTION ---
+    # --- STRATEGY SECTION ---
     st.divider()
-    st.write("### 🎯 Friday, April 3rd: $900 Deployment Plan")
+    st.subheader("🎯 $900 Rebalance Strategy (Friday, April 3rd)")
     
-    # Logic: Pick the best value (Lowest RSI)
-    best_pick = df.sort_values(by='RSI').iloc[0]
+    # AI logic: Buy what is most oversold
+    best_buy = df.sort_values(by='RSI').iloc[0]
     
-    sc1, sc2 = st.columns(2)
-    with sc1:
-        st.success(f"**Primary Target:** Buy **${900}** of **{best_pick['Ticker']}**")
-        st.write(f"**Rationale:** {best_pick['Ticker']} is currently the most oversold asset in your list with an RSI of {best_pick['RSI']}. This provides the highest probability of a bounce and maximizes long-term gains.")
+    b1, b2 = st.columns(2)
+    with b1:
+        st.info(f"**Primary Target:** {best_buy['Asset']}")
+        st.write(f"Deploy your $900 here. This asset has the lowest Relative Strength Index ({best_buy['RSI']}) in your portfolio, making it the most mathematically sound value buy for this cycle.")
     
-    with sc2:
-        st.info("**Hedge Strategy:** Split $900 into VOO ($450) and QQQ ($450)")
-        st.write("Use this if you prefer a 'Core-Satellite' stability approach for this pay cycle.")
+    with b2:
+        st.success("**Safe Alternative:** VOO / QQQ Split")
+        st.write("Alternatively, put $450 into VOO and $450 into QQQ to maintain your baseline market exposure.")
 
 else:
-    st.warning("Click the 'REFRESH' button above to load your live data and AI recommendations.")
-
-# --- FOOTER / LOGS ---
-with st.expander("📝 History of Recommendations"):
-    st.write("3/31/2026: Recommended accumulating NVDA due to SMA-50 support.")
-    st.write("3/15/2026: Recommended holding VOO; index remains in strong uptrend.")
+    st.info("👋 Welcome! Click the **Refresh** button above to load your Robinhood data and generate live recommendations.")

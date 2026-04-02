@@ -1,13 +1,14 @@
 [theme]
-primaryColor = "#00f0aa"
-backgroundColor = "#0a0e14"
-secondaryBackgroundColor = "#131820"
-textColor = "#e8ecf8"
-font = "monospace"
+base = "dark"
+backgroundColor = "#08090d"
+secondaryBackgroundColor = "#0f1117"
+primaryColor = "#4ade80"
+textColor = "#e8eaf0"
+font = "serif"
 
 [server]
 headless = true
-port = 8501
+maxUploadSize = 50
 
 [browser]
 gatherUsageStats = false

@@ -1,15 +1,32 @@
 """
-Portfolio War Room — App.py v6.1
+Portfolio War Room — App.py v7.0
 Single-file Streamlit app for Streamlit Cloud deployment.
 
-Key fixes vs v6.0:
-  - Transaction deduplication: every processed row gets a SHA-1 fingerprint
-    stored in session_state["tx_ledger"]. Re-uploading the same CSV (or any
-    CSV that overlaps with a previous one) will SKIP already-seen rows and
-    only apply genuinely NEW transactions.
-  - Import preview shows: total rows / skipped (already seen) / new (applied)
-  - All prior fixes retained: file-object parser, incremental merge, diff view,
-    premium UI, Plotly charts, mobile responsive.
+ARCHITECTURE (v7 — fixes the doubling bug permanently):
+  The root cause of doubling was that the old design kept a hardcoded
+  BASELINE_PORTFOLIO (shares already baked in) and then ADDED transaction
+  deltas on top of it every upload.  This doubled every position.
+
+  v7 replaces that with a single source of truth:
+    session_state["tx_store"]  — dict of {fingerprint: row_dict}
+                                  every unique Robinhood transaction row ever seen
+    portfolio                  — ALWAYS recomputed from tx_store from scratch
+                                  by replaying all transactions in date order
+
+  Uploading any CSV (new, old, partial, full re-export):
+    1. Parse every row → compute fingerprint
+    2. Skip rows already in tx_store (exact dedup by content hash)
+    3. Add only genuinely new rows to tx_store
+    4. Recompute portfolio from entire tx_store
+    5. Show diff: what changed between old portfolio and new portfolio
+
+  This means:
+    - Re-uploading the same CSV → tx_store unchanged → portfolio unchanged
+    - Uploading a new CSV with 5 new trades → only those 5 added → portfolio updated correctly
+    - Session restart → tx_store starts empty → first upload builds it fresh from scratch
+
+  Crypto (BTC/XRP) positions are manually managed via Settings since
+  Robinhood Crypto CSV is a separate export.
 
 Deploy: streamlit run App.py
 """
@@ -285,51 +302,176 @@ ACTION_CALENDAR = [
     {"date":"Dec 20", "type":"tax",    "action":"🧾 Year-end: harvest losses, net gains before Dec 31"},
 ]
 
-# Baseline portfolio from 583 reconciled transactions
-BASELINE_PORTFOLIO = {
-    "BTC":  {"shares":0.03433,  "avg_cost":52800.00, "category":"Crypto",  "lt_date":"2024-09-01"},
-    "XRP":  {"shares":1.066,    "avg_cost":0.68,      "category":"Crypto",  "lt_date":"2024-11-01"},
-    "NVDA": {"shares":35.5042,  "avg_cost":82.50,     "category":"Stocks",  "lt_date":"2024-06-01"},
-    "META": {"shares":2.3024,   "avg_cost":490.00,    "category":"Stocks",  "lt_date":"2025-03-01"},
-    "GOOGL":{"shares":4.0033,   "avg_cost":165.00,    "category":"Stocks",  "lt_date":"2024-12-01"},
-    "AAPL": {"shares":2.5977,   "avg_cost":172.50,    "category":"Stocks",  "lt_date":"2024-03-01"},
-    "MSFT": {"shares":0.0124,   "avg_cost":398.00,    "category":"Stocks",  "lt_date":"2024-03-01"},
-    "NFLX": {"shares":21.3325,  "avg_cost":580.00,    "category":"Stocks",  "lt_date":"2024-06-01"},
-    "COST": {"shares":2.3423,   "avg_cost":880.00,    "category":"Stocks",  "lt_date":"2024-08-01"},
-    "TSM":  {"shares":3.50,     "avg_cost":155.00,    "category":"Stocks",  "lt_date":"2024-11-01"},
-    "CRM":  {"shares":1.20,     "avg_cost":285.00,    "category":"Stocks",  "lt_date":"2024-09-01"},
-    "QCOM": {"shares":2.3724,   "avg_cost":158.00,    "category":"Stocks",  "lt_date":"2024-03-01"},
-    "WMT":  {"shares":4.149,    "avg_cost":62.00,     "category":"Stocks",  "lt_date":"2024-03-01"},
-    "BRK-B":{"shares":4.5154,   "avg_cost":360.00,    "category":"Stocks",  "lt_date":"2024-06-01"},
-    "RDDT": {"shares":1.0,      "avg_cost":34.00,     "category":"Stocks",  "lt_date":"2025-03-01"},
-    "ALK":  {"shares":0.6087,   "avg_cost":41.07,     "category":"Stocks",  "lt_date":"2025-04-01"},
-    "SNOW": {"shares":0.7808,   "avg_cost":158.00,    "category":"Stocks",  "lt_date":"2025-04-01"},
-    "BMWYY":{"shares":1.0,      "avg_cost":39.72,     "category":"Stocks",  "lt_date":"2025-03-01"},
-    "BLSH": {"shares":10.0,     "avg_cost":37.00,     "category":"Stocks",  "lt_date":"2026-08-14"},
-    "KLAR": {"shares":11.0,     "avg_cost":40.00,     "category":"Stocks",  "lt_date":"2026-09-11"},
-    "STUB": {"shares":23.3561,  "avg_cost":25.62,     "category":"Stocks",  "lt_date":"2026-09-18"},
-    "VOO":  {"shares":7.601,    "avg_cost":480.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "QQQ":  {"shares":2.7532,   "avg_cost":450.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VTI":  {"shares":0.7507,   "avg_cost":252.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VGT":  {"shares":1.4649,   "avg_cost":510.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VHT":  {"shares":1.8845,   "avg_cost":245.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VIS":  {"shares":1.9664,   "avg_cost":260.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VYM":  {"shares":22.912,   "avg_cost":118.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
-    "SCHD": {"shares":19.445,   "avg_cost":26.50,     "category":"ETFs",    "lt_date":"2024-03-01"},
-    "VXUS": {"shares":23.548,   "avg_cost":57.00,     "category":"ETFs",    "lt_date":"2024-03-01"},
-    "GLD":  {"shares":6.6408,   "avg_cost":218.00,    "category":"ETFs",    "lt_date":"2024-04-01"},
-    "XLE":  {"shares":18.933,   "avg_cost":87.00,     "category":"ETFs",    "lt_date":"2024-03-01"},
-    "SPY":  {"shares":0.50,     "avg_cost":480.00,    "category":"ETFs",    "lt_date":"2025-05-20","sell_flag":True},
-    "VUG":  {"shares":0.4647,   "avg_cost":380.00,    "category":"ETFs",    "lt_date":"2025-07-15","sell_flag":True},
-    "VTV":  {"shares":0.1658,   "avg_cost":155.89,    "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
-    "VEA":  {"shares":0.2523,   "avg_cost":49.13,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
-    "VWO":  {"shares":0.1446,   "avg_cost":41.40,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
-    "BND":  {"shares":0.578,    "avg_cost":72.17,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
+# ── metadata that can't come from CSV (category, LT dates, sell flags) ────────
+# These stay as reference — they are NOT used to set share counts.
+TICKER_META = {
+    "BTC":  {"category":"Crypto", "lt_date":"2024-09-01"},
+    "XRP":  {"category":"Crypto", "lt_date":"2024-11-01"},
+    "NVDA": {"category":"Stocks", "lt_date":"2024-06-01"},
+    "META": {"category":"Stocks", "lt_date":"2025-03-01"},
+    "GOOGL":{"category":"Stocks", "lt_date":"2024-12-01"},
+    "AAPL": {"category":"Stocks", "lt_date":"2024-03-01"},
+    "MSFT": {"category":"Stocks", "lt_date":"2024-03-01"},
+    "NFLX": {"category":"Stocks", "lt_date":"2024-06-01"},
+    "COST": {"category":"Stocks", "lt_date":"2024-08-01"},
+    "TSM":  {"category":"Stocks", "lt_date":"2024-11-01"},
+    "CRM":  {"category":"Stocks", "lt_date":"2024-09-01"},
+    "QCOM": {"category":"Stocks", "lt_date":"2024-03-01"},
+    "WMT":  {"category":"Stocks", "lt_date":"2024-03-01"},
+    "BRK-B":{"category":"Stocks", "lt_date":"2024-06-01"},
+    "BRK.B":{"category":"Stocks", "lt_date":"2024-06-01"},
+    "RDDT": {"category":"Stocks", "lt_date":"2025-03-01"},
+    "ALK":  {"category":"Stocks", "lt_date":"2025-04-01"},
+    "SNOW": {"category":"Stocks", "lt_date":"2025-04-01"},
+    "BMWYY":{"category":"Stocks", "lt_date":"2025-03-01"},
+    "BLSH": {"category":"Stocks", "lt_date":"2026-08-14"},
+    "KLAR": {"category":"Stocks", "lt_date":"2026-09-11"},
+    "STUB": {"category":"Stocks", "lt_date":"2026-09-18"},
+    "VOO":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "QQQ":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VTI":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VGT":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VHT":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VIS":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VYM":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "SCHD": {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "VXUS": {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "GLD":  {"category":"ETFs",   "lt_date":"2024-04-01"},
+    "XLE":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "SPY":  {"category":"ETFs",   "lt_date":"2025-05-20", "sell_flag":True},
+    "VUG":  {"category":"ETFs",   "lt_date":"2025-07-15", "sell_flag":True},
+    "VTV":  {"category":"ETFs",   "lt_date":"2024-03-01", "sell_flag":True},
+    "VEA":  {"category":"ETFs",   "lt_date":"2024-03-01", "sell_flag":True},
+    "VWO":  {"category":"ETFs",   "lt_date":"2024-03-01", "sell_flag":True},
+    "BND":  {"category":"ETFs",   "lt_date":"2024-03-01", "sell_flag":True},
+    "XOP":  {"category":"ETFs",   "lt_date":"2024-03-01"},
+    "CAVA": {"category":"Stocks", "lt_date":"2025-01-01"},
+    "RIVN": {"category":"Stocks", "lt_date":"2025-01-01"},
+    "AMD":  {"category":"Stocks", "lt_date":"2024-03-01"},
 }
+
+ETF_SET = {
+    "VOO","QQQ","VTI","VGT","VHT","VIS","VYM","SCHD","VXUS","GLD",
+    "XLE","BND","VUG","VTV","VEA","VWO","SPY","XOP",
+}
+
+def _infer_category(ticker):
+    if ticker in CRYPTO:        return "Crypto"
+    if ticker in ETF_SET:       return "ETFs"
+    m = TICKER_META.get(ticker) or TICKER_META.get(ticker.replace("-","."))
+    if m:                       return m.get("category","Stocks")
+    return "Stocks"
+
+def _get_meta(ticker, key, default=""):
+    m = TICKER_META.get(ticker) or TICKER_META.get(ticker.replace("-","."), {})
+    return m.get(key, default)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# CSV PARSER  — accepts file object OR string, handles all 12 Robinhood codes
+# CORE: recompute portfolio from transaction store
+# This is the ONLY correct way to build the portfolio.
+# It replays ALL transactions in chronological order from scratch.
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _parse_date(s):
+    """Parse M/D/YYYY → datetime for sorting."""
+    try:    return datetime.strptime(str(s).strip(), "%m/%d/%Y")
+    except:
+        try:    return datetime.strptime(str(s).strip(), "%Y-%m-%d")
+        except: return datetime.min
+
+
+def recompute_portfolio(tx_store: dict, manual_overrides: dict = None) -> dict:
+    """
+    Replay ALL rows in tx_store (sorted oldest→newest) and compute
+    current share counts and avg costs from scratch.
+
+    tx_store: {fingerprint: row_dict}  — every unique Robinhood CSV row ever seen
+    manual_overrides: {ticker: {"shares":x,"avg_cost":y}} for crypto / manual edits
+
+    Returns portfolio dict: {ticker: {shares, avg_cost, category, lt_date, sell_flag}}
+    """
+    rows = sorted(tx_store.values(), key=lambda r: _parse_date(r.get("Activity Date","")))
+
+    shares     = defaultdict(float)
+    cost_total = defaultdict(float)
+
+    for row in rows:
+        ticker = (row.get("Instrument") or "").strip()
+        # normalise BRK.B / BRK-B
+        if ticker == "BRK.B": ticker = "BRK-B"
+        code   = (row.get("Trans Code") or "").strip()
+        qty    = _parse_qty(row.get("Quantity",""))
+        price  = _parse_dollar(row.get("Price",""))
+        amount = _parse_dollar(row.get("Amount",""))
+
+        if code == "Buy":
+            if not ticker: continue
+            cost = qty * price if price else abs(amount)
+            shares[ticker]     += qty
+            cost_total[ticker] += cost
+
+        elif code == "Sell":
+            if not ticker: continue
+            held = shares[ticker]
+            if held > 0 and qty > 0:
+                # reduce cost basis proportionally
+                frac = min(qty / held, 1.0)
+                cost_total[ticker] *= (1.0 - frac)
+            shares[ticker] = max(0.0, held - qty)
+
+        elif code == "SPL":
+            if ticker: shares[ticker] += qty
+
+        elif code in ("REC","SXCH"):
+            if ticker: shares[ticker] += qty
+
+        elif code == "LIQ":
+            if not ticker: continue
+            held = shares[ticker]
+            if held > 0 and qty > 0:
+                frac = min(qty / held, 1.0)
+                cost_total[ticker] *= (1.0 - frac)
+            shares[ticker] = max(0.0, held - qty)
+
+    # build portfolio dict — only positions with shares remaining
+    portfolio = {}
+    for ticker, sh in shares.items():
+        if sh < 0.00001: continue
+        avg = cost_total[ticker] / sh if sh else 0.0
+        portfolio[ticker] = {
+            "shares":    round(sh, 6),
+            "avg_cost":  round(avg, 4),
+            "category":  _infer_category(ticker),
+            "lt_date":   _get_meta(ticker, "lt_date", ""),
+            "sell_flag": _get_meta(ticker, "sell_flag", ticker in SELL_FLAGS),
+        }
+
+    # apply manual overrides (crypto, manual edits)
+    if manual_overrides:
+        for ticker, ov in manual_overrides.items():
+            if ticker in portfolio:
+                portfolio[ticker].update(ov)
+            else:
+                portfolio[ticker] = {
+                    "shares":    ov.get("shares", 0),
+                    "avg_cost":  ov.get("avg_cost", 0),
+                    "category":  _infer_category(ticker),
+                    "lt_date":   _get_meta(ticker, "lt_date", ""),
+                    "sell_flag": False,
+                }
+
+    return portfolio
+
+
+# ── EMPTY baseline — no hardcoded positions, CSV is the only truth ────────────
+# (kept for backwards compat with any code that references BASELINE_PORTFOLIO)
+BASELINE_PORTFOLIO = {}
+
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CSV PARSER — returns raw rows keyed by fingerprint for the tx_store
 # ════════════════════════════════════════════════════════════════════════════════
 
 TX_CODES = {"Buy","Sell","CDIV","SPL","ACH","RTP","LIQ","REC","SXCH","DFEE","DTAX","MISC"}
@@ -345,11 +487,9 @@ def _parse_qty(s):
 
 def _tx_fingerprint(row: dict) -> str:
     """
-    Stable SHA-1 fingerprint for one Robinhood CSV row.
-    Built from the fields that uniquely identify a transaction:
-      Activity Date + Trans Code + Instrument + Quantity + Amount
-    This is deterministic: the same row always produces the same hash,
-    regardless of which CSV file it came from or when it was uploaded.
+    Deterministic SHA-1 fingerprint for one Robinhood CSV row.
+    Uses: Activity Date | Trans Code | Instrument | Quantity | Amount | Price
+    Same row always produces the same hash regardless of which CSV file it's from.
     """
     key = "|".join([
         (row.get("Activity Date") or "").strip(),
@@ -357,48 +497,48 @@ def _tx_fingerprint(row: dict) -> str:
         (row.get("Instrument")    or "").strip(),
         (row.get("Quantity")      or "").strip(),
         (row.get("Amount")        or "").strip(),
-        (row.get("Price")         or "").strip(),   # tiebreaker for same-day same-qty trades
+        (row.get("Price")         or "").strip(),
     ])
     return hashlib.sha1(key.encode()).hexdigest()
 
 
-def parse_robinhood_csv(source, seen_fingerprints: set = None) -> dict:
+def ingest_csv(source, existing_tx_store: dict) -> dict:
     """
-    Parse Robinhood activity CSV.
-    source              : file-like object (st.file_uploader) OR str content.
-    seen_fingerprints   : set of previously processed tx hashes (from session_state).
-                          Rows whose fingerprint is already in this set are SKIPPED.
-                          Pass None to process all rows (e.g. in unit tests).
+    Parse a Robinhood activity CSV and return an updated tx_store.
 
-    Returns delta dict suitable for merge_into_portfolio().
-    Extra keys vs v6.0:
-      "skipped"         : int  — rows already seen (deduped)
-      "new_fingerprints": set  — fingerprints for the NEW rows processed this run
+    source           : file-like object (st.file_uploader) OR str content
+    existing_tx_store: {fingerprint: row_dict} — transactions already known
+
+    Returns:
+      {
+        "tx_store":   dict  — updated store (existing + new rows merged in)
+        "new_count":  int   — genuinely new rows added
+        "skip_count": int   — rows already in store (skipped)
+        "total_rows": int   — total valid-code rows in this file
+        "new_rows":   list  — the new row dicts for display
+        "cash_in":    float — cash deposit total in this file
+        "buys":       int
+        "sells":      int
+        "drip":       int
+      }
     """
-    if seen_fingerprints is None:
-        seen_fingerprints = set()   # no deduplication in test mode
-
-    # ── normalise input ──────────────────────────────────────────────────────
+    # ── normalise source to string ───────────────────────────────────────────
     if hasattr(source, "read"):
         raw = source.read()
         if isinstance(raw, bytes):
             for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
-                try:
-                    content = raw.decode(enc)
-                    break
-                except UnicodeDecodeError:
-                    continue
+                try:    content = raw.decode(enc); break
+                except: continue
             else:
                 content = raw.decode("latin-1", errors="replace")
     else:
         content = str(source)
 
-    # ── strip Robinhood disclaimer footer ───────────────────────────────────
+    # ── strip Robinhood disclaimer footer ────────────────────────────────────
     lines = content.splitlines()
     clean = []
     for line in lines:
-        if "data provided is for informational" in line.lower():
-            break
+        if "data provided is for informational" in line.lower(): break
         clean.append(line)
     content = "\n".join(clean)
 
@@ -408,151 +548,51 @@ def parse_robinhood_csv(source, seen_fingerprints: set = None) -> dict:
         skipinitialspace=True,
     )
 
-    delta_shares    = defaultdict(float)
-    delta_cost      = defaultdict(float)
-    drip_events     = defaultdict(list)
-    tx_log          = []
-    new_fingerprints = set()
-
-    total_rows = total_tx = buys = sells = drip_ct = skipped = 0
-    cash_in    = 0.0
+    new_store   = dict(existing_tx_store)  # copy so we can compare
+    new_rows    = []
+    total_rows  = new_count = skip_count = 0
+    buys = sells = drip_ct = 0
+    cash_in = 0.0
 
     for row in reader:
-        ticker  = (row.get("Instrument")    or "").strip()
-        desc    = (row.get("Description")   or "").strip().replace("\n"," ")
-        code    = (row.get("Trans Code")    or "").strip()
-        qty_s   = (row.get("Quantity")      or "").strip()
-        price_s = (row.get("Price")         or "").strip()
-        amount_s= (row.get("Amount")        or "").strip()
-        date_s  = (row.get("Activity Date") or "").strip()
-
+        code = (row.get("Trans Code") or "").strip()
         if not code or code not in TX_CODES:
             continue
-
         total_rows += 1
 
-        # ── DEDUPLICATION CHECK ──────────────────────────────────────────────
         fp = _tx_fingerprint(row)
-        if fp in seen_fingerprints:
-            skipped += 1
-            continue   # already applied in a previous upload — skip silently
-        new_fingerprints.add(fp)
-        # ────────────────────────────────────────────────────────────────────
 
-        total_tx += 1
-        qty    = _parse_qty(qty_s)
-        price  = _parse_dollar(price_s)
-        amount = _parse_dollar(amount_s)
+        if fp in existing_tx_store:
+            skip_count += 1
+            continue   # already known — skip
 
+        # genuinely new row
+        new_count += 1
+        new_store[fp] = dict(row)
+        new_rows.append(dict(row))
+
+        # stats for summary display
+        desc = (row.get("Description") or "").replace("\n"," ")
         if code == "Buy":
-            if not ticker: continue
-            is_drip    = "reinvestment" in desc.lower()
-            cost_basis = qty * price if price else abs(amount)
-            delta_shares[ticker] += qty
-            delta_cost[ticker]   += cost_basis
             buys += 1
-            if is_drip:
-                drip_events[ticker].append({"qty":qty,"price":price,"date":date_s,"amount":abs(amount)})
-                drip_ct += 1
-            tx_log.append({"date":date_s,"ticker":ticker,"action":"Buy","qty":qty,"price":price,"amount":abs(amount),"drip":is_drip})
-
-        elif code == "Sell":
-            if not ticker: continue
-            delta_shares[ticker] -= qty
+            if "reinvestment" in desc.lower(): drip_ct += 1
+        elif code in ("Sell","LIQ"):
             sells += 1
-            tx_log.append({"date":date_s,"ticker":ticker,"action":"Sell","qty":qty,"price":price,"amount":abs(amount),"drip":False})
-
-        elif code == "SPL":
-            if ticker: delta_shares[ticker] += qty
-
-        elif code in ("REC","SXCH"):
-            if ticker: delta_shares[ticker] += qty
-
-        elif code == "LIQ":
-            if ticker:
-                delta_shares[ticker] -= qty
-                sells += 1
-
         elif code in ("ACH","RTP"):
-            cash_in += abs(amount)
+            cash_in += abs(_parse_dollar(row.get("Amount","")))
 
     return {
-        "total_rows":      total_rows,          # all valid-code rows in file
-        "total_tx":        total_tx,            # rows actually applied (new only)
-        "skipped":         skipped,             # rows skipped (already seen)
-        "buys":            buys,
-        "sells":           sells,
-        "drip":            drip_ct,
-        "cash_in":         cash_in,
-        "delta_shares":    dict(delta_shares),
-        "delta_cost":      dict(delta_cost),
-        "drip_events":     dict(drip_events),
-        "tx_log":          tx_log,
-        "new_fingerprints":new_fingerprints,    # caller should add these to ledger
+        "tx_store":   new_store,
+        "new_count":  new_count,
+        "skip_count": skip_count,
+        "total_rows": total_rows,
+        "new_rows":   new_rows,
+        "cash_in":    cash_in,
+        "buys":       buys,
+        "sells":      sells,
+        "drip":       drip_ct,
     }
 
-
-def merge_into_portfolio(portfolio: dict, delta: dict) -> tuple[dict, list]:
-    """
-    Incrementally apply a CSV delta to existing portfolio.
-    Returns (new_portfolio, diff_list).
-    diff_list items: {"ticker","change","old_shares","new_shares","old_cost","new_cost"}
-    """
-    new_port = copy.deepcopy(portfolio)
-    diff = []
-
-    for ticker, qty_delta in delta["delta_shares"].items():
-        cost_delta = delta["delta_cost"].get(ticker, 0.0)
-        old_entry  = new_port.get(ticker)
-        old_shares = old_entry["shares"] if old_entry else 0.0
-        old_cost_t = old_entry["avg_cost"] * old_shares if old_entry else 0.0
-
-        new_shares = max(0.0, old_shares + qty_delta)
-
-        if qty_delta >= 0:
-            # buying — blended avg cost
-            new_total_cost = old_cost_t + cost_delta
-            new_avg_cost   = new_total_cost / new_shares if new_shares else 0
-        else:
-            # selling — avg cost unchanged (FIFO approximation)
-            new_avg_cost = old_entry["avg_cost"] if old_entry else 0
-
-        if old_entry:
-            if abs(new_shares - old_shares) < 0.00001:
-                continue  # no real change
-            diff.append({
-                "ticker":     ticker,
-                "change":     "REMOVED" if new_shares < 0.00001 else "MODIFIED",
-                "old_shares": round(old_shares, 6),
-                "new_shares": round(new_shares, 6),
-                "delta":      round(qty_delta, 6),
-                "old_avg_cost": round(old_entry["avg_cost"], 2),
-                "new_avg_cost": round(new_avg_cost, 2),
-            })
-            if new_shares < 0.00001:
-                del new_port[ticker]
-            else:
-                new_port[ticker]["shares"]   = round(new_shares, 6)
-                new_port[ticker]["avg_cost"] = round(new_avg_cost, 4)
-        else:
-            if new_shares > 0.00001:
-                # new position — infer category
-                cat = "Crypto" if ticker in CRYPTO else "ETFs" if ticker in {"VOO","QQQ","VTI","VGT","VHT","VIS","VYM","SCHD","VXUS","GLD","XLE","BND","VUG","VTV","VEA","VWO","SPY","XOP"} else "Stocks"
-                new_port[ticker] = {
-                    "shares":   round(new_shares, 6),
-                    "avg_cost": round(new_avg_cost, 4),
-                    "category": cat,
-                    "lt_date":  "",
-                    "sell_flag": ticker in SELL_FLAGS,
-                }
-                diff.append({
-                    "ticker": ticker, "change":"ADDED",
-                    "old_shares":0, "new_shares":round(new_shares,6),
-                    "delta": round(qty_delta,6),
-                    "old_avg_cost":0, "new_avg_cost":round(new_avg_cost,2),
-                })
-
-    return new_port, diff
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -745,18 +785,20 @@ def _fp(v):
 
 def _ss_init():
     defaults = {
-        "portfolio":    copy.deepcopy(BASELINE_PORTFOLIO),
-        "prices":       {},
-        "last_refresh": None,
-        "cash":         1042.17,
-        "active_card":  None,
-        "deposit_log":  [],
-        "rec_history":  [],
-        "import_log":   [],   # list of {date, filename, diff, summary}
-        "drip_log":     {},   # ticker → list of drip events
-        # ── transaction ledger — stores SHA-1 fingerprints of every row
-        #    ever applied so that re-uploading the same CSV never double-counts
-        "tx_ledger":    set(),
+        # tx_store is the ONLY source of truth for positions.
+        # {fingerprint: row_dict} — every unique Robinhood CSV row ever ingested.
+        # Portfolio is always recomputed from this store.
+        "tx_store":        {},
+        # manual overrides for crypto / positions not in Robinhood CSV
+        "manual_overrides":{"BTC":{"shares":0.03433,"avg_cost":52800.00},"XRP":{"shares":1.066,"avg_cost":0.68}},
+        "prices":          {},
+        "last_refresh":    None,
+        "cash":            1042.17,
+        "active_card":     None,
+        "deposit_log":     [],
+        "rec_history":     [],
+        "import_log":      [],
+        "drip_log":        {},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -766,10 +808,14 @@ _ss_init()
 
 
 # ════════════════════════════════════════════════════════════════════════════════
-# COMPUTED VARS
+# COMPUTED VARS — derived fresh every render from tx_store
 # ════════════════════════════════════════════════════════════════════════════════
 
-portfolio  = st.session_state.portfolio
+# Build portfolio by replaying all transactions
+portfolio = recompute_portfolio(
+    st.session_state.tx_store,
+    st.session_state.manual_overrides,
+)
 prices     = st.session_state.prices
 cash       = st.session_state.cash
 recs       = generate_recs(portfolio, prices)
@@ -1182,31 +1228,21 @@ with tabs[1]:
 
 
 # ══════════════════════════════════════════════════
-# TAB 3 — IMPORT  (fixed CSV + PDF support)
+# TAB 3 — IMPORT
 # ══════════════════════════════════════════════════
 with tabs[2]:
     st.markdown("<div class='sec-head'>📥 Import Activity</div>", unsafe_allow_html=True)
 
-    st.markdown("""
-    <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:13px;color:#4a6080'>
-      Upload <b>any activity CSV — new or previously uploaded</b>. The app fingerprints every transaction row and
-      <b>skips anything already applied</b>, so you'll never double-count a trade. Only genuinely new rows are merged.
-      For crypto: upload your Robinhood Crypto PDF in the right panel.
-    </div>
-    """, unsafe_allow_html=True)
-
-    # ── ledger stats ──
-    ledger_size = len(st.session_state.tx_ledger)
+    store_size = len(st.session_state.tx_store)
     st.markdown(f"""
-    <div style='display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap'>
-      <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 16px;font-size:12px'>
-        <span style='color:#3d5478'>Transactions in ledger</span>
-        <b style='color:#60a5fa;font-family:IBM Plex Mono,monospace;margin-left:8px'>{ledger_size:,}</b>
-      </div>
-      <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 16px;font-size:12px'>
-        <span style='color:#3d5478'>Protection</span>
-        <b style='color:#4ade80;margin-left:8px'>✅ Dedup active — safe to re-upload any file</b>
-      </div>
+    <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 16px;margin-bottom:16px;font-size:13px;color:#4a6080'>
+      Upload <b>any Robinhood activity CSV</b> — new, old, partial, or a full re-export.
+      Every row is fingerprinted. Rows already in the transaction store are <b>silently skipped</b>.
+      Only genuinely new rows are added, then the portfolio is <b>recomputed from scratch</b>.
+      <br><br>
+      <span style='color:#60a5fa;font-family:IBM Plex Mono,monospace'>
+        {store_size:,} transactions in store · safe to re-upload any file
+      </span>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1225,91 +1261,97 @@ with tabs[2]:
             if st.button("⚙️ Parse & Preview Changes", key="btn_csv"):
                 with st.spinner("Parsing & deduplicating…"):
                     try:
-                        # pass current ledger — already-seen rows are skipped
-                        delta = parse_robinhood_csv(csv_file, seen_fingerprints=st.session_state.tx_ledger)
-                        new_port, diff = merge_into_portfolio(st.session_state.portfolio, delta)
+                        result = ingest_csv(csv_file, st.session_state.tx_store)
 
-                        # ── dedup summary ──
-                        total_rows = delta.get("total_rows", 0)
-                        skipped    = delta.get("skipped", 0)
-                        new_count  = delta["total_tx"]
+                        total_rows = result["total_rows"]
+                        new_count  = result["new_count"]
+                        skip_count = result["skip_count"]
 
-                        if skipped == total_rows and total_rows > 0:
-                            st.warning(f"⚠️ All {total_rows} rows already imported — nothing new to apply.")
+                        # ── dedup summary ────────────────────────────────────
+                        if new_count == 0:
+                            st.warning(f"⚠️ All {total_rows} rows already in store — nothing new. Portfolio unchanged.")
                         else:
-                            if skipped > 0:
-                                st.info(f"🔁 {skipped} of {total_rows} rows already seen — skipped (deduped).")
-                            st.success(f"✅ {new_count} new transactions · {delta['buys']} buys · {delta['sells']} sells · {delta['drip']} DRIP")
-                        if delta.get("cash_in"):
-                            st.info(f"💵 New cash deposits detected: {_fd(delta['cash_in'])}")
+                            if skip_count > 0:
+                                st.info(f"🔁 {skip_count} of {total_rows} rows already seen — skipped.")
+                            st.success(f"✅ {new_count} new rows · {result['buys']} buys · {result['sells']} sells · {result['drip']} DRIP")
+                        if result["cash_in"]:
+                            st.info(f"💵 Cash deposits in file: {_fd(result['cash_in'])}")
 
-                        # diff table
-                        st.markdown("**Holdings Changes Preview**")
-                        if diff:
+                        if new_count > 0:
+                            # compute what portfolio will look like after adding new rows
+                            new_portfolio = recompute_portfolio(
+                                result["tx_store"],
+                                st.session_state.manual_overrides,
+                            )
+
+                            # ── diff: old vs new ────────────────────────────
                             diff_rows = []
-                            for d in diff:
+                            all_tickers = set(portfolio.keys()) | set(new_portfolio.keys())
+                            for t in sorted(all_tickers):
+                                old_sh  = portfolio.get(t, {}).get("shares", 0)
+                                new_sh  = new_portfolio.get(t, {}).get("shares", 0)
+                                old_avg = portfolio.get(t, {}).get("avg_cost", 0)
+                                new_avg = new_portfolio.get(t, {}).get("avg_cost", 0)
+                                delta_sh = new_sh - old_sh
+                                if abs(delta_sh) < 0.00001 and abs(new_avg - old_avg) < 0.001:
+                                    continue
+                                chg = "ADDED" if old_sh == 0 else "REMOVED" if new_sh == 0 else "MODIFIED"
                                 diff_rows.append({
-                                    "Ticker":       d["ticker"],
-                                    "Change":       d["change"],
-                                    "Old Shares":   d["old_shares"],
-                                    "New Shares":   d["new_shares"],
-                                    "Δ Shares":     d["delta"],
-                                    "Old Avg Cost": _fd(d["old_avg_cost"]),
-                                    "New Avg Cost": _fd(d["new_avg_cost"]),
+                                    "Ticker":       t,
+                                    "Change":       chg,
+                                    "Old Shares":   round(old_sh, 6),
+                                    "New Shares":   round(new_sh, 6),
+                                    "Δ Shares":     round(delta_sh, 6),
+                                    "Old Avg Cost": _fd(old_avg),
+                                    "New Avg Cost": _fd(new_avg),
                                 })
-                            df_diff = pd.DataFrame(diff_rows)
-                            st.dataframe(df_diff, use_container_width=True)
-                        else:
-                            st.info("No holdings changes from the new rows.")
 
-                        # store pending merge
-                        st.session_state["_pending_port"]  = new_port
-                        st.session_state["_pending_delta"] = delta
-                        st.session_state["_pending_diff"]  = diff
-                        st.session_state["_pending_file"]  = csv_file.name
+                            st.markdown("**Holdings Changes Preview**")
+                            if diff_rows:
+                                st.dataframe(pd.DataFrame(diff_rows), use_container_width=True)
+                            else:
+                                st.info("New transactions found but no net holdings change.")
+
+                            # store pending
+                            st.session_state["_pending_store"]     = result["tx_store"]
+                            st.session_state["_pending_portfolio"]  = new_portfolio
+                            st.session_state["_pending_result"]     = result
+                            st.session_state["_pending_diff"]       = diff_rows
+                            st.session_state["_pending_file"]       = csv_file.name
 
                     except Exception as e:
                         st.error(f"Parse error: {e}")
                         import traceback
                         st.code(traceback.format_exc())
 
-        # confirm apply
-        if "_pending_port" in st.session_state:
-            st.warning("⚠️ Preview ready — click below to apply to portfolio.")
-            if st.button("✅ Apply Changes to Portfolio", key="btn_apply"):
-                delta    = st.session_state["_pending_delta"]
-                diff     = st.session_state["_pending_diff"]
+        # ── confirm apply ────────────────────────────────────────────────────
+        if "_pending_store" in st.session_state:
+            st.warning("⚠️ Preview ready — apply when satisfied.")
+            if st.button("✅ Apply to Portfolio", key="btn_apply"):
+                result   = st.session_state["_pending_result"]
                 fname    = st.session_state["_pending_file"]
-                new_port = st.session_state["_pending_port"]
+                diff     = st.session_state["_pending_diff"]
 
-                st.session_state.portfolio = new_port
+                # commit new tx_store — portfolio auto-recomputes next render
+                st.session_state.tx_store = st.session_state["_pending_store"]
 
-                # ── commit new fingerprints to the ledger ──────────────────
-                new_fps = delta.get("new_fingerprints", set())
-                st.session_state.tx_ledger.update(new_fps)
-
-                # log import
+                # log
                 st.session_state.import_log.append({
-                    "date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "file":     fname,
-                    "tx_new":   delta["total_tx"],
-                    "tx_skip":  delta.get("skipped", 0),
-                    "buys":     delta["buys"],
-                    "sells":    delta["sells"],
-                    "drip":     delta["drip"],
-                    "changes":  len(diff),
-                    "diff":     diff,
+                    "date":    datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "file":    fname,
+                    "tx_new":  result["new_count"],
+                    "tx_skip": result["skip_count"],
+                    "buys":    result["buys"],
+                    "sells":   result["sells"],
+                    "drip":    result["drip"],
+                    "changes": len(diff),
+                    "diff":    diff,
                 })
 
-                # update DRIP log
-                for t, events in delta.get("drip_events",{}).items():
-                    st.session_state.drip_log.setdefault(t,[]).extend(events)
-
-                # clean up
-                for k in ("_pending_port","_pending_delta","_pending_diff","_pending_file"):
+                for k in ("_pending_store","_pending_portfolio","_pending_result","_pending_diff","_pending_file"):
                     st.session_state.pop(k, None)
 
-                st.success(f"✅ Portfolio updated! Ledger now has {len(st.session_state.tx_ledger):,} transactions. Refresh prices.")
+                st.success(f"✅ Done! Transaction store now has {len(st.session_state.tx_store):,} rows. Refresh prices.")
                 st.rerun()
 
     with imp2:
@@ -1327,8 +1369,7 @@ with tabs[2]:
                     text = ""
                     pdf_bytes = pdf_file.read()
                     try:
-                        import pdfplumber
-                        import io as _io
+                        import pdfplumber, io as _io
                         with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
                             text = "\n".join(p.extract_text() or "" for p in pdf.pages)
                     except Exception:
@@ -1340,46 +1381,38 @@ with tabs[2]:
                             st.warning(f"PDF library error: {e2}. Install pdfplumber.")
 
                     if text:
-                        st.markdown("**Extracted Text (first 2000 chars)**")
-                        st.text_area("PDF content", text[:2000], height=180)
-
+                        st.text_area("Extracted text (first 2000 chars)", text[:2000], height=180)
                         btc_m = re.search(r"(?i)bitcoin[^\d]*([\d.]+)\s*(?:BTC)?", text)
                         xrp_m = re.search(r"(?i)(?:XRP|Ripple)[^\d]*([\d.]+)", text)
-
                         found = []
                         if btc_m: found.append(("BTC", float(btc_m.group(1))))
                         if xrp_m: found.append(("XRP", float(xrp_m.group(1))))
-
                         if found:
                             st.success(f"Detected: {', '.join(f'{t}: {s}' for t,s in found)}")
-                            if st.button("✅ Update Crypto Holdings"):
-                                for t,s in found:
-                                    if t in st.session_state.portfolio:
-                                        st.session_state.portfolio[t]["shares"] = s
-                                    else:
-                                        st.session_state.portfolio[t] = {"shares":s,"avg_cost":0,"category":"Crypto","lt_date":""}
-                                st.success("Crypto positions updated!")
+                            if st.button("✅ Update Crypto"):
+                                for t, s in found:
+                                    st.session_state.manual_overrides[t] = {"shares": s}
+                                st.success("Crypto updated!")
                                 st.rerun()
                         else:
-                            st.info("Couldn't auto-detect amounts. Review text and use Settings → Manual Override.")
+                            st.info("Couldn't auto-detect — use Settings → Manual Override.")
                     else:
-                        st.error("No text extracted. PDF may be image-based — use Settings to enter manually.")
+                        st.error("No text extracted. Use Settings to enter manually.")
 
-    # import log
+    # import history
     if st.session_state.import_log:
         st.markdown("<div class='sec-head'>📋 Import History</div>", unsafe_allow_html=True)
         for imp in reversed(st.session_state.import_log):
-            new_c  = imp.get("tx_new",  imp.get("tx", 0))
-            skip_c = imp.get("tx_skip", 0)
-            with st.expander(f"📁 {imp['date']} — {imp['file']} ({imp['changes']} holdings changes)"):
+            with st.expander(f"📁 {imp['date']} — {imp['file']} ({imp['changes']} changes)"):
                 c1,c2,c3,c4,c5 = st.columns(5)
-                c1.metric("New Tx",   new_c)
-                c2.metric("Skipped",  skip_c)
-                c3.metric("Buys",     imp["buys"])
-                c4.metric("Sells",    imp["sells"])
-                c5.metric("DRIP",     imp["drip"])
+                c1.metric("New Rows",  imp.get("tx_new",0))
+                c2.metric("Skipped",   imp.get("tx_skip",0))
+                c3.metric("Buys",      imp.get("buys",0))
+                c4.metric("Sells",     imp.get("sells",0))
+                c5.metric("DRIP",      imp.get("drip",0))
                 if imp.get("diff"):
                     st.dataframe(pd.DataFrame(imp["diff"]), use_container_width=True)
+
 
 
 # ══════════════════════════════════════════════════
@@ -1495,57 +1528,55 @@ with tabs[5]:
 
     s1,s2 = st.columns(2)
     with s1:
-        st.markdown("**Manual Position Override**")
-        ov_t = st.text_input("Ticker (e.g. NVDA)", key="ov_t").upper().strip()
-        ov_s = st.number_input("Shares", value=0.0, step=0.0001, format="%.4f", key="ov_s")
-        ov_c = st.number_input("Avg Cost ($)", value=0.0, step=0.01, format="%.2f", key="ov_c")
-        ov_cat = st.selectbox("Category", ["Stocks","ETFs","Crypto"], key="ov_cat")
-        if st.button("💾 Update Position"):
+        st.markdown("**Manual Override** *(for crypto or any position not in your CSV)*")
+        ov_t   = st.text_input("Ticker (e.g. BTC)", key="ov_t").upper().strip()
+        ov_s   = st.number_input("Shares", value=0.0, step=0.0001, format="%.4f", key="ov_s")
+        ov_c   = st.number_input("Avg Cost ($)", value=0.0, step=0.01, format="%.2f", key="ov_c")
+        if st.button("💾 Save Override"):
             if ov_t:
-                st.session_state.portfolio[ov_t] = {
-                    "shares":   ov_s,
-                    "avg_cost": ov_c,
-                    "category": ov_cat,
-                    "lt_date":  st.session_state.portfolio.get(ov_t,{}).get("lt_date",""),
-                    "sell_flag":st.session_state.portfolio.get(ov_t,{}).get("sell_flag",False),
-                }
-                st.success(f"Updated {ov_t}")
+                st.session_state.manual_overrides[ov_t] = {"shares": ov_s, "avg_cost": ov_c}
+                st.success(f"Override saved for {ov_t}")
                 st.rerun()
 
-        st.markdown("**Remove Position**")
-        rm_t = st.text_input("Ticker to remove", key="rm_t").upper().strip()
-        if st.button("🗑 Remove", type="secondary"):
-            if rm_t and rm_t in st.session_state.portfolio:
-                del st.session_state.portfolio[rm_t]
-                st.success(f"Removed {rm_t}")
-                st.rerun()
+        # show current overrides
+        if st.session_state.manual_overrides:
+            st.markdown("**Current overrides:**")
+            for t, v in st.session_state.manual_overrides.items():
+                c1, c2, c3 = st.columns([2,2,1])
+                c1.markdown(f"`{t}` — {v.get('shares',0):.4f} sh @ {_fd(v.get('avg_cost',0))}")
+                if c3.button("✕", key=f"rm_ov_{t}"):
+                    del st.session_state.manual_overrides[t]
+                    st.rerun()
 
     with s2:
-        st.markdown("**Export**")
+        st.markdown("**Export computed portfolio**")
         if st.button("📥 Export Portfolio CSV"):
-            rows = [{"Ticker":t,"Shares":v["shares"],"Avg Cost":v["avg_cost"],"Category":v["category"],"LT Date":v.get("lt_date","")} for t,v in st.session_state.portfolio.items()]
+            rows = [{"Ticker":t,"Shares":v["shares"],"Avg Cost":v["avg_cost"],
+                     "Category":v["category"],"LT Date":v.get("lt_date","")}
+                    for t,v in portfolio.items()]
             csv_out = pd.DataFrame(rows).to_csv(index=False)
             st.download_button("⬇️ Download", csv_out, "portfolio.csv", "text/csv")
 
         st.markdown("**Reset**")
-        if st.button("🔄 Reset to Baseline Portfolio", type="secondary"):
-            st.session_state.portfolio    = copy.deepcopy(BASELINE_PORTFOLIO)
-            st.session_state.prices       = {}
-            st.session_state.cash         = 1042.17
-            st.session_state.active_card  = None
-            st.session_state.import_log   = []
-            st.session_state.drip_log     = {}
-            st.session_state.tx_ledger    = set()
-            st.success("Reset complete — portfolio, prices, and ledger cleared.")
+        if st.button("🔄 Clear all — start fresh", type="secondary"):
+            st.session_state.tx_store         = {}
+            st.session_state.manual_overrides = {"BTC":{"shares":0.03433,"avg_cost":52800.00},"XRP":{"shares":1.066,"avg_cost":0.68}}
+            st.session_state.prices           = {}
+            st.session_state.cash             = 1042.17
+            st.session_state.active_card      = None
+            st.session_state.import_log       = []
+            st.session_state.drip_log         = {}
+            st.success("Cleared. Upload your CSV to rebuild.")
             st.rerun()
 
-        st.markdown("**Transaction Ledger**")
-        ledger_n = len(st.session_state.tx_ledger)
-        st.markdown(f"<div style='color:#4a6080;font-size:12px;margin-bottom:8px'>{ledger_n:,} unique transactions recorded. Clear only if you want to re-import everything from scratch.</div>", unsafe_allow_html=True)
-        if st.button("🗑 Clear Ledger (allow re-import)", type="secondary"):
-            st.session_state.tx_ledger = set()
-            st.success("Ledger cleared — all CSVs can be re-imported.")
+        st.markdown("**Transaction Store**")
+        n = len(st.session_state.tx_store)
+        st.markdown(f"<div style='color:#4a6080;font-size:12px;margin-bottom:8px'>{n:,} unique transactions stored. Clear only to re-import from scratch.</div>", unsafe_allow_html=True)
+        if st.button("🗑 Clear Transaction Store", type="secondary"):
+            st.session_state.tx_store = {}
+            st.success("Store cleared — re-upload your CSV to rebuild.")
             st.rerun()
 
     st.markdown("---")
-    st.markdown(f"<div style='color:#1e3a5f;font-size:11px;font-family:IBM Plex Mono,monospace'>Portfolio War Room v6.0 · {datetime.now().strftime('%b %d, %Y')} · {len(portfolio)} positions · prashanthkrishnan91</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='color:#1e3a5f;font-size:11px;font-family:IBM Plex Mono,monospace'>Portfolio War Room v7.0 · {datetime.now().strftime('%b %d, %Y')} · {len(portfolio)} positions · prashanthkrishnan91</div>", unsafe_allow_html=True)
+

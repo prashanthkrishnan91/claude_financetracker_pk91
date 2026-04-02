@@ -1,87 +1,189 @@
-# ⚡ Portfolio War Room v4.0
+# Portfolio War Room v5.0 - Enhanced Edition
 
-> Personal portfolio intelligence system — live prices, smart recommendations, DRIP tracking, tax optimization
+⚡ Real-time portfolio intelligence with live pricing, tax-optimized recommendations, and mobile-first design.
 
-## Live Demo
-Deploy free on [Streamlit Cloud](https://share.streamlit.io) in 2 minutes.
+## 🆕 What's New in v5.0
 
-## Features
+### 1. **Clickable Overview Cards**
+- All 4 overview metric cards now expand to show detailed buy/sell/trim information
+- Quick decision-making without scrolling through tables
+- Color-coded urgency indicators
 
-- **Live prices** via yfinance + CoinGecko — zero API keys needed
-- **Smart recommendations** — buy/sell/trim/hold with LT/ST tax awareness
-- **DRIP tracking** — every dividend reinvestment tracked, compound growth projected
-- **CSV import** — upload Robinhood Account Activity CSV, all transaction types handled:
-  - `Buy`, `Sell`, `CDIV`, `SPL`, `RTP`, `ACH`, `LIQ`, `REC`, `SXCH`
-- **Auto-removes closed positions** — sold-out SELL positions disappear after import
-- **Biweekly $900 deploy plan** — rotating picks, schedule through Dec 2026
-- **Snapshot history** — every price refresh saved with timestamp
-- **56/56 unit tests pass**
+### 2. **Visual Holdings Improvements**
+- ✅ Red highlighting for positions with losses
+- ✅ Green highlighting for positions with gains
+- ✅ Fixed SELL category sync between Overview and Holdings tabs
+- Sortable by Equity, Gain %, or Ticker
+- Filterable by Category and Action
 
-## Setup
+### 3. **CSV/PDF Import Enhancements**
+- ✅ Fixed upload button text alignment
+- ✅ Added PDF upload support for crypto statements (parsing in progress)
+- Transaction preview before applying changes
+- Confirm/cancel workflow for position updates
 
+### 4. **Cash Deployment Recommendations**
+- 💰 Real-time recommendations for current cash balance ($1,042.17)
+- 💰 Dynamic allocation based on future cash inflows from sells
+- Automatic calculation of shares to purchase at live prices
+- Biweekly $900 deployment calendar with all 2026 dates
+
+### 5. **Mobile & Desktop Responsive**
+- Fully responsive grid layout (1 column mobile → 4 columns desktop)
+- Touch-friendly buttons and cards
+- Optimized typography and spacing for all screen sizes
+- Works perfectly in laptop and mobile browsers
+
+## 📱 Deployment Options
+
+### Option 1: Streamlit Cloud (Recommended - Free & Mobile-Accessible)
+
+1. **Push to GitHub:**
 ```bash
-git clone https://github.com/YOUR_USERNAME/my-portfolio-ai
 cd my-portfolio-ai
-pip install -r requirements.txt
-streamlit run app.py
+git add .
+git commit -m "v5.0 enhanced with mobile responsive design"
+git push origin main
 ```
 
-## Deploy to Streamlit Cloud (free)
+2. **Deploy on Streamlit Cloud:**
+   - Go to [share.streamlit.io](https://share.streamlit.io)
+   - Click "New app"
+   - Connect to `prashanthkrishnan91/my-portfolio-ai`
+   - Set main file: `app_enhanced.py`
+   - Click "Deploy"
+   - Your app will be live at: `https://[your-app-name].streamlit.app`
 
-1. Fork this repo
-2. Go to [share.streamlit.io](https://share.streamlit.io)
-3. Click **New app** → select your fork → `app.py`
-4. Deploy — live in ~2 minutes
+3. **Access anywhere:**
+   - Desktop browser: Full desktop experience
+   - Mobile browser: Optimized mobile layout
+   - Bookmark for quick access
 
-## Run Tests
+### Option 2: Local Development
 
 ```bash
-python3 -c "
-import sys; sys.path.insert(0,'.')
-from tests.test_all import TestCSVParser, TestReconcile, TestRecEngine, TestIntegration
-# ... (see tests/test_all.py)
-"
+# Clone repo
+git clone https://github.com/prashanthkrishnan91/my-portfolio-ai.git
+cd my-portfolio-ai
+
+# Install dependencies
+pip install -r requirements.txt
+
+# Run locally
+streamlit run app_enhanced.py
+
+# Access at http://localhost:8501
 ```
 
-## Architecture
+## 🎯 Quick Start Guide
 
+### First Time Setup
+
+1. **Refresh Prices**: Click "🔄 REFRESH PRICES" to fetch live data
+2. **Import CSV**: Go to "Import Data" tab and upload your latest Robinhood CSV
+3. **Review Holdings**: Check the "Holdings" tab to verify all positions
+4. **Check Recommendations**: "Overview" tab shows all buy/sell/trim actions
+
+### Weekly Workflow
+
+**Every Friday (Deposit Day):**
+1. Click "Deploy $900" tab
+2. Review recommended allocation
+3. Buy stocks per recommendations in Robinhood
+4. Click "✓ Log This Deposit" to update holdings
+5. Done!
+
+**As Needed (Market Moves):**
+1. Click "🔄 REFRESH PRICES"
+2. Check "Overview" for any new SELL or TRIM alerts
+3. Execute trades as recommended
+4. Import CSV to update holdings
+
+## 🔧 Technical Architecture
+
+### File Structure
 ```
 my-portfolio-ai/
-├── app.py                 # Main Streamlit app (7 pages)
-├── requirements.txt
-├── .streamlit/config.toml
-├── data/
-│   └── portfolio.py       # All 39 positions, DRIP data, schedules
-├── utils/
-│   ├── csv_parser.py      # Full Robinhood CSV parser (all tx codes)
-│   ├── rec_engine.py      # Recommendation engine (DRIP-aware, tax-aware)
-│   └── price_fetcher.py   # yfinance + CoinGecko dual-source fetcher
-└── tests/
-    └── test_all.py        # 56 unit + integration tests
+├── app_enhanced.py          # Main Streamlit app (v5.0)
+├── requirements.txt         # Python dependencies
+├── README.md               # This file
+├── .streamlit/
+│   └── config.toml         # Dark theme config
+└── data/
+    └── (optional) CSV backups
 ```
 
-## Data Sources
+### Data Sources
+- **Stocks/ETFs**: yfinance (batch fetch, no API key needed)
+- **Crypto**: CoinGecko free API (BTC, XRP)
+- **Rate Limits**: ~100 requests/hour (more than enough for 41 positions)
 
-| Source | Covers | Cost |
-|--------|--------|------|
-| yfinance | All 39 stocks/ETFs | Free |
-| CoinGecko | BTC + XRP | Free |
+### Storage
+- Session state (in-memory during use)
+- Export to JSON for backups
+- CSV import for reconciliation
 
-Runs server-side → no CORS issues, no 429 rate limits.
+## 💡 Pro Tips
 
-## Recommendation Logic
+### Tax Optimization
+- 🔴 **SELL NOW** = Long-term eligible, execute immediately
+- ⏳ **WAIT → SELL** = Short-term, wait for LT date to avoid 37% tax
+- 📅 Mark your calendar for LT conversion dates (shown in Overview)
 
-Priority order:
-1. Income ETFs (VYM, SCHD) → **HOLD FOREVER** — never sell, always DRIP
-2. Core index (VOO, QQQ, VTI) → **DCA ALWAYS** — buy every deposit
-3. SELL list → **SELL NOW** (if LT) or **WAIT** (with LT date)
-4. Bear proximity → **STOP-LOSS ALERT** (non-crypto)
-5. Crypto → accumulate/hold/trim based on 25% upside threshold
-6. Declining thesis → conservative accumulate cap
-7. Normal thesis → dip buying, accumulate, trim at target
+### Portfolio Strategy
+- **Income ETFs (VYM, SCHD)**: Never sell, DRIP forever
+- **Core ETFs (VOO, QQQ, VTI)**: DCA $200-150 biweekly always
+- **SELL List**: Consolidate underperformers into core positions
+- **Rotating Pick**: Changes based on highest upside opportunity
 
-Tax awareness: every recommendation includes LT vs ST tax rate impact.
-DRIP yield: positions with high dividend yield get stronger hold/accumulate signals.
+### Cash Management
+- Keep $1,000+ available for opportunities
+- SELL proceeds automatically calculate in deployment recs
+- Emergency cash stays in account, invested cash goes to $900 plan
+
+## 🚀 Roadmap
+
+### Planned Features
+- [ ] PDF crypto statement parsing (PyPDF2 integration)
+- [ ] Historical performance charts
+- [ ] Tax loss harvesting calculator
+- [ ] Dividend reinvestment tracking
+- [ ] Export to Excel for tax reporting
+- [ ] Price alerts via email/SMS
+
+### Known Issues
+- PDF upload UI ready, parsing logic pending
+- Large CSV files (>1000 rows) may take 5-10 seconds to parse
+
+## 📊 Portfolio Summary (as of April 1, 2026)
+
+| Metric | Value |
+|--------|-------|
+| **Total Positions** | 41 active |
+| **Total Equity** | ~$48,288 |
+| **Cash Available** | $1,042.17 |
+| **Categories** | Crypto (2), Core (13), Other (6), IPO (3), ETF✓ (12), ETF🔴 (5) |
+| **DRIPs Active** | 26 positions |
+| **Next Deposit** | April 3, 2026 ($900) |
+
+## 🔐 Security & Privacy
+
+- No API keys required (uses free public APIs)
+- All data stored locally in session
+- No data sent to third parties
+- CSV/PDF uploads never leave your browser
+- Export JSON for backups (store securely)
+
+## 📞 Support
+
+Questions or issues? Check:
+1. Progress log: `progress_log0401.md`
+2. GitHub Issues: Create issue in repo
+3. Streamlit Docs: [docs.streamlit.io](https://docs.streamlit.io)
 
 ---
-*Not financial advice. For personal tracking purposes only.*
+
+**Version**: 5.0 Enhanced Edition  
+**Last Updated**: April 1, 2026  
+**License**: MIT  
+**Author**: Prashanth Krishnan (@prashanthkrishnan91)

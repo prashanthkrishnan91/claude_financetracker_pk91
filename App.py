@@ -1,1005 +1,1475 @@
 """
-Portfolio War Room v5.0 - Enhanced Edition
-Mobile-first investment tracker with live pricing and intelligent recommendations
+Portfolio War Room — App.py v6.0
+Single-file Streamlit app for Streamlit Cloud deployment.
+
+Key fixes vs v5:
+  - CSV parser accepts file object OR string (fixes the pd.read_csv crash)
+  - Incremental CSV merge: upload new activity → appended to existing holdings
+  - Diff view: shows exactly what changed after each import
+  - Premium dark financial dashboard UI (CashPilot / InvestX inspired)
+  - Plotly charts for allocation pie + P&L bar
+  - All recs recalculate from live prices on every refresh
+  - Mobile + desktop responsive
+
+Deploy: streamlit run App.py
 """
 
+# ── stdlib ───────────────────────────────────────────────────────────────────
+import io
+import re
+import csv
+import json
+import copy
+from datetime import date, datetime
+from collections import defaultdict
+
+# ── third-party ──────────────────────────────────────────────────────────────
 import streamlit as st
 import pandas as pd
-import yfinance as yf
-import requests
-from datetime import datetime, timedelta
-import json
-import time
-from typing import Dict, List, Tuple, Optional
-import io
-import base64
 
-# ════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION & STYLING
-# ════════════════════════════════════════════════════════════════════════════
-
+# ── page config ──────────────────────────────────────────────────────────────
 st.set_page_config(
-    page_title="Portfolio War Room",
+    page_title="⚡ Portfolio War Room",
     page_icon="⚡",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="collapsed",
 )
 
-# Enhanced CSS for mobile and desktop responsiveness
+# ════════════════════════════════════════════════════════════════════════════════
+# GLOBAL CSS  — Premium dark financial dashboard aesthetic
+# Inspired by CashPilot + InvestX dark finance UIs
+# ════════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700;800&family=Instrument+Serif:ital@0;1&display=swap');
-    
-    /* Base theme */
-    :root {
-        --bg-primary: #0a0e14;
-        --bg-secondary: #131820;
-        --bg-card: #1a1f2e;
-        --border: #2a3344;
-        --accent: #00f0aa;
-        --accent-dim: rgba(0, 240, 170, 0.15);
-        --gold: #f0c040;
-        --gold-dim: rgba(240, 192, 64, 0.15);
-        --red: #ff4060;
-        --red-dim: rgba(255, 64, 96, 0.15);
-        --blue: #4090ff;
-        --blue-dim: rgba(64, 144, 255, 0.15);
-        --text: #e8ecf8;
-        --text-dim: #6a7590;
-    }
-    
-    /* Remove default Streamlit padding */
-    .block-container {
-        padding-top: 2rem;
-        padding-bottom: 0rem;
-        max-width: 100%;
-    }
-    
-    /* Hide Streamlit branding */
-    #MainMenu, footer, header {visibility: hidden;}
-    
-    /* Typography */
-    * {
-        font-family: 'JetBrains Mono', monospace;
-    }
-    
-    h1, h2, h3 {
-        font-family: 'Instrument Serif', serif;
-        color: var(--accent);
-    }
-    
-    /* Mobile-first responsive grid */
-    .card-grid {
-        display: grid;
-        grid-template-columns: 1fr;
-        gap: 1rem;
-        margin-bottom: 1.5rem;
-    }
-    
-    @media (min-width: 768px) {
-        .card-grid {
-            grid-template-columns: repeat(2, 1fr);
-        }
-    }
-    
-    @media (min-width: 1200px) {
-        .card-grid {
-            grid-template-columns: repeat(4, 1fr);
-        }
-    }
-    
-    /* Clickable cards */
-    .metric-card {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        padding: 1.25rem;
-        cursor: pointer;
-        transition: all 0.2s ease;
-        position: relative;
-        overflow: hidden;
-    }
-    
-    .metric-card:hover {
-        border-color: var(--accent);
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(0, 240, 170, 0.12);
-    }
-    
-    .metric-card::before {
-        content: '';
-        position: absolute;
-        top: 0;
-        left: 0;
-        right: 0;
-        height: 3px;
-        background: var(--accent);
-        transform: scaleX(0);
-        transition: transform 0.2s ease;
-    }
-    
-    .metric-card:hover::before {
-        transform: scaleX(1);
-    }
-    
-    .metric-label {
-        font-size: 0.7rem;
-        letter-spacing: 0.1em;
-        color: var(--text-dim);
-        font-weight: 800;
-        text-transform: uppercase;
-        margin-bottom: 0.5rem;
-    }
-    
-    .metric-value {
-        font-size: 1.8rem;
-        font-weight: 800;
-        color: var(--text);
-        margin-bottom: 0.25rem;
-    }
-    
-    .metric-subtext {
-        font-size: 0.75rem;
-        color: var(--text-dim);
-    }
-    
-    /* Holdings table enhancements */
-    .holdings-row-loss {
-        background: var(--red-dim);
-        border-left: 3px solid var(--red);
-    }
-    
-    .holdings-row-gain {
-        background: var(--accent-dim);
-        border-left: 3px solid var(--accent);
-    }
-    
-    /* Status badges */
-    .status-badge {
-        display: inline-block;
-        padding: 0.25rem 0.75rem;
-        border-radius: 6px;
-        font-size: 0.7rem;
-        font-weight: 800;
-        letter-spacing: 0.05em;
-    }
-    
-    .status-buy {
-        background: var(--accent-dim);
-        color: var(--accent);
-        border: 1px solid var(--accent);
-    }
-    
-    .status-sell {
-        background: var(--red-dim);
-        color: var(--red);
-        border: 1px solid var(--red);
-    }
-    
-    .status-trim {
-        background: var(--gold-dim);
-        color: var(--gold);
-        border: 1px solid var(--gold);
-    }
-    
-    .status-hold {
-        background: var(--blue-dim);
-        color: var(--blue);
-        border: 1px solid var(--blue);
-    }
-    
-    /* Upload button fix */
-    .stButton > button {
-        width: 100%;
-        background: var(--accent-dim);
-        border: 1px solid var(--accent);
-        color: var(--accent);
-        border-radius: 8px;
-        padding: 0.75rem 1rem;
-        font-weight: 800;
-        letter-spacing: 0.05em;
-        transition: all 0.2s ease;
-    }
-    
-    .stButton > button:hover {
-        background: var(--accent);
-        color: var(--bg-primary);
-        transform: translateY(-1px);
-    }
-    
-    /* File uploader styling */
-    [data-testid="stFileUploader"] {
-        background: var(--bg-card);
-        border: 1px dashed var(--border);
-        border-radius: 12px;
-        padding: 1.5rem;
-    }
-    
-    [data-testid="stFileUploader"]:hover {
-        border-color: var(--accent);
-    }
-    
-    /* Mobile optimization */
-    @media (max-width: 768px) {
-        .metric-value {
-            font-size: 1.5rem;
-        }
-        
-        .block-container {
-            padding-left: 1rem;
-            padding-right: 1rem;
-        }
-    }
-    
-    /* Tab styling */
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 0.5rem;
-        background: var(--bg-secondary);
-        border-radius: 12px;
-        padding: 0.5rem;
-    }
-    
-    .stTabs [data-baseweb="tab"] {
-        border-radius: 8px;
-        color: var(--text-dim);
-        font-weight: 700;
-        font-size: 0.8rem;
-        letter-spacing: 0.05em;
-    }
-    
-    .stTabs [aria-selected="true"] {
-        background: var(--accent-dim);
-        color: var(--accent);
-    }
-    
-    /* Expander styling */
-    .streamlit-expanderHeader {
-        background: var(--bg-card);
-        border: 1px solid var(--border);
-        border-radius: 8px;
-        color: var(--text);
-        font-weight: 700;
-    }
-    
-    .streamlit-expanderHeader:hover {
-        border-color: var(--accent);
-    }
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@300;400;500;600&display=swap');
+
+/* ── reset / base ── */
+html, body, [class*="css"] { font-family: 'Inter', sans-serif; background:#080c14; color:#dde3f0; }
+.stApp { background: #080c14; }
+#MainMenu, footer, header { visibility: hidden; }
+.block-container { padding: 1rem 1.4rem 3rem; max-width: 1480px; margin: 0 auto; }
+
+/* ── typography ── */
+h1,h2,h3 { font-family: 'Syne', sans-serif; }
+.mono     { font-family: 'IBM Plex Mono', monospace; }
+
+/* ══ TOP HEADER BAR ══ */
+.war-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 0 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    margin-bottom: 24px;
+}
+.war-title { font-family:'Syne',sans-serif; font-size:24px; font-weight:800; letter-spacing:-0.03em; }
+.war-title span { color:#4ade80; }
+.war-ts { font-family:'IBM Plex Mono',monospace; font-size:10px; color:#3d4f6e; margin-top:3px; }
+
+/* ══ METRIC CARDS ══ */
+.kpi-grid { display:grid; grid-template-columns:repeat(5,1fr); gap:12px; margin-bottom:24px; }
+.kpi-card {
+    background: linear-gradient(145deg,#0d1525,#111c30);
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius:16px; padding:18px 20px 16px;
+    position:relative; overflow:hidden; cursor:pointer;
+    transition: transform .15s, border-color .15s, box-shadow .15s;
+}
+.kpi-card:hover { transform:translateY(-3px); border-color:rgba(74,222,128,.25); box-shadow:0 12px 40px rgba(0,0,0,.4); }
+.kpi-card::after {
+    content:''; position:absolute; top:0;left:0;right:0;height:2px;
+    border-radius:16px 16px 0 0;
+}
+.kpi-green::after  { background:linear-gradient(90deg,#4ade80,#22d3ee); }
+.kpi-red::after    { background:linear-gradient(90deg,#f87171,#fb923c); }
+.kpi-yellow::after { background:linear-gradient(90deg,#fbbf24,#f59e0b); }
+.kpi-blue::after   { background:linear-gradient(90deg,#60a5fa,#818cf8); }
+.kpi-purple::after { background:linear-gradient(90deg,#a78bfa,#ec4899); }
+.kpi-label { font-size:10px; font-weight:600; letter-spacing:.12em; text-transform:uppercase; color:#3d5478; margin-bottom:8px; }
+.kpi-value { font-family:'IBM Plex Mono',monospace; font-size:24px; font-weight:600; line-height:1; color:#eef2ff; }
+.kpi-sub   { font-size:11px; color:#4a6080; margin-top:6px; }
+.kpi-click { font-size:9px; color:#243047; margin-top:8px; letter-spacing:.05em; }
+
+/* ══ DRILL PANEL ══ */
+.drill {
+    background:#0b1220; border:1px solid rgba(96,165,250,.15);
+    border-radius:12px; padding:18px 20px; margin-bottom:18px;
+    animation: fadeSlide .2s ease;
+}
+@keyframes fadeSlide { from{opacity:0;transform:translateY(-6px)} to{opacity:1;transform:translateY(0)} }
+.drill-title { font-family:'Syne',sans-serif; font-size:13px; font-weight:700; color:#60a5fa; margin-bottom:14px; letter-spacing:.02em; }
+.drill-row {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:7px 0; border-bottom:1px solid rgba(255,255,255,.04); font-size:12px;
+}
+.drill-row:last-child { border-bottom:none; }
+.dk { color:#4a6080; }
+.dv { font-family:'IBM Plex Mono',monospace; font-size:11px; color:#c7d2e7; }
+.dg { color:#4ade80; } .dr { color:#f87171; } .dy { color:#fbbf24; }
+
+/* ══ SECTION HEADER ══ */
+.sec-head {
+    font-family:'Syne',sans-serif; font-size:17px; font-weight:700;
+    color:#c7d2e7; margin: 28px 0 14px; padding-bottom:10px;
+    border-bottom:1px solid rgba(255,255,255,.05);
+    display:flex; align-items:center; gap:8px;
+}
+
+/* ══ HOLDINGS TABLE ══ */
+.htable { width:100%; border-collapse:collapse; font-size:12.5px; }
+.htable thead th {
+    background:#0b1220; color:#2e4060; font-size:9.5px; letter-spacing:.12em;
+    text-transform:uppercase; padding:9px 10px; text-align:right;
+    border-bottom:1px solid rgba(255,255,255,.05); position:sticky; top:0;
+}
+.htable thead th:first-child { text-align:left; border-radius:8px 0 0 0; }
+.htable thead th:last-child  { border-radius:0 8px 0 0; }
+.htable tbody td { padding:9px 10px; border-bottom:1px solid rgba(255,255,255,.03); text-align:right; }
+.htable tbody td:first-child { text-align:left; font-weight:600; font-size:13px; }
+.htable tbody tr:hover td { background:rgba(255,255,255,.025); }
+.row-loss td { color:#f87171 !important; }
+.row-loss td:first-child { color:#f87171; }
+.row-gain-pnl { color:#4ade80; }
+.row-loss-pnl { color:#f87171; }
+
+/* ══ BADGES ══ */
+.b { border-radius:5px; padding:2px 7px; font-size:10px; font-weight:700; letter-spacing:.04em; }
+.b-sell   { background:#3d0d0d; color:#f87171; border:1px solid #7f1d1d; }
+.b-buy    { background:#052e1a; color:#4ade80; border:1px solid #14532d; }
+.b-trim   { background:#2d1a00; color:#fbbf24; border:1px solid #78350f; }
+.b-hold   { background:#0f1f3d; color:#60a5fa; border:1px solid #1e3a5f; }
+.b-dca    { background:#052e1a; color:#34d399; border:1px solid #065f46; }
+.b-lock   { background:#1a1228; color:#a78bfa; border:1px solid #4c1d95; }
+
+/* ══ ALERT STRIP ══ */
+.alert-strip {
+    display:flex; gap:8px; flex-wrap:wrap; margin-bottom:18px;
+}
+.alert-pill {
+    background:#0b1220; border-radius:8px; padding:8px 14px;
+    font-size:12px; border:1px solid rgba(255,255,255,.07);
+    display:flex; align-items:center; gap:6px;
+}
+.alert-pill b { font-family:'IBM Plex Mono',monospace; }
+
+/* ══ CASH CARDS ══ */
+.cash-card {
+    background:linear-gradient(145deg,#0d1525,#0a1322);
+    border:1px solid rgba(96,165,250,.18); border-radius:14px;
+    padding:16px 18px; margin-bottom:12px;
+}
+.cash-head { font-family:'Syne',sans-serif; font-size:13px; font-weight:700; color:#60a5fa; margin-bottom:10px; }
+.cash-row  { display:flex; justify-content:space-between; padding:5px 0; font-size:12px; color:#8aa0c0; border-bottom:1px solid rgba(255,255,255,.04); }
+.cash-row:last-child { border-bottom:none; }
+.cash-amt  { font-family:'IBM Plex Mono',monospace; color:#4ade80; }
+
+/* ══ DIFF TABLE ══ */
+.diff-add  td { background:rgba(74,222,128,.06); }
+.diff-mod  td { background:rgba(251,191,36,.06); }
+.diff-rm   td { background:rgba(248,113,113,.06); }
+
+/* ══ CALENDAR ITEMS ══ */
+.cal-item {
+    display:flex; gap:14px; padding:11px 16px;
+    background:#0b1220; border-left:3px solid #60a5fa;
+    border-radius:0 10px 10px 0; margin-bottom:8px; font-size:12.5px;
+}
+.cal-date { font-family:'IBM Plex Mono',monospace; color:#60a5fa; min-width:72px; font-size:11px; }
+
+/* ══ TABS ══ */
+.stTabs [data-baseweb="tab-list"] {
+    background:#0b1220; border-radius:12px; padding:4px; gap:2px;
+    border:1px solid rgba(255,255,255,.05);
+}
+.stTabs [data-baseweb="tab"] { border-radius:9px; color:#3d5478; font-size:12.5px; font-weight:500; padding:8px 18px; }
+.stTabs [aria-selected="true"] { background:#111c30 !important; color:#60a5fa !important; font-weight:600 !important; }
+
+/* ══ BUTTONS ══ */
+.stButton > button {
+    background:linear-gradient(135deg,#1d4ed8,#2563eb);
+    color:#fff; border:none; border-radius:10px; font-weight:600;
+    font-size:12.5px; padding:9px 20px; transition:all .15s;
+    letter-spacing:.02em;
+}
+.stButton > button:hover { background:linear-gradient(135deg,#2563eb,#3b82f6); transform:translateY(-1px); box-shadow:0 6px 20px rgba(37,99,235,.4); }
+
+/* ══ FILE UPLOADER ══ */
+[data-testid="stFileUploaderDropzone"] { background:#0b1220 !important; border:1px dashed rgba(255,255,255,.1) !important; border-radius:12px !important; }
+[data-testid="stFileUploaderDropzone"] p { color:#3d5478 !important; font-size:13px !important; }
+
+/* ══ INPUTS ══ */
+.stTextInput input, .stNumberInput input, .stSelectbox select {
+    background:#0b1220 !important; border:1px solid rgba(255,255,255,.08) !important;
+    color:#dde3f0 !important; border-radius:8px !important;
+}
+
+/* ══ MOBILE ══ */
+@media (max-width:768px) {
+    .kpi-grid { grid-template-columns:repeat(2,1fr); }
+    .kpi-value { font-size:18px; }
+    .block-container { padding:.6rem .6rem 2rem; }
+    .htable { font-size:11px; }
+    .htable td, .htable th { padding:6px 6px; }
+    .war-title { font-size:18px; }
+}
+@media (max-width:480px) {
+    .kpi-grid { grid-template-columns:1fr 1fr; }
+}
+
+/* ══ MISC ══ */
+.stDataFrame { border:1px solid rgba(255,255,255,.06); border-radius:10px; overflow:hidden; }
+.positive { color:#4ade80; } .negative { color:#f87171; }
+hr { border-color:rgba(255,255,255,.05); }
 </style>
 """, unsafe_allow_html=True)
 
-# ════════════════════════════════════════════════════════════════════════════
-# DATA STRUCTURES
-# ════════════════════════════════════════════════════════════════════════════
 
-# Initialize session state for portfolio data
-if 'portfolio' not in st.session_state:
-    st.session_state.portfolio = {
-        "BTC": {"shares": 0.03433, "cost": 66997, "target": 110000, "bear": 45000, "bull": 175000, "category": "Crypto", "name": "Bitcoin", "lt_ready": True},
-        "XRP": {"shares": 1.066, "cost": 1.886, "target": 2.80, "bear": 0.60, "bull": 5.00, "category": "Crypto", "name": "XRP / Ripple", "lt_ready": True},
-        "NVDA": {"shares": 35.5042, "cost": 103, "target": 175, "bear": 90, "bull": 250, "category": "Core", "name": "NVIDIA", "lt_ready": True},
-        "META": {"shares": 2.8, "cost": 612, "target": 720, "bear": 400, "bull": 900, "category": "Core", "name": "Meta Platforms", "lt_ready": False, "lt_date": "Sep 23 2026"},
-        "GOOGL": {"shares": 4.0, "cost": 307, "target": 210, "bear": 140, "bull": 280, "category": "Core", "name": "Alphabet", "lt_ready": False, "lt_date": "Dec 15 2026"},
-        "AAPL": {"shares": 16.1, "cost": 172, "target": 240, "bear": 170, "bull": 290, "category": "Core", "name": "Apple", "lt_ready": True},
-        "MSFT": {"shares": 0.012, "cost": 402, "target": 480, "bear": 330, "bull": 560, "category": "Core", "name": "Microsoft", "lt_ready": True},
-        "NFLX": {"shares": 21.3325, "cost": 86, "target": 1100, "bear": 700, "bull": 1400, "category": "Core", "name": "Netflix", "lt_ready": True},
-        "COST": {"shares": 1.85, "cost": 925, "target": 1050, "bear": 820, "bull": 1300, "category": "Core", "name": "Costco", "lt_ready": True},
-        "TSM": {"shares": 1.98, "cost": 290, "target": 230, "bear": 130, "bull": 320, "category": "Core", "name": "Taiwan Semi", "lt_ready": False, "lt_date": "Nov 6 2026"},
-        "CRM": {"shares": 2.74, "cost": 254, "target": 320, "bear": 180, "bull": 400, "category": "Core", "name": "Salesforce", "lt_ready": True},
-        "QCOM": {"shares": 2.37, "cost": 165, "target": 175, "bear": 100, "bull": 230, "category": "Core", "name": "Qualcomm", "lt_ready": True},
-        "WMT": {"shares": 13.6, "cost": 82, "target": 105, "bear": 75, "bull": 130, "category": "Core", "name": "Walmart", "lt_ready": True},
-        "BRK-B": {"shares": 4.5154, "cost": 502, "target": 530, "bear": 400, "bull": 620, "category": "Core", "name": "Berkshire B", "lt_ready": True},
-        "AMD": {"shares": 0, "cost": 164, "target": 140, "bear": 80, "bull": 220, "category": "Core", "name": "AMD", "lt_ready": True},
-        "RDDT": {"shares": 1, "cost": 34, "target": 130, "bear": 60, "bull": 200, "category": "Other", "name": "Reddit", "lt_ready": True},
-        "ALK": {"shares": 0.6, "cost": 41, "target": 55, "bear": 28, "bull": 75, "category": "Other", "name": "Alaska Air", "lt_ready": True},
-        "SNOW": {"shares": 3.6, "cost": 152, "target": 190, "bear": 90, "bull": 250, "category": "Other", "name": "Snowflake", "lt_ready": True},
-        "CAVA": {"shares": 0, "cost": 91.66, "target": 120, "bear": 60, "bull": 180, "category": "Other", "name": "CAVA Group", "lt_ready": True},
-        "RIVN": {"shares": 0, "cost": 14.62, "target": 25, "bear": 5, "bull": 45, "category": "Other", "name": "Rivian", "lt_ready": True},
-        "BMWYY": {"shares": 1.0, "cost": 39.72, "target": 50, "bear": 25, "bull": 65, "category": "Other", "name": "BMW", "lt_ready": True},
-        "BLSH": {"shares": 10.0, "cost": 37, "target": 60, "bear": 15, "bull": 90, "category": "IPO", "name": "Bullish", "lt_ready": False, "lt_date": "Aug 14 2026"},
-        "KLAR": {"shares": 11.0, "cost": 40, "target": 65, "bear": 25, "bull": 100, "category": "IPO", "name": "Klarna", "lt_ready": False, "lt_date": "Sep 11 2026"},
-        "STUB": {"shares": 23.3561, "cost": 25.62, "target": 38, "bear": 12, "bull": 60, "category": "IPO", "name": "StubHub", "lt_ready": False, "lt_date": "Sep 18 2026"},
-        "VOO": {"shares": 7.601, "cost": 479, "target": 650, "bear": 420, "bull": 750, "category": "ETF✓", "name": "Vanguard S&P 500", "lt_ready": True},
-        "QQQ": {"shares": 2.37, "cost": 503, "target": 580, "bear": 380, "bull": 700, "category": "ETF✓", "name": "Invesco Nasdaq-100", "lt_ready": True},
-        "VTI": {"shares": 1.96, "cost": 274, "target": 370, "bear": 240, "bull": 430, "category": "ETF✓", "name": "Vanguard Total Market", "lt_ready": True},
-        "VGT": {"shares": 1.46, "cost": 548, "target": 760, "bear": 480, "bull": 920, "category": "ETF✓", "name": "Vanguard IT ETF", "lt_ready": True},
-        "VHT": {"shares": 1.87, "cost": 271, "target": 300, "bear": 200, "bull": 370, "category": "ETF✓", "name": "Vanguard Health Care", "lt_ready": True},
-        "VIS": {"shares": 1.97, "cost": 258, "target": 340, "bear": 210, "bull": 420, "category": "ETF✓", "name": "Vanguard Industrials", "lt_ready": True},
-        "VYM": {"shares": 20.4, "cost": 132, "target": 160, "bear": 110, "bull": 190, "category": "ETF✓", "name": "Vanguard Hi-Div", "lt_ready": True},
-        "SCHD": {"shares": 19.6, "cost": 27, "target": 32, "bear": 20, "bull": 42, "category": "ETF✓", "name": "Schwab Dividend", "lt_ready": True},
-        "VXUS": {"shares": 22.7, "cost": 78, "target": 85, "bear": 55, "bull": 110, "category": "ETF✓", "name": "Vanguard Intl", "lt_ready": True},
-        "GLD": {"shares": 6.6408, "cost": 287, "target": 320, "bear": 220, "bull": 420, "category": "ETF✓", "name": "SPDR Gold", "lt_ready": False, "lt_date": "Apr 4 2026"},
-        "XLE": {"shares": 21.3, "cost": 74, "target": 72, "bear": 44, "bull": 95, "category": "ETF✓", "name": "Energy SPDR", "lt_ready": True},
-        "SPY": {"shares": 0.51, "cost": 595, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "SPDR S&P 500 → VOO", "lt_ready": False, "lt_date": "May 20 2026"},
-        "VTV": {"shares": 0.1658, "cost": 163, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "Vanguard Value → VOO", "lt_ready": True},
-        "VUG": {"shares": 0.46, "cost": 441, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "Vanguard Growth → QQQ", "lt_ready": False, "lt_date": "Jul 15 2026"},
-        "VEA": {"shares": 0.2523, "cost": 50, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "Dev Markets → VXUS", "lt_ready": True},
-        "VWO": {"shares": 0.1446, "cost": 41, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "Emg Markets → VXUS", "lt_ready": True},
-        "BND": {"shares": 0.578, "cost": 72, "target": None, "bear": None, "bull": None, "category": "ETF🔴", "name": "Total Bond → VYM", "lt_ready": True},
+# ════════════════════════════════════════════════════════════════════════════════
+# CONSTANTS & BASELINE DATA
+# ════════════════════════════════════════════════════════════════════════════════
+
+ANALYST_TARGETS = {
+    "NVDA":650,"META":720,"GOOGL":230,"AAPL":240,"MSFT":480,
+    "NFLX":1100,"COST":1050,"TSM":220,"CRM":310,"QCOM":175,
+    "WMT":95,"BRK-B":480,"RDDT":160,"ALK":70,"SNOW":200,
+    "BMWYY":55,"VOO":620,"QQQ":570,"VTI":290,"VGT":750,
+    "VHT":290,"VIS":340,"VYM":155,"SCHD":38,"VXUS":80,
+    "GLD":450,"XLE":100,"BTC":120000,"XRP":4.5,
+    "BLSH":60,"KLAR":70,"STUB":35,
+    "SPY":540,"VUG":480,"VTV":200,"VEA":66,"VWO":54,"BND":75,
+}
+
+FOREVER_HOLD = {"VYM","SCHD"}
+ALWAYS_DCA   = {"VOO","QQQ","VTI"}
+SELL_FLAGS   = {"SPY","VUG","VTV","VEA","VWO","BND"}
+SELL_LT      = {"VTV":"2025-03-01","VEA":"2025-03-01","VWO":"2025-03-01",
+                 "BND":"2025-03-01","SPY":"2026-05-20","VUG":"2026-07-15"}
+CRYPTO       = {"BTC","XRP"}
+IPO_SET      = {"BLSH","KLAR","STUB"}
+COINGECKO    = {"BTC":"bitcoin","XRP":"ripple"}
+
+BIWEEKLY_SCHEDULE = [
+    {"date":"2026-04-03","amount":900,"picks":"NVDA · VOO · VYM · QQQ · META"},
+    {"date":"2026-04-17","amount":900,"picks":"NVDA · VOO · VYM · QQQ · GOOGL"},
+    {"date":"2026-05-01","amount":900,"picks":"NVDA · VOO · VYM · QQQ · AAPL"},
+    {"date":"2026-05-15","amount":900,"picks":"NVDA · VOO · VYM · QQQ · MSFT"},
+    {"date":"2026-05-29","amount":900,"picks":"NVDA · VOO · VYM · QQQ · COST"},
+    {"date":"2026-06-12","amount":900,"picks":"NVDA · VOO · VYM · QQQ · TSM"},
+    {"date":"2026-06-26","amount":900,"picks":"NVDA · VOO · VYM · QQQ · CRM"},
+    {"date":"2026-07-10","amount":900,"picks":"NVDA · VOO · VYM · QQQ · NFLX"},
+    {"date":"2026-07-24","amount":900,"picks":"NVDA · VOO · VYM · QQQ · META"},
+    {"date":"2026-08-07","amount":900,"picks":"NVDA · VOO · VYM · QQQ · GOOGL"},
+    {"date":"2026-08-21","amount":900,"picks":"NVDA · VOO · VYM · QQQ · AAPL"},
+    {"date":"2026-09-04","amount":900,"picks":"NVDA · VOO · VYM · QQQ · MSFT"},
+    {"date":"2026-09-18","amount":900,"picks":"NVDA · VOO · VYM · QQQ · COST"},
+    {"date":"2026-10-02","amount":900,"picks":"NVDA · VOO · VYM · QQQ · TSM"},
+    {"date":"2026-10-16","amount":900,"picks":"NVDA · VOO · VYM · QQQ · CRM"},
+    {"date":"2026-10-30","amount":900,"picks":"NVDA · VOO · VYM · QQQ · NFLX"},
+    {"date":"2026-11-13","amount":900,"picks":"NVDA · VOO · VYM · QQQ · META"},
+    {"date":"2026-11-27","amount":900,"picks":"NVDA · VOO · VYM · QQQ · GOOGL"},
+    {"date":"2026-12-11","amount":900,"picks":"NVDA · VOO · VYM · QQQ · AAPL"},
+]
+
+ACTION_CALENDAR = [
+    {"date":"Apr 3",  "type":"sell",   "action":"SELL VTV, VEA, VWO, BND — all LT eligible now → redeploy into VOO/VYM"},
+    {"date":"Apr 3",  "type":"deposit","action":"💰 $900 deposit #1 — NVDA/VOO/VYM/QQQ + META"},
+    {"date":"Apr 4",  "type":"trim",   "action":"GLD → LT eligible today — trim 25% at $450 target"},
+    {"date":"Apr 17", "type":"deposit","action":"💰 $900 deposit #2 — NVDA/VOO/VYM/QQQ + GOOGL"},
+    {"date":"May 1",  "type":"deposit","action":"💰 $900 deposit #3 — NVDA/VOO/VYM/QQQ + AAPL"},
+    {"date":"May 20", "type":"sell",   "action":"SPY → LT eligible — sell all, reinvest into VOO same day"},
+    {"date":"Jul 15", "type":"sell",   "action":"VUG → LT eligible — sell all, reinvest into QQQ"},
+    {"date":"Aug 14", "type":"review", "action":"BLSH hits 1 year — evaluate / trim 25%"},
+    {"date":"Sep 11", "type":"review", "action":"KLAR hits 1 year — evaluate / trim 25%"},
+    {"date":"Sep 18", "type":"review", "action":"STUB hits 1 year — evaluate / trim"},
+    {"date":"Nov 6",  "type":"trim",   "action":"TSM big lot → LT — trim 20%"},
+    {"date":"Dec 15", "type":"trim",   "action":"GOOGL big lot → LT — trim 20%"},
+    {"date":"Dec 20", "type":"tax",    "action":"🧾 Year-end: harvest losses, net gains before Dec 31"},
+]
+
+# Baseline portfolio from 583 reconciled transactions
+BASELINE_PORTFOLIO = {
+    "BTC":  {"shares":0.03433,  "avg_cost":52800.00, "category":"Crypto",  "lt_date":"2024-09-01"},
+    "XRP":  {"shares":1.066,    "avg_cost":0.68,      "category":"Crypto",  "lt_date":"2024-11-01"},
+    "NVDA": {"shares":35.5042,  "avg_cost":82.50,     "category":"Stocks",  "lt_date":"2024-06-01"},
+    "META": {"shares":2.3024,   "avg_cost":490.00,    "category":"Stocks",  "lt_date":"2025-03-01"},
+    "GOOGL":{"shares":4.0033,   "avg_cost":165.00,    "category":"Stocks",  "lt_date":"2024-12-01"},
+    "AAPL": {"shares":2.5977,   "avg_cost":172.50,    "category":"Stocks",  "lt_date":"2024-03-01"},
+    "MSFT": {"shares":0.0124,   "avg_cost":398.00,    "category":"Stocks",  "lt_date":"2024-03-01"},
+    "NFLX": {"shares":21.3325,  "avg_cost":580.00,    "category":"Stocks",  "lt_date":"2024-06-01"},
+    "COST": {"shares":2.3423,   "avg_cost":880.00,    "category":"Stocks",  "lt_date":"2024-08-01"},
+    "TSM":  {"shares":3.50,     "avg_cost":155.00,    "category":"Stocks",  "lt_date":"2024-11-01"},
+    "CRM":  {"shares":1.20,     "avg_cost":285.00,    "category":"Stocks",  "lt_date":"2024-09-01"},
+    "QCOM": {"shares":2.3724,   "avg_cost":158.00,    "category":"Stocks",  "lt_date":"2024-03-01"},
+    "WMT":  {"shares":4.149,    "avg_cost":62.00,     "category":"Stocks",  "lt_date":"2024-03-01"},
+    "BRK-B":{"shares":4.5154,   "avg_cost":360.00,    "category":"Stocks",  "lt_date":"2024-06-01"},
+    "RDDT": {"shares":1.0,      "avg_cost":34.00,     "category":"Stocks",  "lt_date":"2025-03-01"},
+    "ALK":  {"shares":0.6087,   "avg_cost":41.07,     "category":"Stocks",  "lt_date":"2025-04-01"},
+    "SNOW": {"shares":0.7808,   "avg_cost":158.00,    "category":"Stocks",  "lt_date":"2025-04-01"},
+    "BMWYY":{"shares":1.0,      "avg_cost":39.72,     "category":"Stocks",  "lt_date":"2025-03-01"},
+    "BLSH": {"shares":10.0,     "avg_cost":37.00,     "category":"Stocks",  "lt_date":"2026-08-14"},
+    "KLAR": {"shares":11.0,     "avg_cost":40.00,     "category":"Stocks",  "lt_date":"2026-09-11"},
+    "STUB": {"shares":23.3561,  "avg_cost":25.62,     "category":"Stocks",  "lt_date":"2026-09-18"},
+    "VOO":  {"shares":7.601,    "avg_cost":480.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "QQQ":  {"shares":2.7532,   "avg_cost":450.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VTI":  {"shares":0.7507,   "avg_cost":252.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VGT":  {"shares":1.4649,   "avg_cost":510.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VHT":  {"shares":1.8845,   "avg_cost":245.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VIS":  {"shares":1.9664,   "avg_cost":260.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VYM":  {"shares":22.912,   "avg_cost":118.00,    "category":"ETFs",    "lt_date":"2024-03-01"},
+    "SCHD": {"shares":19.445,   "avg_cost":26.50,     "category":"ETFs",    "lt_date":"2024-03-01"},
+    "VXUS": {"shares":23.548,   "avg_cost":57.00,     "category":"ETFs",    "lt_date":"2024-03-01"},
+    "GLD":  {"shares":6.6408,   "avg_cost":218.00,    "category":"ETFs",    "lt_date":"2024-04-01"},
+    "XLE":  {"shares":18.933,   "avg_cost":87.00,     "category":"ETFs",    "lt_date":"2024-03-01"},
+    "SPY":  {"shares":0.50,     "avg_cost":480.00,    "category":"ETFs",    "lt_date":"2025-05-20","sell_flag":True},
+    "VUG":  {"shares":0.4647,   "avg_cost":380.00,    "category":"ETFs",    "lt_date":"2025-07-15","sell_flag":True},
+    "VTV":  {"shares":0.1658,   "avg_cost":155.89,    "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
+    "VEA":  {"shares":0.2523,   "avg_cost":49.13,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
+    "VWO":  {"shares":0.1446,   "avg_cost":41.40,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
+    "BND":  {"shares":0.578,    "avg_cost":72.17,     "category":"ETFs",    "lt_date":"2024-03-01","sell_flag":True},
+}
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# CSV PARSER  — accepts file object OR string, handles all 12 Robinhood codes
+# ════════════════════════════════════════════════════════════════════════════════
+
+TX_CODES = {"Buy","Sell","CDIV","SPL","ACH","RTP","LIQ","REC","SXCH","DFEE","DTAX","MISC"}
+
+def _parse_dollar(s):
+    s = str(s or "").strip().replace(",","").replace("$","").replace("(", "-").replace(")","")
+    try:    return float(s)
+    except: return 0.0
+
+def _parse_qty(s):
+    try:    return float(str(s or "").strip())
+    except: return 0.0
+
+def parse_robinhood_csv(source) -> dict:
+    """
+    Parse Robinhood activity CSV.
+    source: file-like object (st.file_uploader) OR str content.
+    Returns delta dict suitable for merge_into_portfolio().
+    """
+    # ── normalise input ──────────────────────────────────────────────────────
+    if hasattr(source, "read"):
+        raw = source.read()
+        if isinstance(raw, bytes):
+            # try common encodings
+            for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
+                try:
+                    content = raw.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            else:
+                content = raw.decode("latin-1", errors="replace")
+    else:
+        content = str(source)
+
+    # ── strip Robinhood disclaimer footer ───────────────────────────────────
+    lines = content.splitlines()
+    clean = []
+    for line in lines:
+        if "data provided is for informational" in line.lower():
+            break
+        clean.append(line)
+    content = "\n".join(clean)
+
+    # ── handle Robinhood's multiline description cells (embedded newlines) ──
+    # Robinhood sometimes writes:
+    #   "4/1/2026","4/1/2026","4/2/2026","NVDA","NVIDIA\nCUSIP: 12345\nRecurring","Buy",...
+    # We collapse everything between outer quotes that spans multiple lines.
+    # Pandas read_csv with quoting=csv.QUOTE_ALL handles this fine but we use
+    # the stdlib csv reader with correct quoting to be safe.
+
+    reader = csv.DictReader(
+        io.StringIO(content),
+        quoting=csv.QUOTE_ALL,
+        skipinitialspace=True,
+    )
+
+    # accumulate per-ticker deltas from THIS CSV only
+    delta_shares = defaultdict(float)
+    delta_cost   = defaultdict(float)
+    drip_events  = defaultdict(list)
+    tx_log       = []
+
+    total_tx = buys = sells = drip_ct = 0
+    cash_in  = 0.0
+
+    for row in reader:
+        ticker  = (row.get("Instrument") or "").strip()
+        desc    = (row.get("Description") or "").strip().replace("\n"," ")
+        code    = (row.get("Trans Code")  or "").strip()
+        qty_s   = (row.get("Quantity")    or "").strip()
+        price_s = (row.get("Price")       or "").strip()
+        amount_s= (row.get("Amount")      or "").strip()
+        date_s  = (row.get("Activity Date") or "").strip()
+
+        if not code or code not in TX_CODES:
+            continue
+
+        total_tx += 1
+        qty    = _parse_qty(qty_s)
+        price  = _parse_dollar(price_s)
+        amount = _parse_dollar(amount_s)
+
+        # ── BUY ──
+        if code == "Buy":
+            if not ticker: continue
+            is_drip = "reinvestment" in desc.lower()
+            cost_basis = qty * price if price else abs(amount)
+            delta_shares[ticker] += qty
+            delta_cost[ticker]   += cost_basis
+            buys += 1
+            if is_drip:
+                drip_events[ticker].append({"qty":qty,"price":price,"date":date_s,"amount":abs(amount)})
+                drip_ct += 1
+            tx_log.append({"date":date_s,"ticker":ticker,"action":"Buy","qty":qty,"price":price,"amount":abs(amount),"drip":is_drip})
+
+        # ── SELL ──
+        elif code == "Sell":
+            if not ticker: continue
+            delta_shares[ticker] -= qty
+            # cost basis reduction handled at merge time
+            sells += 1
+            tx_log.append({"date":date_s,"ticker":ticker,"action":"Sell","qty":qty,"price":price,"amount":abs(amount),"drip":False})
+
+        # ── STOCK SPLIT — additional shares granted ──
+        elif code == "SPL":
+            if ticker: delta_shares[ticker] += qty
+
+        # ── TRANSFER IN ──
+        elif code in ("REC","SXCH"):
+            if ticker: delta_shares[ticker] += qty
+
+        # ── LIQUIDATION (forced sell) ──
+        elif code == "LIQ":
+            if ticker:
+                delta_shares[ticker] -= qty
+                sells += 1
+
+        # ── CASH DEPOSITS ──
+        elif code in ("ACH","RTP"):
+            cash_in += abs(amount)
+
+        # CDIV, DFEE, DTAX, MISC — no share impact
+
+    return {
+        "total_tx":   total_tx,
+        "buys":       buys,
+        "sells":      sells,
+        "drip":       drip_ct,
+        "cash_in":    cash_in,
+        "delta_shares": dict(delta_shares),
+        "delta_cost":   dict(delta_cost),
+        "drip_events":  dict(drip_events),
+        "tx_log":       tx_log,
     }
 
-if 'cash_balance' not in st.session_state:
-    st.session_state.cash_balance = 1042.17
 
-if 'prices' not in st.session_state:
-    st.session_state.prices = {}
+def merge_into_portfolio(portfolio: dict, delta: dict) -> tuple[dict, list]:
+    """
+    Incrementally apply a CSV delta to existing portfolio.
+    Returns (new_portfolio, diff_list).
+    diff_list items: {"ticker","change","old_shares","new_shares","old_cost","new_cost"}
+    """
+    new_port = copy.deepcopy(portfolio)
+    diff = []
 
-if 'last_update' not in st.session_state:
-    st.session_state.last_update = None
+    for ticker, qty_delta in delta["delta_shares"].items():
+        cost_delta = delta["delta_cost"].get(ticker, 0.0)
+        old_entry  = new_port.get(ticker)
+        old_shares = old_entry["shares"] if old_entry else 0.0
+        old_cost_t = old_entry["avg_cost"] * old_shares if old_entry else 0.0
 
-if 'recommendation_history' not in st.session_state:
-    st.session_state.recommendation_history = []
+        new_shares = max(0.0, old_shares + qty_delta)
 
-# ════════════════════════════════════════════════════════════════════════════
-# PRICE FETCHING
-# ════════════════════════════════════════════════════════════════════════════
+        if qty_delta >= 0:
+            # buying — blended avg cost
+            new_total_cost = old_cost_t + cost_delta
+            new_avg_cost   = new_total_cost / new_shares if new_shares else 0
+        else:
+            # selling — avg cost unchanged (FIFO approximation)
+            new_avg_cost = old_entry["avg_cost"] if old_entry else 0
 
-def fetch_live_prices(tickers: List[str]) -> Dict[str, float]:
-    """Fetch live prices for stocks/ETFs (yfinance) and crypto (CoinGecko)"""
+        if old_entry:
+            if abs(new_shares - old_shares) < 0.00001:
+                continue  # no real change
+            diff.append({
+                "ticker":     ticker,
+                "change":     "REMOVED" if new_shares < 0.00001 else "MODIFIED",
+                "old_shares": round(old_shares, 6),
+                "new_shares": round(new_shares, 6),
+                "delta":      round(qty_delta, 6),
+                "old_avg_cost": round(old_entry["avg_cost"], 2),
+                "new_avg_cost": round(new_avg_cost, 2),
+            })
+            if new_shares < 0.00001:
+                del new_port[ticker]
+            else:
+                new_port[ticker]["shares"]   = round(new_shares, 6)
+                new_port[ticker]["avg_cost"] = round(new_avg_cost, 4)
+        else:
+            if new_shares > 0.00001:
+                # new position — infer category
+                cat = "Crypto" if ticker in CRYPTO else "ETFs" if ticker in {"VOO","QQQ","VTI","VGT","VHT","VIS","VYM","SCHD","VXUS","GLD","XLE","BND","VUG","VTV","VEA","VWO","SPY","XOP"} else "Stocks"
+                new_port[ticker] = {
+                    "shares":   round(new_shares, 6),
+                    "avg_cost": round(new_avg_cost, 4),
+                    "category": cat,
+                    "lt_date":  "",
+                    "sell_flag": ticker in SELL_FLAGS,
+                }
+                diff.append({
+                    "ticker": ticker, "change":"ADDED",
+                    "old_shares":0, "new_shares":round(new_shares,6),
+                    "delta": round(qty_delta,6),
+                    "old_avg_cost":0, "new_avg_cost":round(new_avg_cost,2),
+                })
+
+    return new_port, diff
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# PRICE FETCHER
+# ════════════════════════════════════════════════════════════════════════════════
+
+def fetch_all_prices(tickers: list) -> dict:
     prices = {}
-    
-    # Separate crypto and stocks
-    crypto_map = {"BTC": "bitcoin", "XRP": "ripple"}
-    crypto_tickers = [t for t in tickers if t in crypto_map]
-    stock_tickers = [t for t in tickers if t not in crypto_map and st.session_state.portfolio[t]["shares"] > 0]
-    
-    # Fetch crypto prices
-    if crypto_tickers:
-        try:
-            cg_ids = [crypto_map[t] for t in crypto_tickers]
-            response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": ",".join(cg_ids), "vs_currencies": "usd"},
-                timeout=10
-            )
-            if response.status_code == 200:
-                data = response.json()
-                for ticker in crypto_tickers:
-                    cg_id = crypto_map[ticker]
-                    if cg_id in data and "usd" in data[cg_id]:
-                        prices[ticker] = data[cg_id]["usd"]
-        except Exception as e:
-            st.error(f"Crypto price fetch error: {e}")
-    
-    # Fetch stock prices in batch
+    stock_tickers  = [t for t in tickers if t not in CRYPTO and t != "_fetched_at"]
+    crypto_tickers = [t for t in tickers if t in CRYPTO]
+
+    # ── stocks via yfinance ──
     if stock_tickers:
         try:
-            data = yf.download(stock_tickers, period="1d", interval="1d", progress=False, threads=True)
-            if len(stock_tickers) == 1:
-                prices[stock_tickers[0]] = data['Close'].iloc[-1] if not data.empty else None
-            else:
-                for ticker in stock_tickers:
-                    if ticker in data['Close'].columns:
-                        prices[ticker] = data['Close'][ticker].iloc[-1]
-        except Exception as e:
-            st.error(f"Stock price fetch error: {e}")
-    
+            import yfinance as yf
+            joined = " ".join(stock_tickers)
+            data = yf.download(joined, period="2d", auto_adjust=True, progress=False, threads=True)
+            closes = data["Close"] if "Close" in data.columns else data
+            for t in stock_tickers:
+                try:
+                    if hasattr(closes, "columns") and t in closes.columns:
+                        series = closes[t].dropna()
+                    elif len(stock_tickers) == 1:
+                        series = closes.squeeze().dropna()
+                    else:
+                        continue
+                    if len(series) >= 2:
+                        p, prev = float(series.iloc[-1]), float(series.iloc[-2])
+                        prices[t] = {"price":p, "chg_pct":(p-prev)/prev*100, "src":"yf"}
+                    elif len(series) == 1:
+                        prices[t] = {"price":float(series.iloc[-1]), "chg_pct":0.0, "src":"yf"}
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+    # ── crypto via CoinGecko ──
+    if crypto_tickers:
+        try:
+            import requests
+            ids = ",".join(COINGECKO[t] for t in crypto_tickers if t in COINGECKO)
+            url = f"https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=usd&include_24hr_change=true"
+            r = requests.get(url, timeout=8)
+            r.raise_for_status()
+            d = r.json()
+            for t in crypto_tickers:
+                cg = COINGECKO.get(t)
+                if cg and cg in d:
+                    prices[t] = {"price":d[cg]["usd"],"chg_pct":d[cg].get("usd_24h_change",0),"src":"cg"}
+        except Exception:
+            pass
+
+    prices["_ts"] = datetime.now().strftime("%b %d %Y %H:%M:%S")
     return prices
 
-# ════════════════════════════════════════════════════════════════════════════
-# RECOMMENDATION ENGINE
-# ════════════════════════════════════════════════════════════════════════════
 
-def generate_recommendation(ticker: str, data: dict, price: float) -> dict:
-    """Generate buy/sell/hold recommendation with tax awareness"""
-    
-    if data["shares"] == 0:
-        return {"action": "SOLD", "detail": "Position closed", "color": "#6a7590", "urgency": 0}
-    
-    # SELL list override
-    if data["category"] == "ETF🔴":
-        if data["lt_ready"]:
-            return {"action": "SELL NOW", "detail": f"LT eligible - consolidate position", "color": "#ff4060", "urgency": 5}
-        else:
-            return {"action": "WAIT → SELL", "detail": f"LT on {data.get('lt_date', 'TBD')}", "color": "#ff9030", "urgency": 3}
-    
-    if not price or not data.get("target"):
-        return {"action": "HOLD", "detail": "Awaiting price data", "color": "#6a7590", "urgency": 0}
-    
-    # Calculate metrics
-    gain_pct = ((price - data["cost"]) / data["cost"]) * 100
-    upside_pct = ((data["target"] - price) / price) * 100 if data["target"] else 0
-    downside_pct = ((price - data["bear"]) / price) * 100 if data.get("bear") else 100
-    
-    is_crypto = data["category"] == "Crypto"
-    is_income_etf = ticker in ["VYM", "SCHD"]
-    is_core_etf = ticker in ["VOO", "QQQ", "VTI"]
-    is_lt = data["lt_ready"]
-    
-    # Income ETFs - never sell
-    if is_income_etf:
-        return {"action": "HOLD ♾", "detail": "Income engine — DRIP forever", "color": "#9070ff", "urgency": 0}
-    
-    # Core ETFs - always DCA
-    if is_core_etf:
-        allocation = {"VOO": "$200", "QQQ": "$150", "VTI": "$100"}.get(ticker, "$—")
-        return {"action": "DCA ♾", "detail": f"Add {allocation} biweekly", "color": "#00f0aa", "urgency": 0}
-    
-    # Crypto special handling
-    if is_crypto:
-        if upside_pct > 25:
-            return {"action": "ACCUMULATE", "detail": f"{upside_pct:.0f}% to target — keep stacking", "color": "#00f0aa", "urgency": 4}
-        elif upside_pct < -20:
-            return {"action": "TRIM 20%", "detail": f"{abs(upside_pct):.0f}% above target — take profits", "color": "#f0c040", "urgency": 3}
-    
-    # Bear case proximity (non-crypto)
-    if not is_crypto and data.get("bear") and price < data["bear"] * 1.10:
-        return {"action": "STOP LOSS", "detail": f"Within 10% of bear case (${data['bear']:.0f})", "color": "#ff4060", "urgency": 5}
-    
-    # Strong buy zone
-    if upside_pct > 60 and gain_pct < -15:
-        return {"action": "STRONG BUY", "detail": f"{upside_pct:.0f}% to target, deep value", "color": "#00f0aa", "urgency": 5}
-    
-    # Accumulate zone
-    if upside_pct > 40:
-        return {"action": "ACCUMULATE", "detail": f"{upside_pct:.0f}% upside to analyst target", "color": "#00f0aa", "urgency": 4}
-    
-    # Buy dip
-    if upside_pct > 20 and gain_pct < -15:
-        return {"action": "BUY DIP", "detail": f"Down {abs(gain_pct):.0f}%, {upside_pct:.0f}% to target", "color": "#20d080", "urgency": 4}
-    
-    # At target - trim if LT
-    if -10 < upside_pct < 5:
-        if not is_lt:
-            return {"action": "HOLD (ST)", "detail": f"Near target — wait for LT: {data.get('lt_date', 'TBD')}", "color": "#ff9030", "urgency": 2}
-        return {"action": "TRIM 20%", "detail": "At analyst target — partial profits (LT)", "color": "#f0c040", "urgency": 3}
-    
-    # Above target
-    if upside_pct <= -10:
-        if not is_lt:
-            return {"action": "HOLD (ST)", "detail": f"Above target — wait for LT to avoid 37% tax", "color": "#ff9030", "urgency": 2}
-        return {"action": "TRIM 25%", "detail": f"{abs(upside_pct):.0f}% above target — lock gains (LT)", "color": "#f0c040", "urgency": 3}
-    
-    # Default hold
-    return {"action": "HOLD", "detail": f"{upside_pct:.0f}% to target", "color": "#4090ff", "urgency": 1}
+# ════════════════════════════════════════════════════════════════════════════════
+# RECOMMENDATION ENGINE  — fully dynamic, recalculates from live price
+# ════════════════════════════════════════════════════════════════════════════════
 
-def generate_cash_deployment_recs(cash: float, prices: dict) -> List[dict]:
-    """Generate recommendations for deploying available cash"""
-    recommendations = []
-    
-    # Base $900 allocation template
-    base_allocation = [
-        {"ticker": "NVDA", "pct": 0.28, "rationale": "AI supercycle core conviction"},
-        {"ticker": "VOO", "pct": 0.22, "rationale": "S&P 500 DCA forever"},
-        {"ticker": "VYM", "pct": 0.17, "rationale": "Dividend compound engine"},
-        {"ticker": "QQQ", "pct": 0.17, "rationale": "Nasdaq-100 tech exposure"},
-    ]
-    
-    # Dynamic rotation pick based on current opportunities
-    portfolio = st.session_state.portfolio
-    rotation_candidates = ["META", "GOOGL", "AAPL", "MSFT", "COST", "TSM", "CRM", "NFLX", "AMD"]
-    
-    # Find best rotation pick (highest upside with shares > 0)
-    best_pick = None
-    best_upside = 0
-    
-    for ticker in rotation_candidates:
-        data = portfolio.get(ticker, {})
-        if data.get("shares", 0) > 0 and ticker in prices and data.get("target"):
-            price = prices[ticker]
-            upside = ((data["target"] - price) / price) * 100
-            if upside > best_upside:
-                best_upside = upside
-                best_pick = ticker
-    
-    if best_pick:
-        base_allocation.append({
-            "ticker": best_pick,
-            "pct": 0.16,
-            "rationale": f"{best_upside:.0f}% upside — rotation opportunity"
-        })
-    
-    # Scale to available cash
-    for alloc in base_allocation:
-        ticker = alloc["ticker"]
-        amount = cash * alloc["pct"]
-        
-        if ticker in prices:
-            price = prices[ticker]
-            shares = amount / price
-            recommendations.append({
-                "ticker": ticker,
-                "amount": amount,
-                "shares": shares,
-                "price": price,
-                "rationale": alloc["rationale"]
-            })
-    
-    return recommendations
+def is_lt(lt_date_str):
+    if not lt_date_str: return False
+    try:    return date.today() >= date.fromisoformat(lt_date_str)
+    except: return False
 
-# ════════════════════════════════════════════════════════════════════════════
-# CSV/PDF PARSING
-# ════════════════════════════════════════════════════════════════════════════
+def generate_recs(portfolio: dict, prices: dict) -> list:
+    recs = []
+    for ticker, pos in portfolio.items():
+        shares   = pos.get("shares", 0)
+        cost     = pos.get("avg_cost", 0)
+        lt_date  = pos.get("lt_date", "")
+        lt_elig  = is_lt(lt_date)
+        sell_flg = pos.get("sell_flag", ticker in SELL_FLAGS)
+        lp       = prices.get(ticker, {}).get("price") if isinstance(prices.get(ticker), dict) else None
+        target   = ANALYST_TARGETS.get(ticker)
 
-def parse_robinhood_csv(file) -> Tuple[pd.DataFrame, dict]:
-    """Parse Robinhood CSV and return transactions + updated positions"""
-    df = pd.read_csv(file)
-    
-    # Parse transactions
-    transactions = []
-    for _, row in df.iterrows():
-        trans = {
-            "date": row.get("Activity Date"),
-            "ticker": row.get("Instrument"),
-            "type": row.get("Trans Code"),
-            "quantity": float(row.get("Quantity", 0) or 0),
-            "price": float(str(row.get("Price", "0")).replace("$", "").replace(",", "") or 0),
-            "amount": float(str(row.get("Amount", "0")).replace("$", "").replace("(", "").replace(")", "").replace(",", "") or 0),
-        }
-        transactions.append(trans)
-    
-    # Update positions based on Buy/Sell
-    updates = {}
-    for trans in transactions:
-        ticker = trans["ticker"]
-        if ticker and ticker in st.session_state.portfolio:
-            if trans["type"] == "Buy":
-                current = st.session_state.portfolio[ticker]["shares"]
-                updates[ticker] = current + trans["quantity"]
-            elif trans["type"] == "Sell":
-                current = st.session_state.portfolio[ticker]["shares"]
-                updates[ticker] = max(0, current - trans["quantity"])
-    
-    return pd.DataFrame(transactions), updates
+        tax_note = f"✅ LT ({lt_date})" if lt_elig else f"⚠️ ST → LT {lt_date}"
+        action = rationale = ""
+        trim_pct = None
 
-def parse_crypto_pdf(file) -> dict:
-    """Parse crypto statement PDF (placeholder - requires PyPDF2)"""
-    # TODO: Implement PDF parsing for crypto statements
-    st.warning("PDF parsing for crypto statements will be implemented in next update")
-    return {}
+        # priority 1 — income ETFs
+        if ticker in FOREVER_HOLD:
+            action    = "♾ HOLD FOREVER"
+            rationale = "Dividend compounding — never sell, DRIP on."
 
-# ════════════════════════════════════════════════════════════════════════════
-# MAIN APP
-# ════════════════════════════════════════════════════════════════════════════
+        # priority 2 — core index
+        elif ticker in ALWAYS_DCA:
+            action    = "📈 DCA ALWAYS"
+            rationale = "Core index — DCA every deposit, never stop."
 
-def main():
-    # Header
-    st.markdown("""
-        <h1 style='margin-bottom: 0; font-size: 2.5rem;'>⚡ Portfolio War Room</h1>
-        <p style='color: var(--text-dim); margin-top: 0.5rem; font-size: 0.9rem;'>
-            Real-time portfolio intelligence · Tax-optimized recommendations · $900 biweekly deploy
-        </p>
-    """, unsafe_allow_html=True)
-    
-    # Refresh prices button (prominent)
-    col1, col2, col3 = st.columns([2, 1, 1])
-    with col1:
-        if st.button("🔄 REFRESH PRICES", use_container_width=True):
-            with st.spinner("Fetching live prices..."):
-                active_tickers = [t for t, d in st.session_state.portfolio.items() if d["shares"] > 0]
-                st.session_state.prices = fetch_live_prices(active_tickers)
-                st.session_state.last_update = datetime.now().strftime("%b %d, %Y %I:%M %p")
-                st.success(f"✓ Updated {len(st.session_state.prices)} positions")
-                st.rerun()
-    
-    with col2:
-        st.metric("Cash", f"${st.session_state.cash_balance:,.2f}")
-    
-    with col3:
-        if st.session_state.last_update:
-            st.caption(f"Updated: {st.session_state.last_update}")
-    
-    st.markdown("---")
-    
-    # Tab navigation
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Overview",
-        "💼 Holdings",
-        "📥 Import Data",
-        "💰 Deploy $900",
-        "📈 Performance",
-        "⚙️ Settings"
-    ])
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 1: OVERVIEW
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab1:
-        # Calculate metrics
-        portfolio = st.session_state.portfolio
-        prices = st.session_state.prices
-        
-        total_equity = st.session_state.cash_balance
-        total_cost = 0
-        position_count = 0
-        
-        sell_positions = []
-        trim_positions = []
-        buy_positions = []
-        
-        for ticker, data in portfolio.items():
-            if data["shares"] > 0:
-                position_count += 1
-                cost_basis = data["shares"] * data["cost"]
-                total_cost += cost_basis
-                
-                if ticker in prices:
-                    equity = data["shares"] * prices[ticker]
-                    total_equity += equity
-                    
-                    # Generate recommendation
-                    rec = generate_recommendation(ticker, data, prices[ticker])
-                    
-                    if "SELL" in rec["action"]:
-                        sell_positions.append({"ticker": ticker, "rec": rec, "equity": equity})
-                    elif "TRIM" in rec["action"]:
-                        trim_positions.append({"ticker": ticker, "rec": rec, "equity": equity})
-                    elif rec["action"] in ["STRONG BUY", "BUY DIP", "ACCUMULATE"]:
-                        buy_positions.append({"ticker": ticker, "rec": rec, "upside": ((data["target"] - prices[ticker]) / prices[ticker] * 100) if data.get("target") else 0})
-        
-        total_gain = total_equity - total_cost
-        total_gain_pct = (total_gain / total_cost * 100) if total_cost > 0 else 0
-        
-        # Clickable metric cards
-        st.markdown('<div class="card-grid">', unsafe_allow_html=True)
-        
-        # Card 1: Total Equity (expandable)
-        with st.expander(f"💰 **TOTAL EQUITY** ${total_equity:,.2f}", expanded=False):
-            st.markdown(f"""
-            **Cost Basis:** ${total_cost:,.2f}  
-            **Total Gain:** ${total_gain:,.2f} ({total_gain_pct:+.1f}%)  
-            **Active Positions:** {position_count}  
-            **Cash Available:** ${st.session_state.cash_balance:,.2f}
-            """)
-        
-        # Card 2: Sell Alerts (expandable)
-        with st.expander(f"🔴 **SELL NOW** ({len(sell_positions)} positions)", expanded=False):
-            if sell_positions:
-                for pos in sorted(sell_positions, key=lambda x: x["equity"], reverse=True):
-                    st.markdown(f"""
-                    **{pos['ticker']}** — ${pos['equity']:,.2f}  
-                    _{pos['rec']['detail']}_
-                    """)
-                st.info("💡 Sell these positions and reinvest proceeds per tax playbook")
+        # priority 3 — sell list
+        elif sell_flg or ticker in SELL_FLAGS:
+            sell_lt = SELL_LT.get(ticker, lt_date)
+            if is_lt(sell_lt):
+                action    = "🔴 SELL NOW"
+                tax_note  = "✅ LT — 15-20% rate, reinvest proceeds"
+                rationale = f"On SELL list. LT eligible. Exit & redeploy to VOO/VYM."
             else:
-                st.success("No immediate sell actions needed")
-        
-        # Card 3: Trim Alerts (expandable)
-        with st.expander(f"⚠️ **TRIM POSITIONS** ({len(trim_positions)} positions)", expanded=False):
-            if trim_positions:
-                for pos in sorted(trim_positions, key=lambda x: x["equity"], reverse=True):
-                    st.markdown(f"""
-                    **{pos['ticker']}** — ${pos['equity']:,.2f}  
-                    _{pos['rec']['detail']}_
-                    """)
-                st.info("💡 Lock in partial profits while maintaining long-term position")
-            else:
-                st.success("No trim actions needed")
-        
-        # Card 4: Buy Opportunities (expandable)
-        with st.expander(f"📈 **BUY OPPORTUNITIES** ({len(buy_positions)} positions)", expanded=False):
-            if buy_positions:
-                for pos in sorted(buy_positions, key=lambda x: x["upside"], reverse=True)[:5]:
-                    st.markdown(f"""
-                    **{pos['ticker']}** — {pos['rec']['action']}  
-                    _{pos['rec']['detail']}_  
-                    _Upside: {pos['upside']:.0f}%_
-                    """)
-                st.info("💡 Best opportunities based on analyst targets and current valuations")
-            else:
-                st.info("No strong buy signals at current prices")
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Cash deployment recommendations
-        st.markdown("### 💵 Cash Deployment Plan")
-        if st.session_state.cash_balance > 100:
-            cash_recs = generate_cash_deployment_recs(st.session_state.cash_balance, prices)
-            
-            if cash_recs:
-                rec_df = pd.DataFrame(cash_recs)
-                rec_df["amount"] = rec_df["amount"].apply(lambda x: f"${x:,.2f}")
-                rec_df["shares"] = rec_df["shares"].apply(lambda x: f"{x:.4f}")
-                rec_df["price"] = rec_df["price"].apply(lambda x: f"${x:,.2f}")
-                
-                st.dataframe(
-                    rec_df[["ticker", "amount", "shares", "price", "rationale"]],
-                    use_container_width=True,
-                    hide_index=True
-                )
-                
-                total_deployed = sum([r["amount"] for r in cash_recs])
-                st.info(f"💡 Total deployment: ${total_deployed:,.2f} of ${st.session_state.cash_balance:,.2f} available")
-        else:
-            st.info("🎯 Awaiting next biweekly deposit ($900 on Friday)")
-        
-        # Action Calendar
-        st.markdown("### 📅 Upcoming Actions")
-        actions = [
-            {"date": "Apr 3, 2026", "action": "💰 First $900 deposit", "priority": "high"},
-            {"date": "Apr 4, 2026", "action": "🟡 GLD → LT eligible, trim 25% at $320 target", "priority": "medium"},
-            {"date": "May 20, 2026", "action": "🔴 SPY turns LT → sell all, reinvest to VOO", "priority": "high"},
-            {"date": "Jul 15, 2026", "action": "🔴 VUG turns LT → sell all, reinvest to QQQ", "priority": "high"},
-        ]
-        
-        for action in actions:
-            color = "#ff4060" if action["priority"] == "high" else "#f0c040"
-            st.markdown(f"""
-            <div style='background: {color}18; border-left: 3px solid {color}; padding: 0.75rem; margin-bottom: 0.5rem; border-radius: 4px;'>
-                <strong>{action['date']}</strong> — {action['action']}
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 2: HOLDINGS
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab2:
-        st.markdown("### 📊 All Holdings")
-        
-        # Build holdings table
-        holdings_data = []
-        for ticker, data in portfolio.items():
-            if data["shares"] == 0:
-                continue
-                
-            price = prices.get(ticker, 0)
-            cost_basis = data["shares"] * data["cost"]
-            equity = data["shares"] * price if price else 0
-            gain = equity - cost_basis
-            gain_pct = (gain / cost_basis * 100) if cost_basis > 0 else 0
-            
-            rec = generate_recommendation(ticker, data, price) if price else {"action": "—", "detail": "No price", "color": "#6a7590"}
-            
-            holdings_data.append({
-                "Ticker": ticker,
-                "Name": data["name"],
-                "Category": data["category"],
-                "Shares": f"{data['shares']:.4f}",
-                "Avg Cost": f"${data['cost']:.2f}",
-                "Price": f"${price:.2f}" if price else "—",
-                "Equity": f"${equity:,.2f}",
-                "Gain": f"${gain:,.2f}",
-                "Gain %": f"{gain_pct:+.1f}%",
-                "Action": rec["action"],
-                "Detail": rec["detail"],
-                "gain_raw": gain,
-                "rec_action": rec["action"]
-            })
-        
-        if holdings_data:
-            df = pd.DataFrame(holdings_data)
-            
-            # Filter options
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                category_filter = st.selectbox("Category", ["All"] + sorted(df["Category"].unique().tolist()))
-            with col2:
-                action_filter = st.selectbox("Action", ["All"] + sorted(df["Action"].unique().tolist()))
-            with col3:
-                sort_by = st.selectbox("Sort by", ["Equity", "Gain %", "Ticker"])
-            
-            # Apply filters
-            filtered_df = df.copy()
-            if category_filter != "All":
-                filtered_df = filtered_df[filtered_df["Category"] == category_filter]
-            if action_filter != "All":
-                filtered_df = filtered_df[filtered_df["Action"] == action_filter]
-            
-            # Sort
-            if sort_by == "Equity":
-                filtered_df = filtered_df.sort_values("gain_raw", ascending=False)
-            elif sort_by == "Gain %":
-                filtered_df = filtered_df.sort_values("Gain %", ascending=False)
-            else:
-                filtered_df = filtered_df.sort_values("Ticker")
-            
-            # Display with color coding
-            display_df = filtered_df[["Ticker", "Name", "Category", "Shares", "Price", "Equity", "Gain", "Gain %", "Action", "Detail"]]
-            
-            # Color code rows
-            def highlight_row(row):
-                if row["gain_raw"] < 0:
-                    return ['background-color: rgba(255, 64, 96, 0.15); border-left: 3px solid #ff4060'] * len(row)
+                action    = f"⏳ WAIT → SELL {sell_lt}"
+                tax_note  = f"⚠️ ST now (37%) → wait for {sell_lt}"
+                rationale = "Hold until LT to avoid 37% ordinary income rate."
+
+        # priority 4 — stop-loss
+        elif ticker not in CRYPTO and lp and cost:
+            bear = cost * 0.80
+            if lp <= bear * 1.10:
+                action    = "🚨 STOP-LOSS REVIEW"
+                rationale = f"Price {_fd(lp)} within 10% of bear case {_fd(bear)}. Review thesis."
+
+        # priority 5 — crypto
+        elif ticker in CRYPTO:
+            if lp and target:
+                up = (target - lp) / lp * 100
+                if up > 25:
+                    action    = "🚀 ACCUMULATE"
+                    rationale = f"Target {_fd(target)}, {up:.0f}% upside from {_fd(lp)}."
+                elif up < -20:
+                    action    = "✂️ TRIM 25%"
+                    trim_pct  = 25
+                    rationale = f"Above target {_fd(target)}. Lock 25%."
                 else:
-                    return ['background-color: rgba(0, 240, 170, 0.08); border-left: 3px solid #00f0aa'] * len(row)
-            
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                height=600
-            )
-            
-            # Summary stats
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                total_equity_shown = filtered_df["Equity"].apply(lambda x: float(x.replace("$", "").replace(",", ""))).sum()
-                st.metric("Total Equity (Filtered)", f"${total_equity_shown:,.2f}")
-            with col2:
-                avg_gain_pct = filtered_df["Gain %"].apply(lambda x: float(x.replace("%", "").replace("+", ""))).mean()
-                st.metric("Avg Gain %", f"{avg_gain_pct:+.1f}%")
-            with col3:
-                st.metric("Positions Shown", len(filtered_df))
+                    action    = "⏸ HOLD"
+                    rationale = f"In range. Target {_fd(target)}."
+            else:
+                action = "⏸ HOLD"; rationale = "Accumulate on dips."
+
+        # priority 6 — IPO
+        elif ticker in IPO_SET:
+            action    = f"🔒 HOLD — IPO"
+            rationale = f"Hold until LT eligible ({lt_date}), then evaluate."
+
+        # priority 7 — normal
+        elif not lp or not target:
+            action = "⏸ HOLD"; rationale = "No live price — monitoring."
         else:
-            st.info("No active positions")
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 3: IMPORT DATA
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab3:
-        st.markdown("### 📥 Import Robinhood Data")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.markdown("#### CSV Upload")
-            csv_file = st.file_uploader(
-                "Upload Robinhood account activity CSV",
-                type=["csv"],
-                help="Download from Robinhood: Account → History → Export"
+            up  = (target - lp) / lp * 100
+            dip = (lp - cost) / cost * 100 if cost else 0
+            if up > 20:
+                action    = "🟢 STRONG BUY" if dip < -8 else "🟢 ACCUMULATE"
+                rationale = f"Target {_fd(target)} = {up:.0f}% upside. {'On dip — prime entry.' if dip<-8 else ''}"
+            elif up < -15 and lt_elig:
+                action    = "✂️ TRIM 20%"
+                trim_pct  = 20
+                tax_note  = "✅ LT — lock gains at 15-20%"
+                rationale = f"Above target. LT eligible — harvest 20% of position."
+            elif up < -15:
+                action    = "⏸ HOLD (near target, ST)"
+                rationale = f"Near target but ST — wait until {lt_date}."
+            elif dip < -5:
+                action    = "🟡 DIP BUY"
+                rationale = f"Minor dip ({dip:.1f}%). Add small at {_fd(lp)}."
+            else:
+                action    = "⏸ HOLD"
+                rationale = f"Fair value. Target {_fd(target)}, upside {up:.1f}%."
+
+        mv       = lp * shares if lp else cost * shares
+        gl       = (lp - cost) * shares if lp else None
+        pct_gain = (lp - cost) / cost * 100 if lp and cost else None
+
+        recs.append({
+            "ticker":    ticker,
+            "action":    action,
+            "tax_note":  tax_note,
+            "rationale": rationale,
+            "trim_pct":  trim_pct,
+            "live_price":lp,
+            "market_val":mv,
+            "gain_loss": gl,
+            "pct_gain":  pct_gain,
+            "shares":    shares,
+            "avg_cost":  cost,
+            "category":  pos.get("category","Stocks"),
+            "lt_date":   lt_date,
+            "sell_flag": sell_flg,
+        })
+    return recs
+
+def _fd(v):
+    if v is None: return "—"
+    return f"${v:,.0f}" if v > 999 else f"${v:,.2f}"
+
+def _fp(v):
+    if v is None: return "—"
+    return f"{'+' if v>=0 else ''}{v:.1f}%"
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# SESSION STATE INIT
+# ════════════════════════════════════════════════════════════════════════════════
+
+def _ss_init():
+    defaults = {
+        "portfolio":    copy.deepcopy(BASELINE_PORTFOLIO),
+        "prices":       {},
+        "last_refresh": None,
+        "cash":         1042.17,
+        "active_card":  None,
+        "deposit_log":  [],
+        "rec_history":  [],
+        "import_log":   [],   # list of {date, filename, diff, summary}
+        "drip_log":     {},   # ticker → list of drip events
+    }
+    for k, v in defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+_ss_init()
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# COMPUTED VARS
+# ════════════════════════════════════════════════════════════════════════════════
+
+portfolio  = st.session_state.portfolio
+prices     = st.session_state.prices
+cash       = st.session_state.cash
+recs       = generate_recs(portfolio, prices)
+rec_map    = {r["ticker"]: r for r in recs}
+
+sell_recs  = [r for r in recs if "SELL" in r["action"] or "STOP" in r["action"]]
+trim_recs  = [r for r in recs if "TRIM" in r["action"]]
+buy_recs   = [r for r in recs if any(k in r["action"] for k in ("BUY","DCA","ACCUM","FOREVER"))]
+
+total_mv   = sum(r["market_val"] or 0 for r in recs)
+total_gl   = sum(r["gain_loss"] or 0 for r in recs if r["gain_loss"] is not None)
+total_cost = sum((r["avg_cost"] or 0) * r["shares"] for r in recs)
+total_pct  = total_gl / total_cost * 100 if total_cost else 0
+equity     = total_mv + cash
+sell_proceeds_est = sum(r["market_val"] or 0 for r in sell_recs)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# HEADER
+# ════════════════════════════════════════════════════════════════════════════════
+
+hc1, hc2 = st.columns([4, 1])
+with hc1:
+    ts = st.session_state.last_refresh or "— prices not loaded —"
+    st.markdown(f"""
+    <div class='war-header'>
+      <div>
+        <div class='war-title'>⚡ Portfolio <span>War Room</span></div>
+        <div class='war-ts'>prashanthkrishnan91 · {len(portfolio)} positions · refreshed {ts}</div>
+      </div>
+    </div>""", unsafe_allow_html=True)
+with hc2:
+    if st.button("🔄 Refresh Prices", use_container_width=True):
+        tickers = list(portfolio.keys())
+        with st.spinner("Fetching live prices…"):
+            st.session_state.prices = fetch_all_prices(tickers)
+        st.session_state.last_refresh = st.session_state.prices.get("_ts","—")
+        st.rerun()
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# KPI CARDS  (clickable)
+# ════════════════════════════════════════════════════════════════════════════════
+
+def toggle_card(key):
+    st.session_state.active_card = None if st.session_state.active_card == key else key
+
+gl_color   = "kpi-green" if total_gl >= 0 else "kpi-red"
+gl_sign    = "▲" if total_gl >= 0 else "▼"
+gl_style   = "color:#4ade80" if total_gl >= 0 else "color:#f87171"
+
+st.markdown(f"""
+<div class='kpi-grid'>
+  <div class='kpi-card {gl_color}'>
+    <div class='kpi-label'>Total Equity</div>
+    <div class='kpi-value'>{_fd(equity)}</div>
+    <div class='kpi-sub'>{gl_sign} {_fd(abs(total_gl))} ({_fp(total_pct)})</div>
+    <div class='kpi-click'>▼ tap for breakdown</div>
+  </div>
+  <div class='kpi-card kpi-red'>
+    <div class='kpi-label'>Sell Alerts</div>
+    <div class='kpi-value' style='color:#f87171'>{len(sell_recs)}</div>
+    <div class='kpi-sub'>Positions to exit</div>
+    <div class='kpi-click'>▼ tap for list</div>
+  </div>
+  <div class='kpi-card kpi-yellow'>
+    <div class='kpi-label'>Trim Alerts</div>
+    <div class='kpi-value' style='color:#fbbf24'>{len(trim_recs)}</div>
+    <div class='kpi-sub'>Take partial profits</div>
+    <div class='kpi-click'>▼ tap for list</div>
+  </div>
+  <div class='kpi-card kpi-green'>
+    <div class='kpi-label'>Buy Signals</div>
+    <div class='kpi-value' style='color:#4ade80'>{len(buy_recs)}</div>
+    <div class='kpi-sub'>Accumulate / DCA</div>
+    <div class='kpi-click'>▼ tap for list</div>
+  </div>
+  <div class='kpi-card kpi-blue'>
+    <div class='kpi-label'>Cash Available</div>
+    <div class='kpi-value' style='color:#60a5fa'>{_fd(cash)}</div>
+    <div class='kpi-sub'>+{_fd(sell_proceeds_est)} if sells done</div>
+    <div class='kpi-click'>▼ tap to deploy</div>
+  </div>
+</div>
+""", unsafe_allow_html=True)
+
+# card click buttons (hidden labels)
+cc1,cc2,cc3,cc4,cc5 = st.columns(5)
+with cc1:
+    if st.button("Equity ▼", key="c_eq",  use_container_width=True): toggle_card("eq");  st.rerun()
+with cc2:
+    if st.button("Sell ▼",   key="c_sell", use_container_width=True): toggle_card("sell"); st.rerun()
+with cc3:
+    if st.button("Trim ▼",   key="c_trim", use_container_width=True): toggle_card("trim"); st.rerun()
+with cc4:
+    if st.button("Buy ▼",    key="c_buy",  use_container_width=True): toggle_card("buy");  st.rerun()
+with cc5:
+    if st.button("Cash ▼",   key="c_cash", use_container_width=True): toggle_card("cash"); st.rerun()
+
+# ── drill panels ──────────────────────────────────────────────────────────────
+active = st.session_state.active_card
+
+if active == "eq":
+    cats = {"Stocks":0,"ETFs":0,"Crypto":0}
+    for r in recs:
+        cats[r["category"]] = cats.get(r["category"],0) + (r["market_val"] or 0)
+    rows = "".join(f"<div class='drill-row'><span class='dk'>{k}</span><span class='dv'>{_fd(v)}</span></div>" for k,v in cats.items())
+    rows += f"""
+    <div class='drill-row'><span class='dk'>Cash</span><span class='dv'>{_fd(cash)}</span></div>
+    <div class='drill-row'><span class='dk'>Total Cost Basis</span><span class='dv'>{_fd(total_cost)}</span></div>
+    <div class='drill-row'><span class='dk'>Unrealized Gain</span><span class='dv {"dg" if total_gl>=0 else "dr"}'>{_fd(total_gl)}</span></div>
+    <div class='drill-row'><span class='dk'>Overall Return</span><span class='dv {"dg" if total_pct>=0 else "dr"}'>{_fp(total_pct)}</span></div>"""
+    st.markdown(f"<div class='drill'><div class='drill-title'>📊 Portfolio Breakdown</div>{rows}</div>", unsafe_allow_html=True)
+
+elif active == "sell":
+    rows = ""
+    for r in sell_recs:
+        gl  = r.get("gain_loss",0) or 0
+        rows += f"""
+        <div class='drill-row'>
+          <span class='dk'><b style='color:#f87171'>{r['ticker']}</b> — {r['action']}</span>
+          <span class='dv'>{_fd(r.get('market_val'))} · <span class='{"dg" if gl>=0 else "dr"}'>{_fd(gl)}</span> · <span class='dy'>{r['tax_note']}</span></span>
+        </div>
+        <div style='font-size:11px;color:#2e4060;padding:2px 0 6px 12px'>{r['rationale']}</div>"""
+    if not rows: rows = "<div style='color:#2e4060'>No sell alerts right now.</div>"
+    st.markdown(f"<div class='drill'><div class='drill-title'>🔴 Sell Alerts — Act Now</div>{rows}</div>", unsafe_allow_html=True)
+
+elif active == "trim":
+    rows = ""
+    for r in trim_recs:
+        gl  = r.get("gain_loss",0) or 0
+        pct = r.get("trim_pct",20)
+        est = (r.get("market_val") or 0) * pct/100
+        rows += f"""
+        <div class='drill-row'>
+          <span class='dk'><b style='color:#fbbf24'>{r['ticker']}</b> — Trim {pct}%</span>
+          <span class='dv'>Est proceeds {_fd(est)} · <span class='dg'>{_fd(gl)}</span> gain · <span class='dy'>{r['tax_note']}</span></span>
+        </div>
+        <div style='font-size:11px;color:#2e4060;padding:2px 0 6px 12px'>{r['rationale']}</div>"""
+    if not rows: rows = "<div style='color:#2e4060'>No trim alerts right now.</div>"
+    st.markdown(f"<div class='drill'><div class='drill-title'>✂️ Trim Alerts</div>{rows}</div>", unsafe_allow_html=True)
+
+elif active == "buy":
+    rows = ""
+    for r in buy_recs:
+        rows += f"""
+        <div class='drill-row'>
+          <span class='dk'><b style='color:#4ade80'>{r['ticker']}</b> — {r['action']}</span>
+          <span class='dv'>{_fd(r.get('live_price'))} live · <span class='dy'>{r['tax_note']}</span></span>
+        </div>
+        <div style='font-size:11px;color:#2e4060;padding:2px 0 6px 12px'>{r['rationale']}</div>"""
+    if not rows: rows = "<div style='color:#2e4060'>No buy signals.</div>"
+    st.markdown(f"<div class='drill'><div class='drill-title'>🟢 Buy / Accumulate</div>{rows}</div>", unsafe_allow_html=True)
+
+elif active == "cash":
+    total_dep = cash + sell_proceeds_est + 900
+    plan = [("NVDA",0.28,"AI supercycle"),("VOO",0.22,"S&P 500 DCA"),("VYM",0.17,"Dividend engine"),("QQQ",0.17,"Nasdaq-100"),("META",0.16,"Rotating pick")]
+    rows = f"""
+    <div class='drill-row'><span class='dk'>Current cash</span><span class='dv dg'>{_fd(cash)}</span></div>
+    <div class='drill-row'><span class='dk'>Sell proceeds (est)</span><span class='dv dy'>{_fd(sell_proceeds_est)}</span></div>
+    <div class='drill-row'><span class='dk'>Next $900 deposit</span><span class='dv'>$900.00</span></div>
+    <div class='drill-row'><span class='dk'><b>Total deployable</b></span><span class='dv dg'><b>{_fd(total_dep)}</b></span></div>"""
+    rows += "<br><div style='font-size:10px;color:#3d5478;letter-spacing:.1em;margin-bottom:6px'>ALLOCATION PLAN</div>"
+    for t,pct,note in plan:
+        amt = total_dep * pct
+        rows += f"<div class='drill-row'><span class='dk'>{t} ({int(pct*100)}%) — {note}</span><span class='dv dg'>{_fd(amt)}</span></div>"
+    st.markdown(f"<div class='drill'><div class='drill-title'>💵 Cash Deploy Plan</div>{rows}</div>", unsafe_allow_html=True)
+
+
+# ════════════════════════════════════════════════════════════════════════════════
+# MAIN TABS
+# ════════════════════════════════════════════════════════════════════════════════
+
+tabs = st.tabs(["📋 Holdings","💰 Cash & Deploy","📥 Import","📈 DRIP","🗓 History","⚙️ Settings"])
+
+
+# ══════════════════════════════════════════════════
+# TAB 1 — HOLDINGS
+# ══════════════════════════════════════════════════
+with tabs[0]:
+    st.markdown("<div class='sec-head'>📋 All Holdings</div>", unsafe_allow_html=True)
+
+    fc1,fc2,fc3 = st.columns([2,2,2])
+    with fc1: f_cat = st.selectbox("Category", ["All","Stocks","ETFs","Crypto","🔴 Sell List"], key="f_cat")
+    with fc2: f_sig = st.selectbox("Signal",   ["All","SELL","TRIM","BUY","HOLD"],              key="f_sig")
+    with fc3: f_srt = st.selectbox("Sort by",  ["Ticker","Value ↓","P&L $ ↓","P&L % ↓"],       key="f_srt")
+
+    sell_set = {r["ticker"] for r in sell_recs}
+
+    def passes(r):
+        if f_cat == "🔴 Sell List" and r["ticker"] not in sell_set: return False
+        if f_cat not in ("All","🔴 Sell List") and r["category"] != f_cat: return False
+        a = r["action"].upper()
+        if f_sig == "SELL" and "SELL" not in a and "STOP" not in a: return False
+        if f_sig == "TRIM" and "TRIM" not in a:                      return False
+        if f_sig == "BUY"  and not any(k in a for k in ("BUY","DCA","ACCUM","FOREVER")): return False
+        if f_sig == "HOLD" and "HOLD" not in a and "LOCK" not in a: return False
+        return True
+
+    filtered = [r for r in recs if passes(r)]
+    if f_srt == "Value ↓":   filtered.sort(key=lambda r: r["market_val"] or 0, reverse=True)
+    elif f_srt == "P&L $ ↓": filtered.sort(key=lambda r: r["gain_loss"] or -9e9, reverse=True)
+    elif f_srt == "P&L % ↓": filtered.sort(key=lambda r: r["pct_gain"] or -9e9, reverse=True)
+    else:                     filtered.sort(key=lambda r: r["ticker"])
+
+    if not filtered:
+        st.info("No positions match the selected filters.")
+    else:
+        def badge(action):
+            a = action.upper()
+            if "SELL" in a or "STOP" in a: return "<span class='b b-sell'>SELL</span>"
+            if "TRIM" in a:                return "<span class='b b-trim'>TRIM</span>"
+            if "FOREVER" in a or "DCA" in a: return "<span class='b b-dca'>DCA</span>"
+            if "BUY" in a or "ACCUM" in a: return "<span class='b b-buy'>BUY</span>"
+            if "LOCK" in a:                return "<span class='b b-lock'>LOCK</span>"
+            return "<span class='b b-hold'>HOLD</span>"
+
+        rows_html = ""
+        for r in filtered:
+            loss = r["gain_loss"] is not None and r["gain_loss"] < 0
+            rc   = "row-loss" if loss else ""
+            gl_c = "row-loss-pnl" if loss else "row-gain-pnl"
+            sell_dot = " 🔴" if r["ticker"] in sell_set else ""
+            rows_html += f"""
+            <tr class='{rc}'>
+              <td>{r['ticker']}{sell_dot}</td>
+              <td>{r['shares']:.4f}</td>
+              <td>{_fd(r['avg_cost'])}</td>
+              <td>{_fd(r['live_price'])}</td>
+              <td>{_fd(r['market_val'])}</td>
+              <td class='{gl_c}'>{_fd(r['gain_loss'])}</td>
+              <td class='{gl_c}'>{_fp(r['pct_gain'])}</td>
+              <td style='text-align:center'>{badge(r['action'])}</td>
+              <td style='font-size:11px;color:#3d5478;max-width:220px;white-space:normal'>{r['tax_note']}</td>
+            </tr>"""
+
+        st.markdown(f"""
+        <div style='overflow-x:auto'>
+        <table class='htable'>
+          <thead>
+            <tr><th>Ticker</th><th>Shares</th><th>Avg Cost</th><th>Live</th>
+                <th>Mkt Value</th><th>P&L $</th><th>P&L %</th><th>Signal</th><th>Tax</th></tr>
+          </thead>
+          <tbody>{rows_html}</tbody>
+        </table>
+        </div>""", unsafe_allow_html=True)
+
+    # ── Sell list detail ──
+    st.markdown("<div class='sec-head'>🔴 Sell List — Full Detail</div>", unsafe_allow_html=True)
+    if sell_recs:
+        for r in sell_recs:
+            gl = r.get("gain_loss",0) or 0
+            st.markdown(f"""
+            <div class='cash-card' style='border-color:rgba(248,113,113,.25)'>
+              <div class='cash-head' style='color:#f87171'>🔴 {r['ticker']} — {r['action']}</div>
+              <div class='cash-row'><span>Live Price</span><span class='cash-amt'>{_fd(r['live_price'])}</span></div>
+              <div class='cash-row'><span>Market Value</span><span class='cash-amt'>{_fd(r['market_val'])}</span></div>
+              <div class='cash-row'><span>P&L</span><span style='color:{"#4ade80" if gl>=0 else "#f87171"}'>{_fd(gl)}</span></div>
+              <div class='cash-row'><span>Tax Note</span><span style='color:#fbbf24'>{r['tax_note']}</span></div>
+              <div style='font-size:11px;color:#4a6080;margin-top:8px'>{r['rationale']}</div>
+            </div>""", unsafe_allow_html=True)
+    else:
+        st.info("✅ No active sell alerts right now.")
+
+    # ── Charts (if plotly available) ──
+    try:
+        import plotly.graph_objects as go
+        import plotly.express as px
+
+        st.markdown("<div class='sec-head'>📊 Allocation & P&L Charts</div>", unsafe_allow_html=True)
+        ch1, ch2 = st.columns(2)
+
+        with ch1:
+            cat_vals = {"Stocks":0,"ETFs":0,"Crypto":0}
+            for r in recs:
+                cat_vals[r["category"]] = cat_vals.get(r["category"],0) + (r["market_val"] or 0)
+            fig_pie = go.Figure(go.Pie(
+                labels=list(cat_vals.keys()),
+                values=list(cat_vals.values()),
+                hole=0.6,
+                marker_colors=["#4ade80","#60a5fa","#f59e0b"],
+                textinfo="label+percent",
+                textfont=dict(color="#dde3f0",size=11),
+            ))
+            fig_pie.update_layout(
+                paper_bgcolor="#0b1220",plot_bgcolor="#0b1220",
+                showlegend=False,margin=dict(t=20,b=10,l=10,r=10),
+                height=240,
+                annotations=[dict(text="Allocation",x=0.5,y=0.5,font_color="#60a5fa",font_size=13,showarrow=False)]
             )
-            
-            if csv_file:
-                if st.button("Parse CSV & Update Portfolio", use_container_width=True):
-                    with st.spinner("Parsing transactions..."):
-                        transactions_df, position_updates = parse_robinhood_csv(csv_file)
-                        
-                        # Show preview
-                        st.success(f"✓ Parsed {len(transactions_df)} transactions")
-                        st.dataframe(transactions_df.head(20), use_container_width=True)
-                        
-                        # Show position updates
-                        if position_updates:
-                            st.markdown("#### Position Updates")
-                            for ticker, new_shares in position_updates.items():
-                                old_shares = st.session_state.portfolio[ticker]["shares"]
-                                diff = new_shares - old_shares
-                                st.markdown(f"**{ticker}**: {old_shares:.4f} → {new_shares:.4f} ({diff:+.4f})")
-                            
-                            if st.button("✓ Confirm & Apply Updates", use_container_width=True):
-                                for ticker, new_shares in position_updates.items():
-                                    st.session_state.portfolio[ticker]["shares"] = new_shares
-                                st.success("Portfolio updated!")
-                                st.rerun()
-        
-        with col2:
-            st.markdown("#### PDF Upload (Crypto Statements)")
-            pdf_file = st.file_uploader(
-                "Upload crypto statement PDF",
-                type=["pdf"],
-                help="Upload Robinhood Crypto statement for BTC/XRP transactions"
+            st.plotly_chart(fig_pie, use_container_width=True, config={"displayModeBar":False})
+
+        with ch2:
+            top = sorted(recs, key=lambda r: abs(r["gain_loss"] or 0), reverse=True)[:12]
+            bar_x = [r["ticker"] for r in top]
+            bar_y = [r["gain_loss"] or 0 for r in top]
+            bar_c = ["#4ade80" if v>=0 else "#f87171" for v in bar_y]
+            fig_bar = go.Figure(go.Bar(x=bar_x, y=bar_y, marker_color=bar_c, text=[_fd(v) for v in bar_y], textposition="outside"))
+            fig_bar.update_layout(
+                paper_bgcolor="#0b1220",plot_bgcolor="#0b1220",
+                font_color="#dde3f0",
+                xaxis=dict(tickfont=dict(size=9)),
+                yaxis=dict(showgrid=True,gridcolor="#111c30"),
+                margin=dict(t=20,b=10,l=10,r=10),height=240,showlegend=False
             )
-            
-            if pdf_file:
-                st.info("PDF parsing will be available in next update")
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 4: DEPLOY $900
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab4:
-        st.markdown("### 💰 Biweekly $900 Deployment")
-        
-        st.markdown("""
-        **Next deposit:** Friday, April 3, 2026  
-        **Amount:** $900  
-        **Strategy:** DCA into core positions + rotating opportunity pick
-        """)
-        
-        # Show allocation
-        if prices:
-            cash_recs = generate_cash_deployment_recs(900, prices)
-            
-            if cash_recs:
-                st.markdown("#### Recommended Allocation")
-                
-                for rec in cash_recs:
-                    col1, col2, col3, col4 = st.columns([2, 1, 1, 3])
-                    with col1:
-                        st.markdown(f"**{rec['ticker']}**")
-                    with col2:
-                        st.markdown(f"${rec['amount']:.2f}")
-                    with col3:
-                        st.markdown(f"{rec['shares']:.4f} sh")
-                    with col4:
-                        st.markdown(f"_{rec['rationale']}_")
-                
-                st.markdown("---")
-                
-                if st.button("✓ Log This Deposit", use_container_width=True):
-                    # Update holdings
-                    for rec in cash_recs:
-                        ticker = rec['ticker']
-                        st.session_state.portfolio[ticker]["shares"] += rec['shares']
-                    
-                    # Update cash
-                    st.session_state.cash_balance -= 900
-                    
-                    # Log to history
-                    st.session_state.recommendation_history.append({
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                        "amount": 900,
-                        "allocation": cash_recs
-                    })
-                    
-                    st.success("Deposit logged! Portfolio updated.")
-                    st.rerun()
-        else:
-            st.warning("Refresh prices to see deployment recommendations")
-        
-        # Show 2026 deposit schedule
-        st.markdown("#### 2026 Deposit Calendar")
-        deposit_dates = [
-            "Apr 3", "Apr 17", "May 1", "May 15", "May 29", "Jun 12", "Jun 26",
-            "Jul 10", "Jul 24", "Aug 7", "Aug 21", "Sep 4", "Sep 18", "Oct 2",
-            "Oct 16", "Oct 30", "Nov 13", "Nov 27", "Dec 11"
-        ]
-        
-        cols = st.columns(5)
-        for i, date in enumerate(deposit_dates):
-            with cols[i % 5]:
-                st.markdown(f"**{date}**")
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 5: PERFORMANCE
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab5:
-        st.markdown("### 📈 Performance Tracking")
-        
-        # Show recommendation history
-        if st.session_state.recommendation_history:
-            st.markdown("#### Deposit History")
-            
-            for entry in reversed(st.session_state.recommendation_history):
-                with st.expander(f"{entry['date']} — ${entry['amount']} deployed"):
-                    for alloc in entry['allocation']:
-                        st.markdown(f"- **{alloc['ticker']}**: ${alloc['amount']:.2f} ({alloc['shares']:.4f} shares)")
-        else:
-            st.info("No deposits logged yet")
-    
-    # ════════════════════════════════════════════════════════════════════════════
-    # TAB 6: SETTINGS
-    # ════════════════════════════════════════════════════════════════════════════
-    
-    with tab6:
-        st.markdown("### ⚙️ Settings")
-        
-        # Manual cash update
-        st.markdown("#### Update Cash Balance")
-        new_cash = st.number_input("Cash available", value=st.session_state.cash_balance, step=100.0)
-        if st.button("Update Cash"):
-            st.session_state.cash_balance = new_cash
-            st.success(f"Cash updated to ${new_cash:,.2f}")
-        
-        st.markdown("---")
-        
-        # Export data
-        st.markdown("#### Export Data")
-        if st.button("📥 Download Portfolio as JSON"):
-            export_data = {
-                "portfolio": st.session_state.portfolio,
-                "cash_balance": st.session_state.cash_balance,
-                "prices": st.session_state.prices,
-                "last_update": st.session_state.last_update,
-                "history": st.session_state.recommendation_history
-            }
-            
-            st.download_button(
-                label="Download JSON",
-                data=json.dumps(export_data, indent=2),
-                file_name=f"portfolio_backup_{datetime.now().strftime('%Y%m%d')}.json",
-                mime="application/json"
-            )
-        
-        st.markdown("---")
-        
-        # Reset warning
-        st.markdown("#### Danger Zone")
-        if st.button("🔴 Reset All Data", use_container_width=True):
-            st.warning("This will reset all holdings to defaults. This action cannot be undone.")
-            if st.button("Confirm Reset"):
-                # Reset to initial state
-                st.session_state.portfolio = {
-                    # Re-initialize with original data
-                }
-                st.session_state.cash_balance = 1042.17
-                st.session_state.prices = {}
-                st.session_state.recommendation_history = []
-                st.success("Data reset complete")
+            st.plotly_chart(fig_bar, use_container_width=True, config={"displayModeBar":False})
+    except ImportError:
+        pass
+
+
+# ══════════════════════════════════════════════════
+# TAB 2 — CASH & DEPLOY
+# ══════════════════════════════════════════════════
+with tabs[1]:
+    st.markdown("<div class='sec-head'>💰 Cash & Deploy Plan</div>", unsafe_allow_html=True)
+
+    col_ca, col_cb = st.columns(2)
+    with col_ca:
+        total_deployable = cash + sell_proceeds_est
+        st.markdown(f"""
+        <div class='cash-card'>
+          <div class='cash-head'>💵 Cash Summary</div>
+          <div class='cash-row'><span>Current cash</span><span class='cash-amt'>{_fd(cash)}</span></div>
+          <div class='cash-row'><span>Est. sell proceeds ({len(sell_recs)} positions)</span><span class='cash-amt'>{_fd(sell_proceeds_est)}</span></div>
+          <div class='cash-row'><span>Next $900 deposit (Apr 3)</span><span class='cash-amt'>$900.00</span></div>
+          <div class='cash-row'><span><b>Total deployable</b></span><span class='cash-amt' style='font-size:16px'>{_fd(total_deployable+900)}</span></div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_cb:
+        new_cash = st.number_input("Update Cash Balance ($)", value=float(cash), step=0.01, format="%.2f")
+        if st.button("💾 Save Cash Balance"):
+            st.session_state.cash = new_cash
+            st.success(f"Cash updated → {_fd(new_cash)}")
+            st.rerun()
+
+    st.markdown("<div class='sec-head'>🎯 Deploy $1,042 Current Cash</div>", unsafe_allow_html=True)
+    cash_plan = [
+        ("NVDA",0.28,"AI supercycle — core conviction at dip"),
+        ("VOO", 0.22,"S&P 500 DCA — never stop buying"),
+        ("VYM", 0.17,"Dividend engine — compound income"),
+        ("QQQ", 0.17,"Nasdaq-100 — tech backbone"),
+        ("META",0.16,"Rotating pick — strong momentum"),
+    ]
+    cp1,cp2 = st.columns(2)
+    for i,(ticker,pct,note) in enumerate(cash_plan):
+        with (cp1 if i%2==0 else cp2):
+            lp = (prices.get(ticker) or {}).get("price") if isinstance(prices.get(ticker),dict) else None
+            amt = cash * pct
+            sh_est = amt/lp if lp else None
+            st.markdown(f"""
+            <div class='cash-card'>
+              <div class='cash-head'>{ticker} — {int(pct*100)}%</div>
+              <div class='cash-row'><span>Amount</span><span class='cash-amt'>{_fd(amt)}</span></div>
+              <div class='cash-row'><span>Live price</span><span class='cash-amt'>{_fd(lp)}</span></div>
+              <div class='cash-row'><span>Est. shares</span><span class='cash-amt'>{f"{sh_est:.4f}" if sh_est else "—"}</span></div>
+              <div style='font-size:11px;color:#3d5478;margin-top:6px'>{note}</div>
+            </div>""", unsafe_allow_html=True)
+
+    if sell_proceeds_est > 10:
+        st.markdown("<div class='sec-head'>♻️ Redeploy Sell Proceeds</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='color:#4a6080;font-size:13px;margin-bottom:12px'>After {len(sell_recs)} sells, ~{_fd(sell_proceeds_est)} freed. Redeploy:</div>", unsafe_allow_html=True)
+        for t,pct in [("VOO",0.40),("VYM",0.30),("QQQ",0.30)]:
+            amt = sell_proceeds_est*pct
+            lp  = (prices.get(t) or {}).get("price") if isinstance(prices.get(t),dict) else None
+            st.markdown(f"""
+            <div class='cash-card'>
+              <div class='cash-head'>→ {t} ({int(pct*100)}%)</div>
+              <div class='cash-row'><span>Amount</span><span class='cash-amt'>{_fd(amt)}</span></div>
+              <div class='cash-row'><span>Est shares</span><span class='cash-amt'>{f"{amt/lp:.4f}" if lp else "—"}</span></div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec-head'>📅 Biweekly $900 Schedule — 2026</div>", unsafe_allow_html=True)
+    today_str = date.today().strftime("%Y-%m-%d")
+    sc1,sc2,sc3 = st.columns(3)
+    for i,dep in enumerate(BIWEEKLY_SCHEDULE):
+        past = dep["date"] <= today_str
+        with [sc1,sc2,sc3][i%3]:
+            bg  = "#0b1220" if past else "#0d1830"
+            bdr = "#1f2d45" if past else "#1d4ed8"
+            ck  = "✅" if past else "🔜"
+            st.markdown(f"""
+            <div style='background:{bg};border:1px solid {bdr};border-radius:10px;padding:10px 13px;margin-bottom:8px'>
+              <div style='font-family:IBM Plex Mono,monospace;font-size:10px;color:#60a5fa'>{ck} {dep["date"]}</div>
+              <div style='font-size:13px;font-weight:600;margin-top:3px'>${dep["amount"]:,}</div>
+              <div style='font-size:10px;color:#3d5478;margin-top:2px'>{dep["picks"]}</div>
+            </div>""", unsafe_allow_html=True)
+
+    st.markdown("<div class='sec-head'>➕ Log a Deposit</div>", unsafe_allow_html=True)
+    dl1,dl2,dl3 = st.columns(3)
+    with dl1: dep_dt  = st.date_input("Date", value=date.today())
+    with dl2: dep_amt = st.number_input("Amount ($)", value=900.0, step=50.0)
+    with dl3: dep_note= st.text_input("Picks", "NVDA/VOO/VYM/QQQ")
+    if st.button("➕ Log Deposit"):
+        st.session_state.deposit_log.append({"date":str(dep_dt),"amount":dep_amt,"picks":dep_note})
+        st.session_state.cash += dep_amt
+        st.success(f"Logged {_fd(dep_amt)} on {dep_dt}")
+        st.rerun()
+    if st.session_state.deposit_log:
+        st.dataframe(pd.DataFrame(st.session_state.deposit_log), use_container_width=True)
+
+    # Action calendar
+    st.markdown("<div class='sec-head'>📅 Action Calendar 2026</div>", unsafe_allow_html=True)
+    for item in ACTION_CALENDAR:
+        color = {"sell":"#f87171","trim":"#fbbf24","deposit":"#4ade80","review":"#60a5fa","tax":"#a78bfa"}.get(item["type"],"#60a5fa")
+        st.markdown(f"""
+        <div class='cal-item' style='border-left-color:{color}'>
+          <div class='cal-date'>{item['date']}</div>
+          <div>{item['action']}</div>
+        </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════
+# TAB 3 — IMPORT  (fixed CSV + PDF support)
+# ══════════════════════════════════════════════════
+with tabs[2]:
+    st.markdown("<div class='sec-head'>📥 Import Activity</div>", unsafe_allow_html=True)
+
+    st.markdown("""
+    <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:13px;color:#4a6080'>
+      Upload <b>new activity only</b> — the app will <b>append & merge</b> into your existing holdings and show you exactly what changed.
+      For crypto: export your Robinhood Crypto PDF statement and upload in the right panel.
+    </div>
+    """, unsafe_allow_html=True)
+
+    imp1, imp2 = st.columns(2)
+
+    with imp1:
+        st.markdown("**📄 Robinhood Activity CSV**")
+        csv_file = st.file_uploader(
+            "Drop CSV here or click to browse",
+            type=["csv"],
+            key="csv_up",
+            label_visibility="visible",
+        )
+        if csv_file:
+            st.markdown(f"*Uploaded: `{csv_file.name}`*")
+            if st.button("⚙️ Parse & Preview Changes", key="btn_csv"):
+                with st.spinner("Parsing…"):
+                    try:
+                        delta = parse_robinhood_csv(csv_file)
+                        new_port, diff = merge_into_portfolio(st.session_state.portfolio, delta)
+
+                        # summary
+                        st.success(f"✅ {delta['total_tx']} transactions · {delta['buys']} buys · {delta['sells']} sells · {delta['drip']} DRIP")
+                        if delta.get("cash_in"):
+                            st.info(f"💵 Cash deposits detected: {_fd(delta['cash_in'])}")
+
+                        # diff table
+                        st.markdown("**Holdings Changes Preview**")
+                        if diff:
+                            diff_rows = []
+                            for d in diff:
+                                diff_rows.append({
+                                    "Ticker":       d["ticker"],
+                                    "Change":       d["change"],
+                                    "Old Shares":   d["old_shares"],
+                                    "New Shares":   d["new_shares"],
+                                    "Δ Shares":     d["delta"],
+                                    "Old Avg Cost": _fd(d["old_avg_cost"]),
+                                    "New Avg Cost": _fd(d["new_avg_cost"]),
+                                })
+                            df_diff = pd.DataFrame(diff_rows)
+                            st.dataframe(df_diff, use_container_width=True)
+                        else:
+                            st.info("No holdings changes detected in this file.")
+
+                        # store pending merge in session state
+                        st.session_state["_pending_port"] = new_port
+                        st.session_state["_pending_delta"] = delta
+                        st.session_state["_pending_diff"]  = diff
+                        st.session_state["_pending_file"]  = csv_file.name
+
+                    except Exception as e:
+                        st.error(f"Parse error: {e}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
+        # confirm apply
+        if "_pending_port" in st.session_state:
+            st.warning("⚠️ Preview ready — click below to apply to portfolio.")
+            if st.button("✅ Apply Changes to Portfolio", key="btn_apply"):
+                delta    = st.session_state["_pending_delta"]
+                diff     = st.session_state["_pending_diff"]
+                fname    = st.session_state["_pending_file"]
+                new_port = st.session_state["_pending_port"]
+
+                st.session_state.portfolio = new_port
+
+                # log import
+                st.session_state.import_log.append({
+                    "date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "file":     fname,
+                    "tx":       delta["total_tx"],
+                    "buys":     delta["buys"],
+                    "sells":    delta["sells"],
+                    "drip":     delta["drip"],
+                    "changes":  len(diff),
+                    "diff":     diff,
+                })
+
+                # update DRIP log
+                for t, events in delta.get("drip_events",{}).items():
+                    st.session_state.drip_log.setdefault(t,[]).extend(events)
+
+                # clean up
+                for k in ("_pending_port","_pending_delta","_pending_diff","_pending_file"):
+                    st.session_state.pop(k, None)
+
+                st.success("✅ Portfolio updated! Refresh prices to see new recommendations.")
                 st.rerun()
 
-if __name__ == "__main__":
-    main()
+    with imp2:
+        st.markdown("**📜 Robinhood Crypto PDF Statement**")
+        pdf_file = st.file_uploader(
+            "Drop PDF here or click to browse",
+            type=["pdf"],
+            key="pdf_up",
+            label_visibility="visible",
+        )
+        if pdf_file:
+            st.markdown(f"*Uploaded: `{pdf_file.name}`*")
+            if st.button("⚙️ Extract Crypto Data", key="btn_pdf"):
+                with st.spinner("Extracting from PDF…"):
+                    text = ""
+                    pdf_bytes = pdf_file.read()
+                    try:
+                        import pdfplumber
+                        import io as _io
+                        with pdfplumber.open(_io.BytesIO(pdf_bytes)) as pdf:
+                            text = "\n".join(p.extract_text() or "" for p in pdf.pages)
+                    except Exception:
+                        try:
+                            import PyPDF2, io as _io
+                            reader = PyPDF2.PdfReader(_io.BytesIO(pdf_bytes))
+                            text = "\n".join(pg.extract_text() or "" for pg in reader.pages)
+                        except Exception as e2:
+                            st.warning(f"PDF library error: {e2}. Install pdfplumber.")
+
+                    if text:
+                        st.markdown("**Extracted Text (first 2000 chars)**")
+                        st.text_area("PDF content", text[:2000], height=180)
+
+                        btc_m = re.search(r"(?i)bitcoin[^\d]*([\d.]+)\s*(?:BTC)?", text)
+                        xrp_m = re.search(r"(?i)(?:XRP|Ripple)[^\d]*([\d.]+)", text)
+
+                        found = []
+                        if btc_m: found.append(("BTC", float(btc_m.group(1))))
+                        if xrp_m: found.append(("XRP", float(xrp_m.group(1))))
+
+                        if found:
+                            st.success(f"Detected: {', '.join(f'{t}: {s}' for t,s in found)}")
+                            if st.button("✅ Update Crypto Holdings"):
+                                for t,s in found:
+                                    if t in st.session_state.portfolio:
+                                        st.session_state.portfolio[t]["shares"] = s
+                                    else:
+                                        st.session_state.portfolio[t] = {"shares":s,"avg_cost":0,"category":"Crypto","lt_date":""}
+                                st.success("Crypto positions updated!")
+                                st.rerun()
+                        else:
+                            st.info("Couldn't auto-detect amounts. Review text and use Settings → Manual Override.")
+                    else:
+                        st.error("No text extracted. PDF may be image-based — use Settings to enter manually.")
+
+    # import log
+    if st.session_state.import_log:
+        st.markdown("<div class='sec-head'>📋 Import History</div>", unsafe_allow_html=True)
+        for imp in reversed(st.session_state.import_log):
+            with st.expander(f"📁 {imp['date']} — {imp['file']} ({imp['changes']} changes)"):
+                st.markdown(f"**{imp['tx']} transactions** · {imp['buys']} buys · {imp['sells']} sells · {imp['drip']} DRIP")
+                if imp.get("diff"):
+                    st.dataframe(pd.DataFrame(imp["diff"]), use_container_width=True)
+
+
+# ══════════════════════════════════════════════════
+# TAB 4 — DRIP
+# ══════════════════════════════════════════════════
+with tabs[3]:
+    st.markdown("<div class='sec-head'>📈 DRIP Analytics</div>", unsafe_allow_html=True)
+
+    # baseline DRIP data
+    drip_data = {
+        "VYM":{"reinvested":65.12,"shares":0.46512,"events":8},
+        "VOO":{"reinvested":36.47,"shares":0.06235,"events":6},
+        "AAPL":{"reinvested":18.87,"shares":0.07762,"events":7},
+        "XLE":{"reinvested":18.66,"shares":0.29084,"events":5},
+        "VXUS":{"reinvested":16.15,"shares":0.21327,"events":6},
+        "SCHD":{"reinvested":14.92,"shares":0.49108,"events":4},
+        "QQQ":{"reinvested":12.50,"shares":0.02220,"events":4},
+        "QCOM":{"reinvested":10.20,"shares":0.07860,"events":5},
+    }
+    # merge any live drip data
+    for t, events in st.session_state.drip_log.items():
+        if events:
+            tot = sum(e.get("amount",0) for e in events)
+            shr = sum(e.get("qty",0)    for e in events)
+            if t in drip_data:
+                drip_data[t]["reinvested"] += tot
+                drip_data[t]["shares"]     += shr
+                drip_data[t]["events"]     += len(events)
+            else:
+                drip_data[t] = {"reinvested":tot,"shares":shr,"events":len(events)}
+
+    total_reinvested = sum(v["reinvested"] for v in drip_data.values())
+    total_drip_ev    = sum(v["events"]     for v in drip_data.values())
+
+    d1,d2,d3,d4 = st.columns(4)
+    d1.metric("Total Events",     total_drip_ev)
+    d2.metric("Total Reinvested", f"${total_reinvested:,.2f}")
+    d3.metric("Total Declared",   "$290.07")
+    d4.metric("Tickers w/ DRIP",  len(drip_data))
+
+    st.markdown("**Per-Ticker DRIP Breakdown**")
+    rows = sorted(drip_data.items(), key=lambda x: x[1]["reinvested"], reverse=True)
+    html = "".join(f"""
+    <div class='cash-card' style='margin-bottom:8px'>
+      <div class='cash-head'>{t}</div>
+      <div class='cash-row'><span>Reinvested</span><span class='cash-amt'>${v["reinvested"]:,.2f}</span></div>
+      <div class='cash-row'><span>Shares from DRIP</span><span class='cash-amt'>{v["shares"]:.5f}</span></div>
+      <div class='cash-row'><span>Events</span><span class='cash-amt'>{v["events"]}</span></div>
+    </div>""" for t,v in rows)
+
+    dr1,dr2 = st.columns(2)
+    items = list(enumerate(rows))
+    for i,(t,v) in items[:len(items)//2+1]:
+        with dr1:
+            st.markdown(f"""
+            <div class='cash-card' style='margin-bottom:8px'>
+              <div class='cash-head'>{t}</div>
+              <div class='cash-row'><span>Reinvested</span><span class='cash-amt'>${v["reinvested"]:,.2f}</span></div>
+              <div class='cash-row'><span>DRIP Shares</span><span class='cash-amt'>{v["shares"]:.5f}</span></div>
+              <div class='cash-row'><span>Events</span><span class='cash-amt'>{v["events"]}</span></div>
+            </div>""", unsafe_allow_html=True)
+    for i,(t,v) in items[len(items)//2+1:]:
+        with dr2:
+            st.markdown(f"""
+            <div class='cash-card' style='margin-bottom:8px'>
+              <div class='cash-head'>{t}</div>
+              <div class='cash-row'><span>Reinvested</span><span class='cash-amt'>${v["reinvested"]:,.2f}</span></div>
+              <div class='cash-row'><span>DRIP Shares</span><span class='cash-amt'>{v["shares"]:.5f}</span></div>
+              <div class='cash-row'><span>Events</span><span class='cash-amt'>{v["events"]}</span></div>
+            </div>""", unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════
+# TAB 5 — HISTORY
+# ══════════════════════════════════════════════════
+with tabs[4]:
+    st.markdown("<div class='sec-head'>🗓 Recommendation History</div>", unsafe_allow_html=True)
+
+    if st.button("📸 Snapshot Today's Recommendations"):
+        snap = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "count": len(recs),
+            "recs": [{"ticker":r["ticker"],"action":r["action"],"live":_fd(r["live_price"]),"tax":r["tax_note"],"note":r["rationale"]} for r in recs]
+        }
+        st.session_state.rec_history.append(snap)
+        st.success("Snapshot saved!")
+
+    if st.session_state.rec_history:
+        for snap in reversed(st.session_state.rec_history):
+            with st.expander(f"📅 {snap['date']} — {snap['count']} recommendations"):
+                st.dataframe(pd.DataFrame(snap["recs"]), use_container_width=True)
+    else:
+        st.info("No snapshots yet. Hit 'Snapshot' to archive today's recommendations.")
+
+    st.markdown("<div class='sec-head'>📋 Current Recommendations</div>", unsafe_allow_html=True)
+    df_recs = pd.DataFrame([{
+        "Ticker":    r["ticker"],
+        "Action":    r["action"],
+        "Live Price":_fd(r["live_price"]),
+        "Market Val":_fd(r["market_val"]),
+        "P&L":       _fd(r["gain_loss"]),
+        "Tax Note":  r["tax_note"],
+        "Rationale": r["rationale"],
+    } for r in recs])
+    st.dataframe(df_recs, use_container_width=True)
+
+
+# ══════════════════════════════════════════════════
+# TAB 6 — SETTINGS
+# ══════════════════════════════════════════════════
+with tabs[5]:
+    st.markdown("<div class='sec-head'>⚙️ Settings & Manual Overrides</div>", unsafe_allow_html=True)
+
+    s1,s2 = st.columns(2)
+    with s1:
+        st.markdown("**Manual Position Override**")
+        ov_t = st.text_input("Ticker (e.g. NVDA)", key="ov_t").upper().strip()
+        ov_s = st.number_input("Shares", value=0.0, step=0.0001, format="%.4f", key="ov_s")
+        ov_c = st.number_input("Avg Cost ($)", value=0.0, step=0.01, format="%.2f", key="ov_c")
+        ov_cat = st.selectbox("Category", ["Stocks","ETFs","Crypto"], key="ov_cat")
+        if st.button("💾 Update Position"):
+            if ov_t:
+                st.session_state.portfolio[ov_t] = {
+                    "shares":   ov_s,
+                    "avg_cost": ov_c,
+                    "category": ov_cat,
+                    "lt_date":  st.session_state.portfolio.get(ov_t,{}).get("lt_date",""),
+                    "sell_flag":st.session_state.portfolio.get(ov_t,{}).get("sell_flag",False),
+                }
+                st.success(f"Updated {ov_t}")
+                st.rerun()
+
+        st.markdown("**Remove Position**")
+        rm_t = st.text_input("Ticker to remove", key="rm_t").upper().strip()
+        if st.button("🗑 Remove", type="secondary"):
+            if rm_t and rm_t in st.session_state.portfolio:
+                del st.session_state.portfolio[rm_t]
+                st.success(f"Removed {rm_t}")
+                st.rerun()
+
+    with s2:
+        st.markdown("**Export**")
+        if st.button("📥 Export Portfolio CSV"):
+            rows = [{"Ticker":t,"Shares":v["shares"],"Avg Cost":v["avg_cost"],"Category":v["category"],"LT Date":v.get("lt_date","")} for t,v in st.session_state.portfolio.items()]
+            csv_out = pd.DataFrame(rows).to_csv(index=False)
+            st.download_button("⬇️ Download", csv_out, "portfolio.csv", "text/csv")
+
+        st.markdown("**Reset**")
+        if st.button("🔄 Reset to Baseline Portfolio", type="secondary"):
+            st.session_state.portfolio    = copy.deepcopy(BASELINE_PORTFOLIO)
+            st.session_state.prices       = {}
+            st.session_state.cash         = 1042.17
+            st.session_state.active_card  = None
+            st.session_state.import_log   = []
+            st.session_state.drip_log     = {}
+            st.success("Reset complete")
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown(f"<div style='color:#1e3a5f;font-size:11px;font-family:IBM Plex Mono,monospace'>Portfolio War Room v6.0 · {datetime.now().strftime('%b %d, %Y')} · {len(portfolio)} positions · prashanthkrishnan91</div>", unsafe_allow_html=True)

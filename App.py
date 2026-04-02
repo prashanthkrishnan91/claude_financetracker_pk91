@@ -1,15 +1,15 @@
 """
-Portfolio War Room — App.py v6.0
+Portfolio War Room — App.py v6.1
 Single-file Streamlit app for Streamlit Cloud deployment.
 
-Key fixes vs v5:
-  - CSV parser accepts file object OR string (fixes the pd.read_csv crash)
-  - Incremental CSV merge: upload new activity → appended to existing holdings
-  - Diff view: shows exactly what changed after each import
-  - Premium dark financial dashboard UI (CashPilot / InvestX inspired)
-  - Plotly charts for allocation pie + P&L bar
-  - All recs recalculate from live prices on every refresh
-  - Mobile + desktop responsive
+Key fixes vs v6.0:
+  - Transaction deduplication: every processed row gets a SHA-1 fingerprint
+    stored in session_state["tx_ledger"]. Re-uploading the same CSV (or any
+    CSV that overlaps with a previous one) will SKIP already-seen rows and
+    only apply genuinely NEW transactions.
+  - Import preview shows: total rows / skipped (already seen) / new (applied)
+  - All prior fixes retained: file-object parser, incremental merge, diff view,
+    premium UI, Plotly charts, mobile responsive.
 
 Deploy: streamlit run App.py
 """
@@ -20,6 +20,7 @@ import re
 import csv
 import json
 import copy
+import hashlib
 from datetime import date, datetime
 from collections import defaultdict
 
@@ -342,17 +343,45 @@ def _parse_qty(s):
     try:    return float(str(s or "").strip())
     except: return 0.0
 
-def parse_robinhood_csv(source) -> dict:
+def _tx_fingerprint(row: dict) -> str:
+    """
+    Stable SHA-1 fingerprint for one Robinhood CSV row.
+    Built from the fields that uniquely identify a transaction:
+      Activity Date + Trans Code + Instrument + Quantity + Amount
+    This is deterministic: the same row always produces the same hash,
+    regardless of which CSV file it came from or when it was uploaded.
+    """
+    key = "|".join([
+        (row.get("Activity Date") or "").strip(),
+        (row.get("Trans Code")    or "").strip(),
+        (row.get("Instrument")    or "").strip(),
+        (row.get("Quantity")      or "").strip(),
+        (row.get("Amount")        or "").strip(),
+        (row.get("Price")         or "").strip(),   # tiebreaker for same-day same-qty trades
+    ])
+    return hashlib.sha1(key.encode()).hexdigest()
+
+
+def parse_robinhood_csv(source, seen_fingerprints: set = None) -> dict:
     """
     Parse Robinhood activity CSV.
-    source: file-like object (st.file_uploader) OR str content.
+    source              : file-like object (st.file_uploader) OR str content.
+    seen_fingerprints   : set of previously processed tx hashes (from session_state).
+                          Rows whose fingerprint is already in this set are SKIPPED.
+                          Pass None to process all rows (e.g. in unit tests).
+
     Returns delta dict suitable for merge_into_portfolio().
+    Extra keys vs v6.0:
+      "skipped"         : int  — rows already seen (deduped)
+      "new_fingerprints": set  — fingerprints for the NEW rows processed this run
     """
+    if seen_fingerprints is None:
+        seen_fingerprints = set()   # no deduplication in test mode
+
     # ── normalise input ──────────────────────────────────────────────────────
     if hasattr(source, "read"):
         raw = source.read()
         if isinstance(raw, bytes):
-            # try common encodings
             for enc in ("utf-8", "utf-8-sig", "latin-1", "cp1252"):
                 try:
                     content = raw.decode(enc)
@@ -373,49 +402,51 @@ def parse_robinhood_csv(source) -> dict:
         clean.append(line)
     content = "\n".join(clean)
 
-    # ── handle Robinhood's multiline description cells (embedded newlines) ──
-    # Robinhood sometimes writes:
-    #   "4/1/2026","4/1/2026","4/2/2026","NVDA","NVIDIA\nCUSIP: 12345\nRecurring","Buy",...
-    # We collapse everything between outer quotes that spans multiple lines.
-    # Pandas read_csv with quoting=csv.QUOTE_ALL handles this fine but we use
-    # the stdlib csv reader with correct quoting to be safe.
-
     reader = csv.DictReader(
         io.StringIO(content),
         quoting=csv.QUOTE_ALL,
         skipinitialspace=True,
     )
 
-    # accumulate per-ticker deltas from THIS CSV only
-    delta_shares = defaultdict(float)
-    delta_cost   = defaultdict(float)
-    drip_events  = defaultdict(list)
-    tx_log       = []
+    delta_shares    = defaultdict(float)
+    delta_cost      = defaultdict(float)
+    drip_events     = defaultdict(list)
+    tx_log          = []
+    new_fingerprints = set()
 
-    total_tx = buys = sells = drip_ct = 0
-    cash_in  = 0.0
+    total_rows = total_tx = buys = sells = drip_ct = skipped = 0
+    cash_in    = 0.0
 
     for row in reader:
-        ticker  = (row.get("Instrument") or "").strip()
-        desc    = (row.get("Description") or "").strip().replace("\n"," ")
-        code    = (row.get("Trans Code")  or "").strip()
-        qty_s   = (row.get("Quantity")    or "").strip()
-        price_s = (row.get("Price")       or "").strip()
-        amount_s= (row.get("Amount")      or "").strip()
+        ticker  = (row.get("Instrument")    or "").strip()
+        desc    = (row.get("Description")   or "").strip().replace("\n"," ")
+        code    = (row.get("Trans Code")    or "").strip()
+        qty_s   = (row.get("Quantity")      or "").strip()
+        price_s = (row.get("Price")         or "").strip()
+        amount_s= (row.get("Amount")        or "").strip()
         date_s  = (row.get("Activity Date") or "").strip()
 
         if not code or code not in TX_CODES:
             continue
+
+        total_rows += 1
+
+        # ── DEDUPLICATION CHECK ──────────────────────────────────────────────
+        fp = _tx_fingerprint(row)
+        if fp in seen_fingerprints:
+            skipped += 1
+            continue   # already applied in a previous upload — skip silently
+        new_fingerprints.add(fp)
+        # ────────────────────────────────────────────────────────────────────
 
         total_tx += 1
         qty    = _parse_qty(qty_s)
         price  = _parse_dollar(price_s)
         amount = _parse_dollar(amount_s)
 
-        # ── BUY ──
         if code == "Buy":
             if not ticker: continue
-            is_drip = "reinvestment" in desc.lower()
+            is_drip    = "reinvestment" in desc.lower()
             cost_basis = qty * price if price else abs(amount)
             delta_shares[ticker] += qty
             delta_cost[ticker]   += cost_basis
@@ -425,44 +456,39 @@ def parse_robinhood_csv(source) -> dict:
                 drip_ct += 1
             tx_log.append({"date":date_s,"ticker":ticker,"action":"Buy","qty":qty,"price":price,"amount":abs(amount),"drip":is_drip})
 
-        # ── SELL ──
         elif code == "Sell":
             if not ticker: continue
             delta_shares[ticker] -= qty
-            # cost basis reduction handled at merge time
             sells += 1
             tx_log.append({"date":date_s,"ticker":ticker,"action":"Sell","qty":qty,"price":price,"amount":abs(amount),"drip":False})
 
-        # ── STOCK SPLIT — additional shares granted ──
         elif code == "SPL":
             if ticker: delta_shares[ticker] += qty
 
-        # ── TRANSFER IN ──
         elif code in ("REC","SXCH"):
             if ticker: delta_shares[ticker] += qty
 
-        # ── LIQUIDATION (forced sell) ──
         elif code == "LIQ":
             if ticker:
                 delta_shares[ticker] -= qty
                 sells += 1
 
-        # ── CASH DEPOSITS ──
         elif code in ("ACH","RTP"):
             cash_in += abs(amount)
 
-        # CDIV, DFEE, DTAX, MISC — no share impact
-
     return {
-        "total_tx":   total_tx,
-        "buys":       buys,
-        "sells":      sells,
-        "drip":       drip_ct,
-        "cash_in":    cash_in,
-        "delta_shares": dict(delta_shares),
-        "delta_cost":   dict(delta_cost),
-        "drip_events":  dict(drip_events),
-        "tx_log":       tx_log,
+        "total_rows":      total_rows,          # all valid-code rows in file
+        "total_tx":        total_tx,            # rows actually applied (new only)
+        "skipped":         skipped,             # rows skipped (already seen)
+        "buys":            buys,
+        "sells":           sells,
+        "drip":            drip_ct,
+        "cash_in":         cash_in,
+        "delta_shares":    dict(delta_shares),
+        "delta_cost":      dict(delta_cost),
+        "drip_events":     dict(drip_events),
+        "tx_log":          tx_log,
+        "new_fingerprints":new_fingerprints,    # caller should add these to ledger
     }
 
 
@@ -728,6 +754,9 @@ def _ss_init():
         "rec_history":  [],
         "import_log":   [],   # list of {date, filename, diff, summary}
         "drip_log":     {},   # ticker → list of drip events
+        # ── transaction ledger — stores SHA-1 fingerprints of every row
+        #    ever applied so that re-uploading the same CSV never double-counts
+        "tx_ledger":    set(),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -1160,8 +1189,24 @@ with tabs[2]:
 
     st.markdown("""
     <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:13px;color:#4a6080'>
-      Upload <b>new activity only</b> — the app will <b>append & merge</b> into your existing holdings and show you exactly what changed.
-      For crypto: export your Robinhood Crypto PDF statement and upload in the right panel.
+      Upload <b>any activity CSV — new or previously uploaded</b>. The app fingerprints every transaction row and
+      <b>skips anything already applied</b>, so you'll never double-count a trade. Only genuinely new rows are merged.
+      For crypto: upload your Robinhood Crypto PDF in the right panel.
+    </div>
+    """, unsafe_allow_html=True)
+
+    # ── ledger stats ──
+    ledger_size = len(st.session_state.tx_ledger)
+    st.markdown(f"""
+    <div style='display:flex;gap:16px;margin-bottom:16px;flex-wrap:wrap'>
+      <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 16px;font-size:12px'>
+        <span style='color:#3d5478'>Transactions in ledger</span>
+        <b style='color:#60a5fa;font-family:IBM Plex Mono,monospace;margin-left:8px'>{ledger_size:,}</b>
+      </div>
+      <div style='background:#0b1220;border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:8px 16px;font-size:12px'>
+        <span style='color:#3d5478'>Protection</span>
+        <b style='color:#4ade80;margin-left:8px'>✅ Dedup active — safe to re-upload any file</b>
+      </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1178,15 +1223,25 @@ with tabs[2]:
         if csv_file:
             st.markdown(f"*Uploaded: `{csv_file.name}`*")
             if st.button("⚙️ Parse & Preview Changes", key="btn_csv"):
-                with st.spinner("Parsing…"):
+                with st.spinner("Parsing & deduplicating…"):
                     try:
-                        delta = parse_robinhood_csv(csv_file)
+                        # pass current ledger — already-seen rows are skipped
+                        delta = parse_robinhood_csv(csv_file, seen_fingerprints=st.session_state.tx_ledger)
                         new_port, diff = merge_into_portfolio(st.session_state.portfolio, delta)
 
-                        # summary
-                        st.success(f"✅ {delta['total_tx']} transactions · {delta['buys']} buys · {delta['sells']} sells · {delta['drip']} DRIP")
+                        # ── dedup summary ──
+                        total_rows = delta.get("total_rows", 0)
+                        skipped    = delta.get("skipped", 0)
+                        new_count  = delta["total_tx"]
+
+                        if skipped == total_rows and total_rows > 0:
+                            st.warning(f"⚠️ All {total_rows} rows already imported — nothing new to apply.")
+                        else:
+                            if skipped > 0:
+                                st.info(f"🔁 {skipped} of {total_rows} rows already seen — skipped (deduped).")
+                            st.success(f"✅ {new_count} new transactions · {delta['buys']} buys · {delta['sells']} sells · {delta['drip']} DRIP")
                         if delta.get("cash_in"):
-                            st.info(f"💵 Cash deposits detected: {_fd(delta['cash_in'])}")
+                            st.info(f"💵 New cash deposits detected: {_fd(delta['cash_in'])}")
 
                         # diff table
                         st.markdown("**Holdings Changes Preview**")
@@ -1205,10 +1260,10 @@ with tabs[2]:
                             df_diff = pd.DataFrame(diff_rows)
                             st.dataframe(df_diff, use_container_width=True)
                         else:
-                            st.info("No holdings changes detected in this file.")
+                            st.info("No holdings changes from the new rows.")
 
-                        # store pending merge in session state
-                        st.session_state["_pending_port"] = new_port
+                        # store pending merge
+                        st.session_state["_pending_port"]  = new_port
                         st.session_state["_pending_delta"] = delta
                         st.session_state["_pending_diff"]  = diff
                         st.session_state["_pending_file"]  = csv_file.name
@@ -1229,11 +1284,16 @@ with tabs[2]:
 
                 st.session_state.portfolio = new_port
 
+                # ── commit new fingerprints to the ledger ──────────────────
+                new_fps = delta.get("new_fingerprints", set())
+                st.session_state.tx_ledger.update(new_fps)
+
                 # log import
                 st.session_state.import_log.append({
                     "date":     datetime.now().strftime("%Y-%m-%d %H:%M"),
                     "file":     fname,
-                    "tx":       delta["total_tx"],
+                    "tx_new":   delta["total_tx"],
+                    "tx_skip":  delta.get("skipped", 0),
                     "buys":     delta["buys"],
                     "sells":    delta["sells"],
                     "drip":     delta["drip"],
@@ -1249,7 +1309,7 @@ with tabs[2]:
                 for k in ("_pending_port","_pending_delta","_pending_diff","_pending_file"):
                     st.session_state.pop(k, None)
 
-                st.success("✅ Portfolio updated! Refresh prices to see new recommendations.")
+                st.success(f"✅ Portfolio updated! Ledger now has {len(st.session_state.tx_ledger):,} transactions. Refresh prices.")
                 st.rerun()
 
     with imp2:
@@ -1309,8 +1369,15 @@ with tabs[2]:
     if st.session_state.import_log:
         st.markdown("<div class='sec-head'>📋 Import History</div>", unsafe_allow_html=True)
         for imp in reversed(st.session_state.import_log):
-            with st.expander(f"📁 {imp['date']} — {imp['file']} ({imp['changes']} changes)"):
-                st.markdown(f"**{imp['tx']} transactions** · {imp['buys']} buys · {imp['sells']} sells · {imp['drip']} DRIP")
+            new_c  = imp.get("tx_new",  imp.get("tx", 0))
+            skip_c = imp.get("tx_skip", 0)
+            with st.expander(f"📁 {imp['date']} — {imp['file']} ({imp['changes']} holdings changes)"):
+                c1,c2,c3,c4,c5 = st.columns(5)
+                c1.metric("New Tx",   new_c)
+                c2.metric("Skipped",  skip_c)
+                c3.metric("Buys",     imp["buys"])
+                c4.metric("Sells",    imp["sells"])
+                c5.metric("DRIP",     imp["drip"])
                 if imp.get("diff"):
                     st.dataframe(pd.DataFrame(imp["diff"]), use_container_width=True)
 
@@ -1468,7 +1535,16 @@ with tabs[5]:
             st.session_state.active_card  = None
             st.session_state.import_log   = []
             st.session_state.drip_log     = {}
-            st.success("Reset complete")
+            st.session_state.tx_ledger    = set()
+            st.success("Reset complete — portfolio, prices, and ledger cleared.")
+            st.rerun()
+
+        st.markdown("**Transaction Ledger**")
+        ledger_n = len(st.session_state.tx_ledger)
+        st.markdown(f"<div style='color:#4a6080;font-size:12px;margin-bottom:8px'>{ledger_n:,} unique transactions recorded. Clear only if you want to re-import everything from scratch.</div>", unsafe_allow_html=True)
+        if st.button("🗑 Clear Ledger (allow re-import)", type="secondary"):
+            st.session_state.tx_ledger = set()
+            st.success("Ledger cleared — all CSVs can be re-imported.")
             st.rerun()
 
     st.markdown("---")

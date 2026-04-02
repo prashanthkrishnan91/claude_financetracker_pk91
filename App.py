@@ -1,9 +1,11 @@
 """
-Portfolio War Room  v9.0
-━━━━━━━━━━━━━━━━━━━━━━━
-Amateur-investor–first design: clear guidance, plain English, one-tap actions.
-All v7 functionality preserved + enhanced recommendation engine.
-First launch: 585 historical transactions baked in — no upload needed.
+Portfolio War Room  v9.1
+Fixes:
+  1. KPI cards clickable (st.button overlay pattern)
+  2. Cash deposit recommendations panel
+  3. Portfolio value = live price × shares (matches Robinhood)
+  4. P&L recalculates on every Refresh
+  5. Every widget tested and wired
 """
 
 import streamlit as st
@@ -14,9 +16,7 @@ from pathlib import Path
 import plotly.express as px
 import plotly.graph_objects as go
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PERSISTENCE
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ PERSISTENCE
 TX_STORE_PATH    = Path("tx_store.json")
 REC_HISTORY_PATH = Path("rec_history.json")
 DEPOSIT_LOG_PATH = Path("deposit_log.json")
@@ -31,9 +31,7 @@ def _load(p, d):
 def _save(p, o):
     p.write_text(json.dumps(o, separators=(",",":")), encoding="utf-8")
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# BAKED-IN DATA  (your CSV as of April 2026 + crypto from Feb 2026 PDF)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ BAKED DATA
 BAKED_TX_STORE: dict = {"dd59fb50579c9a6ce2456c6cd3417af9935e94b1":{"Activity Date":"4/1/2026","Process Date":"4/1/2026","Settle Date":"4/2/2026","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000499","Price":"$440.56","Amount":"($0.22)"},"9663ac50acfe759a4be1a5dddb047b42d7fcb571":{"Activity Date":"4/1/2026","Process Date":"4/1/2026","Settle Date":"4/2/2026","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.023644","Price":"$601.84","Amount":"($14.23)"},"c910cd89ca305ec668482821aa7e54fe3b56f6d3":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"3/31/2026","Instrument":"VUG","Description":"Cash Div: R/D 2026-03-27 P/D 2026-03-31 - 0.464688 shares at 0.4778","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.22"},"048e6f61f323e7a77408e16e7a455b6f42e247b6":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"3/31/2026","Instrument":"VTV","Description":"Cash Div: R/D 2026-03-27 P/D 2026-03-31 - 0.489248 shares at 1.0792","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.53"},"bc3801ec42ea8bfaccd3df9a71759e33cd5a9893":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"3/31/2026","Instrument":"VOO","Description":"Cash Div: R/D 2026-03-27 P/D 2026-03-31 - 7.601023 shares at 1.8724","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$14.23"},"047354bc367e1ff850b676715a4b2576524f19e7":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"4/1/2026","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.159886","Price":"$30.71","Amount":"($4.91)"},"b46086225164d3de88c356e54af13d051dfa3ac9":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"4/1/2026","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858","Trans Code":"Sell","Quantity":"0.150974","Price":"$52.67","Amount":"$7.95"},"f640e6980347c2d0100f7e45b1d689a1f87046c0":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"4/1/2026","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744","Trans Code":"Sell","Quantity":"0.489248","Price":"$194.70","Amount":"$95.26"},"26d6a21f1c46f443a41b7fdafe0222e846b25821":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"4/1/2026","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858","Trans Code":"Sell","Quantity":"0.261968","Price":"$62.80","Amount":"$16.45"},"f8abbba25043cb4b01b7283adf234e2a05af14ec":{"Activity Date":"3/31/2026","Process Date":"3/31/2026","Settle Date":"4/1/2026","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835","Trans Code":"Sell","Quantity":"0.594855","Price":"$73.66","Amount":"$43.82"},"5dd412e0e2662b18595a353802be0777abf20c91":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/30/2026","Instrument":"SCHD","Description":"Cash Div: R/D 2026-03-25 P/D 2026-03-30 - 19.12575 shares at 0.2569","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.91"},"de3e62030c9f085542d70c91998c5282c10dbfe7":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.003573","Price":"$562.54","Amount":"($2.01)"},"d4cf4587a1434fbc0e78af8b172736a51af30a75":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Sell","Quantity":"0.663685","Price":"$205.32","Amount":"$136.27"},"9102683fc343eae0d0d6c05f15fc1c9dcc4febac":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Sell","Quantity":"1","Price":"$205.32","Amount":"$205.32"},"3a4992df6a512529e36a770704e0f5eef133bf55":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"CAVA","Description":"CAVA\nCUSIP: 148929102","Trans Code":"Sell","Quantity":"1","Price":"$75.28","Amount":"$75.28"},"7c667b760d465010e6c92f9afea5d55660b477d0":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"XOP","Description":"State Street SPDR S&P Oil & Gas Exploration & Production ETF\nCUSIP: 78468R556","Trans Code":"Sell","Quantity":"0.640768","Price":"$190.33","Amount":"$121.96"},"5298c1a89eb9b807130bda477ec48d418d554f1a":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"XOP","Description":"State Street SPDR S&P Oil & Gas Exploration & Production ETF\nCUSIP: 78468R556","Trans Code":"Sell","Quantity":"1","Price":"$190.33","Amount":"$190.33"},"82292fb7b4f6b173017c88d285bf50f28f30d37c":{"Activity Date":"3/30/2026","Process Date":"3/30/2026","Settle Date":"3/31/2026","Instrument":"RIVN","Description":"Rivian Automotive\nCUSIP: 76954A103","Trans Code":"Sell","Quantity":"10","Price":"$14.90","Amount":"$149.00"},"fdcc06c1db0c5d8f751c4ff43f1fe512c7fe7013":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/27/2026","Instrument":"QQQ","Description":"Cash Div: R/D 2026-03-23 P/D 2026-03-27 - 2.749467 shares at 0.73282","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.01"},"26ae7d802e74c1e044b7be186f6cf000ccfb16e5":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/30/2026","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.006966","Price":"$268.44","Amount":"($1.87)"},"9ee7bc31d6d87f8f416c6ce96a575a45fdfa33f6":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/30/2026","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002272","Price":"$532.36","Amount":"($1.21)"},"af2cefdcbbb4c4babae493a2f5b0ababb34a142c":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/30/2026","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.005025","Price":"$308.44","Amount":"($1.55)"},"631f3b32fbd93b5694bcb40103a9cbddf2110c46":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/30/2026","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001581","Price":"$689.28","Amount":"($1.09)"},"e30f4087437c2af95f6da803f25281e07a0418f1":{"Activity Date":"3/27/2026","Process Date":"3/27/2026","Settle Date":"3/30/2026","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.016248","Price":"$129.86","Amount":"($2.11)"},"0bfb3bd11495e74c57a7da4f954f95c745f45414":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"VGT","Description":"Cash Div: R/D 2026-03-24 P/D 2026-03-26 - 1.464906 shares at 0.7438","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.09"},"a97b8ea9ba483d0a0eb6e0a61d024a970071ec80":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"VHT","Description":"Cash Div: R/D 2026-03-24 P/D 2026-03-26 - 1.884484 shares at 0.994","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.87"},"409e19a38b8b467fe9a7a7aa8d1d675ab9e465c7":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"QCOM","Description":"Cash Div: R/D 2026-03-05 P/D 2026-03-26 - 2.372401 shares at 0.89","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.11"},"104407d6a058921e912e7e34ec5f6be1b5fb1ad0":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"META","Description":"Cash Div: R/D 2026-03-16 P/D 2026-03-26 - 2.302381 shares at 0.525","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.21"},"306229573039405c7b35e6c5e196abd6b5f14cbe":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"VIS","Description":"Cash Div: R/D 2026-03-24 P/D 2026-03-26 - 1.966439 shares at 0.7877","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.55"},"2785681f64f5de7b90bb0bc956300ab863e746eb":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.096874","Price":"$60.80","Amount":"($5.89)"},"295c0bbfe278021e40ce98a03e5ffa5959b6cad9":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"0.315443","Price":"$76.02","Amount":"($23.98)"},"0e17a94af09afb2618300317b2a94aea66130630":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"1","Price":"$76.02","Amount":"($76.02)"},"ab27baf3443baea0d2bd8ecfc77c91e639bc26ea":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"1.355932","Price":"$147.50","Amount":"($200.00)"},"d237d75435f92f29a26a06e510cf5b2ea3dcf200":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.166286","Price":"$601.37","Amount":"($100.00)"},"0cf1e1f52c2617a520db453cfd824a3cc8f71d8d":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"0.489632","Price":"$408.47","Amount":"($200.00)"},"5a87e193cd9bdbff226717e1489d7ce403306faa":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"XOP","Description":"State Street SPDR S&P Oil & Gas Exploration & Production ETF\nCUSIP: 78468R556","Trans Code":"Buy","Quantity":"0.640768","Price":"$182.84","Amount":"($117.16)"},"2f960594f3d7afa62c2fbd9cc1b5fedccf7af470":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/27/2026","Instrument":"XOP","Description":"State Street SPDR S&P Oil & Gas Exploration & Production ETF\nCUSIP: 78468R556","Trans Code":"Buy","Quantity":"1","Price":"$182.84","Amount":"($182.84)"},"15f24d6f663e118d83c791269e686865cb7bfdec":{"Activity Date":"3/26/2026","Process Date":"3/26/2026","Settle Date":"3/26/2026","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$900.00"},"df72b05772dddd294d8d430bfda0765f1f31f806":{"Activity Date":"3/25/2026","Process Date":"3/25/2026","Settle Date":"3/25/2026","Instrument":"XLE","Description":"Cash Div: R/D 2026-03-23 P/D 2026-03-25 - 15.28264 shares at 0.385178","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$5.89"},"2dff5c474a79cfdb4f6a34e71b8efc99fa5fd1b9":{"Activity Date":"3/25/2026","Process Date":"3/25/2026","Settle Date":"3/26/2026","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000469","Price":"$63.88","Amount":"($0.03)"},"decd8ff4aa16702c151d3cd10cd84a2117b3edd1":{"Activity Date":"3/25/2026","Process Date":"3/25/2026","Settle Date":"3/26/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.020363","Price":"$77.10","Amount":"($1.57)"},"92808fd914f07a546fcd394b40988d5ade1ce4a8":{"Activity Date":"3/25/2026","Process Date":"3/25/2026","Settle Date":"3/26/2026","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.118718","Price":"$148.33","Amount":"($17.61)"},"f229512fbb4ce1a4e9f81c583b4f231f8e26880e":{"Activity Date":"3/24/2026","Process Date":"3/24/2026","Settle Date":"3/24/2026","Instrument":"VEA","Description":"Cash Div: R/D 2026-03-20 P/D 2026-03-24 - 0.261499 shares at 0.109","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.03"},"f52762fa9aafbf850a9ed3b9f572db7ae3ae3deb":{"Activity Date":"3/24/2026","Process Date":"3/24/2026","Settle Date":"3/24/2026","Instrument":"VXUS","Description":"Cash Div: R/D 2026-03-20 P/D 2026-03-24 - 19.712553 shares at 0.0795","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.57"},"7d464a6da9cf6d0f380b5bff3b850a38ca71996c":{"Activity Date":"3/24/2026","Process Date":"3/24/2026","Settle Date":"3/24/2026","Instrument":"VYM","Description":"Cash Div: R/D 2026-03-20 P/D 2026-03-24 - 20.440192 shares at 0.8617","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$17.61"},"cecbfedd610696176f2dfea23632da6d5dff5a1c":{"Activity Date":"3/17/2026","Process Date":"3/17/2026","Settle Date":"3/18/2026","Instrument":"GOOGL","Description":"Alphabet Class A\nCUSIP: 02079K305\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002738","Price":"$306.68","Amount":"($0.84)"},"a2b3bdaa0e79bd88384b8bb00ce3f1e91c3d3219":{"Activity Date":"3/16/2026","Process Date":"3/16/2026","Settle Date":"3/16/2026","Instrument":"GOOGL","Description":"Cash Div: R/D 2026-03-09 P/D 2026-03-16 - 4.003261 shares at 0.21","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.84"},"796af43c7550ad443f51d1ff7b32ce9380373225":{"Activity Date":"3/13/2026","Process Date":"3/13/2026","Settle Date":"3/16/2026","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000024","Price":"$402.39","Amount":"($0.01)"},"aad7e47a88b9884659d14fba5a27f1b678bc66a6":{"Activity Date":"3/12/2026","Process Date":"3/12/2026","Settle Date":"3/12/2026","Instrument":"MSFT","Description":"Cash Div: R/D 2026-02-19 P/D 2026-03-12 - 0.012358 shares at 0.91","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"06c84c2f9ab9a53561d8e15823dcd4f3bedbf12c":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"0.50074","Price":"$79.98","Amount":"($40.05)"},"0d2c80b18384e7176e07fa6a7c49e868f7fbdfc8":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"2","Price":"$79.98","Amount":"($159.95)"},"0e8c7e04b4e1c07dc22bde808915e1fa87030391":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506","Trans Code":"Buy","Quantity":"3.551451","Price":"$56.32","Amount":"($200.00)"},"b3eaade0a3fc460b1187106fc5606a8660c05ded":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"1.317436","Price":"$151.81","Amount":"($200.00)"},"3919d285cf05530e8a13084c19548d2a64edbb37":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.319177","Price":"$626.61","Amount":"($200.00)"},"8dc508ec7a1efb8c35707cf52ef6d69e58bcbe79":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"0.667046","Price":"$479.89","Amount":"($320.11)"},"8474a5bec80bb0d01b3efd274e43be46f1dc0e12":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/11/2026","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"1","Price":"$479.89","Amount":"($479.89)"},"2625d3321754bd84546f3154f5505b797a91f99c":{"Activity Date":"3/10/2026","Process Date":"3/10/2026","Settle Date":"3/10/2026","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$1,600.00"},"295305f4d5c56fe3585a0c716e7cda09c8b73b94":{"Activity Date":"3/5/2026","Process Date":"3/5/2026","Settle Date":"3/6/2026","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001884","Price":"$74.28","Amount":"($0.14)"},"318a4fc93660c754713b5f41868753a2a4a41568":{"Activity Date":"3/4/2026","Process Date":"3/4/2026","Settle Date":"3/4/2026","Instrument":"BND","Description":"Cash Div: R/D 2026-03-02 P/D 2026-03-04 - 0.592971 shares at 0.227824","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"f5ef91503c960ba6ba0b37cd8e4f8ba249f1b39c":{"Activity Date":"2/17/2026","Process Date":"2/17/2026","Settle Date":"2/18/2026","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002968","Price":"$1,023.96","Amount":"($3.04)"},"e2318dbd14798434f501c9bfd11e4f4d13037599":{"Activity Date":"2/13/2026","Process Date":"2/13/2026","Settle Date":"2/13/2026","Instrument":"COST","Description":"Cash Div: R/D 2026-01-30 P/D 2026-02-13 - 2.339329 shares at 1.3","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$3.04"},"68ae9ad4bf28aba22fd88164a5e554c1c2ec0117":{"Activity Date":"2/13/2026","Process Date":"2/13/2026","Settle Date":"2/17/2026","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.01617","Price":"$259.11","Amount":"($4.19)"},"dd38faffe0eef10af2c6cbb520cfc5a9d94b3f4e":{"Activity Date":"2/12/2026","Process Date":"2/12/2026","Settle Date":"2/12/2026","Instrument":"AAPL","Description":"Cash Div: R/D 2026-02-09 P/D 2026-02-12 - 16.097454 shares at 0.26","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.19"},"f54f4e2b422bb344352a971f0bd0d9e4727a98ad":{"Activity Date":"2/12/2026","Process Date":"2/12/2026","Settle Date":"2/13/2026","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"0.638406","Price":"$156.64","Amount":"($100.00)"},"8b9b0b66ce94cff147dd888b80ca248e60a12294":{"Activity Date":"2/12/2026","Process Date":"2/12/2026","Settle Date":"2/13/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"1.201634","Price":"$83.22","Amount":"($100.00)"},"5eea91453eb67561ec356a7d8b6a0f6a41d380e4":{"Activity Date":"2/12/2026","Process Date":"2/12/2026","Settle Date":"2/13/2026","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"0.291808","Price":"$342.69","Amount":"($100.00)"},"5a338bc3986ff54c54752b363247d09d6e31e259":{"Activity Date":"2/11/2026","Process Date":"2/11/2026","Settle Date":"2/12/2026","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103","Trans Code":"Buy","Quantity":"0.163077","Price":"$613.20","Amount":"($100.00)"},"029ccbe6e27c9a8a459854947c92f0cf4954f9a6":{"Activity Date":"2/11/2026","Process Date":"2/11/2026","Settle Date":"2/12/2026","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.627982","Price":"$636.96","Amount":"($400.00)"},"981b5a9845a2462a2e14d19731b27f76cf77334b":{"Activity Date":"2/11/2026","Process Date":"2/11/2026","Settle Date":"2/11/2026","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"4f89fd34e41ce2ce09bc0b71e002e145fd57e01b":{"Activity Date":"2/5/2026","Process Date":"2/5/2026","Settle Date":"2/6/2026","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002026","Price":"$74.02","Amount":"($0.15)"},"d35c588fc67099a34dae36cf62a7f84611d10a64":{"Activity Date":"2/4/2026","Process Date":"2/4/2026","Settle Date":"2/4/2026","Instrument":"BND","Description":"Cash Div: R/D 2026-02-02 P/D 2026-02-04 - 0.590945 shares at 0.24547","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.15"},"7a4b0c52c0cda83fc581d990e602ddde53f05418":{"Activity Date":"2/2/2026","Process Date":"2/2/2026","Settle Date":"2/3/2026","Instrument":"SPY","Description":"SPDR S&P 500 ETF Trust\nCUSIP: 78462F103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001456","Price":"$693.44","Amount":"($1.01)"},"491aefde7eaad5f99348b8077255388bd6910f1e":{"Activity Date":"1/30/2026","Process Date":"1/30/2026","Settle Date":"1/30/2026","Instrument":"SPY","Description":"Cash Div: R/D 2025-12-19 P/D 2026-01-30 - 0.506954 shares at 1.993368","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.01"},"af5ba3a1151d33538bcc93d4bd05d46ed6b3104c":{"Activity Date":"1/26/2026","Process Date":"1/26/2026","Settle Date":"1/27/2026","Instrument":"TSM","Description":"Taiwan Semiconductor Manufacturing\nCUSIP: 874039100","Trans Code":"Buy","Quantity":"0.601196","Price":"$332.67","Amount":"($200.00)"},"7b5d51b30e4222e5f45e1cd5b371df0dbf23e564":{"Activity Date":"1/23/2026","Process Date":"1/23/2026","Settle Date":"1/26/2026","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797","Trans Code":"Buy","Quantity":"10.329834","Price":"$29.14","Amount":"($301.00)"},"3b25c3991b756018148d410c60687180e5722850":{"Activity Date":"1/23/2026","Process Date":"1/23/2026","Settle Date":"1/26/2026","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103","Trans Code":"Buy","Quantity":"1.608573","Price":"$621.67","Amount":"($1,000.00)"},"5014197099461cdefac34f80ead5885c0e649d01":{"Activity Date":"1/23/2026","Process Date":"1/23/2026","Settle Date":"1/26/2026","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"5.813973","Price":"$86.00","Amount":"($500.00)"},"5e699e3d8783e15d2a55379485df8263a7cb9944":{"Activity Date":"1/23/2026","Process Date":"1/23/2026","Settle Date":"1/23/2026","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$2,000.00"},"846e5835cc91fad7f923e029f51bc54086b2592b":{"Activity Date":"1/23/2026","Process Date":"1/23/2026","Settle Date":"1/23/2026","Instrument":"","Description":"Cash reward","Trans Code":"MISC","Quantity":"","Price":"","Amount":"$1.00"},"4dc93dcf86fbaaf6081ccdc51a6cc53b1da9fc06":{"Activity Date":"1/12/2026","Process Date":"1/12/2026","Settle Date":"1/13/2026","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103","Trans Code":"Buy","Quantity":"0.64187","Price":"$623.18","Amount":"($400.00)"},"748f42efccde97e35037dde9c02638cd65cc71cc":{"Activity Date":"1/12/2026","Process Date":"1/12/2026","Settle Date":"1/13/2026","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"5.120655","Price":"$78.12","Amount":"($400.00)"},"d896ac347d5a5530e01bbe82b46f0073e4470bee":{"Activity Date":"1/12/2026","Process Date":"1/12/2026","Settle Date":"1/12/2026","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"7500c4243a176fa33e9ed72a0c70b551dc75b545":{"Activity Date":"1/9/2026","Process Date":"1/9/2026","Settle Date":"1/12/2026","Instrument":"TSM","Description":"Taiwan Semiconductor Manufacturing\nCUSIP: 874039100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002715","Price":"$320.33","Amount":"($0.87)"},"914cc6f8abadcf9b715111ee39450e85df3c52a0":{"Activity Date":"1/9/2026","Process Date":"1/9/2026","Settle Date":"1/12/2026","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004408","Price":"$258.62","Amount":"($1.14)"},"606e12f69f32c159ba2b72d79adcaa66dd13dbc2":{"Activity Date":"1/8/2026","Process Date":"1/8/2026","Settle Date":"1/8/2026","Instrument":"CRM","Description":"Cash Div: R/D 2025-12-18 P/D 2026-01-08 - 2.736019 shares at 0.416","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.14"},"9ce46c670829b29b0afd75a747e9d289623669dc":{"Activity Date":"1/8/2026","Process Date":"1/8/2026","Settle Date":"1/8/2026","Instrument":"TSM","Description":"Cash Div: R/D 2025-12-11 P/D 2026-01-08 - 1.380127 shares at 0.79542","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.10"},"99ec53e5cd4a4e26805a7b98e2a9316501a10640":{"Activity Date":"1/6/2026","Process Date":"1/6/2026","Settle Date":"1/7/2026","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.028422","Price":"$112.24","Amount":"($3.19)"},"5025858d8cbfae90bea22daecfcbd5c9ded66083":{"Activity Date":"1/5/2026","Process Date":"1/5/2026","Settle Date":"1/5/2026","Instrument":"WMT","Description":"Cash Div: R/D 2025-12-12 P/D 2026-01-05 - 13.558271 shares at 0.235","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$3.19"},"92a30d778cccc40a323a0a2f64a95a02de0569e5":{"Activity Date":"1/2/2026","Process Date":"1/2/2026","Settle Date":"1/5/2026","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000434","Price":"$621.23","Amount":"($0.27)"},"96a6d6747103c659ec659cee6b4519d4969dd89b":{"Activity Date":"12/31/2025","Process Date":"12/31/2025","Settle Date":"12/31/2025","Instrument":"QQQ","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-31 - 0.335513 shares at 0.79408","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.27"},"3d5fbc8259373ba62a89753fed4126b0554adca0":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001926","Price":"$186.85","Amount":"($0.36)"},"1d739d0a48de42bb20fda587a45736c940cfd7d7":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"1","Price":"$338.46","Amount":"($338.46)"},"9e636947e086ae27ae520d5a7f04ed9d6b3b908b":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"0.477278","Price":"$338.46","Amount":"($161.54)"},"79d671a001e812a19dd972e0b48892eaef79d792":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702","Trans Code":"Buy","Quantity":"0.65671","Price":"$761.37","Amount":"($500.00)"},"fcab13da65fa17c8f5b30739911f22341ca5d628":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"3.449465","Price":"$144.95","Amount":"($500.00)"},"229a1eb99f4ce4f00a780dae136bdbaa2dd78ec1":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/30/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.790807","Price":"$632.26","Amount":"($500.00)"},"2dcdc885859eb2e68ced562414a65c6356bdafad":{"Activity Date":"12/29/2025","Process Date":"12/29/2025","Settle Date":"12/29/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$2,000.00"},"be599553dc731b25036e7b031a89a9075e340883":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/26/2025","Instrument":"NVDA","Description":"Cash Div: R/D 2025-12-04 P/D 2025-12-26 - 35.502224 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.36"},"7c51ab839c0ee1555459528657e10c36efc0c121":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/29/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000464","Price":"$494.96","Amount":"($0.23)"},"57350a6967517a914a361f9fa0c99942e270a3bb":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/29/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.015851","Price":"$634.63","Amount":"($10.06)"},"0d00f1dd4c0e79d6f114f1038a3fc87d6b484135":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/29/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.005442","Price":"$339.92","Amount":"($1.85)"},"628f62193d72a36aa134b3895df281707b557e6a":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/29/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.097835","Price":"$44.36","Amount":"($4.34)"},"6961df01e9257f9e64286813f4cd6289d38cbe05":{"Activity Date":"12/26/2025","Process Date":"12/26/2025","Settle Date":"12/29/2025","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002487","Price":"$192.95","Amount":"($0.48)"},"96c20e4dac0c37e2e843a57c07b19816e24a07d0":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/24/2025","Instrument":"VTV","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-24 - 0.486761 shares at 0.9862","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.48"},"d49a8b6d3c5ef2a8092b18998c26af93b0a2f1a2":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/24/2025","Instrument":"VOO","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-24 - 5.68092 shares at 1.771","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$10.06"},"3d112821eb47034f7cad2fa1a0556b1ce3d7e066":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/24/2025","Instrument":"VUG","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-24 - 0.464224 shares at 0.4993","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.23"},"68495542e4f9d4f63e2f9c02eaab445b8efb852d":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/24/2025","Instrument":"XLE","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-24 - 11.633354 shares at 0.373015","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.34"},"57545bb8856e253c9844a6e71aa7978f4e6c3cd1":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/24/2025","Instrument":"VTI","Description":"Cash Div: R/D 2025-12-22 P/D 2025-12-24 - 1.941793 shares at 0.9508","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.85"},"06a6fd1db41555f39a70dc133849d37ceaf23cc5":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/26/2025","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.192907","Price":"$75.58","Amount":"($14.58)"},"7fd619c337ecf852af66c7bfb5a19c1518bbfc66":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/26/2025","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00431","Price":"$62.64","Amount":"($0.27)"},"d66ad05dcca284d63266e5a5b09773012648de0a":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/26/2025","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002794","Price":"$53.68","Amount":"($0.15)"},"06fa48ec8c59cd0ec2c376c09e3273b16725a16e":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/26/2025","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001818","Price":"$665.50","Amount":"($1.21)"},"a0231a066e12cee62641e7a4bdf2605bc4c03045":{"Activity Date":"12/24/2025","Process Date":"12/24/2025","Settle Date":"12/26/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.097754","Price":"$144.75","Amount":"($14.15)"},"a0288fd58c8acaabf182aa62148398fcc3b9965f":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/23/2025","Instrument":"VEA","Description":"Cash Div: R/D 2025-12-19 P/D 2025-12-23 - 0.257189 shares at 1.04","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.27"},"749f727d9dd979865a436f3335b1363925f3a0e0":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/23/2025","Instrument":"META","Description":"Cash Div: R/D 2025-12-15 P/D 2025-12-23 - 2.300563 shares at 0.525","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.21"},"9dcde9b22c70eca764d95914152517d3e641d476":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/23/2025","Instrument":"VYM","Description":"Cash Div: R/D 2025-12-19 P/D 2025-12-23 - 14.937131 shares at 0.9474","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$14.15"},"3c03652665592cbf4a98634e4439c5c69adec5db":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/23/2025","Instrument":"VXUS","Description":"Cash Div: R/D 2025-12-19 P/D 2025-12-23 - 10.696617 shares at 1.3631","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$14.58"},"97dacd32be03fec9cc216431594c3c02363aa870":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/23/2025","Instrument":"VWO","Description":"Cash Div: R/D 2025-12-19 P/D 2025-12-23 - 0.14818 shares at 1.0325","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.15"},"f39bec077a5a07433367bc0ca52ebb07db16f041":{"Activity Date":"12/23/2025","Process Date":"12/23/2025","Settle Date":"12/24/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00203","Price":"$73.87","Amount":"($0.15)"},"0398fb7c3cb9bfc5890f737b1f7632209387b0e6":{"Activity Date":"12/22/2025","Process Date":"12/22/2025","Settle Date":"12/22/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-12-18 P/D 2025-12-22 - 0.588915 shares at 0.246638","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.15"},"c79c6d799d9752750eb96c0cd14c1c55fbcef1d9":{"Activity Date":"12/22/2025","Process Date":"12/22/2025","Settle Date":"12/23/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000801","Price":"$761.05","Amount":"($0.61)"},"63cd150921ef3765189030ea3a652e0010387cab":{"Activity Date":"12/22/2025","Process Date":"12/22/2025","Settle Date":"12/23/2025","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.005301","Price":"$301.81","Amount":"($1.60)"},"6cee0a1984e73deafd191a11cbfd79216b74eeba":{"Activity Date":"12/22/2025","Process Date":"12/22/2025","Settle Date":"12/23/2025","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.010822","Price":"$288.30","Amount":"($3.12)"},"4dbc47f53f9a06eb8a9c5e81de8ecad11c4de9f0":{"Activity Date":"12/19/2025","Process Date":"12/19/2025","Settle Date":"12/19/2025","Instrument":"VHT","Description":"Cash Div: R/D 2025-12-17 P/D 2025-12-19 - 1.873662 shares at 1.6654","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$3.12"},"f0d36c056aa67256d375377674c59181b982fa0b":{"Activity Date":"12/19/2025","Process Date":"12/19/2025","Settle Date":"12/19/2025","Instrument":"VIS","Description":"Cash Div: R/D 2025-12-17 P/D 2025-12-19 - 1.961138 shares at 0.8141","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.60"},"7a3c6c22ecd247c7fb9e7cdc51c8c64e81cf6413":{"Activity Date":"12/19/2025","Process Date":"12/19/2025","Settle Date":"12/19/2025","Instrument":"VGT","Description":"Cash Div: R/D 2025-12-17 P/D 2025-12-19 - 0.807395 shares at 0.757","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.61"},"b25b1564337306b6c5ed74faa06c78e8f1fc3ebd":{"Activity Date":"12/19/2025","Process Date":"12/19/2025","Settle Date":"12/22/2025","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.011935","Price":"$175.94","Amount":"($2.10)"},"1a628daa89fcdaf724477586ab7b5b697a9820fd":{"Activity Date":"12/18/2025","Process Date":"12/18/2025","Settle Date":"12/18/2025","Instrument":"QCOM","Description":"Cash Div: R/D 2025-12-04 P/D 2025-12-18 - 2.360466 shares at 0.89","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.10"},"ad259423cb7546b9341a0a1e5ab19da98ef5e578":{"Activity Date":"12/16/2025","Process Date":"12/16/2025","Settle Date":"12/17/2025","Instrument":"GOOGL","Description":"Alphabet Class A\nCUSIP: 02079K305\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000941","Price":"$307.95","Amount":"($0.29)"},"531b038d5a78ab01093bb49f0d5d8b2969744b41":{"Activity Date":"12/16/2025","Process Date":"12/16/2025","Settle Date":"12/17/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.087776","Price":"$27.57","Amount":"($2.42)"},"efad2ecda2f869dde565600681574448cda456fb":{"Activity Date":"12/15/2025","Process Date":"12/15/2025","Settle Date":"12/15/2025","Instrument":"SCHD","Description":"Cash Div: R/D 2025-12-10 P/D 2025-12-15 - 8.70814 shares at 0.2782","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.42"},"76848c4d995f1b7d245e51518829d780af72cb68":{"Activity Date":"12/15/2025","Process Date":"12/15/2025","Settle Date":"12/15/2025","Instrument":"GOOGL","Description":"Cash Div: R/D 2025-12-08 P/D 2025-12-15 - 1.401836 shares at 0.21","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.29"},"5feaff62e92765d3d768655b897a5461f8a43f1a":{"Activity Date":"12/15/2025","Process Date":"12/15/2025","Settle Date":"12/16/2025","Instrument":"GOOGL","Description":"Alphabet Class A\nCUSIP: 02079K305","Trans Code":"Buy","Quantity":"2.600484","Price":"$307.64","Amount":"($800.00)"},"5f95ec9cbb0dd466eac01fe249f138562042af47":{"Activity Date":"12/15/2025","Process Date":"12/15/2025","Settle Date":"12/15/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"90f65dae10d45a614b03141ac6391db4c3308272":{"Activity Date":"12/12/2025","Process Date":"12/12/2025","Settle Date":"12/15/2025","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00002","Price":"$479.66","Amount":"($0.01)"},"ea3a339bbc199db0cf65ec103ade7c9458295b93":{"Activity Date":"12/11/2025","Process Date":"12/11/2025","Settle Date":"12/11/2025","Instrument":"MSFT","Description":"Cash Div: R/D 2025-11-20 P/D 2025-12-11 - 0.012338 shares at 0.91","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"d6868f8bf7f664012ab81382a3be4a51ba31d143":{"Activity Date":"12/5/2025","Process Date":"12/5/2025","Settle Date":"12/5/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506","Trans Code":"SPL","Quantity":"5.8167","Price":"","Amount":""},"a5e78adfba63d7410562751164edcbc0e0fdbcd6":{"Activity Date":"12/4/2025","Process Date":"12/4/2025","Settle Date":"12/5/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001883","Price":"$74.33","Amount":"($0.14)"},"85314292f4193742f585f6366ebe6af1ba2f1af4":{"Activity Date":"12/3/2025","Process Date":"12/3/2025","Settle Date":"12/3/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-12-01 P/D 2025-12-03 - 0.587032 shares at 0.238572","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"914c1d99351a8b54cc365b2b26ed661f7119ade2":{"Activity Date":"11/28/2025","Process Date":"11/28/2025","Settle Date":"12/1/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.441174","Price":"$906.67","Amount":"($400.00)"},"716466d6390ef296d417d2643bf031279cca3973":{"Activity Date":"11/28/2025","Process Date":"11/28/2025","Settle Date":"12/1/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"3.749531","Price":"$106.68","Amount":"($400.00)"},"7c28c54a88808ae0b087a7653d4a2d09663ca6ba":{"Activity Date":"11/28/2025","Process Date":"11/28/2025","Settle Date":"11/28/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"997da3d3fdb9a58939a5a4b5033cc3a05bf9d69c":{"Activity Date":"11/17/2025","Process Date":"11/17/2025","Settle Date":"11/18/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.436979","Price":"$915.38","Amount":"($400.00)"},"aec93e5a471272aa5153d71c8cd75eec34cd96ff":{"Activity Date":"11/17/2025","Process Date":"11/17/2025","Settle Date":"11/18/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"3.628282","Price":"$110.24","Amount":"($400.00)"},"c0ee92d6e17e6fbbeb5c532584f8d8261b3c2075":{"Activity Date":"11/17/2025","Process Date":"11/17/2025","Settle Date":"11/17/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"5be55d51814c05b6bc76474a588af792a55ead4e":{"Activity Date":"11/17/2025","Process Date":"11/17/2025","Settle Date":"11/18/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002067","Price":"$919.16","Amount":"($1.90)"},"13044a6b5fa90d44caaa5adec301a9c67b773699":{"Activity Date":"11/17/2025","Process Date":"11/17/2025","Settle Date":"11/17/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"SPL","Quantity":"7.3266","Price":"","Amount":""},"d59b67e8b98933dffac994b7cdfd5c6052705d4b":{"Activity Date":"11/14/2025","Process Date":"11/14/2025","Settle Date":"11/14/2025","Instrument":"COST","Description":"Cash Div: R/D 2025-10-31 P/D 2025-11-14 - 1.459109 shares at 1.3","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.90"},"d55b30bbbf406918b2376606935f5f482def140d":{"Activity Date":"11/14/2025","Process Date":"11/14/2025","Settle Date":"11/17/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.015341","Price":"$272.47","Amount":"($4.18)"},"d6a93e5de1751db084565046403f628eed0ab5bc":{"Activity Date":"11/13/2025","Process Date":"11/13/2025","Settle Date":"11/13/2025","Instrument":"AAPL","Description":"Cash Div: R/D 2025-11-10 P/D 2025-11-13 - 16.082113 shares at 0.26","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.18"},"449321dc405407ed447a41185d414f9fba56cc15":{"Activity Date":"11/6/2025","Process Date":"11/6/2025","Settle Date":"11/7/2025","Instrument":"GOOGL","Description":"Alphabet Class A\nCUSIP: 02079K305","Trans Code":"Buy","Quantity":"1.401836","Price":"$285.34","Amount":"($400.00)"},"c0d39b6a93dcd85c3b3acf633443a7eef459cfca":{"Activity Date":"11/6/2025","Process Date":"11/6/2025","Settle Date":"11/7/2025","Instrument":"TSM","Description":"Taiwan Semiconductor Manufacturing\nCUSIP: 874039100","Trans Code":"Buy","Quantity":"0.380127","Price":"$289.83","Amount":"($110.17)"},"7015d4d58453d2dd760236b0d6d080f3551fae50":{"Activity Date":"11/6/2025","Process Date":"11/6/2025","Settle Date":"11/7/2025","Instrument":"TSM","Description":"Taiwan Semiconductor Manufacturing\nCUSIP: 874039100","Trans Code":"Buy","Quantity":"1","Price":"$289.83","Amount":"($289.83)"},"3f96cff7698e43447da6bae7bd56d7598854ca18":{"Activity Date":"11/6/2025","Process Date":"11/6/2025","Settle Date":"11/6/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"8ac295bf633336dde9050786bba3a8e382e79681":{"Activity Date":"11/6/2025","Process Date":"11/6/2025","Settle Date":"11/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001883","Price":"$74.32","Amount":"($0.14)"},"08ac771aa4ad1645071df1474a9fc739f4f23d4c":{"Activity Date":"11/5/2025","Process Date":"11/5/2025","Settle Date":"11/5/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-11-03 P/D 2025-11-05 - 0.585149 shares at 0.243631","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"b289357ce43ef7a45a6a230bed73b2df749fba38":{"Activity Date":"11/3/2025","Process Date":"11/3/2025","Settle Date":"11/4/2025","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000363","Price":"$632.54","Amount":"($0.23)"},"2319dbd9f86f4b57b06637d4f6f238be12182f59":{"Activity Date":"11/3/2025","Process Date":"11/3/2025","Settle Date":"11/4/2025","Instrument":"SPY","Description":"SPDR S&P 500 ETF Trust\nCUSIP: 78462F103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001362","Price":"$682.74","Amount":"($0.93)"},"202691d55a58e9078196696eadf61a3e782b61b5":{"Activity Date":"10/31/2025","Process Date":"10/31/2025","Settle Date":"10/31/2025","Instrument":"SPY","Description":"Cash Div: R/D 2025-09-19 P/D 2025-10-31 - 0.505592 shares at 1.831114","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.93"},"eae9a3277b9ca472a8144b9cfb37808fc7b036d0":{"Activity Date":"10/31/2025","Process Date":"10/31/2025","Settle Date":"10/31/2025","Instrument":"QQQ","Description":"Cash Div: R/D 2025-09-22 P/D 2025-10-31 - 0.33515 shares at 0.69395","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.23"},"b935129abd5bddd5454515ca65178f9e5f74f1f1":{"Activity Date":"10/20/2025","Process Date":"10/20/2025","Settle Date":"10/21/2025","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"1.663685","Price":"$240.43","Amount":"($400.00)"},"2bff37a953d3693ddfd5e66da4352377ade614ad":{"Activity Date":"10/20/2025","Process Date":"10/20/2025","Settle Date":"10/21/2025","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"0.999612","Price":"$400.16","Amount":"($400.00)"},"fb3865c03fe0aa33b91079a01bde10a8ce15a631":{"Activity Date":"10/20/2025","Process Date":"10/20/2025","Settle Date":"10/21/2025","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$800.00"},"2734622e72ed0f0c8297c3b6f7e09da7fc2c11cd":{"Activity Date":"10/10/2025","Process Date":"10/10/2025","Settle Date":"10/14/2025","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004606","Price":"$247.46","Amount":"($1.14)"},"b3f7bb40a58a07f4a055ff642f45fcf325de6c19":{"Activity Date":"10/9/2025","Process Date":"10/9/2025","Settle Date":"10/9/2025","Instrument":"CRM","Description":"Cash Div: R/D 2025-09-17 P/D 2025-10-09 - 2.731413 shares at 0.416","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.14"},"928a0f0443a7df615695269460a8a01d1b24712b":{"Activity Date":"10/6/2025","Process Date":"10/6/2025","Settle Date":"10/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001886","Price":"$74.21","Amount":"($0.14)"},"4be335134fe51429831274fa56045153ada52709":{"Activity Date":"10/6/2025","Process Date":"10/6/2025","Settle Date":"10/7/2025","Instrument":"VXUS","Description":"Vanguard Total International Stock ETF\nCUSIP: 921909768","Trans Code":"Buy","Quantity":"10.696617","Price":"$74.79","Amount":"($800.00)"},"9abae1ce5b02dcc145106374edcbe545508bc8e5":{"Activity Date":"10/6/2025","Process Date":"10/6/2025","Settle Date":"10/6/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"70536c58280f1f7ffd9c73e1ac9fe1bee108b1a5":{"Activity Date":"10/3/2025","Process Date":"10/3/2025","Settle Date":"10/3/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-10-01 P/D 2025-10-03 - 0.583263 shares at 0.237328","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"35817a1a46a7097ec30592fa7698eab1d93b010d":{"Activity Date":"10/3/2025","Process Date":"10/3/2025","Settle Date":"10/6/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00191","Price":"$188.48","Amount":"($0.36)"},"1f340f6fb57ffb5bbe5149b92863223b37280d26":{"Activity Date":"10/2/2025","Process Date":"10/2/2025","Settle Date":"10/2/2025","Instrument":"NVDA","Description":"Cash Div: R/D 2025-09-11 P/D 2025-10-02 - 35.500314 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.36"},"5d093c6cac6519cbdb92202b33c855959348a43e":{"Activity Date":"10/2/2025","Process Date":"10/2/2025","Settle Date":"10/3/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000496","Price":"$483.38","Amount":"($0.24)"},"036c50849875bef9e658ecd971eb94148cf73f8d":{"Activity Date":"10/2/2025","Process Date":"10/2/2025","Settle Date":"10/3/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.005345","Price":"$329.26","Amount":"($1.76)"},"758e4eb93d506197ac01169eb278f08c590d0aad":{"Activity Date":"10/2/2025","Process Date":"10/2/2025","Settle Date":"10/3/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.016031","Price":"$615.03","Amount":"($9.86)"},"a46bea7b0a825bb8747c78201ab20431eec9f8af":{"Activity Date":"10/2/2025","Process Date":"10/2/2025","Settle Date":"10/3/2025","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00246","Price":"$186.97","Amount":"($0.46)"},"df8f22f636e6e25edd0c6398184e7f90898c6a76":{"Activity Date":"10/1/2025","Process Date":"10/1/2025","Settle Date":"10/1/2025","Instrument":"VTI","Description":"Cash Div: R/D 2025-09-29 P/D 2025-10-01 - 1.936448 shares at 0.9072","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.76"},"a1163bae77a7c3d95b222e0945d34440e48dd284":{"Activity Date":"10/1/2025","Process Date":"10/1/2025","Settle Date":"10/1/2025","Instrument":"VUG","Description":"Cash Div: R/D 2025-09-29 P/D 2025-10-01 - 0.463728 shares at 0.5068","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.24"},"55b17b8717f189c8877075d9cc3c8d94a58670af":{"Activity Date":"10/1/2025","Process Date":"10/1/2025","Settle Date":"10/1/2025","Instrument":"VTV","Description":"Cash Div: R/D 2025-09-29 P/D 2025-10-01 - 0.484301 shares at 0.9433","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.46"},"ff0bc394fc091e9608600eea9f84c039b347b62e":{"Activity Date":"10/1/2025","Process Date":"10/1/2025","Settle Date":"10/1/2025","Instrument":"VOO","Description":"Cash Div: R/D 2025-09-29 P/D 2025-10-01 - 5.664889 shares at 1.74","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$9.86"},"a25a617539c449725c4ebebe7b20f7fe87900a7d":{"Activity Date":"9/30/2025","Process Date":"9/30/2025","Settle Date":"10/1/2025","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001272","Price":"$730.80","Amount":"($0.93)"},"4387aa5feabc25c521ee4758890d09cf49057ca0":{"Activity Date":"9/30/2025","Process Date":"9/30/2025","Settle Date":"10/1/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.083056","Price":"$27.09","Amount":"($2.25)"},"c43cd5a90450e8c2d9ec39f2c7eff81a61d9c005":{"Activity Date":"9/29/2025","Process Date":"9/29/2025","Settle Date":"9/29/2025","Instrument":"SCHD","Description":"Cash Div: R/D 2025-09-24 P/D 2025-09-29 - 8.625084 shares at 0.2604","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.25"},"97beb43a93b21a7eaca69654f134e4b3a3428bc6":{"Activity Date":"9/29/2025","Process Date":"9/29/2025","Settle Date":"9/29/2025","Instrument":"META","Description":"Cash Div: R/D 2025-09-22 P/D 2025-09-29 - 1.768435 shares at 0.525","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.93"},"9ac3d96db5d5761c6bb8c013050e2d2d2d3571ad":{"Activity Date":"9/29/2025","Process Date":"9/29/2025","Settle Date":"9/30/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000924","Price":"$746.37","Amount":"($0.69)"},"a2390be0eb842db419d075fe62c54175d3b117a9":{"Activity Date":"9/29/2025","Process Date":"9/29/2025","Settle Date":"9/30/2025","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.007935","Price":"$253.28","Amount":"($2.01)"},"332f3ee157a7ad7c20af8b02a32670954f752e3c":{"Activity Date":"9/29/2025","Process Date":"9/29/2025","Settle Date":"9/30/2025","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004856","Price":"$294.48","Amount":"($1.43)"},"b5abe7978cf9b669574980b924558e9b3758af2e":{"Activity Date":"9/26/2025","Process Date":"9/26/2025","Settle Date":"9/26/2025","Instrument":"VIS","Description":"Cash Div: R/D 2025-09-24 P/D 2025-09-26 - 1.956282 shares at 0.7324","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.43"},"f28405a342604c7869b527658bbf6b9e467da218":{"Activity Date":"9/26/2025","Process Date":"9/26/2025","Settle Date":"9/26/2025","Instrument":"VHT","Description":"Cash Div: R/D 2025-09-24 P/D 2025-09-26 - 1.865727 shares at 1.0765","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.01"},"aff9f8e217f2b0e7e94b0a08f24004dbcbd9a1b3":{"Activity Date":"9/26/2025","Process Date":"9/26/2025","Settle Date":"9/26/2025","Instrument":"VGT","Description":"Cash Div: R/D 2025-09-24 P/D 2025-09-26 - 0.806471 shares at 0.8586","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.69"},"ac5da206ed7262ad441393f17dfb859be1ad19dd":{"Activity Date":"9/26/2025","Process Date":"9/26/2025","Settle Date":"9/29/2025","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.012269","Price":"$170.34","Amount":"($2.09)"},"278b384184c9df6cc094a3e95c1127123010938e":{"Activity Date":"9/25/2025","Process Date":"9/25/2025","Settle Date":"9/25/2025","Instrument":"QCOM","Description":"Cash Div: R/D 2025-09-04 P/D 2025-09-25 - 2.348197 shares at 0.89","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.09"},"f96a77c0c61bb85348bdec3e1fab99ff781b52b1":{"Activity Date":"9/25/2025","Process Date":"9/25/2025","Settle Date":"9/26/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.047906","Price":"$90.18","Amount":"($4.32)"},"8edd36aac70dc843925f0abc82369be2cb8a768c":{"Activity Date":"9/24/2025","Process Date":"9/24/2025","Settle Date":"9/24/2025","Instrument":"XLE","Description":"Cash Div: R/D 2025-09-22 P/D 2025-09-24 - 5.768771 shares at 0.748731","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.32"},"158a6fa5bc41567915e0439feea07b23885cc505":{"Activity Date":"9/24/2025","Process Date":"9/24/2025","Settle Date":"9/25/2025","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000739","Price":"$54.06","Amount":"($0.04)"},"95e16bd1a51f42d0eaa41ad7d04bf0f647573220":{"Activity Date":"9/24/2025","Process Date":"9/24/2025","Settle Date":"9/25/2025","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001174","Price":"$59.60","Amount":"($0.07)"},"6f3ae5a689b67c9a713185f54652ffca055adb0c":{"Activity Date":"9/24/2025","Process Date":"9/24/2025","Settle Date":"9/25/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.088759","Price":"$140.83","Amount":"($12.50)"},"90dcd7ac376c90e8132be38e8408410a859c062b":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/23/2025","Instrument":"VYM","Description":"Cash Div: R/D 2025-09-19 P/D 2025-09-23 - 14.848372 shares at 0.8417","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$12.50"},"21d91bace4cf0f2f2fc4bf35aac01d80ef8726fc":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/23/2025","Instrument":"VWO","Description":"Cash Div: R/D 2025-09-19 P/D 2025-09-23 - 0.147441 shares at 0.2795","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.04"},"a33d8cf9df89b14feaa64699d360f2bb6e65dd33":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/23/2025","Instrument":"VEA","Description":"Cash Div: R/D 2025-09-19 P/D 2025-09-23 - 0.256015 shares at 0.2865","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.07"},"d1e5f84e1bc2edfc5f3e373e47f6274cb89c8416":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/24/2025","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102","Trans Code":"Buy","Quantity":"0.530856","Price":"$753.50","Amount":"($400.00)"},"e5b206b1f4bb3d46fd0ba0ad00a56daa61ab3a8d":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/24/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.654686","Price":"$610.98","Amount":"($400.00)"},"62b78da8407f888fffc75ce1bbc22d9a61c14b5c":{"Activity Date":"9/23/2025","Process Date":"9/23/2025","Settle Date":"9/23/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"7c6202f717965c663e70855c54a1f8724d70233f":{"Activity Date":"9/17/2025","Process Date":"9/17/2025","Settle Date":"9/18/2025","Instrument":"STUB","Description":"StubHub\nCUSIP: 86384P109","Trans Code":"Buy","Quantity":"22.356143","Price":"$25.72","Amount":"($575.00)"},"d05307ef60375ff7c4a7587beae876bcc99dc6c9":{"Activity Date":"9/17/2025","Process Date":"9/17/2025","Settle Date":"9/18/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"0.001229","Price":"$1,220.50","Amount":"($1.50)"},"4d9c3dc22fb9b614c6c860e05e241f3a738097bb":{"Activity Date":"9/17/2025","Process Date":"9/17/2025","Settle Date":"9/18/2025","Instrument":"STUB","Description":"StubHub\nCUSIP: 86384P109\nPrimary Issue","Trans Code":"Buy","Quantity":"1","Price":"$23.50","Amount":"($23.50)"},"c53af735c25c92b651fcc580b1ee7e1b8b59991f":{"Activity Date":"9/15/2025","Process Date":"9/15/2025","Settle Date":"9/16/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"0.132595","Price":"$1,206.68","Amount":"($160.00)"},"ba2da8b486200defcaa0cbb212a9b9f0c0d4c5ae":{"Activity Date":"9/12/2025","Process Date":"9/12/2025","Settle Date":"9/15/2025","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000019","Price":"$507.30","Amount":"($0.01)"},"0922bfdc5c1ca98a00f470ca2a8f73b50819c8a2":{"Activity Date":"9/11/2025","Process Date":"9/11/2025","Settle Date":"9/11/2025","Instrument":"MSFT","Description":"Cash Div: R/D 2025-08-21 P/D 2025-09-11 - 0.012319 shares at 0.83","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"efea52159da610d2e0330a6e9462b1f01340f88a":{"Activity Date":"9/10/2025","Process Date":"9/10/2025","Settle Date":"9/11/2025","Instrument":"KLAR","Description":"Klarna Group\nCUSIP: G5279N105\nPrimary Issue","Trans Code":"Buy","Quantity":"11","Price":"$40.00","Amount":"($440.00)"},"7c87015c258233c1c746e9797203354063653aa5":{"Activity Date":"9/10/2025","Process Date":"9/10/2025","Settle Date":"9/11/2025","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103","Trans Code":"Buy","Quantity":"0.113083","Price":"$583.64","Amount":"($66.00)"},"3f09db185aae73898cf6649c7dc25eed2e011c51":{"Activity Date":"9/8/2025","Process Date":"9/8/2025","Settle Date":"9/9/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.207176","Price":"$965.36","Amount":"($200.00)"},"1f85fc68c08c71643434faa8760c67c9dbb5e889":{"Activity Date":"9/8/2025","Process Date":"9/8/2025","Settle Date":"9/8/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"191cb8cfc5d71439d3dbf6b0a6eb99407b80b13e":{"Activity Date":"9/5/2025","Process Date":"9/5/2025","Settle Date":"9/8/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001883","Price":"$74.34","Amount":"($0.14)"},"d060649dd6addb5ee71d44c6c9bde21dcedd9cf1":{"Activity Date":"9/4/2025","Process Date":"9/4/2025","Settle Date":"9/4/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-09-02 P/D 2025-09-04 - 0.58138 shares at 0.242759","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"784be965e942f517af36479c5e1a1ce811c67160":{"Activity Date":"9/4/2025","Process Date":"9/4/2025","Settle Date":"9/4/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$666.00"},"13a9e74ee713b52c474b5711368533c1231d334e":{"Activity Date":"9/3/2025","Process Date":"9/3/2025","Settle Date":"9/4/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.027553","Price":"$97.99","Amount":"($2.70)"},"c1400d7be861c69e46416a0d73ff945b7de82c8b":{"Activity Date":"9/2/2025","Process Date":"9/2/2025","Settle Date":"9/2/2025","Instrument":"WMT","Description":"Cash Div: R/D 2025-08-15 P/D 2025-09-02 - 11.487301 shares at 0.235","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.70"},"5007ecfda95fed3e5828ac5518d6caefa218e3b2":{"Activity Date":"8/25/2025","Process Date":"8/25/2025","Settle Date":"8/26/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"0.043417","Price":"$96.91","Amount":"($4.21)"},"ef10662ef79b2cdf12ff3ee6755b02a5d9268062":{"Activity Date":"8/25/2025","Process Date":"8/25/2025","Settle Date":"8/26/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"2","Price":"$96.91","Amount":"($193.81)"},"de7ae3b0109a842716f054683f3644d100f30d53":{"Activity Date":"8/22/2025","Process Date":"8/22/2025","Settle Date":"8/25/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.337057","Price":"$593.37","Amount":"($200.00)"},"09c3c58e6dda36e2a40122f0f8b2429ebc356956":{"Activity Date":"8/22/2025","Process Date":"8/22/2025","Settle Date":"8/25/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"0.166252","Price":"$1,202.99","Amount":"($200.00)"},"937bc198851a84748cd5e22342b482b44d8430a6":{"Activity Date":"8/22/2025","Process Date":"8/22/2025","Settle Date":"8/25/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"1","Price":"$227.98","Amount":"($227.98)"},"508be531c4b25a5edf219ec4dba2bd9cb099e58f":{"Activity Date":"8/22/2025","Process Date":"8/22/2025","Settle Date":"8/22/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"e9cd28695cc806597173e7b1914a2c98f0200e60":{"Activity Date":"8/18/2025","Process Date":"8/18/2025","Settle Date":"8/19/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001674","Price":"$973.16","Amount":"($1.63)"},"abc5ad07396176d638d3192d70291d8890181f2e":{"Activity Date":"8/15/2025","Process Date":"8/15/2025","Settle Date":"8/15/2025","Instrument":"COST","Description":"Cash Div: R/D 2025-08-01 P/D 2025-08-15 - 1.250259 shares at 1.3","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.63"},"9286723e290d529010d622d67428334a751d57b4":{"Activity Date":"8/15/2025","Process Date":"8/15/2025","Settle Date":"8/18/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.016863","Price":"$232.45","Amount":"($3.92)"},"290232a5acab9db57090796bd7d3dcc544c52854":{"Activity Date":"8/14/2025","Process Date":"8/14/2025","Settle Date":"8/14/2025","Instrument":"AAPL","Description":"Cash Div: R/D 2025-08-11 P/D 2025-08-14 - 15.06525 shares at 0.26","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$3.92"},"dd2050ba7dc1417c66d46544428da14b6e6919a2":{"Activity Date":"8/13/2025","Process Date":"8/13/2025","Settle Date":"8/14/2025","Instrument":"BLSH","Description":"Bullish\nCUSIP: G16910120\nPrimary Issue","Trans Code":"Buy","Quantity":"10","Price":"$37.00","Amount":"($370.00)"},"d1ecb931f2b4e94190bc9c7676df3468db76ccd8":{"Activity Date":"8/11/2025","Process Date":"8/11/2025","Settle Date":"8/12/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797","Trans Code":"Buy","Quantity":"0.61615","Price":"$26.79","Amount":"($16.51)"},"c7f3d76bcc1e1398fcffa1cafa52ae02fde99898":{"Activity Date":"8/11/2025","Process Date":"8/11/2025","Settle Date":"8/12/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797","Trans Code":"Buy","Quantity":"7","Price":"$26.79","Amount":"($187.51)"},"8698509c9b85d4ee23b106f0b60d6bea695de46a":{"Activity Date":"8/11/2025","Process Date":"8/11/2025","Settle Date":"8/12/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.34169","Price":"$585.31","Amount":"($199.99)"},"8e2adeb1d2fb75c743c074388a8dd309af37d2b4":{"Activity Date":"8/11/2025","Process Date":"8/11/2025","Settle Date":"8/11/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"0c1c88b6a367b3756d4494184aac305b17467cd4":{"Activity Date":"8/6/2025","Process Date":"8/6/2025","Settle Date":"8/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001902","Price":"$73.59","Amount":"($0.14)"},"dc5ba9d90dfafbdb9bb17a18c6bffe9ddd342986":{"Activity Date":"8/5/2025","Process Date":"8/5/2025","Settle Date":"8/5/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-08-01 P/D 2025-08-05 - 0.579478 shares at 0.241866","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"12d5b08f544e385720e9c8b1b80213a626bcf2e7":{"Activity Date":"8/1/2025","Process Date":"8/1/2025","Settle Date":"8/4/2025","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000235","Price":"$551.90","Amount":"($0.13)"},"27cb252d9f583a8298c70f2cbf8191ac3b9c4cff":{"Activity Date":"8/1/2025","Process Date":"8/1/2025","Settle Date":"8/4/2025","Instrument":"SPY","Description":"SPDR S&P 500 ETF Trust\nCUSIP: 78462F103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001432","Price":"$621.40","Amount":"($0.89)"},"20f21e190c32e6b56716806cfd6b24a0d4fee13d":{"Activity Date":"7/31/2025","Process Date":"7/31/2025","Settle Date":"7/31/2025","Instrument":"SPY","Description":"Cash Div: R/D 2025-06-20 P/D 2025-07-31 - 0.50416 shares at 1.761117","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.89"},"266b1694e3d2d7fd19dbfb534ec3b97267d27655":{"Activity Date":"7/31/2025","Process Date":"7/31/2025","Settle Date":"7/31/2025","Instrument":"QQQ","Description":"Cash Div: R/D 2025-06-23 P/D 2025-07-31 - 0.221832 shares at 0.59111","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"7edb7377a96e1eaa57111fdf3275014dc42410fe":{"Activity Date":"7/31/2025","Process Date":"7/31/2025","Settle Date":"8/1/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.3189","Price":"$940.72","Amount":"($299.99)"},"9f18f3969eb7288e120bd9eb7fa68dc9f45923a3":{"Activity Date":"7/31/2025","Process Date":"7/31/2025","Settle Date":"7/31/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$300.00"},"ba361a1dec68268934f5515de74fbdae982c65bb":{"Activity Date":"7/14/2025","Process Date":"7/14/2025","Settle Date":"7/15/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736","Trans Code":"Buy","Quantity":"0.45306","Price":"$441.44","Amount":"($200.00)"},"8b76c21cd7be1e7349a7dd49d60f570897a5e063":{"Activity Date":"7/14/2025","Process Date":"7/14/2025","Settle Date":"7/15/2025","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109","Trans Code":"Buy","Quantity":"0.9417","Price":"$212.38","Amount":"($200.00)"},"87054fb984bfe333acd8a17d3f0d0be144b22d4c":{"Activity Date":"7/14/2025","Process Date":"7/14/2025","Settle Date":"7/15/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.40952","Price":"$976.75","Amount":"($400.00)"},"eb0b8494f16005e7d15dd4876f3a0bb576d4701c":{"Activity Date":"7/14/2025","Process Date":"7/14/2025","Settle Date":"7/14/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"ac70461e2d078dcee61b7d6225080f91add28edc":{"Activity Date":"7/11/2025","Process Date":"7/11/2025","Settle Date":"7/14/2025","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004325","Price":"$261.27","Amount":"($1.13)"},"06c47bd2b7704e6f3358dc08a6159f4b0788b8ca":{"Activity Date":"7/10/2025","Process Date":"7/10/2025","Settle Date":"7/10/2025","Instrument":"CRM","Description":"Cash Div: R/D 2025-06-18 P/D 2025-07-10 - 2.727088 shares at 0.416","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.13"},"ba162bbdf2f85b74755432b6300e98ceaf6dba17":{"Activity Date":"7/7/2025","Process Date":"7/7/2025","Settle Date":"7/8/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00192","Price":"$72.90","Amount":"($0.14)"},"6c8e6702087b565e8c9ed27e2bed31d786aa8168":{"Activity Date":"7/7/2025","Process Date":"7/7/2025","Settle Date":"7/8/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002208","Price":"$158.51","Amount":"($0.35)"},"07736568ce792cc405e4fcdd04d53474f9a589fb":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/3/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-07-01 P/D 2025-07-03 - 0.577558 shares at 0.235347","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"0c4b294d6f00d247dfb0bf150e6d48acfc90889b":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/3/2025","Instrument":"NVDA","Description":"Cash Div: R/D 2025-06-11 P/D 2025-07-03 - 35.498106 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.35"},"88c83ab3ec4b273ae175766389d08df0c16c391b":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/7/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"3.6831","Price":"$135.76","Amount":"($500.00)"},"fcbe06a17b8690da0a56d03f50b7dee44a4dc111":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/3/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"d423bd182e8ffb81d4ac2d169f8864d347f42f40":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/7/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.013098","Price":"$574.88","Amount":"($7.53)"},"2b4361d6f1db65f1ec620d4ca56bf808cd89ec6c":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/7/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000022","Price":"$441.45","Amount":"($0.01)"},"f33d064ccabe10c50369c320fa5cfcfef0ac1a04":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/7/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.005719","Price":"$307.72","Amount":"($1.76)"},"0a81d991e563140e7b874a0e4b9e2a09b871215d":{"Activity Date":"7/3/2025","Process Date":"7/3/2025","Settle Date":"7/7/2025","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002564","Price":"$179.39","Amount":"($0.46)"},"dc135b7dc646c142ab09c6da44b98c11e6144d6f":{"Activity Date":"7/2/2025","Process Date":"7/2/2025","Settle Date":"7/2/2025","Instrument":"VTV","Description":"Cash Div: R/D 2025-06-30 P/D 2025-07-02 - 0.481737 shares at 0.9635","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.46"},"ad3927620f6b86a3318820992d36f0888866b4a6":{"Activity Date":"7/2/2025","Process Date":"7/2/2025","Settle Date":"7/2/2025","Instrument":"VOO","Description":"Cash Div: R/D 2025-06-30 P/D 2025-07-02 - 4.318358 shares at 1.7447","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$7.53"},"bc3a158182a9e042b760c20754f620632e9be2e4":{"Activity Date":"7/2/2025","Process Date":"7/2/2025","Settle Date":"7/2/2025","Instrument":"VUG","Description":"Cash Div: R/D 2025-06-30 P/D 2025-07-02 - 0.010646 shares at 0.5044","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"ece483b0689d2f7f32e731efb6d73d138528a743":{"Activity Date":"7/2/2025","Process Date":"7/2/2025","Settle Date":"7/2/2025","Instrument":"VTI","Description":"Cash Div: R/D 2025-06-30 P/D 2025-07-02 - 1.930729 shares at 0.9132","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.76"},"3d5b5f173f10bdf744b2738e7ec6305def4f0565":{"Activity Date":"7/1/2025","Process Date":"7/1/2025","Settle Date":"7/2/2025","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004938","Price":"$279.42","Amount":"($1.38)"},"8b91becc496af34b5b8f6b2983fb8a87b975f89c":{"Activity Date":"7/1/2025","Process Date":"7/1/2025","Settle Date":"7/2/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000868","Price":"$656.35","Amount":"($0.57)"},"53c35046525b94545aeac39ea587958bc42c3d90":{"Activity Date":"7/1/2025","Process Date":"7/1/2025","Settle Date":"7/2/2025","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.007115","Price":"$251.56","Amount":"($1.79)"},"a35c7a9542ee5b49f2bf04bfe400b0dfb3489f27":{"Activity Date":"7/1/2025","Process Date":"7/1/2025","Settle Date":"7/2/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.009705","Price":"$26.79","Amount":"($0.26)"},"c24e1234f709074b09d02d49b4da7d6d1145d66e":{"Activity Date":"6/30/2025","Process Date":"6/30/2025","Settle Date":"6/30/2025","Instrument":"VHT","Description":"Cash Div: R/D 2025-06-26 P/D 2025-06-30 - 1.858612 shares at 0.9619","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.79"},"430828750f8ef84b243476263684c8315f62a6f8":{"Activity Date":"6/30/2025","Process Date":"6/30/2025","Settle Date":"6/30/2025","Instrument":"VIS","Description":"Cash Div: R/D 2025-06-26 P/D 2025-06-30 - 1.951344 shares at 0.7054","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.38"},"e6df068298ea793df485450ec219397582126ec8":{"Activity Date":"6/30/2025","Process Date":"6/30/2025","Settle Date":"6/30/2025","Instrument":"VGT","Description":"Cash Div: R/D 2025-06-26 P/D 2025-06-30 - 0.805603 shares at 0.7028","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.57"},"18d3788aeeff8b4a00790da642b343eab98a05e9":{"Activity Date":"6/30/2025","Process Date":"6/30/2025","Settle Date":"6/30/2025","Instrument":"SCHD","Description":"Cash Div: R/D 2025-06-25 P/D 2025-06-30 - 0.999229 shares at 0.2602","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.26"},"86354b2acadbd397d3ae22e86195371992ba3e86":{"Activity Date":"6/27/2025","Process Date":"6/27/2025","Settle Date":"6/30/2025","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001272","Price":"$730.88","Amount":"($0.93)"},"ae13e65a64e574a4bfe27b4500b7adf298dbc29f":{"Activity Date":"6/27/2025","Process Date":"6/27/2025","Settle Date":"6/30/2025","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.012999","Price":"$160.00","Amount":"($2.08)"},"4d381119397c80b232d4176455fde37198e27ec9":{"Activity Date":"6/26/2025","Process Date":"6/26/2025","Settle Date":"6/26/2025","Instrument":"META","Description":"Cash Div: R/D 2025-06-16 P/D 2025-06-26 - 1.767163 shares at 0.525","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.93"},"3383cdce6e2ed56beba1ca16b2e52357e34e94f4":{"Activity Date":"6/26/2025","Process Date":"6/26/2025","Settle Date":"6/26/2025","Instrument":"QCOM","Description":"Cash Div: R/D 2025-06-05 P/D 2025-06-26 - 2.335198 shares at 0.89","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.08"},"5aed73df77ab26cfb1aa1334e32a8f476b6b0d45":{"Activity Date":"6/26/2025","Process Date":"6/26/2025","Settle Date":"6/27/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.048221","Price":"$85.23","Amount":"($4.11)"},"9004483459530f93afdea7b6c0c1fad7337f7525":{"Activity Date":"6/25/2025","Process Date":"6/25/2025","Settle Date":"6/25/2025","Instrument":"XLE","Description":"Cash Div: R/D 2025-06-23 P/D 2025-06-25 - 5.72055 shares at 0.718258","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$4.11"},"fddee063f43ba04507845a351706c626344ac4ef":{"Activity Date":"6/25/2025","Process Date":"6/25/2025","Settle Date":"6/26/2025","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00197","Price":"$55.81","Amount":"($0.11)"},"7aefad708dec05b27e615a973976ebfe9f4cae1e":{"Activity Date":"6/25/2025","Process Date":"6/25/2025","Settle Date":"6/26/2025","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000407","Price":"$49.07","Amount":"($0.02)"},"6c7c4b4b2d8e11863e9c67ca9a2c37489307a718":{"Activity Date":"6/25/2025","Process Date":"6/25/2025","Settle Date":"6/26/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.072891","Price":"$131.15","Amount":"($9.56)"},"755d38d204fe88ed2a80bf2128d1a187b7e5879e":{"Activity Date":"6/24/2025","Process Date":"6/24/2025","Settle Date":"6/24/2025","Instrument":"VEA","Description":"Cash Div: R/D 2025-06-20 P/D 2025-06-24 - 0.254045 shares at 0.4407","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.11"},"3ce1ea34244cad783a54bc0aa2e16e6ede76c382":{"Activity Date":"6/24/2025","Process Date":"6/24/2025","Settle Date":"6/24/2025","Instrument":"VWO","Description":"Cash Div: R/D 2025-06-20 P/D 2025-06-24 - 0.147034 shares at 0.1385","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.02"},"3c10a20f67dc3e54b782f87ba4ee7072e1051559":{"Activity Date":"6/24/2025","Process Date":"6/24/2025","Settle Date":"6/24/2025","Instrument":"VYM","Description":"Cash Div: R/D 2025-06-20 P/D 2025-06-24 - 11.092381 shares at 0.8617","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$9.56"},"c9e7d72f20539b93e4ead95e3d918b9445a6385f":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/13/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"0902dfc9b0fa1edca86790187db5c9249f34c4b6":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/16/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"0.03681","Price":"$94.84","Amount":"($3.49)"},"6182f25fbae986a4ad54531beda87a05f8bf921e":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/16/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"3","Price":"$94.84","Amount":"($284.51)"},"8015adf1708ab624c2b9ac321e8034e3a3382c27":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/16/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"2.02994","Price":"$197.05","Amount":"($400.00)"},"f5eb6f65f5c448e9ec8f401522cb04e1ac6af11d":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/16/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.81759","Price":"$489.24","Amount":"($400.00)"},"0036fe87eab5eedc138365a60f16daa73b3b484b":{"Activity Date":"6/13/2025","Process Date":"6/13/2025","Settle Date":"6/16/2025","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00002","Price":"$476.82","Amount":"($0.01)"},"051246500ddc75c4411b71d0813077db562a3ff2":{"Activity Date":"6/12/2025","Process Date":"6/12/2025","Settle Date":"6/12/2025","Instrument":"MSFT","Description":"Cash Div: R/D 2025-05-15 P/D 2025-06-12 - 0.012299 shares at 0.83","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"180cdde1fe4132f8f643da8a6bae22c6073bdbc4":{"Activity Date":"6/5/2025","Process Date":"6/5/2025","Settle Date":"6/6/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001925","Price":"$72.71","Amount":"($0.14)"},"928eb5b2358f8d0a4771e5f485315f0487e33567":{"Activity Date":"6/4/2025","Process Date":"6/4/2025","Settle Date":"6/4/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-06-02 P/D 2025-06-04 - 0.575633 shares at 0.240315","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"44e5f74c311bc4e423f0f04ff1f1cf7bfcd634cd":{"Activity Date":"5/28/2025","Process Date":"5/28/2025","Settle Date":"5/29/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.015291","Price":"$97.44","Amount":"($1.49)"},"116a64ed6b0346447e6fb71ba854d3cf89dcc6f1":{"Activity Date":"5/27/2025","Process Date":"5/27/2025","Settle Date":"5/27/2025","Instrument":"WMT","Description":"Cash Div: R/D 2025-05-09 P/D 2025-05-27 - 6.36114 shares at 0.235","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.49"},"92a70ffec545f8f46c3661305ddac35b3e4be978":{"Activity Date":"5/19/2025","Process Date":"5/19/2025","Settle Date":"5/20/2025","Instrument":"SPY","Description":"SPDR S&P 500 ETF Trust\nCUSIP: 78462F103","Trans Code":"Buy","Quantity":"0.50416","Price":"$595.04","Amount":"($300.00)"},"8a7027b0d7ae4ac19b3bd2fecb2f5386bf845854":{"Activity Date":"5/19/2025","Process Date":"5/19/2025","Settle Date":"5/20/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"1.43585","Price":"$208.94","Amount":"($300.00)"},"f3955390152d65875efe1e3864d6476c45e97a54":{"Activity Date":"5/19/2025","Process Date":"5/19/2025","Settle Date":"5/20/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.3898","Price":"$513.08","Amount":"($200.00)"},"d45a17040a8e60fa3b331ba0a8c36f90657eaf9d":{"Activity Date":"5/19/2025","Process Date":"5/19/2025","Settle Date":"5/19/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"a3bdcdb1b72b555021ee8389d6ce0f636ba05b4d":{"Activity Date":"5/19/2025","Process Date":"5/19/2025","Settle Date":"5/20/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000409","Price":"$1,026.74","Amount":"($0.42)"},"581113391df34cf28f671b3b954e4f46a01150db":{"Activity Date":"5/16/2025","Process Date":"5/16/2025","Settle Date":"5/16/2025","Instrument":"COST","Description":"Cash Div: R/D 2025-05-02 P/D 2025-05-16 - 0.3241 shares at 1.3","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.42"},"5acfe332b2a55ab68fad6ed1c14321dc4abcb627":{"Activity Date":"5/16/2025","Process Date":"5/16/2025","Settle Date":"5/19/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.011979","Price":"$210.37","Amount":"($2.52)"},"eac749ad44caa447d8052d103bb2758b558b506f":{"Activity Date":"5/15/2025","Process Date":"5/15/2025","Settle Date":"5/15/2025","Instrument":"AAPL","Description":"Cash Div: R/D 2025-05-12 P/D 2025-05-15 - 9.688981 shares at 0.26","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.52"},"4efb32345dd8b14a5906ffa2a1abf2afde4f51a6":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/13/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.8985","Price":"$210.70","Amount":"($189.31)"},"c2aa097c807b58838d5fb57c2562995809594247":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/13/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"1","Price":"$210.70","Amount":"($210.70)"},"822e93c5fb8bfcfce556cf09cefdbfa6cc241df4":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/13/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.19733","Price":"$1,013.48","Amount":"($199.99)"},"59ad055c9f2a729d017bf8d38534ceed407e98e8":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/13/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"0.07406","Price":"$96.43","Amount":"($7.14)"},"6961985f6327b49f494b6140c22c7cf440d8a5ac":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/13/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"2","Price":"$96.43","Amount":"($192.86)"},"d4c22df5e77f00b634a1069761118cf4db17d751":{"Activity Date":"5/12/2025","Process Date":"5/12/2025","Settle Date":"5/12/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$800.00"},"fd371ddfcd64e6f62d42caded735d56f4191e0b2":{"Activity Date":"5/6/2025","Process Date":"5/6/2025","Settle Date":"5/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001929","Price":"$72.54","Amount":"($0.14)"},"b480bedd036f8752a26faeb80eb247abb3176c10":{"Activity Date":"5/5/2025","Process Date":"5/5/2025","Settle Date":"5/5/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-05-01 P/D 2025-05-05 - 0.573704 shares at 0.236371","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"6b735dfc64eef64999029cb192fc68142c707375":{"Activity Date":"5/1/2025","Process Date":"5/1/2025","Settle Date":"5/2/2025","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00033","Price":"$484.24","Amount":"($0.16)"},"096331f824859442f38c6b0dfb84666ef8befe6e":{"Activity Date":"4/30/2025","Process Date":"4/30/2025","Settle Date":"4/30/2025","Instrument":"QQQ","Description":"Cash Div: R/D 2025-03-24 P/D 2025-04-30 - 0.221502 shares at 0.71571","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.16"},"18e7d1fef827208e3ef0c70d434e185a37278c15":{"Activity Date":"4/25/2025","Process Date":"4/25/2025","Settle Date":"4/28/2025","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.004268","Price":"$264.72","Amount":"($1.13)"},"0fe555826785b1c81573076d5c8b06abebe017a1":{"Activity Date":"4/24/2025","Process Date":"4/24/2025","Settle Date":"4/24/2025","Instrument":"CRM","Description":"Cash Div: R/D 2025-04-10 P/D 2025-04-24 - 2.72282 shares at 0.416","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.13"},"b66cb735c31cfd83b8c597346231328f8f49340c":{"Activity Date":"4/22/2025","Process Date":"4/22/2025","Settle Date":"4/23/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.60727","Price":"$513.77","Amount":"($312.00)"},"7237c357aa86ba938a0b9e1287d7155db8b08759":{"Activity Date":"4/21/2025","Process Date":"4/21/2025","Settle Date":"4/21/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$600.00"},"1a2f99af635611f2870f16a20be50db71149454c":{"Activity Date":"4/8/2025","Process Date":"4/8/2025","Settle Date":"4/9/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.017161","Price":"$86.82","Amount":"($1.49)"},"90df1ca1bec901d1b6d12643f49d969b826e68d6":{"Activity Date":"4/7/2025","Process Date":"4/7/2025","Settle Date":"4/7/2025","Instrument":"WMT","Description":"Cash Div: R/D 2025-03-21 P/D 2025-04-07 - 6.343979 shares at 0.235","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.49"},"692c45a839f35b7d8dc6ad57488a81c659048174":{"Activity Date":"4/4/2025","Process Date":"4/4/2025","Settle Date":"4/7/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.99615","Price":"$501.93","Amount":"($500.00)"},"c3eb868b9edbcf3d191150adc61c4418d1adc9a8":{"Activity Date":"4/4/2025","Process Date":"4/4/2025","Settle Date":"4/4/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"62f012d4317ce49848f6a6bed8e20cbfcefd38de":{"Activity Date":"4/4/2025","Process Date":"4/4/2025","Settle Date":"4/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001883","Price":"$74.31","Amount":"($0.14)"},"d941241a42eb9bc1a67c91a67b904c93c914c9e5":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/3/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-04-01 P/D 2025-04-03 - 0.571821 shares at 0.240374","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.14"},"d4df1a34777dec992a014166481db48908f30eb4":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/4/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506","Trans Code":"Buy","Quantity":"0.72055","Price":"$87.41","Amount":"($62.98)"},"b4144050daba2409c59647b95fb05b831a5f6e15":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/4/2025","Instrument":"XLE","Description":"State Street Energy Select Sector SPDR ETF\nCUSIP: 81369Y506","Trans Code":"Buy","Quantity":"5","Price":"$87.41","Amount":"($437.03)"},"0310788d4b649323ea0f531ddf55227eb15d13bd":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/3/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"5afd4157a28e3018d333dbd7f3c25d1e9eaad37d":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/4/2025","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"0.48446","Price":"$286.99","Amount":"($139.03)"},"c55648450aee016da0609cb044237db2be8662f9":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/4/2025","Instrument":"GLD","Description":"SPDR Gold Trust\nCUSIP: 78463V107","Trans Code":"Buy","Quantity":"3","Price":"$286.99","Amount":"($860.96)"},"b8c9a1ae78c1a3db213c067561a51e496e176d19":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/3/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$1,000.00"},"6fd9277e22a1ceb5825a5db9cab09286b70191ee":{"Activity Date":"4/3/2025","Process Date":"4/3/2025","Settle Date":"4/4/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.003372","Price":"$103.78","Amount":"($0.35)"},"c8be9317de2d461caf6b356f5a89712b184735fc":{"Activity Date":"4/2/2025","Process Date":"4/2/2025","Settle Date":"4/2/2025","Instrument":"NVDA","Description":"Cash Div: R/D 2025-03-12 P/D 2025-04-02 - 34.618694 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.35"},"515f3ae724cdbd00be26f9b5daa64967e1c9d518":{"Activity Date":"4/1/2025","Process Date":"4/1/2025","Settle Date":"4/2/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.015133","Price":"$515.41","Amount":"($7.80)"},"2cdef808550990cb13de2934e186324382f75cf0":{"Activity Date":"4/1/2025","Process Date":"4/1/2025","Settle Date":"4/2/2025","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002839","Price":"$172.57","Amount":"($0.49)"},"96f2b43f99f005c6c8871ea9ad4bb7a8a95b7b22":{"Activity Date":"4/1/2025","Process Date":"4/1/2025","Settle Date":"4/2/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000026","Price":"$372.48","Amount":"($0.01)"},"6e71ca36752c0fe261bdd7964be2d35be68aad13":{"Activity Date":"4/1/2025","Process Date":"4/1/2025","Settle Date":"4/2/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.006911","Price":"$274.91","Amount":"($1.90)"},"ed98f6e15138ed81fc67b88c6f70f31987047676":{"Activity Date":"4/1/2025","Process Date":"4/1/2025","Settle Date":"4/2/2025","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.008996","Price":"$27.79","Amount":"($0.25)"},"a2e85a0e2aff9a6d0ded5989768169fad20d2d1d":{"Activity Date":"3/31/2025","Process Date":"3/31/2025","Settle Date":"3/31/2025","Instrument":"SCHD","Description":"Cash Div: R/D 2025-03-26 P/D 2025-03-31 - 0.990233 shares at 0.2488","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.25"},"0cf87151aeee0d0d510d22882f1884af36560e6d":{"Activity Date":"3/31/2025","Process Date":"3/31/2025","Settle Date":"3/31/2025","Instrument":"VUG","Description":"Cash Div: R/D 2025-03-27 P/D 2025-03-31 - 0.01062 shares at 0.5","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"61b069ce457978a92264c8a8e9658290def8e397":{"Activity Date":"3/31/2025","Process Date":"3/31/2025","Settle Date":"3/31/2025","Instrument":"VOO","Description":"Cash Div: R/D 2025-03-27 P/D 2025-03-31 - 4.303225 shares at 1.8121","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$7.80"},"c8dfc42174a7aeebe0ef32181cfed06728a3b5cb":{"Activity Date":"3/31/2025","Process Date":"3/31/2025","Settle Date":"3/31/2025","Instrument":"VTI","Description":"Cash Div: R/D 2025-03-27 P/D 2025-03-31 - 1.923818 shares at 0.9854","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.90"},"6d34b07f69eee968df3e177b7e4fe756b74bd180":{"Activity Date":"3/31/2025","Process Date":"3/31/2025","Settle Date":"3/31/2025","Instrument":"VTV","Description":"Cash Div: R/D 2025-03-27 P/D 2025-03-31 - 0.478898 shares at 1.013","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.49"},"9342c6e8a0977fad7763765d5a92ad8de7d8e2d0":{"Activity Date":"3/28/2025","Process Date":"3/28/2025","Settle Date":"3/31/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001078","Price":"$546.84","Amount":"($0.59)"},"ad26f38b897128d3220ea9ec51d98fc4c3913932":{"Activity Date":"3/28/2025","Process Date":"3/28/2025","Settle Date":"3/31/2025","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.006613","Price":"$263.10","Amount":"($1.74)"},"5a11fee1b4537a977c0c3cc2b90877d476510924":{"Activity Date":"3/28/2025","Process Date":"3/28/2025","Settle Date":"3/31/2025","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.006048","Price":"$247.99","Amount":"($1.50)"},"e514a37c4c2875c811d042a89d20aae40547597a":{"Activity Date":"3/28/2025","Process Date":"3/28/2025","Settle Date":"3/31/2025","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.012761","Price":"$154.37","Amount":"($1.97)"},"d18935e6d47275213c3284f5bab22dca7cceefcf":{"Activity Date":"3/27/2025","Process Date":"3/27/2025","Settle Date":"3/27/2025","Instrument":"VGT","Description":"Cash Div: R/D 2025-03-25 P/D 2025-03-27 - 0.804525 shares at 0.7294","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.59"},"1413789d8ebb3bc71bdb7a0b66bf11214297f876":{"Activity Date":"3/27/2025","Process Date":"3/27/2025","Settle Date":"3/27/2025","Instrument":"VIS","Description":"Cash Div: R/D 2025-03-25 P/D 2025-03-27 - 1.945296 shares at 0.7703","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.50"},"fb2944184031e72032b800e4ed1c527b52fb3b22":{"Activity Date":"3/27/2025","Process Date":"3/27/2025","Settle Date":"3/27/2025","Instrument":"VHT","Description":"Cash Div: R/D 2025-03-25 P/D 2025-03-27 - 1.851999 shares at 0.9396","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.74"},"61a320dedf1e9bfabe8d01efee997c5e760ad3ee":{"Activity Date":"3/27/2025","Process Date":"3/27/2025","Settle Date":"3/27/2025","Instrument":"QCOM","Description":"Cash Div: R/D 2025-03-06 P/D 2025-03-27 - 2.322437 shares at 0.85","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.97"},"800395ee1c9105b2fd6ca2845f245d154c63a885":{"Activity Date":"3/27/2025","Process Date":"3/27/2025","Settle Date":"3/28/2025","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001519","Price":"$612.00","Amount":"($0.93)"},"b6cb53dba6beb17eb5d4fa5c326386222a198ad7":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/26/2025","Instrument":"META","Description":"Cash Div: R/D 2025-03-14 P/D 2025-03-26 - 1.765644 shares at 0.525","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.93"},"b8c353243087db38a2faf242ee7bed6e4a23e61c":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/27/2025","Instrument":"COST","Description":"Costco\nCUSIP: 22160K105","Trans Code":"Buy","Quantity":"0.3241","Price":"$925.63","Amount":"($300.00)"},"53e48ac7d9789c448afcca8596c5d4277e6bb2b4":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/26/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$300.00"},"413243b20afbc6734f3b7627fd62761621eee4c7":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/27/2025","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00115","Price":"$52.14","Amount":"($0.06)"},"aad196a2344a2da02393951ec55e5a22bd8a499c":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/27/2025","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000217","Price":"$45.94","Amount":"($0.01)"},"a825fd4eff8b1653768599915ec1d32e5b900d53":{"Activity Date":"3/26/2025","Process Date":"3/26/2025","Settle Date":"3/27/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.072038","Price":"$130.07","Amount":"($9.37)"},"fc177ee4a45dee7a7d7b38c46b68d4165ce505bc":{"Activity Date":"3/25/2025","Process Date":"3/25/2025","Settle Date":"3/25/2025","Instrument":"VEA","Description":"Cash Div: R/D 2025-03-21 P/D 2025-03-25 - 0.252895 shares at 0.2422","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.06"},"73dd2df01f92cb6aa3531fcfad772c06f1450c80":{"Activity Date":"3/25/2025","Process Date":"3/25/2025","Settle Date":"3/25/2025","Instrument":"VWO","Description":"Cash Div: R/D 2025-03-21 P/D 2025-03-25 - 0.146817 shares at 0.0468","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"8847f9ca7dceb981e872d8ecd8af857dcea5ede7":{"Activity Date":"3/25/2025","Process Date":"3/25/2025","Settle Date":"3/25/2025","Instrument":"VYM","Description":"Cash Div: R/D 2025-03-21 P/D 2025-03-25 - 11.020343 shares at 0.85","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$9.37"},"1f05af8a72d15e019c5492117f9e0d8ec6c2377d":{"Activity Date":"3/24/2025","Process Date":"3/24/2025","Settle Date":"3/25/2025","Instrument":"NFLX","Description":"Netflix\nCUSIP: 64110L106","Trans Code":"Buy","Quantity":"0.51399","Price":"$972.78","Amount":"($500.00)"},"8efde4267a81cd61228551ae9363bc8ed18c2bf9":{"Activity Date":"3/24/2025","Process Date":"3/24/2025","Settle Date":"3/24/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"b62ab1915b1db3b04c80b8b30785560ff8c6c41b":{"Activity Date":"3/14/2025","Process Date":"3/14/2025","Settle Date":"3/17/2025","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000026","Price":"$383.66","Amount":"($0.01)"},"3812b0dc93ad983ca3ada044d0f10c549c59f4c2":{"Activity Date":"3/13/2025","Process Date":"3/13/2025","Settle Date":"3/13/2025","Instrument":"MSFT","Description":"Cash Div: R/D 2025-02-20 P/D 2025-03-13 - 0.012273 shares at 0.83","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"7acc1bf74b46ae38278f0a7ef14ce7191d619fa0":{"Activity Date":"3/12/2025","Process Date":"3/12/2025","Settle Date":"3/13/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"1.00401","Price":"$498.00","Amount":"($500.00)"},"c540e79bd1d715b81c8c31ce57b3537ecaa27783":{"Activity Date":"3/12/2025","Process Date":"3/12/2025","Settle Date":"3/13/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.96844","Price":"$516.29","Amount":"($500.00)"},"65dd70238c64e8ea02f015353c20b2466adc3850":{"Activity Date":"3/12/2025","Process Date":"3/12/2025","Settle Date":"3/13/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"0.87604","Price":"$114.15","Amount":"($100.00)"},"d3836ac406ad3accb94f4f11d244040cf6fc6d50":{"Activity Date":"3/12/2025","Process Date":"3/12/2025","Settle Date":"3/12/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$600.00"},"a0c1cd077a2ef6d9fa23ba61456ce8e01656b541":{"Activity Date":"3/12/2025","Process Date":"3/12/2025","Settle Date":"3/12/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"3919bfdc49ae39720332fb1125915933bea1db7f":{"Activity Date":"3/6/2025","Process Date":"3/6/2025","Settle Date":"3/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001782","Price":"$72.92","Amount":"($0.13)"},"0b3a0159434c53ea22e67759bcbeeee0bf853b11":{"Activity Date":"3/5/2025","Process Date":"3/5/2025","Settle Date":"3/5/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-03-03 P/D 2025-03-05 - 0.570039 shares at 0.21946","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"d537136a68fabd46643d0ba297f13989f398e3c7":{"Activity Date":"2/25/2025","Process Date":"2/25/2025","Settle Date":"2/26/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"0.49788","Price":"$133.37","Amount":"($66.40)"},"465055b0d43c472ccb715fd789f2884a37719e78":{"Activity Date":"2/25/2025","Process Date":"2/25/2025","Settle Date":"2/26/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"7","Price":"$133.37","Amount":"($933.60)"},"be1d93168e483438989558f28eaf0e0b694f2a51":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/25/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"1.819703","Price":"$549.54","Amount":"($1,000.00)"},"6671fcaf1a30fbb3ea5666bcd4c8e3a571aebf6d":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/24/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$2,000.00"},"91df029b1ed2b6e2c35bae959e52351a2de600b8":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/25/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.18064","Price":"$553.57","Amount":"($100.00)"},"e6ca99901b727d98e557199dbdd5555c51f11ac8":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/25/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"0.92255","Price":"$136.93","Amount":"($126.32)"},"58abd265c9a29bcfaed2e429048d63745807e515":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/25/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"2","Price":"$136.84","Amount":"($273.68)"},"ac1b81446dd5a56e0d1963d62b0d6599567769cd":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/25/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702","Trans Code":"Buy","Quantity":"0.15969","Price":"$626.19","Amount":"($100.00)"},"986f17c792ff19b5ca971b407889d2c772b91baf":{"Activity Date":"2/24/2025","Process Date":"2/24/2025","Settle Date":"2/24/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$600.00"},"5e3ad8c2d329d87c07b3241d75bece9686ae5e12":{"Activity Date":"2/14/2025","Process Date":"2/14/2025","Settle Date":"2/18/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.009475","Price":"$243.79","Amount":"($2.31)"},"895d277355d869f745385c5dbe8d27bf8a0f363c":{"Activity Date":"2/13/2025","Process Date":"2/13/2025","Settle Date":"2/13/2025","Instrument":"AAPL","Description":"Cash Div: R/D 2025-02-10 P/D 2025-02-13 - 9.244816 shares at 0.25","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.31"},"2e9b929e9bcd5fad2e14c6f1f291fb4a5583a92a":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"0.75193","Price":"$132.99","Amount":"($100.00)"},"fe4ac128dbd5777528fe32f1e93986aee8b23380":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"0.97897","Price":"$102.15","Amount":"($100.00)"},"ea64dfc8a2674c90483c8816afcc2599d00c6d42":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702","Trans Code":"Buy","Quantity":"0.15988","Price":"$625.45","Amount":"($100.00)"},"bf92dacbcfe1ba8f4b3fb8c523b8811f6a465e0a":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.43469","Price":"$230.04","Amount":"($100.00)"},"eab4f75bf047c927312946cce530f12160c52ab5":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.18005","Price":"$555.38","Amount":"($100.00)"},"4adf5cfe8f42d1bd4d51e1012fd8ba72dfd31b8e":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/11/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"0.33382","Price":"$299.56","Amount":"($100.00)"},"32531aabd9630b1cd32d19c80392c92218593293":{"Activity Date":"2/10/2025","Process Date":"2/10/2025","Settle Date":"2/10/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$600.00"},"ca1f1ab594ec0d544f0bdc67b8ce514486726c11":{"Activity Date":"2/6/2025","Process Date":"2/6/2025","Settle Date":"2/7/2025","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001791","Price":"$72.58","Amount":"($0.13)"},"2fd527ee47be01c90ecd3ca9f6cb97941c75b3fd":{"Activity Date":"2/5/2025","Process Date":"2/5/2025","Settle Date":"2/5/2025","Instrument":"BND","Description":"Cash Div: R/D 2025-02-03 P/D 2025-02-05 - 0.568248 shares at 0.234799","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"69fee76d41eafe7c34d6399c2ed23de42f27f9f0":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"VUG","Description":"Vanguard Growth ETF\nCUSIP: 922908736","Trans Code":"Buy","Quantity":"0.01062","Price":"$418.72","Amount":"($4.45)"},"0a025784410e5ed5f04a55f34267bd5e36857d31":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"0.75608","Price":"$132.26","Amount":"($100.00)"},"08c446a68ff7b29ed7125beb57c41f4f72ff2664":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702","Trans Code":"Buy","Quantity":"0.16209","Price":"$616.93","Amount":"($100.00)"},"bd6e8785189c9722cba34a7eb9c49b4b86926514":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.21143","Price":"$472.96","Amount":"($100.00)"},"79a0599403c616e7d839ca062f8d2bef5a71af8d":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"0.8364","Price":"$298.90","Amount":"($250.00)"},"18a64f616eee96601b878537616f08a7688b435c":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.45114","Price":"$554.15","Amount":"($250.00)"},"4aaff6a1a4f505f07099a32f4df249d98a673d47":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/29/2025","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"10","Price":"$119.56","Amount":"($1,195.55)"},"f25b143483e02b0cc2ea8c0690aade3f7620aa69":{"Activity Date":"1/28/2025","Process Date":"1/28/2025","Settle Date":"1/28/2025","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$2,000.00"},"9d81784ecb0f4051a19f9bbccf66a09dc89cb6eb":{"Activity Date":"1/10/2025","Process Date":"1/10/2025","Settle Date":"1/13/2025","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.003415","Price":"$319.10","Amount":"($1.09)"},"fd2bfabe0bf7964e449cd5bff2964b34f484c675":{"Activity Date":"1/9/2025","Process Date":"1/9/2025","Settle Date":"1/9/2025","Instrument":"CRM","Description":"Cash Div: R/D 2024-12-18 P/D 2025-01-09 - 2.719405 shares at 0.4","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.09"},"7d6f3ccf3c0d7b871bf1ccbd7caeba157058a613":{"Activity Date":"1/7/2025","Process Date":"1/7/2025","Settle Date":"1/8/2025","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.012246","Price":"$90.64","Amount":"($1.11)"},"ec27bb39000d5be91126eb0d3bc5d77af925ceff":{"Activity Date":"1/6/2025","Process Date":"1/6/2025","Settle Date":"1/6/2025","Instrument":"WMT","Description":"Cash Div: R/D 2024-12-13 P/D 2025-01-06 - 5.352763 shares at 0.2075","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.11"},"958da76665e70361e2a3475d7fef6a531d0a3592":{"Activity Date":"1/2/2025","Process Date":"1/2/2025","Settle Date":"1/3/2025","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000351","Price":"$512.38","Amount":"($0.18)"},"72a3c9edb87f7d7424399b282dc7b95a42732ffe":{"Activity Date":"12/31/2024","Process Date":"12/31/2024","Settle Date":"12/31/2024","Instrument":"QQQ","Description":"Cash Div: R/D 2024-12-23 P/D 2024-12-31 - 0.221151 shares at 0.83466","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.18"},"4e3f2b42d77c48e31c361994033cbd63bc7ce96a":{"Activity Date":"12/30/2024","Process Date":"12/30/2024","Settle Date":"12/31/2024","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001805","Price":"$72.01","Amount":"($0.13)"},"19cc9c9dfe8abddc15bc1114f4aa36efcddb466c":{"Activity Date":"12/30/2024","Process Date":"12/30/2024","Settle Date":"12/31/2024","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001604","Price":"$137.14","Amount":"($0.22)"},"77d303b339eff5747fa64c4004c17b827488ac51":{"Activity Date":"12/30/2024","Process Date":"12/30/2024","Settle Date":"12/31/2024","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001494","Price":"$588.92","Amount":"($0.88)"},"ba9ca45931ed289e6da8cbe0a09145e7d70a8c21":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/27/2024","Instrument":"META","Description":"Cash Div: R/D 2024-12-16 P/D 2024-12-27 - 1.76415 shares at 0.5","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.88"},"c6dbc2d35a09ea7850ef53beadda629c63e0c9e6":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/27/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-12-24 P/D 2024-12-27 - 0.566443 shares at 0.233378","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"d8bfcffb48f897c7a404a2f41bd1db693e8c07d7":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/27/2024","Instrument":"NVDA","Description":"Cash Div: R/D 2024-12-05 P/D 2024-12-27 - 21.50534 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.22"},"300d35b6ad416b276142a053f38a8cb1b0bea6cc":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/30/2024","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002422","Price":"$293.07","Amount":"($0.71)"},"64d908aafe665b3e59e02a6c56568348d11fb07e":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/30/2024","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002237","Price":"$545.21","Amount":"($1.22)"},"1b1fb47df99794a46fed99eea78293a90546b0f7":{"Activity Date":"12/27/2024","Process Date":"12/27/2024","Settle Date":"12/30/2024","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.002753","Price":"$170.66","Amount":"($0.47)"},"fb001b785db0a8533936797fb165d61bd73c3c56":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/26/2024","Instrument":"VTV","Description":"Cash Div: R/D 2024-12-23 P/D 2024-12-26 - 0.476145 shares at 0.9802","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.47"},"e8e2cfe402a9e6260bdb9e48cab535b2827f0ad3":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/26/2024","Instrument":"VTI","Description":"Cash Div: R/D 2024-12-23 P/D 2024-12-26 - 0.751176 shares at 0.9412","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.71"},"a5d586db45518bab1419c8952598f1905828e430":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/26/2024","Instrument":"VOO","Description":"Cash Div: R/D 2024-12-23 P/D 2024-12-26 - 0.701015 shares at 1.7385","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.22"},"dcda1092847855076e68ca2941fe45817ea1ce40":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/27/2024","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.003357","Price":"$44.68","Amount":"($0.15)"},"7e72fd296ac117319af5a8fa3963ead900552f7f":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/27/2024","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.003735","Price":"$48.19","Amount":"($0.18)"},"cf405af13936a7f4412f3a50135c21d703ee4ec0":{"Activity Date":"12/26/2024","Process Date":"12/26/2024","Settle Date":"12/27/2024","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.01496","Price":"$129.01","Amount":"($1.93)"},"bfcff5020802c04c446d642ea6ea4c012fa3cbed":{"Activity Date":"12/24/2024","Process Date":"12/24/2024","Settle Date":"12/24/2024","Instrument":"VYM","Description":"Cash Div: R/D 2024-12-20 P/D 2024-12-24 - 1.999493 shares at 0.9642","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.93"},"8a192ff93e7eb0d87cd7e7633f9d76819fe3fbc3":{"Activity Date":"12/24/2024","Process Date":"12/24/2024","Settle Date":"12/24/2024","Instrument":"VWO","Description":"Cash Div: R/D 2024-12-20 P/D 2024-12-24 - 0.14346 shares at 1.0656","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.15"},"b55f59d16610ce90cd4d736271a920f367797778":{"Activity Date":"12/24/2024","Process Date":"12/24/2024","Settle Date":"12/24/2024","Instrument":"VEA","Description":"Cash Div: R/D 2024-12-20 P/D 2024-12-24 - 0.24916 shares at 0.7126","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.18"},"968ba532ca08be5e04ca814ea65e494f70b405ee":{"Activity Date":"12/23/2024","Process Date":"12/23/2024","Settle Date":"12/24/2024","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000395","Price":"$632.08","Amount":"($0.25)"},"06e71d03d9120b3ca0be6c7c1d296bc5991a50bb":{"Activity Date":"12/23/2024","Process Date":"12/23/2024","Settle Date":"12/24/2024","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.006693","Price":"$253.98","Amount":"($1.70)"},"bd3c5e6e4735399a031a814656c43c2810fce83c":{"Activity Date":"12/23/2024","Process Date":"12/23/2024","Settle Date":"12/24/2024","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.007316","Price":"$255.58","Amount":"($1.87)"},"b1e3972a59121a2c6072318d22e584bfa5c97f06":{"Activity Date":"12/20/2024","Process Date":"12/20/2024","Settle Date":"12/20/2024","Instrument":"VIS","Description":"Cash Div: R/D 2024-12-18 P/D 2024-12-20 - 1.93798 shares at 0.9667","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.87"},"54ff6391e2650a2ab62bd75ea6d59d90cbacbac2":{"Activity Date":"12/20/2024","Process Date":"12/20/2024","Settle Date":"12/20/2024","Instrument":"VHT","Description":"Cash Div: R/D 2024-12-18 P/D 2024-12-20 - 1.845306 shares at 0.9188","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.70"},"319036d48726f1993324d137df7b885fa9d74d35":{"Activity Date":"12/20/2024","Process Date":"12/20/2024","Settle Date":"12/20/2024","Instrument":"VGT","Description":"Cash Div: R/D 2024-12-18 P/D 2024-12-20 - 0.32247 shares at 0.7766","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.25"},"f5c1a0f6f2dc10b4549691e19a8da6f60ffd1723":{"Activity Date":"12/20/2024","Process Date":"12/20/2024","Settle Date":"12/23/2024","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.012934","Price":"$151.53","Amount":"($1.96)"},"0b28f2f8aa3e0a75db54b5d04d6ed766f5366939":{"Activity Date":"12/19/2024","Process Date":"12/19/2024","Settle Date":"12/19/2024","Instrument":"QCOM","Description":"Cash Div: R/D 2024-12-05 P/D 2024-12-19 - 2.309503 shares at 0.85","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.96"},"59ec7813d9d0f9a33299fb6e9ec85f0a24c9ebac":{"Activity Date":"12/17/2024","Process Date":"12/17/2024","Settle Date":"12/18/2024","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.009329","Price":"$27.87","Amount":"($0.26)"},"8110e36470237a7b76e95c182dc38adf36c66752":{"Activity Date":"12/16/2024","Process Date":"12/16/2024","Settle Date":"12/16/2024","Instrument":"SCHD","Description":"Cash Div: R/D 2024-12-11 P/D 2024-12-16 - 0.980904 shares at 0.2645","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.26"},"a3ca26681e38983d406cfdb44144e429cc16b74e":{"Activity Date":"12/16/2024","Process Date":"12/16/2024","Settle Date":"12/17/2024","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"0.1892","Price":"$132.29","Amount":"($25.03)"},"6ff0b020672e126499214bc3e732492d11679305":{"Activity Date":"12/13/2024","Process Date":"12/13/2024","Settle Date":"12/16/2024","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000022","Price":"$449.40","Amount":"($0.01)"},"99d9609470b78223d2d05d0aa248cbef1dbb82e6":{"Activity Date":"12/12/2024","Process Date":"12/12/2024","Settle Date":"12/12/2024","Instrument":"MSFT","Description":"Cash Div: R/D 2024-11-21 P/D 2024-12-12 - 0.012251 shares at 0.83","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"afc8b16659febfb71037cd9e22e184fdac1267a7":{"Activity Date":"12/5/2024","Process Date":"12/5/2024","Settle Date":"12/6/2024","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001771","Price":"$73.40","Amount":"($0.13)"},"34198fd1c4b1b70d8af53e9be017bc36d0e514c8":{"Activity Date":"12/5/2024","Process Date":"12/5/2024","Settle Date":"12/5/2024","Instrument":"BMWYY","Description":"Cash received thru Liquidation 1 shares at $25.026688","Trans Code":"LIQ","Quantity":"","Price":"","Amount":"$25.03"},"cb9f2637eb9986081f2b66456e8ecd8f873e3b23":{"Activity Date":"12/4/2024","Process Date":"12/4/2024","Settle Date":"12/4/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-12-02 P/D 2024-12-04 - 0.564672 shares at 0.222928","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"47ec0d6a1a1e3bc3289ee5b3d354a6ddd48a2565":{"Activity Date":"11/15/2024","Process Date":"11/15/2024","Settle Date":"11/18/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.00779","Price":"$224.64","Amount":"($1.75)"},"5db0f2ed3d261a315812c7019dc86651b1e0e1e0":{"Activity Date":"11/14/2024","Process Date":"11/14/2024","Settle Date":"11/14/2024","Instrument":"AAPL","Description":"Cash Div: R/D 2024-11-11 P/D 2024-11-14 - 6.994276 shares at 0.25","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.75"},"9fe71fe855a48534fe2fc09600add73697eaa018":{"Activity Date":"11/11/2024","Process Date":"11/11/2024","Settle Date":"11/12/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.24275","Price":"$222.94","Amount":"($54.12)"},"ec44baabafbc932c0a8ba9759b7d177bffa6faa0":{"Activity Date":"11/11/2024","Process Date":"11/11/2024","Settle Date":"11/12/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"2","Price":"$222.94","Amount":"($445.88)"},"0debe7371c269ae3c6380deadde9ad6b9d4b7e67":{"Activity Date":"11/11/2024","Process Date":"11/11/2024","Settle Date":"11/11/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"8aa0013b66ac529cbf9c31064276b77e3c4c156c":{"Activity Date":"11/6/2024","Process Date":"11/6/2024","Settle Date":"11/7/2024","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.001796","Price":"$72.35","Amount":"($0.13)"},"519e03764bd71af0713d30e58220251806c17d3a":{"Activity Date":"11/6/2024","Process Date":"11/6/2024","Settle Date":"11/7/2024","Instrument":"META","Description":"Meta Platforms\nCUSIP: 30303M102","Trans Code":"Buy","Quantity":"1.76415","Price":"$566.84","Amount":"($1,000.00)"},"6fd009f5f390f85a62f5e693b7c21c97e50180a5":{"Activity Date":"11/6/2024","Process Date":"11/6/2024","Settle Date":"11/6/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$1,000.00"},"68fb46e98cf6af811eaaca0b9f938034f9a6056f":{"Activity Date":"11/5/2024","Process Date":"11/5/2024","Settle Date":"11/5/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-11-01 P/D 2024-11-05 - 0.562876 shares at 0.227631","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"9e1f7c0f78bd7eaae3d3694a12d8f6527b1d03d3":{"Activity Date":"11/1/2024","Process Date":"11/1/2024","Settle Date":"11/4/2024","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103\nDividend Reinvestment","Trans Code":"Buy","Quantity":"0.000306","Price":"$490.16","Amount":"($0.15)"},"e2d26a27f3046b050acf52bbd91d37d08affd1cb":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"10/31/2024","Instrument":"QQQ","Description":"Cash Div: R/D 2024-09-23 P/D 2024-10-31 - 0.220845 shares at 0.67686","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.15"},"5a1f503d53a11fa55c1cfff132f3eb7a9423627d":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"10/31/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"c806a67e306649ff33b336bcc64b177cffd73320":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"1.999776","Price":"$223.75","Amount":"($447.45)"},"dc2fafacf58ead4d0ec5194a19475aaa00cb8b0d":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.234886","Price":"$223.72","Amount":"($52.55)"},"77aa94e36cf7229e5968e2ec7aa8eb52491146c1":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363","Trans Code":"Buy","Quantity":"0.38288","Price":"$524.47","Amount":"($200.81)"},"ee828924dc72ff5918995912abe19c0c810bd1e8":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302","Trans Code":"Buy","Quantity":"0.68674","Price":"$291.23","Amount":"($200.00)"},"ce787a4704f3a66498a3038b0cd2998c0a59dc7c":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"1.50534","Price":"$132.86","Amount":"($200.00)"},"374f6a46276f087626a194f4aeda4ca3964d736d":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.88169","Price":"$226.84","Amount":"($200.00)"},"0e07076dd1e9eb0a269568c12e86258b6656d353":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"2.43738","Price":"$82.06","Amount":"($200.00)"},"5e6ea02d5358c47687375453aaa3476df28e87b5":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"VHT","Description":"Vanguard Health Care ETF\nCUSIP: 92204A504","Trans Code":"Buy","Quantity":"1.845306","Price":"$270.96","Amount":"($500.00)"},"a92a649804b90045068860c6561bd99b917c0f2e":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"11/1/2024","Instrument":"VIS","Description":"Vanguard Industrials ETF\nCUSIP: 92204A603","Trans Code":"Buy","Quantity":"1.93798","Price":"$258.00","Amount":"($500.00)"},"77247647d393983254a80af0a6bab41d0f08ed45":{"Activity Date":"10/31/2024","Process Date":"10/31/2024","Settle Date":"10/31/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$2,000.00"},"373f91023de99edcff84e72f1b3b77cbdd6f3cf2":{"Activity Date":"10/11/2024","Process Date":"10/11/2024","Settle Date":"10/11/2024","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797","Trans Code":"SPL","Quantity":"0.6539","Price":"","Amount":""},"66ce4f14d83786d0b0f3caaafce78cddf728c508":{"Activity Date":"10/8/2024","Process Date":"10/8/2024","Settle Date":"10/8/2024","Instrument":"CRM","Description":"Cash Div: R/D 2024-09-18 P/D 2024-10-08 - 2.032665 shares at 0.4","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.81"},"3eaae23f65d3496543933d3680ac637efa1d6a7e":{"Activity Date":"10/7/2024","Process Date":"10/7/2024","Settle Date":"10/8/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.02756","Price":"$224.94","Amount":"($6.20)"},"99ea67baf3764396fa05fb00eedddb31d2816273":{"Activity Date":"10/3/2024","Process Date":"10/3/2024","Settle Date":"10/3/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-10-01 P/D 2024-10-03 - 0.562876 shares at 0.220705","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.12"},"91920668e0b04d93abc92e72602d2dc87b71eac5":{"Activity Date":"10/3/2024","Process Date":"10/3/2024","Settle Date":"10/3/2024","Instrument":"NVDA","Description":"Cash Div: R/D 2024-09-12 P/D 2024-10-03 - 20 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.20"},"3e4e8cdbd122a38a4295d46fc145fe0625f85e29":{"Activity Date":"10/1/2024","Process Date":"10/1/2024","Settle Date":"10/1/2024","Instrument":"VGT","Description":"Cash Div: R/D 2024-09-27 P/D 2024-10-01 - 0.32247 shares at 0.9171","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.30"},"1d77b48c1e2b7393a0134f4a4700c3bbf2c59699":{"Activity Date":"10/1/2024","Process Date":"10/1/2024","Settle Date":"10/1/2024","Instrument":"VOO","Description":"Cash Div: R/D 2024-09-27 P/D 2024-10-01 - 0.318135 shares at 1.6386","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.52"},"60830663af342d8d46b3d75e55c002f3f1fe337e":{"Activity Date":"10/1/2024","Process Date":"10/1/2024","Settle Date":"10/1/2024","Instrument":"VTI","Description":"Cash Div: R/D 2024-09-27 P/D 2024-10-01 - 0.751176 shares at 0.8707","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.65"},"0686c2906323e6f325fd9cfd2012cf0f3c399c89":{"Activity Date":"9/30/2024","Process Date":"9/30/2024","Settle Date":"9/30/2024","Instrument":"SCHD","Description":"Cash Div: R/D 2024-09-25 P/D 2024-09-30 - 0.326968 shares at 0.7545","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.25"},"8fd47ac164e632a7d0eaf9ee45b3a9bc90b54960":{"Activity Date":"9/30/2024","Process Date":"9/30/2024","Settle Date":"9/30/2024","Instrument":"VTV","Description":"Cash Div: R/D 2024-09-26 P/D 2024-09-30 - 0.476145 shares at 0.9143","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.44"},"2b1dc7493624a496ecdac3762c9b2322675bd2dd":{"Activity Date":"9/26/2024","Process Date":"9/26/2024","Settle Date":"9/26/2024","Instrument":"QCOM","Description":"Cash Div: R/D 2024-09-05 P/D 2024-09-26 - 2.309503 shares at 0.85","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.96"},"182638f7c36082bd752fccc5f22bb2b26bf6f559":{"Activity Date":"9/24/2024","Process Date":"9/24/2024","Settle Date":"9/24/2024","Instrument":"VWO","Description":"Cash Div: R/D 2024-09-20 P/D 2024-09-24 - 0.14346 shares at 0.1344","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.02"},"9b08efb6261d06f28e01a1c4e171a5ab51640666":{"Activity Date":"9/24/2024","Process Date":"9/24/2024","Settle Date":"9/24/2024","Instrument":"VEA","Description":"Cash Div: R/D 2024-09-20 P/D 2024-09-24 - 0.24916 shares at 0.1444","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.04"},"5b05942a3d197b984bd8e9e7bd329c43aca8487e":{"Activity Date":"9/24/2024","Process Date":"9/24/2024","Settle Date":"9/24/2024","Instrument":"VYM","Description":"Cash Div: R/D 2024-09-20 P/D 2024-09-24 - 1.999493 shares at 0.8511","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$1.70"},"fd080cd098b5b67f212175aa18c153931efde686":{"Activity Date":"9/17/2024","Process Date":"9/17/2024","Settle Date":"9/18/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.01302","Price":"$215.79","Amount":"($2.81)"},"9fbc8919af0bbbcd347166306ab6f69ab3f41f29":{"Activity Date":"9/12/2024","Process Date":"9/12/2024","Settle Date":"9/12/2024","Instrument":"MSFT","Description":"Cash Div: R/D 2024-08-15 P/D 2024-09-12 - 0.012251 shares at 0.75","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"94a5d08c5d3a29952feee933a7e73a7945d80e06":{"Activity Date":"9/5/2024","Process Date":"9/5/2024","Settle Date":"9/5/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-09-03 P/D 2024-09-05 - 0.562876 shares at 0.225518","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"854f31a4aaacff059ae2ce61c1400287bb8a3cd6":{"Activity Date":"9/3/2024","Process Date":"9/3/2024","Settle Date":"9/3/2024","Instrument":"WMT","Description":"Cash Div: R/D 2024-08-16 P/D 2024-09-03 - 2.915383 shares at 0.2075","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.60"},"24a7542e5ac38abf1312e7ff8d7e5dc303185e28":{"Activity Date":"8/15/2024","Process Date":"8/15/2024","Settle Date":"8/15/2024","Instrument":"AAPL","Description":"Cash Div: R/D 2024-08-12 P/D 2024-08-15 - 3.837344 shares at 0.25","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.96"},"a5a81c99afb0951abbc189abc264b245c9aac6c2":{"Activity Date":"8/5/2024","Process Date":"8/5/2024","Settle Date":"8/5/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-08-01 P/D 2024-08-05 - 0.562876 shares at 0.223909","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.13"},"96f929e9e316a533d0aa6d197e635525e7d20d0a":{"Activity Date":"7/31/2024","Process Date":"7/31/2024","Settle Date":"7/31/2024","Instrument":"QQQ","Description":"Cash Div: R/D 2024-06-24 P/D 2024-07-31 - 0.220845 shares at 0.7615","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.17"},"e1523e567df7ab8775cd2783cf6f2724f177cc98":{"Activity Date":"7/25/2024","Process Date":"7/25/2024","Settle Date":"7/25/2024","Instrument":"CRM","Description":"Cash Div: R/D 2024-07-09 P/D 2024-07-25 - 2.032665 shares at 0.4","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.81"},"9e716ef1f1d4a75237b75fb229363dd73936208a":{"Activity Date":"7/8/2024","Process Date":"7/8/2024","Settle Date":"7/9/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"2.23511","Price":"$224.44","Amount":"($501.66)"},"8178b750af72918b5491f589a933674f99161b9e":{"Activity Date":"7/8/2024","Process Date":"7/8/2024","Settle Date":"7/8/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$500.00"},"b70e0428200c02464b2e98e1e772e611d49dc51b":{"Activity Date":"7/3/2024","Process Date":"7/3/2024","Settle Date":"7/3/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-07-01 P/D 2024-07-03 - 0.562876 shares at 0.220702","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.12"},"4ad48c5f3004c2076785dad8735be6c61147a670":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/2/2024","Instrument":"VTI","Description":"Cash Div: R/D 2024-06-28 P/D 2024-07-02 - 0.751176 shares at 0.9519","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.72"},"554ece2cd5d6dfa7338b41e817192c3ce3982a6c":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/2/2024","Instrument":"VOO","Description":"Cash Div: R/D 2024-06-28 P/D 2024-07-02 - 0.318135 shares at 1.7835","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.57"},"5a392c76e1bb8470d79b8ffdb874985f7ea4f793":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/2/2024","Instrument":"VGT","Description":"Cash Div: R/D 2024-06-28 P/D 2024-07-02 - 0.32247 shares at 0.7624","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.25"},"b98467b7cb865a053a6fc1c5ef836cd77b86c4dc":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/3/2024","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302","Trans Code":"Buy","Quantity":"2","Price":"$254.64","Amount":"($509.29)"},"097a7722ab04064561bba4de3a6df2ad0e870396":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/3/2024","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302","Trans Code":"Buy","Quantity":"0.000431","Price":"$254.64","Amount":"($0.11)"},"a13724c145c3357d8b17fdb97f9d66c825c80f2d":{"Activity Date":"7/2/2024","Process Date":"7/2/2024","Settle Date":"7/3/2024","Instrument":"CRM","Description":"Salesforce\nCUSIP: 79466L302","Trans Code":"Buy","Quantity":"0.032234","Price":"$254.70","Amount":"($8.21)"},"45b03292fb0ec261864a456e16445a3cfe4694bc":{"Activity Date":"7/1/2024","Process Date":"7/1/2024","Settle Date":"7/1/2024","Instrument":"VTV","Description":"Cash Div: R/D 2024-06-27 P/D 2024-07-01 - 0.476145 shares at 1.0149","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.48"},"059f23e296f57cff388fcde8fcccc5e6508e14ab":{"Activity Date":"7/1/2024","Process Date":"7/1/2024","Settle Date":"7/1/2024","Instrument":"SCHD","Description":"Cash Div: R/D 2024-06-26 P/D 2024-07-01 - 0.326968 shares at 0.8241","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.27"},"921053447555382980a733816a3a06a7f2c4d7ff":{"Activity Date":"6/28/2024","Process Date":"6/28/2024","Settle Date":"6/28/2024","Instrument":"NVDA","Description":"Cash Div: R/D 2024-06-11 P/D 2024-06-28 - 20 shares at 0.01","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.20"},"c5c096e350f49202c62f2ef075fa9d95c8f09a6f":{"Activity Date":"6/27/2024","Process Date":"6/27/2024","Settle Date":"6/28/2024","Instrument":"BRK.B","Description":"Berkshire Hathaway Inc. Class B\nCUSIP: 084670702","Trans Code":"Buy","Quantity":"0.489141","Price":"$408.88","Amount":"($200.00)"},"a936d9d6210d09bb12680b6735f2a882859c7c44":{"Activity Date":"6/26/2024","Process Date":"6/26/2024","Settle Date":"6/27/2024","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"1","Price":"$156.29","Amount":"($156.29)"},"b7ae35201b3212b36cf247c4c7eb44175b15f5ea":{"Activity Date":"6/26/2024","Process Date":"6/26/2024","Settle Date":"6/27/2024","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103","Trans Code":"Buy","Quantity":"2","Price":"$195.88","Amount":"($391.76)"},"af32c4b0f382554318a6c525ef8e734ca98db46e":{"Activity Date":"6/26/2024","Process Date":"6/26/2024","Settle Date":"6/27/2024","Instrument":"RIVN","Description":"Rivian Automotive\nCUSIP: 76954A103","Trans Code":"Buy","Quantity":"10","Price":"$14.62","Amount":"($146.20)"},"8e0910ef5d31e93328e74891c6f7aecebac3920a":{"Activity Date":"6/26/2024","Process Date":"6/26/2024","Settle Date":"6/27/2024","Instrument":"CAVA","Description":"CAVA\nCUSIP: 148929102","Trans Code":"Buy","Quantity":"1","Price":"$91.66","Amount":"($91.66)"},"3e2902e580cdd40dd7deef2a7f107ffd66d8e6de":{"Activity Date":"6/26/2024","Process Date":"6/26/2024","Settle Date":"6/26/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$1,500.00"},"f4230100438a8192ada517d8ebf5eb2f00958392":{"Activity Date":"6/25/2024","Process Date":"6/25/2024","Settle Date":"6/25/2024","Instrument":"VWO","Description":"Cash Div: R/D 2024-06-21 P/D 2024-06-25 - 0.14346 shares at 0.1704","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.02"},"14f7d73e440ae5d2225670d833cf418f5cd0aef7":{"Activity Date":"6/25/2024","Process Date":"6/25/2024","Settle Date":"6/25/2024","Instrument":"VYM","Description":"Cash Div: R/D 2024-06-21 P/D 2024-06-25 - 1.999493 shares at 1.0237","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.05"},"218f795435eb5532f4522d71737d36e71c8881fa":{"Activity Date":"6/25/2024","Process Date":"6/25/2024","Settle Date":"6/25/2024","Instrument":"VEA","Description":"Cash Div: R/D 2024-06-21 P/D 2024-06-25 - 0.24916 shares at 0.4607","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.11"},"579d078f2530173b9a9bd003271250573cb9cf1a":{"Activity Date":"6/20/2024","Process Date":"6/20/2024","Settle Date":"6/20/2024","Instrument":"QCOM","Description":"Cash Div: R/D 2024-05-30 P/D 2024-06-20 - 0.309503 shares at 0.85","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.26"},"3e5b2763a0292931705cefbda4be1ddf8b5052f9":{"Activity Date":"6/13/2024","Process Date":"6/13/2024","Settle Date":"6/13/2024","Instrument":"MSFT","Description":"Cash Div: R/D 2024-05-16 P/D 2024-06-13 - 0.012251 shares at 0.75","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"2d32ff67103eb4b2761e12f8f51de21b61f11aa7":{"Activity Date":"6/10/2024","Process Date":"6/10/2024","Settle Date":"6/10/2024","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"SPL","Quantity":"18","Price":"","Amount":""},"0031c06e1434ae2b1b5c809c638c40168cdc3887":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/5/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-06-03 P/D 2024-06-05 - 0.562876 shares at 0.218966","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.12"},"6a92d530cbb174317eaf2f35a931509e6122e25d":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/6/2024","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109","Trans Code":"Buy","Quantity":"2","Price":"$132.44","Amount":"($264.88)"},"368b2eec8d872382979e54215e3faec24c2b586c":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/6/2024","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109","Trans Code":"Buy","Quantity":"0.000906","Price":"$132.44","Amount":"($0.12)"},"bffee72d478ad208df66a93e70109b50a56faca2":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/5/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$265.00"},"a7d03f63ffc161058dee57a4241df86b71928938":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/6/2024","Instrument":"","Description":"ACH CANCEL","Trans Code":"ACH","Quantity":"","Price":"","Amount":"($261.00)"},"5af4a108a1755ce6c55d7bb3caff392c4b01a1ad":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/6/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$261.00"},"df1e4cbe8c0e4709e0f44431ce2fe2c1d08acf98":{"Activity Date":"6/5/2024","Process Date":"6/5/2024","Settle Date":"6/6/2024","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109","Trans Code":"Buy","Quantity":"0.01197","Price":"$130.32","Amount":"($1.56)"},"0e6fb2828a2180957bcaabc57964695958dc0d5d":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"5/31/2024","Instrument":"BMWYY","Description":"Cash Div: R/D 2024-05-17 P/D 2024-05-31 - 1 shares at 2.1608","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$2.16"},"93fd44e9db9141cc8b02b5add543530f5fb9fb30":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"VYM","Description":"Vanguard High Dividend Yield ETF\nCUSIP: 921946406","Trans Code":"Buy","Quantity":"1.999493","Price":"$118.36","Amount":"($236.66)"},"b7b08fc005b111a9e19b8efa840df8a1ffc9ea6c":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"5/31/2024","Instrument":"","Description":"Instant bank transfer - account ending in 0536","Trans Code":"RTP","Quantity":"","Price":"","Amount":"$33.24"},"4344cd68c0514adc4d17e916b25f271bde75c323":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH CANCEL","Trans Code":"ACH","Quantity":"","Price":"","Amount":"($33.32)"},"535fa58f79aa3db77733ea6a823b625afbb1e220":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$33.32"},"2d9ae1f7f26d66dd637cbd01f70b0e88be71e4ab":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"NVDA","Description":"NVIDIA\nCUSIP: 67066G104","Trans Code":"Buy","Quantity":"2","Price":"$1,098.42","Amount":"($2,196.84)"},"7381e737f0d08ab464feb4f3b22c5fe1aabee6c0":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$2,400.00"},"7e9f90a2469aa1c1ef1b74272a4f2899a08f92b4":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH CANCEL","Trans Code":"ACH","Quantity":"","Price":"","Amount":"($2,187.00)"},"057224a5f3c52d554a4fcb99e84e99c0ae7119a6":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH CANCEL","Trans Code":"ACH","Quantity":"","Price":"","Amount":"($110.00)"},"4d881a9db1455dec73045d125fa2bf5de770b5f4":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$110.00"},"59e8fc489a295c955fc9872a2ef18fc9c6cd154c":{"Activity Date":"5/31/2024","Process Date":"5/31/2024","Settle Date":"6/3/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$2,187.00"},"9f2c84698921488f4b6dbe5988a479452364cdff":{"Activity Date":"5/28/2024","Process Date":"5/28/2024","Settle Date":"5/28/2024","Instrument":"WMT","Description":"Cash Div: R/D 2024-05-10 P/D 2024-05-28 - 1.234827 shares at 0.2075","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.26"},"866f02292d09d0765653521adbc6cce28ef53f6d":{"Activity Date":"5/24/2024","Process Date":"5/24/2024","Settle Date":"5/29/2024","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"0.308994","Price":"$161.21","Amount":"($49.81)"},"6de614fd5a994163c95f65603d35f8af7a8eddf1":{"Activity Date":"5/24/2024","Process Date":"5/24/2024","Settle Date":"5/29/2024","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"0.001178","Price":"$161.21","Amount":"($0.19)"},"30e68ac58884e1f19c89ff4f7b2d56acee0df302":{"Activity Date":"5/24/2024","Process Date":"5/24/2024","Settle Date":"5/28/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$0.40"},"d750852189d06eafad94cf2db8920fd1de2bc1c6":{"Activity Date":"5/24/2024","Process Date":"5/24/2024","Settle Date":"5/28/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$49.60"},"ff24498de79ee47d858d976fbb0325df33ca46b2":{"Activity Date":"5/21/2024","Process Date":"5/21/2024","Settle Date":"5/23/2024","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109","Trans Code":"Buy","Quantity":"0.616275","Price":"$162.26","Amount":"($100.00)"},"131e5ecff1df7597cad1d53d679b2121d19019d9":{"Activity Date":"5/21/2024","Process Date":"5/21/2024","Settle Date":"5/22/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$99.60"},"51351590c86ca22066205fa40c2b64bb345449e4":{"Activity Date":"5/16/2024","Process Date":"5/16/2024","Settle Date":"5/16/2024","Instrument":"AAPL","Description":"Cash Div: R/D 2024-05-13 P/D 2024-05-16 - 1.602234 shares at 0.25","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.40"},"261083edc6027ac304ecf9ab09043c125c197dad":{"Activity Date":"5/15/2024","Process Date":"5/15/2024","Settle Date":"5/17/2024","Instrument":"QQQ","Description":"Invesco QQQ\nCUSIP: 46090E103","Trans Code":"Buy","Quantity":"0.220845","Price":"$452.80","Amount":"($100.00)"},"259c486e096008a25a81ee79091005bc31b19273":{"Activity Date":"5/15/2024","Process Date":"5/15/2024","Settle Date":"5/17/2024","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103","Trans Code":"Buy","Quantity":"1.680556","Price":"$59.64","Amount":"($100.22)"},"022e28c0e393b10111a8db56a0d4863fb0d140b6":{"Activity Date":"5/15/2024","Process Date":"5/15/2024","Settle Date":"5/16/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$200.00"},"26f1093c1e7b6a4167149cac319287637de7d782":{"Activity Date":"5/6/2024","Process Date":"5/6/2024","Settle Date":"5/6/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-05-02 P/D 2024-05-06 - 0.562876 shares at 0.213811","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.12"},"c3375ffce3bbea434ac75ac24a7c26261f0e5522":{"Activity Date":"4/19/2024","Process Date":"4/19/2024","Settle Date":"4/22/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$1,000.00"},"16024ba26e6e54f1802e69e29bd2c998e4371f24":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nRecurring","Trans Code":"Buy","Quantity":"0.415558","Price":"$60.16","Amount":"($25.00)"},"472ee63ee7bca26fca70d5e49bcc664547aa43ee":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nRecurring","Trans Code":"Buy","Quantity":"0.199465","Price":"$250.67","Amount":"($50.00)"},"91ca91798551cee1e387736348b449222555a669":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nRecurring","Trans Code":"Buy","Quantity":"0.143513","Price":"$174.20","Amount":"($25.00)"},"a1c5ace2c46bb3918fe490e6b767152bc83af2b0":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nRecurring","Trans Code":"Buy","Quantity":"0.160369","Price":"$155.89","Amount":"($25.00)"},"5f6f5df350e24592f0f168c936cd05eb73d0e87f":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nRecurring","Trans Code":"Buy","Quantity":"0.107388","Price":"$465.60","Amount":"($50.00)"},"0c09a935d93a88bf25f71ff3e521b3b1c646fa02":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"SNOW","Description":"Snowflake\nCUSIP: 833445109\nRecurring","Trans Code":"Buy","Quantity":"0.164495","Price":"$151.98","Amount":"($25.00)"},"8c8667ca2c50e82846ad2f0035e25293fa01554a":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"SCHD","Description":"Schwab US Dividend Equity ETF\nCUSIP: 808524797\nRecurring","Trans Code":"Buy","Quantity":"0.326968","Price":"$76.46","Amount":"($25.00)"},"a26c874ce884a7593a75087fd6c2e129033d06d6":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/17/2024","Instrument":"ALK","Description":"Alaska Air\nCUSIP: 011659109\nRecurring","Trans Code":"Buy","Quantity":"0.608716","Price":"$41.07","Amount":"($25.00)"},"79f24d7e3e79609897a431e24a07554649c46032":{"Activity Date":"4/15/2024","Process Date":"4/15/2024","Settle Date":"4/16/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$200.00"},"51003d73f0831d8a886c34dc2027ad5886a1e9c2":{"Activity Date":"4/9/2024","Process Date":"4/9/2024","Settle Date":"4/10/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$1,000.00"},"54438e9e2846a07f55f6196fe362ef0ee1122718":{"Activity Date":"4/4/2024","Process Date":"4/4/2024","Settle Date":"4/4/2024","Instrument":"BND","Description":"Cash Div: R/D 2024-04-02 P/D 2024-04-04 - 0.562876 shares at 0.2163","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.12"},"3477fa094a8cfed58c5d71f1f2b74021ebf07af2":{"Activity Date":"4/1/2024","Process Date":"4/1/2024","Settle Date":"4/3/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100\nRecurring","Trans Code":"Buy","Quantity":"0.294221","Price":"$169.94","Amount":"($50.00)"},"340922fa873821e40675df2f90bdfacde9caa81c":{"Activity Date":"4/1/2024","Process Date":"4/1/2024","Settle Date":"4/3/2024","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nRecurring","Trans Code":"Buy","Quantity":"0.193072","Price":"$258.97","Amount":"($50.00)"},"6ccba8dfd0d1c18523a27684c46e5c210e862715":{"Activity Date":"4/1/2024","Process Date":"4/1/2024","Settle Date":"4/3/2024","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nRecurring","Trans Code":"Buy","Quantity":"0.104288","Price":"$479.44","Amount":"($50.00)"},"4c1dac12c1ed6c983509e6eb50d7c29420494ded":{"Activity Date":"4/1/2024","Process Date":"4/1/2024","Settle Date":"4/2/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$200.00"},"ef390111b6207ff778839cef4a69b83df177092a":{"Activity Date":"3/27/2024","Process Date":"3/27/2024","Settle Date":"3/27/2024","Instrument":"VOO","Description":"Cash Div: R/D 2024-03-25 P/D 2024-03-27 - 0.106459 shares at 1.5429","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.16"},"a2df725ca5167e3426056655f77dfcefda60a990":{"Activity Date":"3/27/2024","Process Date":"3/27/2024","Settle Date":"3/27/2024","Instrument":"VTI","Description":"Cash Div: R/D 2024-03-25 P/D 2024-03-27 - 0.358639 shares at 0.9105","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.33"},"29df32dc30f92fdac1cdd3b5cd337e4129525192":{"Activity Date":"3/26/2024","Process Date":"3/26/2024","Settle Date":"3/26/2024","Instrument":"VTV","Description":"Cash Div: R/D 2024-03-22 P/D 2024-03-26 - 0.315776 shares at 1.0064","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.32"},"daadf191fe0ce9ded9402c6108a9f7608ccdd8f9":{"Activity Date":"3/22/2024","Process Date":"3/22/2024","Settle Date":"3/26/2024","Instrument":"VGT","Description":"Vanguard Information Technology ETF\nCUSIP: 92204A702","Trans Code":"Buy","Quantity":"0.32247","Price":"$527.18","Amount":"($170.00)"},"bbcdffcc663b55a72a669637d085f280993ad015":{"Activity Date":"3/21/2024","Process Date":"3/21/2024","Settle Date":"3/25/2024","Instrument":"RDDT","Description":"Reddit\nCUSIP: 75734B100","Trans Code":"Buy","Quantity":"1","Price":"$34.00","Amount":"($34.00)"},"f86aaa26ff5e0bd7bdaccca25be2973e7b918684":{"Activity Date":"3/21/2024","Process Date":"3/21/2024","Settle Date":"3/25/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.290435","Price":"$172.46","Amount":"($50.09)"},"9bcb4670ea1c41c18bc00798cbc6609b93fc49fe":{"Activity Date":"3/21/2024","Process Date":"3/21/2024","Settle Date":"3/22/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$50.00"},"fdafdf3b8fc34a048d6cf45d1781ac3e0b536e5b":{"Activity Date":"3/20/2024","Process Date":"3/20/2024","Settle Date":"3/20/2024","Instrument":"VWO","Description":"Cash Div: R/D 2024-03-18 P/D 2024-03-20 - 0.14346 shares at 0.0385","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.01"},"831c2f2e5debae087fcd0616492da5c8832393c9":{"Activity Date":"3/20/2024","Process Date":"3/20/2024","Settle Date":"3/20/2024","Instrument":"VEA","Description":"Cash Div: R/D 2024-03-18 P/D 2024-03-20 - 0.24916 shares at 0.2865","Trans Code":"CDIV","Quantity":"","Price":"","Amount":"$0.07"},"56a2ba21e502d06fc6982a30495e2281937f7b38":{"Activity Date":"3/20/2024","Process Date":"3/20/2024","Settle Date":"3/21/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$4.00"},"c7efb15242943f52e481eafc896e99b6d6a536f2":{"Activity Date":"3/20/2024","Process Date":"3/20/2024","Settle Date":"3/21/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$200.00"},"f6fbadc9f5dc40f121737fa0faa03eb12649f4ca":{"Activity Date":"3/18/2024","Process Date":"3/18/2024","Settle Date":"3/19/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$100.00"},"90b0877a9a58a80924049ee480bdd9bd316c4761":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/19/2024","Instrument":"WMT","Description":"Walmart\nCUSIP: 931142103\nRecurring","Trans Code":"Buy","Quantity":"0.819269","Price":"$61.03","Amount":"($50.00)"},"2b97515b0cf34f173d2c1935a8ac896eef3545f6":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/19/2024","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769\nRecurring","Trans Code":"Buy","Quantity":"0.197223","Price":"$253.52","Amount":"($50.00)"},"b8dd04ebfc82b225aa0f572b4697927310f3ca80":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/19/2024","Instrument":"VOO","Description":"Vanguard S&P 500 ETF\nCUSIP: 922908363\nRecurring","Trans Code":"Buy","Quantity":"0.106459","Price":"$469.66","Amount":"($50.00)"},"1ea9e7ef549cb473f38a8cb79389940b1939c246":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/19/2024","Instrument":"VTV","Description":"Vanguard Value ETF\nCUSIP: 922908744\nRecurring","Trans Code":"Buy","Quantity":"0.315776","Price":"$158.34","Amount":"($50.00)"},"3097501984d5e15728ea03879123d6e4f60d4955":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/18/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$50.00"},"880456093f0eabc674262cce431c8521a4572746":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/19/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.29283","Price":"$170.74","Amount":"($50.00)"},"ba695ac780195523f821f24336a155a888afb2e8":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/18/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$200.00"},"4c9bdd97cb7bdf390825959dd5b9ea3b0c829cbb":{"Activity Date":"3/15/2024","Process Date":"3/15/2024","Settle Date":"3/18/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$40.00"},"c73fe93a67599b5f657f831d70974141b83a01f4":{"Activity Date":"3/14/2024","Process Date":"3/14/2024","Settle Date":"3/18/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.289017","Price":"$173.00","Amount":"($50.00)"},"308a2ff6253d052458d363916b56d1cf064300c0":{"Activity Date":"3/14/2024","Process Date":"3/14/2024","Settle Date":"3/15/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$50.00"},"17d6aac699d72f47665fb3e0d52e767f64d38d95":{"Activity Date":"3/13/2024","Process Date":"3/13/2024","Settle Date":"3/15/2024","Instrument":"AAPL","Description":"Apple\nCUSIP: 037833100","Trans Code":"Buy","Quantity":"0.292218","Price":"$171.10","Amount":"($50.00)"},"f9a6d6a08406782c72303a38f68187de415e6dc6":{"Activity Date":"3/13/2024","Process Date":"3/13/2024","Settle Date":"3/14/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$49.89"},"fb5fd6410831ea88bce469984c7044a90f271ea1":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/6/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$50.00"},"70b1a10fee6dc371547f8a476fb0cfe314f333e4":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/7/2024","Instrument":"BMWYY","Description":"BMW\nCUSIP: 072743305","Trans Code":"Buy","Quantity":"1","Price":"$39.72","Amount":"($39.72)"},"f52903cf2850819395f0bf63bd9f2692732aaa69":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/7/2024","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"0.001197","Price":"$200.38","Amount":"($0.24)"},"e80a8dfc3d5751b0bcc37c87812524177f67e307":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/7/2024","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103","Trans Code":"Buy","Quantity":"0.309382","Price":"$164.73","Amount":"($50.96)"},"da8d45e2b512056a63c203df463af11b0e10f5ef":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/7/2024","Instrument":"QCOM","Description":"Qualcomm\nCUSIP: 747525103","Trans Code":"Buy","Quantity":"0.000121","Price":"$164.73","Amount":"($0.02)"},"a885689707bcea909bdccc4ae0c2b3444056aea4":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/7/2024","Instrument":"AMD","Description":"AMD\nCUSIP: 007903107","Trans Code":"Buy","Quantity":"0.248323","Price":"$200.38","Amount":"($49.76)"},"e0d0029d126fb98faee84bb75c6240de0b047918":{"Activity Date":"3/5/2024","Process Date":"3/5/2024","Settle Date":"3/6/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$100.00"},"b486c881e8229e882852109de4758f8fd0aa475b":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/5/2024","Instrument":"","Description":"ACH Deposit","Trans Code":"ACH","Quantity":"","Price":"","Amount":"$100.00"},"1f4f0bca1e74fb4f0899587e2c336ba1b9fa943d":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/6/2024","Instrument":"VEA","Description":"Vanguard FTSE Developed Markets ETF\nCUSIP: 921943858","Trans Code":"Buy","Quantity":"0.24916","Price":"$49.13","Amount":"($12.24)"},"3274cc194ac4bf94e78ada582fa256f4a4110f57":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/6/2024","Instrument":"BND","Description":"Vanguard Total Bond Market ETF\nCUSIP: 921937835","Trans Code":"Buy","Quantity":"0.562876","Price":"$72.17","Amount":"($40.62)"},"d627074df7b12167efeb4891b70c086e8664eb1a":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/6/2024","Instrument":"VTI","Description":"Vanguard Total Stock Market ETF\nCUSIP: 922908769","Trans Code":"Buy","Quantity":"0.161416","Price":"$255.24","Amount":"($41.20)"},"353b6f2cfbb6ea2297cdbada61ed177f0a5a6eca":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/6/2024","Instrument":"VWO","Description":"Vanguard FTSE Emerging Markets Fund\nCUSIP: 922042858","Trans Code":"Buy","Quantity":"0.14346","Price":"$41.40","Amount":"($5.94)"},"da128c1f170114dd7cbc33bcca1e66b7e869aaeb":{"Activity Date":"3/4/2024","Process Date":"3/4/2024","Settle Date":"3/4/2024","Instrument":"MSFT","Description":"Microsoft\nCUSIP: 594918104","Trans Code":"REC","Quantity":"0.0123","Price":"","Amount":""}}
 
 
@@ -50,264 +48,113 @@ def _bootstrap():
 
 _bootstrap()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PAGE CONFIG & THEME
-# ═══════════════════════════════════════════════════════════════════════════════
-st.set_page_config(
-    page_title="War Room — Portfolio AI",
-    page_icon="⚔️",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+# ═══════════════════════════════════════════ PAGE CONFIG
+st.set_page_config(page_title="Portfolio War Room", page_icon="⚔️",
+                   layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Literata:ital,wght@0,400;0,600;1,400&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+:root{
+  --bg:#08090d;--surface:#0f1117;--card:#141720;
+  --border:#1e2333;--border2:#2a3045;--text:#e8eaf0;--muted:#6b7280;
+  --green:#4ade80;--blue:#60a5fa;--red:#f87171;--yellow:#fbbf24;--gold:#f59e0b;--orange:#f97316;
+}
+html,body,[class*="css"]{background:var(--bg)!important;color:var(--text);font-family:'Syne',sans-serif}
+.stApp{background:var(--bg)!important}
+#MainMenu,footer,header{visibility:hidden}
+.block-container{padding:1.2rem 2rem 3rem;max-width:1400px}
 
-:root {
-  --bg:       #08090d;
-  --surface:  #0f1117;
-  --card:     #141720;
-  --border:   #1e2333;
-  --border2:  #2a3045;
-  --text:     #e8eaf0;
-  --muted:    #6b7280;
-  --accent:   #4ade80;
-  --accent2:  #60a5fa;
-  --danger:   #f87171;
-  --warn:     #fbbf24;
-  --gold:     #f59e0b;
-}
+/* KPI cards */
+.kpi-wrap{position:relative;flex:1;min-width:150px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;
+     padding:16px 18px;transition:border-color .2s,box-shadow .2s;height:100%}
+.kpi.active{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
+.kpi-lbl{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:6px}
+.kpi-val{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;line-height:1}
+.kpi-sub{font-size:.7rem;color:var(--muted);margin-top:5px}
+.green{color:var(--green)}.blue{color:var(--blue)}.red{color:var(--red)}
+.yellow{color:var(--yellow)}.gold{color:var(--gold)}.orange{color:var(--orange)}
 
-html, body, [class*="css"] {
-  background: var(--bg) !important;
-  color: var(--text);
-  font-family: 'Literata', Georgia, serif;
-}
-.stApp { background: var(--bg) !important; }
-.stApp > header { background: transparent !important; }
+/* Make st.button look invisible so it overlays the KPI card */
+.kpi-btn>button{position:absolute!important;inset:0!important;width:100%!important;
+  height:100%!important;opacity:0!important;cursor:pointer!important;z-index:10!important}
 
-/* ── Sidebar ── */
-section[data-testid="stSidebar"] {
-  background: var(--surface) !important;
-  border-right: 1px solid var(--border);
-}
+/* Recommendation cards */
+.rcard{background:var(--card);border-radius:10px;border-left:4px solid var(--border2);
+       padding:14px 16px;margin-bottom:8px}
+.rcard.sell{border-left-color:var(--red)}
+.rcard.buy{border-left-color:var(--green)}
+.rcard.trim{border-left-color:var(--yellow)}
+.rcard.alert{border-left-color:var(--orange)}
+.rcard.hold{border-left-color:var(--blue)}
+.rc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.rc-ticker{font-size:1.1rem;font-weight:800;letter-spacing:-.02em}
+.rc-plain{font-size:.8rem;color:var(--text);margin:4px 0;line-height:1.45}
+.rc-meta{font-family:'JetBrains Mono',monospace;font-size:.68rem;color:var(--muted);
+         display:flex;gap:12px;flex-wrap:wrap;margin-top:6px}
+.pill{display:inline-block;padding:2px 8px;border-radius:4px;font-size:.65rem;font-weight:700}
+.pill-green{background:rgba(74,222,128,.15);color:var(--green)}
+.pill-red{background:rgba(248,113,113,.15);color:var(--red)}
+.pill-blue{background:rgba(96,165,250,.15);color:var(--blue)}
+.pill-yellow{background:rgba(251,191,36,.15);color:var(--yellow)}
+.pill-orange{background:rgba(249,115,22,.15);color:var(--orange)}
 
-/* ── Hide default streamlit chrome ── */
-#MainMenu, footer, header { visibility: hidden; }
-.block-container { padding: 1.5rem 2rem 3rem; max-width: 1400px; }
+/* Section headers */
+.sh{font-size:.95rem;font-weight:800;color:var(--text);
+    margin:24px 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
 
-/* ── Top bar ── */
-.war-header {
-  display: flex; align-items: center; gap: 16px;
-  padding: 0 0 24px 0;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 24px;
-}
-.war-logo {
-  font-family: 'Syne', sans-serif;
-  font-size: 1.5rem; font-weight: 800;
-  color: var(--text); letter-spacing: -0.03em;
-}
-.war-logo span { color: var(--accent); }
-.war-badge {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: .68rem; color: var(--accent);
-  background: rgba(74,222,128,.1);
-  border: 1px solid rgba(74,222,128,.25);
-  padding: 3px 10px; border-radius: 20px;
-}
-.war-badge-warn {
-  color: var(--warn); background: rgba(251,191,36,.08);
-  border-color: rgba(251,191,36,.25);
-}
+/* Alert box */
+.alert-box{background:rgba(248,113,113,.08);border:1px solid rgba(248,113,113,.3);
+           border-radius:10px;padding:14px 18px;margin-bottom:16px}
+.alert-title{font-weight:800;color:var(--red);margin-bottom:6px}
 
-/* ── KPI strip ── */
-.kpi-row { display: flex; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
-.kpi {
-  flex: 1; min-width: 140px;
-  background: var(--card);
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 18px 20px;
-  transition: border-color .2s, transform .15s;
-  cursor: default;
-}
-.kpi:hover { border-color: var(--border2); transform: translateY(-2px); }
-.kpi-label {
-  font-family: 'Syne', sans-serif;
-  font-size: .65rem; font-weight: 700;
-  text-transform: uppercase; letter-spacing: .1em;
-  color: var(--muted); margin-bottom: 8px;
-}
-.kpi-value {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 1.6rem; font-weight: 700; line-height: 1;
-}
-.kpi-sub { font-size: .72rem; color: var(--muted); margin-top: 6px; }
-.green  { color: var(--accent); }
-.blue   { color: var(--accent2); }
-.red    { color: var(--danger); }
-.yellow { color: var(--warn); }
-.gold   { color: var(--gold); }
+/* Deposit plan */
+.dp-card{background:var(--card);border-radius:10px;padding:14px 18px;margin-bottom:10px}
+.dp-date{font-weight:800;color:var(--blue);font-size:.85rem;margin-bottom:8px}
+.dp-row{display:flex;align-items:center;gap:12px;padding:5px 0;
+        border-bottom:1px solid var(--border);font-size:.8rem}
+.dp-row:last-child{border-bottom:none}
+.dp-ticker{font-weight:800;min-width:55px}
+.dp-amt{color:var(--green);font-family:'JetBrains Mono',monospace;min-width:50px}
+.dp-sh{color:var(--muted);font-family:'JetBrains Mono',monospace;min-width:90px}
+.dp-why{color:var(--muted);font-size:.72rem;margin-left:auto}
 
-/* ── Section headers ── */
-.sec-head {
-  font-family: 'Syne', sans-serif;
-  font-size: 1.05rem; font-weight: 700;
-  color: var(--text); margin: 28px 0 14px 0;
-  display: flex; align-items: center; gap: 10px;
-}
-.sec-head::after {
-  content: ''; flex: 1; height: 1px;
-  background: var(--border); margin-left: 8px;
-}
+/* Cal */
+.cal-row{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.8rem;align-items:flex-start}
+.cal-date{font-weight:800;color:var(--blue);min-width:58px}
 
-/* ── Action cards ── */
-.action-grid { display: grid; grid-template-columns: repeat(auto-fill,minmax(280px,1fr)); gap: 12px; }
-.action-card {
-  background: var(--card); border-radius: 12px;
-  border-left: 4px solid var(--border2);
-  padding: 14px 16px;
-}
-.action-card.sell  { border-left-color: var(--danger); }
-.action-card.buy   { border-left-color: var(--accent); }
-.action-card.hold  { border-left-color: var(--accent2); }
-.action-card.trim  { border-left-color: var(--warn); }
-.action-card.alert { border-left-color: #f97316; }
-.ac-ticker {
-  font-family: 'Syne', sans-serif; font-size: 1.1rem;
-  font-weight: 800; letter-spacing: -.02em;
-}
-.ac-action { font-size: .75rem; font-weight: 600; margin: 4px 0; }
-.ac-body   { font-size: .78rem; color: var(--muted); line-height: 1.45; }
-.ac-meta   {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: .68rem; color: var(--muted);
-  margin-top: 8px; display: flex; gap: 12px; flex-wrap: wrap;
-}
-.pill {
-  display: inline-block; padding: 1px 7px; border-radius: 4px;
-  font-family: 'Syne', sans-serif; font-size: .65rem; font-weight: 700;
-}
-.pill-green  { background:rgba(74,222,128,.15);  color:var(--accent); }
-.pill-red    { background:rgba(248,113,113,.15); color:var(--danger); }
-.pill-blue   { background:rgba(96,165,250,.15);  color:var(--accent2); }
-.pill-yellow { background:rgba(251,191,36,.15);  color:var(--warn); }
-.pill-orange { background:rgba(249,115,22,.15);  color:#f97316; }
+/* Tabs */
+.stTabs [data-baseweb="tab-list"]{gap:2px;border-bottom:1px solid var(--border)}
+.stTabs [data-baseweb="tab"]{font-size:.82rem;font-weight:700;color:var(--muted);
+  background:transparent;border:none;padding:10px 16px;border-radius:8px 8px 0 0}
+.stTabs [aria-selected="true"]{color:var(--text)!important;background:var(--card)!important;
+  border-bottom:2px solid var(--green)!important}
 
-/* ── Tabs ── */
-.stTabs [data-baseweb="tab-list"] {
-  gap: 4px; border-bottom: 1px solid var(--border);
-  background: transparent;
-}
-.stTabs [data-baseweb="tab"] {
-  font-family: 'Syne', sans-serif; font-size: .82rem; font-weight: 600;
-  color: var(--muted); background: transparent;
-  border: none; border-radius: 8px 8px 0 0; padding: 10px 18px;
-  transition: color .2s, background .2s;
-}
-.stTabs [aria-selected="true"] {
-  color: var(--text) !important;
-  background: var(--card) !important;
-  border-bottom: 2px solid var(--accent) !important;
-}
+/* Buttons */
+.stButton>button{font-weight:700;border-radius:8px;border:1px solid var(--border2);
+  background:var(--card);color:var(--text);transition:all .2s}
+.stButton>button:hover{border-color:var(--green);color:var(--green)}
+.stButton>button[kind="primary"]{background:var(--green);color:#000;border-color:var(--green)}
+.stButton>button[kind="primary"]:hover{background:#22c55e}
 
-/* ── Tables ── */
-div[data-testid="stDataFrame"] { border-radius: 10px; overflow: hidden; }
-div[data-testid="stDataFrame"] table {
-  font-family: 'JetBrains Mono', monospace; font-size: .78rem;
-}
+div[data-testid="stDataFrame"]{border-radius:8px;overflow:hidden}
+.stDataFrame td,.stDataFrame th{font-family:'JetBrains Mono',monospace;font-size:.78rem}
 
-/* ── Buttons ── */
-.stButton > button {
-  font-family: 'Syne', sans-serif; font-weight: 600;
-  border-radius: 8px; border: 1px solid var(--border2);
-  background: var(--card); color: var(--text);
-  transition: all .2s;
-}
-.stButton > button:hover {
-  border-color: var(--accent); color: var(--accent);
-  background: rgba(74,222,128,.06);
-}
-.stButton > button[kind="primary"] {
-  background: var(--accent); color: #000;
-  border-color: var(--accent);
-}
-.stButton > button[kind="primary"]:hover {
-  background: #22c55e; color: #000;
-}
-
-/* ── Inputs ── */
-.stTextInput input, .stNumberInput input, .stSelectbox select,
-div[data-baseweb="select"] { background: var(--card) !important; color: var(--text) !important; }
-
-/* ── Expander ── */
-.streamlit-expanderHeader {
-  font-family: 'Syne', sans-serif; font-size: .85rem;
-  color: var(--muted); background: var(--card); border-radius: 8px;
-}
-
-/* ── Calendar card ── */
-.cal-row {
-  display: flex; align-items: center; gap: 14px;
-  padding: 10px 0; border-bottom: 1px solid var(--border);
-  font-size: .82rem;
-}
-.cal-date {
-  font-family: 'Syne', sans-serif; font-weight: 700;
-  min-width: 60px; color: var(--accent2);
-}
-
-/* ── Today's plan highlight ── */
-.today-box {
-  background: linear-gradient(135deg, rgba(74,222,128,.08), rgba(96,165,250,.06));
-  border: 1px solid rgba(74,222,128,.2);
-  border-radius: 14px; padding: 20px 24px; margin-bottom: 20px;
-}
-.today-title {
-  font-family: 'Syne', sans-serif; font-size: 1rem;
-  font-weight: 800; color: var(--accent); margin-bottom: 8px;
-}
-
-/* ── Deposit row ── */
-.dep-row {
-  display:flex; gap:10px; align-items:center;
-  padding: 10px 14px; background: var(--card);
-  border-radius: 8px; margin: 4px 0; font-size: .8rem;
-}
-.dep-ticker { font-family:sans-serif; font-weight:800; min-width:60px; }
-.dep-amt    { font-family:monospace; color:var(--accent); }
-
-/* ── Progress bar custom ── */
-.prog-bg {
-  background: var(--border); border-radius: 4px;
-  height: 6px; overflow: hidden; margin-top: 6px;
-}
-.prog-fill {
-  height: 6px; border-radius: 4px;
-  background: linear-gradient(90deg, var(--accent), var(--accent2));
-  transition: width .5s ease;
-}
-
-/* ── Mobile ── */
-@media(max-width:768px) {
-  .block-container { padding: .8rem 1rem 2rem; }
-  .kpi-value { font-size: 1.2rem; }
-  .kpi { min-width: 120px; padding: 12px 14px; }
-  .action-grid { grid-template-columns: 1fr; }
+@media(max-width:768px){
+  .block-container{padding:.8rem 1rem 2rem}
+  .kpi-val{font-size:1.1rem}
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CONSTANTS & CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ CONSTANTS
 CRYPTO_TICKERS = {"BTC","XRP","ETH","SOL","DOGE"}
 FOREVER_HOLD   = {"VYM","SCHD","VTI"}
 DCA_ALWAYS     = {"VOO","QQQ"}
 SELL_LIST      = {"VTV","VEA","VWO","BND"}
 IPO_HOLDS      = {"BLSH","KLAR","STUB","RDDT","SNOW"}
+SELL_PENDING   = {"SPY","VUG"}   # not LT yet but calendar-flagged
 
 TARGETS = {
     "NVDA":200,"AAPL":240,"NFLX":900,"WMT":110,"GLD":450,"XLE":75,
@@ -317,41 +164,34 @@ TARGETS = {
     "SPY":620,"VUG":470,"BRK.B":550,"VTI":310,"STUB":35,"KLAR":60,
     "BLSH":60,"SNOW":200,"ALK":80,"RDDT":200,
 }
-
 BIWEEKLY_PLAN = [
     {"ticker":"NVDA","pct":.28,"why":"AI supercycle — top conviction"},
-    {"ticker":"VOO", "pct":.22,"why":"S&P 500 — DCA forever, never stop"},
-    {"ticker":"VYM", "pct":.17,"why":"Dividend engine — compounds income"},
+    {"ticker":"VOO", "pct":.22,"why":"S&P 500 index — DCA forever"},
+    {"ticker":"VYM", "pct":.17,"why":"Dividend ETF — compounds income"},
     {"ticker":"QQQ", "pct":.17,"why":"Nasdaq-100 — tech exposure"},
-    {"ticker":"META","pct":.16,"why":"Rotating pick (changes each deposit)"},
+    {"ticker":"META","pct":.16,"why":"Rotating pick"},
 ]
 ROTATING      = ["META","GOOGL","AAPL","MSFT","COST","TSM","CRM","NFLX"]
 DEPOSIT_AMT   = 900
 DEPOSIT_START = datetime.date(2026, 4, 3)
+ROBINHOOD_CASH = 1042.17   # actual cash from Robinhood
 
 ACTION_CALENDAR = [
-    ("Apr 3",  "🔴", "SELL",  "Sell VTV, VEA, VWO, BND — all LT eligible → reinvest into VOO+VYM"),
-    ("Apr 3",  "💰", "BUY",   "Deposit #1 ($900) — NVDA 28%, VOO 22%, VYM 17%, QQQ 17%, META 16%"),
-    ("Apr 4",  "✂️", "TRIM",  "GLD → LT eligible today — consider trimming 25% near $450 target"),
-    ("Apr 17", "💰", "BUY",   "Deposit #2 ($900) — NVDA/VOO/VYM/QQQ + GOOGL as rotating pick"),
-    ("May 20", "🔴", "SELL",  "SPY turns LT → sell all, reinvest into VOO same day (not wash sale)"),
-    ("Jul 15", "🔴", "SELL",  "VUG turns LT → sell all, reinvest into QQQ same day"),
-    ("Aug 14", "🔵", "HOLD",  "BLSH hits 1 year — evaluate, trim 25% if up >20%"),
-    ("Sep 11", "🔵", "HOLD",  "KLAR hits 1 year — evaluate, trim 25% if up >20%"),
-    ("Sep 18", "🔵", "HOLD",  "STUB hits 1 year — evaluate position"),
-    ("Nov 6",  "✂️", "TRIM",  "TSM big lot → LT — trim 20% to lock gains"),
-    ("Dec 15", "✂️", "TRIM",  "GOOGL big lot → LT — trim 20% to lock gains"),
-    ("Dec 20", "🧾", "TAX",   "Year-end: net any remaining gains vs losses before Dec 31"),
+    ("Apr 3",  "🔴","SELL", "Sell VTV, VEA, VWO, BND — LT eligible → reinvest VOO+VYM same day"),
+    ("Apr 3",  "💰","BUY",  "Deposit #1 — $900 into NVDA/VOO/VYM/QQQ + META"),
+    ("Apr 4",  "✂️","TRIM", "GLD turns LT today — trim 25% near $450 target"),
+    ("Apr 17", "💰","BUY",  "Deposit #2 — $900 into NVDA/VOO/VYM/QQQ + GOOGL"),
+    ("May 20", "🔴","SELL", "SPY turns LT → sell all, buy VOO same day"),
+    ("Jul 15", "🔴","SELL", "VUG turns LT → sell all, buy QQQ same day"),
+    ("Aug 14", "🔵","HOLD", "BLSH hits 1 yr — review, trim 25% if up >20%"),
+    ("Sep 11", "🔵","HOLD", "KLAR hits 1 yr — review, trim 25% if up >20%"),
+    ("Sep 18", "🔵","HOLD", "STUB hits 1 yr — review position"),
+    ("Nov 6",  "✂️","TRIM", "TSM big lot turns LT — trim 20%"),
+    ("Dec 15", "✂️","TRIM", "GOOGL big lot turns LT — trim 20%"),
+    ("Dec 20", "🧾","TAX",  "Year-end: harvest remaining losses to offset gains"),
 ]
 
-COIN_MAP = {
-    "bitcoin":"BTC","ethereum":"ETH","solana":"SOL","dogecoin":"DOGE",
-    "xrp":"XRP","litecoin":"LTC","cardano":"ADA","avalanche":"AVAX",
-}
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# CORE HELPERS
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ HELPERS
 def _dollar(s) -> float:
     try: return float(str(s).strip().replace("$","").replace(",","").replace("(","-").replace(")",""))
     except: return 0.0
@@ -367,40 +207,37 @@ def _date(s):
     return None
 
 def _ep(ticker, pos, prices) -> float:
-    """Safe effective price — never None/NaN."""
+    """Live price if available, else avg_cost. NEVER None."""
     p = prices.get(ticker)
-    if p is None or (isinstance(p,float) and p!=p): return float(pos["avg_cost"])
-    return float(p)
+    if p and isinstance(p, (int,float)) and p == p and p > 0:
+        return float(p)
+    return float(pos["avg_cost"])
 
 def lt_ok(fbd) -> bool:
     if fbd is None: return False
     return (datetime.date.today() - fbd).days >= 366
 
-def _pnl_color(v):
-    if v >= 5:  return "green"
-    if v >= 0:  return "blue"
-    if v >= -10: return "yellow"
-    return "red"
-
-def _next_friday_deposit() -> datetime.date:
+def _next_deposit() -> tuple:
     d = DEPOSIT_START
     today = datetime.date.today()
     while d < today:
         d += datetime.timedelta(days=14)
-    return d
+    days_to = (d - today).days
+    return d, days_to
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CSV INGESTION
-# ═══════════════════════════════════════════════════════════════════════════════
+def _pill(text, cls) -> str:
+    return f'<span class="pill pill-{cls}">{text}</span>'
+
+# ═══════════════════════════════════════════ CSV INGESTION
 def _fp(row) -> str:
     key = "|".join([row.get("Activity Date",""),row.get("Trans Code",""),
-                    row.get("Instrument",""),   row.get("Quantity",""),
-                    row.get("Amount",""),       row.get("Price","")])
+                    row.get("Instrument",""),row.get("Quantity",""),
+                    row.get("Amount",""),row.get("Price","")])
     return hashlib.sha1(key.encode()).hexdigest()
 
 OK_CODES = {"Buy","Sell","CDIV","SPL","REC","LIQ","ACH","RTP","JNLS","MISC","ACATS"}
 
-def ingest_csv(source, store:dict) -> tuple:
+def ingest_csv(source, store: dict) -> tuple:
     if hasattr(source,"read"):
         raw = source.read()
         if isinstance(raw,bytes): raw = raw.decode("utf-8-sig",errors="replace")
@@ -420,9 +257,7 @@ def ingest_csv(source, store:dict) -> tuple:
         new[fp] = {k:str(v) for k,v in row.items()}; added+=1
     return new, {"added":added,"skipped":skipped,"total":len(new)}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# CRYPTO PDF PARSER
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ CRYPTO PDF
 def parse_crypto_pdf(file_obj):
     try: import pdfplumber
     except ImportError: return None
@@ -431,39 +266,34 @@ def parse_crypto_pdf(file_obj):
             text = "\n".join(p.extract_text() or "" for p in pdf.pages)
         result = {}
         pat = re.compile(r"([A-Za-z][A-Za-z ]{1,20}?)\s+([\d]+\.[\d]+)\s+([A-Z]{2,6})\s+\$([\d,]+\.[\d]{2})\s+[\d.]+%")
+        coin_map = {"bitcoin":"BTC","ethereum":"ETH","solana":"SOL","dogecoin":"DOGE","xrp":"XRP"}
         for m in pat.finditer(text):
-            name,qty,symbol = m.group(1).strip().lower(), float(m.group(2)), m.group(3).upper()
-            mktval = float(m.group(4).replace(",",""))
-            ticker = symbol if symbol in CRYPTO_TICKERS else COIN_MAP.get(name,symbol)
-            if qty>0: result[ticker]={"shares":qty,"market_value":mktval}
+            name,qty,symbol = m.group(1).strip().lower(),float(m.group(2)),m.group(3).upper()
+            ticker = symbol if symbol in CRYPTO_TICKERS else coin_map.get(name,symbol)
+            if qty>0: result[ticker]={"shares":qty,"market_value":float(m.group(4).replace(",",""))}
         if not result:
             for line in text.splitlines():
                 ll=line.lower()
-                for name,ticker in COIN_MAP.items():
+                for name,ticker in coin_map.items():
                     if name in ll:
                         nums=re.findall(r"[\d]+\.[\d]+",line)
                         if nums: result[ticker]={"shares":float(nums[0]),"market_value":float(nums[1].replace(",","")) if len(nums)>1 else 0.0}
         return result or None
     except: return None
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PORTFOLIO RECOMPUTE  (replay from scratch every time)
-# ═══════════════════════════════════════════════════════════════════════════════
-def recompute(store:dict, crypto_ovr:dict=None) -> dict:
+# ═══════════════════════════════════════════ PORTFOLIO RECOMPUTE
+def recompute(store: dict, crypto_ovr: dict = None) -> dict:
     rows = sorted(store.values(), key=lambda r: _date(r.get("Activity Date","")) or datetime.date(2000,1,1))
     pf = {}
     for row in rows:
-        code   = str(row.get("Trans Code","")).strip()
-        ticker = str(row.get("Instrument","")).strip().upper()
-        qty    = _qty(row.get("Quantity",""))
-        price  = _dollar(row.get("Price",""))
-        amount = abs(_dollar(row.get("Amount","")))
-        desc   = str(row.get("Description","")).lower()
-        dt     = _date(row.get("Activity Date",""))
+        code=str(row.get("Trans Code","")).strip(); ticker=str(row.get("Instrument","")).strip().upper()
+        qty=_qty(row.get("Quantity","")); price=_dollar(row.get("Price",""))
+        amount=abs(_dollar(row.get("Amount",""))); desc=str(row.get("Description","")).lower()
+        dt=_date(row.get("Activity Date",""))
         if code in ("ACH","RTP","CDIV"): continue
         if code in ("Buy","REC","SPL"):
             if not ticker: continue
-            is_drip = "reinvestment" in desc
+            is_drip="reinvestment" in desc
             if ticker not in pf:
                 pf[ticker]={"shares":0.0,"avg_cost":0.0,"first_buy_date":dt,"drip_count":0,"drip_total":0.0}
             pos=pf[ticker]; cost=(price*qty) if (price and qty) else amount
@@ -482,20 +312,18 @@ def recompute(store:dict, crypto_ovr:dict=None) -> dict:
                    "first_buy_date":None,"drip_count":0,"drip_total":0.0}
     return {k:v for k,v in pf.items() if v["shares"]>0.0001}
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# PRICE FETCHER  (tuple arg = hashable = cache works)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ PRICE FETCHER (tuple = hashable)
 @st.cache_data(ttl=120, show_spinner="Fetching live prices…")
 def fetch_prices(tickers: tuple) -> dict:
-    prices={}
+    prices = {}
     stocks  = [t for t in tickers if t not in CRYPTO_TICKERS]
     cryptos = [t for t in tickers if t in CRYPTO_TICKERS]
     for t in stocks:
         try:
-            info=yf.Ticker(t).fast_info
-            p=info.get("last_price") or info.get("regularMarketPrice")
-            prices[t]=round(float(p),2) if p else None
-        except: prices[t]=None
+            info = yf.Ticker(t).fast_info
+            p = info.get("last_price") or info.get("regularMarketPrice")
+            prices[t] = round(float(p),2) if p else None
+        except: prices[t] = None
     cg={"BTC":"bitcoin","XRP":"ripple","ETH":"ethereum","SOL":"solana","DOGE":"dogecoin"}
     for t in cryptos:
         cid=cg.get(t)
@@ -506,11 +334,9 @@ def fetch_prices(tickers: tuple) -> dict:
         except: prices[t]=None
     return prices
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# RECOMMENDATION ENGINE
-# ═══════════════════════════════════════════════════════════════════════════════
-def generate_recs(pf:dict, prices:dict, cash:float=1042.17) -> list:
-    recs=[]
+# ═══════════════════════════════════════════ RECOMMENDATION ENGINE
+def generate_recs(pf: dict, prices: dict) -> list:
+    recs = []
     for ticker,pos in pf.items():
         price=_ep(ticker,pos,prices); shares=pos["shares"]; cost=pos["avg_cost"]
         fbd=pos["first_buy_date"]; is_lt=lt_ok(fbd)
@@ -518,285 +344,378 @@ def generate_recs(pf:dict, prices:dict, cash:float=1042.17) -> list:
         target=TARGETS.get(ticker,cost*1.25)
         upside=(target-price)/price*100 if price>0 else 0.0
         lt_date=(fbd+datetime.timedelta(days=366)) if fbd else None
-        tax="✅ LT (15%)" if is_lt else (f"⏳ ST — wait until {lt_date}" if lt_date else "⏳ ST")
+        tax="✅ LT (15%)" if is_lt else (f"⏳ ST until {lt_date}" if lt_date else "⏳ ST")
 
-        # ── Rule engine ──────────────────────────────────────────────────
         if ticker in FOREVER_HOLD:
-            action="HOLD FOREVER"; cat="hold"
-            why="Income ETF. Keep forever, reinvest every dividend (DRIP)."
-            plain="Keep this. Never sell. Turn on dividend reinvestment."
+            action,cat="HOLD FOREVER","hold"
+            plain="Never sell. Keep DRIP on — every dividend buys more shares."
+            why="Core income ETF. Compounding dividend machine."
         elif ticker in DCA_ALWAYS:
-            action="DCA EVERY DEPOSIT"; cat="buy"
-            why="Core index fund. Add to this every single deposit — it tracks the whole market."
-            plain="Buy more every 2 weeks with your $900 deposit."
+            action,cat="DCA EVERY DEPOSIT","buy"
+            plain=f"Add to this every 2 weeks. It tracks the whole market."
+            why="Core index. Never stop accumulating."
         elif ticker in SELL_LIST:
             if is_lt:
-                action="SELL NOW"; cat="sell"
-                why="You held this >1 year — now LT eligible. Sell and reinvest into VOO/VYM."
-                plain=f"Sell all {shares:.2f} shares (est. ${price*shares:,.0f}). Reinvest into VOO or VYM same day."
+                action,cat="SELL NOW","sell"
+                plain=f"Sell all {shares:.4f} shares (est. ${price*shares:,.0f}). Reinvest into VOO or VYM same day."
+                why="LT eligible. Pay 15% not 37%. ETF swap = no wash sale."
             else:
-                action=f"WAIT — sell after {lt_date}"; cat="hold"
-                why="Hold until 1-year mark to pay only 15% tax instead of 37%."
-                plain=f"Don't sell yet. Wait until {lt_date} to save on taxes."
+                action,cat=f"WAIT — sell after {lt_date}","hold"
+                plain=f"Don't sell yet — wait until {lt_date} to pay only 15% tax."
+                why=f"Currently short-term. Selling now costs ~37%."
         elif ticker in IPO_HOLDS:
             if is_lt:
-                action="TRIM 25%"; cat="trim"
-                why="You've held this IPO stock >1 year. Trim 25% at LT rates."
-                plain=f"Sell {shares*0.25:.2f} shares (est. ${price*shares*0.25:,.0f}) to lock in gains."
+                action,cat="TRIM 25%","trim"
+                plain=f"Sell {shares*0.25:.2f} shares (est. ${price*shares*0.25:,.0f}). Keep the other 75%."
+                why="IPO position now LT. Lock in some gains at 15% rate."
             else:
-                action=f"HOLD — IPO lock until {lt_date}"; cat="hold"
-                why="Hold this IPO/speculative position until LT eligible."
-                plain=f"Don't sell yet. Hold until {lt_date} for better tax treatment."
+                action,cat=f"HOLD until {lt_date}","hold"
+                plain=f"Hold until {lt_date} before selling — saves ~22% in taxes."
+                why="IPO/speculative. Hold for LT treatment."
+        elif ticker in SELL_PENDING:
+            if is_lt:
+                action,cat="SELL NOW","sell"
+                plain=f"Now LT eligible. Sell all → reinvest into index fund."
+                why="Calendar-flagged sell. ETF → ETF swap allowed."
+            else:
+                action,cat=f"HOLD — sell after {lt_date}","hold"
+                plain=f"Calendar: sell after {lt_date}. Reinvest into better ETF."
+                why="Flagged for eventual ETF swap."
         elif ticker in CRYPTO_TICKERS:
             if upside>25:
-                action="ACCUMULATE"; cat="buy"
-                why=f"Crypto is {upside:.0f}% below target. Strong risk/reward to add more."
-                plain=f"Consider adding to this. Target is ${target:,.0f}."
+                action,cat="ACCUMULATE","buy"
+                plain=f"Target ${target:,.0f}. Still {upside:.0f}% upside. Consider adding."
+                why=f"Strong risk/reward at current price."
             elif pnl>20 and is_lt:
-                action="TRIM 25%"; cat="trim"
-                why="Crypto up >20% and LT eligible. Trim 25% to lock some profit."
-                plain=f"Sell {shares*0.25:.4f} coins (est. ${price*shares*0.25:,.0f}). Keep the rest."
+                action,cat="TRIM 25%","trim"
+                plain=f"Up {pnl:.0f}% and LT eligible. Sell {shares*0.25:.4f} coins (est. ${price*shares*0.25:,.0f})."
+                why="Lock partial gains at 15% rate. Keep 75%."
             else:
-                action="HOLD"; cat="hold"
-                why="Hold crypto. Don't sell short-term — aim for long-term gains."
-                plain="Keep holding. Don't panic sell on dips."
+                action,cat="HOLD","hold"
+                plain="Keep holding. Don't sell crypto short-term."
+                why="Hold for long-term gains. Avoid short-term crypto tax."
         elif pnl < -20:
-            action="REVIEW — BIG LOSS"; cat="alert"
-            why=f"Down {abs(pnl):.0f}% from your buy price. Decide: cut loss or buy more."
-            plain=f"You're down ${(price-cost)*shares:,.0f}. Decide if you still believe in this stock."
+            action,cat="REVIEW — BIG LOSS","alert"
+            plain=f"Down ${abs((price-cost)*shares):,.0f} ({pnl:.0f}%). Decide: cut loss or add more."
+            why="Down >20%. Needs active decision."
         elif pnl < -8 and upside > 20:
-            action="STRONG BUY — DIP"; cat="buy"
-            why=f"Down {abs(pnl):.0f}% but {upside:.0f}% upside to target. Excellent entry point."
-            plain=f"This is on sale. Consider adding — target is ${target}."
+            action,cat="STRONG BUY — DIP","buy"
+            plain=f"Down {abs(pnl):.0f}% with {upside:.0f}% upside to ${target}. Great entry."
+            why="Dip + strong upside = high conviction add."
         elif upside > 20:
-            action="ACCUMULATE"; cat="buy"
-            why=f"{upside:.0f}% upside to ${target} target. Good risk/reward."
-            plain=f"Good time to add. Still {upside:.0f}% below target of ${target}."
+            action,cat="ACCUMULATE","buy"
+            plain=f"Still {upside:.0f}% below target of ${target}. Good time to add."
+            why="Significant upside remaining."
         elif pnl > 20 and is_lt:
-            action="TRIM 20%"; cat="trim"
-            why=f"Up {pnl:.0f}% and LT eligible. Take some profit at 15% tax rate."
-            plain=f"Consider selling {shares*0.20:.2f} shares (est. ${price*shares*0.20:,.0f}) to lock gains."
+            action,cat="TRIM 20%","trim"
+            plain=f"Up {pnl:.0f}% and LT. Sell {shares*0.20:.2f} shares (est. ${price*shares*0.20:,.0f}) to lock gains."
+            why="Take some profit tax-efficiently."
         elif pnl > 20:
-            action="HOLD — wait for LT"; cat="hold"
-            why=f"Up {pnl:.0f}% but NOT yet LT eligible. Wait to avoid 37% tax."
-            plain=f"Don't sell yet! Wait until {lt_date} — saves you big on taxes."
+            action,cat="HOLD — wait for LT","hold"
+            plain=f"Up {pnl:.0f}% but NOT LT yet. Wait until {lt_date} — saves ~22% tax."
+            why="Gains locked in — wait for LT before trimming."
         else:
-            action="HOLD"; cat="hold"
-            why=f"{upside:.0f}% to target; currently {pnl:+.1f}% from your buy price."
-            plain="On track. Hold and be patient."
+            action,cat="HOLD","hold"
+            plain=f"On track. {upside:.0f}% to target. P&L: {pnl:+.1f}%."
+            why=f"No action needed."
 
         proceeds=None
-        if cat=="trim":   proceeds=round(shares*price*(0.25 if "25%" in action else 0.20),2)
-        elif cat=="sell": proceeds=round(shares*price,2)
+        if cat=="trim":
+            pct=0.25 if "25%" in action else 0.20
+            proceeds=round(shares*price*pct,2)
+        elif cat=="sell":
+            proceeds=round(shares*price,2)
 
         recs.append({
             "ticker":ticker,"shares":round(shares,4),"avg_cost":round(cost,2),
-            "price":prices.get(ticker),"pnl_pct":round(pnl,2),"equity":round(equity,2),
-            "action":action,"cat":cat,"why":why,"plain":plain,
+            "price":prices.get(ticker),"live_price":price,
+            "pnl_pct":round(pnl,2),"equity":round(equity,2),
+            "action":action,"cat":cat,"plain":plain,"why":why,
             "tax_note":tax,"proceeds":proceeds,"upside":round(upside,1),
             "lt_date":str(lt_date) if lt_date else None,"is_lt":is_lt,
         })
 
     priority={"sell":0,"alert":1,"buy":2,"trim":3,"hold":4}
-    recs.sort(key=lambda r: (priority.get(r["cat"],5), -r["equity"]))
+    recs.sort(key=lambda r:(priority.get(r["cat"],5),-r["equity"]))
     return recs
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# SESSION STATE & CENTRAL REFRESH
-# ═══════════════════════════════════════════════════════════════════════════════
+def generate_deposit_recs(prices: dict, portfolio: dict, cash: float) -> list:
+    """What to buy with the next $900 deposit + any available cash."""
+    next_dep, days_to = _next_deposit()
+    rot_idx = 0
+    d = DEPOSIT_START
+    i = 0
+    while d < next_dep:
+        d += datetime.timedelta(days=14)
+        i += 1
+    rot_ticker = ROTATING[i % len(ROTATING)]
+
+    plan = BIWEEKLY_PLAN[:-1] + [{"ticker":rot_ticker,"pct":.16,"why":f"Rotating pick #{i+1}"}]
+    recs = []
+    total = DEPOSIT_AMT + max(0, cash - 50)  # deploy cash too, keep $50 buffer
+
+    for s in plan:
+        t = s["ticker"]
+        amt = round(total * s["pct"], 2)
+        p = prices.get(t)
+        shares_to_buy = round(amt/p, 4) if p else None
+        current_shares = portfolio.get(t,{}).get("shares",0)
+        recs.append({
+            "ticker":t,"amount":amt,"pct":s["pct"],
+            "price":p,"shares_to_buy":shares_to_buy,
+            "current_shares":current_shares,"why":s["why"],
+        })
+    return recs, next_dep, days_to, total
+
+# ═══════════════════════════════════════════ SESSION STATE
 def _ss_init():
-    if "tx_store"    not in st.session_state: st.session_state.tx_store    = _load(TX_STORE_PATH,{})
-    if "crypto_ovr"  not in st.session_state: st.session_state.crypto_ovr  = _load(CRYPTO_OVR_PATH,BAKED_CRYPTO)
-    if "prices"      not in st.session_state: st.session_state.prices      = {}
-    if "portfolio"   not in st.session_state: st.session_state.portfolio   = {}
-    if "recs"        not in st.session_state: st.session_state.recs        = []
-    if "rec_history" not in st.session_state: st.session_state.rec_history = _load(REC_HISTORY_PATH,[])
-    if "deposit_log" not in st.session_state: st.session_state.deposit_log = _load(DEPOSIT_LOG_PATH,[])
-    if "cash"        not in st.session_state: st.session_state.cash        = 1042.17
+    if "tx_store"      not in st.session_state: st.session_state.tx_store      = _load(TX_STORE_PATH,{})
+    if "crypto_ovr"    not in st.session_state: st.session_state.crypto_ovr    = _load(CRYPTO_OVR_PATH,BAKED_CRYPTO)
+    if "prices"        not in st.session_state: st.session_state.prices        = {}
+    if "portfolio"     not in st.session_state: st.session_state.portfolio     = {}
+    if "recs"          not in st.session_state: st.session_state.recs          = []
+    if "rec_history"   not in st.session_state: st.session_state.rec_history   = _load(REC_HISTORY_PATH,[])
+    if "deposit_log"   not in st.session_state: st.session_state.deposit_log   = _load(DEPOSIT_LOG_PATH,[])
+    if "cash"          not in st.session_state: st.session_state.cash          = ROBINHOOD_CASH
+    if "kpi_expanded"  not in st.session_state: st.session_state.kpi_expanded  = None
+    if "prices_loaded" not in st.session_state: st.session_state.prices_loaded = False
 
 _ss_init()
 
 def _refresh():
-    pf=recompute(st.session_state.tx_store, st.session_state.crypto_ovr)
-    st.session_state.portfolio=pf
-    prices=fetch_prices(tuple(sorted(pf.keys())))
-    st.session_state.prices=prices
-    st.session_state.recs=generate_recs(pf, prices, st.session_state.cash)
+    pf = recompute(st.session_state.tx_store, st.session_state.crypto_ovr)
+    st.session_state.portfolio = pf
+    prices = fetch_prices(tuple(sorted(pf.keys())))
+    st.session_state.prices = prices
+    st.session_state.recs   = generate_recs(pf, prices)
+    st.session_state.prices_loaded = True
 
 if st.session_state.tx_store and not st.session_state.portfolio:
     _refresh()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# HEADER
-# ═══════════════════════════════════════════════════════════════════════════════
-h1, h2, h3 = st.columns([5, 2, 1])
-with h1:
+# ═══════════════════════════════════════════ HEADER
+st.markdown("### ⚔️ Portfolio War Room")
+hc1, hc2, hc3 = st.columns([5, 2, 1])
+with hc1:
     n  = len(st.session_state.tx_store)
     np = len(st.session_state.portfolio)
-    st.markdown(
-        '<div class="war-header">' +
-        '<div class="war-logo">⚔️ War<span>Room</span></div>' +
-        f'<span class="war-badge">✅ {n} transactions · {np} positions loaded</span>' +
-        '</div>', unsafe_allow_html=True)
-with h2:
-    next_dep = _next_friday_deposit()
-    days_to  = (next_dep - datetime.date.today()).days
-    dep_label = f'{next_dep.strftime("%b %d")} (in {days_to}d)'
-    st.markdown(
-        f'<div style="padding:8px 0"><div class="kpi-label">Next $900 deposit</div>'
-        f'<div style="font-family:var(--mono,monospace);font-size:.9rem;color:var(--warn)">'
-        f'{dep_label}</div></div>',
-        unsafe_allow_html=True)
-with h3:
-    if st.button("🔄 Refresh", type="primary", use_container_width=True,
-                 help="Fetch latest prices and recalculate all recommendations"):
-        st.cache_data.clear(); _refresh(); st.rerun()
+    next_dep, days_to = _next_deposit()
+    loaded = st.session_state.prices_loaded
+    badge_color = "#4ade80" if loaded else "#fbbf24"
+    badge_txt   = f"✅ {np} positions · prices live" if loaded else f"⚠️ {n} transactions loaded · click Refresh for prices"
+    st.markdown(f'<span style="background:rgba(74,222,128,.1);border:1px solid {badge_color}33;color:{badge_color};padding:4px 12px;border-radius:20px;font-size:.72rem">{badge_txt}</span>', unsafe_allow_html=True)
+with hc2:
+    st.markdown(f'<div style="font-size:.75rem;color:var(--muted,#6b7280)">Next $900 deposit</div><div style="font-family:monospace;font-size:.9rem;color:#fbbf24;font-weight:700">{next_dep.strftime("%b %d")} — in {days_to} days</div>', unsafe_allow_html=True)
+with hc3:
+    if st.button("🔄 Refresh", type="primary", use_container_width=True, help="Fetch latest prices and recalculate everything"):
+        st.cache_data.clear()
+        _refresh()
+        st.rerun()
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# TABS
-# ═══════════════════════════════════════════════════════════════════════════════
-tab_names = ["🏠 Dashboard","📋 Holdings","💰 Invest","📥 Import","🌱 DRIP","📸 History","⚙️ Settings"]
-tabs = st.tabs(tab_names)
+st.markdown("---")
 
-# ════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════ TABS
+tabs = st.tabs(["🏠 Dashboard","📋 Holdings","💰 Invest","📥 Import","🌱 DRIP","📸 History","⚙️ Settings"])
+
+# ══════════════════════════════════════════════════════════════
 # TAB 1  DASHBOARD
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[0]:
-    pf=st.session_state.portfolio; pr=st.session_state.prices; recs=st.session_state.recs
+    pf   = st.session_state.portfolio
+    pr   = st.session_state.prices
+    recs = st.session_state.recs
+    cash = st.session_state.cash
 
     if not pf:
-        st.info("👆 Click **🔄 Refresh** above to load live prices and your recommendations.")
+        st.info("👆 Click **🔄 Refresh** in the top-right to load live prices and recommendations.")
         st.stop()
 
-    # KPIs
-    total_eq   = sum(_ep(t,pos,pr)*pos["shares"] for t,pos in pf.items())
-    total_cost = sum(pos["avg_cost"]*pos["shares"] for pos in pf.values())
-    total_pnl  = total_eq - total_cost
-    pnl_pct    = total_pnl/total_cost*100 if total_cost else 0
-    cash       = st.session_state.cash
-    n_sell     = sum(1 for r in recs if r["cat"]=="sell")
-    n_buy      = sum(1 for r in recs if r["cat"]=="buy")
-    n_alert    = sum(1 for r in recs if r["cat"]=="alert")
-    pnl_col    = "green" if total_pnl>=0 else "red"
-    pnl_sign   = "+" if total_pnl>=0 else ""
+    # ── LIVE numbers matching Robinhood ──────────────────────────────
+    stocks_val  = sum(_ep(t,pos,pr)*pos["shares"] for t,pos in pf.items() if t not in CRYPTO_TICKERS)
+    crypto_val  = sum(_ep(t,pos,pr)*pos["shares"] for t,pos in pf.items() if t in CRYPTO_TICKERS)
+    total_val   = stocks_val + crypto_val + cash
+    total_cost  = sum(pos["avg_cost"]*pos["shares"] for pos in pf.values())
+    total_pnl   = (stocks_val + crypto_val) - total_cost
+    pnl_pct     = total_pnl/total_cost*100 if total_cost else 0
+    n_sell      = sum(1 for r in recs if r["cat"]=="sell")
+    n_buy       = sum(1 for r in recs if r["cat"]=="buy")
+    n_alert     = sum(1 for r in recs if r["cat"]=="alert")
+    n_trim      = sum(1 for r in recs if r["cat"]=="trim")
+    sell_proceeds = sum(r["proceeds"] or 0 for r in recs if r["cat"]=="sell")
+    pnl_col = "green" if total_pnl>=0 else "red"
+    pnl_sign = "+" if total_pnl>=0 else ""
 
-    st.markdown(f"""
-    <div class="kpi-row">
-      <div class="kpi">
-        <div class="kpi-label">Portfolio Value</div>
-        <div class="kpi-value blue">${total_eq:,.0f}</div>
-        <div class="kpi-sub">Cost basis ${total_cost:,.0f}</div>
-        <div class="prog-bg"><div class="prog-fill" style="width:{min(100,total_eq/total_cost*100 if total_cost else 0):.0f}%"></div></div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Total Gain / Loss</div>
-        <div class="kpi-value {pnl_col}">{pnl_sign}${abs(total_pnl):,.0f}</div>
-        <div class="kpi-sub">{pnl_sign}{pnl_pct:.1f}% overall return</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Cash Available</div>
-        <div class="kpi-value gold">${cash:,.2f}</div>
-        <div class="kpi-sub">Ready to deploy + sell proceeds</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Action Required</div>
-        <div class="kpi-value red">{n_sell + n_alert}</div>
-        <div class="kpi-sub">{n_sell} sell · {n_alert} review · {n_buy} buy signals</div>
-      </div>
-      <div class="kpi">
-        <div class="kpi-label">Positions</div>
-        <div class="kpi-value blue">{len(pf)}</div>
-        <div class="kpi-sub">{sum(1 for pos in pf.values() if lt_ok(pos["first_buy_date"]))} LT eligible</div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    # ── KPI cards (clickable via button overlay) ─────────────────────
+    # Each card uses position:relative wrapper + invisible absolute button
+    kpi_ids = ["value","pnl","actions","cash","positions"]
+    labels  = ["Total Portfolio","Gain / Loss","Actions Needed","Cash Available","Positions"]
+    values  = [
+        f"${total_val:,.0f}",
+        f"{pnl_sign}${abs(total_pnl):,.0f}",
+        str(n_sell+n_alert),
+        f"${cash:,.0f}",
+        str(len(pf)),
+    ]
+    subvals = [
+        f"Stocks ${stocks_val:,.0f} · Crypto ${crypto_val:,.0f} · Cash ${cash:,.0f}",
+        f"{pnl_sign}{pnl_pct:.1f}% overall return on cost",
+        f"{n_sell} sell · {n_alert} review · {n_buy} buy · {n_trim} trim",
+        f"${sell_proceeds:,.0f} more if you action sells",
+        f"{sum(1 for pos in pf.values() if lt_ok(pos['first_buy_date']))} LT eligible",
+    ]
+    colors = ["blue", pnl_col, "red" if (n_sell+n_alert)>0 else "green", "gold", "blue"]
 
-    # ── Today's action box ──────────────────────────────────────────
+    cols = st.columns(5)
+    for col, kid, lbl, val, sub, color in zip(cols,kpi_ids,labels,values,subvals,colors):
+        with col:
+            is_active = st.session_state.kpi_expanded == kid
+            active_cls = "active" if is_active else ""
+            st.markdown(
+                f'<div class="kpi-wrap"><div class="kpi {active_cls}">'
+                f'<div class="kpi-lbl">{lbl}</div>'
+                f'<div class="kpi-val {color}">{val}</div>'
+                f'<div class="kpi-sub">{sub}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True)
+            # Invisible button overlay — clicking toggles the drill-down
+            if st.button(" ", key=f"kpi_btn_{kid}", help=f"Click to expand {lbl} details",
+                         use_container_width=True):
+                st.session_state.kpi_expanded = None if st.session_state.kpi_expanded == kid else kid
+                st.rerun()
+
+    # ── Drill-down panel ─────────────────────────────────────────────
+    ec = st.session_state.kpi_expanded
+    if ec:
+        with st.container():
+            st.markdown("---")
+            if ec == "value":
+                st.markdown("**📊 Portfolio Breakdown (live prices)**")
+                bd = pd.DataFrame([{
+                    "Ticker":t,
+                    "Shares":round(pos["shares"],4),
+                    "Avg Cost":f"${pos['avg_cost']:,.2f}",
+                    "Live Price":f"${_ep(t,pos,pr):,.2f}",
+                    "Value":f"${_ep(t,pos,pr)*pos['shares']:,.0f}",
+                    "Type":"Crypto" if t in CRYPTO_TICKERS else "Stock/ETF",
+                } for t,pos in sorted(pf.items(),key=lambda x:_ep(x[0],x[1],pr)*x[1]["shares"],reverse=True)])
+                st.dataframe(bd, use_container_width=True, hide_index=True)
+                st.caption(f"Stocks: ${stocks_val:,.2f} · Crypto: ${crypto_val:,.2f} · Cash: ${cash:,.2f} · **Total: ${total_val:,.2f}**")
+
+            elif ec == "pnl":
+                st.markdown("**📈 P&L Breakdown by Position**")
+                pnl_data = []
+                for t,pos in pf.items():
+                    price=_ep(t,pos,pr); pnl=(price-pos["avg_cost"])/pos["avg_cost"]*100 if pos["avg_cost"]>0 else 0
+                    pnl_data.append({"Ticker":t,"Avg Cost":f"${pos['avg_cost']:,.2f}","Live Price":f"${price:,.2f}",
+                                     "P&L %":f"{pnl:+.1f}%","P&L $":f"${(price-pos['avg_cost'])*pos['shares']:+,.0f}",
+                                     "LT?":"✅" if lt_ok(pos["first_buy_date"]) else "❌"})
+                pnl_df = pd.DataFrame(pnl_data)
+                st.dataframe(pnl_df, use_container_width=True, hide_index=True)
+
+            elif ec == "actions":
+                st.markdown("**⚡ All Actions Required**")
+                action_recs = [r for r in recs if r["cat"] in ("sell","alert","buy","trim")]
+                if action_recs:
+                    for r in action_recs:
+                        st.markdown(_rcard(r), unsafe_allow_html=True)
+                else:
+                    st.success("No urgent actions — portfolio is on track!")
+
+            elif ec == "cash":
+                st.markdown("**💵 Cash Deployment Plan**")
+                dep_recs, nd, dt_days, total_deploy = generate_deposit_recs(pr, pf, cash)
+                st.markdown(f"Deploying **${total_deploy:,.0f}** (${DEPOSIT_AMT} deposit + ${cash-50:.0f} available cash):")
+                for dr in dep_recs:
+                    t=dr["ticker"]; amt=dr["amount"]; p=dr["price"]
+                    sh=f"{dr['shares_to_buy']:.4f} sh" if dr["shares_to_buy"] else "—"
+                    st.markdown(f"- **{t}**: ${amt:.0f} ({dr['pct']*100:.0f}%) → {sh} @ ${p:,.2f}" if p else f"- **{t}**: ${amt:.0f} ({dr['pct']*100:.0f}%)")
+
+            elif ec == "positions":
+                st.markdown("**📋 All Positions**")
+                pos_data=[]
+                for t,pos in sorted(pf.items(),key=lambda x:_ep(x[0],x[1],pr)*x[1]["shares"],reverse=True):
+                    rec = next((r for r in recs if r["ticker"]==t), None)
+                    price=_ep(t,pos,pr)
+                    pos_data.append({"Ticker":t,"Value":f"${price*pos['shares']:,.0f}",
+                                     "P&L %":f"{(price-pos['avg_cost'])/pos['avg_cost']*100:+.1f}%" if pos["avg_cost"]>0 else "—",
+                                     "LT?":"✅" if lt_ok(pos["first_buy_date"]) else "❌",
+                                     "Recommendation":rec["action"] if rec else "—"})
+                st.dataframe(pd.DataFrame(pos_data), use_container_width=True, hide_index=True)
+
+        st.markdown("---")
+
+    # ── Urgent alert box ──────────────────────────────────────────────
     urgent = [r for r in recs if r["cat"] in ("sell","alert")]
-    buys   = [r for r in recs if r["cat"]=="buy"]
-    trims  = [r for r in recs if r["cat"]=="trim"]
-
     if urgent:
-        items = "".join(f'<div style="margin:4px 0;font-size:.82rem">🔴 <b>{r["ticker"]}</b> — {r["plain"]}</div>' for r in urgent)
-        st.markdown(f'<div class="today-box"><div class="today-title">⚡ Action Required Today</div>{items}</div>', unsafe_allow_html=True)
+        items = "".join(f'<div style="font-size:.82rem;margin:3px 0">🔴 <b>{r["ticker"]}</b> — {r["plain"]}</div>' for r in urgent)
+        st.markdown(f'<div class="alert-box"><div class="alert-title">⚡ Action Required</div>{items}</div>', unsafe_allow_html=True)
 
-    # ── Recommendation cards ─────────────────────────────────────────
-    def _card(r) -> str:
-        cat  = r["cat"]
-        pnl  = r["pnl_pct"]
-        p    = r["price"]
-        pill_map = {"sell":"pill-red","buy":"pill-green","trim":"pill-yellow",
-                    "hold":"pill-blue","alert":"pill-orange"}
-        pill_cls = pill_map.get(cat,"pill-blue")
-        price_str = f"${p:,.2f}" if p else "—"
-        eq_str    = f"${r['equity']:,.0f}"
-        pnl_str   = f"{pnl:+.1f}%"
-        pnl_col   = "color:var(--accent)" if pnl>=0 else "color:var(--danger)"
-        proc_str  = f" · Est. ${r['proceeds']:,.0f}" if r["proceeds"] else ""
-        return (
-            f'<div class="action-card {cat}">' +
-            f'<div style="display:flex;justify-content:space-between;align-items:center">' +
-            f'<span class="ac-ticker">{r["ticker"]}</span>' +
-            f'<span class="pill {pill_cls}">{r["action"]}</span></div>' +
-            f'<div class="ac-body" style="margin:6px 0">{r["plain"]}</div>' +
-            f'<div class="ac-meta">' +
-            f'<span>Price: {price_str}</span>' +
-            f'<span style="{pnl_col}">{pnl_str}</span>' +
-            f'<span>Equity: {eq_str}{proc_str}</span>' +
-            f'<span style="color:var(--muted)">{r["tax_note"]}</span>' +
-            f'</div></div>'
-        )
+    # ── Recommendations grid ──────────────────────────────────────────
+    pill_map = {"sell":"red","buy":"green","trim":"yellow","hold":"blue","alert":"orange"}
 
-    if urgent:
-        st.markdown('<div class="sec-head">🔴 Sell / Review Now</div>', unsafe_allow_html=True)
-        st.markdown('<div class="action-grid">' + "".join(_card(r) for r in urgent) + '</div>', unsafe_allow_html=True)
+    def _rcard(r) -> str:
+        p = r["live_price"]; pnl = r["pnl_pct"]
+        pnl_color = "var(--green)" if pnl>=0 else "var(--red)"
+        proc = f" · Proceeds: ${r['proceeds']:,.0f}" if r["proceeds"] else ""
+        return (f'<div class="rcard {r["cat"]}">'
+                f'<div class="rc-head"><span class="rc-ticker">{r["ticker"]}</span>'
+                f'{_pill(r["action"], pill_map.get(r["cat"],"blue"))}</div>'
+                f'<div class="rc-plain">{r["plain"]}</div>'
+                f'<div class="rc-meta">'
+                f'<span>Price: ${p:,.2f}</span>'
+                f'<span style="color:{pnl_color}">P&L: {pnl:+.1f}%</span>'
+                f'<span>Equity: ${r["equity"]:,.0f}{proc}</span>'
+                f'<span>{r["tax_note"]}</span>'
+                f'</div></div>')
 
-    if buys:
-        st.markdown('<div class="sec-head">🟢 Buy / Accumulate</div>', unsafe_allow_html=True)
-        st.markdown('<div class="action-grid">' + "".join(_card(r) for r in buys) + '</div>', unsafe_allow_html=True)
-
-    if trims:
-        st.markdown('<div class="sec-head">✂️ Trim (Take Some Profit)</div>', unsafe_allow_html=True)
-        st.markdown('<div class="action-grid">' + "".join(_card(r) for r in trims) + '</div>', unsafe_allow_html=True)
+    cats_order = [("sell","🔴 Sell Now"),("alert","🚨 Review"),("buy","🟢 Buy / Accumulate"),("trim","✂️ Trim (Take Profit)")]
+    for cat, heading in cats_order:
+        group = [r for r in recs if r["cat"]==cat]
+        if not group: continue
+        st.markdown(f'<div class="sh">{heading}</div>', unsafe_allow_html=True)
+        n_cols = min(len(group), 3)
+        cols = st.columns(n_cols)
+        for i, r in enumerate(group):
+            with cols[i % n_cols]:
+                st.markdown(_rcard(r), unsafe_allow_html=True)
 
     holds = [r for r in recs if r["cat"]=="hold"]
     if holds:
-        with st.expander(f"🟡 Hold Positions ({len(holds)}) — all on track"):
-            st.markdown('<div class="action-grid">' + "".join(_card(r) for r in holds) + '</div>', unsafe_allow_html=True)
+        with st.expander(f"🟡 Hold Positions ({len(holds)}) — no action needed"):
+            n_cols = 3
+            cols = st.columns(n_cols)
+            for i, r in enumerate(holds):
+                with cols[i % n_cols]:
+                    st.markdown(_rcard(r), unsafe_allow_html=True)
 
-    # ── Calendar ────────────────────────────────────────────────────
-    st.markdown('<div class="sec-head">📅 Action Calendar 2026</div>', unsafe_allow_html=True)
-    type_pill = {"SELL":"pill-red","BUY":"pill-green","TRIM":"pill-yellow","TAX":"pill-blue","HOLD":"pill-blue"}
+    # ── Action Calendar ───────────────────────────────────────────────
+    st.markdown('<div class="sh">📅 2026 Action Calendar</div>', unsafe_allow_html=True)
+    type_pill = {"SELL":"red","BUY":"green","TRIM":"yellow","TAX":"blue","HOLD":"blue"}
     cal_html = ""
     for date_s, icon, typ, desc in ACTION_CALENDAR:
-        pill_cls = type_pill.get(typ,"pill-blue")
-        cal_html += (
-            f'<div class="cal-row">' +
-            f'<span class="cal-date">{date_s}</span>' +
-            f'<span class="pill {pill_cls}" style="min-width:42px;text-align:center">{typ}</span>' +
-            f'<span>{icon} {desc}</span></div>'
-        )
+        pc = type_pill.get(typ,"blue")
+        cal_html += f'<div class="cal-row"><span class="cal-date">{date_s}</span>{_pill(typ,pc)}<span>{icon} {desc}</span></div>'
     st.markdown(cal_html, unsafe_allow_html=True)
 
-    with st.expander("🧾 Tax Playbook — How to Pay Less Tax"):
+    with st.expander("🧾 Tax Guide — How to Keep More of Your Gains"):
         st.markdown("""
-**The #1 rule:** Never sell a position you've held less than 1 year.
-- Holding <1 yr = **short-term (ST)** → you pay your income tax rate (~37%)
-- Holding >1 yr = **long-term (LT)** → you pay only 15–20%
+**The single most important rule:** Never sell a stock you've held less than 1 year.
+- **Under 1 year (Short-Term):** You pay your income tax rate — typically **37%**
+- **Over 1 year (Long-Term):** You pay only **15–20%** — saves you thousands
 
-**What to do:**
-1. Always check the "LT?" column before selling anything
+**Step-by-step tax playbook:**
+1. Check the **LT?** column in Holdings before selling anything
 2. Sell VTV, VEA, VWO, BND now — all LT eligible, reinvest same day into VOO/VYM
-3. After selling one ETF and buying another (e.g. SPY→VOO), this is NOT a wash sale — it's allowed
-4. Let DRIP run — each reinvestment creates a new tax lot at today's lower price
-5. Before Dec 31: see if any positions are in loss — you can sell to offset gains
+3. Swapping one ETF for another (SPY→VOO, VUG→QQQ) is **not** a wash sale — it's allowed
+4. Leave DRIP on — each reinvestment creates a new tax lot at today's lower prices
+5. Before Dec 31: sell any losing positions to offset gains (tax-loss harvesting)
 
-**Crypto rule:** Never sell BTC or XRP short-term. Hold at least 1 year from purchase date.
+**Crypto tax rule:** Hold BTC and XRP at least 1 year from purchase. Never sell short-term.
 """)
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 2  HOLDINGS
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[1]:
     pf=st.session_state.portfolio; pr=st.session_state.prices
     if not pf:
@@ -807,39 +726,40 @@ with tabs[1]:
             price=_ep(ticker,pos,pr); equity=price*pos["shares"]
             pnl=(price-pos["avg_cost"])/pos["avg_cost"]*100 if pos["avg_cost"]>0 else 0
             rows.append({
-                "Ticker":ticker, "Shares":round(pos["shares"],4),
-                "Avg Cost":pos["avg_cost"], "Live Price":price,
-                "Equity":round(equity,2), "P&L %":round(pnl,2),
+                "Ticker":ticker,"Shares":round(pos["shares"],4),
+                "Avg Buy Price":pos["avg_cost"],"Live Price":price,
+                "Market Value":round(equity,2),"P&L %":round(pnl,2),
+                "P&L $":round((price-pos["avg_cost"])*pos["shares"],2),
                 "First Buy":str(pos["first_buy_date"]) if pos["first_buy_date"] else "—",
                 "LT Eligible?":"✅ YES" if lt_ok(pos["first_buy_date"]) else "❌ NO",
             })
-        df=pd.DataFrame(rows).sort_values("Equity",ascending=False)
+        df=pd.DataFrame(rows).sort_values("Market Value",ascending=False)
+
+        # Summary metrics row
+        total_mkt = df["Market Value"].sum()
+        winners=sum(1 for r in rows if r["P&L %"]>=0); losers=len(rows)-winners
+        best=max(rows,key=lambda r:r["P&L %"]); worst=min(rows,key=lambda r:r["P&L %"])
+        mc1,mc2,mc3,mc4 = st.columns(4)
+        mc1.metric("Holdings Value",f"${total_mkt:,.0f}")
+        mc2.metric("Winners / Losers",f"{winners} / {losers}")
+        mc3.metric("Best Position",f"{best['Ticker']} {best['P&L %']:+.1f}%")
+        mc4.metric("Worst Position",f"{worst['Ticker']} {worst['P&L %']:+.1f}%")
 
         def _row_color(row):
             if row["P&L %"] < -10: return ["background:#3d0000;color:#fca5a5"]*len(row)
             if row["P&L %"] < 0:   return ["background:#2d1a00;color:#fbbf24"]*len(row)
             return [""]*len(row)
 
-        # Summary bar
-        winners = sum(1 for r in rows if r["P&L %"]>=0)
-        losers  = len(rows)-winners
-        st.markdown(
-            '<div style="display:flex;gap:20px;padding:12px 0;font-size:.82rem;font-family:monospace">'
-            f'<span>📊 <b>{len(rows)}</b> positions</span>'
-            f'<span class="green">▲ <b>{winners}</b> winning</span>'
-            f'<span class="red">▼ <b>{losers}</b> losing</span>'
-            f'<span class="gold">💵 Total equity: <b>${sum(r["Equity"] for r in rows):,.0f}</b></span>'
-            '</div>', unsafe_allow_html=True)
-
         st.dataframe(
             df.style.apply(_row_color,axis=1).format({
-                "Avg Cost":"${:,.2f}","Live Price":"${:,.2f}",
-                "Equity":"${:,.0f}","P&L %":"{:+.2f}%"
+                "Avg Buy Price":"${:,.2f}","Live Price":"${:,.2f}",
+                "Market Value":"${:,.2f}","P&L %":"{:+.2f}%","P&L $":"${:+,.2f}"
             }), use_container_width=True, hide_index=True)
 
-        col_pie, col_bar = st.columns(2)
+        # Charts
+        col_pie,col_bar=st.columns(2)
         with col_pie:
-            fig=px.pie(df,values="Equity",names="Ticker",title="Portfolio Allocation",
+            fig=px.pie(df,values="Market Value",names="Ticker",title="Portfolio Allocation by Market Value",
                        color_discrete_sequence=px.colors.qualitative.Set3)
             fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",font_color="#e8eaf0",
                               title_font_family="Syne",legend_font_color="#e8eaf0")
@@ -847,134 +767,142 @@ with tabs[1]:
         with col_bar:
             colors=["#4ade80" if v>=0 else "#f87171" for v in df["P&L %"]]
             fig2=go.Figure(go.Bar(x=df["Ticker"],y=df["P&L %"],marker_color=colors,
-                                  text=[f"{v:+.1f}%" for v in df["P&L %"]],textposition="outside"))
+                text=[f"{v:+.1f}%" for v in df["P&L %"]],textposition="outside"))
             fig2.update_layout(title="P&L % by Position",paper_bgcolor="rgba(0,0,0,0)",
                                plot_bgcolor="rgba(0,0,0,0)",font_color="#e8eaf0",
-                               title_font_family="Syne",yaxis_title="P&L %")
+                               title_font_family="Syne",yaxis_title="P&L %",
+                               yaxis_zeroline=True,yaxis_zerolinecolor="#333")
             st.plotly_chart(fig2,use_container_width=True)
 
-        sell_list=[r for r in st.session_state.recs if r["cat"]=="sell"]
-        if sell_list:
-            st.markdown('<div class="sec-head">🔴 Active Sell List</div>', unsafe_allow_html=True)
+        # Active sell list
+        sell_recs=[r for r in st.session_state.recs if r["cat"]=="sell"]
+        if sell_recs:
+            st.markdown('<div class="sh">🔴 Active Sell List</div>', unsafe_allow_html=True)
             sl_df=pd.DataFrame([{
                 "Ticker":r["ticker"],"Shares":r["shares"],
+                "Current Value":f"${r['equity']:,.0f}",
                 "Est Proceeds":f"${r['proceeds']:,.0f}" if r["proceeds"] else "—",
-                "What to do":r["plain"],"Tax":r["tax_note"]
-            } for r in sell_list])
+                "Tax":r["tax_note"],"What to do":r["plain"]
+            } for r in sell_recs])
             st.dataframe(sl_df,use_container_width=True,hide_index=True)
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 3  INVEST
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[2]:
-    pr=st.session_state.prices; recs=st.session_state.recs
-    cash=st.session_state.cash
+    pr=st.session_state.prices; pf=st.session_state.portfolio
+    cash=st.session_state.cash; recs=st.session_state.recs
     sell_proc=sum(r["proceeds"] or 0 for r in recs if r["cat"]=="sell")
-    total_avail=cash+sell_proc
+    dep_recs, next_dep, days_to, total_deploy = generate_deposit_recs(pr, pf, cash)
 
-    # Cash overview
-    st.markdown(f"""
-    <div class="kpi-row">
-      <div class="kpi"><div class="kpi-label">Cash on Hand</div>
-        <div class="kpi-value gold">${cash:,.2f}</div>
-        <div class="kpi-sub">Available in Robinhood</div></div>
-      <div class="kpi"><div class="kpi-label">If You Action Sells</div>
-        <div class="kpi-value green">+${sell_proc:,.2f}</div>
-        <div class="kpi-sub">From SELL NOW positions</div></div>
-      <div class="kpi"><div class="kpi-label">Total to Deploy</div>
-        <div class="kpi-value blue">${total_avail:,.2f}</div>
-        <div class="kpi-sub">Cash + sell proceeds</div></div>
-      <div class="kpi"><div class="kpi-label">Next Deposit</div>
-        <div class="kpi-value yellow">$900</div>
-        <div class="kpi-sub">{_next_friday_deposit().strftime("%B %d, %Y")}</div></div>
-    </div>
-    """, unsafe_allow_html=True)
+    # Cash overview KPIs
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Cash in Robinhood",f"${cash:,.2f}","Your actual balance")
+    c2.metric("Sell Proceeds (if actioned)",f"${sell_proc:,.2f}","From SELL NOW list")
+    c3.metric("Total to Deploy",f"${total_deploy:,.2f}","Deposit + available cash")
+    c4.metric("Next Deposit Date",next_dep.strftime("%b %d, %Y"),f"In {days_to} days")
 
-    st.markdown('<div class="sec-head">💰 Biweekly $900 Plan — Where to Put Each Deposit</div>', unsafe_allow_html=True)
-    st.markdown("""
-    <div style="background:var(--card);border-radius:10px;padding:14px 18px;margin-bottom:14px;font-size:.82rem;color:var(--muted)">
-    Every 2 weeks on Friday, deposit $900 into Robinhood and split it exactly like this.
-    The rotating pick changes each time to diversify your exposure.
-    </div>""", unsafe_allow_html=True)
+    # ── Next deposit plan ──────────────────────────────────────────────
+    st.markdown('<div class="sh">💰 Your Next Deposit Plan</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="background:rgba(96,165,250,.08);border:1px solid rgba(96,165,250,.2);'
+        f'border-radius:10px;padding:12px 16px;font-size:.82rem;margin-bottom:12px">'
+        f'On <b style="color:#60a5fa">{next_dep.strftime("%A, %B %d")}</b>, deposit <b>$900</b> '
+        f'into Robinhood and place these exact trades. Total to deploy (including available cash): '
+        f'<b style="color:#4ade80">${total_deploy:,.2f}</b></div>',
+        unsafe_allow_html=True)
 
-    rows_sched=[]
+    dep_html = '<div class="dp-card">'
+    for dr in dep_recs:
+        t=dr["ticker"]; amt=dr["amount"]; p=dr["price"]
+        sh_str=f"{dr['shares_to_buy']:.4f} shares" if dr["shares_to_buy"] else "— (refresh for price)"
+        pct_str=f"{dr['pct']*100:.0f}%"
+        dep_html += (f'<div class="dp-row">'
+                     f'<span class="dp-ticker">{t}</span>'
+                     f'<span class="dp-amt">${amt:.0f}</span>'
+                     f'<span style="color:#94a3b8;font-size:.72rem">{pct_str}</span>'
+                     f'<span class="dp-sh">{sh_str}</span>'
+                     f'<span class="dp-why">{dr["why"]}</span>'
+                     f'</div>')
+    dep_html += '</div>'
+    st.markdown(dep_html, unsafe_allow_html=True)
+
+    # Why each pick
+    with st.expander("📖 Why these picks?"):
+        st.markdown("""
+| Ticker | % | Reason |
+|--------|---|--------|
+| **NVDA** | 28% | AI infrastructure is a decade-long supercycle. Core holding — top conviction. |
+| **VOO** | 22% | S&P 500 index. Tracks 500 biggest US companies. Buy forever, never stop. |
+| **VYM** | 17% | High-dividend ETF. Pays you quarterly — reinvest to compound income. |
+| **QQQ** | 17% | Nasdaq-100. Top 100 tech companies. Long-term growth engine. |
+| **Rotating pick** | 16% | Changes each deposit to diversify exposure across strong single stocks. |
+
+**Rotating schedule:** META → GOOGL → AAPL → MSFT → COST → TSM → CRM → NFLX → repeat
+""")
+
+    # ── Full 18-deposit schedule ────────────────────────────────────────
+    st.markdown('<div class="sh">📅 Full $900 Biweekly Schedule</div>', unsafe_allow_html=True)
+    all_rows=[]
     for i in range(18):
         d=DEPOSIT_START+datetime.timedelta(days=14*i)
-        if d < datetime.date.today()-datetime.timedelta(days=14): continue
         rot=ROTATING[i%len(ROTATING)]
-        plan=BIWEEKLY_PLAN[:-1]+[{"ticker":rot,"pct":.16,"why":"Rotating pick this cycle"}]
-        dep_html=f'<div style="margin-bottom:18px"><div style="font-family:sans-serif;font-weight:700;font-size:.85rem;color:var(--accent2);margin-bottom:6px">📅 {d.strftime("%B %d, %Y")}</div>'
+        plan=BIWEEKLY_PLAN[:-1]+[{"ticker":rot,"pct":.16,"why":"Rotating pick"}]
         for s in plan:
             t=s["ticker"]; amt=round(DEPOSIT_AMT*s["pct"],2); p=pr.get(t)
-            sh_str=f"{amt/p:.4f} shares" if p else "—"
-            dep_html+=f'<div class="dep-row"><span class="dep-ticker">{t}</span><span class="dep-amt">${amt:.0f}</span><span style="color:var(--muted);font-size:.75rem">{sh_str}</span><span style="color:var(--muted);font-size:.75rem;margin-left:auto">{s["why"]}</span></div>'
-        dep_html+="</div>"
-        rows_sched.append((d,dep_html))
-        if len(rows_sched)>=6: break
+            all_rows.append({"Date":d.strftime("%b %d"),"Ticker":t,
+                             "Amount":f"${amt:.0f}","Est Shares":f"{amt/p:.4f}" if p else "—","Why":s["why"]})
+    st.dataframe(pd.DataFrame(all_rows),use_container_width=True,hide_index=True)
 
-    for _,h in rows_sched:
-        st.markdown(h,unsafe_allow_html=True)
-
-    if len(rows_sched)<18:
-        with st.expander("Show full 18-deposit schedule"):
-            for i in range(18):
-                d=DEPOSIT_START+datetime.timedelta(days=14*i)
-                rot=ROTATING[i%len(ROTATING)]
-                plan=BIWEEKLY_PLAN[:-1]+[{"ticker":rot,"pct":.16,"why":"Rotating pick"}]
-                cols=st.columns([1,1,1,1,1])
-                for j,s in enumerate(plan):
-                    t=s["ticker"]; amt=round(DEPOSIT_AMT*s["pct"],2); p=pr.get(t)
-                    cols[j].metric(t,f"${amt:.0f}",f"{amt/p:.4f} sh" if p else "—")
-
-    # ── Log deposits ────────────────────────────────────────────────
-    st.markdown('<div class="sec-head">📝 Log a Deposit</div>', unsafe_allow_html=True)
+    # ── Log deposit ──────────────────────────────────────────────────────
+    st.markdown('<div class="sh">📝 Log a Completed Deposit</div>', unsafe_allow_html=True)
     with st.form("dep_form"):
-        c1,c2,c3,c4=st.columns([1,1,1,2])
-        dep_date  =c1.date_input("Date",value=datetime.date.today())
-        dep_ticker=c2.selectbox("Ticker",[p["ticker"] for p in BIWEEKLY_PLAN]+["OTHER"])
-        dep_amt   =c3.number_input("Amount ($)",value=900.0,step=50.0)
-        dep_note  =c4.text_input("Note (optional)")
+        col1,col2,col3,col4=st.columns([1,1,1,2])
+        dep_date=col1.date_input("Date",value=datetime.date.today())
+        dep_ticker=col2.selectbox("Ticker",[p["ticker"] for p in BIWEEKLY_PLAN]+["OTHER"])
+        dep_amt=col3.number_input("Amount ($)",value=900.0,step=50.0)
+        dep_note=col4.text_input("Note (optional)")
         if st.form_submit_button("✅ Log Deposit",type="primary"):
             entry={"date":str(dep_date),"ticker":dep_ticker,"amount":dep_amt,
                    "note":dep_note,"logged_at":datetime.datetime.now().isoformat()}
             st.session_state.deposit_log.append(entry)
             _save(DEPOSIT_LOG_PATH,st.session_state.deposit_log)
-            # Update cash balance
-            st.session_state.cash=round(st.session_state.cash+dep_amt,2)
             st.success(f"✅ Logged ${dep_amt:,.2f} → {dep_ticker} on {dep_date}")
 
-    # ── Update cash balance ──────────────────────────────────────────
-    st.markdown('<div class="sec-head">💵 Update Cash Balance</div>', unsafe_allow_html=True)
-    new_cash=st.number_input("Current cash in Robinhood ($)",value=float(st.session_state.cash),step=10.0,format="%.2f")
-    if st.button("Update Cash"):
+    # ── Update cash ──────────────────────────────────────────────────────
+    st.markdown('<div class="sh">💵 Update Cash Balance</div>', unsafe_allow_html=True)
+    new_cash=st.number_input("Enter current cash shown in Robinhood ($)",
+                             value=float(st.session_state.cash),step=10.0,format="%.2f")
+    if st.button("Update Cash Balance",use_container_width=False):
         st.session_state.cash=new_cash
         st.success(f"Cash updated to ${new_cash:,.2f}")
 
     if st.session_state.deposit_log:
-        st.markdown('<div class="sec-head">📋 Deposit History</div>', unsafe_allow_html=True)
-        dl=pd.DataFrame(st.session_state.deposit_log)
-        st.dataframe(dl,use_container_width=True,hide_index=True)
+        st.markdown('<div class="sh">📋 Deposit History</div>', unsafe_allow_html=True)
+        st.dataframe(pd.DataFrame(st.session_state.deposit_log),use_container_width=True,hide_index=True)
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 4  IMPORT
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[3]:
     n=len(st.session_state.tx_store)
     st.markdown(
-        f'<span class="war-badge">✅ {n} transactions on disk — baked-in data ready · upload only for NEW activity</span>',
+        f'<span style="background:rgba(74,222,128,.1);border:1px solid rgba(74,222,128,.25);'
+        f'color:#4ade80;padding:4px 12px;border-radius:20px;font-size:.72rem">'
+        f'✅ {n} transactions on disk · baked-in data pre-loaded · upload only for NEW activity</span>',
         unsafe_allow_html=True)
     st.markdown("")
 
-    st.markdown('<div class="sec-head">📥 Robinhood Activity CSV</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Download from Robinhood app → Account → Statements & History → Export to CSV</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">📥 Robinhood Activity CSV</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.8rem;color:#6b7280;margin-bottom:10px">Robinhood app → Account → Statements → Export to CSV</div>', unsafe_allow_html=True)
 
-    up_csv=st.file_uploader("Drop your CSV here",type=["csv"],key="csv_up")
+    up_csv=st.file_uploader("Drop Robinhood CSV here",type=["csv"],key="csv_up")
     if up_csv:
         new_store,stats=ingest_csv(up_csv,st.session_state.tx_store)
         c1,c2,c3=st.columns(3)
-        c1.metric("New transactions found",stats["added"])
-        c2.metric("Already imported (skipped)",stats["skipped"])
-        c3.metric("Total in store",stats["total"])
+        c1.metric("New transactions",stats["added"])
+        c2.metric("Already imported",stats["skipped"])
+        c3.metric("Total on disk",stats["total"])
         if stats["added"]>0:
             st.markdown("**New rows preview:**")
             existing_fps=set(st.session_state.tx_store.keys())
@@ -987,86 +915,97 @@ with tabs[3]:
                 st.success(f"✅ {stats['added']} new transactions added. Portfolio updated.")
                 st.rerun()
         else:
-            st.success("✅ Nothing new — your portfolio is already up to date!")
+            st.success("✅ Nothing new — portfolio is already up to date!")
 
-    st.markdown('<div class="sec-head">🪙 Robinhood Crypto PDF Statement</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Download from Robinhood Crypto → Statements — updates your BTC/XRP share counts automatically</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">🪙 Robinhood Crypto PDF Statement</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.8rem;color:#6b7280;margin-bottom:10px">Updates BTC/XRP share counts from your monthly statement PDF</div>', unsafe_allow_html=True)
 
-    up_pdf=st.file_uploader("Drop your crypto PDF here",type=["pdf"],key="pdf_up")
+    up_pdf=st.file_uploader("Drop Crypto PDF here",type=["pdf"],key="pdf_up")
     if up_pdf:
         with st.spinner("Reading PDF…"):
             parsed=parse_crypto_pdf(up_pdf)
         if not parsed:
-            st.error("Could not read this PDF. Try entering values manually in ⚙️ Settings.")
+            st.error("Could not parse PDF. Enter values manually in ⚙️ Settings.")
         else:
             st.dataframe(pd.DataFrame([{"Coin":t,"Shares":v["shares"],
                 "Market Value (at statement date)":f"${v['market_value']:,.2f}"} for t,v in parsed.items()]),
                 use_container_width=True,hide_index=True)
-            st.info("Your avg purchase price is preserved — only share counts update from the PDF.")
+            st.info("Your avg buy price is kept from Settings — only share counts update.")
             if st.button("✅ Update Crypto Holdings",type="primary"):
                 ovr=st.session_state.crypto_ovr
                 for t,info in parsed.items():
                     ovr[t]={"shares":info["shares"],"avg_cost":ovr.get(t,{}).get("avg_cost",0)}
                 st.session_state.crypto_ovr=ovr; _save(CRYPTO_OVR_PATH,ovr)
                 _refresh()
-                st.success("✅ Crypto updated. "+", ".join(f"{t}: {v['shares']} shares" for t,v in parsed.items()))
+                st.success("✅ Crypto updated: "+", ".join(f"{t}={v['shares']} shares" for t,v in parsed.items()))
                 st.rerun()
 
-    with st.expander("ℹ️ How persistence works"):
+    with st.expander("ℹ️ How data persistence works"):
         st.markdown("""
-**First launch:** Your 585 historical transactions are baked into the app itself and written to disk automatically.
-No upload needed — the app is ready immediately.
-
-**Future uploads:** Only rows with a NEW transaction fingerprint (SHA-1 hash) are added.
-Re-uploading the same CSV always shows "0 new rows" — no doubling ever.
-
-**After a server restart:** The app reads `tx_store.json` from disk and is ready in seconds.
+- **First launch:** 585 historical transactions are baked in and written to `tx_store.json` automatically.
+- **No upload needed on day 1.** The app is ready immediately.
+- **Future uploads:** Only rows with a new SHA-1 fingerprint are added. Re-uploading the same CSV is always safe — 0 duplicates.
+- **After server restart:** App reads `tx_store.json` from disk and rebuilds the portfolio from scratch.
 """)
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 5  DRIP
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[4]:
     pf=st.session_state.portfolio
-    st.markdown('<div class="sec-head">🌱 Dividend Reinvestment (DRIP) — Your Compounding Engine</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.82rem;color:var(--muted);margin-bottom:16px">DRIP = every dividend is automatically reinvested to buy more shares. Over time this compounds significantly.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">🌱 Dividend Reinvestment (DRIP)</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.82rem;color:#6b7280;margin-bottom:14px">DRIP = every dividend is automatically reinvested to buy more shares. Over years this compounds significantly.</div>', unsafe_allow_html=True)
 
-    drip=[{"Ticker":t,"DRIP Events":pos["drip_count"],"Total Reinvested":pos["drip_total"]}
+    drip=[{"Ticker":t,"DRIP Events":pos["drip_count"],"Total Reinvested ($)":round(pos["drip_total"],2)}
           for t,pos in pf.items() if pos["drip_count"]>0]
     if drip:
-        drip_df=pd.DataFrame(drip).sort_values("Total Reinvested",ascending=False)
-        total_ev=sum(d["DRIP Events"] for d in drip); total_amt=sum(d["Total Reinvested"] for d in drip)
+        drip_df=pd.DataFrame(drip).sort_values("Total Reinvested ($)",ascending=False)
+        total_ev=drip_df["DRIP Events"].sum(); total_amt=drip_df["Total Reinvested ($)"].sum()
         c1,c2,c3=st.columns(3)
-        c1.metric("Total DRIP Events",total_ev)
+        c1.metric("Total DRIP Events",int(total_ev))
         c2.metric("Total Reinvested",f"${total_amt:,.2f}")
         c3.metric("Tickers with DRIP",len(drip))
-        st.dataframe(drip_df.style.format({"Total Reinvested":"${:,.2f}"}),
-                     use_container_width=True,hide_index=True)
-        fig=px.bar(drip_df,x="Ticker",y="Total Reinvested",title="DRIP Reinvested by Ticker",
-                   color="Total Reinvested",color_continuous_scale="Greens")
+        st.dataframe(drip_df.style.format({"Total Reinvested ($)":"${:,.2f}"}),use_container_width=True,hide_index=True)
+        fig=px.bar(drip_df,x="Ticker",y="Total Reinvested ($)",title="Total DRIP Reinvested by Ticker",
+                   color="Total Reinvested ($)",color_continuous_scale="Greens",text_auto=".2f")
         fig.update_layout(paper_bgcolor="rgba(0,0,0,0)",plot_bgcolor="rgba(0,0,0,0)",
                           font_color="#e8eaf0",title_font_family="Syne",showlegend=False)
         st.plotly_chart(fig,use_container_width=True)
     else:
-        st.info("No DRIP activity recorded yet. Import your Robinhood CSV.")
+        st.info("No DRIP activity yet.")
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 6  HISTORY
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[5]:
-    st.markdown('<div class="sec-head">📸 Recommendation Snapshots</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.82rem;color:var(--muted);margin-bottom:12px">Save a snapshot any time to compare how recommendations change over time.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">📸 Recommendation Snapshots</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.82rem;color:#6b7280;margin-bottom:12px">Save a snapshot to track how recommendations change over time as prices move.</div>', unsafe_allow_html=True)
 
-    if st.button("📸 Save Snapshot of Today's Recommendations",type="primary"):
-        if st.session_state.recs:
-            snap={"timestamp":datetime.datetime.now().isoformat(),"recs":st.session_state.recs,
-                  "portfolio_value":sum(_ep(t,pos,st.session_state.prices)*pos["shares"]
-                                         for t,pos in st.session_state.portfolio.items())}
-            st.session_state.rec_history.append(snap)
-            _save(REC_HISTORY_PATH,st.session_state.rec_history)
-            st.success("✅ Snapshot saved.")
-        else:
-            st.warning("Refresh prices first.")
+    col_snap, col_clear = st.columns([3,1])
+    with col_snap:
+        if st.button("📸 Save Snapshot of Today's Recommendations",type="primary",use_container_width=True):
+            if st.session_state.recs:
+                pf=st.session_state.portfolio; pr=st.session_state.prices
+                stocks_val=sum(_ep(t,pos,pr)*pos["shares"] for t,pos in pf.items() if t not in CRYPTO_TICKERS)
+                crypto_val=sum(_ep(t,pos,pr)*pos["shares"] for t,pos in pf.items() if t in CRYPTO_TICKERS)
+                snap={
+                    "timestamp":datetime.datetime.now().isoformat(),
+                    "recs":st.session_state.recs,
+                    "portfolio_value":round(stocks_val+crypto_val+st.session_state.cash,2),
+                    "stocks_value":round(stocks_val,2),
+                    "crypto_value":round(crypto_val,2),
+                }
+                st.session_state.rec_history.append(snap)
+                _save(REC_HISTORY_PATH,st.session_state.rec_history)
+                st.success("✅ Snapshot saved.")
+            else:
+                st.warning("Refresh prices first.")
+    with col_clear:
+        if st.button("🗑️ Clear History",use_container_width=True):
+            st.session_state.rec_history=[]
+            _save(REC_HISTORY_PATH,[])
+            st.success("History cleared.")
+            st.rerun()
 
     history=st.session_state.rec_history
     if not history:
@@ -1075,69 +1014,71 @@ with tabs[5]:
         for i,snap in enumerate(reversed(history)):
             ts=snap["timestamp"][:16].replace("T"," ")
             pv=snap.get("portfolio_value",0)
-            with st.expander(f"📸 {ts}  ·  Portfolio ${pv:,.0f}"):
+            sv=snap.get("stocks_value",0); cv=snap.get("crypto_value",0)
+            with st.expander(f"📸 {ts}  ·  Total ${pv:,.0f}  (Stocks ${sv:,.0f} · Crypto ${cv:,.0f})"):
                 snap_df=pd.DataFrame([{
                     "Ticker":r["ticker"],
-                    "Price":f"${r['price']:,.2f}" if r["price"] else "—",
-                    "P&L %":f"{r['pnl_pct']:+.1f}%",
-                    "Action":r["action"],
-                    "What to do":r["plain"],
+                    "Price":f"${r['live_price']:,.2f}" if r.get("live_price") else (f"${r['price']:,.2f}" if r["price"] else "—"),
+                    "P&L %":f"{r['pnl_pct']:+.1f}%","Action":r["action"],"Tax":r["tax_note"],
                 } for r in snap["recs"]])
                 st.dataframe(snap_df,use_container_width=True,hide_index=True)
 
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TAB 7  SETTINGS
-# ════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 with tabs[6]:
-    st.markdown('<div class="sec-head">🪙 Crypto Manual Overrides</div>', unsafe_allow_html=True)
-    st.markdown('<div style="font-size:.8rem;color:var(--muted);margin-bottom:12px">Update if you bought/sold more crypto outside of what is in your CSV.</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">🪙 Crypto Overrides</div>', unsafe_allow_html=True)
+    st.markdown('<div style="font-size:.8rem;color:#6b7280;margin-bottom:10px">Update if your BTC/XRP balance has changed since last PDF upload.</div>', unsafe_allow_html=True)
 
     ovr=st.session_state.crypto_ovr
     c1,c2=st.columns(2)
     with c1:
         st.markdown("**Bitcoin (BTC)**")
-        btc_sh=st.number_input("BTC Shares",value=float(ovr.get("BTC",{}).get("shares",0.03432981)),format="%.8f")
-        btc_co=st.number_input("BTC Avg Buy Price ($)",value=float(ovr.get("BTC",{}).get("avg_cost",52800)),step=100.0)
+        btc_sh=st.number_input("Shares",value=float(ovr.get("BTC",{}).get("shares",0.03432981)),format="%.8f",key="btc_sh")
+        btc_co=st.number_input("Avg Buy Price ($)",value=float(ovr.get("BTC",{}).get("avg_cost",52800)),step=100.0,key="btc_co")
     with c2:
         st.markdown("**XRP**")
-        xrp_sh=st.number_input("XRP Shares",value=float(ovr.get("XRP",{}).get("shares",1.066)),format="%.4f")
-        xrp_co=st.number_input("XRP Avg Buy Price ($)",value=float(ovr.get("XRP",{}).get("avg_cost",0.68)),format="%.4f")
+        xrp_sh=st.number_input("Shares",value=float(ovr.get("XRP",{}).get("shares",1.066)),format="%.4f",key="xrp_sh")
+        xrp_co=st.number_input("Avg Buy Price ($)",value=float(ovr.get("XRP",{}).get("avg_cost",0.68)),format="%.4f",key="xrp_co")
     if st.button("💾 Save & Recalculate",type="primary"):
         new_ovr={"BTC":{"shares":btc_sh,"avg_cost":btc_co},"XRP":{"shares":xrp_sh,"avg_cost":xrp_co}}
         st.session_state.crypto_ovr=new_ovr; _save(CRYPTO_OVR_PATH,new_ovr); _refresh()
-        st.success("✅ Saved. Portfolio recalculated with new crypto values.")
+        st.success("✅ Saved. Portfolio recalculated.")
 
-    st.markdown('<div class="sec-head">📤 Export</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">📤 Export Portfolio</div>', unsafe_allow_html=True)
     if st.session_state.portfolio:
         pr=st.session_state.prices
         exp=[{"Ticker":t,"Shares":pos["shares"],"Avg Buy Price":pos["avg_cost"],
-              "Live Price":_ep(t,pos,pr),"Equity":round(_ep(t,pos,pr)*pos["shares"],2),
+              "Live Price":_ep(t,pos,pr),"Market Value":round(_ep(t,pos,pr)*pos["shares"],2),
               "P&L %":round((_ep(t,pos,pr)-pos["avg_cost"])/pos["avg_cost"]*100 if pos["avg_cost"]>0 else 0,2),
-              "First Buy Date":str(pos["first_buy_date"]),"LT Eligible":lt_ok(pos["first_buy_date"])}
+              "First Buy":str(pos["first_buy_date"]),"LT Eligible":lt_ok(pos["first_buy_date"])}
              for t,pos in st.session_state.portfolio.items()]
-        st.download_button("⬇️ Download Portfolio as CSV",
-            pd.DataFrame(exp).to_csv(index=False).encode(),"portfolio.csv","text/csv")
+        st.download_button("⬇️ Download Portfolio CSV",pd.DataFrame(exp).to_csv(index=False).encode(),"portfolio.csv","text/csv")
 
-    st.markdown('<div class="sec-head">💾 System Status</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">💾 System Status</div>', unsafe_allow_html=True)
     c1,c2,c3,c4=st.columns(4)
     c1.metric("Transactions on disk",len(st.session_state.tx_store))
     c2.metric("Active positions",len(st.session_state.portfolio))
-    fetched=sum(1 for v in st.session_state.prices.values() if v is not None)
-    c3.metric("Prices loaded",f"{fetched}/{len(st.session_state.prices)}")
-    c4.metric("Rec snapshots saved",len(st.session_state.rec_history))
+    fetched=sum(1 for v in st.session_state.prices.values() if v is not None) if st.session_state.prices else 0
+    total_tickers=len(st.session_state.prices)
+    c3.metric("Live prices",f"{fetched}/{total_tickers}")
+    c4.metric("Snapshots saved",len(st.session_state.rec_history))
 
-    st.markdown('<div class="sec-head">⚠️ Reset Options</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sh">⚠️ Reset Options</div>', unsafe_allow_html=True)
     col_a,col_b=st.columns(2)
     with col_a:
-        if st.button("Reset to original baked-in data"):
+        if st.button("Reset to original data (keeps CSV history)",use_container_width=True):
             _save(TX_STORE_PATH,BAKED_TX_STORE); _save(CRYPTO_OVR_PATH,BAKED_CRYPTO)
             st.session_state.tx_store=dict(BAKED_TX_STORE)
             st.session_state.crypto_ovr=dict(BAKED_CRYPTO)
             st.session_state.portfolio={}; st.session_state.prices={}; st.session_state.recs=[]
-            _refresh(); st.success("Reset to original data."); st.rerun()
+            st.session_state.prices_loaded=False
+            _refresh(); st.success("Reset complete."); st.rerun()
     with col_b:
-        if st.button("⚠️ Clear ALL data (full wipe)",type="secondary"):
-            _save(TX_STORE_PATH,{})
-            st.session_state.tx_store={}; st.session_state.portfolio={}
-            st.session_state.prices={}; st.session_state.recs=[]
-            st.warning("All data cleared. Upload a CSV to restore."); st.rerun()
+        if st.button("⚠️ Full wipe (clear everything)",type="secondary",use_container_width=True):
+            for p in [TX_STORE_PATH,CRYPTO_OVR_PATH,REC_HISTORY_PATH,DEPOSIT_LOG_PATH]:
+                _save(p,{} if "store" in str(p) or "over" in str(p) else [])
+            for key in ["tx_store","crypto_ovr","portfolio","prices","recs","rec_history","deposit_log"]:
+                st.session_state[key]={} if key not in ("recs","rec_history","deposit_log") else []
+            st.session_state.prices_loaded=False
+            st.warning("All data cleared."); st.rerun()

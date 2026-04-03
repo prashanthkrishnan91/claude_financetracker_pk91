@@ -485,47 +485,45 @@ with tabs[3]:
 
         st.markdown('<div class="sec-title">Allocation Table</div>', unsafe_allow_html=True)
 
-        # Rich table: Asset | Current Value | Target % | Action | Amount | Est. Shares | Live Price
-        table_html = """
-        <table style="width:100%;border-collapse:collapse;background:#16191f;border-radius:12px;overflow:hidden;font-family:JetBrains Mono;font-size:.78rem">
-          <thead>
-            <tr style="border-bottom:1px solid #22262e">
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:left">Asset</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:right">Current Value</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:right">Target %</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:center">Action</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:right">Amount</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:right">Est. Shares</th>
-              <th style="padding:11px 14px;color:#5f6368;text-transform:uppercase;font-size:.62rem;letter-spacing:.08em;text-align:right">Live Price</th>
-            </tr>
-          </thead>
-          <tbody>
-        """
-        for a in allocs:
-            act = a.get("action","BUY")
-            act_color = "#00e676" if act=="BUY" else "#ff5252"
-            tgt_str = f"{a['target_pct']:.1f}%" if a.get("target_pct",0)>0 else "—"
-            table_html += f"""
-            <tr style="border-top:1px solid #22262e">
-              <td style="padding:10px 14px;font-weight:600;color:#e8eaed">{a['ticker']}</td>
-              <td style="padding:10px 14px;color:#9aa0ac;text-align:right">${a['current_value']:,.0f}</td>
-              <td style="padding:10px 14px;color:#448aff;text-align:right">{tgt_str}</td>
-              <td style="padding:10px 14px;text-align:center">
-                <span style="background:{'#1a3d2b' if act=='BUY' else '#3d1a1a'};color:{act_color};padding:2px 8px;border-radius:4px;font-size:.68rem">{act}</span>
-              </td>
-              <td style="padding:10px 14px;color:#00e676;text-align:right;font-weight:600">${a['amount']:,.2f}</td>
-              <td style="padding:10px 14px;color:#9aa0ac;text-align:right">{a['est_shares']:.4f}</td>
-              <td style="padding:10px 14px;color:#448aff;text-align:right">${a['live_price']:,.2f}</td>
-            </tr>"""
-        total_buy = sum(a["amount"] for a in allocs if a.get("action")=="BUY")
-        table_html += f"""
-            <tr style="border-top:2px solid #22262e;background:#0a0c10">
-              <td colspan="4" style="padding:10px 14px;color:#5f6368;font-size:.7rem">TOTAL BUY</td>
-              <td style="padding:10px 14px;color:#00e676;text-align:right;font-weight:600">${total_buy:,.2f}</td>
-              <td colspan="2"></td>
-            </tr>
-          </tbody></table>"""
-        st.markdown(table_html, unsafe_allow_html=True)
+        # ── Build a clean DataFrame — zero HTML string-concat, zero markdown escaping risk ──
+        alloc_df = pd.DataFrame([{
+            "Asset":           a["ticker"],
+            "Current Value":   a["current_value"],
+            "Target %":        a["target_pct"] if a.get("target_pct", 0) > 0 else 0.0,
+            "Action":          a.get("action", "BUY"),
+            "$ Amount":        a["amount"],
+            "Est. Shares":     a["est_shares"],
+            "Live Price":      a["live_price"],
+            "Why":             a.get("reason", ""),
+        } for a in allocs])
+
+        st.dataframe(
+            alloc_df,
+            column_config={
+                "Asset":         st.column_config.TextColumn("Asset", width="small"),
+                "Current Value": st.column_config.NumberColumn("Current Value", format="$%,.0f"),
+                "Target %":      st.column_config.NumberColumn("Target %",       format="%.1f%%"),
+                "Action":        st.column_config.TextColumn("Action",           width="small"),
+                "$ Amount":      st.column_config.NumberColumn("$ Amount",       format="$%.2f"),
+                "Est. Shares":   st.column_config.NumberColumn("Est. Shares",    format="%.4f"),
+                "Live Price":    st.column_config.NumberColumn("Live Price",     format="$%,.2f"),
+                "Why":           st.column_config.TextColumn("Reason",           width="large"),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
+
+        # ── Totals summary row — reliable st.columns + st.metric, no HTML ──
+        total_buy  = sum(a["amount"] for a in allocs if a.get("action") == "BUY")
+        total_trim = sum(a["amount"] for a in allocs if a.get("action") == "TRIM")
+        n_buy      = sum(1 for a in allocs if a.get("action") == "BUY")
+        n_trim     = sum(1 for a in allocs if a.get("action") == "TRIM")
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Total to Deploy",  f"${total_buy:,.2f}",  f"{n_buy} BUY positions")
+        m2.metric("Total to Trim",    f"${total_trim:,.2f}", f"{n_trim} TRIM positions" if n_trim else "None")
+        m3.metric("Deposit Amount",   "$900.00")
+        m4.metric("Remaining",        f"${900 - total_buy:,.2f}" if total_buy <= 900 else "$0.00")
 
         st.markdown("<br>", unsafe_allow_html=True)
         col1, col2 = st.columns([3, 1])

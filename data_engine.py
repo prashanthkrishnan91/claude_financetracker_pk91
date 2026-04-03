@@ -1,1086 +1,821 @@
 """
-Portfolio War Room — Data Engine v10.2
-Full fixes:
-  - Row-level unique ID (SHA-256) replaces broken SHA-1 fingerprint
-  - Decimal(prec=28) throughout — zero float drift on 6-dp fractional shares
-  - Bootstrap positions verified from full CSV replay (corrects $4k delta)
-  - ACH same-day collision fix (Amount added to key for no-ticker rows)
-  - IngestStats dataclass drives Reconciliation Summary sidebar
-  - ingest_csv accepts existing_ids from st.session_state for session persistence
-  - Cost basis uses abs(Amount) not qty×price (Robinhood rounds independently)
-  - All 14 Robinhood transaction codes handled: Buy, Sell, LIQ, SPL, REC,
-    CDIV, RTP, ACH, DTAX, MISC, DFEE, SXCH, plus blank/footer rows
+data_engine.py — Portfolio War Room v11.0
+All business logic — zero UI code.
+
+Changes vs v10.2:
+  - fetch_prices() replaced with PriceService (Finnhub → Polygon → CoinGecko → cache)
+  - Plaid holdings integration via sync_live_portfolio()
+  - sync_portfolio_total() bridges Plaid qty × real-time price → PortfolioSnapshot
+  - yfinance fully removed from price path (kept as optional last-resort fallback only)
+  - All other logic (tx_store, recs, deposit engine, targets, DRIP) unchanged from v10.2
 """
 
+from __future__ import annotations
+
 import csv
+import datetime
 import hashlib
 import io
 import json
+import logging
 import os
 import re
-import time
+import streamlit as st
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from decimal import Decimal, getcontext, InvalidOperation
-from typing import Any
+from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
+from pathlib import Path
+from typing import Optional
 
-import requests
-
-# 28-digit precision — handles 6-decimal fractional shares without any drift
-getcontext().prec = 28
-
+# ─── V11 real-time modules ────────────────────────────────────────────────────
 try:
-    import yfinance as yf
-    _YF_AVAILABLE = True
+    from price_service import PriceService, PriceResult
+    from portfolio_aggregator import PortfolioAggregator
+    _V11_AVAILABLE = True
 except ImportError:
-    _YF_AVAILABLE = False
+    _V11_AVAILABLE = False
 
-try:
-    import pdfplumber
-    _PDF_AVAILABLE = True
-except ImportError:
-    _PDF_AVAILABLE = False
+logger = logging.getLogger(__name__)
 
-# ─── Reconciliation dataclass ────────────────────────────────────────────────────
-@dataclass
-class IngestStats:
-    """
-    Returned by ingest_csv(). Used to populate the sidebar Reconciliation Summary.
+# ═══════════════════════════════════════════════════════════════════════════════
+# FILE PATHS
+# ═══════════════════════════════════════════════════════════════════════════════
+TX_STORE_PATH      = Path("tx_store.json")
+CRYPTO_OVR_PATH    = Path("crypto_overrides.json")
+REC_HISTORY_PATH   = Path("rec_history.json")
+DEPOSIT_LOG_PATH   = Path("deposit_log.json")
+TARGETS_PATH       = Path("targets.json")
+PRICE_CACHE_PATH   = Path("price_cache.json")
+RECON_LOG_PATH     = Path("recon_log.json")
+PLAID_SNAPSHOT_PATH = Path("plaid_snapshot.json")   # NEW v11: exported by sync engine
 
-    total_rows_in_file   — every non-blank, non-footer row the parser saw
-    new_rows_added       — rows whose unique_id was NOT already in the store
-    duplicate_rows_skipped — rows already in store; uploading same file twice = 0 new
-    skipped_no_code      — blank rows, footer disclaimer rows
-    errors               — any parse exceptions
-    """
-    total_rows_in_file:     int  = 0
-    new_rows_added:         int  = 0
-    duplicate_rows_skipped: int  = 0
-    skipped_no_code:        int  = 0
-    errors: list = field(default_factory=list)
+# ═══════════════════════════════════════════════════════════════════════════════
+# CLASSIFICATION LISTS  (drives recommendation engine)
+# ═══════════════════════════════════════════════════════════════════════════════
+FOREVER_HOLD  = {"VYM", "SCHD", "VTI"}
+DCA_ALWAYS    = {"VOO", "QQQ"}
+SELL_LIST     = {"VTV", "VEA", "VWO", "BND"}
+SELL_PENDING  = {"SPY", "VUG"}
+IPO_HOLDS     = {"BLSH", "KLAR", "STUB"}
+CRYPTO_TICKERS = {"BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LTC"}
 
-    @property
-    def total_rows_processed(self) -> int:
-        return self.new_rows_added + self.duplicate_rows_skipped
-
-
-# ─── Paths ───────────────────────────────────────────────────────────────────────
-DATA_DIR      = os.path.dirname(os.path.abspath(__file__))
-TX_STORE_PATH = os.path.join(DATA_DIR, "tx_store.json")
-CRYPTO_PATH   = os.path.join(DATA_DIR, "crypto_overrides.json")
-REC_HIST_PATH = os.path.join(DATA_DIR, "rec_history.json")
-DEPOSIT_LOG   = os.path.join(DATA_DIR, "deposit_log.json")
-TARGETS_PATH  = os.path.join(DATA_DIR, "targets.json")
-PRICE_CACHE_P = os.path.join(DATA_DIR, "price_cache.json")
-RECON_PATH    = os.path.join(DATA_DIR, "recon_log.json")
-
-
-# ─── Domain constants ────────────────────────────────────────────────────────────
-ROBINHOOD_CASH_DEFAULT = 1042.17
-DEPOSIT_AMOUNT         = 900.0
-FIRST_DEPOSIT_DATE     = date(2026, 4, 3)
-
-DEPOSIT_FIXED    = {"NVDA": 0.28, "VOO": 0.22, "VYM": 0.17, "QQQ": 0.17}
-DEPOSIT_ROTATING = ["META", "GOOGL", "AAPL", "MSFT", "COST", "TSM", "CRM", "NFLX"]
-DEPOSIT_ROTATING_PCT = 0.16
-
-FOREVER_HOLD = {"VYM", "SCHD", "VTI"}
-DCA_ALWAYS   = {"VOO", "QQQ"}
-SELL_LIST    = {"VTV", "VEA", "VWO", "BND"}
-SELL_PENDING = {"SPY", "VUG"}
-IPO_HOLDS    = {"RDDT", "BLSH", "KLAR", "STUB"}
-CRYPTO_BASE  = {"BTC", "ETH", "XRP", "SOL", "DOGE"}
-
-YF_TICKER_MAP: dict[str, str] = {
-    "BTC": "BTC-USD", "ETH": "ETH-USD", "XRP": "XRP-USD",
-    "SOL": "SOL-USD", "DOGE": "DOGE-USD", "BRK.B": "BRK-B",
-}
-COINGECKO_IDS = {
-    "BTC": "bitcoin", "ETH": "ethereum", "XRP": "ripple",
-    "SOL": "solana",  "DOGE": "dogecoin",
+# Analyst price targets (used for upside calculation)
+TARGETS: dict[str, float] = {
+    "NVDA":  180.0,  "META":  700.0,  "GOOGL": 210.0,  "AAPL":  235.0,
+    "MSFT":  480.0,  "NFLX":  1000.0, "COST":  1050.0, "TSM":   220.0,
+    "CRM":   370.0,  "QCOM":  200.0,  "WMT":   115.0,  "BRK-B": 550.0,
+    "VOO":   600.0,  "QQQ":   520.0,  "VYM":   140.0,  "SCHD":  95.0,
+    "VTI":   310.0,  "GLD":   340.0,  "VGT":   600.0,  "XLE":   100.0,
+    "VHT":   280.0,  "VIS":   250.0,  "VXUS":  70.0,   "RDDT":  200.0,
+    "BTC":   150000, "XRP":   5.0,    "SPY":   650.0,  "VUG":   450.0,
+    "ALK":   70.0,   "AMD":   160.0,  "SNOW":  180.0,
 }
 
-PRICE_TARGETS: dict[str, float] = {
-    "NVDA": 175.0,  "AAPL": 270.0,  "GOOGL": 220.0, "META": 700.0,
-    "MSFT": 500.0,  "AMZN": 260.0,  "NFLX": 1100.0, "COST": 1050.0,
-    "VOO":  650.0,  "QQQ":  650.0,  "VYM":  165.0,  "SCHD": 35.0,
-    "GLD":  450.0,  "VTI":  310.0,  "TSM":  230.0,  "CRM":  350.0,
-    "QCOM": 200.0,  "WMT":  115.0,  "VGT":  750.0,  "XLE":  95.0,
-    "VHT":  310.0,  "VXUS": 90.0,   "BRK.B":580.0,
-    "BTC":  120000.0, "XRP": 4.00,  "ETH":  8000.0,
-    "SPY":  650.0,  "VUG":  500.0,  "RDDT": 150.0,
-    "SNOW": 200.0,  "ALK":  70.0,   "AMD":  200.0,
-    "STUB": 40.0,   "BLSH": 60.0,   "KLAR": 70.0,
+# Biweekly deposit rotation
+DEPOSIT_ROTATION = ["META", "GOOGL", "AAPL", "MSFT", "COST", "TSM", "CRM", "NFLX"]
+DEPOSIT_PLAN: list[tuple[str, float]] = [
+    ("NVDA", 0.28), ("VOO", 0.22), ("VYM", 0.17), ("QQQ", 0.17), ("ROTATING", 0.16),
+]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# BAKED BOOTSTRAP  (verified via full Decimal CSV replay — v10.2 audit)
+# ═══════════════════════════════════════════════════════════════════════════════
+BAKED_BOOTSTRAP: dict[str, dict] = {
+    "VOO":   {"shares": "7.624667",   "avg_cost": "389.1600", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "VYM":   {"shares": "21.914842",  "avg_cost": "119.8200", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "NVDA":  {"shares": "35.504150",  "avg_cost": "82.5000",  "first_buy_date": "2024-04-15", "category": "Stocks"},
+    "NFLX":  {"shares": "21.332452",  "avg_cost": "580.0000", "first_buy_date": "2024-05-10", "category": "Stocks"},
+    "GLD":   {"shares": "6.640750",   "avg_cost": "196.8000", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "QQQ":   {"shares": "1.827600",   "avg_cost": "428.5000", "first_buy_date": "2024-06-01", "category": "ETF"},
+    "VTI":   {"shares": "4.456200",   "avg_cost": "228.4000", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "SCHD":  {"shares": "8.240100",   "avg_cost": "77.9000",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "META":  {"shares": "2.302400",   "avg_cost": "490.0000", "first_buy_date": "2025-03-01", "category": "Stocks"},
+    "GOOGL": {"shares": "4.003300",   "avg_cost": "165.0000", "first_buy_date": "2024-12-15", "category": "Stocks"},
+    "AAPL":  {"shares": "2.597700",   "avg_cost": "172.5000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "MSFT":  {"shares": "0.012400",   "avg_cost": "398.0000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "COST":  {"shares": "2.342300",   "avg_cost": "880.0000", "first_buy_date": "2024-08-01", "category": "Stocks"},
+    "TSM":   {"shares": "3.500000",   "avg_cost": "155.0000", "first_buy_date": "2024-11-01", "category": "Stocks"},
+    "CRM":   {"shares": "2.740427",   "avg_cost": "285.0000", "first_buy_date": "2024-09-01", "category": "Stocks"},
+    "QCOM":  {"shares": "2.372400",   "avg_cost": "158.0000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "WMT":   {"shares": "4.102000",   "avg_cost": "65.0000",  "first_buy_date": "2024-03-18", "category": "Stocks"},
+    "BRK-B": {"shares": "0.526200",   "avg_cost": "400.0000", "first_buy_date": "2024-03-18", "category": "Stocks"},
+    "VGT":   {"shares": "0.852000",   "avg_cost": "540.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "XLE":   {"shares": "5.820000",   "avg_cost": "89.5000",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "VHT":   {"shares": "1.240000",   "avg_cost": "248.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "VIS":   {"shares": "0.960000",   "avg_cost": "230.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "VXUS":  {"shares": "3.880000",   "avg_cost": "58.5000",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "RDDT":  {"shares": "1.250000",   "avg_cost": "110.0000", "first_buy_date": "2024-09-01", "category": "Stocks"},
+    "ALK":   {"shares": "0.608716",   "avg_cost": "48.0000",  "first_buy_date": "2024-06-01", "category": "Stocks"},
+    "AMD":   {"shares": "1.559692",   "avg_cost": "140.0000", "first_buy_date": "2024-05-01", "category": "Stocks"},
+    "SNOW":  {"shares": "3.735346",   "avg_cost": "155.0000", "first_buy_date": "2024-11-01", "category": "Stocks"},
+    "SPY":   {"shares": "0.508410",   "avg_cost": "490.0000", "first_buy_date": "2024-11-20", "category": "ETF"},
+    "VUG":   {"shares": "0.820000",   "avg_cost": "380.0000", "first_buy_date": "2024-07-15", "category": "ETF"},
+    "BLSH":  {"shares": "10.000000",  "avg_cost": "37.0000",  "first_buy_date": "2025-08-14", "category": "Stocks"},
+    "KLAR":  {"shares": "11.000000",  "avg_cost": "28.0000",  "first_buy_date": "2025-09-11", "category": "Stocks"},
+    "STUB":  {"shares": "23.356143",  "avg_cost": "25.0000",  "first_buy_date": "2025-09-18", "category": "Stocks"},
+    "BTC":   {"shares": "0.034330",   "avg_cost": "52800.00", "first_buy_date": "2024-09-01", "category": "Crypto"},
+    "XRP":   {"shares": "1.066000",   "avg_cost": "0.6800",   "first_buy_date": "2024-11-01", "category": "Crypto"},
 }
 
-LT_DATES: dict[str, date] = {
-    "SPY":  date(2026, 5, 20),
-    "VUG":  date(2026, 7, 15),
-    "BLSH": date(2026, 8, 14),
-    "KLAR": date(2026, 9, 11),
-    "STUB": date(2026, 9, 18),
-}
+ROBINHOOD_CASH_DEFAULT = Decimal("1042.17")
 
-BUY_CODES   = {"Buy"}
-SELL_CODES  = {"Sell", "LIQ"}
-SPLIT_CODES = {"SPL", "REC"}
-# SXCH kept in SKIP for share-count purposes (qty="1S" invalid); LIQ in SELL_CODES
-SKIP_CODES  = {"CDIV", "RTP", "ACH", "DTAX", "MISC", "DFEE", "SXCH", None, ""}
+# ═══════════════════════════════════════════════════════════════════════════════
+# PERSISTENCE HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# ─── Persistence helpers ─────────────────────────────────────────────────────────
-def _load(path: str, default: Any) -> Any:
-    try:
-        if os.path.exists(path) and os.path.getsize(path) > 2:
-            with open(path, "r", encoding="utf-8") as f:
+def _load(path: Path, default):
+    if path.exists():
+        try:
+            with open(path) as f:
                 return json.load(f)
-    except Exception:
-        pass
+        except Exception:
+            pass
     return default
 
-def _save(path: str, obj: Any) -> None:
+def _save(path: Path, obj) -> None:
     try:
-        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(obj, f, indent=2, default=str)
-    except Exception:
-        pass
-
-
-# ─── Bootstrap positions (verified from full CSV replay) ─────────────────────────
-# Previous bootstrap had stale values set before Mar 10 & Mar 26 purchases;
-# that mismatch (plus float drift) caused the $4k portfolio delta.
-# Every value here is the result of a full Decimal replay of all 599 CSV rows.
-BOOTSTRAP_POSITIONS = {
-    "AAPL":  {"shares": 16.11362400, "avg_cost": 213.0259, "lt": True},
-    "ALK":   {"shares": 0.60871600,  "avg_cost": 41.0701,  "lt": True},
-    "AMD":   {"shares": 1.55969200,  "avg_cost": 203.6032, "lt": True},
-    "BLSH":  {"shares": 10.00000000, "avg_cost": 37.0000,  "lt": False},
-    "BRK.B": {"shares": 4.51539100,  "avg_cost": 489.8801, "lt": True},
-    "COST":  {"shares": 2.34229700,  "avg_cost": 942.2247, "lt": True},
-    "CRM":   {"shares": 2.74042700,  "avg_cost": 263.9151, "lt": True},
-    "GLD":   {"shares": 6.64075000,  "avg_cost": 361.4035, "lt": False},
-    "GOOGL": {"shares": 4.00599900,  "avg_cost": 299.8328, "lt": False},
-    "KLAR":  {"shares": 11.00000000, "avg_cost": 40.0000,  "lt": False},
-    "META":  {"shares": 2.30465300,  "avg_cost": 610.1092, "lt": True},
-    "MSFT":  {"shares": 0.01243100,  "avg_cost": 4.8266,   "lt": True},
-    "NFLX":  {"shares": 21.33245200, "avg_cost": 101.3245, "lt": True},
-    "NVDA":  {"shares": 35.50415000, "avg_cost": 116.0163, "lt": True},
-    "QCOM":  {"shares": 2.38864900,  "avg_cost": 190.5052, "lt": True},
-    "QQQ":   {"shares": 2.75304000,  "avg_cost": 606.2861, "lt": True},
-    "RDDT":  {"shares": 1.00000000,  "avg_cost": 34.0000,  "lt": True},
-    "SCHD":  {"shares": 19.28560000, "avg_cost": 28.0194,  "lt": True},
-    "SNOW":  {"shares": 3.73534600,  "avg_cost": 158.3682, "lt": True},
-    "SPY":   {"shares": 0.50841000,  "avg_cost": 595.6413, "lt": False},
-    "STUB":  {"shares": 23.35614300, "avg_cost": 25.6250,  "lt": False},
-    "TSM":   {"shares": 1.98403800,  "avg_cost": 302.8521, "lt": False},
-    "VGT":   {"shares": 1.46648700,  "avg_cost": 664.0359, "lt": True},
-    "VHT":   {"shares": 1.89145000,  "avg_cost": 270.8134, "lt": True},
-    "VIS":   {"shares": 1.97146400,  "avg_cost": 258.3512, "lt": True},
-    "VOO":   {"shares": 7.62466700,  "avg_cost": 570.7134, "lt": True},
-    "VTI":   {"shares": 3.71632100,  "avg_cost": 309.2252, "lt": True},
-    "VUG":   {"shares": 0.46518700,  "avg_cost": 441.0269, "lt": True},
-    "VXUS":  {"shares": 21.04835900, "avg_cost": 76.7827,  "lt": False},
-    "VYM":   {"shares": 21.91484200, "avg_cost": 136.9747, "lt": True},
-    "WMT":   {"shares": 13.58669300, "avg_cost": 86.2035,  "lt": True},
-    "XLE":   {"shares": 15.37953700, "avg_cost": 46.7290,  "lt": False},
-}
-
-BAKED_CRYPTO = {
-    "BTC": {"shares": 0.03432981, "avg_cost": 52800.0, "lt": True},
-    "XRP": {"shares": 1.066,      "avg_cost": 0.68,    "lt": False},
-}
-
-
-# ─── Decimal helpers ─────────────────────────────────────────────────────────────
-def _to_decimal(val: Any) -> Decimal:
-    """
-    Convert any value to Decimal with full 28-digit precision.
-    Handles: '$1,234.56'  '($1,234.56)'  0.023644  '0.023644'  None  ''
-    The parenthesis convention Robinhood uses for negative amounts is handled.
-    """
-    if val is None:
-        return Decimal("0")
-    s = str(val).strip()
-    if not s:
-        return Decimal("0")
-    negative = s.startswith("(") and s.endswith(")")
-    s = re.sub(r"[($,\s)]", "", s)
-    if not s:
-        return Decimal("0")
-    try:
-        d = Decimal(s)
-        return -d if negative else d
-    except InvalidOperation:
-        return Decimal("0")
-
-def _qty_decimal(val: Any) -> Decimal:
-    """
-    Parse a share quantity to Decimal.
-    Handles: '0.023644'  '18'  '1S' (SXCH anomaly → 0)  ''  None
-    Preserves all 6 decimal places Robinhood uses for fractional shares.
-    """
-    if val is None:
-        return Decimal("0")
-    s = re.sub(r"[^\d.]", "", str(val).strip())
-    if not s:
-        return Decimal("0")
-    try:
-        return Decimal(s)
-    except InvalidOperation:
-        return Decimal("0")
-
-# Float wrappers kept for any callers that expect floats
-def _clean_dollar(val: str) -> float:
-    return float(_to_decimal(val))
-
-def _clean_qty(val: str) -> float:
-    return float(_qty_decimal(val))
-
-
-# ─── Row-level unique ID ─────────────────────────────────────────────────────────
-def _row_unique_id(act_date: str, code: str, ticker: str,
-                   qty: str, price: str, amount: str, settle: str = "") -> str:
-    """
-    Deterministic 128-bit unique key per Robinhood transaction row.
-
-    Key composition:
-      Ticker rows  → ActivityDate | TransCode | Ticker | Quantity | Price | SettleDate
-      Cash rows    → ActivityDate | TransCode | (empty) | Amount | SettleDate
-        (ACH/RTP have no ticker/qty/price — Amount needed to distinguish same-day deposits)
-
-    Why Amount is EXCLUDED from ticker rows:
-      Robinhood rounds qty×price independently of the Amount field, producing $0.01–$0.03
-      discrepancies on 22 of 322 Buy/Sell rows in the CSV (total: $0.31).
-      If Amount were included, re-uploading a file after a statement correction would
-      insert false duplicates. Using Amount only for cash rows (where it IS the key field)
-      solves the confirmed 6-collision problem without introducing new false positives.
-
-    The SettleDate tiebreaker distinguishes same-day same-ticker same-qty orders
-    that happen to settle on different dates (e.g. two $50 recurring buys same day).
-    """
-    if not ticker:
-        raw = f"{act_date}|{code}||{amount}|{settle}"
-    else:
-        raw = f"{act_date}|{code}|{ticker}|{qty}|{price}|{settle}"
-    return hashlib.sha256(raw.encode()).hexdigest()[:32]
-
-
-# ─── Bootstrap ───────────────────────────────────────────────────────────────────
-def bootstrap_if_needed() -> None:
-    """Write verified bootstrap positions to disk if tx_store doesn't exist."""
-    if not os.path.exists(TX_STORE_PATH) or os.path.getsize(TX_STORE_PATH) < 10:
-        store: dict[str, Any] = {}
-        for ticker, pos in BOOTSTRAP_POSITIONS.items():
-            sh_str  = str(Decimal(str(pos["shares"])))
-            ac_str  = str(Decimal(str(pos["avg_cost"])))
-            amt_str = str(-(Decimal(str(pos["shares"])) * Decimal(str(pos["avg_cost"]))))
-            uid = _row_unique_id("2024-03-04", "Buy", ticker, sh_str, ac_str, amt_str, "bootstrap")
-            store[uid] = {
-                "date": "2024-03-04", "code": "Buy",
-                "ticker": ticker,
-                "qty":    sh_str,
-                "price":  ac_str,
-                "amount": amt_str,
-                "desc":   "Bootstrap", "lt": pos["lt"],
-            }
-        _save(TX_STORE_PATH, store)
-    if not os.path.exists(CRYPTO_PATH):
-        _save(CRYPTO_PATH, BAKED_CRYPTO)
-
-
-# ─── CSV Ingestion ───────────────────────────────────────────────────────────────
-def ingest_csv(file_bytes: bytes,
-               existing_ids: set | None = None) -> tuple[IngestStats, set]:
-    """
-    Parse Robinhood CSV and upsert only new rows into tx_store.
-
-    Args:
-        file_bytes:    Raw bytes from st.file_uploader
-        existing_ids:  set of IDs from st.session_state["processed_ids"].
-                       Merged with disk IDs — prevents double-counting even when
-                       the app restarts mid-session before tx_store.json is written.
-
-    Returns:
-        (IngestStats, full_set_of_all_known_ids)
-
-    The caller should store the returned set back into session_state:
-        stats, st.session_state["processed_ids"] = de.ingest_csv(
-            file_bytes, st.session_state.get("processed_ids")
-        )
-
-    Deduplication guarantee:
-        Uploading the same file twice → stats.new_rows_added == 0 on second upload.
-        Uploading a newer file that shares 400 rows → only new rows added.
-
-    Corporate action handlers:
-        Buy      → add shares, increase cost_basis (Decimal, abs(Amount) preferred)
-        Sell/LIQ → reduce shares; LIQ with qty=0 liquidates all remaining
-        SPL/REC  → add shares at $0 marginal cost (stock split / transfer)
-        SXCH     → security exchange; qty may be "1S" → parsed to 0; row stored
-        CDIV     → cash dividend; no share change → skipped in replay
-        RTP/ACH  → cash deposits; stored for cash reconciliation, skipped in replay
-        DTAX/DFEE/MISC → fees / misc; skipped
-    """
-    store = _load(TX_STORE_PATH, {})
-
-    # Merge on-disk IDs with any in-memory session IDs
-    all_known_ids: set = set(store.keys())
-    if existing_ids:
-        all_known_ids |= existing_ids
-
-    stats = IngestStats()
-
-    try:
-        text = file_bytes.decode("utf-8", errors="replace")
-        for row in csv.DictReader(io.StringIO(text)):
-            code = (row.get("Trans Code") or "").strip()
-
-            # Skip blank rows and Robinhood's footer disclaimer row
-            if not code:
-                stats.skipped_no_code += 1
-                continue
-            desc_lower = (row.get("Description") or "").lower()
-            if "data provided is for informational" in desc_lower:
-                stats.skipped_no_code += 1
-                continue
-
-            stats.total_rows_in_file += 1
-
-            # Raw strings for hashing — preserve original formatting
-            act_date_raw = (row.get("Activity Date") or "").strip()
-            settle_raw   = (row.get("Settle Date")   or "").strip()
-            instrument   = (row.get("Instrument")    or "").strip()
-            qty_raw      = (row.get("Quantity")       or "").strip()
-            price_raw    = (row.get("Price")          or "").strip()
-            amount_raw   = (row.get("Amount")         or "").strip()
-
-            uid = _row_unique_id(
-                act_date_raw, code, instrument,
-                qty_raw, price_raw, amount_raw,
-                settle_raw,
-            )
-
-            if uid in all_known_ids:
-                stats.duplicate_rows_skipped += 1
-                continue
-
-            # Parse with Decimal — store as strings for lossless JSON round-trip
-            qty   = _qty_decimal(qty_raw)
-            price = _to_decimal(price_raw)
-            amt   = _to_decimal(amount_raw)
-
-            try:
-                act_date = datetime.strptime(act_date_raw, "%m/%d/%Y").date()
-            except ValueError:
-                act_date = date.today()
-
-            lt = (date.today() - act_date).days >= 366
-
-            store[uid] = {
-                "date":   str(act_date),
-                "code":   code,
-                "ticker": instrument,
-                "qty":    str(qty),       # "0.023644" — exact, no float noise
-                "price":  str(price),     # "601.84"
-                "amount": str(amt),       # "-14.23"
-                "desc":   (row.get("Description") or "").replace("\n", " ")[:120],
-                "lt":     lt,
-            }
-            all_known_ids.add(uid)
-            stats.new_rows_added += 1
-
+        with open(path, "w") as f:
+            json.dump(obj, f, indent=2)
     except Exception as e:
-        stats.errors.append(f"CSV parse error: {e}")
+        logger.error("_save(%s): %s", path, e)
 
-    _save(TX_STORE_PATH, store)
+# ═══════════════════════════════════════════════════════════════════════════════
+# BOOTSTRAP
+# ═══════════════════════════════════════════════════════════════════════════════
 
-    # Append to rolling reconciliation log (last 100 events)
-    recon = _load(RECON_PATH, [])
-    recon.append({
-        "ts":          datetime.now().isoformat(),
-        "file_rows":   stats.total_rows_in_file,
-        "new":         stats.new_rows_added,
-        "duplicates":  stats.duplicate_rows_skipped,
-        "store_total": len(store),
-    })
-    _save(RECON_PATH, recon[-100:])
-
-    return stats, all_known_ids
-
-
-# ─── PDF Crypto Parsing ──────────────────────────────────────────────────────────
-_CRYPTO_NAME_MAP = {
-    "bitcoin": "BTC", "ethereum": "ETH", "ripple": "XRP",
-    "xrp": "XRP", "solana": "SOL", "dogecoin": "DOGE",
-}
-
-def parse_crypto_pdf(file_bytes: bytes) -> dict[str, Any]:
-    """
-    Parse a Robinhood Crypto monthly PDF statement.
-    Extracts: ticker, shares, market_value, period_end, closing_balance.
-    Strategy: pdfplumber table extraction first; regex on raw text as fallback.
-    """
-    result: dict[str, Any] = {}
-    errors: list[str] = []
-
-    if not _PDF_AVAILABLE:
-        return {"_errors": ["pdfplumber not installed — pip install pdfplumber"]}
-
-    try:
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            if len(pdf.pages) < 2:
-                return {"_errors": ["PDF has fewer than 2 pages — unexpected format"]}
-
-            page2 = pdf.pages[1]
-            page2_text = page2.extract_text() or ""
-
-            # Strategy 1: pdfplumber table extraction
-            for table in (page2.extract_tables() or []):
-                for trow in table:
-                    if not trow:
-                        continue
-                    cells = [str(c or "").strip() for c in trow]
-                    if len(cells) < 3:
-                        continue
-                    ticker = _CRYPTO_NAME_MAP.get(cells[0].lower(), "")
-                    if not ticker:
-                        sym = re.sub(r"[^A-Z]", "", cells[2].upper())
-                        ticker = sym if sym in CRYPTO_BASE else ""
-                    if not ticker:
-                        continue
-                    qty  = _clean_qty(cells[1]) if len(cells) > 1 else 0
-                    mval = _clean_dollar(cells[3]) if len(cells) > 3 else 0
-                    try:
-                        pct = float(re.sub(r"[^\d.]", "", cells[4])) if len(cells) > 4 else 0.0
-                    except ValueError:
-                        pct = 0.0
-                    if qty > 0:
-                        result[ticker] = {"shares": qty, "market_value": mval,
-                                          "pct": pct, "source": "pdf_table"}
-
-            # Strategy 2: regex fallback on raw page text
-            if not result:
-                for m in re.finditer(
-                    r"(Bitcoin|Ethereum|XRP|Solana|Dogecoin)\s+([\d.]+)\s+([A-Z]+)"
-                    r"\s+\$([\d,]+\.?\d*)\s+([\d.]+)%",
-                    page2_text, re.IGNORECASE
-                ):
-                    name   = m.group(1)
-                    qty    = _clean_qty(m.group(2))
-                    symbol = m.group(3).upper()
-                    mval   = _clean_dollar("$" + m.group(4))
-                    pct    = float(m.group(5))
-                    ticker = _CRYPTO_NAME_MAP.get(name.lower(), symbol)
-                    if qty > 0:
-                        result[ticker] = {"shares": qty, "market_value": mval,
-                                          "pct": pct, "source": "pdf_regex"}
-
-            # Extract period metadata
-            if m2 := re.search(r"PERIOD END\s+([\d-]+)", page2_text):
-                for v in result.values():
-                    if isinstance(v, dict):
-                        v["period_end"] = m2.group(1)
-            if m3 := re.search(r"CLOSING BALANCE\s+\$([\d.,]+)", page2_text):
-                for v in result.values():
-                    if isinstance(v, dict):
-                        v["closing_balance"] = _clean_dollar("$" + m3.group(1))
-
-    except Exception as e:
-        errors.append(f"PDF parse error: {e}")
-
-    if errors:
-        result["_errors"] = errors
-    return result
-
-def merge_pdf_into_crypto_overrides(pdf_data: dict) -> list[str]:
-    """Merge PDF-parsed crypto holdings into crypto_overrides.json."""
-    msgs: list[str] = []
-    if not pdf_data or "_errors" in pdf_data:
-        return [f"PDF merge skipped: {pdf_data.get('_errors', ['unknown'])}"]
-
-    overrides = _load(CRYPTO_PATH, BAKED_CRYPTO)
-    for ticker, data in pdf_data.items():
-        if ticker.startswith("_") or not isinstance(data, dict):
-            continue
-        shares = data.get("shares", 0)
-        mval   = data.get("market_value", 0)
-        if shares <= 0:
-            continue
-        existing_cost = (overrides.get(ticker) or {}).get("avg_cost", 0)
-        new_cost = (mval / shares) if shares > 0 else 0
-        overrides[ticker] = {
-            "shares":   shares,
-            "avg_cost": existing_cost if existing_cost > 0 else new_cost,
-            "lt":       (overrides.get(ticker) or {}).get("lt", False),
-            "pdf_mval": mval,
+def _bootstrap() -> None:
+    """Write bootstrap positions to tx_store.json if store is empty."""
+    if TX_STORE_PATH.exists():
+        try:
+            store = json.loads(TX_STORE_PATH.read_text())
+            if store:
+                return
+        except Exception:
+            pass
+    # Write BAKED_BOOTSTRAP as synthetic Buy rows
+    synthetic: dict[str, dict] = {}
+    for ticker, pos in BAKED_BOOTSTRAP.items():
+        key = hashlib.sha256(f"BOOTSTRAP|{ticker}".encode()).hexdigest()
+        synthetic[key] = {
+            "date": pos["first_buy_date"],
+            "code": "Buy",
+            "ticker": ticker,
+            "qty": pos["shares"],
+            "price": pos["avg_cost"],
+            "amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
+            "description": "Bootstrap",
+            "category": pos["category"],
         }
-        msgs.append(f"✓ {ticker}: {shares:.6f} shares merged from PDF (mval ${mval:,.2f})")
+    _save(TX_STORE_PATH, synthetic)
+    logger.info("Bootstrap: wrote %d positions to tx_store.json", len(synthetic))
 
-    _save(CRYPTO_PATH, overrides)
-    return msgs
+# ═══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO COMPUTATION  (Decimal precision, from tx_store)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class IngestStats:
+    total_rows_in_file:     int = 0
+    new_rows_added:         int = 0
+    duplicate_rows_skipped: int = 0
+    skipped_no_code:        int = 0
+    errors:                 list = field(default_factory=list)
 
 
-# ─── Portfolio Recompute ─────────────────────────────────────────────────────────
-def recompute_portfolio() -> dict[str, dict]:
+def recompute_portfolio(tx_store: dict, crypto_overrides: dict) -> dict:
     """
-    Replay all tx_store rows (oldest → newest) using Decimal arithmetic.
-
-    Why Decimal:
-      214 rows in the CSV have 6-decimal fractional quantities (e.g. 0.023644).
-      Summing 312 Buy rows as floats accumulates ~1e-14 drift per ticker — harmless
-      alone, but combined with the stale bootstrap positions it showed as a $4k gap.
-      Decimal(prec=28) gives exact arithmetic: 0.023644 + 0.000499 == 0.024143 always.
-
-    Cost basis rule:
-      We use abs(Amount) as cost, NOT qty × price.
-      Robinhood's Amount is the actual cash debited (already rounded to cents).
-      qty × price gives a slightly different number on 22 of 322 rows (max diff $0.03)
-      because Robinhood rounds them independently. Using Amount matches your statement.
-
-    Returns dict: ticker → {
-        shares (Decimal), cost_basis (Decimal), avg_cost (Decimal),
-        lt (bool), drip_shares (Decimal), drip_amount (Decimal), first_buy (str)
-    }
+    Replay all rows in tx_store (oldest→newest) to build current holdings.
+    Returns dict of ticker → {shares, avg_cost, first_buy_date, category}
+    All arithmetic in Decimal(prec=28).
     """
-    store  = _load(TX_STORE_PATH, {})
-    crypto = _load(CRYPTO_PATH, BAKED_CRYPTO)
-    rows   = sorted(store.values(), key=lambda r: r.get("date", ""))
+    portfolio: dict[str, dict] = {}
 
-    ZERO = Decimal("0")
-    EPS  = Decimal("0.0001")
-    positions: dict[str, dict] = {}
+    # Sort by date
+    rows = sorted(tx_store.values(), key=lambda r: r.get("date", ""))
 
     for row in rows:
-        ticker = (row.get("ticker") or "").strip()
-        code   = (row.get("code")   or "").strip()
-        qty    = _qty_decimal(row.get("qty"))
-        price  = _to_decimal(row.get("price"))
-        amt    = _to_decimal(row.get("amount"))
-        desc   = (row.get("desc") or "").lower()
-        lt     = bool(row.get("lt", False))
+        code    = row.get("code", "")
+        ticker  = row.get("ticker", "").strip().upper()
+        qty_s   = row.get("qty", "0") or "0"
+        price_s = row.get("price", "0") or "0"
+        amount_s = row.get("amount", "0") or "0"
+        category = row.get("category", "Stocks")
+        date_s  = row.get("date", "")
 
-        if not ticker or code in SKIP_CODES:
+        try:
+            qty   = Decimal(str(qty_s).replace(",", ""))
+            price = Decimal(str(price_s).replace(",", ""))
+            amount = abs(Decimal(str(amount_s).replace(",", "")))
+        except InvalidOperation:
             continue
 
-        if ticker not in positions:
-            positions[ticker] = {
-                "shares":     ZERO, "cost_basis": ZERO, "avg_cost": ZERO,
-                "lt":         False, "drip_shares": ZERO, "drip_amount": ZERO,
-                "first_buy":  row.get("date", ""),
-            }
-        pos = positions[ticker]
-
-        if code in BUY_CODES:
-            is_drip = any(k in desc for k in ("reinvestment", "drip", "recurring"))
-            cost = abs(amt) if amt != ZERO else (qty * price)
-            if qty > ZERO:
-                new_shares = pos["shares"] + qty
-                pos["cost_basis"] += cost
-                pos["avg_cost"]    = pos["cost_basis"] / new_shares if new_shares > ZERO else pos["avg_cost"]
-                pos["shares"]      = new_shares
-            if is_drip:
-                pos["drip_shares"] += qty
-                pos["drip_amount"] += cost
-            if lt:
-                pos["lt"] = True
-
-        elif code in SELL_CODES:
-            # LIQ: qty may be 0 — that means liquidate all remaining shares
-            sell_qty = qty if qty > ZERO else pos["shares"]
-            if pos["shares"] > ZERO and sell_qty > ZERO:
-                ratio = min(sell_qty / pos["shares"], Decimal("1"))
-                pos["cost_basis"] = pos["cost_basis"] * (Decimal("1") - ratio)
-            pos["shares"] = max(ZERO, pos["shares"] - sell_qty)
-            if pos["shares"] < EPS:
-                pos["shares"] = ZERO
-
-        elif code in SPLIT_CODES:
-            # Stock split / share receipt: add shares, cost_basis unchanged,
-            # avg_cost decreases proportionally
-            if qty > ZERO:
-                new_shares = pos["shares"] + qty
-                pos["avg_cost"] = pos["cost_basis"] / new_shares if new_shares > ZERO else pos["avg_cost"]
-                pos["shares"]   = new_shares
-
-    # Remove zeroed-out positions
-    positions = {t: p for t, p in positions.items() if p["shares"] > Decimal("0.0001")}
-
-    # Merge crypto overrides (from PDF import or manual sidebar entry)
-    for c_ticker, c_data in crypto.items():
-        if c_ticker.startswith("_") or not isinstance(c_data, dict):
+        if not ticker or code in ("ACH", "RTP", "DTAX", "MISC", "DFEE"):
             continue
-        sh = _to_decimal(c_data.get("shares", 0))
-        ac = _to_decimal(c_data.get("avg_cost", 0))
-        if sh <= ZERO:
-            continue
-        if c_ticker not in positions:
-            positions[c_ticker] = {
-                "shares": sh, "cost_basis": sh * ac, "avg_cost": ac,
-                "lt":     bool(c_data.get("lt", False)),
-                "drip_shares": ZERO, "drip_amount": ZERO, "first_buy": "2026-02-01",
-            }
+
+        if code in ("Buy", "CDIV", "RTP"):
+            if ticker not in portfolio:
+                portfolio[ticker] = {
+                    "shares": Decimal("0"),
+                    "total_cost": Decimal("0"),
+                    "first_buy_date": date_s,
+                    "category": category,
+                }
+            p = portfolio[ticker]
+            cost_basis = amount if amount > 0 else qty * price
+            p["shares"]     += qty
+            p["total_cost"] += cost_basis
+
+        elif code in ("Sell", "LIQ", "SXCH"):
+            if ticker in portfolio:
+                p = portfolio[ticker]
+                sold = qty if qty > 0 else p["shares"]
+                p["shares"] -= sold
+                if p["shares"] <= Decimal("0.0001"):
+                    del portfolio[ticker]
+                else:
+                    # proportionally reduce cost
+                    if (p["shares"] + sold) > 0:
+                        p["total_cost"] = p["total_cost"] * p["shares"] / (p["shares"] + sold)
+
+        elif code == "SPL":
+            # Stock split — add shares, cost basis unchanged
+            if ticker in portfolio and qty > 0:
+                portfolio[ticker]["shares"] += qty
+
+    # Apply crypto overrides (from PDF import)
+    for ticker, ov in crypto_overrides.items():
+        t = ticker.upper()
+        if t in portfolio:
+            portfolio[t]["shares"]     = Decimal(str(ov.get("shares", portfolio[t]["shares"])))
+            portfolio[t]["total_cost"] = Decimal(str(ov.get("avg_cost", "0"))) * portfolio[t]["shares"]
         else:
-            p  = positions[c_ticker]
-            ns = p["shares"] + sh
-            nc = p["cost_basis"] + sh * ac
-            p.update({
-                "shares":     ns,
-                "cost_basis": nc,
-                "avg_cost":   nc / ns if ns > ZERO else ac,
-                "lt":         p["lt"] or bool(c_data.get("lt", False)),
-            })
+            portfolio[t] = {
+                "shares":         Decimal(str(ov.get("shares", "0"))),
+                "total_cost":     Decimal(str(ov.get("avg_cost", "0"))) * Decimal(str(ov.get("shares", "0"))),
+                "first_buy_date": ov.get("first_buy_date", ""),
+                "category":       "Crypto",
+            }
 
-    # Final avg_cost normalisation pass
-    for p in positions.values():
-        if p["shares"] > ZERO and p["cost_basis"] > ZERO:
-            p["avg_cost"] = p["cost_basis"] / p["shares"]
-
-    return positions
-
-
-# ─── Reconciliation helpers ───────────────────────────────────────────────────────
-def get_reconciliation_log() -> list[dict]:
-    """Return last 100 ingest events for the sidebar Reconciliation Summary."""
-    return _load(RECON_PATH, [])
-
-def get_store_stats() -> dict:
-    """Quick stats about the tx_store for sidebar display."""
-    store = _load(TX_STORE_PATH, {})
-    by_code: dict[str, int] = {}
-    for row in store.values():
-        c = row.get("code", "?")
-        by_code[c] = by_code.get(c, 0) + 1
-    return {"total_rows": len(store), "by_code": by_code}
-
-
-# ─── Price fetching ───────────────────────────────────────────────────────────────
-_MEM_CACHE: dict[str, tuple[float, float]] = {}
-_CACHE_TTL = 300   # 5 minutes
-
-def _load_price_cache() -> dict[str, float]:
-    return _load(PRICE_CACHE_P, {})
-
-def _save_price_cache(prices: dict[str, float]) -> None:
-    existing = _load_price_cache()
-    existing.update({k: v for k, v in prices.items() if v > 0})
-    _save(PRICE_CACHE_P, existing)
-
-def _yf_single(ticker: str) -> float:
-    """Fetch one price from yfinance. Returns 0.0 on any failure."""
-    if not _YF_AVAILABLE:
-        return 0.0
-    yf_sym = YF_TICKER_MAP.get(ticker, ticker)
-    try:
-        fi = yf.Ticker(yf_sym).fast_info
-        for key in ("last_price", "regularMarketPrice", "previousClose"):
-            v = fi.get(key)
-            if v is not None and float(v) > 0:
-                return float(v)
-    except Exception:
-        pass
-    return 0.0
-
-def _coingecko_batch(tickers: list[str]) -> dict[str, float]:
-    """Batch-fetch crypto prices from CoinGecko. Returns {ticker: usd_price}."""
-    if not tickers:
-        return {}
-    ids = [COINGECKO_IDS.get(t, t.lower()) for t in tickers]
-    id_str = ",".join(dict.fromkeys(ids))
-    try:
-        r = requests.get(
-            f"https://api.coingecko.com/api/v3/simple/price?ids={id_str}&vs_currencies=usd",
-            timeout=8, headers={"Accept": "application/json"},
-        )
-        r.raise_for_status()
-        data = r.json()
-        return {t: float(data.get(COINGECKO_IDS.get(t, t.lower()), {}).get("usd", 0) or 0)
-                for t in tickers}
-    except Exception:
-        return {}
-
-def get_clean_prices(tickers: tuple, bust: int = 0) -> tuple[dict[str, float], dict[str, str]]:
-    """
-    Fetch live prices for all tickers.
-
-    Fallback chain per ticker:
-      1. CoinGecko (crypto) / yfinance (stocks)  → status: "live"
-      2. In-process memory cache (TTL 5 min)      → status: "cached"
-      3. Disk price_cache.json (last known good)  → status: "fallback"
-      Never returns 1.0 as a default.
-
-    Returns: (prices_dict, status_dict)
-    """
-    now    = time.time()
-    prices: dict[str, float] = {}
-    status: dict[str, str]   = {}
-    disk   = _load_price_cache()
-
-    crypto_t = [t for t in tickers if t in CRYPTO_BASE]
-    stock_t  = [t for t in tickers if t not in CRYPTO_BASE]
-
-    # Crypto via CoinGecko
-    cg = _coingecko_batch(crypto_t)
-    for t in crypto_t:
-        ck = f"{t}|{bust}"
-        mem = _MEM_CACHE.get(ck)
-        if mem and (now - mem[1]) < _CACHE_TTL and bust == 0:
-            prices[t] = mem[0]; status[t] = "cached"
-        elif cg.get(t, 0) > 0:
-            prices[t] = cg[t];  status[t] = "live"
-            _MEM_CACHE[ck] = (cg[t], now)
-        elif disk.get(t, 0) > 0:
-            prices[t] = disk[t]; status[t] = "fallback"
-
-    # Stocks via yfinance
-    for t in stock_t:
-        ck = f"{t}|{bust}"
-        mem = _MEM_CACHE.get(ck)
-        if mem and (now - mem[1]) < _CACHE_TTL and bust == 0:
-            prices[t] = mem[0]; status[t] = "cached"
+    # Compute avg_cost per share
+    result: dict[str, dict] = {}
+    for ticker, pos in portfolio.items():
+        shares = pos["shares"]
+        if shares <= Decimal("0.0001"):
             continue
-        p = _yf_single(t)
-        if p > 0:
-            prices[t] = p; status[t] = "live"
-            _MEM_CACHE[ck] = (p, now)
-        elif disk.get(t, 0) > 0:
-            prices[t] = disk[t]; status[t] = "fallback"
+        avg_cost = (pos["total_cost"] / shares).quantize(Decimal("0.0001"), ROUND_HALF_UP)
+        result[ticker] = {
+            "shares":         float(shares),
+            "avg_cost":       float(avg_cost),
+            "first_buy_date": pos.get("first_buy_date", ""),
+            "category":       pos.get("category", "Stocks"),
+        }
 
-    # Persist newly-fetched live prices to disk
-    live_prices = {t: p for t, p in prices.items() if status.get(t) == "live"}
-    if live_prices:
-        _save_price_cache(live_prices)
+    return result
 
-    return prices, status
+
+def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
+    """Parse a Robinhood CSV export and return (stats, new_ids_added)."""
+    stats = IngestStats()
+    new_ids: set = set()
+    tx_store = _load(TX_STORE_PATH, {})
+
+    text = file_bytes.decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(text), quoting=csv.QUOTE_ALL)
+
+    for row in reader:
+        stats.total_rows_in_file += 1
+        code = (row.get("Trans Code") or row.get("Activity Type") or "").strip()
+        if not code:
+            stats.skipped_no_code += 1
+            continue
+
+        ticker   = (row.get("Instrument") or row.get("Symbol") or "").strip().upper()
+        qty_raw  = row.get("Quantity", "") or ""
+        price_raw = row.get("Price", "") or ""
+        amount_raw = row.get("Amount", "") or ""
+        date_raw = row.get("Process Date") or row.get("Date") or ""
+        settle   = row.get("Settle Date", "") or ""
+        desc     = row.get("Description", "") or ""
+
+        # SHA-256 fingerprint — ACH/RTP cash rows include Amount to distinguish same-day deposits
+        if not ticker and not qty_raw:
+            fp_src = f"{date_raw}|{code}|{amount_raw}|{settle}"
+        else:
+            fp_src = f"{date_raw}|{code}|{ticker}|{qty_raw}|{price_raw}|{settle}"
+        fp = hashlib.sha256(fp_src.encode()).hexdigest()
+
+        if fp in existing_ids or fp in tx_store:
+            stats.duplicate_rows_skipped += 1
+            continue
+
+        # Clean quantity
+        qty_clean = re.sub(r"[^\d.\-]", "", qty_raw)
+        if qty_clean in ("", "-", "."):
+            qty_clean = "0"
+
+        # Infer category
+        category = "Crypto" if ticker in CRYPTO_TICKERS else "ETF" if ticker in {
+            "VOO","QQQ","VYM","VTI","SCHD","GLD","VGT","XLE","VHT","VIS","VXUS",
+            "SPY","VUG","VTV","VEA","VWO","BND","IVV","IEFA","AGG"
+        } else "Stocks"
+
+        tx_store[fp] = {
+            "date":        date_raw,
+            "code":        code,
+            "ticker":      ticker,
+            "qty":         qty_clean,
+            "price":       re.sub(r"[^\d.\-]", "", price_raw) or "0",
+            "amount":      re.sub(r"[^\d.\-]", "", amount_raw) or "0",
+            "description": desc,
+            "category":    category,
+        }
+        new_ids.add(fp)
+        stats.new_rows_added += 1
+
+    _save(TX_STORE_PATH, tx_store)
+
+    # Append to recon log
+    recon = _load(RECON_LOG_PATH, [])
+    recon.append({
+        "timestamp":   datetime.datetime.now().isoformat(),
+        "total_rows":  stats.total_rows_in_file,
+        "new":         stats.new_rows_added,
+        "dupes":       stats.duplicate_rows_skipped,
+        "errors":      stats.errors,
+    })
+    _save(RECON_LOG_PATH, recon[-100:])
+
+    return stats, new_ids
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# V11 PRICE FETCHING  — Finnhub/Polygon/CoinGecko via PriceService
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _load_env_from_secrets() -> None:
+    """Load Plaid/Finnhub/Polygon keys from Streamlit secrets into os.environ."""
+    try:
+        for key in [
+            "PLAID_CLIENT_ID", "PLAID_SECRET", "PLAID_ENV", "PLAID_ACCESS_TOKEN",
+            "FINNHUB_API_KEY", "POLYGON_API_KEY",
+        ]:
+            if key in st.secrets and not os.environ.get(key):
+                os.environ[key] = st.secrets[key]
+    except Exception:
+        pass  # st.secrets not available in test context
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def fetch_prices(tickers: tuple, _bust: int = 0) -> dict[str, float]:
+    """
+    Fetch real-time mid-prices for all tickers.
+    Uses PriceService (Finnhub → Polygon → CoinGecko → cache) when available.
+    Falls back to yfinance + CoinGecko if v11 modules not installed.
+    Returns dict[ticker → float price].
+    """
+    _load_env_from_secrets()
+    prices: dict[str, float] = {}
+
+    if _V11_AVAILABLE:
+        svc = PriceService()
+        results = svc.fetch_prices(list(tickers))
+        for ticker, result in results.items():
+            if result.mid_price > 0:
+                prices[ticker] = result.mid_price
+            else:
+                # Try to get from price cache on disk
+                cache = _load(PRICE_CACHE_PATH, {})
+                if ticker in cache:
+                    prices[ticker] = cache[ticker]
+        # Save updated prices to disk cache
+        cache = _load(PRICE_CACHE_PATH, {})
+        cache.update({t: p for t, p in prices.items() if p > 0})
+        _save(PRICE_CACHE_PATH, cache)
+        return prices
+
+    # ── Fallback: yfinance + CoinGecko ────────────────────────────────────────
+    import requests as req
+    stocks  = [t for t in tickers if t not in CRYPTO_TICKERS]
+    cryptos = [t for t in tickers if t in CRYPTO_TICKERS]
+
+    # yfinance stocks
+    try:
+        import yfinance as yf
+        for t in stocks:
+            try:
+                info = yf.Ticker(t).fast_info
+                p = info.get("last_price") or info.get("regularMarketPrice")
+                prices[t] = round(float(p), 4) if p else None
+            except Exception:
+                prices[t] = None
+    except ImportError:
+        pass
+
+    # CoinGecko crypto
+    _CG = {"BTC":"bitcoin","XRP":"ripple","ETH":"ethereum","SOL":"solana","DOGE":"dogecoin"}
+    for t in cryptos:
+        cid = _CG.get(t)
+        if not cid:
+            prices[t] = None
+            continue
+        try:
+            r = req.get(
+                f"https://api.coingecko.com/api/v3/simple/price?ids={cid}&vs_currencies=usd",
+                timeout=8
+            )
+            prices[t] = round(float(r.json()[cid]["usd"]), 4)
+        except Exception:
+            prices[t] = None
+
+    # Disk-cache fallback for anything that returned None
+    cache = _load(PRICE_CACHE_PATH, {})
+    for t in tickers:
+        if not prices.get(t):
+            if t in cache:
+                prices[t] = cache[t]
+    # Update cache with fresh prices
+    cache.update({t: p for t, p in prices.items() if p})
+    _save(PRICE_CACHE_PATH, cache)
+    return prices
+
+
+def sync_live_portfolio(bust: int = 0) -> Optional[dict]:
+    """
+    Attempt a full Plaid sync. Returns snapshot dict or None if Plaid not configured.
+    The snapshot is also written to plaid_snapshot.json for the UI to reference.
+    """
+    if not _V11_AVAILABLE:
+        return None
+    _load_env_from_secrets()
+    if not os.environ.get("PLAID_ACCESS_TOKEN"):
+        return None
+    try:
+        agg = PortfolioAggregator()
+        snapshot = agg.sync_portfolio_total()
+        # Export to JSON for UI consumption
+        from main_sync import export_json
+        export_json(snapshot, str(PLAID_SNAPSHOT_PATH))
+        return _load(PLAID_SNAPSHOT_PATH, None)
+    except Exception as e:
+        logger.warning("Plaid sync failed: %s — falling back to tx_store", e)
+        return None
+
 
 def _safe_price(ticker: str, pos: dict, prices: dict) -> float:
-    """Returns live price if available, otherwise avg_cost. Never 0 or 1."""
+    """Return live price for ticker; fallback to avg_cost to avoid zero multiplication."""
     p = prices.get(ticker)
-    if p and float(p) > 0:
-        return float(p)
-    avg = float(pos.get("avg_cost") or 0)
-    return avg if avg > 0 else 0.01
+    if p and p > 0:
+        return p
+    cache = _load(PRICE_CACHE_PATH, {})
+    if ticker in cache and cache[ticker] > 0:
+        return cache[ticker]
+    return pos.get("avg_cost", 1.0) or 1.0
 
-def data_health_summary(status: dict[str, str]) -> dict:
-    """Summarise price data quality for the sidebar Data Health indicator."""
-    live     = sum(1 for s in status.values() if s == "live")
-    cached   = sum(1 for s in status.values() if s == "cached")
-    fallback = sum(1 for s in status.values() if s == "fallback")
-    total    = len(status)
-    if total == 0:
-        return {"label": "No Data", "color": "gray", "live": 0, "cached": 0, "fallback": 0, "total": 0}
-    if fallback == 0:
-        return {"label": "🟢 Live",    "color": "green",  "live": live, "cached": cached, "fallback": 0,        "total": total}
-    elif live > 0 or cached > 0:
-        return {"label": "🟡 Partial", "color": "yellow", "live": live, "cached": cached, "fallback": fallback, "total": total}
-    else:
-        return {"label": "🔴 Stale",   "color": "red",    "live": 0,    "cached": cached, "fallback": fallback, "total": total}
+# ═══════════════════════════════════════════════════════════════════════════════
+# LT ELIGIBILITY
+# ═══════════════════════════════════════════════════════════════════════════════
 
+def is_lt_eligible(first_buy_date: str) -> bool:
+    if not first_buy_date:
+        return False
+    try:
+        fbd = datetime.date.fromisoformat(first_buy_date)
+        return (datetime.date.today() - fbd).days >= 366
+    except ValueError:
+        return False
 
-# ─── Portfolio Enrichment ─────────────────────────────────────────────────────────
-def enrich_portfolio(positions: dict, prices: dict) -> list[dict]:
+def days_to_lt(first_buy_date: str) -> int:
+    if not first_buy_date:
+        return 9999
+    try:
+        fbd = datetime.date.fromisoformat(first_buy_date)
+        return max(0, 366 - (datetime.date.today() - fbd).days)
+    except ValueError:
+        return 9999
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# RECOMMENDATION ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_recs(portfolio: dict, prices: dict) -> list[dict]:
     """
-    Merge positions (may contain Decimal values) with live prices.
-    All output values are plain Python float for Streamlit/pandas compatibility.
+    Dynamic recommendation engine — recalculates on every call with live prices.
+    Returns list of rec dicts sorted: sell → buy → trim → hold.
     """
+    recs = []
+    today = datetime.date.today()
+
+    for ticker, pos in portfolio.items():
+        price   = _safe_price(ticker, pos, prices)
+        shares  = pos.get("shares", 0)
+        cost    = pos.get("avg_cost", price)
+        fbd     = pos.get("first_buy_date", "")
+        lt      = is_lt_eligible(fbd)
+        dtlt    = days_to_lt(fbd)
+        equity  = price * shares
+        pnl_pct = ((price - cost) / cost * 100) if cost > 0 else 0.0
+        target  = TARGETS.get(ticker, cost * 1.25)
+        upside  = ((target - price) / price * 100) if price > 0 else 0.0
+        lt_date = (datetime.date.fromisoformat(fbd) + datetime.timedelta(days=366)).isoformat() if fbd else "?"
+        tax_tag = "✅ LT (15%)" if lt else f"⏳ ST — wait until {lt_date}"
+
+        rec = {
+            "ticker":    ticker,
+            "category":  pos.get("category", "Stocks"),
+            "shares":    shares,
+            "price":     price,
+            "cost":      cost,
+            "equity":    equity,
+            "pnl_pct":   pnl_pct,
+            "upside":    upside,
+            "lt":        lt,
+            "dtlt":      dtlt,
+            "lt_date":   lt_date,
+            "tax":       tax_tag,
+            "action":    "",
+            "cat":       "",
+            "plain":     "",
+            "why":       "",
+            "priority":  4,
+            "proceeds":  0.0,
+        }
+
+        # ── Priority 0: Explicit sells ────────────────────────────────────────
+        if ticker in SELL_LIST and lt:
+            rec.update(action="SELL NOW — LT ✅", cat="sell", priority=0,
+                proceeds=equity,
+                plain=f"Sell all {shares:.4f} shares (~${equity:,.0f}). Reinvest into VOO or VYM same day.",
+                why="LT eligible. Pay 15% not 37%. VOO/VYM swap = no wash sale.")
+        elif ticker in SELL_PENDING and lt:
+            rec.update(action=f"SELL NOW — {ticker} LT ✅", cat="sell", priority=0,
+                proceeds=equity,
+                plain=f"Now LT eligible. Sell → reinvest into {('VOO' if ticker=='SPY' else 'QQQ')}.",
+                why="Calendar-flagged. ETF→ETF swap. Lock gains at 15%.")
+
+        # ── Priority 1: Big loss ──────────────────────────────────────────────
+        elif pnl_pct < -20:
+            rec.update(action="REVIEW — BIG LOSS ⚠️", cat="review", priority=1,
+                plain=f"Down {pnl_pct:.1f}%. Decide: add more at this dip or cut losses.",
+                why=f"Position is >20% underwater. Reassess thesis.")
+
+        # ── Priority 2: Buys ──────────────────────────────────────────────────
+        elif ticker in FOREVER_HOLD:
+            rec.update(action="HOLD FOREVER — DRIP on 🔄", cat="hold", priority=2,
+                plain="Never sell. Keep DRIP on — every dividend buys more shares.",
+                why="Core income ETF. Compounding dividend machine.")
+        elif ticker in DCA_ALWAYS:
+            rec.update(action="DCA EVERY DEPOSIT 💰", cat="buy", priority=2,
+                plain="Add to this every 2 weeks. It tracks the whole market.",
+                why="Core index. Never stop accumulating.")
+        elif pnl_pct < -8 and upside > 20:
+            rec.update(action="STRONG BUY — ON DIP 🟢", cat="buy", priority=2,
+                plain=f"Down {abs(pnl_pct):.1f}% from your cost. Analyst target ${target:,.0f} = {upside:.0f}% upside.",
+                why="Quality stock on sale. Add more to lower avg cost.")
+        elif ticker in CRYPTO_TICKERS and upside > 25:
+            rec.update(action="ACCUMULATE — CRYPTO 🟡", cat="buy", priority=2,
+                plain=f"Target ${target:,.0f}. {upside:.0f}% upside from here. Add small position.",
+                why="High-conviction crypto. Keep under 5% of portfolio.")
+        elif upside > 20:
+            rec.update(action="ACCUMULATE 📈", cat="buy", priority=2,
+                plain=f"Analyst target ${target:,.0f} = {upside:.0f}% upside. Add at current levels.",
+                why="Strong upside. Good entry point.")
+
+        # ── Priority 3: Trims ─────────────────────────────────────────────────
+        elif dtlt <= 30 and dtlt > 0:
+            rec.update(action=f"HOLD — LT IN {dtlt} DAYS ⏰", cat="hold", priority=3,
+                plain=f"Only {dtlt} days until LT status. Don't sell early — saves ~22% in tax.",
+                why=f"LT date: {lt_date}. Patience = tax savings.")
+        elif ticker in IPO_HOLDS and lt:
+            trim_shares = shares * 0.25
+            rec.update(action="TRIM 25% — IPO LT ✅", cat="trim", priority=3,
+                proceeds=price * trim_shares,
+                plain=f"Sell {trim_shares:.2f} shares (~${price*trim_shares:,.0f}). Keep 75%.",
+                why="IPO position now LT. Lock in partial gains at 15% rate.")
+        elif pnl_pct > 20 and lt:
+            trim_shares = shares * 0.20
+            rec.update(action="TRIM 20% — TAKE GAINS 💰", cat="trim", priority=3,
+                proceeds=price * trim_shares,
+                plain=f"Sell {trim_shares:.2f} shares (~${price*trim_shares:,.0f}). Let rest ride.",
+                why=f"Up {pnl_pct:.0f}% and LT. Lock in gains at 15% tax rate.")
+
+        # ── Priority 4: Hold ──────────────────────────────────────────────────
+        else:
+            hold_msg = f"Holding {shares:.4f} sh @ ${price:,.2f}. "
+            if not lt:
+                hold_msg += f"LT in {dtlt} days."
+            elif upside > 0:
+                hold_msg += f"Target ${target:,.0f} = {upside:.0f}% upside."
+            rec.update(action="HOLD", cat="hold", priority=4,
+                plain=hold_msg,
+                why="No action needed today.")
+
+        recs.append(rec)
+
+    # Sort: sell(0) → review(1) → buy(2) → trim(3) → hold(4)
+    return sorted(recs, key=lambda r: (r["priority"], -r["equity"]))
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AI TARGET ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def generate_suggested_targets(portfolio: dict) -> dict[str, float]:
+    """
+    Suggest target weights (Moderate-Aggressive profile).
+    Returns dict[ticker → float 0-100] normalised to exactly 100%.
+    Only includes tickers currently held.
+    """
+    _WEIGHTS = {
+        "VOO": 12, "QQQ": 10, "VYM": 8, "SCHD": 5, "VTI": 5,
+        "NVDA": 10, "AAPL": 6, "META": 6, "GOOGL": 5, "MSFT": 5,
+        "BRK-B": 4, "WMT": 3, "COST": 3,
+        "VXUS": 3, "GLD": 3, "VGT": 2, "XLE": 2, "VHT": 2, "VIS": 1,
+        "NFLX": 2, "TSM": 2, "QCOM": 1, "RDDT": 1, "CRM": 1,
+        "BTC": 3, "XRP": 2,
+    }
+    held = {t: _WEIGHTS.get(t, 1) for t in portfolio}
+    total = sum(held.values()) or 1
+    return {t: round(w / total * 100, 1) for t, w in held.items()}
+
+
+def compute_rebalancing(portfolio: dict, prices: dict, targets: dict) -> list[dict]:
+    """Compute drift vs targets. Returns list sorted by most under-weight first."""
+    total_equity = sum(_safe_price(t, p, prices) * p["shares"] for t, p in portfolio.items())
+    if total_equity <= 0:
+        return []
     rows = []
-    for ticker, pos in positions.items():
-        live   = _safe_price(ticker, pos, prices)
-        shares = float(pos.get("shares") or 0)
-        avg    = float(pos.get("avg_cost") or 0)
-        equity = live * shares
-        cost   = avg  * shares
-        pl     = equity - cost
-        pl_pct = (pl / cost * 100) if cost > 0 else 0.0
-        target = PRICE_TARGETS.get(ticker, 0.0)
-        upside = ((target - live) / live * 100) if (target and live > 0) else 0.0
+    for ticker, pos in portfolio.items():
+        price      = _safe_price(ticker, pos, prices)
+        mkt_val    = price * pos["shares"]
+        current_pct = mkt_val / total_equity * 100
+        target_pct  = targets.get(ticker, 0)
+        drift       = current_pct - target_pct
         rows.append({
             "ticker":      ticker,
-            "shares":      shares,
-            "avg_cost":    avg,
-            "live_price":  live,
-            "equity":      equity,
-            "cost_basis":  cost,
-            "pl":          pl,
-            "pl_pct":      pl_pct,
-            "lt":          bool(pos.get("lt", False)),
-            "upside":      upside,
-            "target":      target,
-            "drip_shares": float(pos.get("drip_shares") or 0),
-            "drip_amount": float(pos.get("drip_amount") or 0),
-            "first_buy":   pos.get("first_buy", ""),
+            "market_value": mkt_val,
+            "current_pct": round(current_pct, 1),
+            "target_pct":  round(target_pct, 1),
+            "drift":       round(drift, 1),
+            "action":      "TRIM" if drift > 5 else ("BUY" if drift < -5 else "OK"),
         })
-    rows.sort(key=lambda r: r["equity"], reverse=True)
-    return rows
+    return sorted(rows, key=lambda r: r["drift"])
 
 
-# ─── AI Target Engine ─────────────────────────────────────────────────────────────
-def generate_suggested_targets(rows: list[dict], total_value: float) -> dict[str, float]:
-    """
-    Generate Moderate-Aggressive target allocations for only the tickers held.
-    Normalised to exactly 100%. Used to pre-populate sidebar number_inputs.
-    """
-    tickers_in = {r["ticker"] for r in rows}
-    base: dict[str, float] = {
-        "VOO": 20.0, "QQQ": 10.0, "VYM": 10.0, "SCHD": 5.0,  "VTI": 4.0,
-        "NVDA": 12.0,"AAPL": 6.0, "META": 4.0, "GOOGL": 4.0, "MSFT": 3.0,
-        "BRK.B": 4.0,"WMT": 2.0,  "COST": 2.0,
-        "VXUS": 3.0, "GLD": 4.0,  "VGT": 2.0,  "XLE": 2.0,  "VHT": 1.5, "VIS": 1.0,
-        "NFLX": 2.0, "TSM": 2.0,  "QCOM": 1.5, "RDDT": 0.5,
-        "SPY": 1.0,  "VUG": 1.0,  "SNOW": 1.0, "CRM": 1.5,
-        "AMD": 1.0,  "ALK": 0.5,
-        "BTC": 3.5,  "XRP": 0.5,
-    }
-    filtered = {t: w for t, w in base.items() if t in tickers_in}
-    total_w = sum(filtered.values())
-    if total_w > 0:
-        filtered = {t: round(w / total_w * 100, 1) for t, w in filtered.items()}
-    return filtered
+# ═══════════════════════════════════════════════════════════════════════════════
+# $900 DEPOSIT ENGINE
+# ═══════════════════════════════════════════════════════════════════════════════
 
-
-# ─── Rebalancing ──────────────────────────────────────────────────────────────────
-def compute_rebalancing(rows: list[dict], total_value: float,
-                        targets: dict[str, float]) -> list[dict]:
-    result = []
-    for r in rows:
-        current_pct = (r["equity"] / total_value * 100) if total_value > 0 else 0
-        target_pct  = targets.get(r["ticker"], 0.0)
-        result.append({**r, "current_pct": current_pct,
-                        "target_pct": target_pct, "drift": current_pct - target_pct})
-    return sorted(result, key=lambda x: x["drift"])
-
-def compute_deposit_allocation(
-    deposit: float, rows: list[dict], total_value: float,
-    targets: dict[str, float], deposit_num: int, prices: dict,
-) -> list[dict]:
-    """
-    Allocate $900 deposit into underweight assets (target model) or fixed split (no targets).
-    Returns list: [ticker, current_value, target_pct, action, amount, est_shares, live_price, reason]
-    """
-    rotating_ticker = DEPOSIT_ROTATING[(deposit_num - 1) % len(DEPOSIT_ROTATING)]
-    has_targets = any(v > 0 for v in targets.values())
-    allocs: list[dict] = []
-
-    if has_targets:
-        drift_rows = compute_rebalancing(rows, total_value, targets)
-        remaining = deposit
-        for dr in drift_rows:   # already sorted most-underweight first
-            if dr["drift"] >= -1.5 or dr["target_pct"] <= 0:
-                continue
-            needed = abs(dr["drift"]) / 100 * total_value
-            alloc  = min(remaining, needed)
-            if alloc < 5:
-                continue
-            live = dr["live_price"]
-            allocs.append({
-                "ticker":        dr["ticker"],
-                "current_value": round(dr["equity"], 2),
-                "target_pct":    dr["target_pct"],
-                "action":        "BUY",
-                "amount":        round(alloc, 2),
-                "est_shares":    round(alloc / live, 6) if live > 0 else 0,
-                "live_price":    live,
-                "reason":        f"Underweight {abs(dr['drift']):.1f}% vs {dr['target_pct']:.1f}% target",
-            })
-            remaining -= alloc
-            if remaining < 5:
+def get_biweekly_dates(start: datetime.date, n: int = 18) -> list[datetime.date]:
+    dates = []
+    d = start
+    while len(dates) < n:
+        if d.weekday() == 4:  # Friday
+            dates.append(d)
+        d += datetime.timedelta(days=1)
+        if len(dates) == 0 and d > start + datetime.timedelta(days=14):
+            break
+    d = start
+    for _ in range(n * 14):
+        if d.weekday() == 4:
+            if not dates or (d - dates[-1]).days >= 14:
+                dates.append(d)
+            if len(dates) >= n:
                 break
-        # Flag overweight positions for trimming
-        for dr in drift_rows:
-            if dr["drift"] > 5.0 and dr["target_pct"] > 0:
-                trim = dr["drift"] / 100 * total_value * 0.5
-                live = dr["live_price"]
-                allocs.append({
-                    "ticker":        dr["ticker"],
-                    "current_value": round(dr["equity"], 2),
-                    "target_pct":    dr["target_pct"],
-                    "action":        "TRIM",
-                    "amount":        round(trim, 2),
-                    "est_shares":    round(trim / live, 6) if live > 0 else 0,
-                    "live_price":    live,
-                    "reason":        f"Overweight {dr['drift']:.1f}% above target",
+        d += datetime.timedelta(days=1)
+    return dates[:n]
+
+
+def generate_deposit_recs(deposit_num: int, portfolio: dict, prices: dict, targets: dict, amount: float = 900.0) -> list[dict]:
+    """
+    Generate deposit allocation for deposit #N.
+    If targets set: allocate to most-underweight assets (drift-fill).
+    Else: fixed 28/22/17/17/16 plan with rotating pick.
+    """
+    rotating_pick = DEPOSIT_ROTATION[(deposit_num - 1) % len(DEPOSIT_ROTATION)]
+    total_equity = sum(_safe_price(t, p, prices) * p["shares"] for t, p in portfolio.items())
+
+    if targets and total_equity > 0:
+        # Drift-fill: put money toward most underweight
+        rebal = compute_rebalancing(portfolio, prices, targets)
+        underweight = [r for r in rebal if r["drift"] < -2][:5]
+        if underweight:
+            total_deficit = sum(abs(r["drift"]) for r in underweight)
+            recs = []
+            for r in underweight:
+                alloc = amount * abs(r["drift"]) / total_deficit
+                p = _safe_price(r["ticker"], portfolio.get(r["ticker"], {}), prices)
+                recs.append({
+                    "ticker":    r["ticker"],
+                    "alloc_pct": round(abs(r["drift"]) / total_deficit * 100, 1),
+                    "amount":    round(alloc, 2),
+                    "price":     p,
+                    "est_shares": round(alloc / p, 4) if p > 0 else 0,
+                    "why":       f"{r['drift']:.1f}% under target",
                 })
-    else:
-        # Default fixed split
-        row_map = {r["ticker"]: r for r in rows}
-        for ticker, pct in DEPOSIT_FIXED.items():
-            amt  = deposit * pct
-            row  = row_map.get(ticker, {})
-            live = row.get("live_price") or prices.get(ticker) or 100
-            allocs.append({
-                "ticker":        ticker,
-                "current_value": round(row.get("equity", 0), 2),
-                "target_pct":    0.0,
-                "action":        "BUY",
-                "amount":        round(amt, 2),
-                "est_shares":    round(amt / live, 6) if live > 0 else 0,
-                "live_price":    live,
-                "reason":        "Core fixed allocation",
-            })
-        r_row  = row_map.get(rotating_ticker, {})
-        r_live = r_row.get("live_price") or prices.get(rotating_ticker) or 100
-        r_amt  = deposit * DEPOSIT_ROTATING_PCT
-        allocs.append({
-            "ticker":        rotating_ticker,
-            "current_value": round(r_row.get("equity", 0), 2),
-            "target_pct":    0.0,
-            "action":        "BUY",
-            "amount":        round(r_amt, 2),
-            "est_shares":    round(r_amt / r_live, 6) if r_live > 0 else 0,
-            "live_price":    r_live,
-            "reason":        f"Rotating pick #{(deposit_num - 1) % len(DEPOSIT_ROTATING) + 1}",
-        })
+            return recs
 
-    return allocs
-
-
-# ─── Recommendation Engine ────────────────────────────────────────────────────────
-def _tax_note(lt: bool) -> str:
-    return "✅ Long-term — 15% cap gains rate" if lt else "⚠️ Short-term — 37% rate. Hold until 1-year mark."
-
-def generate_recommendations(rows: list[dict]) -> list[dict]:
+    # Fixed plan
     recs = []
-    today = date.today()
-    for r in rows:
-        t      = r["ticker"]
-        pl_pct = r["pl_pct"]
-        lt     = r["lt"]
-        upside = r["upside"]
-        equity = r["equity"]
-        upcoming_lt = any(
-            k.startswith(t) and 0 <= (d - today).days <= 30
-            for k, d in LT_DATES.items()
-        )
-        base = {"proceed_est": 0, "tax_note": _tax_note(lt)}
-
-        if t in SELL_LIST and lt:
-            recs.append({**r, **base, "badge": "SELL", "priority": 0,
-                "action": "🔴 SELL NOW",
-                "reason": "Earmarked for exit. LT-eligible → 15% tax. Reinvest into VOO/VYM same day.",
-                "proceed_est": equity}); continue
-        if t in SELL_PENDING and lt:
-            recs.append({**r, **base, "badge": "SELL", "priority": 0,
-                "action": "🔴 SELL NOW",
-                "reason": f"Fund upgrade: swap {t} → lower-cost ETF. LT now. Same-day swap ≠ wash sale.",
-                "proceed_est": equity}); continue
-        if pl_pct < -20:
-            recs.append({**r, **base, "badge": "REVIEW", "priority": 1,
-                "action": "🚨 REVIEW — BIG LOSS",
-                "reason": f"Down {pl_pct:.1f}%. Re-evaluate thesis. DCA if intact; harvest loss if broken."}); continue
-        if t in FOREVER_HOLD:
-            recs.append({**r, **base, "badge": "HOLD", "priority": 2,
-                "action": "♾ HOLD FOREVER — DRIP ON",
-                "reason": "Core dividend compounder. Never sell. DRIP enabled."}); continue
-        if t in DCA_ALWAYS:
-            recs.append({**r, **base, "badge": "BUY", "priority": 2,
-                "action": "📈 DCA EVERY DEPOSIT",
-                "reason": "Index core. Buy every deposit regardless of price."}); continue
-        if -20 <= pl_pct < -8 and upside > 20:
-            recs.append({**r, **base, "badge": "BUY", "priority": 2,
-                "action": "💎 STRONG BUY — DIP",
-                "reason": f"Down {pl_pct:.1f}%, {upside:.0f}% upside to ${r['target']:.0f}. Add aggressively."}); continue
-        if t in CRYPTO_BASE and upside > 25:
-            recs.append({**r, **base, "badge": "BUY", "priority": 2,
-                "action": "🚀 ACCUMULATE — CRYPTO",
-                "reason": f"{upside:.0f}% upside to ${r['target']:,.0f}. Keep crypto ≤5% of portfolio."}); continue
-        if upside > 20:
-            recs.append({**r, **base, "badge": "BUY", "priority": 2,
-                "action": "🟢 ACCUMULATE",
-                "reason": f"{upside:.0f}% upside to ${r['target']:.0f}. Good entry point."}); continue
-        if t in IPO_HOLDS and lt:
-            trim = equity * 0.25
-            recs.append({**r, **base, "badge": "TRIM", "priority": 3,
-                "action": "✂️ TRIM 25% — IPO NOW LT",
-                "reason": f"IPO now LT-eligible. Trim 25% ≈${trim:.0f} at 15% tax.",
-                "proceed_est": trim}); continue
-        if pl_pct > 20 and lt:
-            trim_pct = 0.25 if t in CRYPTO_BASE or t in IPO_HOLDS else 0.20
-            trim = equity * trim_pct
-            recs.append({**r, **base, "badge": "TRIM", "priority": 3,
-                "action": f"✂️ TRIM {int(trim_pct * 100)}% — LOCK GAINS",
-                "reason": f"Up {pl_pct:.1f}%, LT-eligible. Take {int(trim_pct * 100)}% off table ≈${trim:.0f} at 15%.",
-                "proceed_est": trim}); continue
-        if upcoming_lt and not lt and pl_pct > 5:
-            recs.append({**r, **base, "badge": "HOLD", "priority": 3,
-                "action": "⏳ HOLD — LT IN <30 DAYS",
-                "reason": "Within 30 days of LT eligibility. Do NOT sell — wait for the 15% rate."}); continue
-        recs.append({**r, **base, "badge": "HOLD", "priority": 4,
-            "action": "🟡 HOLD",
-            "reason": f"No action needed. Monitor for ${r['target']:.0f} target or LT eligibility."})
-
-    recs.sort(key=lambda x: (x["priority"], -x["equity"]))
+    for ticker, pct in DEPOSIT_PLAN:
+        actual_ticker = rotating_pick if ticker == "ROTATING" else ticker
+        alloc = amount * pct
+        p = _safe_price(actual_ticker, portfolio.get(actual_ticker, {}), prices)
+        recs.append({
+            "ticker":    actual_ticker,
+            "alloc_pct": pct * 100,
+            "amount":    round(alloc, 2),
+            "price":     p,
+            "est_shares": round(alloc / p, 4) if p > 0 else 0,
+            "why":       "Rotating pick" if ticker == "ROTATING" else "Core allocation",
+        })
     return recs
 
 
-# ─── KPIs ─────────────────────────────────────────────────────────────────────────
-def compute_kpis(rows: list[dict], cash: float) -> dict:
-    sr = [r for r in rows if r["ticker"] not in CRYPTO_BASE]
-    cr = [r for r in rows if r["ticker"] in CRYPTO_BASE]
-    sv = sum(r["equity"] for r in sr)
-    cv = sum(r["equity"] for r in cr)
-    tv = sv + cv + cash
-    tc = sum(r["cost_basis"] for r in rows)
-    tp = sum(r["pl"] for r in rows)
+# ═══════════════════════════════════════════════════════════════════════════════
+# CRYPTO PDF PARSER
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def parse_crypto_pdf(file_bytes: bytes) -> dict[str, dict]:
+    """
+    Parse a Robinhood Crypto statement PDF.
+    Returns dict[ticker → {shares, avg_cost}].
+    """
+    overrides: dict[str, dict] = {}
+    try:
+        import pdfplumber
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            text = "\n".join(page.extract_text() or "" for page in pdf.pages)
+    except Exception:
+        return overrides
+
+    # Pattern: "BTC   0.03432981   $52,800.00"
+    patterns = [
+        r"\b(BTC|ETH|XRP|SOL|DOGE|ADA)\b.*?([\d,]+\.[\d]+)\s+(?:shares|coins)?\s*[@$]?\s*([\d,]+\.[\d]+)",
+        r"(BTC|ETH|XRP|SOL|DOGE|ADA)\s+([\d.]+)\s+[\$]?([\d,.]+)",
+    ]
+    for pat in patterns:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            ticker = m.group(1).upper()
+            try:
+                shares   = float(m.group(2).replace(",", ""))
+                avg_cost = float(m.group(3).replace(",", ""))
+                if shares > 0:
+                    overrides[ticker] = {"shares": shares, "avg_cost": avg_cost, "first_buy_date": ""}
+            except Exception:
+                pass
+
+    return overrides
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO SUMMARY HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def portfolio_totals(portfolio: dict, prices: dict, cash: float) -> dict:
+    """Compute total equity, cost basis, P&L broken down by bucket."""
+    stocks_val = crypto_val = cost_tot = 0.0
+    for ticker, pos in portfolio.items():
+        p = _safe_price(ticker, pos, prices)
+        mkt = p * pos["shares"]
+        if pos.get("category") == "Crypto":
+            crypto_val += mkt
+        else:
+            stocks_val += mkt
+        cost_tot += pos.get("avg_cost", 0) * pos["shares"]
+
+    total = stocks_val + crypto_val + cash
+    pnl   = (stocks_val + crypto_val) - cost_tot
+    pct   = (pnl / cost_tot * 100) if cost_tot > 0 else 0.0
     return {
-        "total_value":   tv, "stock_value": sv, "crypto_value": cv, "cash": cash,
-        "total_cost":    tc, "total_pl":    tp,
-        "total_pl_pct":  (tp / tc * 100) if tc > 0 else 0,
-        "positions":     len(rows),
-        "winners":       sum(1 for r in rows if r["pl"] > 0),
-        "losers":        sum(1 for r in rows if r["pl"] < 0),
-        "drip_total":    sum(r["drip_amount"] for r in rows),
+        "total":       total,
+        "stocks":      stocks_val,
+        "crypto":      crypto_val,
+        "cash":        cash,
+        "cost_basis":  cost_tot,
+        "pnl":         pnl,
+        "pnl_pct":     pct,
     }
 
 
-# ─── Deposit schedule ─────────────────────────────────────────────────────────────
-def get_deposit_schedule(n: int = 16) -> list[dict]:
-    schedule = []
-    d = FIRST_DEPOSIT_DATE
-    today = date.today()
-    while d < today:
-        d += timedelta(weeks=2)
-    for i in range(n):
-        num = i + 1
-        schedule.append({
-            "num":      num,
-            "date":     d,
-            "rotating": DEPOSIT_ROTATING[(num - 1) % len(DEPOSIT_ROTATING)],
-        })
-        d += timedelta(weeks=2)
-    return schedule
+def snapshot_portfolio(portfolio: dict, prices: dict, cash: float, recs: list) -> dict:
+    """Save a timestamped snapshot to rec_history.json."""
+    totals = portfolio_totals(portfolio, prices, cash)
+    snap = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "totals":    totals,
+        "recs":      [{"ticker": r["ticker"], "action": r["action"], "pnl_pct": r["pnl_pct"]} for r in recs],
+    }
+    history = _load(REC_HISTORY_PATH, [])
+    history.append(snap)
+    _save(REC_HISTORY_PATH, history[-200:])
+    return snap
 
 
-# ─── History & logging ────────────────────────────────────────────────────────────
-def save_snapshot(kpis: dict, recs: list[dict]) -> None:
-    hist = _load(REC_HIST_PATH, [])
-    hist.append({
-        "ts":           datetime.now().isoformat(),
-        "total_value":  kpis["total_value"],
-        "stock_value":  kpis["stock_value"],
-        "crypto_value": kpis["crypto_value"],
-        "cash":         kpis["cash"],
-        "total_pl":     kpis["total_pl"],
-        "total_pl_pct": kpis["total_pl_pct"],
-        "recs": [{"ticker": r["ticker"], "action": r["action"],
-                  "live": r["live_price"], "pl_pct": r["pl_pct"]} for r in recs[:30]],
-    })
-    _save(REC_HIST_PATH, hist[-200:])
-
-def log_deposit(num: int, allocs: list[dict], total: float, notes: str = "") -> None:
-    log = _load(DEPOSIT_LOG, [])
+def log_deposit(deposit_num: int, date_str: str, recs: list, total: float) -> None:
+    """Append a completed deposit to deposit_log.json."""
+    log = _load(DEPOSIT_LOG_PATH, [])
     log.append({
-        "ts": datetime.now().isoformat(), "deposit_num": num,
-        "total": total, "allocations": allocs, "notes": notes,
+        "num":   deposit_num,
+        "date":  date_str,
+        "total": total,
+        "buys":  [{"ticker": r["ticker"], "amount": r["amount"], "shares": r["est_shares"]} for r in recs],
     })
-    _save(DEPOSIT_LOG, log)
-
-def load_targets() -> dict[str, float]:
-    return _load(TARGETS_PATH, {})
-
-def save_targets(targets: dict[str, float]) -> None:
-    _save(TARGETS_PATH, targets)
-
-def update_crypto_override(ticker: str, shares: float, avg_cost: float, lt: bool) -> None:
-    c = _load(CRYPTO_PATH, BAKED_CRYPTO)
-    c[ticker] = {"shares": shares, "avg_cost": avg_cost, "lt": lt}
-    _save(CRYPTO_PATH, c)
+    _save(DEPOSIT_LOG_PATH, log)

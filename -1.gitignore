@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+tx_store.json
+crypto_overrides.json
+rec_history.json
+deposit_log.json
+targets.json
+*.csv
+.env

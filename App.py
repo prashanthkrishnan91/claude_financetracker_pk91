@@ -497,7 +497,7 @@ with tabs[1]:
             })
         df = pd.DataFrame(rows)
         st.dataframe(
-            df.style.applymap(lambda v: "color:#22c55e" if isinstance(v,float) and v>0
+            df.style.map(lambda v: "color:#22c55e" if isinstance(v,float) and v>0
                               else ("color:#ef4444" if isinstance(v,float) and v<0 else ""),
                               subset=["P&L %"]),
             use_container_width=True, height=520,

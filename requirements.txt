@@ -1,6 +1,27 @@
+# Portfolio War Room v11.0
+# pip install -r requirements.txt
+
+# Core UI
 streamlit>=1.32.0
-yfinance>=0.2.38
 pandas>=2.2.0
 plotly>=5.20.0
+
+# V11 real-time pricing (replaces yfinance)
 requests>=2.31.0
-pdfplumber
+urllib3>=2.0.0
+
+# V11 Plaid holdings
+plaid-python>=22.0.0
+
+# Crypto PDF import
+pdfplumber>=0.11.0
+
+# Environment variables (local dev)
+python-dotenv>=1.0.0
+
+# Optional: yfinance as last-resort fallback only
+yfinance>=0.2.38
+
+# Testing
+pytest>=8.0.0
+pytest-asyncio>=0.23.0

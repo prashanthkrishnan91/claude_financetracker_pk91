@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import streamlit as st
+import pandas as pd
 from dataclasses import dataclass, field
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from pathlib import Path

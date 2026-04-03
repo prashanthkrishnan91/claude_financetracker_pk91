@@ -1,12 +1,15 @@
 """
-portfolio_aggregator.py — Portfolio War Room v11.0
-Combines Plaid holdings (quantity) + real-time PriceService (mid_price)
-to compute Total Equity matching Robinhood's Mark Price calculation.
+portfolio_aggregator.py — Portfolio War Room v11.1
+Combines HoldingsManager (smart-cached Plaid quantities) +
+async PriceService (Finnhub/Polygon/CoinGecko) to compute Total Equity.
 
-Architecture:
-    PlaidClient          → authoritative quantity per ticker
-    PriceService         → real-time mid_price (bid+ask)/2 per ticker
-    PortfolioAggregator  → multiplies them, calculates P&L, returns snapshot
+Key changes vs v11.0:
+  - PlaidClient no longer called directly — all holdings via HoldingsManager
+  - HoldingsManager enforces 24h TTL: Plaid called at most once/day
+  - calculate_total_value() is the new primary entry point
+  - sync_portfolio_total() kept as backward-compat alias
+  - Async path uses fully-async PriceService (asyncio.gather + aiohttp)
+  - PortfolioSnapshot gains: holdings_cache_age_h, plaid_sync_triggered
 """
 
 from __future__ import annotations
@@ -17,266 +20,302 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-from plaid_client import PlaidClient, PlaidHolding, PlaidPortfolio
+from holdings_manager import HoldingsManager, HoldingsCache, CachedHolding
 from price_service import PriceService, PriceResult
 
 logger = logging.getLogger(__name__)
 
+_CRYPTO_TICKERS = {"BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LTC"}
 
-# ─── Data Structures ──────────────────────────────────────────────────────────
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# DATA STRUCTURES
+# ═══════════════════════════════════════════════════════════════════════════════
 
 @dataclass
 class PositionSnapshot:
-    """Single position — quantity from Plaid × price from PriceService."""
-    ticker: str
-    name: str
-    quantity: float
-    avg_cost_basis: float     # Per share (from Plaid)
-    mid_price: float          # Real-time mark price
-    market_value: float       # quantity × mid_price
-    cost_total: float         # quantity × avg_cost_basis
-    unrealised_pnl: float     # market_value − cost_total
-    unrealised_pct: float     # unrealised_pnl / cost_total × 100
-    price_source: str         # 'finnhub' | 'polygon' | 'coingecko' | 'cache(...)'
-    bid: Optional[float]
-    ask: Optional[float]
-    last_trade: float
-    security_type: str
-    price_stale: bool         # True if using cached / fallback price
-    price_error: Optional[str]
+    """Single position — quantity from HoldingsManager × price from PriceService."""
+    ticker:         str
+    name:           str
+    quantity:       float
+    avg_cost_basis: float
+    mid_price:      float
+    market_value:   float
+    cost_total:     float
+    unrealised_pnl: float
+    unrealised_pct: float
+    price_source:   str
+    bid:            Optional[float]
+    ask:            Optional[float]
+    last_trade:     float
+    security_type:  str
+    price_stale:    bool
+    price_error:    Optional[str]
 
 
 @dataclass
 class PortfolioSnapshot:
     """
-    Complete portfolio snapshot matching Robinhood's display:
-        Total Equity = Stocks Equity + Crypto Equity + Cash
+    Complete portfolio snapshot.
+    Total Equity = Stocks + Crypto + Cash  (mirrors Robinhood's Mark Price total)
     """
-    positions: list[PositionSnapshot] = field(default_factory=list)
-    stocks_equity: float = 0.0      # All equity/ETF positions
-    crypto_equity: float = 0.0      # Crypto positions
-    cash_usd: float = 0.0           # Cash from Plaid
-    total_equity: float = 0.0       # = stocks + crypto + cash
-    total_cost_basis: float = 0.0
+    positions:            list[PositionSnapshot] = field(default_factory=list)
+    stocks_equity:        float = 0.0
+    crypto_equity:        float = 0.0
+    cash_usd:             float = 0.0
+    total_equity:         float = 0.0
+    total_cost_basis:     float = 0.0
     total_unrealised_pnl: float = 0.0
     total_unrealised_pct: float = 0.0
-    positions_count: int = 0
-    stale_prices: list[str] = field(default_factory=list)   # Tickers with stale prices
-    failed_prices: list[str] = field(default_factory=list)  # Tickers that failed entirely
-    snapshot_timestamp: float = field(default_factory=time.time)
-    plaid_account_ids: list[str] = field(default_factory=list)
+    positions_count:      int   = 0
+    stale_prices:         list[str] = field(default_factory=list)
+    failed_prices:        list[str] = field(default_factory=list)
+    snapshot_timestamp:   float = field(default_factory=time.time)
+    plaid_account_ids:    list[str] = field(default_factory=list)
+    # Smart-sync metadata
+    holdings_cache_age_h: float = 0.0   # Age of holdings_cache.json in hours
+    plaid_sync_triggered: bool  = False  # True if this run actually called Plaid
 
 
-# ─── PortfolioAggregator ──────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# PORTFOLIO AGGREGATOR
+# ═══════════════════════════════════════════════════════════════════════════════
 
 class PortfolioAggregator:
     """
-    Orchestrates Plaid + PriceService to produce a PortfolioSnapshot.
+    Orchestrates HoldingsManager + PriceService to produce a PortfolioSnapshot.
 
-    Usage:
-        aggregator = PortfolioAggregator()
-        snapshot = aggregator.sync_portfolio_total()
-        print(f"Total Equity: ${snapshot.total_equity:,.2f}")
+    Smart Sync:
+      Holdings quantity  → HoldingsCache (Plaid called only if cache >24h old)
+      Live prices        → Finnhub/Polygon/CoinGecko (called every time, no Plaid)
+      Fallback prices    → institution_price stored in HoldingsCache
+
+    Quick start:
+        agg  = PortfolioAggregator()
+        snap = agg.calculate_total_value()
+        print(f"${snap.total_equity:,.2f}")
+
+        # Force Plaid re-sync
+        snap = agg.calculate_total_value(force_plaid_refresh=True)
+
+        # Async
+        snap = await agg.calculate_total_value_async()
     """
 
     def __init__(
         self,
-        plaid_client: Optional[PlaidClient] = None,
-        price_service: Optional[PriceService] = None,
+        holdings_manager: Optional[HoldingsManager] = None,
+        price_service:    Optional[PriceService]    = None,
     ) -> None:
-        self._plaid   = plaid_client  or PlaidClient()
-        self._prices  = price_service or PriceService()
+        self._holdings = holdings_manager or HoldingsManager()
+        self._prices   = price_service    or PriceService()
 
-    # ── Main sync function ────────────────────────────────────────────────────
+    # ── Primary sync entry point ──────────────────────────────────────────────
+
+    def calculate_total_value(
+        self,
+        force_plaid_refresh: bool = False,
+        account_ids: Optional[list[str]] = None,
+    ) -> PortfolioSnapshot:
+        """
+        Loads quantities from local cache (or Plaid if missing/stale),
+        fetches fresh prices, returns PortfolioSnapshot.
+
+        Plaid is called ONLY when:
+          - holdings_cache.json is missing
+          - Cache is older than 24 hours (HOLDINGS_CACHE_TTL_HOURS env var)
+          - force_plaid_refresh=True
+
+        Prices are always fetched live — independent of Plaid.
+        """
+        t0 = time.monotonic()
+        needs_sync, reason = self._holdings.needs_plaid_sync(force_refresh=force_plaid_refresh)
+        logger.info("Holdings [sync]: %s", reason)
+
+        cache: HoldingsCache = self._holdings.get_holdings(
+            force_refresh=force_plaid_refresh,
+            account_ids=account_ids,
+        )
+        plaid_triggered = needs_sync
+
+        if not cache.holdings:
+            logger.warning("No holdings in cache — returning cash-only snapshot")
+            return PortfolioSnapshot(
+                cash_usd=cache.cash_usd, total_equity=cache.cash_usd,
+                snapshot_timestamp=time.time(),
+                plaid_account_ids=cache.account_ids,
+                holdings_cache_age_h=round(cache.age_hours, 2),
+                plaid_sync_triggered=plaid_triggered,
+            )
+
+        tickers = list({h.ticker for h in cache.holdings if h.ticker})
+        logger.info("Fetching live prices for %d tickers…", len(tickers))
+
+        price_map: dict[str, PriceResult] = self._prices.fetch_prices(
+            tickers, institution_fallback=cache
+        )
+        logger.info("Price fetch done in %.2fs", time.monotonic() - t0)
+
+        positions, stale, failed = [], [], []
+        for holding in cache.holdings:
+            pos = self._build_position(holding, price_map)
+            positions.append(pos)
+            if pos.price_stale:
+                stale.append(pos.ticker)
+            if pos.price_error and not pos.price_stale:
+                failed.append(pos.ticker)
+
+        snapshot = self._aggregate(
+            positions=positions, cash_usd=cache.cash_usd,
+            stale=stale, failed=failed, account_ids=cache.account_ids,
+            cache_age_h=cache.age_hours, plaid_triggered=plaid_triggered,
+        )
+        logger.info(
+            "Portfolio total | $%.2f | Plaid called: %s | %.2fs elapsed",
+            snapshot.total_equity, plaid_triggered, time.monotonic() - t0,
+        )
+        return snapshot
+
+    # ── Primary async entry point ─────────────────────────────────────────────
+
+    async def calculate_total_value_async(
+        self,
+        force_plaid_refresh: bool = False,
+        account_ids: Optional[list[str]] = None,
+    ) -> PortfolioSnapshot:
+        """
+        Async version — holdings loaded in executor (Plaid SDK is sync),
+        prices fetched via asyncio.gather + aiohttp in parallel.
+        """
+        t0 = time.monotonic()
+        needs_sync, reason = self._holdings.needs_plaid_sync(force_refresh=force_plaid_refresh)
+        logger.info("Holdings [async]: %s", reason)
+
+        loop  = asyncio.get_event_loop()
+        cache = await loop.run_in_executor(
+            None,
+            lambda: self._holdings.get_holdings(
+                force_refresh=force_plaid_refresh, account_ids=account_ids
+            ),
+        )
+        plaid_triggered = needs_sync
+
+        if not cache.holdings:
+            return PortfolioSnapshot(
+                cash_usd=cache.cash_usd, total_equity=cache.cash_usd,
+                snapshot_timestamp=time.time(), plaid_account_ids=cache.account_ids,
+                holdings_cache_age_h=round(cache.age_hours, 2),
+                plaid_sync_triggered=plaid_triggered,
+            )
+
+        tickers   = list({h.ticker for h in cache.holdings if h.ticker})
+        price_map = await self._prices.fetch_prices_async(tickers, institution_fallback=cache)
+
+        positions, stale, failed = [], [], []
+        for holding in cache.holdings:
+            pos = self._build_position(holding, price_map)
+            positions.append(pos)
+            if pos.price_stale:
+                stale.append(pos.ticker)
+            if pos.price_error and not pos.price_stale:
+                failed.append(pos.ticker)
+
+        snapshot = self._aggregate(
+            positions=positions, cash_usd=cache.cash_usd,
+            stale=stale, failed=failed, account_ids=cache.account_ids,
+            cache_age_h=cache.age_hours, plaid_triggered=plaid_triggered,
+        )
+        logger.info("Async total | $%.2f | %.2fs", snapshot.total_equity, time.monotonic() - t0)
+        return snapshot
+
+    # ── Backward-compatibility aliases ────────────────────────────────────────
 
     def sync_portfolio_total(
         self,
         account_ids: Optional[list[str]] = None,
+        force_refresh: bool = False,
     ) -> PortfolioSnapshot:
-        """
-        Fetch holdings from Plaid and real-time prices concurrently.
-        Returns a PortfolioSnapshot with Total Equity matching Robinhood's Mark Price.
-
-        Steps:
-            1. Fetch Plaid holdings (blocking — sequential, usually <1s)
-            2. Extract all tickers
-            3. Fetch all prices concurrently via ThreadPoolExecutor
-            4. Multiply quantity × mid_price for each position
-            5. Sum into buckets: stocks + crypto + cash
-
-        Args:
-            account_ids: Optional Plaid account filter.
-        """
-        t0 = time.monotonic()
-
-        # ── Step 1: Plaid holdings ────────────────────────────────────────────
-        logger.info("Fetching Plaid holdings…")
-        portfolio: PlaidPortfolio = self._plaid.get_holdings(account_ids=account_ids)
-        logger.info("Plaid returned %d holdings", len(portfolio.holdings))
-
-        if not portfolio.holdings:
-            logger.warning("No holdings returned from Plaid — returning empty snapshot")
-            return PortfolioSnapshot(
-                cash_usd=portfolio.cash_usd,
-                total_equity=portfolio.cash_usd,
-                snapshot_timestamp=time.time(),
-                plaid_account_ids=portfolio.account_ids,
-            )
-
-        # ── Step 2: Extract unique tickers ────────────────────────────────────
-        tickers = list({h.ticker for h in portfolio.holdings if h.ticker})
-        logger.info("Fetching real-time prices for %d tickers…", len(tickers))
-
-        # ── Step 3: Concurrent price fetch ───────────────────────────────────
-        price_map: dict[str, PriceResult] = self._prices.fetch_prices(tickers)
-
-        t1 = time.monotonic()
-        logger.info("Price fetch completed in %.2fs", t1 - t0)
-
-        # ── Step 4: Build positions ───────────────────────────────────────────
-        positions: list[PositionSnapshot] = []
-        stale_tickers: list[str] = []
-        failed_tickers: list[str] = []
-
-        for holding in portfolio.holdings:
-            pos = self._build_position(holding, price_map)
-            positions.append(pos)
-
-            if pos.price_stale:
-                stale_tickers.append(pos.ticker)
-            if pos.price_error and not pos.price_stale:
-                failed_tickers.append(pos.ticker)
-
-        # ── Step 5: Aggregate totals ──────────────────────────────────────────
-        snapshot = self._aggregate(
-            positions=positions,
-            cash_usd=portfolio.cash_usd,
-            stale=stale_tickers,
-            failed=failed_tickers,
-            account_ids=portfolio.account_ids,
+        """Alias — preserves v11.0 call sites in data_engine.py / main_sync.py."""
+        return self.calculate_total_value(
+            force_plaid_refresh=force_refresh, account_ids=account_ids
         )
-
-        logger.info(
-            "Portfolio sync complete | Total: $%.2f | Stocks: $%.2f | "
-            "Crypto: $%.2f | Cash: $%.2f | %.2fs elapsed",
-            snapshot.total_equity,
-            snapshot.stocks_equity,
-            snapshot.crypto_equity,
-            snapshot.cash_usd,
-            time.monotonic() - t0,
-        )
-
-        return snapshot
 
     async def sync_portfolio_total_async(
-        self,
-        account_ids: Optional[list[str]] = None,
+        self, account_ids: Optional[list[str]] = None
     ) -> PortfolioSnapshot:
-        """Async version — runs sync_portfolio_total in a thread pool."""
-        loop = asyncio.get_event_loop()
-        return await loop.run_in_executor(
-            None, self.sync_portfolio_total, account_ids
-        )
+        return await self.calculate_total_value_async(account_ids=account_ids)
 
     # ── Position builder ──────────────────────────────────────────────────────
 
     def _build_position(
-        self,
-        holding: PlaidHolding,
-        price_map: dict[str, PriceResult],
+        self, holding: CachedHolding, price_map: dict[str, PriceResult]
     ) -> PositionSnapshot:
-        """Build one PositionSnapshot by combining Plaid qty + real-time price."""
-        price_result = price_map.get(holding.ticker)
+        pr = price_map.get(holding.ticker)
 
-        if price_result is None:
-            # ticker wasn't in our fetch batch (shouldn't happen)
-            mid_price   = holding.institution_price  # Plaid's fallback
-            price_src   = "institution_fallback"
-            is_stale    = True
-            price_error = "Not in price fetch batch"
+        if pr is None or not pr.is_valid:
+            mid      = holding.institution_price or 0.0
+            src      = "institution_fallback"
+            is_stale = True
+            err      = pr.error if pr else "Not in price fetch batch"
             bid = ask = None
-            last_trade  = mid_price
-        elif not price_result.is_valid:
-            # All providers failed — use Plaid institution price as last resort
-            mid_price   = holding.institution_price or 0.0
-            price_src   = "institution_fallback"
-            is_stale    = True
-            price_error = price_result.error
-            bid = ask = None
-            last_trade  = mid_price
+            last     = mid
         else:
-            mid_price   = price_result.mid_price
-            price_src   = price_result.source
-            is_stale    = price_result.error is not None   # has error but is_valid = cached
-            price_error = price_result.error
-            bid         = price_result.bid
-            ask         = price_result.ask
-            last_trade  = price_result.last_trade
+            mid      = pr.mid_price
+            src      = pr.source
+            is_stale = pr.is_stale
+            err      = pr.error
+            bid      = pr.bid
+            ask      = pr.ask
+            last     = pr.last_trade
 
-        qty          = holding.quantity
-        cost_per_sh  = holding.cost_basis
-        market_val   = qty * mid_price
-        cost_total   = qty * cost_per_sh
-        unreal_pnl   = market_val - cost_total
-        unreal_pct   = (unreal_pnl / cost_total * 100) if cost_total > 0 else 0.0
+        qty        = holding.quantity
+        cost_sh    = holding.cost_basis
+        mkt_val    = qty * mid
+        cost_tot   = qty * cost_sh
+        unreal     = mkt_val - cost_tot
+        unreal_pct = (unreal / cost_tot * 100) if cost_tot > 0 else 0.0
 
         return PositionSnapshot(
-            ticker=holding.ticker,
-            name=holding.name,
-            quantity=qty,
-            avg_cost_basis=cost_per_sh,
-            mid_price=mid_price,
-            market_value=market_val,
-            cost_total=cost_total,
-            unrealised_pnl=unreal_pnl,
-            unrealised_pct=unreal_pct,
-            price_source=price_src,
-            bid=bid,
-            ask=ask,
-            last_trade=last_trade,
+            ticker=holding.ticker, name=holding.name,
+            quantity=qty, avg_cost_basis=cost_sh,
+            mid_price=mid, market_value=mkt_val,
+            cost_total=cost_tot, unrealised_pnl=unreal,
+            unrealised_pct=unreal_pct, price_source=src,
+            bid=bid, ask=ask, last_trade=last,
             security_type=holding.security_type,
-            price_stale=is_stale,
-            price_error=price_error,
+            price_stale=is_stale, price_error=err,
         )
 
     # ── Aggregation ───────────────────────────────────────────────────────────
 
     @staticmethod
     def _aggregate(
-        positions: list[PositionSnapshot],
-        cash_usd: float,
-        stale: list[str],
-        failed: list[str],
-        account_ids: list[str],
+        positions: list[PositionSnapshot], cash_usd: float,
+        stale: list[str], failed: list[str], account_ids: list[str],
+        cache_age_h: float, plaid_triggered: bool,
     ) -> PortfolioSnapshot:
-        """Sum positions into stocks / crypto / cash buckets."""
-        _CRYPTO = {"BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LTC"}
-
         stocks_eq = crypto_eq = cost_tot = 0.0
-
         for pos in positions:
-            if pos.ticker.upper() in _CRYPTO:
+            if pos.ticker.upper() in _CRYPTO_TICKERS:
                 crypto_eq += pos.market_value
             else:
                 stocks_eq += pos.market_value
             cost_tot += pos.cost_total
 
         total_eq  = stocks_eq + crypto_eq + cash_usd
-        total_pnl = total_eq - cash_usd - cost_tot   # exclude cash from P&L calc
+        total_pnl = (stocks_eq + crypto_eq) - cost_tot
         total_pct = (total_pnl / cost_tot * 100) if cost_tot > 0 else 0.0
 
         return PortfolioSnapshot(
             positions=positions,
-            stocks_equity=stocks_eq,
-            crypto_equity=crypto_eq,
-            cash_usd=cash_usd,
-            total_equity=total_eq,
+            stocks_equity=stocks_eq, crypto_equity=crypto_eq,
+            cash_usd=cash_usd, total_equity=total_eq,
             total_cost_basis=cost_tot,
-            total_unrealised_pnl=total_pnl,
-            total_unrealised_pct=total_pct,
+            total_unrealised_pnl=total_pnl, total_unrealised_pct=total_pct,
             positions_count=len(positions),
-            stale_prices=stale,
-            failed_prices=failed,
+            stale_prices=stale, failed_prices=failed,
             snapshot_timestamp=time.time(),
             plaid_account_ids=account_ids,
+            holdings_cache_age_h=round(cache_age_h, 2),
+            plaid_sync_triggered=plaid_triggered,
         )

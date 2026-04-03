@@ -1,17 +1,9 @@
-# Rename this file to .gitignore in your repo
-# Runtime data (created by app on first launch — do NOT commit these)
+__pycache__/
+*.pyc
 tx_store.json
 crypto_overrides.json
 rec_history.json
 deposit_log.json
-
-# Python
-__pycache__/
-*.pyc
+targets.json
+*.csv
 .env
-venv/
-.venv/
-
-# OS
-.DS_Store
-Thumbs.db

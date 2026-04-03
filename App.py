@@ -66,19 +66,40 @@ html,body,[class*="css"]{background:var(--bg)!important;color:var(--text);font-f
 .block-container{padding:1.2rem 2rem 3rem;max-width:1400px}
 
 /* KPI cards */
-.kpi-wrap{position:relative;flex:1;min-width:150px}
-.kpi{background:var(--card);border:1px solid var(--border);border-radius:12px;
-     padding:16px 18px;transition:border-color .2s,box-shadow .2s;height:100%}
-.kpi.active{border-color:var(--green);box-shadow:0 0 0 1px var(--green)}
-.kpi-lbl{font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);margin-bottom:6px}
-.kpi-val{font-family:'JetBrains Mono',monospace;font-size:1.5rem;font-weight:700;line-height:1}
-.kpi-sub{font-size:.7rem;color:var(--muted);margin-top:5px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:14px;
+     padding:18px 20px;transition:border-color .2s,box-shadow .2s}
+.kpi.active{border-color:var(--green);box-shadow:0 0 0 2px rgba(74,222,128,.25)}
+.kpi-lbl{font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.12em;
+         color:var(--muted);margin-bottom:8px}
+.kpi-val{font-family:'JetBrains Mono',monospace;font-size:1.45rem;font-weight:700;line-height:1.1}
+.kpi-sub{font-size:.68rem;color:var(--muted);margin-top:6px;line-height:1.4}
+.kpi-hint{font-size:.6rem;color:var(--border2);margin-top:8px;text-align:right}
 .green{color:var(--green)}.blue{color:var(--blue)}.red{color:var(--red)}
 .yellow{color:var(--yellow)}.gold{color:var(--gold)}.orange{color:var(--orange)}
 
-/* Make st.button look invisible so it overlays the KPI card */
-.kpi-btn>button{position:absolute!important;inset:0!important;width:100%!important;
-  height:100%!important;opacity:0!important;cursor:pointer!important;z-index:10!important}
+/* KPI toggle button — small, subtle, sits below the card content */
+div[data-testid="stVerticalBlock"] .kpi-toggle button{
+  width:100%!important;border:1px solid var(--border)!important;
+  background:transparent!important;color:var(--muted)!important;
+  font-size:.65rem!important;padding:3px 8px!important;
+  border-radius:0 0 8px 8px!important;margin-top:-2px!important;
+  border-top:none!important;transition:color .2s,border-color .2s!important}
+div[data-testid="stVerticalBlock"] .kpi-toggle button:hover{
+  color:var(--green)!important;border-color:var(--green)!important}
+
+/* Better tab styling */
+.stTabs [data-baseweb="tab-list"]{
+  gap:0;border-bottom:2px solid var(--border);background:transparent;padding:0}
+.stTabs [data-baseweb="tab"]{
+  font-size:.82rem;font-weight:600;color:var(--muted);
+  background:transparent;border:none;padding:12px 20px;
+  margin-bottom:-2px;transition:color .2s}
+.stTabs [aria-selected="true"]{
+  color:var(--text)!important;background:transparent!important;
+  border-bottom:2px solid var(--green)!important;font-weight:700!important}
+.stTabs [data-baseweb="tab"]:hover{color:var(--text)!important}
+.stTabs [data-baseweb="tab-panel"]{padding-top:20px!important}
+.stTabs [data-baseweb="tab-panel"]{padding-top:24px!important}
 
 /* Recommendation cards */
 .rcard{background:var(--card);border-radius:10px;border-left:4px solid var(--border2);
@@ -124,12 +145,7 @@ html,body,[class*="css"]{background:var(--bg)!important;color:var(--text);font-f
 .cal-row{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid var(--border);font-size:.8rem;align-items:flex-start}
 .cal-date{font-weight:800;color:var(--blue);min-width:58px}
 
-/* Tabs */
-.stTabs [data-baseweb="tab-list"]{gap:2px;border-bottom:1px solid var(--border)}
-.stTabs [data-baseweb="tab"]{font-size:.82rem;font-weight:700;color:var(--muted);
-  background:transparent;border:none;padding:10px 16px;border-radius:8px 8px 0 0}
-.stTabs [aria-selected="true"]{color:var(--text)!important;background:var(--card)!important;
-  border-bottom:2px solid var(--green)!important}
+/* tabs styled above in kpi block */
 
 /* Buttons */
 .stButton>button{font-weight:700;border-radius:8px;border:1px solid var(--border2);
@@ -314,7 +330,7 @@ def recompute(store: dict, crypto_ovr: dict = None) -> dict:
 
 # ═══════════════════════════════════════════ PRICE FETCHER (tuple = hashable)
 @st.cache_data(ttl=120, show_spinner="Fetching live prices…")
-def fetch_prices(tickers: tuple) -> dict:
+def fetch_prices(tickers: tuple, _bust: int = 0) -> dict:
     prices = {}
     stocks  = [t for t in tickers if t not in CRYPTO_TICKERS]
     cryptos = [t for t in tickers if t in CRYPTO_TICKERS]
@@ -478,14 +494,16 @@ def _ss_init():
     if "deposit_log"   not in st.session_state: st.session_state.deposit_log   = _load(DEPOSIT_LOG_PATH,[])
     if "cash"          not in st.session_state: st.session_state.cash          = ROBINHOOD_CASH
     if "kpi_expanded"  not in st.session_state: st.session_state.kpi_expanded  = None
-    if "prices_loaded" not in st.session_state: st.session_state.prices_loaded = False
+    if "prices_loaded"    not in st.session_state: st.session_state.prices_loaded = False
+    if "refresh_count"    not in st.session_state: st.session_state.refresh_count  = 0
 
 _ss_init()
 
 def _refresh():
     pf = recompute(st.session_state.tx_store, st.session_state.crypto_ovr)
     st.session_state.portfolio = pf
-    prices = fetch_prices(tuple(sorted(pf.keys())))
+    st.session_state.refresh_count += 1
+    prices = fetch_prices(tuple(sorted(pf.keys())), _bust=st.session_state.refresh_count)
     st.session_state.prices = prices
     st.session_state.recs   = generate_recs(pf, prices)
     st.session_state.prices_loaded = True
@@ -508,7 +526,6 @@ with hc2:
     st.markdown(f'<div style="font-size:.75rem;color:var(--muted,#6b7280)">Next $900 deposit</div><div style="font-family:monospace;font-size:.9rem;color:#fbbf24;font-weight:700">{next_dep.strftime("%b %d")} — in {days_to} days</div>', unsafe_allow_html=True)
 with hc3:
     if st.button("🔄 Refresh", type="primary", use_container_width=True, help="Fetch latest prices and recalculate everything"):
-        st.cache_data.clear()
         _refresh()
         st.rerun()
 
@@ -545,6 +562,24 @@ with tabs[0]:
     pnl_col = "green" if total_pnl>=0 else "red"
     pnl_sign = "+" if total_pnl>=0 else ""
 
+    # ── Helper functions defined here so available everywhere in this tab ──
+    pill_map = {"sell":"red","buy":"green","trim":"yellow","hold":"blue","alert":"orange"}
+
+    def _rcard(r) -> str:
+        p = r["live_price"]; pnl = r["pnl_pct"]
+        pnl_color = "var(--green)" if pnl>=0 else "var(--red)"
+        proc = f" · Est. proceeds: ${r['proceeds']:,.0f}" if r["proceeds"] else ""
+        return (f'<div class="rcard {r["cat"]}">'
+                f'<div class="rc-head"><span class="rc-ticker">{r["ticker"]}</span>'
+                f'{_pill(r["action"], pill_map.get(r["cat"],"blue"))}</div>'
+                f'<div class="rc-plain">{r["plain"]}</div>'
+                f'<div class="rc-meta">'
+                f'<span>Price: ${p:,.2f}</span>'
+                f'<span style="color:{pnl_color}">P&L: {pnl:+.1f}%</span>'
+                f'<span>Equity: ${r["equity"]:,.0f}{proc}</span>'
+                f'<span>{r["tax_note"]}</span>'
+                f'</div></div>')
+
     # ── KPI cards (clickable via button overlay) ─────────────────────
     # Each card uses position:relative wrapper + invisible absolute button
     kpi_ids = ["value","pnl","actions","cash","positions"]
@@ -570,18 +605,20 @@ with tabs[0]:
         with col:
             is_active = st.session_state.kpi_expanded == kid
             active_cls = "active" if is_active else ""
+            arrow = "▲ collapse" if is_active else "▼ details"
             st.markdown(
-                f'<div class="kpi-wrap"><div class="kpi {active_cls}">'
+                f'<div class="kpi {active_cls}">'
                 f'<div class="kpi-lbl">{lbl}</div>'
                 f'<div class="kpi-val {color}">{val}</div>'
                 f'<div class="kpi-sub">{sub}</div>'
-                f'</div></div>',
+                f'</div>',
                 unsafe_allow_html=True)
-            # Invisible button overlay — clicking toggles the drill-down
-            if st.button(" ", key=f"kpi_btn_{kid}", help=f"Click to expand {lbl} details",
-                         use_container_width=True):
-                st.session_state.kpi_expanded = None if st.session_state.kpi_expanded == kid else kid
+            # Small visible toggle button immediately below the card
+            st.markdown('<div class="kpi-toggle">', unsafe_allow_html=True)
+            if st.button(arrow, key=f"kpi_btn_{kid}", use_container_width=True):
+                st.session_state.kpi_expanded = None if is_active else kid
                 st.rerun()
+            st.markdown('</div>', unsafe_allow_html=True)
 
     # ── Drill-down panel ─────────────────────────────────────────────
     ec = st.session_state.kpi_expanded
@@ -651,23 +688,6 @@ with tabs[0]:
         st.markdown(f'<div class="alert-box"><div class="alert-title">⚡ Action Required</div>{items}</div>', unsafe_allow_html=True)
 
     # ── Recommendations grid ──────────────────────────────────────────
-    pill_map = {"sell":"red","buy":"green","trim":"yellow","hold":"blue","alert":"orange"}
-
-    def _rcard(r) -> str:
-        p = r["live_price"]; pnl = r["pnl_pct"]
-        pnl_color = "var(--green)" if pnl>=0 else "var(--red)"
-        proc = f" · Proceeds: ${r['proceeds']:,.0f}" if r["proceeds"] else ""
-        return (f'<div class="rcard {r["cat"]}">'
-                f'<div class="rc-head"><span class="rc-ticker">{r["ticker"]}</span>'
-                f'{_pill(r["action"], pill_map.get(r["cat"],"blue"))}</div>'
-                f'<div class="rc-plain">{r["plain"]}</div>'
-                f'<div class="rc-meta">'
-                f'<span>Price: ${p:,.2f}</span>'
-                f'<span style="color:{pnl_color}">P&L: {pnl:+.1f}%</span>'
-                f'<span>Equity: ${r["equity"]:,.0f}{proc}</span>'
-                f'<span>{r["tax_note"]}</span>'
-                f'</div></div>')
-
     cats_order = [("sell","🔴 Sell Now"),("alert","🚨 Review"),("buy","🟢 Buy / Accumulate"),("trim","✂️ Trim (Take Profit)")]
     for cat, heading in cats_order:
         group = [r for r in recs if r["cat"]==cat]

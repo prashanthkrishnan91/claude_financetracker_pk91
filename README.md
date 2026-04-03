@@ -1,72 +1,74 @@
-# ⚔️ Portfolio War Room
+# ⚔️ Portfolio War Room v10.0
 
-> Amateur-investor–first portfolio intelligence system. Live prices, plain-English guidance, tax-aware recommendations, biweekly $900 deploy plan.
+A modular, production-ready personal portfolio intelligence system.
+Live prices · Tax-optimized recommendations · Biweekly $900 deploy engine · Target rebalancing
 
-## Features
-
-| Tab | What it does |
-|-----|-------------|
-| 🏠 Dashboard | Live KPI cards, action-required alerts, plain-English rec cards, 2026 calendar |
-| 📋 Holdings | Color-coded table (red=loss), allocation pie, P&L bar chart, active sell list |
-| 💰 Invest | Cash tracker, biweekly $900 deploy schedule with rotating picks, deposit logger |
-| 📥 Import | CSV upload (SHA-1 dedup — never doubles), Crypto PDF parser |
-| 🌱 DRIP | Per-ticker dividend reinvestment breakdown + bar chart |
-| 📸 History | Timestamped recommendation snapshots |
-| ⚙️ Settings | Crypto overrides, portfolio export, system status, reset options |
-
-## First Launch
-
-**No upload needed.** Your 585 historical transactions are baked into the app.  
-On first launch they're written to `tx_store.json` automatically.  
-Just deploy and click **🔄 Refresh**.
-
-## Uploading New Activity
-
-1. Go to Robinhood → Account → Statements & History → Export CSV
-2. Open **📥 Import** tab → drop the file
-3. Only NEW rows are added — re-uploading the same file is always safe (0 duplicates)
-
-## Deploy to Streamlit Cloud
-
-```bash
-git add App.py requirements.txt .streamlit/config.toml README.md
-git commit -m "v9.0: redesigned UI + baked data"
-git push
-```
-
-Streamlit Cloud auto-redeploys in ~60 seconds.
+---
 
 ## Architecture
 
 ```
-App.py                   # Single-file app — all logic + UI
-tx_store.json            # Created automatically on first launch
-crypto_overrides.json    # BTC/XRP positions
-rec_history.json         # Saved recommendation snapshots
-deposit_log.json         # Your logged deposits
-.streamlit/config.toml   # Dark theme
-requirements.txt         # Dependencies
+main_app.py         — Streamlit UI (zero business logic)
+data_engine.py      — All data processing, recs, deposit planning
+requirements.txt    — Python dependencies
+.streamlit/config.toml — Dark theme
 ```
 
-## Recommendation Logic
+Runtime files (auto-created, excluded from git):
+```
+tx_store.json       — All transactions (baked + uploaded)
+crypto_overrides.json
+rec_history.json
+deposit_log.json
+targets.json
+```
 
-| Category | Rule |
-|----------|------|
-| ♾ HOLD FOREVER | VYM, SCHD, VTI — income ETFs, DRIP always on |
-| 📈 DCA ALWAYS | VOO, QQQ — add every $900 deposit |
-| 🔴 SELL NOW | SELL_LIST positions once LT eligible (>1 yr) |
-| 💎 STRONG BUY | Down >8% AND >20% upside to target |
-| 🟢 ACCUMULATE | >20% upside to target |
-| ✂️ TRIM | Up >20% AND LT eligible — harvest partial gains |
-| 🔒 IPO HOLD | BLSH, KLAR, STUB, SNOW — hold until LT |
-| 🚨 REVIEW | Down >20% from cost basis |
+---
 
-## Biweekly $900 Allocation
+## Deploy to Streamlit Cloud
 
-| Ticker | % | Why |
-|--------|---|-----|
-| NVDA | 28% | AI supercycle — top conviction |
-| VOO | 22% | S&P 500 — DCA forever |
-| VYM | 17% | Dividend engine |
-| QQQ | 17% | Nasdaq-100 |
-| Rotating | 16% | META → GOOGL → AAPL → MSFT → COST → TSM → CRM → NFLX |
+```bash
+git add main_app.py data_engine.py requirements.txt .streamlit/config.toml README.md .gitignore
+git commit -m "v10.0: modular architecture, target rebalancing, drift engine"
+git push
+```
+
+Set **Main file path** = `main_app.py` in Streamlit Cloud settings.
+
+---
+
+## Features
+
+| Feature | Description |
+|---|---|
+| Live Prices | yfinance (stocks/ETFs) + CoinGecko (crypto) |
+| On-demand Refresh | Click 🔄 in sidebar — unique cache bust per click |
+| Smart Rebalancing | Set target % → auto-allocate $900 to most underweight |
+| Dynamic Recs | SELL/BUY/TRIM/HOLD — recalculates on every refresh |
+| Tax Intelligence | LT vs ST flag · never sell ST · harvest losses Dec |
+| Deposit Calendar | 16 upcoming biweekly Fridays · rotating pick schedule |
+| Deposit Logger | Log executed deposits · track history |
+| Portfolio Charts | Donut allocation · P&L bar · equity waterfall |
+| History Tab | Snapshot portfolio value over time |
+| Import Tab | SHA-1 dedup CSV ingestion · manual entry fallback |
+| Test Suite | 25 live system tests with real price verification |
+
+---
+
+## First Use
+
+1. Open the app — 30 positions pre-loaded from baked bootstrap data
+2. Click **🔄 Refresh** in sidebar — fetches live prices for all positions
+3. Go to **⚡ Actions** tab — see what to buy/sell/trim today
+4. Go to **💰 Invest $900** tab — see exactly where to put next deposit
+5. To import new trades: **📥 Import** tab → upload Robinhood CSV
+
+---
+
+## Tax Playbook
+
+- **Rule #1:** Never sell < 1 year held — 37% ST vs 15% LT
+- **Apr 3:** Sell VTV/VEA/VWO/BND (LT eligible) → buy VOO/VYM same day
+- **May 20:** SPY turns LT → swap to VOO (not a wash sale — different fund)
+- **Jul 15:** VUG turns LT → swap to QQQ
+- **Dec 20:** Tax-loss harvest — net gains vs losses before Dec 31

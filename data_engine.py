@@ -546,16 +546,24 @@ def generate_recs(portfolio: dict, prices: dict) -> list[dict]:
         shares  = pos.get("shares", 0)
         cost    = pos.get("avg_cost", price)
         fbd     = pos.get("first_buy_date", "")
-        lt      = is_lt_eligible(fbd)
+
         dtlt    = days_to_lt(fbd)
         equity  = price * shares
         pnl_pct = ((price - cost) / cost * 100) if cost > 0 else 0.0
         target  = TARGETS.get(ticker, cost * 1.25)
         upside  = ((target - price) / price * 100) if price > 0 else 0.0
-        lt_date = (
-            (datetime.date.fromisoformat(fbd) + datetime.timedelta(days=366)).isoformat()
-            if fbd else "?"
-        )
+        # 1. Safely convert string to a date object (handles / and - formats)
+        fbd_dt = pd.to_datetime(fbd, errors='coerce') if fbd and fbd != "?" else None
+        
+        # 2. Calculate if Long Term (LT) eligible (over 1 year/366 days)
+        if fbd_dt:
+            lt_threshold = fbd_dt + pd.Timedelta(days=366)
+            lt = pd.Timestamp.now().normalize() >= lt_threshold
+            lt_date = lt_threshold.strftime('%Y-%m-%d')
+        else:
+            lt = False
+            lt_date = "?"
+
         tax_tag = "✅ LT (15%)" if lt else f"⏳ ST — wait until {lt_date}"
 
         rec = {

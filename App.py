@@ -465,7 +465,7 @@ with tabs[1]:
                 return "color: #22c55e" if v > 0 else ("color: #ef4444" if v < 0 else "")
             return ""
         st.dataframe(
-            df.style.applymap(_cpnl, subset=["P&L %", "Unreal P&L"]),
+            df.style.map(_cpnl, subset=["P&L %", "Unreal P&L"]),
             use_container_width=True, height=500,
             column_config={
                 "Market Value": st.column_config.NumberColumn(format="$%.2f"),
@@ -944,7 +944,7 @@ with tabs[8]:
             unsafe_allow_html=True,
         )
         st.dataframe(
-            res_df.style.applymap(
+            res_df.style.map(
                 lambda v: "color:#22c55e" if "PASS" in str(v) else "color:#ef4444",
                 subset=["Status"],
             ),

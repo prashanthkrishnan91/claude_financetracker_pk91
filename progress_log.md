@@ -2,7 +2,7 @@
 **Last Updated:** April 4, 2026
 **User:** prashanthkrishnan91
 **Repo:** github.com/prashanthkrishnan91/my-portfolio-ai
-**Current Version:** v11.4 ✅
+**Current Version:** v12 ✅
 
 ---
 
@@ -12,7 +12,7 @@ A full-stack personal portfolio intelligence system for tracking, analyzing, and
 
 Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints.
 
-**Current file count: 9 Python files + 1 requirements.txt**
+**Current file count: 9 Python files + 1 requirements.txt + system_state.json (runtime)**
 
 ---
 
@@ -32,6 +32,7 @@ requirements.txt         All dependencies
 **Runtime files (auto-created, excluded from git):**
 ```
 tx_store.json            All transactions (SHA-256 canonical fingerprints)
+system_state.json        Mode: "bootstrap" | "live" — controls data origin
 holdings_cache.json      Plaid holdings cache (TTL = 24h)
 plaid_snapshot.json      Full portfolio snapshot from last Plaid sync
 crypto_overrides.json    BTC/XRP from PDF import
@@ -141,7 +142,53 @@ New file: `holdings_manager.py`. Three-condition sync trigger: no cache file / c
 
 ---
 
-## Current App Architecture (v11.4)
+---
+
+### Phase 19 — Bootstrap/Live Mode + Sidebar Fix (v12, April 4, 2026)
+
+**Issue 1 — Duplicate holdings after CSV/PDF import (root cause: bootstrap data mixed with real tx data)**
+
+Root cause: `_bootstrap()` writes synthetic summary-level rows keyed by `make_tx_fingerprint()`. When a real CSV is imported the dedup hash engine correctly identifies matches — BUT the summaries survive inside `tx_store.json` and `recompute_portfolio()` replays BOTH the bootstrap rows and the real CSV rows, doubling holdings.
+
+Fix: introduced `system_state.json` with two modes.
+
+| Mode | What it means |
+|------|--------------|
+| `bootstrap` | Only BAKED_BOOTSTRAP data exists. No real CSV/PDF ever uploaded. |
+| `live` | Real data imported. Bootstrap rows have been permanently purged. |
+
+New functions in `data_engine.py`:
+
+| Function | Description |
+|----------|-------------|
+| `get_system_mode() -> str` | Returns `"bootstrap"` or `"live"` from `system_state.json`. |
+| `transition_to_live() -> None` | Wipes `tx_store.json`, writes `system_state.json{mode:"live"}`. Called once. |
+
+`IngestStats` gains `mode_transitioned: bool` flag.
+
+`ingest_csv()` preamble: if `get_system_mode() == "bootstrap"` → call `transition_to_live()`, clear `existing_ids` in-place, set `stats.mode_transitioned = True`. The `_load(TX_STORE_PATH)` after transition returns `{}` so every real row is imported fresh.
+
+`App.py` CSV upload: if `stats.mode_transitioned` → reset `st.session_state.processed_ids = new_ids` (bootstrap FPs discarded). PDF upload: same guard via direct `get_system_mode()` / `transition_to_live()` call.
+
+Sidebar shows `⚠️ BOOTSTRAP MODE` badge (yellow) or `✅ LIVE MODE` (green).
+
+**Issue 2 — Sidebar disappears**
+
+- `sidebar_open: True` added to `_init()` session state defaults — persists across all reruns.
+- CSS `section[data-testid='stSidebar']{display:none}` injected when `sidebar_open == False`.
+- `[data-testid="collapsedControl"]` forced visible in global CSS — native hamburger never hidden.
+- `◀ Hide` / `▶ Show` toggle button added top-right of header (always in main content area, accessible regardless of sidebar state).
+- `st.set_page_config(initial_sidebar_state="expanded")` already present — sidebar opens expanded on every cold start.
+
+**Constraints preserved:**
+- SHA-256 hashing system untouched
+- Decimal precision untouched
+- Existing JSON schemas untouched (system_state.json is new, additive)
+- UI/logic separation maintained: `get_system_mode()` / `transition_to_live()` in `data_engine.py`; UI wiring in `App.py`
+
+---
+
+## Current App Architecture (v12)
 
 ### Tab Structure (10 tabs)
 
@@ -345,6 +392,8 @@ git push
 | 27 | Same-session re-upload imports duplicate rows | existing_ids never updated in-place during ingest | existing_ids.update(seen_this_upload) called post-loop before return | v11.4 |
 | 28 | Sidebar showed ~34 FPs instead of ~624 | _init() seeded processed_ids with opaque bootstrap keys | seed_processed_ids_from_history() returns bootstrap FPs ∪ disk FPs | v11.4 |
 | 29 | parse_crypto_pdf extracted market value as shares | Regex matched "$2301.45" (dollar amount) instead of "0.03432981" (quantity) | Rewritten to match qty before ticker symbol in statement table | v11.4 |
+| 30 | Holdings doubled after first CSV import | Bootstrap summary rows persisted in tx_store; recompute_portfolio() replayed both bootstrap + real CSV rows | system_state.json bootstrap/live mode; transition_to_live() wipes tx_store on first real import | v12 |
+| 31 | Sidebar permanently disappeared | No persistent state or escape hatch when sidebar collapsed | sidebar_open in session_state; CSS inject to hide; ◀/▶ toggle button always visible in main content | v12 |
 
 ---
 
@@ -361,4 +410,4 @@ git push
 
 ---
 
-*Log updated April 4, 2026 · Portfolio War Room v11.4 · 34 positions · 10-tab UI · high-integrity SHA-256 hashing · canonical fingerprints · bootstrap parity · 36/36 tests passing*
+*Log updated April 4, 2026 · Portfolio War Room v12 · 34 positions · 10-tab UI · bootstrap/live mode · sidebar toggle · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*

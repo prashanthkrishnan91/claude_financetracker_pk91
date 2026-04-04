@@ -91,6 +91,7 @@ RECON_LOG_PATH      = Path("recon_log.json")
 HOLDINGS_CACHE_PATH = Path("holdings_cache.json")
 PLAID_SNAPSHOT_PATH = Path("plaid_snapshot.json")
 DECISION_LOG_PATH   = Path("decision_log.json")   # ← NEW v11.2
+SYSTEM_STATE_PATH   = Path("system_state.json")   # ← NEW v12: bootstrap/live mode
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CLASSIFICATION LISTS
@@ -183,6 +184,41 @@ def _save(path: Path, obj) -> None:
             json.dump(obj, f, indent=2)
     except Exception as e:
         logger.error("_save(%s): %s", path, e)
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SYSTEM STATE (v12) — bootstrap / live mode
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_system_mode() -> str:
+    """
+    Return 'bootstrap' (default) or 'live'.
+
+    'bootstrap': app is running on BAKED_BOOTSTRAP data only.
+                 No real CSV/PDF has ever been imported.
+    'live':      at least one real CSV or PDF has been imported.
+                 Bootstrap data has been purged from tx_store.json.
+    """
+    state = _load(SYSTEM_STATE_PATH, {})
+    return state.get("mode", "bootstrap")
+
+
+def transition_to_live() -> None:
+    """
+    Called once, the first time a real CSV or crypto PDF is uploaded.
+
+    1. Wipes tx_store.json (removes all bootstrap-derived synthetic rows).
+    2. Writes system_state.json with mode='live'.
+
+    After this call, _bootstrap() will never re-run (tx_store is non-empty).
+    Bootstrap data and real transaction data can never be mixed.
+    """
+    _save(TX_STORE_PATH, {})
+    _save(SYSTEM_STATE_PATH, {
+        "mode": "live",
+        "transitioned_at": datetime.datetime.now().isoformat(),
+    })
+    logger.info("System mode: bootstrap → live. tx_store cleared for real-data rebuild.")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # ① TRANSACTION DEDUPLICATION — High-Integrity Hashing Engine (v11.4)
@@ -378,6 +414,7 @@ class IngestStats:
     seen_in_file:           int  = 0   # L3: same row appeared twice in this file
     skipped_no_code:        int  = 0   # blank Trans Code / footer rows
     errors:                 list = field(default_factory=list)
+    mode_transitioned:      bool = False  # v12: True if bootstrap→live happened
 
     @property
     def total_skipped(self) -> int:
@@ -406,6 +443,16 @@ def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
     stats             = IngestStats()
     new_ids: set      = set()
     seen_this_upload: set = set()
+
+    # ── v12: bootstrap → live transition ─────────────────────────────────────
+    # If this is the first real CSV import, purge bootstrap-synthetic rows so
+    # they can never mix with real transaction data.  After transition_to_live()
+    # tx_store.json is empty and existing_ids is cleared so every real row is
+    # treated as genuinely new.
+    if get_system_mode() == "bootstrap":
+        transition_to_live()
+        existing_ids.clear()          # bootstrap FPs are no longer relevant
+        stats.mode_transitioned = True
 
     # Load tx_store and snapshot keys BEFORE the loop (Layer 2 source).
     # Adding rows during this loop must not pollute the Layer 2 snapshot.

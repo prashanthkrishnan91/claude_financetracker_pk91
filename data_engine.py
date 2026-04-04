@@ -271,15 +271,10 @@ def make_tx_fingerprint(row):
 # ═══════════════════════════════════════════════════════════════════════════════
 # BOOTSTRAP  (writes tx_store.json with canonical fingerprints on first run)
 # ═══════════════════════════════════════════════════════════════════════════════
-
 def _bootstrap() -> None:
     """
-    Write BAKED_BOOTSTRAP positions to tx_store.json on first run (empty store).
-
-    CRITICAL: Uses make_tx_fingerprint() to generate keys — NOT the old
-    "BOOTSTRAP|ticker" opaque scheme. This ensures that when a real Robinhood
-    CSV is uploaded later, the fingerprints match and duplicates are correctly
-    detected instead of appearing as all-new rows.
+    Write BAKED_BOOTSTRAP positions to tx_store.json on first run.
+    v11.4 fix: Pass a dictionary to match the new make_tx_fingerprint signature.
     """
     if TX_STORE_PATH.exists():
         try:
@@ -287,31 +282,37 @@ def _bootstrap() -> None:
                 return
         except Exception:
             pass
+
     synthetic: dict[str, dict] = {}
     for ticker, pos in BAKED_BOOTSTRAP.items():
-        # Generate canonical fingerprint — identical to what ingest_csv() would
-        # produce for the same row from a real CSV export.
-        key = make_tx_fingerprint(
-            date_raw  = pos["first_buy_date"],
-            code      = "Buy",
-            ticker    = ticker,
-            qty_raw   = pos["shares"],
-            price_raw = pos["avg_cost"],
-            amt_raw   = "",
-            settle    = "",
-        )
+        # Create a synthetic row object to match CSV structure
+        row_obj = {
+            "Date": pos["first_buy_date"],
+            "Trans Code": "Buy",
+            "Ticker": ticker,
+            "Quantity": pos["shares"],
+            "Price": pos["avg_cost"],
+            "Amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
+            "Settle Date": ""
+        }
+        
+        # Generate canonical fingerprint using the dictionary
+        key = make_tx_fingerprint(row_obj)
+
         synthetic[key] = {
             "date":        pos["first_buy_date"],
             "code":        "Buy",
             "ticker":      ticker,
             "qty":         pos["shares"],
             "price":       pos["avg_cost"],
-            "amount":      str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
+            "amount":      row_obj["Amount"],
             "description": "Bootstrap",
             "category":    pos["category"],
         }
+
     _save(TX_STORE_PATH, synthetic)
     logger.info("Bootstrap: wrote %d positions to tx_store.json", len(synthetic))
+
 
 
 def strip_existing_tx_store_fingerprints() -> set[str]:

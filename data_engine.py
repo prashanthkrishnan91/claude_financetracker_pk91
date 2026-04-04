@@ -126,43 +126,43 @@ DEPOSIT_PLAN: list[tuple[str, float]] = [
 # BAKED BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════════════════════
 BAKED_BOOTSTRAP: dict[str, dict] = {
-    "VOO":   {"shares": "7.624667",   "avg_cost": "570.7100", "first_buy_date": "2024-03-18", "category": "ETF"},
-    "VYM":   {"shares": "21.914842",  "avg_cost": "136.9700", "first_buy_date": "2024-03-18", "category": "ETF"},
-    "NVDA":  {"shares": "35.506150",  "avg_cost": "116.0200",  "first_buy_date": "2024-04-15", "category": "Stocks"},
-    "NFLX":  {"shares": "21.332452",  "avg_cost": "101.3200", "first_buy_date": "2024-05-10", "category": "Stocks"},
-    "GLD":   {"shares": "6.640750",   "avg_cost": "361.4000", "first_buy_date": "2024-03-18", "category": "ETF"},
-    "QQQ":   {"shares": "2.389000",   "avg_cost": "606.2900", "first_buy_date": "2024-06-01", "category": "ETF"},
-    "VTI":   {"shares": "3.728000",   "avg_cost": "309.2600", "first_buy_date": "2024-03-18", "category": "ETF"},
-    "SCHD":  {"shares": "19.28600",   "avg_cost": "28.0200",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "VOO":   {"shares": "7.624667",   "avg_cost": "389.1600", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "VYM":   {"shares": "21.914842",  "avg_cost": "119.8200", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "NVDA":  {"shares": "35.504150",  "avg_cost": "82.5000",  "first_buy_date": "2024-04-15", "category": "Stocks"},
+    "NFLX":  {"shares": "21.332452",  "avg_cost": "580.0000", "first_buy_date": "2024-05-10", "category": "Stocks"},
+    "GLD":   {"shares": "6.640750",   "avg_cost": "196.8000", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "QQQ":   {"shares": "1.827600",   "avg_cost": "428.5000", "first_buy_date": "2024-06-01", "category": "ETF"},
+    "VTI":   {"shares": "4.456200",   "avg_cost": "228.4000", "first_buy_date": "2024-03-18", "category": "ETF"},
+    "SCHD":  {"shares": "8.240100",   "avg_cost": "77.9000",  "first_buy_date": "2024-03-18", "category": "ETF"},
     "META":  {"shares": "2.302400",   "avg_cost": "490.0000", "first_buy_date": "2025-03-01", "category": "Stocks"},
-    "GOOGL": {"shares": "4.006000",   "avg_cost": "299.8300", "first_buy_date": "2024-12-15", "category": "Stocks"},
-    "AAPL":  {"shares": "16.11400",   "avg_cost": "213.0300", "first_buy_date": "2024-03-01", "category": "Stocks"},
-    "MSFT":  {"shares": "0.012400",   "avg_cost": "415.9300", "first_buy_date": "2024-03-01", "category": "Stocks"},
-    "COST":  {"shares": "2.342300",   "avg_cost": "942.2200", "first_buy_date": "2024-08-01", "category": "Stocks"},
-    "TSM":   {"shares": "1.984000",   "avg_cost": "302.8500", "first_buy_date": "2024-11-01", "category": "Stocks"},
-    "CRM":   {"shares": "2.740427",   "avg_cost": "263.9200", "first_buy_date": "2024-09-01", "category": "Stocks"},
-    "QCOM":  {"shares": "2.389000",   "avg_cost": "190.5100", "first_buy_date": "2024-03-01", "category": "Stocks"},
-    "WMT":   {"shares": "13.58700",   "avg_cost": "86.2000",  "first_buy_date": "2024-03-18", "category": "Stocks"},
-    "BRK-B": {"shares": "4.515000",   "avg_cost": "489.8800", "first_buy_date": "2024-03-18", "category": "Stocks"},
-    "VGT":   {"shares": "1.466000",   "avg_cost": "664.0400", "first_buy_date": "2024-07-01", "category": "ETF"},
-    "XLE":   {"shares": "15.380000",   "avg_cost": "46.7300",  "first_buy_date": "2024-03-18", "category": "ETF"},
-    "VHT":   {"shares": "1.891000",   "avg_cost": "270.8100", "first_buy_date": "2024-07-01", "category": "ETF"},
-    "VIS":   {"shares": "1.971000",   "avg_cost": "258.3500", "first_buy_date": "2024-07-01", "category": "ETF"},
-    "VXUS":  {"shares": "21.04800",   "avg_cost": "76.7800",  "first_buy_date": "2024-03-18", "category": "ETF"},
-    "RDDT":  {"shares": "1.000000",   "avg_cost": "34.0000", "first_buy_date": "2024-09-01", "category": "Stocks"},
-    "ALK":   {"shares": "0.608716",   "avg_cost": "41.0700",  "first_buy_date": "2024-06-01", "category": "Stocks"},
-    "AMD":   {"shares": "1.559692",   "avg_cost": "164.3200", "first_buy_date": "2024-05-01", "category": "Stocks"},
-    "SNOW":  {"shares": "3.735346",   "avg_cost": "158.3700", "first_buy_date": "2024-11-01", "category": "Stocks"},
-    "SPY":   {"shares": "0.508410",   "avg_cost": "595.6400", "first_buy_date": "2024-11-20", "category": "ETF"},
-    "VUG":   {"shares": "0.465000",   "avg_cost": "441.0300", "first_buy_date": "2024-07-15", "category": "ETF"},
+    "GOOGL": {"shares": "4.003300",   "avg_cost": "165.0000", "first_buy_date": "2024-12-15", "category": "Stocks"},
+    "AAPL":  {"shares": "2.597700",   "avg_cost": "172.5000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "MSFT":  {"shares": "0.012400",   "avg_cost": "398.0000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "COST":  {"shares": "2.342300",   "avg_cost": "880.0000", "first_buy_date": "2024-08-01", "category": "Stocks"},
+    "TSM":   {"shares": "3.500000",   "avg_cost": "155.0000", "first_buy_date": "2024-11-01", "category": "Stocks"},
+    "CRM":   {"shares": "2.740427",   "avg_cost": "285.0000", "first_buy_date": "2024-09-01", "category": "Stocks"},
+    "QCOM":  {"shares": "2.372400",   "avg_cost": "158.0000", "first_buy_date": "2024-03-01", "category": "Stocks"},
+    "WMT":   {"shares": "4.102000",   "avg_cost": "65.0000",  "first_buy_date": "2024-03-18", "category": "Stocks"},
+    "BRK-B": {"shares": "0.526200",   "avg_cost": "400.0000", "first_buy_date": "2024-03-18", "category": "Stocks"},
+    "VGT":   {"shares": "0.852000",   "avg_cost": "540.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "XLE":   {"shares": "5.820000",   "avg_cost": "89.5000",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "VHT":   {"shares": "1.240000",   "avg_cost": "248.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "VIS":   {"shares": "0.960000",   "avg_cost": "230.0000", "first_buy_date": "2024-07-01", "category": "ETF"},
+    "VXUS":  {"shares": "3.880000",   "avg_cost": "58.5000",  "first_buy_date": "2024-03-18", "category": "ETF"},
+    "RDDT":  {"shares": "1.250000",   "avg_cost": "110.0000", "first_buy_date": "2024-09-01", "category": "Stocks"},
+    "ALK":   {"shares": "0.608716",   "avg_cost": "48.0000",  "first_buy_date": "2024-06-01", "category": "Stocks"},
+    "AMD":   {"shares": "1.559692",   "avg_cost": "140.0000", "first_buy_date": "2024-05-01", "category": "Stocks"},
+    "SNOW":  {"shares": "3.735346",   "avg_cost": "155.0000", "first_buy_date": "2024-11-01", "category": "Stocks"},
+    "SPY":   {"shares": "0.508410",   "avg_cost": "490.0000", "first_buy_date": "2024-11-20", "category": "ETF"},
+    "VUG":   {"shares": "0.820000",   "avg_cost": "380.0000", "first_buy_date": "2024-07-15", "category": "ETF"},
     "BLSH":  {"shares": "10.000000",  "avg_cost": "37.0000",  "first_buy_date": "2025-08-14", "category": "Stocks"},
     "KLAR":  {"shares": "11.000000",  "avg_cost": "28.0000",  "first_buy_date": "2025-09-11", "category": "Stocks"},
-    "STUB":  {"shares": "23.356143",  "avg_cost": "25.6200",  "first_buy_date": "2025-09-18", "category": "Stocks"},
-    "BTC":   {"shares": "0.034330",   "avg_cost": "66997.46", "first_buy_date": "2024-09-01", "category": "Crypto"},
-    "XRP":   {"shares": "1.066000",   "avg_cost": "1.886",   "first_buy_date": "2024-11-01", "category": "Crypto"},
+    "STUB":  {"shares": "23.356143",  "avg_cost": "25.0000",  "first_buy_date": "2025-09-18", "category": "Stocks"},
+    "BTC":   {"shares": "0.034330",   "avg_cost": "52800.00", "first_buy_date": "2024-09-01", "category": "Crypto"},
+    "XRP":   {"shares": "1.066000",   "avg_cost": "0.6800",   "first_buy_date": "2024-11-01", "category": "Crypto"},
 }
 
-ROBINHOOD_CASH_DEFAULT = Decimal("0.00")
+ROBINHOOD_CASH_DEFAULT = Decimal("1042.17")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PERSISTENCE HELPERS
@@ -237,43 +237,59 @@ def _norm_date(val: str) -> str:
         return s
 
 
-def make_tx_fingerprint(row):
+def make_tx_fingerprint(
+    date_raw:  str,
+    code:      str,
+    ticker:    str,
+    qty_raw:   str,
+    price_raw: str,
+    amt_raw:   str,
+    settle:    str,
+) -> str:
     """
-    Creates a unique SHA-256 hash for a transaction.
-    Crucial: Normalizes all inputs so CSV rows match Bootstrap rows.
+    High-integrity SHA-256 fingerprint for one transaction row.
+
+    Canonical string (pipe-separated, all fields normalised):
+      Trade/CDIV/SPL rows (ticker OR qty present):
+        NormDate | Ticker | Code | NormQty(6dp) | NormPrice(6dp)
+        Amount excluded: Robinhood rounds debits independently.
+
+      Cash-only rows (no ticker AND no qty — ACH/RTP deposits):
+        NormDate | "" | Code | NormAmt(6dp) | Settle
+        Settle-date tiebreaker distinguishes same-day same-amount deposits.
+
+    Guarantees:
+      "4/2/2026"  == "2026-04-02"  after _norm_date   → identical hash
+      "$173.78"   == "173.78"      after _norm_decimal → identical hash
+      "0.002071"  == "0.00207100"  after _norm_decimal → identical hash
+      bootstrap row hash == CSV row hash for same transaction
     """
-    import hashlib
-    from decimal import Decimal
-    
-    def _clean(val):
-        if val is None: return "0"
-        s = str(val).replace('$', '').replace(',', '').replace('(', '-').replace(')', '').strip()
-        try:
-            return "{:.6f}".format(float(s))
-        except:
-            return "0"
+    nd = _norm_date(date_raw)
+    t  = (ticker or "").strip().upper()
+    c  = (code   or "").strip()
 
-    # Normalize Date to YYYY-MM-DD
-    try:
-        dt_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
-    except:
-        dt_str = str(row['Date'])
+    if not t and not (qty_raw or "").strip():
+        # Cash-only: ACH / RTP / MISC deposits and withdrawals
+        src = f"{nd}|{t}|{c}|{_norm_decimal(amt_raw)}|{(settle or '').strip()}"
+    else:
+        # Trade, dividend, split — anything with a ticker or quantity
+        src = f"{nd}|{t}|{c}|{_norm_decimal(qty_raw)}|{_norm_decimal(price_raw)}"
 
-    ticker = str(row.get('Ticker', 'CASH')).upper().strip()
-    q = _clean(row.get('Amount', 0))
-    p = _clean(row.get('Price', 0))
-    t = str(row.get('Type', 'UNKNOWN')).upper().strip()
-
-    payload = f"{dt_str}|{ticker}|{t}|{q}|{p}"
-    return hashlib.sha256(payload.encode()).hexdigest()
+    return hashlib.sha256(src.encode()).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # BOOTSTRAP  (writes tx_store.json with canonical fingerprints on first run)
 # ═══════════════════════════════════════════════════════════════════════════════
+
 def _bootstrap() -> None:
     """
-    v11.4.1 Fix: Wrap bootstrap data in a dict to match make_tx_fingerprint(row)
+    Write BAKED_BOOTSTRAP positions to tx_store.json on first run (empty store).
+
+    CRITICAL: Uses make_tx_fingerprint() to generate keys — NOT the old
+    "BOOTSTRAP|ticker" opaque scheme. This ensures that when a real Robinhood
+    CSV is uploaded later, the fingerprints match and duplicates are correctly
+    detected instead of appearing as all-new rows.
     """
     if TX_STORE_PATH.exists():
         try:
@@ -281,35 +297,31 @@ def _bootstrap() -> None:
                 return
         except Exception:
             pass
-
     synthetic: dict[str, dict] = {}
     for ticker, pos in BAKED_BOOTSTRAP.items():
-        # Step A: Create the dictionary 'row' that the hasher now expects
-        row_obj = {
-            "Date": pos["first_buy_date"],
-            "Ticker": ticker,
-            "Type": "Buy",
-            "Amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
-            "Price": pos["avg_cost"]
-        }
-        
-        # Step B: Pass the dictionary to the hasher
-        key = make_tx_fingerprint(row_obj)
-
+        # Generate canonical fingerprint — identical to what ingest_csv() would
+        # produce for the same row from a real CSV export.
+        key = make_tx_fingerprint(
+            date_raw  = pos["first_buy_date"],
+            code      = "Buy",
+            ticker    = ticker,
+            qty_raw   = pos["shares"],
+            price_raw = pos["avg_cost"],
+            amt_raw   = "",
+            settle    = "",
+        )
         synthetic[key] = {
             "date":        pos["first_buy_date"],
             "code":        "Buy",
             "ticker":      ticker,
             "qty":         pos["shares"],
             "price":       pos["avg_cost"],
-            "amount":      row_obj["Amount"],
+            "amount":      str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
             "description": "Bootstrap",
             "category":    pos["category"],
         }
-
     _save(TX_STORE_PATH, synthetic)
     logger.info("Bootstrap: wrote %d positions to tx_store.json", len(synthetic))
-
 
 
 def strip_existing_tx_store_fingerprints() -> set[str]:
@@ -341,17 +353,15 @@ def seed_processed_ids_from_history() -> set[str]:
     # Set 1: bootstrap-derived fingerprints (canonical, matches CSV hashes)
     bootstrap_fps: set[str] = set()
     for ticker, pos in BAKED_BOOTSTRAP.items():
-        # Wrap bootstrap data into a row dictionary
-        row_obj = {
-            "Date": pos["first_buy_date"],
-            "Trans Code": "Buy",
-            "Ticker": ticker,
-            "Quantity": pos["shares"],
-            "Price": pos["avg_cost"],
-            "Amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
-            "Type": "Buy"
-        }
-        fp = make_tx_fingerprint(row_obj)
+        fp = make_tx_fingerprint(
+            date_raw  = pos["first_buy_date"],
+            code      = "Buy",
+            ticker    = ticker,
+            qty_raw   = pos["shares"],
+            price_raw = pos["avg_cost"],
+            amt_raw   = "",
+            settle    = "",
+        )
         bootstrap_fps.add(fp)
 
     # Set 2: whatever is already on disk (covers real CSV rows after first import)

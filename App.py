@@ -453,7 +453,7 @@ with tabs[1]:
         } for p in plaid_snap["positions"]]
         df = pd.DataFrame(rows)
         st.dataframe(
-            df.style.applymap(
+            df.style.map(
                 lambda v: ("color:#22c55e" if isinstance(v,float) and v>0
                            else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
                 subset=["P&L %", "Unreal P&L"],
@@ -486,7 +486,7 @@ with tabs[1]:
             })
         df = pd.DataFrame(rows)
         st.dataframe(
-            df.style.applymap(
+            df.style.map(
                 lambda v: ("color:#22c55e" if isinstance(v,float) and v>0
                            else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
                 subset=["P&L %"],
@@ -750,7 +750,7 @@ with tabs[3]:
         return ""
 
     st.dataframe(
-        df_dep.style.applymap(_color_delta, subset=["Delta ($)"]),
+        df_dep.style.map(_color_delta, subset=["Delta ($)"]),
         use_container_width=True,
         hide_index=True,
         column_config={
@@ -841,7 +841,7 @@ with tabs[4]:
             return ""
 
         st.dataframe(
-            df_log.style.applymap(_color_delta_log, subset=["Delta"] if "Delta" in df_log.columns else []),
+            df_log.style.map(_color_delta_log, subset=["Delta"] if "Delta" in df_log.columns else []),
             use_container_width=True, hide_index=True,
             column_config={
                 "Ai Rec Amount":   st.column_config.NumberColumn(format="$%.2f"),
@@ -1223,7 +1223,7 @@ with tabs[9]:
             unsafe_allow_html=True,
         )
         st.dataframe(
-            res_df.style.applymap(
+            res_df.style.map(
                 lambda v: "color:#22c55e" if "PASS" in str(v) else "color:#ef4444",
                 subset=["Status"],
             ),

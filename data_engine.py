@@ -344,15 +344,17 @@ def seed_processed_ids_from_history() -> set[str]:
     # Set 1: bootstrap-derived fingerprints (canonical, matches CSV hashes)
     bootstrap_fps: set[str] = set()
     for ticker, pos in BAKED_BOOTSTRAP.items():
-        fp = make_tx_fingerprint(
-            date_raw  = pos["first_buy_date"],
-            code      = "Buy",
-            ticker    = ticker,
-            qty_raw   = pos["shares"],
-            price_raw = pos["avg_cost"],
-            amt_raw   = "",
-            settle    = "",
-        )
+        # Wrap bootstrap data into a row dictionary
+        row_obj = {
+            "Date": pos["first_buy_date"],
+            "Trans Code": "Buy",
+            "Ticker": ticker,
+            "Quantity": pos["shares"],
+            "Price": pos["avg_cost"],
+            "Amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
+            "Type": "Buy"
+        }
+        fp = make_tx_fingerprint(row_obj)
         bootstrap_fps.add(fp)
 
     # Set 2: whatever is already on disk (covers real CSV rows after first import)

@@ -273,8 +273,7 @@ def make_tx_fingerprint(row):
 # ═══════════════════════════════════════════════════════════════════════════════
 def _bootstrap() -> None:
     """
-    Write BAKED_BOOTSTRAP positions to tx_store.json on first run.
-    v11.4 fix: Pass a dictionary to match the new make_tx_fingerprint signature.
+    v11.4.1 Fix: Wrap bootstrap data in a dict to match make_tx_fingerprint(row)
     """
     if TX_STORE_PATH.exists():
         try:
@@ -285,18 +284,16 @@ def _bootstrap() -> None:
 
     synthetic: dict[str, dict] = {}
     for ticker, pos in BAKED_BOOTSTRAP.items():
-        # Create a synthetic row object to match CSV structure
+        # Step A: Create the dictionary 'row' that the hasher now expects
         row_obj = {
             "Date": pos["first_buy_date"],
-            "Trans Code": "Buy",
             "Ticker": ticker,
-            "Quantity": pos["shares"],
-            "Price": pos["avg_cost"],
+            "Type": "Buy",
             "Amount": str(Decimal(pos["shares"]) * Decimal(pos["avg_cost"])),
-            "Settle Date": ""
+            "Price": pos["avg_cost"]
         }
         
-        # Generate canonical fingerprint using the dictionary
+        # Step B: Pass the dictionary to the hasher
         key = make_tx_fingerprint(row_obj)
 
         synthetic[key] = {

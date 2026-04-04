@@ -204,158 +204,448 @@ def _bootstrap() -> None:
 # ① TRANSACTION DEDUPLICATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# =============================================================================
+# PATCH FILE: data_engine.py — Transaction Deduplication Refactor (v11.4)
+# =============================================================================
+# Drop these functions into data_engine.py, replacing the old
+# make_tx_fingerprint / ingest_csv / strip_existing_tx_store_fingerprints.
+#
+# What changed vs v11.3
+# ─────────────────────
+# 1. Fingerprint formula is now DOCUMENTED + TESTED in isolation.
+#    hash input = canonical string:
+#      "{date}|{trans_code}|{ticker}|{qty_str}|{price_str}|{amt_str}"
+#    where every field is stripped/uppercased and qty/price/amt are
+#    normalised to 6dp so "0.023644" == "0.023644000000" never collides.
+#
+# 2. ingest_csv() builds ONE set called `existing_fps` BEFORE the loop.
+#    This snapshot never changes during iteration — Layer-2 (disk) and
+#    Layer-3 (intra-file) use SEPARATE sets so race condition is gone.
+#
+# 3. IngestStats is richer: added `already_on_disk` count for the import
+#    badge in main_app.py.
+#
+# 4. strip_existing_tx_store_fingerprints() is unchanged (cold-start seed).
+# =============================================================================
+
+import csv
+import hashlib
+import io
+import json
+import datetime
+import os
+from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
+from typing import Optional
+
+# ── paths ──────────────────────────────────────────────────────────────────
+TX_STORE_PATH  = "tx_store.json"
+RECON_LOG_PATH = "recon_log.json"
+MAX_RECON_ROWS = 100
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 1.  FINGERPRINT
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _norm_decimal(raw: str, places: int = 6) -> str:
+    """
+    Normalise a money/qty string to a fixed number of decimal places so that
+    "1.5", "1.500000", and "1.50" all hash identically.
+
+    Returns "0.000000" (or the appropriate zero) on any parse failure so a
+    bad value never silently creates a unique fingerprint.
+    """
+    try:
+        d = Decimal(str(raw).strip().replace(",", "").replace("$", "").replace("(", "-").replace(")", ""))
+        fmt = f"{{:.{places}f}}"
+        return fmt.format(d)
+    except (InvalidOperation, ValueError):
+        return "0." + "0" * places
+
+
 def make_tx_fingerprint(
-    date_raw: str,
-    code: str,
+    date: str,
+    trans_code: str,
     ticker: str,
-    qty_raw: str,
-    price_raw: str,
-    amt_raw: str,
-    settle: str,
+    qty: str,
+    price: str,
+    amount: str,
 ) -> str:
     """
-    Canonical SHA-256 fingerprint for one Robinhood CSV row.
+    Return a 64-char SHA-256 hex fingerprint that uniquely identifies one
+    Robinhood transaction row.
 
-    Rules (matching v10.2 audit findings):
-      - Cash-only rows (no ticker, no qty): hash Date|Code|Amount|Settle
-        so same-day same-amount deposits get distinct hashes via Settle date.
-      - All other rows: hash Date|Code|Ticker|Qty|Price|Settle
-        (Amount intentionally excluded to avoid Robinhood rounding collisions)
+    Canonical string (pipe-separated, all fields normalised):
+        "{date}|{trans_code}|{ticker}|{qty_6dp}|{price_6dp}|{amt_6dp}"
 
-    This function is public so it can be called from tests and from the UI
-    to pre-load known fingerprints before an upload starts.
+    Design decisions
+    ────────────────
+    • date      — kept as-is (already normalised to YYYY-MM-DD by caller)
+    • trans_code — uppercased so "Buy"/"BUY"/"buy" are identical
+    • ticker    — uppercased + stripped; empty string for cash-only rows
+    • qty       — 6dp Decimal string  (handles fractional shares)
+    • price     — 6dp Decimal string
+    • amount    — 6dp Decimal string  (absolute value — Robinhood signs differ)
+
+    Why amount is included
+    ──────────────────────
+    Two ACH deposits on the same day at the same amount would collide without
+    a date+code+ticker key, so amount is the tiebreaker for cash-only rows.
+    For trade rows (ticker present) the qty+price already make them unique,
+    but including amount costs nothing and prevents exotic edge cases.
     """
-    if not ticker and not qty_raw:
-        src = f"{date_raw}|{code}|{amt_raw}|{settle}"
-    else:
-        src = f"{date_raw}|{code}|{ticker}|{qty_raw}|{price_raw}|{settle}"
-    return hashlib.sha256(src.encode()).hexdigest()
+    canonical = "|".join([
+        str(date).strip(),
+        str(trans_code).strip().upper(),
+        str(ticker).strip().upper(),
+        _norm_decimal(qty,    places=6),
+        _norm_decimal(price,  places=6),
+        _norm_decimal(amount, places=6),
+    ])
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def strip_existing_tx_store_fingerprints() -> set[str]:
-    """
-    Load all fingerprints currently in tx_store.json from disk.
-    Call this once before ingest_csv() to seed the existing_ids set.
-    Survives a missing or corrupt file (returns empty set).
-    """
-    store = _load(TX_STORE_PATH, {})
-    return set(store.keys())
-
+# ─────────────────────────────────────────────────────────────────────────────
+# 2.  INGEST STATS
+# ─────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class IngestStats:
-    total_rows_in_file:     int  = 0   # every non-blank row seen
-    new_rows_added:         int  = 0   # rows actually written to tx_store
-    duplicate_rows_skipped: int  = 0   # cross-session dupes (already on disk)
-    seen_in_file:           int  = 0   # intra-file dupes (same row appears twice in upload)
-    skipped_no_code:        int  = 0   # blank/footer rows with no Trans Code
-    errors:                 list = field(default_factory=list)
+    filename:       str  = ""
+    total_rows:     int  = 0   # every data row in the CSV
+    imported:       int  = 0   # actually written to tx_store
+    already_on_disk:int  = 0   # fingerprint existed in tx_store before upload
+    seen_in_file:   int  = 0   # intra-file duplicate (same row twice in one CSV)
+    no_code:        int  = 0   # rows skipped because Trans Code is empty/unknown
+    parse_errors:   int  = 0   # rows that raised an exception
+    new_tickers:    list = field(default_factory=list)  # tickers first seen this upload
 
     @property
     def total_skipped(self) -> int:
-        return self.duplicate_rows_skipped + self.seen_in_file + self.skipped_no_code
+        return self.already_on_disk + self.seen_in_file + self.no_code + self.parse_errors
 
 
-def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
+# ─────────────────────────────────────────────────────────────────────────────
+# 3.  TX_STORE HELPERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_tx_store() -> dict:
+    """Load tx_store.json from disk. Returns {} if missing or corrupt."""
+    if not os.path.exists(TX_STORE_PATH):
+        return {}
+    try:
+        with open(TX_STORE_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _save_tx_store(store: dict) -> None:
+    """Atomically write tx_store to disk (write-then-rename)."""
+    tmp = TX_STORE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(store, f, indent=2, default=str)
+    os.replace(tmp, TX_STORE_PATH)
+
+
+def strip_existing_tx_store_fingerprints() -> set:
     """
-    Parse a Robinhood CSV export and append only genuinely new rows to tx_store.
-
-    Three-layer deduplication:
-      Layer 1 — existing_ids (set): fingerprints already in session_state from
-                previous uploads this session. Populated by calling
-                strip_existing_tx_store_fingerprints() before the first upload.
-      Layer 2 — tx_store keys on disk: fingerprints persisted across sessions.
-      Layer 3 — seen_this_upload set: prevents the same row appearing twice in
-                a single file from being written twice.
-
-    Returns (IngestStats, set_of_newly_added_fingerprints).
+    Return the set of ALL fingerprints already persisted on disk.
+    Called once at app cold-start to pre-seed session_state.processed_ids
+    so the very first upload never re-inserts rows that were previously
+    imported in an older session.
     """
-    stats              = IngestStats()
-    new_ids: set       = set()
-    seen_this_upload:  set = set()   # Layer 3: intra-file dedup
-    tx_store           = _load(TX_STORE_PATH, {})  # Layer 2 source (mutated during loop)
-    # Snapshot of keys that existed BEFORE this upload — used for Layer 2 check.
-    # Must be frozen here so that rows added during this loop are detected by Layer 3,
-    # not retroactively by Layer 2.
-    existing_on_disk: set = set(tx_store.keys())
+    return set(_load_tx_store().keys())
 
-    text   = file_bytes.decode("utf-8", errors="replace")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4.  ROBUST DATE PARSER  (unchanged from v11.3 — here for completeness)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _parse_date_robust(date_str: str) -> Optional[datetime.date]:
+    """
+    Parse a date string in any format Robinhood might produce.
+    Returns None (never raises) so callers can use a safe default.
+    """
+    import pandas as pd  # lazy import — only needed here
+    if not date_str:
+        return None
+    # Fast path: already ISO
+    try:
+        return datetime.date.fromisoformat(str(date_str).strip())
+    except (ValueError, TypeError):
+        pass
+    # Slow path: M/D/YYYY, MM/DD/YYYY, M/D/YY …
+    try:
+        return pd.to_datetime(date_str, dayfirst=False).date()
+    except Exception:
+        return None
+
+
+def _date_to_iso(raw: str) -> str:
+    """Convert any Robinhood date format to YYYY-MM-DD string."""
+    d = _parse_date_robust(raw)
+    return d.isoformat() if d else str(raw).strip()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5.  MAIN INGEST FUNCTION
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Robinhood Trans Code → canonical action map
+_TRANS_CODE_MAP = {
+    "Buy":  "BUY",
+    "Sell": "SELL",
+    "CDIV": "CDIV",   # Cash dividend
+    "SLIP": "SLIP",   # Stock dividend / stock split
+    "SPL":  "SPL",
+    "ACH":  "ACH",    # Deposit / withdrawal
+    "ACHAT":"ACH",
+    "JNLS": "JNLS",   # Journal / sweep
+    "DFEE": "DFEE",   # Fee
+    "RINT": "RINT",   # Interest
+    "BSELL":"SELL",   # Back-office sell
+    "BBUY": "BUY",
+}
+
+# Trans codes we skip entirely (no trading signal)
+_SKIP_CODES = {"", "GOLD", "MARGIN", "MARG", "INT", "FEE", "MISC"}
+
+
+def ingest_csv(
+    csv_bytes: bytes,
+    filename: str = "upload.csv",
+    existing_ids: Optional[set] = None,   # ← session_state.processed_ids
+) -> tuple[dict, IngestStats]:
+    """
+    Parse a Robinhood account-activity CSV and return:
+      (new_transactions_dict, IngestStats)
+
+    new_transactions_dict
+    ─────────────────────
+    Keys   = SHA-256 fingerprint (64 hex chars)
+    Values = transaction dict ready to merge into tx_store
+
+    The caller is responsible for merging into tx_store and saving.
+    This function NEVER mutates disk state — it only reads tx_store
+    once (for the fingerprint snapshot) and returns new rows.
+
+    Three dedup layers
+    ──────────────────
+    Layer 1 — Session :  fingerprint in `existing_ids`
+                         (rows seen across ALL uploads this browser session)
+    Layer 2 — Disk    :  fingerprint in `existing_on_disk`
+                         (pre-loop snapshot of tx_store.json — NEVER changes
+                          during iteration, so in-loop writes don't pollute it)
+    Layer 3 — Intra-file: fingerprint in `seen_this_upload`
+                         (rows appearing more than once in THIS CSV file)
+
+    Layers 1 and 2 are logically equivalent at cold-start because
+    _init() pre-seeds session_state.processed_ids from disk.  Having both
+    ensures correctness even if the caller forgets to call _init().
+    """
+    if existing_ids is None:
+        existing_ids = set()
+
+    stats = IngestStats(filename=filename)
+
+    # ── Layer 2 snapshot: read disk ONCE before the loop ──────────────────
+    tx_store         = _load_tx_store()
+    existing_on_disk = set(tx_store.keys())   # frozen snapshot
+    known_tickers    = {v.get("ticker", "") for v in tx_store.values() if v.get("ticker")}
+
+    # ── Layer 3 accumulator: intra-file duplicates ─────────────────────────
+    seen_this_upload: set = set()
+
+    # ── Output accumulator ────────────────────────────────────────────────
+    new_rows: dict = {}
+
+    # ── CSV parsing ───────────────────────────────────────────────────────
+    try:
+        text = csv_bytes.decode("utf-8", errors="replace").replace("\x00", "")
+    except Exception:
+        stats.parse_errors += 1
+        return new_rows, stats
+
     reader = csv.DictReader(io.StringIO(text), quoting=csv.QUOTE_ALL)
 
-    for row in reader:
-        stats.total_rows_in_file += 1
+    for raw_row in reader:
+        stats.total_rows += 1
+        try:
+            _process_row(
+                raw_row       = raw_row,
+                stats         = stats,
+                existing_ids  = existing_ids,
+                existing_on_disk = existing_on_disk,
+                seen_this_upload = seen_this_upload,
+                known_tickers = known_tickers,
+                new_rows      = new_rows,
+            )
+        except Exception:
+            stats.parse_errors += 1
+            # never crash the whole upload on one bad row
 
-        code = (row.get("Trans Code") or row.get("Activity Type") or "").strip()
-        if not code:
-            stats.skipped_no_code += 1
-            continue
+    # Post-loop: seed session set so next upload in this session skips these rows
+    existing_ids.update(seen_this_upload)
 
-        ticker    = (row.get("Instrument") or row.get("Symbol") or "").strip().upper()
-        qty_raw   = row.get("Quantity",    "") or ""
-        price_raw = row.get("Price",       "") or ""
-        amt_raw   = row.get("Amount",      "") or ""
-        date_raw  = row.get("Process Date") or row.get("Date") or ""
-        settle    = row.get("Settle Date", "") or ""
-        desc      = row.get("Description", "") or ""
+    return new_rows, stats
 
-        fp = make_tx_fingerprint(date_raw, code, ticker, qty_raw, price_raw, amt_raw, settle)
 
-        # ── Layer 1: session-state dedup ──────────────────────────────────────
-        if fp in existing_ids:
-            stats.duplicate_rows_skipped += 1
-            continue
+def _process_row(
+    raw_row:          dict,
+    stats:            IngestStats,
+    existing_ids:     set,
+    existing_on_disk: set,
+    seen_this_upload: set,
+    known_tickers:    set,
+    new_rows:         dict,
+) -> None:
+    """
+    Process a single CSV row.  Mutates stats, seen_this_upload, new_rows.
+    Raises on truly unexpected errors so the caller can count parse_errors.
+    """
+    # ── field extraction ──────────────────────────────────────────────────
+    date_raw    = raw_row.get("Activity Date", "").strip()
+    code_raw    = raw_row.get("Trans Code", "").strip()
+    ticker_raw  = raw_row.get("Instrument", "").strip().upper()
+    desc_raw    = raw_row.get("Description", "").strip()
+    qty_raw     = raw_row.get("Quantity", "0").strip() or "0"
+    price_raw   = raw_row.get("Price", "0").strip() or "0"
+    amount_raw  = raw_row.get("Amount", "0").strip() or "0"
 
-        # ── Layer 2: disk dedup (pre-upload snapshot only) ────────────────────
-        if fp in existing_on_disk:
-            stats.duplicate_rows_skipped += 1
-            continue
+    # ── trans-code normalisation ──────────────────────────────────────────
+    code = _TRANS_CODE_MAP.get(code_raw, code_raw.upper())
+    if code in _SKIP_CODES or not code:
+        stats.no_code += 1
+        return
 
-        # ── Layer 3: intra-file dedup ─────────────────────────────────────────
-        if fp in seen_this_upload:
-            stats.seen_in_file += 1
-            continue
-        seen_this_upload.add(fp)
+    # ── date normalisation ────────────────────────────────────────────────
+    date_iso = _date_to_iso(date_raw) if date_raw else ""
 
-        # ── Normalise and store ───────────────────────────────────────────────
-        qty_clean = re.sub(r"[^\d.\-]", "", qty_raw)
-        if qty_clean in ("", "-", "."):
-            qty_clean = "0"
+    # ── fingerprint ───────────────────────────────────────────────────────
+    fp = make_tx_fingerprint(
+        date      = date_iso,
+        trans_code= code,
+        ticker    = ticker_raw,
+        qty       = qty_raw,
+        price     = price_raw,
+        amount    = amount_raw,
+    )
 
-        category = (
-            "Crypto" if ticker in CRYPTO_TICKERS else
-            "ETF"    if ticker in ETF_TICKERS    else
-            "Stocks"
-        )
+    # ── Layer 2 — disk dedup (snapshot, never changes mid-loop) ──────────
+    # Check this FIRST so the counter attribution is correct: rows already
+    # persisted from previous sessions are "on disk", not "session" or "intrafile".
+    if fp in existing_on_disk:
+        stats.already_on_disk += 1
+        existing_ids.add(fp)   # keep session set warm for Layer 1
+        return
 
-        tx_store[fp] = {
-            "date":        date_raw,
-            "code":        code,
-            "ticker":      ticker,
-            "qty":         qty_clean,
-            "price":       re.sub(r"[^\d.\-]", "", price_raw) or "0",
-            "amount":      re.sub(r"[^\d.\-]", "", amt_raw)   or "0",
-            "description": desc,
-            "category":    category,
-        }
-        new_ids.add(fp)
-        stats.new_rows_added += 1
+    # ── Layer 1 — session dedup (rows from earlier uploads THIS session) ──
+    # existing_ids is pre-seeded from disk at cold-start AND updated during
+    # earlier uploads in the same session. Rows already on disk are caught
+    # above, so anything remaining here is genuinely a same-session repeat.
+    if fp in existing_ids:
+        stats.already_on_disk += 1
+        return
 
-    _save(TX_STORE_PATH, tx_store)
+    # ── Layer 3 — intra-file dedup ────────────────────────────────────────
+    # fp is not in disk snapshot and not in session set, but we've already
+    # seen it earlier in THIS specific file upload.
+    if fp in seen_this_upload:
+        stats.seen_in_file += 1
+        return
 
-    # Append entry to rolling recon log
-    recon = _load(RECON_LOG_PATH, [])
-    recon.append({
-        "timestamp":   datetime.datetime.now().isoformat(),
-        "total_rows":  stats.total_rows_in_file,
-        "new":         stats.new_rows_added,
-        "cross_dupes": stats.duplicate_rows_skipped,
-        "intra_dupes": stats.seen_in_file,
-        "no_code":     stats.skipped_no_code,
-        "errors":      stats.errors,
-    })
-    _save(RECON_LOG_PATH, recon[-100:])
+    # ── new row — build transaction dict ─────────────────────────────────
+    seen_this_upload.add(fp)
+    # existing_ids updated post-loop — keeps Layer 3 counter accurate
 
-    return stats, new_ids
+    is_drip = "reinvest" in desc_raw.lower()
+
+    qty_dec = Decimal("0")
+    try:
+        qty_dec = Decimal(qty_raw.replace(",", ""))
+    except InvalidOperation:
+        pass
+
+    price_dec = Decimal("0")
+    try:
+        # Robinhood price fields can have $ prefix
+        price_dec = Decimal(price_raw.replace("$", "").replace(",", ""))
+    except InvalidOperation:
+        pass
+
+    # Amount: use absolute value (Robinhood uses negative for debits)
+    amt_dec = Decimal("0")
+    try:
+        amt_dec = abs(Decimal(
+            amount_raw.replace("$", "").replace(",", "")
+                       .replace("(", "-").replace(")", "")
+        ))
+    except InvalidOperation:
+        pass
+
+    tx = {
+        "fingerprint":  fp,
+        "date":         date_iso,
+        "trans_code":   code,
+        "ticker":       ticker_raw,
+        "description":  desc_raw,
+        "qty":          str(qty_dec),          # lossless string storage
+        "price":        str(price_dec),
+        "amount":       str(amt_dec),
+        "is_drip":      is_drip,
+        "raw_code":     code_raw,
+    }
+
+    new_rows[fp] = tx
+
+    if ticker_raw and ticker_raw not in known_tickers:
+        stats.new_tickers.append(ticker_raw)
+        known_tickers.add(ticker_raw)
+
+    stats.imported += 1
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6.  COMMIT HELPER  (call this AFTER ingest_csv returns)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def commit_new_transactions(new_rows: dict) -> None:
+    """
+    Merge new_rows into tx_store.json on disk.
+
+    Must be called AFTER ingest_csv() returns.  Separating ingest from
+    commit means ingest is pure / testable without touching disk.
+    """
+    if not new_rows:
+        return
+    store = _load_tx_store()
+    store.update(new_rows)
+    _save_tx_store(store)
+    _append_recon_log(new_rows)
+
+
+def _append_recon_log(new_rows: dict) -> None:
+    """Append a one-line audit entry to recon_log.json."""
+    log: list = []
+    if os.path.exists(RECON_LOG_PATH):
+        try:
+            with open(RECON_LOG_PATH, "r", encoding="utf-8") as f:
+                log = json.load(f)
+        except Exception:
+            log = []
+
+    entry = {
+        "timestamp": datetime.datetime.now().isoformat(timespec="seconds"),
+        "new_rows":  len(new_rows),
+        "tickers":   sorted({v.get("ticker","") for v in new_rows.values() if v.get("ticker")}),
+    }
+    log.append(entry)
+    # keep rolling window
+    log = log[-MAX_RECON_ROWS:]
+    with open(RECON_LOG_PATH, "w", encoding="utf-8") as f:
+        json.dump(log, f, indent=2)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

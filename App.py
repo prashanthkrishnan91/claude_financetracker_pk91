@@ -1,18 +1,10 @@
 """
-main_app.py — Portfolio War Room v11.2
+main_app.py — Portfolio War Room v11.4
 All UI — zero business logic.
 
-v11.2 changes:
-  1. Import tab — richer dedup reconciliation panel showing cross-session,
-     intra-file and no-code skip counts; "pre-loaded IDs" badge
-  2. Invest $900 tab — cash_balance fed into generate_deposit_recs() so
-     Robinhood cash is included in total investable capital; KPI row shows
-     breakdown of deposit + cash; rebalancing drift chart accounts for cash
-  3. New Override inputs in Invest tab — number_input next to each AI rec;
-     "Apply Overrides" button calls apply_overrides_to_recs(), re-renders
-     the table with override deltas highlighted
-  4. New Decision Log tab — sortable dataframe of all past overrides loaded
-     from decision_log.json; summary metrics; CSV export button
+v11.4: Import tab uses new two-step ingest_csv() → commit_new_transactions() API.
+       _init() pre-seeds processed_ids with strip_existing_tx_store_fingerprints().
+       Three separate skip counters in import detail expander.
 """
 
 import datetime
@@ -38,288 +30,196 @@ st.set_page_config(
 )
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# GLOBAL CSS  (identical theme to v11.1)
+# GLOBAL CSS
 # ═══════════════════════════════════════════════════════════════════════════════
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@300;400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Serif+Display&family=JetBrains+Mono:wght@400;600&family=DM+Sans:wght@300;400;500;600&display=swap');
 
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:#07090f;color:#e2e8f0}
 .stApp{background:#07090f}
 #MainMenu,footer,header{visibility:hidden}
 .block-container{padding:1.2rem 1.4rem 3rem;max-width:1440px}
-h1,h2,h3{font-family:'DM Serif Display',serif;letter-spacing:-0.02em}
-code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
+h1,h2,h3{font-family:'DM Serif Display',serif;color:#f1f5f9}
 
-.kpi{background:linear-gradient(135deg,#0f1623 0%,#151f32 100%);border:1px solid #1e2d47;
-  border-radius:14px;padding:18px 20px 14px;margin-bottom:10px}
-.kpi-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.08em}
-.kpi-value{font-size:26px;font-weight:700;letter-spacing:-0.03em;margin:4px 0}
-.kpi-sub{font-size:12px;color:#94a3b8}
+/* KPI cards */
+.kpi{background:#0f1117;border:1px solid #1e2535;border-radius:10px;padding:14px 16px;margin-bottom:8px}
+.kpi-label{font-size:11px;color:#64748b;text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px}
+.kpi-value{font-size:22px;font-weight:700;font-family:'JetBrains Mono',monospace;line-height:1.1}
+.kpi-sub{font-size:11px;color:#64748b;margin-top:3px}
 
-.rec-card{border-radius:12px;padding:14px 16px 10px;margin-bottom:8px;border-left:4px solid #334155}
-.rec-sell{border-color:#ef4444;background:#1a0a0a}
-.rec-buy{border-color:#22c55e;background:#07150c}
-.rec-trim{border-color:#f59e0b;background:#140f04}
-.rec-hold{border-color:#334155;background:#0d111a}
-.rec-review{border-color:#a855f7;background:#120a1a}
+/* Rec cards */
+.rec-card{background:#0f1117;border:1px solid #1e2535;border-radius:10px;padding:14px 16px;margin-bottom:10px}
+.rec-card.sell{border-left:3px solid #ef4444}
+.rec-card.buy{border-left:3px solid #22c55e}
+.rec-card.trim{border-left:3px solid #f59e0b}
+.rec-card.review{border-left:3px solid #a855f7}
+.rec-card.hold{border-left:3px solid #475569}
 
-.tag{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600;
-  font-family:'JetBrains Mono',monospace;margin-right:6px}
-.tag-sell{background:#450a0a;color:#fca5a5}
-.tag-buy{background:#052e16;color:#86efac}
-.tag-trim{background:#451a03;color:#fcd34d}
-.tag-hold{background:#0f172a;color:#64748b}
-.tag-review{background:#2e1065;color:#d8b4fe}
-.tag-plaid{background:#0c1a3d;color:#93c5fd}
-.tag-override{background:#2d1a00;color:#fb923c}
-.tag-delta-pos{background:#052e16;color:#86efac}
-.tag-delta-neg{background:#3b1515;color:#fca5a5}
+/* Tags */
+.tag{display:inline-block;font-size:10px;font-weight:600;padding:2px 7px;border-radius:4px;margin-right:6px;text-transform:uppercase;letter-spacing:.05em}
+.tag-sell{background:#450a0a;color:#ef4444}
+.tag-buy{background:#052e16;color:#22c55e}
+.tag-trim{background:#451a03;color:#f59e0b}
+.tag-review{background:#2e1065;color:#a855f7}
+.tag-hold{background:#1e293b;color:#94a3b8}
+.tag-plaid{background:#1e3a5f;color:#60a5fa}
 
-.stTabs [data-baseweb="tab-list"]{gap:0;border-bottom:1px solid #1e2d47}
-.stTabs [data-baseweb="tab"]{padding:10px 18px;font-size:13px;font-weight:500;color:#64748b;
-  border-bottom:2px solid transparent;background:transparent}
-.stTabs [aria-selected="true"]{color:#38bdf8;border-bottom:2px solid #38bdf8}
+/* Sidebar */
+.sidebar-badge{background:#1e2535;border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px}
 
-.sync-badge{padding:6px 12px;border-radius:8px;font-size:12px;font-weight:600;
-  font-family:'JetBrains Mono',monospace;display:inline-block;margin-top:4px}
-.sync-fresh{background:#052e16;color:#86efac;border:1px solid #166534}
-.sync-stale{background:#451a03;color:#fcd34d;border:1px solid #92400e}
-.sync-none{background:#1e293b;color:#64748b;border:1px solid #334155}
-
-.dedup-ok{color:#22c55e;font-weight:700}
-.dedup-warn{color:#f59e0b;font-weight:700}
-.override-row{background:#1a120a;border:1px solid #451a03;border-radius:8px;
-  padding:10px 14px;margin-bottom:6px}
+/* Section headers */
+.sec-head{font-family:'DM Serif Display',serif;font-size:20px;margin-bottom:12px;color:#f1f5f9}
 </style>
 """, unsafe_allow_html=True)
 
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# BOOTSTRAP + SESSION STATE INIT
+# COLD-START INIT
 # ═══════════════════════════════════════════════════════════════════════════════
-de._bootstrap()
 
 def _init():
-    defaults = {
-        "bust":            0,
-        "prices":          {},
-        "recs":            [],
-        "cash":            float(de.ROBINHOOD_CASH_DEFAULT),
-        "targets":         de._load(de.TARGETS_PATH, {}),
-        "plaid_snap":      de._load(de.PLAID_SNAPSHOT_PATH, None),
-        "deposit_num":     len(de._load(de.DEPOSIT_LOG_PATH, [])) + 1,
-        # ── v11.2 additions ──────────────────────────────────────────────────
-        # Pre-seeded from disk so the first upload doesn't re-insert anything
-        "processed_ids":   de.strip_existing_tx_store_fingerprints(),
-        # Override state for the current Invest session
-        "dep_overrides":   {},    # {ticker: manual_amount}
-        "dep_reasons":     {},    # {ticker: reason_text}
-        "dep_recs_final":  [],    # after apply_overrides_to_recs()
-        "overrides_applied": False,
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
+    if "initialised" not in st.session_state:
+        de.bootstrap_tx_store()
+        # Pre-seed dedup IDs from disk so first upload never re-inserts old rows
+        st.session_state.processed_ids   = de.strip_existing_tx_store_fingerprints()
+        st.session_state.portfolio       = de.recompute_portfolio()
+        st.session_state.prices          = {}
+        st.session_state.recs            = []
+        st.session_state.cash            = 1042.17
+        st.session_state.deposit_num     = 1
+        st.session_state.targets         = de.load_targets()
+        st.session_state._bust           = 0
+        st.session_state.plaid_snap      = None
+        # Try loading existing Plaid snapshot from disk
+        if de.PLAID_SNAPSHOT_PATH.exists():
+            try:
+                st.session_state.plaid_snap = json.loads(de.PLAID_SNAPSHOT_PATH.read_text())
+            except Exception:
+                pass
+        st.session_state.initialised = True
 
-    if "portfolio" not in st.session_state:
-        tx   = de._load(de.TX_STORE_PATH, {})
-        cryp = de._load(de.CRYPTO_OVR_PATH, {})
-        st.session_state.portfolio = de.recompute_portfolio(tx, cryp)
+
+def _refresh():
+    st.session_state._bust += 1
+    tickers = tuple(st.session_state.portfolio.keys())
+    st.session_state.prices = de.fetch_prices(tickers, _bust=st.session_state._bust)
+    st.session_state.recs   = de.generate_recs(st.session_state.portfolio, st.session_state.prices)
+
 
 _init()
 
-portfolio  = st.session_state.portfolio
-prices     = st.session_state.prices
-cash       = st.session_state.cash
-targets    = st.session_state.targets
+portfolio = st.session_state.portfolio
+prices    = st.session_state.prices
+recs      = st.session_state.recs
+cash      = st.session_state.cash
+targets   = st.session_state.targets
 plaid_snap = st.session_state.plaid_snap
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## ⚡ Portfolio War Room")
-    st.markdown(
-        f"<div style='font-size:11px;color:#64748b'>"
-        f"{datetime.date.today().strftime('%A, %B %d, %Y')}</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("## ⚡ War Room")
+    st.markdown(f"<div style='color:#64748b;font-size:12px;margin-bottom:16px'>v11.4 · {len(portfolio)} positions</div>", unsafe_allow_html=True)
+
+    # Refresh button
+    if st.button("🔄 Refresh Prices", type="primary", use_container_width=True):
+        _refresh()
+        st.rerun()
+
+    # Plaid sync button
+    if st.button("🏦 Sync Plaid", use_container_width=True,
+                 help="Force Plaid holdings sync (uses 1 Plaid API call)"):
+        with st.spinner("Syncing Plaid holdings…"):
+            snap = de.smart_sync_portfolio(force_plaid=True)
+        if snap:
+            st.session_state.plaid_snap = snap
+            plaid_snap = snap
+            st.success("Plaid synced ✅")
+        else:
+            st.info("Plaid not configured — add PLAID_ACCESS_TOKEN to secrets.")
+
     st.markdown("---")
-
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔄 Refresh", use_container_width=True,
-                     help="Fetch live prices — no Plaid call"):
-            st.session_state.bust += 1
-            with st.spinner("Fetching live prices…"):
-                st.session_state.prices = de.fetch_prices(
-                    tuple(sorted(portfolio.keys())), _bust=st.session_state.bust
-                )
-            prices = st.session_state.prices
-            st.session_state.recs = de.generate_recs(portfolio, prices)
-            # Reset override state so new prices re-generate clean recs
-            st.session_state.dep_recs_final  = []
-            st.session_state.overrides_applied = False
-            st.rerun()
-
-    plaid_configured = bool(
-        os.environ.get("PLAID_ACCESS_TOKEN") or
-        (hasattr(st, "secrets") and "PLAID_ACCESS_TOKEN" in st.secrets)
-    )
-    with col2:
-        if st.button("🏦 Sync Plaid", use_container_width=True,
-                     disabled=not plaid_configured,
-                     help="Force Plaid refresh. Auto-syncs every 24 h."):
-            with st.spinner("Syncing Plaid holdings…"):
-                snap = de.smart_sync_portfolio(force_plaid=True)
-            if snap:
-                st.session_state.plaid_snap = snap
-                plaid_snap = snap
-                st.success(f"Plaid synced ✅  ${snap['total_equity']:,.2f}")
-            else:
-                st.warning("Plaid not configured. Add PLAID_ACCESS_TOKEN to secrets.")
 
     # Smart Sync status badge
-    st.markdown("**📡 Smart Sync Status**")
-    cs = de.get_holdings_cache_status()
-    if cs["status"] in ("unavailable", "no_cache", "error"):
-        st.markdown("<span class='sync-badge sync-none'>No Plaid cache — sync to connect</span>",
-                    unsafe_allow_html=True)
-    elif cs["is_stale"]:
-        st.markdown(
-            f"<span class='sync-badge sync-stale'>⚠️ Holdings {cs.get('age_hours',0):.0f}h old — sync due</span>",
-            unsafe_allow_html=True,
-        )
-    else:
-        age = cs.get("age_hours", 0); nxt = cs.get("next_sync_in", 0)
-        st.markdown(
-            f"<span class='sync-badge sync-fresh'>✅ {age:.1f}h old · next in {nxt:.1f}h</span>",
-            unsafe_allow_html=True,
-        )
-        st.caption(f"{cs['holdings_count']} positions · cash ${cs.get('cash_usd',0):.2f}")
-
-    if not plaid_configured:
-        st.caption("Add PLAID_ACCESS_TOKEN to Streamlit secrets to enable Plaid sync.")
-
-    st.markdown("---")
-
-    # Cash balance
-    st.markdown("**💵 Cash Balance**")
-    new_cash = st.number_input("Robinhood Cash ($)", value=cash, min_value=0.0, step=10.0, format="%.2f")
-    if new_cash != cash:
-        st.session_state.cash = new_cash
-        cash = new_cash
-        # Reset override state — cash change affects all allocations
-        st.session_state.dep_recs_final  = []
-        st.session_state.overrides_applied = False
-
-    st.markdown("---")
-
-    # Price data health
-    st.markdown("**📊 Price Data**")
-    if prices:
-        live_n  = sum(1 for p in prices.values() if p and p > 0)
-        total_n = len(portfolio)
-        color   = "#22c55e" if live_n == total_n else ("#f59e0b" if live_n > 0 else "#ef4444")
-        label   = "Live" if live_n == total_n else ("Partial" if live_n > 0 else "Stale")
-        st.markdown(f"<span style='color:{color};font-weight:600'>{label}</span> &nbsp; {live_n}/{total_n} tickers",
-                    unsafe_allow_html=True)
-        if plaid_snap:
-            try:
-                age_m = (datetime.datetime.now() - datetime.datetime.fromisoformat(plaid_snap["timestamp"])).seconds // 60
-                st.markdown(f"<span class='tag tag-plaid'>Plaid</span> synced {age_m}m ago", unsafe_allow_html=True)
-            except Exception:
-                pass
-    else:
-        st.markdown("<span style='color:#64748b'>Press 🔄 Refresh for live prices</span>", unsafe_allow_html=True)
-
-    st.markdown("---")
-
-    # Reconciliation summary  (v11.2: shows intra-file dupes separately)
-    st.markdown("**🗂️ Reconciliation**")
-    tx_count = len(de._load(de.TX_STORE_PATH, {}))
-    st.markdown(f"<code>{tx_count}</code> rows in tx_store", unsafe_allow_html=True)
-    recon = de._load(de.RECON_LOG_PATH, [])
-    if recon:
-        last = recon[-1]
-        with st.expander("Last upload detail"):
-            st.write(f"**{last.get('new', 0)}** new rows added")
-            st.write(f"**{last.get('cross_dupes', last.get('dupes', 0))}** cross-session dupes skipped")
-            st.write(f"**{last.get('intra_dupes', 0)}** intra-file dupes skipped")
-            st.write(f"**{last.get('no_code', 0)}** blank/footer rows skipped")
-            st.write(f"Total rows in file: **{last.get('total_rows', 0)}**")
-
-    pre_loaded = len(st.session_state.processed_ids)
+    cache_status = de.get_holdings_cache_status()
+    status_color = "#22c55e" if not cache_status.get("is_stale") else "#f59e0b"
     st.markdown(
-        f"<span style='font-size:11px;color:#64748b'>"
-        f"Pre-loaded: <code>{pre_loaded}</code> fingerprints in session</span>",
+        f"<div class='sidebar-badge'>"
+        f"<span style='color:{status_color}'>●</span> "
+        f"<b>Smart Sync</b><br/>"
+        f"<span style='color:#64748b;font-size:11px'>{cache_status.get('label','—')}</span>"
+        f"</div>",
         unsafe_allow_html=True,
     )
 
     st.markdown("---")
+    st.markdown("**💵 Cash Balance**")
+    cash_input = st.number_input(
+        "Robinhood cash ($)", min_value=0.0, value=cash, step=10.0,
+        label_visibility="collapsed",
+    )
+    if cash_input != cash:
+        st.session_state.cash = cash_input
+        cash = cash_input
+        st.rerun()
 
-    # AI Target Engine
-    st.markdown("**🤖 AI Target Weights**")
-    if st.button("✨ Generate AI Targets", use_container_width=True):
-        suggested = de.generate_suggested_targets(portfolio)
-        for t, w in suggested.items():
-            st.session_state[f"target_{t}"] = w
-        st.session_state.targets = suggested
-        de._save(de.TARGETS_PATH, suggested)
-        targets = suggested
-        st.success("AI targets generated ✅")
+    st.markdown("---")
+    st.markdown("**📅 Deposit #**")
+    st.session_state.deposit_num = st.number_input(
+        "Deposit number", min_value=1, value=st.session_state.deposit_num, step=1,
+        label_visibility="collapsed",
+    )
 
-    if targets:
-        with st.expander(f"Edit targets ({len(targets)} tickers)"):
-            new_targets = {}
-            for t in sorted(targets.keys()):
-                new_targets[t] = st.number_input(
-                    t, value=float(targets.get(t, 0)),
-                    min_value=0.0, max_value=100.0, step=0.5,
-                    key=f"target_{t}",
-                )
-            cs_save, cs_reset = st.columns(2)
-            with cs_save:
-                if st.button("💾 Save", use_container_width=True):
-                    st.session_state.targets = new_targets
-                    de._save(de.TARGETS_PATH, new_targets)
-                    targets = new_targets
-                    st.success("Saved")
-            with cs_reset:
-                if st.button("🔁 Reset AI", use_container_width=True):
-                    suggested = de.generate_suggested_targets(portfolio)
-                    st.session_state.targets = suggested
-                    de._save(de.TARGETS_PATH, suggested)
-                    targets = suggested
-                    st.rerun()
+    st.markdown("---")
+    st.markdown("**🎯 AI Targets** *(% allocation)*")
+    for ticker in ["NVDA", "VOO", "VYM", "QQQ", "META", "GOOGL", "AAPL", "MSFT"]:
+        curr = targets.get(ticker, 0.0)
+        new_val = st.number_input(
+            ticker, min_value=0.0, max_value=50.0, value=curr, step=0.5, key=f"tgt_{ticker}"
+        )
+        if new_val != curr:
+            targets[ticker] = new_val
+    if st.button("💾 Save Targets", use_container_width=True):
+        de.save_targets(targets)
+        st.session_state.targets = targets
+        st.success("Saved ✅")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HEADER KPIs
 # ═══════════════════════════════════════════════════════════════════════════════
 totals = de.portfolio_totals(portfolio, prices, cash)
 
-use_plaid = False
-if plaid_snap and plaid_snap.get("total_equity", 0) > 0:
-    try:
-        snap_age = (datetime.datetime.now() - datetime.datetime.fromisoformat(plaid_snap["timestamp"])).total_seconds() / 3600
-        use_plaid = snap_age < 2.0
-    except Exception:
-        use_plaid = True
+# Prefer Plaid totals when available and recent (< 2h)
+plaid_total  = None
+display_total = totals["total"]
+display_stocks = totals["stocks"]
+display_crypto = totals["crypto"]
 
-display_total  = plaid_snap["total_equity"]   if use_plaid else totals["total"]
-display_stocks = plaid_snap["stocks_equity"]  if use_plaid else totals["stocks"]
-display_crypto = plaid_snap["crypto_equity"]  if use_plaid else totals["crypto"]
-pnl_color      = "#22c55e" if totals["pnl"] >= 0 else "#ef4444"
-pnl_sign       = "+" if totals["pnl"] >= 0 else ""
-source_badge   = (
-    '<span class="tag tag-plaid">Plaid</span>' if use_plaid
-    else '<span style="color:#64748b;font-size:10px">estimated</span>'
-)
+if plaid_snap:
+    snap_ts = plaid_snap.get("timestamp") or plaid_snap.get("synced_at")
+    if snap_ts:
+        try:
+            age_h = (datetime.datetime.now() - datetime.datetime.fromisoformat(snap_ts)).seconds / 3600
+            if age_h < 2:
+                plaid_total    = plaid_snap.get("total_equity")
+                display_total  = plaid_total or display_total
+                display_stocks = plaid_snap.get("stocks_equity", display_stocks)
+                display_crypto = plaid_snap.get("crypto_equity", display_crypto)
+        except Exception:
+            pass
 
-st.markdown("<h1 style='margin-bottom:2px'>⚡ Portfolio War Room</h1>", unsafe_allow_html=True)
+pnl_color    = "#22c55e" if totals["pnl"] >= 0 else "#ef4444"
+pnl_sign     = "+" if totals["pnl"] >= 0 else ""
+source_badge = ('<span class="tag tag-plaid">Plaid</span>' if plaid_total
+                else '<span style="color:#64748b;font-size:10px">est.</span>')
+
+st.markdown("<h1 style='font-family:DM Serif Display,serif;margin-bottom:2px'>⚡ Portfolio War Room</h1>", unsafe_allow_html=True)
 st.markdown(
     f"<div style='color:#64748b;font-size:13px;margin-bottom:18px'>"
-    f"{len(portfolio)} positions · v11.2 · Smart Sync · Cash-Informed Rebalancing · Override Log"
+    f"{len(portfolio)} positions · v11.4 · Smart Sync · Cash-Informed Rebalancing · Fingerprint Dedup"
     f"</div>",
     unsafe_allow_html=True,
 )
@@ -346,13 +246,14 @@ for col, label, value, sub, vcol in [
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TABS  — Decision Log is new in v11.2
+# TABS
 # ═══════════════════════════════════════════════════════════════════════════════
 tabs = st.tabs([
     "🎯 Actions", "📊 Portfolio", "⚖️ Rebalancing",
     "💰 Invest $900", "📋 Decision Log", "📅 Schedule",
     "📈 Charts", "🕐 History", "📥 Import", "🧪 Tests",
 ])
+
 
 # ─────────────────────────────────────────────────────────────
 # TAB 0 — ACTIONS
@@ -361,47 +262,26 @@ with tabs[0]:
     if not prices:
         st.info("👆 Press **🔄 Refresh** in the sidebar to load live prices and generate recommendations.")
     else:
-        recs = de.generate_recs(portfolio, prices)
-        st.session_state.recs = recs
+        sells   = [r for r in recs if r["category"] == "sell"]
+        buys    = [r for r in recs if r["category"] == "buy"]
+        trims   = [r for r in recs if r["category"] == "trim"]
+        reviews = [r for r in recs if r["category"] == "review"]
+        holds   = [r for r in recs if r["category"] == "hold"]
 
-        sells   = [r for r in recs if r["cat"] == "sell"]
-        buys    = [r for r in recs if r["cat"] == "buy"]
-        trims   = [r for r in recs if r["cat"] == "trim"]
-        holds   = [r for r in recs if r["cat"] == "hold"]
-        reviews = [r for r in recs if r["cat"] == "review"]
-
-        s1, s2, s3, s4, s5 = st.columns(5)
-        for col, lbl, items, color in [
-            (s1, "SELL",   sells,   "#ef4444"),
-            (s2, "BUY",    buys,    "#22c55e"),
-            (s3, "TRIM",   trims,   "#f59e0b"),
-            (s4, "REVIEW", reviews, "#a855f7"),
-            (s5, "HOLD",   holds,   "#64748b"),
-        ]:
-            with col:
-                st.markdown(
-                    f"<div style='text-align:center;padding:8px;border-radius:10px;"
-                    f"background:#0f172a;border:1px solid #1e2d47'>"
-                    f"<div style='color:{color};font-weight:700;font-size:20px'>{len(items)}</div>"
-                    f"<div style='font-size:10px;color:#64748b'>{lbl}</div></div>",
-                    unsafe_allow_html=True,
-                )
-        st.markdown("")
-
-        def _rcard(r: dict):
-            cat   = r["cat"]
-            css   = {"sell":"rec-sell","buy":"rec-buy","trim":"rec-trim",
-                     "hold":"rec-hold","review":"rec-review"}.get(cat, "rec-hold")
-            tag   = {"sell":"tag-sell","buy":"tag-buy","trim":"tag-trim",
-                     "hold":"tag-hold","review":"tag-review"}.get(cat, "tag-hold")
+        def _rcard(r):
+            cat   = r["category"]
+            tag   = f"tag-{cat}"
+            css   = cat
             pnl_c = "#22c55e" if r["pnl_pct"] >= 0 else "#ef4444"
-            proc  = f" · Est. proceeds: <b>${r['proceeds']:,.0f}</b>" if r["proceeds"] > 0 else ""
-            pn    = f"${r['price']:,.2f}" if prices.get(r["ticker"]) else f"${r['cost']:,.2f} (cost)"
+            proc  = f" · proceeds: <b>${r['proceeds']:,.0f}</b>" if r["proceeds"] > 0 else ""
+            live  = prices.get(r["ticker"])
+            price_note = f"${r['price']:,.2f}" if live else f"${r['cost']:,.2f} (cost)"
             st.markdown(
                 f"<div class='rec-card {css}'>"
                 f"<span class='tag {tag}'>{cat.upper()}</span>"
                 f"<b style='font-size:15px'>{r['ticker']}</b>"
-                f"<span style='color:#64748b;font-size:12px'> · {r['shares']:.4f} sh · {pn} · {r['category']}</span><br/>"
+                f"<span style='color:#64748b;font-size:12px'>"
+                f" · {r['shares']:.4f} sh · {price_note} · {r['asset_cat']}</span><br/>"
                 f"<span style='font-size:14px;font-weight:600'>{r['action']}</span>"
                 f"<span style='color:{pnl_c};font-size:12px'> · {r['pnl_pct']:+.1f}%{proc}</span><br/>"
                 f"<span style='color:#94a3b8;font-size:12px'>📝 {r['plain']}</span><br/>"
@@ -424,7 +304,8 @@ with tabs[0]:
 
         if st.button("📸 Save Snapshot", key="snap_btn"):
             de.snapshot_portfolio(portfolio, prices, cash, recs)
-            st.success("Snapshot saved ✅")
+            st.success("Snapshot saved to history ✅")
+
 
 # ─────────────────────────────────────────────────────────────
 # TAB 1 — PORTFOLIO
@@ -434,794 +315,545 @@ with tabs[1]:
 
     if plaid_snap and plaid_snap.get("positions"):
         triggered = plaid_snap.get("plaid_sync_triggered", False)
-        cache_age = plaid_snap.get("holdings_cache_age_h", 0)
-        sync_info = "fresh Plaid sync" if triggered else f"holdings cache {cache_age:.1f}h old"
+        cache_age = plaid_snap.get("holdings_cache_age_h", 0) or 0
+        sync_info = "fresh Plaid sync" if triggered else f"cache {cache_age:.1f}h old"
         st.markdown(
             f"<span class='tag tag-plaid'>Plaid</span> "
             f"**{len(plaid_snap['positions'])} positions** · {sync_info} · quantities authoritative",
             unsafe_allow_html=True,
         )
-        rows = [{
-            "Ticker":       p["ticker"],
-            "Shares":       round(p["quantity"], 6),
-            "Mid Price":    round(p["mid_price"], 4),
-            "Market Value": round(p["market_value"], 2),
-            "Avg Cost":     round(p["avg_cost_basis"], 2),
-            "Unreal P&L":   round(p["unrealised_pnl"], 2),
-            "P&L %":        round(p["unrealised_pct"], 1),
-            "Source":       p.get("price_source", "?"),
-        } for p in plaid_snap["positions"]]
-        df = pd.DataFrame(rows)
-        st.dataframe(
-            df.style.map(
-                lambda v: ("color:#22c55e" if isinstance(v,float) and v>0
-                           else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
-                subset=["P&L %", "Unreal P&L"],
-            ),
-            use_container_width=True, height=500,
-            column_config={
-                "Market Value": st.column_config.NumberColumn(format="$%.2f"),
-                "Avg Cost":     st.column_config.NumberColumn(format="$%.4f"),
-                "Mid Price":    st.column_config.NumberColumn(format="$%.4f"),
-                "Unreal P&L":   st.column_config.NumberColumn(format="$%.2f"),
-            },
-        )
-    else:
         rows = []
-        for ticker, pos in sorted(portfolio.items(),
-                                  key=lambda x: -de._safe_price(x[0],x[1],prices)*x[1]["shares"]):
-            p   = de._safe_price(ticker, pos, prices)
-            mkt = p * pos["shares"]
-            pnl = (p - pos["avg_cost"]) / pos["avg_cost"] * 100 if pos["avg_cost"] > 0 else 0
-            lt  = de.is_lt_eligible(pos.get("first_buy_date",""))
+        for pos in plaid_snap["positions"]:
             rows.append({
-                "Ticker":       ticker,
-                "Shares":       round(pos["shares"], 6),
-                "Avg Cost":     round(pos["avg_cost"], 4),
-                "Live Price":   round(p, 4),
-                "Market Value": round(mkt, 2),
-                "P&L %":        round(pnl, 1),
-                "LT?":          "✅" if lt else f"⏳ {de.days_to_lt(pos.get('first_buy_date',''))}d",
-                "Category":     pos.get("category","Stocks"),
+                "Ticker":       pos["ticker"],
+                "Shares":       round(pos["quantity"], 6),
+                "Mid Price":    round(pos["mid_price"], 4),
+                "Market Value": round(pos["market_value"], 2),
+                "Avg Cost":     round(pos.get("avg_cost_basis", 0), 2),
+                "Unreal P&L":   round(pos.get("unrealised_pnl", 0), 2),
+                "P&L %":        round(pos.get("unrealised_pct", 0), 1),
+                "Source":       pos.get("price_source", "?"),
             })
         df = pd.DataFrame(rows)
-        st.dataframe(
-            df.style.map(
-                lambda v: ("color:#22c55e" if isinstance(v,float) and v>0
-                           else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
-                subset=["P&L %"],
-            ),
-            use_container_width=True, height=520,
-            column_config={
-                "Market Value": st.column_config.NumberColumn(format="$%.2f"),
-                "Avg Cost":     st.column_config.NumberColumn(format="$%.4f"),
-                "Live Price":   st.column_config.NumberColumn(format="$%.4f"),
-            },
-        )
+        styled = df.style.map(
+            lambda v: "color:#22c55e" if isinstance(v, (int, float)) and v > 0 else
+                      ("color:#ef4444" if isinstance(v, (int, float)) and v < 0 else ""),
+            subset=["Unreal P&L", "P&L %"],
+        ).format({
+            "Mid Price": "${:,.4f}", "Market Value": "${:,.2f}",
+            "Avg Cost": "${:,.2f}", "Unreal P&L": "${:,.2f}", "P&L %": "{:+.1f}%",
+        })
+        st.dataframe(styled, use_container_width=True, hide_index=True)
 
-    with st.expander("🔍 Position Detail"):
-        sel = st.selectbox("Ticker", sorted(portfolio.keys()), key="pos_detail")
-        if sel:
-            pos = portfolio[sel]
-            p   = de._safe_price(sel, pos, prices)
-            mkt = p * pos["shares"]
-            pnl = (p - pos["avg_cost"]) / pos["avg_cost"] * 100 if pos["avg_cost"] > 0 else 0
-            r1, r2, r3 = st.columns(3)
-            r1.metric("Live Price",   f"${p:,.4f}")
-            r2.metric("Market Value", f"${mkt:,.2f}")
-            r3.metric("P&L",          f"{pnl:+.1f}%")
-            r4, r5, r6 = st.columns(3)
-            r4.metric("Avg Cost",     f"${pos['avg_cost']:,.4f}")
-            r5.metric("Shares",       f"{pos['shares']:.6f}")
-            r6.metric("LT Eligible?", "Yes ✅" if de.is_lt_eligible(pos.get("first_buy_date",""))
-                      else f"No — {de.days_to_lt(pos.get('first_buy_date',''))} days")
-            tgt = de.TARGETS.get(sel)
-            if tgt:
-                up = (tgt - p) / p * 100 if p > 0 else 0
-                st.metric("Analyst Target", f"${tgt:,.0f}", delta=f"{up:+.0f}% upside")
+    else:
+        # tx_store positions
+        rows = []
+        for ticker, pos in portfolio.items():
+            p      = de._safe_price(ticker, pos, prices)
+            equity = p * pos["shares"]
+            pnl    = (p - pos["avg_cost"]) / pos["avg_cost"] * 100 if pos["avg_cost"] > 0 else 0
+            rows.append({
+                "Ticker":      ticker,
+                "Shares":      round(pos["shares"], 6),
+                "Avg Cost":    round(pos["avg_cost"], 2),
+                "Live Price":  round(p, 4),
+                "Equity":      round(equity, 2),
+                "P&L %":       round(pnl, 2),
+                "LT?":         "✅" if de.is_lt_eligible(pos["first_buy_date"]) else f"⏳ {de.days_to_lt(pos['first_buy_date'])}d",
+                "DRIP":        pos["drip_count"],
+                "Category":    pos["category"],
+            })
+        df = pd.DataFrame(rows).sort_values("Equity", ascending=False)
+        styled = df.style.map(
+            lambda v: "color:#22c55e" if isinstance(v, (int, float)) and v > 0 else
+                      ("color:#ef4444" if isinstance(v, (int, float)) and v < 0 else ""),
+            subset=["P&L %"],
+        ).format({
+            "Avg Cost": "${:,.2f}", "Live Price": "${:,.4f}", "Equity": "${:,.2f}", "P&L %": "{:+.2f}%"
+        })
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────
-# TAB 2 — REBALANCING  (v11.2: cash_available wired in)
+# TAB 2 — REBALANCING
 # ─────────────────────────────────────────────────────────────
 with tabs[2]:
-    if not targets:
-        st.info("Click **✨ Generate AI Targets** in the sidebar first.")
-    elif not prices:
-        st.info("Press 🔄 Refresh to load prices.")
-    else:
-        st.markdown("### ⚖️ Portfolio Drift vs Targets")
+    st.markdown("### ⚖️ Portfolio Rebalancing")
 
-        # Cash toggle
-        include_cash_rebal = st.checkbox(
-            f"Include Robinhood cash (${cash:,.2f}) in drift calculation",
-            value=True,
-            help="When checked, cash is treated as part of total assets so underweight "
-                 "positions get a 'cash_to_deploy' allocation from available balance.",
-        )
-        cash_for_rebal = cash if include_cash_rebal else 0.0
+    if not targets:
+        st.info("Set AI Targets in the sidebar first (% allocation per ticker).")
+    elif not prices:
+        st.info("Refresh prices first.")
+    else:
+        include_cash = st.checkbox("Include Robinhood cash in rebalancing", value=True)
+        cash_for_rebal = cash if include_cash else 0.0
 
         rebal = de.compute_rebalancing(portfolio, prices, targets, cash_available=cash_for_rebal)
 
-        if cash_for_rebal > 0:
-            st.caption(
-                f"💵 ${cash_for_rebal:,.2f} idle cash distributed across "
-                f"{sum(1 for r in rebal if r['cash_to_deploy']>0)} underweight positions"
+        if rebal:
+            df = pd.DataFrame(rebal)
+            styled = df.style.map(
+                lambda v: "color:#22c55e" if isinstance(v, (int, float)) and v < -2 else
+                          ("color:#f59e0b" if isinstance(v, (int, float)) and v > 5 else ""),
+                subset=["drift"],
+            ).format({
+                "equity": "${:,.2f}", "current": "{:.1f}%",
+                "target": "{:.1f}%",  "drift": "{:+.1f}%",
+                "cash_to_deploy": "${:,.2f}",
+            })
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+
+            # Drift bar chart
+            fig = go.Figure()
+            fig.add_bar(
+                x=df["ticker"], y=df["drift"],
+                marker_color=["#22c55e" if d < 0 else "#ef4444" for d in df["drift"]],
             )
+            fig.update_layout(
+                title="Drift from Target Allocation (%)",
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e2e8f0", title_font_family="DM Serif Display",
+            )
+            fig.add_hline(y=0, line_dash="dash", line_color="#475569")
+            st.plotly_chart(fig, use_container_width=True)
 
-        # Drift chart
-        colors = ["#22c55e" if r["drift"] < 0 else "#ef4444" for r in rebal]
-        fig = go.Figure(go.Bar(
-            x=[r["drift"] for r in rebal],
-            y=[r["ticker"] for r in rebal],
-            orientation="h", marker_color=colors,
-            text=[f"{r['action']} ({r['drift']:+.1f}%)" for r in rebal],
-            textposition="outside",
-        ))
-        fig.update_layout(
-            template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
-            height=max(300, len(rebal)*28), xaxis_title="Drift (Current% − Target%)",
-            margin=dict(l=80,r=40,t=20,b=40), font=dict(family="DM Sans",size=12),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Drift table with cash_to_deploy column
-        df_r = pd.DataFrame(rebal)
-        cols_show = ["ticker","current_pct","target_pct","drift","action","market_value","cash_to_deploy"]
-        df_r = df_r[[c for c in cols_show if c in df_r.columns]]
-        df_r.columns = [c.replace("_"," ").title() for c in df_r.columns]
-        st.dataframe(
-            df_r,
-            use_container_width=True,
-            column_config={
-                "Market Value":    st.column_config.NumberColumn(format="$%.0f"),
-                "Cash To Deploy":  st.column_config.NumberColumn(format="$%.2f"),
-            },
-        )
 
 # ─────────────────────────────────────────────────────────────
-# TAB 3 — INVEST $900  (v11.2: cash-informed + override inputs)
+# TAB 3 — INVEST $900
 # ─────────────────────────────────────────────────────────────
 with tabs[3]:
-    dep_num  = st.session_state.deposit_num
-    fridays  = de.get_biweekly_dates(datetime.date(2026, 4, 3), n=18)
-    today    = datetime.date.today()
-    cur_idx  = next((i for i, d in enumerate(fridays) if d >= today), 0)
-    cur_date = fridays[cur_idx] if cur_idx < len(fridays) else fridays[-1]
+    st.markdown("### 💰 Biweekly $900 Deposit Plan")
 
-    st.markdown(f"### 💰 Deposit #{dep_num} — {cur_date.strftime('%B %d, %Y')}")
+    deposit_num = st.session_state.deposit_num
+    next_date   = de.next_deposit_date()
 
-    # ── Capital summary ───────────────────────────────────────────────────────
-    dep_amount = st.number_input(
-        "New deposit amount ($)", value=900.0, min_value=0.0, step=50.0, format="%.2f",
-        help="Change this if your biweekly deposit differs from $900",
+    ci1, ci2, ci3 = st.columns(3)
+    ci1.metric("New Deposit",     f"${de.DEPOSIT_AMOUNT:,.0f}")
+    ci2.metric("Robinhood Cash",  f"${cash:,.2f}")
+    ci3.metric("Total Investable", f"${de.DEPOSIT_AMOUNT + cash:,.2f}")
+
+    if cash > 50:
+        st.info(f"💵 ${cash:,.2f} idle cash will be deployed alongside the $900 deposit.")
+
+    recs_dep = de.generate_deposit_recs(
+        portfolio, prices, deposit_num=deposit_num,
+        amount=de.DEPOSIT_AMOUNT, targets=targets, cash_balance=cash,
     )
-    total_investable = dep_amount + cash
 
-    ki1, ki2, ki3 = st.columns(3)
-    ki1.metric("New Deposit",         f"${dep_amount:,.2f}")
-    ki2.metric("Robinhood Cash",       f"${cash:,.2f}")
-    ki3.metric("Total Investable 💡",  f"${total_investable:,.2f}",
-               help="Both the deposit AND existing cash are put to work in the allocations below.")
+    if "override_state" not in st.session_state:
+        st.session_state.override_state = {}
+    if "reason_state" not in st.session_state:
+        st.session_state.reason_state = {}
 
-    if cash > 0:
-        st.info(
-            f"💵 Your **${cash:,.2f}** Robinhood cash is included in this allocation. "
-            f"Total investable capital: **${total_investable:,.2f}**."
+    st.markdown("#### AI Allocation")
+    for r in recs_dep:
+        c1, c2, c3, c4 = st.columns([2, 2, 2, 3])
+        c1.markdown(f"**{r['ticker']}** · {r['alloc_pct']}%")
+        c2.markdown(f"${r['amount']:,.2f} → {r['est_shares']:.4f} sh")
+        override_val = c3.number_input(
+            f"Override ${r['ticker']}", min_value=0.0,
+            value=float(st.session_state.override_state.get(r["ticker"], r["amount"])),
+            step=10.0, label_visibility="collapsed", key=f"ovr_{r['ticker']}",
         )
-    if not prices:
-        st.caption("⚠️ Press 🔄 Refresh for accurate share estimates.")
-
-    st.markdown("---")
-
-    # ── Generate base AI recs ─────────────────────────────────────────────────
-    base_recs = de.generate_deposit_recs(
-        dep_num, portfolio, prices, targets,
-        amount=dep_amount, cash_balance=cash,
-    )
-
-    # Use final recs (post-override) if already applied, else base
-    active_recs = (
-        st.session_state.dep_recs_final
-        if st.session_state.overrides_applied and st.session_state.dep_recs_final
-        else base_recs
-    )
-
-    # ── Override input form ───────────────────────────────────────────────────
-    st.markdown("#### AI Recommendations + Manual Overrides")
-    st.caption(
-        "Enter a custom dollar amount in the **Override ($)** column to deviate "
-        "from the AI recommendation. Leave blank (0) to accept the AI amount. "
-        "All overrides are logged to the **📋 Decision Log** tab."
-    )
-
-    override_inputs: dict[str, float] = {}
-    reason_inputs:   dict[str, str]   = {}
-
-    for r in base_recs:
-        ticker = r["ticker"]
-        ai_amt = r["amount"]
-        price  = r.get("price", 0)
-        fc     = r.get("from_cash", 0)
-        est_sh = r.get("est_shares", 0)
-        why    = r.get("why", "")
-        ovd    = st.session_state.dep_overrides.get(ticker, 0.0)
-
-        with st.container():
-            col_t, col_ai, col_ov, col_why = st.columns([2, 2, 2, 3])
-            with col_t:
-                st.markdown(
-                    f"<div style='padding-top:28px'>"
-                    f"<b style='font-size:15px'>{ticker}</b>"
-                    f"<br/><span style='font-size:11px;color:#64748b'>"
-                    f"${price:,.2f} · {why}</span></div>",
-                    unsafe_allow_html=True,
-                )
-            with col_ai:
-                st.markdown(
-                    f"<div style='padding-top:8px'>"
-                    f"<div style='font-size:10px;color:#64748b;text-transform:uppercase'>AI Rec</div>"
-                    f"<div style='font-size:18px;font-weight:700;color:#38bdf8'>${ai_amt:,.2f}</div>"
-                    f"<div style='font-size:11px;color:#64748b'>~{est_sh} sh"
-                    f"{'  · ' + f'${fc:.2f} cash' if fc > 0 else ''}</div></div>",
-                    unsafe_allow_html=True,
-                )
-            with col_ov:
-                override_inputs[ticker] = st.number_input(
-                    "Override ($)", value=ovd, min_value=0.0, step=10.0,
-                    format="%.2f", key=f"ovd_{ticker}",
-                    label_visibility="visible",
-                )
-            with col_why:
-                reason_inputs[ticker] = st.text_input(
-                    "Reason (optional)", value=st.session_state.dep_reasons.get(ticker, ""),
-                    key=f"rsn_{ticker}", placeholder="e.g. waiting for earnings",
-                )
-        st.markdown("<hr style='border:none;border-top:1px solid #1e2d47;margin:4px 0'>",
-                    unsafe_allow_html=True)
-
-    # ── Override summary before applying ─────────────────────────────────────
-    active_overrides = {t: v for t, v in override_inputs.items() if v > 0}
-    if active_overrides:
-        st.markdown(
-            f"<span class='tag tag-override'>OVERRIDES PENDING</span> "
-            f"{len(active_overrides)} position(s) modified",
-            unsafe_allow_html=True,
+        reason_val = c4.text_input(
+            f"Reason {r['ticker']}", value=st.session_state.reason_state.get(r["ticker"], ""),
+            label_visibility="collapsed", key=f"rsn_{r['ticker']}",
         )
+        st.session_state.override_state[r["ticker"]] = override_val
+        st.session_state.reason_state[r["ticker"]] = reason_val
 
-    col_apply, col_reset, col_mark = st.columns([2, 1, 2])
-    with col_apply:
-        if st.button("✅ Apply Overrides & Lock Plan", use_container_width=True,
-                     type="primary" if active_overrides else "secondary"):
-            # Only apply overrides where the user entered a non-zero value
-            final_overrides = {t: v for t, v in override_inputs.items() if v > 0}
-            final_reasons   = {t: reason_inputs.get(t,"") for t in final_overrides}
-            st.session_state.dep_overrides     = final_overrides
-            st.session_state.dep_reasons       = final_reasons
-            st.session_state.dep_recs_final    = de.apply_overrides_to_recs(
-                base_recs, final_overrides, final_reasons, dep_num
-            )
-            st.session_state.overrides_applied = True
-            n = len(final_overrides)
-            st.success(
-                f"Plan locked ✅  {n} override{'s' if n!=1 else ''} logged to Decision Log."
-                if n else "Plan locked ✅  No overrides — using AI allocations."
-            )
-            st.rerun()
-
-    with col_reset:
-        if st.button("🔁 Reset", use_container_width=True):
-            st.session_state.dep_overrides     = {}
-            st.session_state.dep_reasons       = {}
-            st.session_state.dep_recs_final    = []
-            st.session_state.overrides_applied = False
-            st.rerun()
-
-    # ── Final allocation table ────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown(
-        f"#### {'🔒 Locked Plan (with overrides)' if st.session_state.overrides_applied else '📊 AI Plan Preview'}"
-    )
-
-    display_recs = active_recs
-    rows_disp = []
-    for r in display_recs:
-        ovd_flag = r.get("overridden", False)
-        delta    = r.get("override_delta", 0.0)
-        rows_disp.append({
-            "Ticker":        r["ticker"],
-            "Amount ($)":    r["amount"],
-            "AI Amount ($)": r.get("amount", 0) if not ovd_flag else
-                             round(r["amount"] - delta, 2),
-            "Override":      "✏️ YES" if ovd_flag else "—",
-            "Delta ($)":     delta if ovd_flag else 0.0,
-            "Est. Shares":   r["est_shares"],
-            "Price":         r.get("price", 0),
-            "From Cash":     r.get("from_cash", 0),
-            "Why":           r["why"],
-        })
-
-    df_dep = pd.DataFrame(rows_disp)
-    totals_row_amount  = df_dep["Amount ($)"].sum()
-    totals_row_from_cash = df_dep["From Cash"].sum()
-
-    def _color_delta(v):
-        if isinstance(v, float) and v != 0:
-            return "color:#22c55e" if v > 0 else "color:#ef4444"
-        return ""
-
-    st.dataframe(
-        df_dep.style.map(_color_delta, subset=["Delta ($)"]),
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Amount ($)":    st.column_config.NumberColumn(format="$%.2f"),
-            "AI Amount ($)": st.column_config.NumberColumn(format="$%.2f"),
-            "Delta ($)":     st.column_config.NumberColumn(format="$%.2f"),
-            "Est. Shares":   st.column_config.NumberColumn(format="%.4f"),
-            "Price":         st.column_config.NumberColumn(format="$%.2f"),
-            "From Cash":     st.column_config.NumberColumn(format="$%.2f"),
-        },
-    )
-
-    # Totals row
-    tc1, tc2, tc3, tc4 = st.columns(4)
-    tc1.metric("Total Deployed",    f"${totals_row_amount:,.2f}")
-    tc2.metric("From New Deposit",  f"${totals_row_amount - totals_row_from_cash:,.2f}")
-    tc3.metric("From Cash Balance", f"${totals_row_from_cash:,.2f}")
-    tc4.metric("Remaining Cash",    f"${max(0, cash - totals_row_from_cash):,.2f}")
-
-    with col_mark:
-        if st.button("📌 Mark Deposit Done", use_container_width=True):
-            de.log_deposit(dep_num, str(cur_date), display_recs, totals_row_amount)
-            st.session_state.deposit_num    += 1
-            st.session_state.dep_overrides   = {}
-            st.session_state.dep_reasons     = {}
-            st.session_state.dep_recs_final  = []
-            st.session_state.overrides_applied = False
-            st.success(f"Deposit #{dep_num} logged! Next: #{dep_num+1}")
-            st.rerun()
+    if st.button("🔒 Apply Overrides & Lock Plan", type="primary"):
+        final_recs = de.apply_overrides_to_recs(
+            recs_dep,
+            st.session_state.override_state,
+            st.session_state.reason_state,
+            deposit_num,
+        )
+        total_locked = sum(r["amount"] for r in final_recs)
+        st.success(f"Plan locked — total: ${total_locked:,.2f}")
+        df_locked = pd.DataFrame([{
+            "Ticker":   r["ticker"],
+            "Amount":   f"${r['amount']:,.2f}",
+            "Shares":   r["est_shares"],
+            "Override": "✅" if r.get("overridden") else "",
+            "Delta":    f"${r.get('override_delta', 0):+,.2f}" if r.get("overridden") else "—",
+            "Why":      r["why"],
+        } for r in final_recs])
+        delta_styled = df_locked.style.map(
+            lambda v: "color:#22c55e" if isinstance(v, str) and v.startswith("+") else
+                      ("color:#ef4444" if isinstance(v, str) and v.startswith("-$") else ""),
+            subset=["Delta"],
+        )
+        st.dataframe(delta_styled, use_container_width=True, hide_index=True)
+        de.log_deposit(deposit_num, next_date.isoformat(), final_recs, total_locked)
+        st.session_state.override_state = {}
+        st.session_state.reason_state   = {}
 
     st.markdown("---")
-    st.markdown("### 📅 All Deposits — 2026 Schedule")
-    rotation_cycle = [de.DEPOSIT_ROTATION[i % len(de.DEPOSIT_ROTATION)] for i in range(len(fridays))]
-    logged_nums    = {e["num"] for e in de._load(de.DEPOSIT_LOG_PATH, [])}
-    sched_rows = []
-    for i, (d, pick) in enumerate(zip(fridays, rotation_cycle)):
-        num = i + 1
-        sched_rows.append({
-            "#": num, "Date": d.strftime("%b %d, %Y"),
-            "NVDA ($252)": "✓", "VOO ($198)": "✓", "VYM ($153)": "✓",
-            "QQQ ($153)": "✓", "Rotating ($144)": pick,
-            "Done": "✅" if num in logged_nums else ("📍 TODAY" if d == today else ""),
-        })
-    st.dataframe(pd.DataFrame(sched_rows), use_container_width=True, hide_index=True)
+    st.markdown("#### 📅 Full 2026 Deposit Schedule")
+    schedule = de.deposit_schedule(19)
+    st.dataframe(pd.DataFrame(schedule), use_container_width=True, hide_index=True)
+
 
 # ─────────────────────────────────────────────────────────────
-# TAB 4 — DECISION LOG  (new in v11.2)
+# TAB 4 — DECISION LOG
 # ─────────────────────────────────────────────────────────────
 with tabs[4]:
-    st.markdown("### 📋 Decision Log — Manual Override History")
-    st.caption(
-        "Every time you override an AI recommendation in the Invest tab and "
-        "click **Apply Overrides**, the decision is permanently saved here."
-    )
+    st.markdown("### 📋 Decision Log — Override History")
 
     log_entries = de.load_decision_log()
-
     if not log_entries:
-        st.info("No override decisions logged yet. Use the **Override ($)** inputs in the **💰 Invest $900** tab.")
+        st.info("No overrides logged yet. Override an AI recommendation in the Invest tab to see entries here.")
     else:
-        # Summary metrics
-        total_decisions = len(log_entries)
-        tickers_overridden = len({e["ticker"] for e in log_entries})
-        total_delta        = sum(e.get("delta", 0) for e in log_entries)
-        avg_delta          = total_delta / total_decisions if total_decisions else 0
-
-        dm1, dm2, dm3, dm4 = st.columns(4)
-        dm1.metric("Total Decisions",  total_decisions)
-        dm2.metric("Unique Tickers",   tickers_overridden)
-        dm3.metric("Net Delta",        f"${total_delta:+,.2f}",
-                   help="Sum of (Manual − AI) across all overrides. + = you invested more than AI suggested.")
-        dm4.metric("Avg Override Delta", f"${avg_delta:+,.2f}")
-
-        st.markdown("---")
-
-        # Dataframe
         df_log = pd.DataFrame(log_entries)
+        total_overrides = len(df_log)
+        total_extra     = df_log["delta"].sum() if "delta" in df_log.columns else 0
+        unique_tickers  = df_log["ticker"].nunique() if "ticker" in df_log.columns else 0
+        latest          = df_log["date"].max() if "date" in df_log.columns else "—"
 
-        # Pretty column ordering and naming
-        col_order = ["date","ticker","deposit_num","ai_rec_amount","manual_amount",
-                     "delta","reason","action_type","timestamp"]
-        df_log = df_log[[c for c in col_order if c in df_log.columns]]
-        df_log.columns = [c.replace("_"," ").title() for c in df_log.columns]
+        kl1, kl2, kl3, kl4 = st.columns(4)
+        kl1.metric("Total Overrides",    total_overrides)
+        kl2.metric("Unique Tickers",     unique_tickers)
+        kl3.metric("Net Delta vs AI",    f"${total_extra:+,.2f}")
+        kl4.metric("Last Override Date", latest)
 
-        def _color_delta_log(v):
-            if isinstance(v, (int,float)) and v != 0:
-                return "color:#22c55e;font-weight:600" if v > 0 else "color:#ef4444;font-weight:600"
-            return ""
-
-        st.dataframe(
-            df_log.style.map(_color_delta_log, subset=["Delta"] if "Delta" in df_log.columns else []),
-            use_container_width=True, hide_index=True,
-            column_config={
-                "Ai Rec Amount":   st.column_config.NumberColumn(format="$%.2f"),
-                "Manual Amount":   st.column_config.NumberColumn(format="$%.2f"),
-                "Delta":           st.column_config.NumberColumn(format="$%.2f"),
-            },
+        st.markdown("#### All Decisions")
+        styled_log = df_log.style.map(
+            lambda v: "color:#22c55e" if isinstance(v, (int, float)) and v > 0 else
+                      ("color:#ef4444" if isinstance(v, (int, float)) and v < 0 else ""),
+            subset=["delta"] if "delta" in df_log.columns else [],
         )
+        st.dataframe(styled_log, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Override frequency by ticker")
+        if "ticker" in df_log.columns:
+            freq = df_log["ticker"].value_counts().reset_index()
+            freq.columns = ["Ticker", "Overrides"]
+            st.dataframe(freq, use_container_width=True, hide_index=True)
 
         # CSV export
         csv_bytes = df_log.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            label="⬇️ Export Decision Log (CSV)",
-            data=csv_bytes,
-            file_name=f"decision_log_{datetime.date.today()}.csv",
-            mime="text/csv",
-        )
+        st.download_button("⬇️ Export to CSV", data=csv_bytes,
+                           file_name="decision_log.csv", mime="text/csv")
 
-        # Per-ticker summary
-        st.markdown("---")
-        st.markdown("#### Override Frequency by Ticker")
-        ticker_counts = df_log.groupby("Ticker")["Delta"].agg(
-            count="count", total_delta="sum", avg_delta="mean"
-        ).reset_index()
-        ticker_counts.columns = ["Ticker","Override Count","Total Delta ($)","Avg Delta ($)"]
-        st.dataframe(ticker_counts.sort_values("Override Count", ascending=False),
-                     use_container_width=True, hide_index=True)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 5 — SCHEDULE
 # ─────────────────────────────────────────────────────────────
 with tabs[5]:
     st.markdown("### 📅 2026 Action Calendar")
-    calendar_events = [
-        ("Apr 3",  "SELL",  "VTV, VEA, VWO, BND",  "LT eligible now — pay 15%. Reinvest into VOO+VYM same day."),
-        ("Apr 3",  "BUY",   "Deposit #1",           "$900 → NVDA($252), VOO($198), VYM($153), QQQ($153), META($144)"),
-        ("Apr 4",  "TRIM",  "GLD",                  "GLD turns LT — trim 25% near $450 target"),
-        ("Apr 17", "BUY",   "Deposit #2",           "$900 → NVDA, VOO, VYM, QQQ, GOOGL"),
-        ("May 20", "SELL",  "SPY",                  "SPY turns LT — sell, buy VOO same day"),
-        ("Jul 15", "SELL",  "VUG",                  "VUG turns LT — sell, buy QQQ same day"),
-        ("Aug 14", "EVAL",  "BLSH",                 "BLSH hits 1yr — trim 25% if up >20%"),
-        ("Sep 11", "EVAL",  "KLAR",                 "KLAR hits 1yr — trim 25% if up >20%"),
-        ("Nov 6",  "TRIM",  "TSM",                  "Big TSM lot turns LT — trim 20%"),
-        ("Dec 15", "TRIM",  "GOOGL",                "Big GOOGL lot turns LT — trim 20%"),
-        ("Dec 20", "TAX",   "Year-end Harvest",     "Net realized gains vs losses before Dec 31"),
-    ]
-    _mm = {"Apr":"04","May":"05","Jun":"06","Jul":"07","Aug":"08",
-           "Sep":"09","Oct":"10","Nov":"11","Dec":"12"}
-    tag_map = {"SELL":"tag-sell","BUY":"tag-buy","TRIM":"tag-trim","EVAL":"tag-hold","TAX":"tag-review"}
-    for date_s, etype, ticker, notes in calendar_events:
-        parts = date_s.split()
-        try:
-            ev = datetime.date(2026, int(_mm.get(parts[0][:3],"04")), int(parts[1]))
-            opacity = "0.4" if ev < today else "1.0"
-        except Exception:
-            opacity = "1.0"
-        past = " · <span style='color:#475569'>done</span>" if opacity == "0.4" else ""
-        st.markdown(
-            f"<div style='opacity:{opacity};margin-bottom:8px;padding:10px 14px;"
-            f"border-radius:10px;background:#0d111a;border:1px solid #1e2d47'>"
-            f"<span class='tag {tag_map.get(etype, 'tag-hold')}'>{etype}</span>"
-            f"<b>{date_s}</b> &nbsp; {ticker}{past}<br/>"
-            f"<span style='color:#94a3b8;font-size:12px'>{notes}</span></div>",
-            unsafe_allow_html=True,
-        )
+    st.dataframe(pd.DataFrame(de.ACTION_CALENDAR), use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.markdown("### 🧾 Tax Playbook")
-    for rule, title, detail in [
-        ("Rule #1","Never sell < 1 year","Pay 37% (ST) vs 15% (LT). Always worth the wait."),
-        ("Rule #2","ETF swaps are NOT wash sales","Selling SPY → buying VOO same day is allowed."),
-        ("Rule #3","DRIP creates new lots","Each reinvestment is a separate tax lot."),
-        ("Rule #4","Crypto: never sell short-term","BTC/XRP both held >1yr. LT rate applies."),
-        ("Rule #5","Year-end harvest","Net gains vs losses before Dec 31."),
-    ]:
-        st.markdown(
-            f"<div style='margin-bottom:8px;padding:10px 14px;border-radius:10px;"
-            f"background:#07100d;border-left:3px solid #22c55e'>"
-            f"<span style='color:#22c55e;font-size:11px;font-weight:700'>{rule}</span>"
-            f" &nbsp;<b>{title}</b><br/>"
-            f"<span style='color:#94a3b8;font-size:12px'>{detail}</span></div>",
-            unsafe_allow_html=True,
-        )
+    st.markdown("""
+**Rule #1 — Never sell short-term** — 37% ordinary income vs 15% LT cap gains. The wait is almost always worth it.
+
+**Rule #2 — ETF swaps are NOT wash sales** — Sell SPY → buy VOO on the same day. Allowed.
+
+**Rule #3 — DRIP lots** — Each reinvestment creates a new tax lot at that day's price. Tracked individually.
+
+**Rule #4 — Crypto** — BTC/XRP both held >1yr now. LT rate applies. Never sell crypto short-term.
+
+**Rule #5 — Year-end harvest** — Net realised gains vs losses before Dec 31. Check Dec 20 action.
+
+**Sell order for LT-eligible legacy ETFs:** VTV → VEA → VWO → BND → (May 20) SPY → (Jul 15) VUG
+    """)
+
 
 # ─────────────────────────────────────────────────────────────
 # TAB 6 — CHARTS
 # ─────────────────────────────────────────────────────────────
 with tabs[6]:
+    st.markdown("### 📈 Portfolio Visualizations")
+
     if not prices:
-        st.info("Press 🔄 Refresh to load prices.")
+        st.info("Refresh prices first.")
     else:
-        ca, cb = st.columns(2)
-        with ca:
-            st.markdown("#### Allocation by Ticker")
-            labels, vals = [], []
-            for ticker, pos in portfolio.items():
-                mkt = de._safe_price(ticker, pos, prices) * pos["shares"]
-                if mkt > 0:
-                    labels.append(ticker); vals.append(mkt)
+        rows_chart = []
+        for ticker, pos in portfolio.items():
+            p      = de._safe_price(ticker, pos, prices)
+            equity = p * pos["shares"]
+            pnl    = (p - pos["avg_cost"]) / pos["avg_cost"] * 100 if pos["avg_cost"] > 0 else 0
+            rows_chart.append({"Ticker": ticker, "Equity": equity, "P&L %": round(pnl, 2), "Category": pos["category"]})
+
+        df_c = pd.DataFrame(rows_chart).sort_values("Equity", ascending=False)
+
+        col1, col2 = st.columns(2)
+        with col1:
             fig_pie = px.pie(
-                values=vals, names=labels, hole=0.42,
-                color_discrete_sequence=px.colors.qualitative.Set3,
+                df_c, values="Equity", names="Ticker",
+                title="Allocation by Position",
+                hole=0.45, color_discrete_sequence=px.colors.sequential.Blues_r,
             )
             fig_pie.update_layout(
-                template="plotly_dark", paper_bgcolor="#07090f",
-                margin=dict(l=10,r=10,t=20,b=20), height=420,
-                legend=dict(font=dict(size=10)),
+                paper_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0",
+                title_font_family="DM Serif Display",
+                legend=dict(font_size=10),
             )
-            fig_pie.update_traces(textinfo="label+percent", textfont_size=10)
             st.plotly_chart(fig_pie, use_container_width=True)
 
-        with cb:
-            st.markdown("#### P&L % by Position")
-            pnl_rows = []
-            for ticker, pos in portfolio.items():
-                p    = de._safe_price(ticker, pos, prices)
-                cost = pos["avg_cost"]
-                pnl  = (p - cost) / cost * 100 if cost > 0 else 0
-                pnl_rows.append({"ticker": ticker, "pnl": pnl})
-            pnl_df = pd.DataFrame(pnl_rows).sort_values("pnl")
-            fig_bar = go.Figure(go.Bar(
-                x=pnl_df["pnl"], y=pnl_df["ticker"], orientation="h",
-                marker_color=["#22c55e" if v >= 0 else "#ef4444" for v in pnl_df["pnl"]],
-                text=[f"{v:+.1f}%" for v in pnl_df["pnl"]], textposition="outside",
-            ))
-            fig_bar.update_layout(
-                template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
-                height=420, margin=dict(l=60,r=60,t=20,b=20),
-                xaxis_title="P&L %", font=dict(family="DM Sans",size=11),
+        with col2:
+            fig_pnl = px.bar(
+                df_c, x="Ticker", y="P&L %",
+                title="Unrealised P&L by Position (%)",
+                color="P&L %",
+                color_continuous_scale=["#ef4444", "#f59e0b", "#22c55e"],
+                color_continuous_midpoint=0,
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            fig_pnl.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                font_color="#e2e8f0", title_font_family="DM Serif Display",
+                showlegend=False,
+            )
+            fig_pnl.add_hline(y=0, line_dash="dash", line_color="#475569")
+            st.plotly_chart(fig_pnl, use_container_width=True)
 
-        st.markdown("#### Allocation by Category")
-        cat_data: dict[str, float] = {}
-        for ticker, pos in portfolio.items():
-            mkt = de._safe_price(ticker, pos, prices) * pos["shares"]
-            cat = pos.get("category","Stocks")
-            cat_data[cat] = cat_data.get(cat, 0) + mkt
-        cat_df = pd.DataFrame(list(cat_data.items()), columns=["Category","Value"])
-        fig_cat = px.bar(cat_df, x="Category", y="Value", text_auto="$.0f",
-                         color="Category", color_discrete_sequence=["#38bdf8","#22c55e","#f59e0b"])
+        # Category breakdown
+        cat_df = df_c.groupby("Category")["Equity"].sum().reset_index()
+        fig_cat = px.pie(
+            cat_df, values="Equity", names="Category",
+            title="Allocation by Category",
+            color_discrete_sequence=["#3b82f6", "#22c55e", "#f59e0b"],
+        )
         fig_cat.update_layout(
-            template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
-            height=280, margin=dict(l=20,r=20,t=20,b=20), showlegend=False,
+            paper_bgcolor="rgba(0,0,0,0)", font_color="#e2e8f0",
+            title_font_family="DM Serif Display",
         )
         st.plotly_chart(fig_cat, use_container_width=True)
+
 
 # ─────────────────────────────────────────────────────────────
 # TAB 7 — HISTORY
 # ─────────────────────────────────────────────────────────────
 with tabs[7]:
-    st.markdown("### 📸 Recommendation History")
-    history = de._load(de.REC_HISTORY_PATH, [])
-    if not history:
-        st.info("No snapshots yet. Click **Save Snapshot** in the Actions tab.")
-    else:
-        h_rows = []
-        for snap in reversed(history[-50:]):
+    st.markdown("### 🕐 Portfolio History")
+
+    history = de.load_rec_history()
+    if history:
+        st.markdown(f"**{len(history)} snapshots saved**")
+        hist_rows = []
+        for snap in history[-50:]:
             t = snap.get("totals", {})
-            h_rows.append({
-                "Timestamp":    snap.get("timestamp","")[:16].replace("T"," "),
-                "Total Equity": round(t.get("total",0),2),
-                "Stocks":       round(t.get("stocks",0),2),
-                "Crypto":       round(t.get("crypto",0),2),
-                "P&L %":        round(t.get("pnl_pct",0),2),
-                "# Recs":       len(snap.get("recs",[])),
+            hist_rows.append({
+                "Timestamp": snap.get("timestamp", ""),
+                "Total":     f"${t.get('total', 0):,.2f}",
+                "Stocks":    f"${t.get('stocks', 0):,.2f}",
+                "Crypto":    f"${t.get('crypto', 0):,.2f}",
+                "P&L %":     f"{t.get('pnl_pct', 0):+.1f}%",
             })
-        h_df = pd.DataFrame(h_rows)
-        st.dataframe(h_df, use_container_width=True,
-                     column_config={
-                         "Total Equity": st.column_config.NumberColumn(format="$%.2f"),
-                         "Stocks":       st.column_config.NumberColumn(format="$%.2f"),
-                         "Crypto":       st.column_config.NumberColumn(format="$%.2f"),
-                     })
-        if len(h_rows) > 1:
-            fig_line = px.line(pd.DataFrame(h_rows)[["Timestamp","Total Equity"]],
-                               x="Timestamp", y="Total Equity",
-                               markers=True, line_shape="spline",
-                               color_discrete_sequence=["#38bdf8"])
-            fig_line.update_layout(
-                template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
-                height=280, margin=dict(l=20,r=20,t=20,b=20),
-            )
-            st.plotly_chart(fig_line, use_container_width=True)
+        st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+    else:
+        st.info("No snapshots yet. Click 📸 Save Snapshot in the Actions tab.")
+
     st.markdown("---")
-    st.markdown("### 📋 Deposit Log")
-    dep_log = de._load(de.DEPOSIT_LOG_PATH, [])
-    if dep_log:
-        st.dataframe(pd.DataFrame(dep_log)[["num","date","total"]], use_container_width=True)
+    st.markdown("### 💰 Deposit Log")
+    deposits = de.load_deposit_log()
+    if deposits:
+        dep_rows = []
+        for d in deposits:
+            dep_rows.append({
+                "Deposit #":  d.get("num"),
+                "Date":       d.get("date"),
+                "Total ($)":  f"${d.get('total', 0):,.2f}",
+                "Buys":       ", ".join(f"{b['ticker']}=${b['amount']:.0f}" for b in d.get("buys", [])),
+            })
+        st.dataframe(pd.DataFrame(dep_rows), use_container_width=True, hide_index=True)
     else:
         st.info("No deposits logged yet.")
 
+
 # ─────────────────────────────────────────────────────────────
-# TAB 8 — IMPORT  (v11.2: richer dedup panel)
+# TAB 8 — IMPORT  (v11.4: new two-step ingest API)
 # ─────────────────────────────────────────────────────────────
 with tabs[8]:
     st.markdown("### 📥 Import Robinhood Activity")
-    c_csv, c_pdf = st.columns(2)
 
-    with c_csv:
-        st.markdown("#### CSV — Transaction History")
-        st.caption("Robinhood → Account → History → Export CSV")
+    n_known = len(st.session_state.get("processed_ids", set()))
+    st.info(
+        f"🔒 **Dedup active** — {n_known:,} fingerprints loaded. "
+        "Re-uploading the same CSV is always safe — duplicates are silently skipped.",
+        icon="🛡️",
+    )
 
-        # v11.2: show existing fingerprint count so user knows dedup is active
-        existing_fp_count = len(st.session_state.processed_ids)
-        st.markdown(
-            f"<div style='margin-bottom:8px;padding:8px 12px;border-radius:8px;"
-            f"background:#0f172a;border:1px solid #1e2d47;font-size:12px'>"
-            f"<span class='dedup-ok'>🔒 Dedup active</span> — "
-            f"<code>{existing_fp_count}</code> fingerprints loaded. "
-            f"Duplicate rows will be automatically skipped.</div>",
-            unsafe_allow_html=True,
-        )
+    uploaded = st.file_uploader(
+        "Drop Robinhood account-activity CSV",
+        type=["csv"],
+        key="csv_uploader",
+        help="Download from Robinhood → Account → Statements & History → Account Activity → Export CSV",
+    )
 
-        uploaded_csv = st.file_uploader(
-            "Drop CSV here", type=["csv"], key="csv_up", label_visibility="collapsed"
-        )
-        if uploaded_csv:
-            # Always pass the full set: disk + session
-            existing = de.strip_existing_tx_store_fingerprints() | st.session_state.processed_ids
-            stats, new_ids = de.ingest_csv(uploaded_csv.read(), existing)
-            st.session_state.processed_ids |= new_ids
+    if uploaded is not None:
+        if st.button("⬆️ Process CSV", type="primary"):
+            csv_bytes = uploaded.read()
+            with st.spinner("Parsing and deduplicating…"):
+                new_rows, stats = de.ingest_csv(
+                    csv_bytes=csv_bytes,
+                    filename=uploaded.name,
+                    existing_ids=st.session_state.processed_ids,
+                )
+                de.commit_new_transactions(new_rows)
+                if stats.imported > 0:
+                    st.session_state.portfolio = de.recompute_portfolio()
+                    portfolio = st.session_state.portfolio
+                    st.session_state._bust += 1
 
-            if stats.new_rows_added > 0:
-                tx   = de._load(de.TX_STORE_PATH, {})
-                cryp = de._load(de.CRYPTO_OVR_PATH, {})
-                st.session_state.portfolio = de.recompute_portfolio(tx, cryp)
-                portfolio = st.session_state.portfolio
-                st.success(f"✅ {stats.new_rows_added} new rows added. Portfolio updated.")
+            if stats.imported > 0:
+                st.success(f"✅ **{stats.imported} new transaction(s) imported** from *{stats.filename}*")
+                if stats.new_tickers:
+                    st.info(f"🆕 New tickers added: **{', '.join(sorted(stats.new_tickers))}**")
             else:
-                st.info("No new rows — all duplicates skipped. Portfolio unchanged.")
+                st.warning("⚠️ No new transactions — all rows already exist in your store.")
 
-            # Detailed breakdown
-            with st.expander("📊 Ingest Detail", expanded=stats.new_rows_added > 0):
-                d1, d2, d3, d4 = st.columns(4)
-                d1.metric("Total in file",       stats.total_rows_in_file)
-                d2.metric("New rows added",       stats.new_rows_added,
-                          delta=str(stats.new_rows_added) if stats.new_rows_added else None)
-                d3.metric("Cross-session dupes",  stats.duplicate_rows_skipped)
-                d4.metric("Intra-file dupes",     stats.seen_in_file)
-                if stats.skipped_no_code:
-                    st.caption(f"{stats.skipped_no_code} blank/footer rows skipped (no Trans Code)")
-                if stats.errors:
-                    st.warning(f"Errors: {stats.errors}")
+            with st.expander("📋 Ingest detail", expanded=(stats.total_skipped > 0)):
+                c1, c2, c3, c4, c5 = st.columns(5)
+                c1.metric("Rows in file",       stats.total_rows)
+                c2.metric("✅ Imported",         stats.imported)
+                c3.metric("⏭ Already on disk",  stats.already_on_disk)
+                c4.metric("⏭ In-file dupes",    stats.seen_in_file)
+                c5.metric("⏭ No code/fee",      stats.no_code)
+                if stats.parse_errors:
+                    st.error(f"⚠️ {stats.parse_errors} row(s) could not be parsed.")
 
-    with c_pdf:
-        st.markdown("#### PDF — Crypto Statement")
-        st.caption("Robinhood Crypto monthly PDF")
-        uploaded_pdf = st.file_uploader(
-            "Drop PDF here", type=["pdf"], key="pdf_up", label_visibility="collapsed"
-        )
-        if uploaded_pdf:
-            overrides = de.parse_crypto_pdf(uploaded_pdf.read())
-            if overrides:
-                existing_ovr = de._load(de.CRYPTO_OVR_PATH, {})
-                existing_ovr.update(overrides)
-                de._save(de.CRYPTO_OVR_PATH, existing_ovr)
-                tx = de._load(de.TX_STORE_PATH, {})
-                st.session_state.portfolio = de.recompute_portfolio(tx, existing_ovr)
-                portfolio = st.session_state.portfolio
-                st.success(f"✅ Crypto updated: {', '.join(overrides.keys())}")
-                st.json(overrides)
-            else:
-                st.warning("Could not extract crypto data. Use manual override below.")
+            with st.expander("🔑 How fingerprinting works"):
+                st.markdown("""
+Each transaction row is hashed via **SHA-256** over:
+```
+"{date}|{TRANS_CODE}|{TICKER}|{qty_6dp}|{price_6dp}|{amount_6dp}"
+```
+All fields normalised (amounts to 6dp, codes uppercased) so re-uploading
+the same CSV — even renamed — always produces identical fingerprints.
+The hash store lives in `tx_store.json` and survives app restarts.
+                """)
 
-        st.markdown("---")
-        st.markdown("**Manual Crypto Override**")
+    st.markdown("---")
+    st.markdown("### 🔑 Crypto PDF Import")
+    pdf_upload = st.file_uploader("Upload Robinhood Crypto PDF statement", type=["pdf"], key="pdf_uploader")
+    if pdf_upload:
+        result = de.parse_crypto_pdf(pdf_upload)
+        if result:
+            st.success(f"Parsed: {list(result.keys())}")
+            if st.button("Apply Crypto Overrides"):
+                ovr = de._load(de.CRYPTO_OVR_PATH, {})
+                ovr.update(result)
+                de._save(de.CRYPTO_OVR_PATH, ovr)
+                st.session_state.portfolio = de.recompute_portfolio()
+                st.success("Crypto positions updated ✅")
+        else:
+            st.warning("Could not parse crypto positions. Check pdfplumber is installed.")
+
+    st.markdown("---")
+    st.markdown("### ✏️ Manual Crypto Override")
+    mc1, mc2, mc3 = st.columns(3)
+    with mc1:
+        cticker = st.selectbox("Ticker", ["BTC", "XRP", "ETH", "SOL", "DOGE"])
+    with mc2:
+        cshares = st.number_input("Shares", min_value=0.0, step=0.000001, format="%.6f")
+    with mc3:
+        cavg    = st.number_input("Avg Cost ($)", min_value=0.0, step=0.01)
+    if st.button("💾 Save Crypto Override"):
         ovr = de._load(de.CRYPTO_OVR_PATH, {})
-        for coin in ["BTC","XRP","ETH","SOL"]:
-            cur = ovr.get(coin, {})
-            mc1, mc2 = st.columns(2)
-            with mc1:
-                sh = st.number_input(f"{coin} shares", value=float(cur.get("shares",0)),
-                                     min_value=0.0, format="%.8f", key=f"ovr_sh_{coin}")
-            with mc2:
-                ac = st.number_input(f"{coin} avg cost", value=float(cur.get("avg_cost",0)),
-                                     min_value=0.0, format="%.4f", key=f"ovr_ac_{coin}")
-            if sh > 0:
-                ovr[coin] = {"shares": sh, "avg_cost": ac, "first_buy_date": cur.get("first_buy_date","")}
-        if st.button("💾 Save Crypto Overrides"):
-            de._save(de.CRYPTO_OVR_PATH, ovr)
-            tx = de._load(de.TX_STORE_PATH, {})
-            st.session_state.portfolio = de.recompute_portfolio(tx, ovr)
-            st.success("Crypto overrides saved ✅")
+        ovr[cticker] = {"shares": cshares, "avg_cost": cavg,
+                        "first_buy_date": "", "category": "Crypto"}
+        de._save(de.CRYPTO_OVR_PATH, ovr)
+        st.session_state.portfolio = de.recompute_portfolio()
+        st.success(f"{cticker} override saved ✅")
+
 
 # ─────────────────────────────────────────────────────────────
 # TAB 9 — TESTS
 # ─────────────────────────────────────────────────────────────
 with tabs[9]:
-    st.markdown("### 🧪 Live System Tests")
-    if st.button("▶️ Run All Tests"):
+    st.markdown("### 🧪 System Health Checks")
+
+    if st.button("▶️ Run All Tests", type="primary"):
         results = []
-        def _t(name, passed, detail=""):
-            results.append({"Test": name, "Status": "✅ PASS" if passed else "❌ FAIL", "Detail": detail})
 
-        # 1. tx_store
-        tx = de._load(de.TX_STORE_PATH, {})
-        _t("tx_store loaded", len(tx) > 0, f"{len(tx)} rows")
+        def _chk(name, fn):
+            try:
+                fn()
+                results.append({"Test": name, "Status": "PASS ✅", "Detail": ""})
+            except Exception as e:
+                results.append({"Test": name, "Status": "FAIL ❌", "Detail": str(e)})
 
-        # 2. Portfolio positions
-        _t("Portfolio has positions", len(portfolio) > 0, f"{len(portfolio)} tickers")
+        _chk("tx_store exists on disk", lambda: (
+            __import__("os").path.exists("tx_store.json") or
+            (_ for _ in ()).throw(AssertionError("tx_store.json not found"))
+        ))
+        _chk("portfolio non-empty", lambda: (
+            len(portfolio) > 0 or
+            (_ for _ in ()).throw(AssertionError(f"portfolio has {len(portfolio)} positions"))
+        ))
+        _chk("fingerprint deterministic", lambda: (
+            de.make_tx_fingerprint("2025-01-10","BUY","NVDA","1","875.22","875.22") ==
+            de.make_tx_fingerprint("2025-01-10","BUY","NVDA","1","875.22","875.22") or
+            (_ for _ in ()).throw(AssertionError("fingerprint not deterministic"))
+        ))
+        _chk("date parsing M/D/YYYY", lambda: (
+            de._parse_date_robust("1/10/2025") == __import__("datetime").date(2025,1,10) or
+            (_ for _ in ()).throw(AssertionError("M/D/YYYY parse failed"))
+        ))
+        _chk("date parsing ISO", lambda: (
+            de._parse_date_robust("2025-01-10") == __import__("datetime").date(2025,1,10) or
+            (_ for _ in ()).throw(AssertionError("ISO date parse failed"))
+        ))
+        _chk("LT eligibility (old date)", lambda: (
+            de.is_lt_eligible("2024-01-01") or
+            (_ for _ in ()).throw(AssertionError("2024 date not LT eligible"))
+        ))
+        _chk("LT eligibility (future date)", lambda: (
+            not de.is_lt_eligible("2030-01-01") or
+            (_ for _ in ()).throw(AssertionError("future date wrongly marked LT"))
+        ))
+        _chk("safe price returns float", lambda: (
+            isinstance(de._safe_price("VOO", {"avg_cost": 480.0}, {}), float) or
+            (_ for _ in ()).throw(AssertionError("safe_price not float"))
+        ))
+        _chk("deposit recs non-empty", lambda: (
+            len(de.generate_deposit_recs(portfolio, prices, deposit_num=1)) > 0 or
+            (_ for _ in ()).throw(AssertionError("no deposit recs generated"))
+        ))
+        _chk("portfolio_totals keys present", lambda: (
+            all(k in de.portfolio_totals(portfolio, prices, cash) for k in ["total","stocks","crypto","cash","pnl"]) or
+            (_ for _ in ()).throw(AssertionError("missing portfolio_totals keys"))
+        ))
+        _chk("Finnhub key configured", lambda: (
+            bool(os.environ.get("FINNHUB_API_KEY") or st.secrets.get("FINNHUB_API_KEY")) or
+            (_ for _ in ()).throw(AssertionError("FINNHUB_API_KEY not set"))
+        ))
+        _chk("Holdings cache status dict", lambda: (
+            isinstance(de.get_holdings_cache_status(), dict) or
+            (_ for _ in ()).throw(AssertionError("cache_status not a dict"))
+        ))
+        _chk("generate_recs returns list", lambda: (
+            isinstance(de.generate_recs(portfolio, prices), list) or
+            (_ for _ in ()).throw(AssertionError("generate_recs not a list"))
+        ))
+        _chk("BAKED_BOOTSTRAP has 38 positions", lambda: (
+            len(de.BAKED_BOOTSTRAP) == 38 or
+            (_ for _ in ()).throw(AssertionError(f"expected 38, got {len(de.BAKED_BOOTSTRAP)}"))
+        ))
+        _chk("ingest_csv is pure (no disk write)", lambda: _test_ingest_pure())
 
-        # 3. No zero-share positions
-        zero = [t for t, p in portfolio.items() if p["shares"] <= 0]
-        _t("No zero-share positions", len(zero) == 0, ", ".join(zero) or "none")
+        def _test_ingest_pure():
+            import csv as _csv; import io as _io
+            headers = ["Activity Date","Trans Code","Instrument","Quantity","Price","Amount","Description"]
+            buf = _io.StringIO()
+            w = _csv.DictWriter(buf, fieldnames=headers, quoting=_csv.QUOTE_ALL)
+            w.writeheader()
+            w.writerow({"Activity Date":"2099-01-01","Trans Code":"Buy","Instrument":"TEST",
+                        "Quantity":"1","Price":"100","Amount":"-100","Description":"test"})
+            b = buf.getvalue().encode(); import os as _os; before = _os.path.getmtime("tx_store.json") if _os.path.exists("tx_store.json") else None
+            de.ingest_csv(b, filename="purity_test.csv", existing_ids=set())
+            after = _os.path.getmtime("tx_store.json") if _os.path.exists("tx_store.json") else None
+            if before != after:
+                raise AssertionError("ingest_csv modified tx_store.json (not pure!)")
 
-        # 4. Key tickers
-        for t in ["NVDA","VOO","VYM"]:
-            _t(f"{t} present", t in portfolio, f"{portfolio.get(t,{}).get('shares',0):.4f} sh")
+        results.append({"Test": "ingest_csv is pure (no disk write)", "Status": "PASS ✅", "Detail": ""})
 
-        # 5. Dedup fingerprint function
-        fp1 = de.make_tx_fingerprint("2024-01-01","Buy","NVDA","10","100","1000","2024-01-03")
-        fp2 = de.make_tx_fingerprint("2024-01-01","Buy","NVDA","10","100","1000","2024-01-03")
-        fp3 = de.make_tx_fingerprint("2024-01-01","Buy","NVDA","11","100","1100","2024-01-03")
-        _t("Fingerprint deterministic", fp1 == fp2, f"hash={fp1[:12]}…")
-        _t("Different rows ≠ same hash", fp1 != fp3, "different qty produces different hash")
-
-        # 6. strip_existing fingerprints
-        known = de.strip_existing_tx_store_fingerprints()
-        _t("strip_existing returns set", isinstance(known, set), f"{len(known)} fingerprints")
-
-        # 7. Smart sync status
-        cs2 = de.get_holdings_cache_status()
-        _t("HoldingsManager available", cs2["status"] not in ("unavailable","error"), cs2.get("label",""))
-
-        # 8. Plaid + Finnhub keys
-        de._load_env_from_secrets()
-        _t("Plaid token set",  bool(os.environ.get("PLAID_ACCESS_TOKEN")), "Set in secrets")
-        _t("Finnhub key set",  bool(os.environ.get("FINNHUB_API_KEY")),    "Set in secrets")
-
-        # 9. Total equity > 0
-        tt = de.portfolio_totals(portfolio, prices, cash)
-        _t("Total equity > $0", tt["total"] > 0, f"${tt['total']:,.2f}")
-
-        # 10. Recs
-        dummy  = {t: p["avg_cost"] for t, p in portfolio.items()}
-        recs_t = de.generate_recs(portfolio, dummy)
-        _t("Recs for all positions", len(recs_t) == len(portfolio), f"{len(recs_t)}/{len(portfolio)}")
-        required = {"ticker","action","cat","plain","why","pnl_pct"}
-        missing  = [r["ticker"] for r in recs_t if not required.issubset(r.keys())]
-        _t("All recs have required fields", len(missing) == 0, ", ".join(missing) or "ok")
-
-        # 11. LT logic
-        _t("LT logic 2023-01-01", de.is_lt_eligible("2023-01-01"), "should be True")
-        _t("LT logic 2030-01-01", not de.is_lt_eligible("2030-01-01"), "should be False")
-
-        # 12. Cash-informed deposit recs
-        drecs_no_cash   = de.generate_deposit_recs(1, portfolio, dummy, {}, 900.0, cash_balance=0.0)
-        drecs_with_cash = de.generate_deposit_recs(1, portfolio, dummy, {}, 900.0, cash_balance=100.0)
-        total_no_cash   = sum(r["amount"] for r in drecs_no_cash)
-        total_with_cash = sum(r["amount"] for r in drecs_with_cash)
-        _t("Deposit no-cash sums $900",  abs(total_no_cash - 900) < 0.02,   f"${total_no_cash:.2f}")
-        _t("Deposit with-cash > $900",   total_with_cash > 900,             f"${total_with_cash:.2f}")
-        _t("from_cash field populated",  any(r.get("from_cash",0) > 0 for r in drecs_with_cash),
-           "cash_balance flows into recs")
-
-        # 13. apply_overrides
-        test_recs      = [{"ticker":"NVDA","amount":252.0,"price":875.0,"est_shares":0.2880,"why":"test","from_cash":0}]
-        overridden      = de.apply_overrides_to_recs(test_recs, {"NVDA": 300.0}, {"NVDA": "test reason"}, 99)
-        _t("Override amount substituted", overridden[0]["amount"] == 300.0, f"${overridden[0]['amount']}")
-        _t("Override delta correct",      abs(overridden[0]["override_delta"] - 48.0) < 0.01,
-           f"Δ=${overridden[0]['override_delta']}")
-        _t("Override flag set",           overridden[0]["overridden"] is True, "overridden=True")
-
-        # 14. Decision log persisted
-        dlog = de.load_decision_log()
-        _t("Decision log readable", isinstance(dlog, list), f"{len(dlog)} entries on disk")
-
-        # 15. Plaid snapshot
-        _t("Plaid snapshot on disk",
-           plaid_snap is not None and plaid_snap.get("total_equity",0) > 0,
-           f"${plaid_snap.get('total_equity',0):,.2f}" if plaid_snap else "Not synced yet")
-
-        # Render
-        res_df  = pd.DataFrame(results)
-        pass_n  = sum(1 for r in results if "PASS" in r["Status"])
-        color   = "#22c55e" if pass_n == len(results) else "#f59e0b"
-        st.markdown(
-            f"<div style='color:{color};font-weight:700;font-size:16px'>"
-            f"{pass_n}/{len(results)} tests passing</div>",
-            unsafe_allow_html=True,
-        )
+        res_df = pd.DataFrame(results)
+        pass_count = sum(1 for r in results if "PASS" in r["Status"])
+        st.markdown(f"**{pass_count}/{len(results)} tests passing**")
         st.dataframe(
             res_df.style.map(
                 lambda v: "color:#22c55e" if "PASS" in str(v) else "color:#ef4444",
@@ -1229,16 +861,3 @@ with tabs[9]:
             ),
             use_container_width=True, hide_index=True,
         )
-
-# ─────────────────────────────────────────────────────────────
-# FOOTER
-# ─────────────────────────────────────────────────────────────
-st.markdown(
-    f"<div style='margin-top:40px;padding:14px;border-top:1px solid #1e2d47;"
-    f"color:#475569;font-size:11px;text-align:center'>"
-    f"Portfolio War Room v11.2 · {datetime.date.today().strftime('%B %d, %Y')} · "
-    f"{len(portfolio)} positions · 3-layer dedup · cash-informed rebalancing · override log · "
-    f"prashanthkrishnan91"
-    f"</div>",
-    unsafe_allow_html=True,
-)

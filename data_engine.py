@@ -579,21 +579,48 @@ def _safe_price(ticker: str, pos: dict, prices: dict) -> float:
 # LT ELIGIBILITY
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def is_lt_eligible(first_buy_date: str) -> bool:
-    if not first_buy_date:
-        return False
+def _parse_date_robust(date_str: str) -> Optional[datetime.date]:
+    """
+    Parse a date string tolerantly, handling:
+      - ISO format:        '2024-03-18'
+      - M/D/YYYY:          '1/10/2025'
+      - M/D/YY:            '1/10/25'
+      - MM/DD/YYYY:        '01/10/2025'
+      - pandas-parsed:     anything pd.to_datetime can handle
+
+    Returns a datetime.date or None on failure.
+    Never raises.
+    """
+    if not date_str:
+        return None
+    # Fast path: already valid ISO (most common for bootstrap/stored rows)
     try:
-        return (datetime.date.today() - datetime.date.fromisoformat(first_buy_date)).days >= 366
-    except ValueError:
+        return datetime.date.fromisoformat(date_str)
+    except (ValueError, TypeError):
+        pass
+    # Slow path: let pandas handle M/D/YYYY and other CSV variants
+    try:
+        import pandas as pd
+        return pd.to_datetime(date_str, dayfirst=False).date()
+    except Exception:
+        pass
+    return None
+
+
+def is_lt_eligible(first_buy_date: str) -> bool:
+    """Return True if the position has been held >= 366 days (long-term eligible)."""
+    d = _parse_date_robust(first_buy_date)
+    if d is None:
         return False
+    return (datetime.date.today() - d).days >= 366
+
 
 def days_to_lt(first_buy_date: str) -> int:
-    if not first_buy_date:
+    """Return days remaining until long-term eligibility (0 if already eligible)."""
+    d = _parse_date_robust(first_buy_date)
+    if d is None:
         return 9999
-    try:
-        return max(0, 366 - (datetime.date.today() - datetime.date.fromisoformat(first_buy_date)).days)
-    except ValueError:
-        return 9999
+    return max(0, 366 - (datetime.date.today() - d).days)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # RECOMMENDATION ENGINE
@@ -613,9 +640,10 @@ def generate_recs(portfolio: dict, prices: dict) -> list[dict]:
         pnl_pct = ((price - cost) / cost * 100) if cost > 0 else 0.0
         target  = TARGETS.get(ticker, cost * 1.25)
         upside  = ((target - price) / price * 100) if price > 0 else 0.0
+        d_fbd   = _parse_date_robust(fbd)
         lt_date = (
-            (datetime.date.fromisoformat(fbd) + datetime.timedelta(days=366)).isoformat()
-            if fbd else "?"
+            (d_fbd + datetime.timedelta(days=366)).isoformat()
+            if d_fbd else "?"
         )
         tax_tag = "✅ LT (15%)" if lt else f"⏳ ST — wait until {lt_date}"
 

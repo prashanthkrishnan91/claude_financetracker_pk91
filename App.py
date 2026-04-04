@@ -100,6 +100,9 @@ code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
 de._bootstrap()
 
 def _init():
+  # Force sidebar to stay visible even if logic is slow
+    st.set_page_config(layout="wide", initial_sidebar_state="expanded")
+  
     defaults = {
         "bust":            0,
         "prices":          {},

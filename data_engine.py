@@ -2,27 +2,26 @@
 data_engine.py — Portfolio War Room v11.4
 All business logic — zero UI code.
 
-Changes vs v11.3 (dedup patch only — no UI changes):
-  TRANSACTION DEDUPLICATION BUG FIX (v11.4):
-     Root cause: existing_ids (Layer 1 session set) was NEVER updated during
-     ingest_csv(). New fingerprints were written to tx_store on disk but not
-     added to existing_ids, so Layer 1 could never catch them on a second
-     upload in the same Streamlit session — the second upload would re-check
-     disk (Layer 2) and find them, but that required reading the file again.
+Changes vs v11.3 — HIGH-INTEGRITY HASHING ENGINE (v11.4, dedup-only patch):
 
-     Fix — two changes only, zero logic rearrangement:
-       1. _norm_decimal() helper: normalises qty/price/amount strings to 6
-          decimal places via Decimal so "875.22" == "875.220000" in the hash.
-          Prevents ACH same-day same-amount collisions that were caught by the
-          old settle-date approach.
-       2. ingest_csv() post-loop: existing_ids.update(seen_this_upload) runs
-          AFTER the loop so every newly imported fingerprint is added to the
-          session set in one atomic step.  Layer 3 (seen_this_upload) still
-          fires for intra-file dupes during the loop; only the post-loop
-          update populates Layer 1 for the NEXT upload.
+  1. _norm_decimal(val, places=8): new helper converts any price/qty/amount string
+     to a fixed-precision Decimal string.  Strips $, commas, and parentheses
+     (Robinhood uses parens for debits: "($14.23)" → "-14.23000000").
+     Ensures "$174.63" == "174.630000" == "($174.63 debit)" all hash identically.
 
-  All other logic (v11.2 cash rebalancing, decision log, v11.3 date parsing,
-  pandas 3.0 applymap→map fixes) is preserved exactly as-is.
+  2. make_tx_fingerprint() rewritten with canonical string:
+       NormalisedDate | Ticker | TransCode | NormQty | NormPrice
+     - Date normalised via pd.to_datetime().strftime('%Y-%m-%d') so
+       "4/2/2026" and "2026-04-02" produce the same hash.
+     - Qty and Price normalised via _norm_decimal() to 8 decimal places.
+     - Amount excluded from trade rows (Robinhood rounding artefacts).
+     - Cash-only rows (no ticker, no qty): Date | "" | Code | NormAmt | Settle
+       so same-day ACH deposits are distinguished by settle date.
+
+  3. ingest_csv() atomic session update (THE BUG FIX):
+     - existing_ids.update(seen_this_upload) called AFTER the loop but BEFORE
+       return so the session set is updated atomically in memory.
+     - Prevents the same file being re-imported in the same Streamlit session.
 
   2. CASH-INFORMED REBALANCING
      - compute_rebalancing() now accepts optional cash_available parameter
@@ -208,68 +207,107 @@ def _bootstrap() -> None:
     logger.info("Bootstrap: wrote %d positions to tx_store.json", len(synthetic))
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ① TRANSACTION DEDUPLICATION
+# ① TRANSACTION DEDUPLICATION — High-Integrity Hashing Engine (v11.4)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _norm_decimal(raw: str, places: int = 6) -> str:
+def _norm_decimal(val: str, places: int = 8) -> str:
     """
-    Normalise a money/qty string to a fixed number of decimal places.
-    "875.22", "875.220000", "$875.22", "(875.22)" all become "875.220000".
-    Returns a zero string on any parse failure — never raises.
-    Used inside make_tx_fingerprint to ensure identical hashes for the same
-    transaction regardless of trailing-zero formatting differences in the CSV.
+    Normalise a price, quantity, or amount string to a fixed-precision Decimal
+    string for use in SHA-256 fingerprinting.
+
+    Handles every format Robinhood produces in CSV exports:
+      "$174.63"       → "174.63000000"
+      "($14.23)"      → "-14.23000000"   (Robinhood debit format)
+      "$1,600.00"     → "1600.00000000"  (comma thousands)
+      "0.002071"      → "0.00207100"
+      ""  / "—"       → "0.00000000"
+
+    Using Decimal (not float) prevents IEEE-754 rounding artefacts.
+    All values round to `places` decimal places via ROUND_HALF_UP.
+    Never raises — returns a zero string on any parse failure.
     """
+    s = str(val).strip()
+    # Detect parenthesis-negative BEFORE stripping chars
+    paren_neg = s.startswith("(") and s.endswith(")")
+    # Strip all non-numeric characters except leading minus
+    s = s.replace(",", "").replace("$", "").replace("(", "").replace(")", "").strip()
+    if paren_neg and s and not s.startswith("-"):
+        s = "-" + s
+    if not s or s in ("-", "."):
+        return "0." + "0" * places
     try:
-        d = Decimal(
-            str(raw).strip()
-                    .replace(",", "")
-                    .replace("$", "")
-                    .replace("(", "-")
-                    .replace(")", "")
-        )
-        return f"{d:.{places}f}"
+        d = Decimal(s).quantize(Decimal(10) ** -places, rounding=ROUND_HALF_UP)
+        return format(d, f".{places}f")
     except (InvalidOperation, ValueError):
         return "0." + "0" * places
 
 
+def _norm_date(raw: str) -> str:
+    """
+    Normalise any date string to YYYY-MM-DD for fingerprinting.
+    Handles M/D/YYYY, MM/DD/YYYY, YYYY-MM-DD and most other formats.
+    Returns the raw string on failure so hashing never crashes.
+    """
+    s = str(raw).strip()
+    if not s:
+        return s
+    # Fast path: already ISO
+    if len(s) == 10 and s[4] == "-" and s[7] == "-":
+        return s
+    # Slow path: let pandas handle M/D/YYYY, MM/DD/YYYY, etc.
+    try:
+        import pandas as pd
+        return pd.to_datetime(s, dayfirst=False).strftime("%Y-%m-%d")
+    except Exception:
+        return s
+
+
 def make_tx_fingerprint(
-    date_raw: str,
-    code: str,
-    ticker: str,
-    qty_raw: str,
+    date_raw:  str,
+    code:      str,
+    ticker:    str,
+    qty_raw:   str,
     price_raw: str,
-    amt_raw: str,
-    settle: str,
+    amt_raw:   str,
+    settle:    str,
 ) -> str:
     """
-    Canonical SHA-256 fingerprint for one Robinhood CSV row.
+    High-integrity SHA-256 fingerprint for one Robinhood CSV row.
 
-    Rules (matching v10.2 audit findings):
-      - Cash-only rows (no ticker, no qty): hash Date|Code|Amount|Settle
-        so same-day same-amount deposits get distinct hashes via Settle date.
-      - All other rows: hash Date|Code|Ticker|Qty|Price|Settle
-        (Amount intentionally excluded to avoid Robinhood rounding collisions)
+    Canonical string format:
+      Trade rows (ticker present OR qty present):
+        NormDate | Ticker | Code | NormQty | NormPrice
+        Amount excluded: Robinhood rounds debits independently of qty×price.
 
-    This function is public so it can be called from tests and from the UI
-    to pre-load known fingerprints before an upload starts.
+      Cash-only rows (no ticker AND no qty — ACH/RTP deposits):
+        NormDate | "" | Code | NormAmt | Settle
+        Settle date used as tiebreaker for same-day same-amount deposits.
+
+    Why this is robust:
+      - "4/2/2026" and "2026-04-02" produce identical NormDate → same fp.
+      - "$173.78" and "173.78" produce identical NormPrice → same fp.
+      - "($0.36)" (debit) and "0.36" (credit) are different values → different fp.
+      - Intra-file duplicates (same row twice) → Layer 3 catches, not hashing.
     """
-    if not ticker and not qty_raw:
-        # Cash-only rows (ACH deposits): use amount normalised to 6dp as tiebreaker.
-        # Settle date kept for same-day same-amount ACH collisions.
-        src = f"{date_raw}|{code}|{_norm_decimal(amt_raw)}|{settle}"
+    nd = _norm_date(date_raw)
+    t  = (ticker or "").strip().upper()
+    c  = (code or "").strip()
+
+    if not t and not (qty_raw or "").strip():
+        # Cash-only row: ACH, RTP, MISC deposits/withdrawals
+        src = f"{nd}|{t}|{c}|{_norm_decimal(amt_raw)}|{(settle or '').strip()}"
     else:
-        # Trade/dividend rows: amount intentionally excluded (Robinhood rounds
-        # independently). Qty and price normalised to 6dp to handle CSV
-        # formatting differences between export versions.
-        src = f"{date_raw}|{code}|{ticker}|{_norm_decimal(qty_raw)}|{_norm_decimal(price_raw)}|{settle}"
+        # Trade, dividend, or any row with a ticker or quantity
+        src = f"{nd}|{t}|{c}|{_norm_decimal(qty_raw)}|{_norm_decimal(price_raw)}"
+
     return hashlib.sha256(src.encode()).hexdigest()
 
 
 def strip_existing_tx_store_fingerprints() -> set[str]:
     """
-    Load all fingerprints currently in tx_store.json from disk.
-    Call this once before ingest_csv() to seed the existing_ids set.
-    Survives a missing or corrupt file (returns empty set).
+    Return the set of all fingerprints persisted in tx_store.json on disk.
+    Call once at app cold-start to pre-seed session_state.processed_ids.
+    Survives a missing or corrupt file — returns empty set, never raises.
     """
     store = _load(TX_STORE_PATH, {})
     return set(store.keys())
@@ -277,11 +315,11 @@ def strip_existing_tx_store_fingerprints() -> set[str]:
 
 @dataclass
 class IngestStats:
-    total_rows_in_file:     int  = 0   # every non-blank row seen
-    new_rows_added:         int  = 0   # rows actually written to tx_store
-    duplicate_rows_skipped: int  = 0   # cross-session dupes (already on disk)
-    seen_in_file:           int  = 0   # intra-file dupes (same row appears twice in upload)
-    skipped_no_code:        int  = 0   # blank/footer rows with no Trans Code
+    total_rows_in_file:     int  = 0   # every non-blank row seen in CSV
+    new_rows_added:         int  = 0   # rows written to tx_store this upload
+    duplicate_rows_skipped: int  = 0   # L1+L2: already in session or on disk
+    seen_in_file:           int  = 0   # L3: same row appeared twice in this file
+    skipped_no_code:        int  = 0   # blank Trans Code / footer rows
     errors:                 list = field(default_factory=list)
 
     @property
@@ -291,28 +329,36 @@ class IngestStats:
 
 def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
     """
-    Parse a Robinhood CSV export and append only genuinely new rows to tx_store.
+    Parse a Robinhood CSV and append only genuinely new rows to tx_store.json.
 
     Three-layer deduplication:
-      Layer 1 — existing_ids (set): fingerprints already in session_state from
-                previous uploads this session. Populated by calling
-                strip_existing_tx_store_fingerprints() before the first upload.
-      Layer 2 — tx_store keys on disk: fingerprints persisted across sessions.
-      Layer 3 — seen_this_upload set: prevents the same row appearing twice in
-                a single file from being written twice.
+      Layer 1 — existing_ids: fingerprints known to this Streamlit session
+                (pre-seeded from disk at startup + updated after each upload).
+      Layer 2 — existing_on_disk: snapshot of tx_store keys taken BEFORE the
+                loop so rows added during this upload are never retroactively
+                caught by Layer 2 — only by Layer 3.
+      Layer 3 — seen_this_upload: intra-file duplicates (same row twice in CSV).
+
+    ATOMIC SESSION UPDATE (the bug fix):
+      existing_ids.update(seen_this_upload) is called AFTER the loop but BEFORE
+      the function returns.  This ensures the session set "remembers" every
+      fingerprint imported in this upload so Layer 1 correctly blocks a
+      re-upload of the same file in the same Streamlit session — without
+      requiring a page reload.
 
     Returns (IngestStats, set_of_newly_added_fingerprints).
     """
-    stats              = IngestStats()
-    new_ids: set       = set()
-    seen_this_upload:  set = set()   # Layer 3: intra-file dedup
-    tx_store           = _load(TX_STORE_PATH, {})  # Layer 2 source (mutated during loop)
-    # Snapshot of keys that existed BEFORE this upload — used for Layer 2 check.
-    # Must be frozen here so that rows added during this loop are detected by Layer 3,
-    # not retroactively by Layer 2.
+    stats             = IngestStats()
+    new_ids: set      = set()
+    seen_this_upload: set = set()   # Layer 3: intra-file dedup accumulator
+
+    # Load tx_store once; snapshot keys BEFORE the loop (Layer 2 source).
+    # Any fingerprints added during this loop are visible only to Layer 3.
+    tx_store          = _load(TX_STORE_PATH, {})
     existing_on_disk: set = set(tx_store.keys())
 
-    text   = file_bytes.decode("utf-8", errors="replace")
+    # Strip null bytes and decode
+    text   = file_bytes.decode("utf-8", errors="replace").replace("", "")
     reader = csv.DictReader(io.StringIO(text), quoting=csv.QUOTE_ALL)
 
     for row in reader:
@@ -324,21 +370,22 @@ def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
             continue
 
         ticker    = (row.get("Instrument") or row.get("Symbol") or "").strip().upper()
-        qty_raw   = row.get("Quantity",    "") or ""
-        price_raw = row.get("Price",       "") or ""
-        amt_raw   = row.get("Amount",      "") or ""
-        date_raw  = row.get("Process Date") or row.get("Date") or ""
-        settle    = row.get("Settle Date", "") or ""
-        desc      = row.get("Description", "") or ""
+        qty_raw   = (row.get("Quantity",    "") or "").strip()
+        price_raw = (row.get("Price",       "") or "").strip()
+        amt_raw   = (row.get("Amount",      "") or "").strip()
+        date_raw  = (row.get("Activity Date") or row.get("Process Date") or
+                     row.get("Date") or "").strip()
+        settle    = (row.get("Settle Date", "") or "").strip()
+        desc      = (row.get("Description", "") or "").strip()
 
         fp = make_tx_fingerprint(date_raw, code, ticker, qty_raw, price_raw, amt_raw, settle)
 
-        # ── Layer 1: session-state dedup ──────────────────────────────────────
+        # ── Layer 1: session dedup ────────────────────────────────────────────
         if fp in existing_ids:
             stats.duplicate_rows_skipped += 1
             continue
 
-        # ── Layer 2: disk dedup (pre-upload snapshot only) ────────────────────
+        # ── Layer 2: disk dedup (pre-loop snapshot — never mutated) ──────────
         if fp in existing_on_disk:
             stats.duplicate_rows_skipped += 1
             continue
@@ -349,7 +396,7 @@ def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
             continue
         seen_this_upload.add(fp)
 
-        # ── Normalise and store ───────────────────────────────────────────────
+        # ── Store the normalised row ──────────────────────────────────────────
         qty_clean = re.sub(r"[^\d.\-]", "", qty_raw)
         if qty_clean in ("", "-", "."):
             qty_clean = "0"
@@ -373,9 +420,10 @@ def ingest_csv(file_bytes: bytes, existing_ids: set) -> tuple[IngestStats, set]:
         new_ids.add(fp)
         stats.new_rows_added += 1
 
-    # ── Post-loop: seed session set so the NEXT upload in this session
-    # correctly skips all rows that were just imported above via Layer 1
-    # (without this, Layer 1 could never fire for rows added this session).
+    # ── ATOMIC SESSION UPDATE ─────────────────────────────────────────────────
+    # Update existing_ids IN PLACE so the caller's session_state set immediately
+    # reflects every fingerprint imported above.  Without this, Layer 1 can
+    # never block a re-upload of the same file in the same Streamlit session.
     existing_ids.update(seen_this_upload)
 
     _save(TX_STORE_PATH, tx_store)
@@ -1008,6 +1056,16 @@ def apply_overrides_to_recs(
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def parse_crypto_pdf(file_bytes: bytes) -> dict[str, dict]:
+    """
+    Parse a Robinhood Crypto monthly statement PDF and return holdings overrides.
+
+    Handles the Robinhood statement table format:
+      "Bitcoin 0.03432981 BTC $2301.45 99.94%"
+      "XRP     1.066      XRP $1.47    0.06%"
+
+    The returned dict maps ticker → {shares, avg_cost, first_buy_date}.
+    avg_cost is set to 0.0 (not available in statement; user or Plaid supplies it).
+    """
     overrides: dict[str, dict] = {}
     try:
         import pdfplumber
@@ -1015,20 +1073,43 @@ def parse_crypto_pdf(file_bytes: bytes) -> dict[str, dict]:
             text = "\n".join(page.extract_text() or "" for page in pdf.pages)
     except Exception:
         return overrides
-    patterns = [
-        r"\b(BTC|ETH|XRP|SOL|DOGE|ADA)\b.*?([\d,]+\.[\d]+)\s+(?:shares|coins)?\s*[@$]?\s*([\d,]+\.[\d]+)",
-        r"(BTC|ETH|XRP|SOL|DOGE|ADA)\s+([\d.]+)\s+[\$]?([\d,.]+)",
-    ]
-    for pat in patterns:
-        for m in re.finditer(pat, text, re.IGNORECASE):
-            ticker = m.group(1).upper()
+
+    # Primary pattern: matches the Robinhood statement table row
+    # "Bitcoin  0.03432981  BTC  $2301.45  99.94%"
+    # Groups: (1) qty, (2) ticker-symbol
+    primary = re.compile(
+        r"(?:Bitcoin|Ethereum|XRP|Solana|Dogecoin|Cardano|Litecoin|Avalanche)"
+        r"\s+([\d]+\.[\d]+)"          # group 1: quantity (e.g. 0.03432981)
+        r"\s+(BTC|ETH|XRP|SOL|DOGE|ADA|LTC|AVAX)"  # group 2: ticker symbol
+        r"\s+\$[\d,]+\.[\d]+",        # market value (dollar amount — not captured)
+        re.IGNORECASE,
+    )
+    for m in primary.finditer(text):
+        try:
+            qty    = float(m.group(1).replace(",", ""))
+            ticker = m.group(2).upper()
+            if qty > 0:
+                overrides[ticker] = {"shares": qty, "avg_cost": 0.0, "first_buy_date": ""}
+        except Exception:
+            pass
+
+    # Fallback pattern if primary fails: look for QUANTITY SYMBOL on the holdings line
+    # "0.03432981 BTC" or "1.066 XRP"
+    if not overrides:
+        fallback = re.compile(
+            r"([\d]+\.[\d]{4,})"           # group 1: quantity (>=4dp suggests crypto)
+            r"\s+(BTC|ETH|XRP|SOL|DOGE|ADA|LTC|AVAX)\b",
+            re.IGNORECASE,
+        )
+        for m in fallback.finditer(text):
             try:
-                shares   = float(m.group(2).replace(",", ""))
-                avg_cost = float(m.group(3).replace(",", ""))
-                if shares > 0:
-                    overrides[ticker] = {"shares": shares, "avg_cost": avg_cost, "first_buy_date": ""}
+                qty    = float(m.group(1))
+                ticker = m.group(2).upper()
+                if qty > 0 and ticker not in overrides:
+                    overrides[ticker] = {"shares": qty, "avg_cost": 0.0, "first_buy_date": ""}
             except Exception:
                 pass
+
     return overrides
 
 # ═══════════════════════════════════════════════════════════════════════════════

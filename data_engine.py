@@ -237,45 +237,35 @@ def _norm_date(val: str) -> str:
         return s
 
 
-def make_tx_fingerprint(
-    date_raw:  str,
-    code:      str,
-    ticker:    str,
-    qty_raw:   str,
-    price_raw: str,
-    amt_raw:   str,
-    settle:    str,
-) -> str:
+def make_tx_fingerprint(row):
     """
-    High-integrity SHA-256 fingerprint for one transaction row.
-
-    Canonical string (pipe-separated, all fields normalised):
-      Trade/CDIV/SPL rows (ticker OR qty present):
-        NormDate | Ticker | Code | NormQty(6dp) | NormPrice(6dp)
-        Amount excluded: Robinhood rounds debits independently.
-
-      Cash-only rows (no ticker AND no qty — ACH/RTP deposits):
-        NormDate | "" | Code | NormAmt(6dp) | Settle
-        Settle-date tiebreaker distinguishes same-day same-amount deposits.
-
-    Guarantees:
-      "4/2/2026"  == "2026-04-02"  after _norm_date   → identical hash
-      "$173.78"   == "173.78"      after _norm_decimal → identical hash
-      "0.002071"  == "0.00207100"  after _norm_decimal → identical hash
-      bootstrap row hash == CSV row hash for same transaction
+    Creates a unique SHA-256 hash for a transaction.
+    Crucial: Normalizes all inputs so CSV rows match Bootstrap rows.
     """
-    nd = _norm_date(date_raw)
-    t  = (ticker or "").strip().upper()
-    c  = (code   or "").strip()
+    import hashlib
+    from decimal import Decimal
+    
+    def _clean(val):
+        if val is None: return "0"
+        s = str(val).replace('$', '').replace(',', '').replace('(', '-').replace(')', '').strip()
+        try:
+            return "{:.6f}".format(float(s))
+        except:
+            return "0"
 
-    if not t and not (qty_raw or "").strip():
-        # Cash-only: ACH / RTP / MISC deposits and withdrawals
-        src = f"{nd}|{t}|{c}|{_norm_decimal(amt_raw)}|{(settle or '').strip()}"
-    else:
-        # Trade, dividend, split — anything with a ticker or quantity
-        src = f"{nd}|{t}|{c}|{_norm_decimal(qty_raw)}|{_norm_decimal(price_raw)}"
+    # Normalize Date to YYYY-MM-DD
+    try:
+        dt_str = pd.to_datetime(row['Date']).strftime('%Y-%m-%d')
+    except:
+        dt_str = str(row['Date'])
 
-    return hashlib.sha256(src.encode()).hexdigest()
+    ticker = str(row.get('Ticker', 'CASH')).upper().strip()
+    q = _clean(row.get('Amount', 0))
+    p = _clean(row.get('Price', 0))
+    t = str(row.get('Type', 'UNKNOWN')).upper().strip()
+
+    payload = f"{dt_str}|{ticker}|{t}|{q}|{p}"
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

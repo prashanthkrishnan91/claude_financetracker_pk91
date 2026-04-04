@@ -91,6 +91,9 @@ code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
 .dedup-warn{color:#f59e0b;font-weight:700}
 .override-row{background:#1a120a;border:1px solid #451a03;border-radius:8px;
   padding:10px 14px;margin-bottom:6px}
+
+/* v12: sidebar toggle — ensure collapse control is always visible */
+[data-testid="collapsedControl"]{display:flex !important;visibility:visible !important}
 </style>
 """, unsafe_allow_html=True)
 
@@ -108,6 +111,8 @@ def _init():
         "targets":         de._load(de.TARGETS_PATH, {}),
         "plaid_snap":      de._load(de.PLAID_SNAPSHOT_PATH, None),
         "deposit_num":     len(de._load(de.DEPOSIT_LOG_PATH, [])) + 1,
+        # v12: sidebar state — persisted across reruns so it never disappears
+        "sidebar_open":    True,
         # ── v11.4: full historical fingerprint seeding ───────────────────────
         # seed_processed_ids_from_history() returns the union of:
         #   (a) fingerprints derived from BAKED_BOOTSTRAP via make_tx_fingerprint
@@ -141,6 +146,18 @@ targets    = st.session_state.targets
 plaid_snap = st.session_state.plaid_snap
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# SIDEBAR VISIBILITY (v12)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Inject CSS to hide/show the sidebar based on persisted session state.
+# The collapsedControl (Streamlit's native hamburger) is always kept visible
+# so the sidebar can never become permanently inaccessible.
+if not st.session_state.sidebar_open:
+    st.markdown(
+        "<style>section[data-testid='stSidebar']{display:none}</style>",
+        unsafe_allow_html=True,
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR
 # ═══════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
@@ -150,6 +167,22 @@ with st.sidebar:
         f"{datetime.date.today().strftime('%A, %B %d, %Y')}</div>",
         unsafe_allow_html=True,
     )
+    # v12: system mode badge
+    _sys_mode = de.get_system_mode()
+    if _sys_mode == "bootstrap":
+        st.markdown(
+            "<span style='background:#451a03;color:#fcd34d;border:1px solid #92400e;"
+            "border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600'>"
+            "⚠️ BOOTSTRAP MODE — upload CSV to go live</span>",
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            "<span style='background:#052e16;color:#86efac;border:1px solid #166534;"
+            "border-radius:6px;padding:3px 8px;font-size:11px;font-weight:600'>"
+            "✅ LIVE MODE</span>",
+            unsafe_allow_html=True,
+        )
     st.markdown("---")
 
     col1, col2 = st.columns(2)
@@ -322,13 +355,22 @@ source_badge   = (
     else '<span style="color:#64748b;font-size:10px">estimated</span>'
 )
 
-st.markdown("<h1 style='margin-bottom:2px'>⚡ Portfolio War Room</h1>", unsafe_allow_html=True)
-st.markdown(
-    f"<div style='color:#64748b;font-size:13px;margin-bottom:18px'>"
-    f"{len(portfolio)} positions · v11.2 · Smart Sync · Cash-Informed Rebalancing · Override Log"
-    f"</div>",
-    unsafe_allow_html=True,
-)
+_hdr_left, _hdr_right = st.columns([8, 1])
+with _hdr_left:
+    st.markdown("<h1 style='margin-bottom:2px'>⚡ Portfolio War Room</h1>", unsafe_allow_html=True)
+    st.markdown(
+        f"<div style='color:#64748b;font-size:13px;margin-bottom:18px'>"
+        f"{len(portfolio)} positions · v12 · Smart Sync · Cash-Informed Rebalancing · Override Log"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+with _hdr_right:
+    # v12: sidebar toggle — always accessible regardless of sidebar state
+    _sb_label = "◀ Hide" if st.session_state.sidebar_open else "▶ Show"
+    if st.button(_sb_label, key="sidebar_toggle", help="Toggle sidebar",
+                 use_container_width=True):
+        st.session_state.sidebar_open = not st.session_state.sidebar_open
+        st.rerun()
 
 c1, c2, c3, c4, c5 = st.columns(5)
 for col, label, value, sub, vcol in [
@@ -1064,10 +1106,17 @@ with tabs[8]:
             "Drop CSV here", type=["csv"], key="csv_up", label_visibility="collapsed"
         )
         if uploaded_csv:
-            # Always pass the full set: disk + session
+            # Always pass the full set: disk + session.
+            # ingest_csv() will clear existing_ids in-place if bootstrap→live.
             existing = de.strip_existing_tx_store_fingerprints() | st.session_state.processed_ids
             stats, new_ids = de.ingest_csv(uploaded_csv.read(), existing)
-            st.session_state.processed_ids |= new_ids
+
+            if stats.mode_transitioned:
+                # Bootstrap rows were wiped; session must start fresh
+                st.session_state.processed_ids = new_ids
+                st.info("🔄 Bootstrap data cleared. Rebuilding from real transactions…")
+            else:
+                st.session_state.processed_ids |= new_ids
 
             if stats.new_rows_added > 0:
                 tx   = de._load(de.TX_STORE_PATH, {})
@@ -1098,6 +1147,12 @@ with tabs[8]:
             "Drop PDF here", type=["pdf"], key="pdf_up", label_visibility="collapsed"
         )
         if uploaded_pdf:
+            # v12: PDF import also triggers bootstrap→live if first real import
+            if de.get_system_mode() == "bootstrap":
+                de.transition_to_live()
+                st.session_state.processed_ids = set()
+                st.info("🔄 Bootstrap data cleared. Rebuilding from real data…")
+
             overrides = de.parse_crypto_pdf(uploaded_pdf.read())
             if overrides:
                 existing_ovr = de._load(de.CRYPTO_OVR_PATH, {})

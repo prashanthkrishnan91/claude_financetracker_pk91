@@ -108,9 +108,15 @@ def _init():
         "targets":         de._load(de.TARGETS_PATH, {}),
         "plaid_snap":      de._load(de.PLAID_SNAPSHOT_PATH, None),
         "deposit_num":     len(de._load(de.DEPOSIT_LOG_PATH, [])) + 1,
-        # ── v11.2 additions ──────────────────────────────────────────────────
-        # Pre-seeded from disk so the first upload doesn't re-insert anything
-        "processed_ids":   de.strip_existing_tx_store_fingerprints(),
+        # ── v11.4: full historical fingerprint seeding ───────────────────────
+        # seed_processed_ids_from_history() returns the union of:
+        #   (a) fingerprints derived from BAKED_BOOTSTRAP via make_tx_fingerprint
+        #       — these now match what ingest_csv() produces for the same rows
+        #   (b) fingerprints already on disk in tx_store.json
+        # Total on a fresh install: ~34 (bootstrap positions)
+        # Total after CSV import:   ~600+ (full transaction history)
+        # The sidebar badge shows this count so the user can verify dedup is live.
+        "processed_ids":   de.seed_processed_ids_from_history(),
         # Override state for the current Invest session
         "dep_overrides":   {},    # {ticker: manual_amount}
         "dep_reasons":     {},    # {ticker: reason_text}

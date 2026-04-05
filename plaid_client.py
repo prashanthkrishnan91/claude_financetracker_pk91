@@ -94,7 +94,7 @@ class PlaidClient:
 
     # ── Environment helpers ───────────────────────────────────────────────────
 
-@staticmethod
+    @staticmethod
     def _require_env(name: str) -> str:
         import streamlit as st
         # 1. Check Streamlit Secrets first

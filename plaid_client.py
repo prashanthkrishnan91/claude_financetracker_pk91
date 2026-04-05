@@ -148,7 +148,10 @@ class PlaidClient:
             EnvironmentError: If required env vars are missing.
         """
         client = self._get_client()
-
+        # FIX: Initialize the dictionary first
+        request_args = {
+            "access_token": self._access_token
+        }
         # Plaid v39+ requires a valid object for options, not None.
         # We only add it if we have account_ids or if we want to provide an empty container.
         if InvestmentsHoldingsGetRequestOptions:

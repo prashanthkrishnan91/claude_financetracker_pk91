@@ -264,14 +264,26 @@ with st.sidebar:
     st.markdown("---")
 
     # Cash balance
-    st.markdown("**💵 Cash Balance**")
-    new_cash = st.number_input("Robinhood Cash ($)", value=cash, min_value=0.0, step=10.0, format="%.2f")
-    if new_cash != cash:
-        st.session_state.cash = new_cash
-        cash = new_cash
-        # Reset override state — cash change affects all allocations
-        st.session_state.dep_recs_final  = []
-        st.session_state.overrides_applied = False
+    # 1. Get the Live Cash from the Plaid Sync
+    plaid_cash = portfolio.get('cash', 0.0)
+
+    # 2. Setup the Sidebar Input (defaulting to 0.0)
+    with st.sidebar:
+        st.markdown("### 💵 Cash Balance")
+        manual_cash_override = st.number_input(
+            "Robinhood Cash ($)", 
+            value=0.0, 
+            step=100.0,
+            help="Leave at 0.0 to use live Plaid data. Enter a value to override."
+        )
+
+    # 3. ARCHITECT LOGIC: If manual is > 0, override. Otherwise, use Plaid.
+    if manual_cash_override > 0:
+        total_cash = manual_cash_override
+        cash_source = "Manual Override"
+    else:
+        total_cash = plaid_cash
+        cash_source = "Plaid"
 
     st.markdown("---")
 

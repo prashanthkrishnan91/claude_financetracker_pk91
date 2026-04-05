@@ -26,6 +26,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 
 import data_engine as de
+import drip_analytics as drip
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG
@@ -92,8 +93,13 @@ code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
 .override-row{background:#1a120a;border:1px solid #451a03;border-radius:8px;
   padding:10px 14px;margin-bottom:6px}
 
-/* v12: sidebar toggle — ensure collapse control is always visible */
-[data-testid="collapsedControl"]{display:flex !important;visibility:visible !important}
+/* v13 sidebar: HIDE native collapse button — our toggle is the only way in/out */
+[data-testid="collapsedControl"]{display:none !important}
+
+/* Sidebar slide transition — never display:none so Streamlit never "collapses" it */
+section[data-testid="stSidebar"]{
+  transition: margin-left 0.3s ease, width 0.3s ease;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -111,8 +117,9 @@ def _init():
         "targets":         de._load(de.TARGETS_PATH, {}),
         "plaid_snap":      de._load(de.PLAID_SNAPSHOT_PATH, None),
         "deposit_num":     len(de._load(de.DEPOSIT_LOG_PATH, [])) + 1,
-        # v12: sidebar state — persisted across reruns so it never disappears
+        # v13: sidebar + navigation state
         "sidebar_open":    True,
+        "page":            "🏠 Dashboard",
         # ── v11.4: full historical fingerprint seeding ───────────────────────
         # seed_processed_ids_from_history() returns the union of:
         #   (a) fingerprints derived from BAKED_BOOTSTRAP via make_tx_fingerprint
@@ -148,12 +155,19 @@ plaid_snap = st.session_state.plaid_snap
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR VISIBILITY (v12)
 # ═══════════════════════════════════════════════════════════════════════════════
-# Inject CSS to hide/show the sidebar based on persisted session state.
-# The collapsedControl (Streamlit's native hamburger) is always kept visible
-# so the sidebar can never become permanently inaccessible.
+# Inject CSS to shift sidebar off-screen when closed.
+# Native collapsedControl is hidden (display:none) — our ☰ button is the only toggle,
+# so the sidebar can never be put into Streamlit's internal "collapsed" state.
 if not st.session_state.sidebar_open:
     st.markdown(
-        "<style>section[data-testid='stSidebar']{display:none}</style>",
+        "<style>"
+        "section[data-testid='stSidebar']{"
+        "  margin-left:-21rem !important;"
+        "  min-width:0 !important;"
+        "  width:0 !important;"
+        "  overflow:hidden !important;"
+        "}"
+        "</style>",
         unsafe_allow_html=True,
     )
 
@@ -167,6 +181,25 @@ with st.sidebar:
         f"{datetime.date.today().strftime('%A, %B %d, %Y')}</div>",
         unsafe_allow_html=True,
     )
+
+    # ── Navigation ────────────────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown(
+        "<div style='font-size:11px;color:#64748b;text-transform:uppercase;"
+        "letter-spacing:.08em;margin-bottom:4px'>Navigation</div>",
+        unsafe_allow_html=True,
+    )
+    _nav_pages = ["🏠 Dashboard", "📊 Portfolio", "💸 DRIP Analytics"]
+    _nav_sel = st.radio(
+        "nav", _nav_pages,
+        index=_nav_pages.index(st.session_state.get("page", "🏠 Dashboard")),
+        label_visibility="collapsed",
+        key="nav_radio",
+    )
+    if _nav_sel != st.session_state.get("page"):
+        st.session_state.page = _nav_sel
+        st.rerun()
+
     # v12: system mode badge
     _sys_mode = de.get_system_mode()
     if _sys_mode == "bootstrap":
@@ -360,14 +393,13 @@ with _hdr_left:
     st.markdown("<h1 style='margin-bottom:2px'>⚡ Portfolio War Room</h1>", unsafe_allow_html=True)
     st.markdown(
         f"<div style='color:#64748b;font-size:13px;margin-bottom:18px'>"
-        f"{len(portfolio)} positions · v12 · Smart Sync · Cash-Informed Rebalancing · Override Log"
+        f"{len(portfolio)} positions · v13 · Smart Sync · DRIP Analytics · Override Log"
         f"</div>",
         unsafe_allow_html=True,
     )
 with _hdr_right:
-    # v12: sidebar toggle — always accessible regardless of sidebar state
-    _sb_label = "◀ Hide" if st.session_state.sidebar_open else "▶ Show"
-    if st.button(_sb_label, key="sidebar_toggle", help="Toggle sidebar",
+    # v13: ☰ toggle — always in main area, sidebar is NEVER unrecoverable
+    if st.button("☰", key="sidebar_toggle", help="Toggle sidebar",
                  use_container_width=True):
         st.session_state.sidebar_open = not st.session_state.sidebar_open
         st.rerun()
@@ -394,8 +426,15 @@ for col, label, value, sub, vcol in [
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TABS  — Decision Log is new in v11.2
+# PAGE ROUTING  — sidebar nav controls which page renders
 # ═══════════════════════════════════════════════════════════════════════════════
+_current_page = st.session_state.get("page", "🏠 Dashboard")
+
+if _current_page == "💸 DRIP Analytics":
+    drip.render_drip_dashboard(portfolio, prices)
+    st.stop()   # skip the rest of the file — tabs are for Dashboard/Portfolio only
+
+# ── Dashboard + Portfolio: full 10-tab layout ─────────────────────────────────
 tabs = st.tabs([
     "🎯 Actions", "📊 Portfolio", "⚖️ Rebalancing",
     "💰 Invest $900", "📋 Decision Log", "📅 Schedule",
@@ -1297,8 +1336,8 @@ with tabs[9]:
 st.markdown(
     f"<div style='margin-top:40px;padding:14px;border-top:1px solid #1e2d47;"
     f"color:#475569;font-size:11px;text-align:center'>"
-    f"Portfolio War Room v11.2 · {datetime.date.today().strftime('%B %d, %Y')} · "
-    f"{len(portfolio)} positions · 3-layer dedup · cash-informed rebalancing · override log · "
+    f"Portfolio War Room v13 · {datetime.date.today().strftime('%B %d, %Y')} · "
+    f"{len(portfolio)} positions · DRIP Analytics · sidebar fix · 3-layer dedup · "
     f"prashanthkrishnan91"
     f"</div>",
     unsafe_allow_html=True,

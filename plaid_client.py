@@ -149,21 +149,22 @@ class PlaidClient:
         """
         client = self._get_client()
 
-        options = None
-        if account_ids:
-            options = InvestmentsHoldingsGetRequestOptions(account_ids=account_ids)
+        # Plaid v39+ requires a valid object for options, not None.
+        # We only add it if we have account_ids or if we want to provide an empty container.
+        if InvestmentsHoldingsGetRequestOptions:
+            # Create an empty options object first
+            options = InvestmentsHoldingsGetRequestOptions()
+            if account_ids:
+                options.account_ids = account_ids
+            request_args["options"] = options
 
-        request = InvestmentsHoldingsGetRequest(
-            access_token=self._access_token,
-            options=options,
-        )
+        request = InvestmentsHoldingsGetRequest(**request_args)
 
         try:
             response = client.investments_holdings_get(request)
         except plaid.ApiException as exc:
             logger.error("Plaid API error [%s]: %s", exc.status, exc.body)
             raise
-
         return self._parse_response(response)
 
     # ── Response parser ───────────────────────────────────────────────────────

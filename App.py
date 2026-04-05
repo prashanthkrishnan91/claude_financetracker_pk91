@@ -219,7 +219,9 @@ with st.sidebar:
             st.rerun()
 
     # Force check against st.secrets directly for maximum reliability on Streamlit Cloud
-    plaid_configured = "PLAID_ACCESS_TOKEN" in st.secrets and st.secrets["PLAID_ACCESS_TOKEN"] != ""
+    # Optimized check for Streamlit Cloud Secrets
+    plaid_token = st.secrets.get("PLAID_ACCESS_TOKEN") or os.environ.get("PLAID_ACCESS_TOKEN")
+    plaid_configured = bool(plaid_token and len(str(plaid_token)) > 10)
     if not plaid_configured:
       # Fallback for local development
       plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))

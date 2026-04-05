@@ -225,14 +225,7 @@ with st.sidebar:
                    st.secrets.get(" PLAID_ACCESS_TOKEN ") or 
                    os.environ.get("PLAID_ACCESS_TOKEN"))
         
-        if p_token and len(str(p_token)) > 20:
-            # Inject it directly into the OS environment for the client
-            os.environ["PLAID_ACCESS_TOKEN"] = str(p_token).strip()
-            plaid_configured = True
-        else:
-            plaid_configured = False
-    except Exception:
-        plaid_configured = False
+        plaid_configured = bool(p_token and len(str(p_token).strip()) > 10)
   
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,

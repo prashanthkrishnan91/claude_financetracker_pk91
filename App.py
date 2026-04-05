@@ -222,8 +222,8 @@ with st.sidebar:
     plaid_configured = "PLAID_ACCESS_TOKEN" in st.secrets and st.secrets["PLAID_ACCESS_TOKEN"] != ""
     
     if not plaid_configured:
-    # Fallback for local development
-    plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
+      # Fallback for local development
+      plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,
                      disabled=not plaid_configured,

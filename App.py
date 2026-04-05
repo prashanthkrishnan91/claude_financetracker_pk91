@@ -218,16 +218,19 @@ with st.sidebar:
             st.session_state.overrides_applied = False
             st.rerun()
 
-    # Force a direct check into st.secrets
-    raw_token = st.secrets.get("PLAID_ACCESS_TOKEN") or st.secrets.get(" PLAID_ACCESS_TOKEN ")
-    p_token = str(raw_token).strip() if raw_token else None
+    # Force a direct check into st.secrets dictionary
+    try:
+        # We convert to dict to bypass any weird Streamlit Proxy issues
+        sec_dict = dict(st.secrets)
+        p_token = sec_dict.get("PLAID_ACCESS_TOKEN")
         
-    if p_token and len(p_token) > 10:
-        os.environ["PLAID_ACCESS_TOKEN"] = p_token
-        plaid_configured = True
-    else:
-        # Fallback for local dev
-        plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
+        if p_token and len(str(p_token)) > 10:
+            os.environ["PLAID_ACCESS_TOKEN"] = str(p_token).strip()
+            plaid_configured = True
+        else:
+            plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
+    except:
+        plaid_configured = False
       
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,

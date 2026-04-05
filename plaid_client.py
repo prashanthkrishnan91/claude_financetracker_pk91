@@ -97,18 +97,15 @@ class PlaidClient:
 @staticmethod
     def _require_env(name: str) -> str:
         import streamlit as st
-        # 1. Check Streamlit Secrets first (Most reliable on Cloud)
+        # 1. Check Streamlit Secrets first
         val = st.secrets.get(name)
         
-        # 2. Fallback to OS Environment (Local dev)
+        # 2. Fallback to OS Environment
         if not val:
             val = os.environ.get(name)
             
         if not val:
-            raise EnvironmentError(
-                f"Required credential '{name}' is not set. "
-                f"Please add it to your Streamlit Cloud Secrets or .env file."
-            )
+            raise EnvironmentError(f"Required credential '{name}' is not set.")
         return val
 
     def _get_client(self) -> plaid_api.PlaidApi:

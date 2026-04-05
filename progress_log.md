@@ -2,7 +2,7 @@
 **Last Updated:** April 5, 2026
 **User:** prashanthkrishnan91
 **Repo:** github.com/prashanthkrishnan91/my-portfolio-ai
-**Current Version:** v12 ✅
+**Current Version:** v13 ✅
 
 ---
 
@@ -10,16 +10,17 @@
 
 A full-stack personal portfolio intelligence system for tracking, analyzing, and optimizing a Robinhood investment account. Designed for an amateur investor — plain-English recommendations, tax-aware guidance, live prices, and a biweekly $900 deployment plan.
 
-Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints → bootstrap/live mode isolation + sidebar persistence.
+Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints → bootstrap/live mode isolation + sidebar persistence → permanent sidebar fix + DRIP Analytics tab.
 
-**Current file count: 9 Python files + 1 requirements.txt + system_state.json (runtime)**
+**Current file count: 10 Python files + 1 requirements.txt + system_state.json (runtime)**
 
 ---
 
-## Architecture at a Glance (v12)
+## Architecture at a Glance (v13)
 
 ```
-App.py                   Streamlit UI — zero business logic (~1,280 lines)
+App.py                   Streamlit UI — zero business logic (~1,340 lines)
+drip_analytics.py        DRIP Analytics module — extract, clean, project, render (310 lines)
 data_engine.py           All processing, recs, deposit planning, price fetching (~1,260 lines)
 price_service.py         Real-time Finnhub/Polygon/CoinGecko pricing engine (401 lines)
 holdings_manager.py      Plaid 24h smart cache — HoldingsManager class (371 lines)
@@ -243,9 +244,62 @@ Sidebar shows `⚠️ BOOTSTRAP MODE` badge (yellow) or `✅ LIVE MODE` (green).
 
 ---
 
-## Current App Architecture (v12)
+---
 
-### Tab Structure (10 tabs)
+### Phase 20 — Sidebar Permanent Fix + DRIP Analytics Tab (v13, April 5, 2026)
+
+#### What was asked
+Two upgrades on top of v12:
+1. **Sidebar bug** — clicking Streamlit's native `<<` collapse button still made the sidebar unrecoverable. Custom toggle stopped working. Only fix was clearing cache.
+2. **DRIP Analytics tab** — full dividend tracking dashboard: history, projections, DRIP share impact.
+
+#### Sidebar fix (root cause + solution)
+
+**Root cause (v12 was incomplete):** The v12 fix kept `[data-testid="collapsedControl"]` visible (`display:flex !important`). Users could still click Streamlit's native collapse button, which set the sidebar to Streamlit's internal "collapsed" state. After that, even re-setting `sidebar_open=True` and removing the CSS `display:none` couldn't bring it back — Streamlit's JS had already moved it.
+
+**Fix (v13):**
+
+| Change | Detail |
+|--------|--------|
+| `[data-testid="collapsedControl"]{display:none !important}` | Native collapse button completely removed from DOM — Streamlit can never internally collapse the sidebar |
+| Sidebar-hidden CSS changed | `display:none` → `margin-left:-21rem; width:0; overflow:hidden` — sidebar stays in Streamlit's DOM as "expanded" at all times, just visually off-screen |
+| Toggle button changed | `◀ Hide / ▶ Show` → single `☰` button always in main header |
+| `sidebar_open` | Still the single source of truth in `st.session_state` |
+
+#### DRIP Analytics (`drip_analytics.py` — new file, 310 lines)
+
+| Function | Description |
+|----------|-------------|
+| `extract_dividends(path)` | Reads all `CDIV` rows from `tx_store.json` |
+| `clean_dividends(raw)` | Deduplicates by `(date, ticker, amount)`, parses types |
+| `calculate_projections(div_json, portfolio_json, prices_json)` | `@st.cache_data` — infers payment frequency per ticker (monthly/quarterly/semi-annual/annual), projects next dates, rolling 30/60/90-day income windows, DRIP share accumulation and current value |
+| `render_drip_dashboard(portfolio, prices)` | Full Streamlit page rendered inside `tabs[10]` |
+
+**Dashboard sections:**
+- 4 KPI cards: Total dividends (all-time), This Year, Last Dividend (ticker/date/amount), Projected Annual
+- Filterable history table: multiselect tickers, date-range picker, sort column, dedup caption
+- Charts: dividends over time (monthly/quarterly/yearly toggle), total by stock (colour-scaled)
+- Future projections: per-ticker table with frequency, avg payout, next estimated date, days-away urgency (🟢 ≤14d · 🟡 ≤45d), upcoming-dividends scatter timeline
+- Next 30/60/90 day income KPI cards
+- DRIP Impact: shares gained per ticker, current value at live prices, stacked bar (original position vs DRIP boost)
+
+#### Navigation change
+- Removed sidebar radio nav (added in earlier v13 commit, reverted per user request)
+- DRIP Analytics added as **tab 11** (`tabs[10]`) alongside the existing 10 tabs — same UX pattern as Portfolio, Import, Tests, etc.
+
+#### Files changed
+- `App.py` — sidebar CSS fix, ☰ toggle, DRIP tab added (+/- ~30 lines net)
+- `drip_analytics.py` — new file, 310 lines
+- `progress_log.md` — updated
+
+#### Commit
+`claude/sidebar-fix-drip-analytics-9ocGu`
+
+---
+
+## Current App Architecture (v13)
+
+### Tab Structure (11 tabs)
 
 | # | Tab | Contents |
 |---|-----|----------|
@@ -259,6 +313,7 @@ Sidebar shows `⚠️ BOOTSTRAP MODE` badge (yellow) or `✅ LIVE MODE` (green).
 | 7 | 🕐 History | Portfolio value over time, deposit log |
 | 8 | 📥 Import | CSV upload (3-layer dedup), crypto PDF parser, manual crypto override |
 | 9 | 🧪 Tests | 15 live system health checks against real data |
+| 10 | 💸 DRIP Analytics | Dividend history, projections, DRIP impact analysis (`drip_analytics.py`) |
 
 ### Hashing Engine (v11.4)
 
@@ -449,6 +504,7 @@ git push
 | 29 | parse_crypto_pdf extracted market value as shares | Regex matched "$2301.45" (dollar amount) instead of "0.03432981" (quantity) | Rewritten to match qty before ticker symbol in statement table | v11.4 |
 | 30 | Holdings doubled after first CSV import | Bootstrap summary rows persisted in tx_store; recompute_portfolio() replayed both bootstrap + real CSV rows | system_state.json bootstrap/live mode; transition_to_live() wipes tx_store on first real import | v12 |
 | 31 | Sidebar permanently disappeared | No persistent state or escape hatch when sidebar collapsed | sidebar_open in session_state; CSS inject to hide; ◀/▶ toggle button always visible in main content | v12 |
+| 32 | Sidebar still unrecoverable after v12 | Native collapsedControl was still visible; clicking it set Streamlit's internal collapsed state which CSS display:none couldn't escape | `[data-testid="collapsedControl"]{display:none !important}` — native button removed; hidden state uses margin-left:-21rem not display:none | v13 |
 
 ---
 
@@ -465,4 +521,4 @@ git push
 
 ---
 
-*Log updated April 5, 2026 · Portfolio War Room v12 · 34 positions · 10-tab UI · bootstrap/live mode · sidebar toggle · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*
+*Log updated April 5, 2026 · Portfolio War Room v13 · 34 positions · 11-tab UI · bootstrap/live mode · permanent sidebar fix · DRIP Analytics · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*

@@ -117,9 +117,8 @@ def _init():
         "targets":         de._load(de.TARGETS_PATH, {}),
         "plaid_snap":      de._load(de.PLAID_SNAPSHOT_PATH, None),
         "deposit_num":     len(de._load(de.DEPOSIT_LOG_PATH, [])) + 1,
-        # v13: sidebar + navigation state
+        # v13: sidebar state — persisted so it never disappears
         "sidebar_open":    True,
-        "page":            "🏠 Dashboard",
         # ── v11.4: full historical fingerprint seeding ───────────────────────
         # seed_processed_ids_from_history() returns the union of:
         #   (a) fingerprints derived from BAKED_BOOTSTRAP via make_tx_fingerprint
@@ -181,24 +180,6 @@ with st.sidebar:
         f"{datetime.date.today().strftime('%A, %B %d, %Y')}</div>",
         unsafe_allow_html=True,
     )
-
-    # ── Navigation ────────────────────────────────────────────────────────────
-    st.markdown("---")
-    st.markdown(
-        "<div style='font-size:11px;color:#64748b;text-transform:uppercase;"
-        "letter-spacing:.08em;margin-bottom:4px'>Navigation</div>",
-        unsafe_allow_html=True,
-    )
-    _nav_pages = ["🏠 Dashboard", "📊 Portfolio", "💸 DRIP Analytics"]
-    _nav_sel = st.radio(
-        "nav", _nav_pages,
-        index=_nav_pages.index(st.session_state.get("page", "🏠 Dashboard")),
-        label_visibility="collapsed",
-        key="nav_radio",
-    )
-    if _nav_sel != st.session_state.get("page"):
-        st.session_state.page = _nav_sel
-        st.rerun()
 
     # v12: system mode badge
     _sys_mode = de.get_system_mode()
@@ -426,19 +407,13 @@ for col, label, value, sub, vcol in [
 st.markdown("---")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# PAGE ROUTING  — sidebar nav controls which page renders
+# TABS  (11 tabs — DRIP Analytics added as tab 10)
 # ═══════════════════════════════════════════════════════════════════════════════
-_current_page = st.session_state.get("page", "🏠 Dashboard")
-
-if _current_page == "💸 DRIP Analytics":
-    drip.render_drip_dashboard(portfolio, prices)
-    st.stop()   # skip the rest of the file — tabs are for Dashboard/Portfolio only
-
-# ── Dashboard + Portfolio: full 10-tab layout ─────────────────────────────────
 tabs = st.tabs([
     "🎯 Actions", "📊 Portfolio", "⚖️ Rebalancing",
     "💰 Invest $900", "📋 Decision Log", "📅 Schedule",
     "📈 Charts", "🕐 History", "📥 Import", "🧪 Tests",
+    "💸 DRIP Analytics",
 ])
 
 # ─────────────────────────────────────────────────────────────
@@ -1329,6 +1304,12 @@ with tabs[9]:
             ),
             use_container_width=True, hide_index=True,
         )
+
+# ─────────────────────────────────────────────────────────────
+# TAB 10 — DRIP ANALYTICS
+# ─────────────────────────────────────────────────────────────
+with tabs[10]:
+    drip.render_drip_dashboard(portfolio, prices)
 
 # ─────────────────────────────────────────────────────────────
 # FOOTER

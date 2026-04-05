@@ -204,7 +204,7 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh", use_container_width=True,
+        if st.button("🔄 Refresh", width='stretch',
                      help="Fetch live prices — no Plaid call"):
             st.session_state.bust += 1
             with st.spinner("Fetching live prices…"):
@@ -227,7 +227,7 @@ with st.sidebar:
     plaid_configured = bool(p_token and len(str(p_token).strip()) > 10)
   
     with col2:
-        if st.button("🏦 Sync Plaid", use_container_width=True,
+        if st.button("🏦 Sync Plaid", width='stretch',
                      disabled=not plaid_configured,
                      help="Force Plaid refresh. Auto-syncs every 24 h."):
             with st.spinner("Syncing Plaid holdings…"):
@@ -320,7 +320,7 @@ with st.sidebar:
 
     # AI Target Engine
     st.markdown("**🤖 AI Target Weights**")
-    if st.button("✨ Generate AI Targets", use_container_width=True):
+    if st.button("✨ Generate AI Targets", width='stretch'):
         suggested = de.generate_suggested_targets(portfolio)
         for t, w in suggested.items():
             st.session_state[f"target_{t}"] = w
@@ -340,13 +340,13 @@ with st.sidebar:
                 )
             cs_save, cs_reset = st.columns(2)
             with cs_save:
-                if st.button("💾 Save", use_container_width=True):
+                if st.button("💾 Save", width='stretch'):
                     st.session_state.targets = new_targets
                     de._save(de.TARGETS_PATH, new_targets)
                     targets = new_targets
                     st.success("Saved")
             with cs_reset:
-                if st.button("🔁 Reset AI", use_container_width=True):
+                if st.button("🔁 Reset AI", width='stretch'):
                     suggested = de.generate_suggested_targets(portfolio)
                     st.session_state.targets = suggested
                     de._save(de.TARGETS_PATH, suggested)
@@ -388,7 +388,7 @@ with _hdr_left:
 with _hdr_right:
     # v13: ☰ toggle — always in main area, sidebar is NEVER unrecoverable
     if st.button("☰", key="sidebar_toggle", help="Toggle sidebar",
-                 use_container_width=True):
+                 width='stretch'):
         st.session_state.sidebar_open = not st.session_state.sidebar_open
         st.rerun()
 
@@ -527,7 +527,7 @@ with tabs[1]:
                            else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
                 subset=["P&L %", "Unreal P&L"],
             ),
-            use_container_width=True, height=500,
+            width='stretch', height=500,
             column_config={
                 "Market Value": st.column_config.NumberColumn(format="$%.2f"),
                 "Avg Cost":     st.column_config.NumberColumn(format="$%.4f"),
@@ -560,7 +560,7 @@ with tabs[1]:
                            else "color:#ef4444" if isinstance(v,float) and v<0 else ""),
                 subset=["P&L %"],
             ),
-            use_container_width=True, height=520,
+            width='stretch', height=520,
             column_config={
                 "Market Value": st.column_config.NumberColumn(format="$%.2f"),
                 "Avg Cost":     st.column_config.NumberColumn(format="$%.4f"),
@@ -631,7 +631,7 @@ with tabs[2]:
             height=max(300, len(rebal)*28), xaxis_title="Drift (Current% − Target%)",
             margin=dict(l=80,r=40,t=20,b=40), font=dict(family="DM Sans",size=12),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width='stretch')
 
         # Drift table with cash_to_deploy column
         df_r = pd.DataFrame(rebal)
@@ -640,7 +640,7 @@ with tabs[2]:
         df_r.columns = [c.replace("_"," ").title() for c in df_r.columns]
         st.dataframe(
             df_r,
-            use_container_width=True,
+            width='stretch',
             column_config={
                 "Market Value":    st.column_config.NumberColumn(format="$%.0f"),
                 "Cash To Deploy":  st.column_config.NumberColumn(format="$%.2f"),
@@ -759,7 +759,7 @@ with tabs[3]:
 
     col_apply, col_reset, col_mark = st.columns([2, 1, 2])
     with col_apply:
-        if st.button("✅ Apply Overrides & Lock Plan", use_container_width=True,
+        if st.button("✅ Apply Overrides & Lock Plan", width='stretch',
                      type="primary" if active_overrides else "secondary"):
             # Only apply overrides where the user entered a non-zero value
             final_overrides = {t: v for t, v in override_inputs.items() if v > 0}
@@ -778,7 +778,7 @@ with tabs[3]:
             st.rerun()
 
     with col_reset:
-        if st.button("🔁 Reset", use_container_width=True):
+        if st.button("🔁 Reset", width='stretch'):
             st.session_state.dep_overrides     = {}
             st.session_state.dep_reasons       = {}
             st.session_state.dep_recs_final    = []
@@ -820,7 +820,7 @@ with tabs[3]:
 
     st.dataframe(
         df_dep.style.map(_color_delta, subset=["Delta ($)"]),
-        use_container_width=True,
+        width='stretch',
         hide_index=True,
         column_config={
             "Amount ($)":    st.column_config.NumberColumn(format="$%.2f"),
@@ -840,7 +840,7 @@ with tabs[3]:
     tc4.metric("Remaining Cash",    f"${max(0, cash - totals_row_from_cash):,.2f}")
 
     with col_mark:
-        if st.button("📌 Mark Deposit Done", use_container_width=True):
+        if st.button("📌 Mark Deposit Done", width='stretch'):
             de.log_deposit(dep_num, str(cur_date), display_recs, totals_row_amount)
             st.session_state.deposit_num    += 1
             st.session_state.dep_overrides   = {}
@@ -863,7 +863,7 @@ with tabs[3]:
             "QQQ ($153)": "✓", "Rotating ($144)": pick,
             "Done": "✅" if num in logged_nums else ("📍 TODAY" if d == today else ""),
         })
-    st.dataframe(pd.DataFrame(sched_rows), use_container_width=True, hide_index=True)
+    st.dataframe(pd.DataFrame(sched_rows), width='stretch', hide_index=True)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 4 — DECISION LOG  (new in v11.2)
@@ -911,7 +911,7 @@ with tabs[4]:
 
         st.dataframe(
             df_log.style.map(_color_delta_log, subset=["Delta"] if "Delta" in df_log.columns else []),
-            use_container_width=True, hide_index=True,
+            width='stretch', hide_index=True,
             column_config={
                 "Ai Rec Amount":   st.column_config.NumberColumn(format="$%.2f"),
                 "Manual Amount":   st.column_config.NumberColumn(format="$%.2f"),
@@ -936,7 +936,7 @@ with tabs[4]:
         ).reset_index()
         ticker_counts.columns = ["Ticker","Override Count","Total Delta ($)","Avg Delta ($)"]
         st.dataframe(ticker_counts.sort_values("Override Count", ascending=False),
-                     use_container_width=True, hide_index=True)
+                     width='stretch', hide_index=True)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 5 — SCHEDULE
@@ -1018,7 +1018,7 @@ with tabs[6]:
                 legend=dict(font=dict(size=10)),
             )
             fig_pie.update_traces(textinfo="label+percent", textfont_size=10)
-            st.plotly_chart(fig_pie, use_container_width=True)
+            st.plotly_chart(fig_pie, width='stretch')
 
         with cb:
             st.markdown("#### P&L % by Position")
@@ -1039,7 +1039,7 @@ with tabs[6]:
                 height=420, margin=dict(l=60,r=60,t=20,b=20),
                 xaxis_title="P&L %", font=dict(family="DM Sans",size=11),
             )
-            st.plotly_chart(fig_bar, use_container_width=True)
+            st.plotly_chart(fig_bar, width='stretch')
 
         st.markdown("#### Allocation by Category")
         cat_data: dict[str, float] = {}
@@ -1054,7 +1054,7 @@ with tabs[6]:
             template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
             height=280, margin=dict(l=20,r=20,t=20,b=20), showlegend=False,
         )
-        st.plotly_chart(fig_cat, use_container_width=True)
+        st.plotly_chart(fig_cat, width='stretch')
 
 # ─────────────────────────────────────────────────────────────
 # TAB 7 — HISTORY
@@ -1077,7 +1077,7 @@ with tabs[7]:
                 "# Recs":       len(snap.get("recs",[])),
             })
         h_df = pd.DataFrame(h_rows)
-        st.dataframe(h_df, use_container_width=True,
+        st.dataframe(h_df, width='stretch',
                      column_config={
                          "Total Equity": st.column_config.NumberColumn(format="$%.2f"),
                          "Stocks":       st.column_config.NumberColumn(format="$%.2f"),
@@ -1092,12 +1092,12 @@ with tabs[7]:
                 template="plotly_dark", paper_bgcolor="#07090f", plot_bgcolor="#07090f",
                 height=280, margin=dict(l=20,r=20,t=20,b=20),
             )
-            st.plotly_chart(fig_line, use_container_width=True)
+            st.plotly_chart(fig_line, width='stretch')
     st.markdown("---")
     st.markdown("### 📋 Deposit Log")
     dep_log = de._load(de.DEPOSIT_LOG_PATH, [])
     if dep_log:
-        st.dataframe(pd.DataFrame(dep_log)[["num","date","total"]], use_container_width=True)
+        st.dataframe(pd.DataFrame(dep_log)[["num","date","total"]], width='stretch')
     else:
         st.info("No deposits logged yet.")
 
@@ -1309,7 +1309,7 @@ with tabs[9]:
                 lambda v: "color:#22c55e" if "PASS" in str(v) else "color:#ef4444",
                 subset=["Status"],
             ),
-            use_container_width=True, hide_index=True,
+            width='stretch', hide_index=True,
         )
 
 # ─────────────────────────────────────────────────────────────

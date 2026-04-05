@@ -94,13 +94,20 @@ class PlaidClient:
 
     # ── Environment helpers ───────────────────────────────────────────────────
 
-    @staticmethod
+@staticmethod
     def _require_env(name: str) -> str:
-        val = os.environ.get(name)
+        import streamlit as st
+        # 1. Check Streamlit Secrets first (Most reliable on Cloud)
+        val = st.secrets.get(name)
+        
+        # 2. Fallback to OS Environment (Local dev)
+        if not val:
+            val = os.environ.get(name)
+            
         if not val:
             raise EnvironmentError(
-                f"Required environment variable '{name}' is not set. "
-                f"Add it to your .env file or Streamlit Cloud secrets."
+                f"Required credential '{name}' is not set. "
+                f"Please add it to your Streamlit Cloud Secrets or .env file."
             )
         return val
 

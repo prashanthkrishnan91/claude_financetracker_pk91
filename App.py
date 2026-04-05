@@ -219,13 +219,12 @@ with st.sidebar:
             st.rerun()
 
     # FORCE LOAD: This bypasses all Streamlit proxy issues
-    try:
         # Check for the secret using every possible naming convention
-        p_token = (st.secrets.get("PLAID_ACCESS_TOKEN") or 
-                   st.secrets.get(" PLAID_ACCESS_TOKEN ") or 
-                   os.environ.get("PLAID_ACCESS_TOKEN"))
-        
-        plaid_configured = bool(p_token and len(str(p_token).strip()) > 10)
+    p_token = (st.secrets.get("PLAID_ACCESS_TOKEN") or 
+               st.secrets.get(" PLAID_ACCESS_TOKEN ") or 
+               os.environ.get("PLAID_ACCESS_TOKEN"))
+    
+    plaid_configured = bool(p_token and len(str(p_token).strip()) > 10)
   
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,

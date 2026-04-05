@@ -218,13 +218,16 @@ with st.sidebar:
             st.session_state.overrides_applied = False
             st.rerun()
 
-    # Force check against st.secrets directly for maximum reliability on Streamlit Cloud
-    # Optimized check for Streamlit Cloud Secrets
-    plaid_token = st.secrets.get("PLAID_ACCESS_TOKEN") or os.environ.get("PLAID_ACCESS_TOKEN")
-    plaid_configured = bool(plaid_token and len(str(plaid_token)) > 10)
-    if not plaid_configured:
-      # Fallback for local development
-      plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
+    # Force a direct check into st.secrets
+    p_token = st.secrets.get("PLAID_ACCESS_TOKEN")
+    
+    # If found in secrets, ensure it's also in the environment for the client to see
+    if p_token:
+        os.environ["PLAID_ACCESS_TOKEN"] = p_token
+        plaid_configured = True
+    else:
+        # Fallback for local dev
+        plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
       
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,

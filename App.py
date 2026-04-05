@@ -219,10 +219,10 @@ with st.sidebar:
             st.rerun()
 
     # Force a direct check into st.secrets
-    p_token = st.secrets.get("PLAID_ACCESS_TOKEN")
-    
-    # If found in secrets, ensure it's also in the environment for the client to see
-    if p_token:
+    raw_token = st.secrets.get("PLAID_ACCESS_TOKEN") or st.secrets.get(" PLAID_ACCESS_TOKEN ")
+    p_token = str(raw_token).strip() if raw_token else None
+        
+    if p_token and len(p_token) > 10:
         os.environ["PLAID_ACCESS_TOKEN"] = p_token
         plaid_configured = True
     else:

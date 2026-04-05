@@ -218,20 +218,22 @@ with st.sidebar:
             st.session_state.overrides_applied = False
             st.rerun()
 
-    # Force a direct check into st.secrets dictionary
+    # FORCE LOAD: This bypasses all Streamlit proxy issues
     try:
-        # We convert to dict to bypass any weird Streamlit Proxy issues
-        sec_dict = dict(st.secrets)
-        p_token = sec_dict.get("PLAID_ACCESS_TOKEN")
+        # Check for the secret using every possible naming convention
+        p_token = (st.secrets.get("PLAID_ACCESS_TOKEN") or 
+                   st.secrets.get(" PLAID_ACCESS_TOKEN ") or 
+                   os.environ.get("PLAID_ACCESS_TOKEN"))
         
-        if p_token and len(str(p_token)) > 10:
+        if p_token and len(str(p_token)) > 20:
+            # Inject it directly into the OS environment for the client
             os.environ["PLAID_ACCESS_TOKEN"] = str(p_token).strip()
             plaid_configured = True
         else:
-            plaid_configured = bool(os.environ.get("PLAID_ACCESS_TOKEN"))
-    except:
+            plaid_configured = False
+    except Exception:
         plaid_configured = False
-      
+  
     with col2:
         if st.button("🏦 Sync Plaid", use_container_width=True,
                      disabled=not plaid_configured,

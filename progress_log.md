@@ -1,5 +1,5 @@
 # ⚡ Portfolio War Room — Project Progress Log
-**Last Updated:** April 4, 2026
+**Last Updated:** April 5, 2026
 **User:** prashanthkrishnan91
 **Repo:** github.com/prashanthkrishnan91/my-portfolio-ai
 **Current Version:** v12 ✅
@@ -10,17 +10,17 @@
 
 A full-stack personal portfolio intelligence system for tracking, analyzing, and optimizing a Robinhood investment account. Designed for an amateur investor — plain-English recommendations, tax-aware guidance, live prices, and a biweekly $900 deployment plan.
 
-Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints.
+Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints → bootstrap/live mode isolation + sidebar persistence.
 
 **Current file count: 9 Python files + 1 requirements.txt + system_state.json (runtime)**
 
 ---
 
-## Architecture at a Glance (v11.4)
+## Architecture at a Glance (v12)
 
 ```
-main_app.py              Streamlit UI — zero business logic (1,250 lines)
-data_engine.py           All processing, recs, deposit planning, price fetching (1,209 lines)
+App.py                   Streamlit UI — zero business logic (~1,280 lines)
+data_engine.py           All processing, recs, deposit planning, price fetching (~1,260 lines)
 price_service.py         Real-time Finnhub/Polygon/CoinGecko pricing engine (401 lines)
 holdings_manager.py      Plaid 24h smart cache — HoldingsManager class (371 lines)
 portfolio_aggregator.py  qty × price math, PortfolioSnapshot builder (321 lines)
@@ -43,6 +43,61 @@ targets.json             User target allocations
 price_cache.json         Last-known prices (offline fallback)
 recon_log.json           Rolling CSV ingest audit log (max 100)
 ```
+
+---
+
+## Session Summary — April 5, 2026 (v11.4 → v12)
+
+### What was asked
+Two production bugs reported for v11.4:
+
+1. **Duplicate holdings** after CSV or PDF import — bootstrap summary data was not being cleared when real transaction data arrived, causing `recompute_portfolio()` to replay both synthetic bootstrap rows and real CSV rows, doubling every holding.
+2. **Sidebar disappears** — once Streamlit collapsed the sidebar, there was no reliable way to reopen it.
+
+### What was diagnosed
+- `_bootstrap()` writes synthetic summary rows into `tx_store.json`. These rows look like real transactions and `recompute_portfolio()` can't distinguish them from CSV-imported rows. The dedup engine was correctly blocking re-import of matching rows, but the bootstrap rows themselves stayed in `tx_store` and contributed to the computed portfolio alongside the new CSV data.
+- The sidebar had no persistent state variable — a Streamlit rerun would restore the default expanded state, but browser-side collapse events were not tracked, so a collapsed sidebar had no programmatic escape hatch.
+
+### What was built (v12)
+
+**data_engine.py** — 3 new additions, 1 modified:
+
+| Change | Detail |
+|--------|--------|
+| `SYSTEM_STATE_PATH` | New path constant for `system_state.json` |
+| `get_system_mode() → str` | Reads `"bootstrap"` (default) or `"live"` |
+| `transition_to_live()` | Wipes `tx_store.json` + writes `{mode:"live"}`. Called once, ever. |
+| `IngestStats.mode_transitioned` | New bool field; True when transition fired during this upload |
+| `ingest_csv()` preamble | If mode == bootstrap: transition_to_live(), clear existing_ids in-place |
+
+**App.py** — 5 targeted edits:
+
+| Change | Detail |
+|--------|--------|
+| `sidebar_open: True` in `_init()` | Session state entry persisting sidebar visibility across reruns |
+| Sidebar CSS injection block | `section[data-testid='stSidebar']{display:none}` when `sidebar_open=False` |
+| Global CSS patch | `[data-testid="collapsedControl"]` forced `display:flex !important` — native hamburger always reachable |
+| `◀ Hide / ▶ Show` button | Top-right of header, `[8,1]` column split — accessible even when sidebar is fully hidden |
+| System mode badge in sidebar | `⚠️ BOOTSTRAP MODE` (amber) or `✅ LIVE MODE` (green) |
+| CSV upload path | Resets `processed_ids = new_ids` when `stats.mode_transitioned` |
+| PDF upload path | Calls `get_system_mode()` / `transition_to_live()` before `parse_crypto_pdf()` |
+
+### What was clarified (not built)
+User also asked to "update the app to fix sidebar visibility and improve UI using React/Tailwind + shadcn/ui". This repo is a Streamlit Python app — no React/JSX files exist. The sidebar fix described above already resolves the underlying issue in the actual stack. A React frontend would require a separate project scaffold.
+
+### Files changed
+- `data_engine.py` — +47 lines (new functions + IngestStats field + ingest_csv preamble)
+- `App.py` — +73 lines, -7 lines (sidebar state, toggle button, CSS, import wiring)
+- `progress_log.md` — updated
+
+### Constraints preserved
+- SHA-256 hashing untouched
+- Decimal precision untouched
+- All existing JSON schemas untouched (`system_state.json` is additive-new)
+- UI/logic separation maintained
+
+### Commit
+`e60a541` — branch `claude/fix-holdings-sidebar-Aj5gr`
 
 ---
 
@@ -144,7 +199,7 @@ New file: `holdings_manager.py`. Three-condition sync trigger: no cache file / c
 
 ---
 
-### Phase 19 — Bootstrap/Live Mode + Sidebar Fix (v12, April 4, 2026)
+### Phase 19 — Bootstrap/Live Mode + Sidebar Fix (v12, April 5, 2026)
 
 **Issue 1 — Duplicate holdings after CSV/PDF import (root cause: bootstrap data mixed with real tx data)**
 
@@ -410,4 +465,4 @@ git push
 
 ---
 
-*Log updated April 4, 2026 · Portfolio War Room v12 · 34 positions · 10-tab UI · bootstrap/live mode · sidebar toggle · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*
+*Log updated April 5, 2026 · Portfolio War Room v12 · 34 positions · 10-tab UI · bootstrap/live mode · sidebar toggle · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*

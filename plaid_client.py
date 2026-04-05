@@ -83,13 +83,12 @@ class PlaidClient:
     Required environment variables:
         PLAID_CLIENT_ID   — Plaid dashboard client ID
         PLAID_SECRET      — Plaid secret (sandbox / development / production)
-        PLAID_ENV         — 'sandbox' | 'development' | 'production'
+        PLAID_ENV         — 'sandbox' | 'production'
         PLAID_ACCESS_TOKEN — OAuth access token for the connected institution
     """
 
     ENV_MAP = {
         "sandbox":     plaid.Environment.Sandbox,
-        "development": plaid.Environment.Development,
         "production":  plaid.Environment.Production,
     }
 

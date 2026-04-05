@@ -13,7 +13,15 @@ from typing import Optional
 import plaid
 from plaid.api import plaid_api
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
-from plaid.model.investments_holdings_get_request_options import InvestmentsHoldingsGetRequestOptions
+try:
+    # Newer versions of the SDK (like your v39.0.0)
+    from plaid.model.investments_holdings_get_request_options import InvestmentsHoldingsGetRequestOptions
+except ImportError:
+    # Fallback for structural changes in newer Plaid releases
+    try:
+        from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequestOptions
+    except ImportError:
+        InvestmentsHoldingsGetRequestOptions = None
 
 logger = logging.getLogger(__name__)
 

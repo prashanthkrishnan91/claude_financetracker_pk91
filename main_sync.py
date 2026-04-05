@@ -166,7 +166,7 @@ def print_cache_status(manager: HoldingsManager, color: bool = True) -> None:
     label_color = _GREEN if status["status"] == "fresh" else _YELLOW
     print(f"  Status:        {_c(status['label'], label_color, color)}")
     print(f"  Last synced:   {status['last_synced'] or 'Never'}")
-    print(f"  Age:           {f\"{status['age_hours']:.2f}h\" if status['age_hours'] is not None else 'N/A'}")
+    print(f"  Age:           {f'{status['age_hours']:.2f}h' if status['age_hours'] is not None else 'N/A'}")
     print(f"  Holdings:      {status['holdings_count']} positions")
     print(f"  Cash (Plaid):  ${status['cash_usd']:.2f}")
     if status["next_sync_in"] is not None and status["next_sync_in"] > 0:

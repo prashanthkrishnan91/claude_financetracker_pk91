@@ -88,7 +88,9 @@ def _make_session() -> requests.Session:
         status_forcelist=[429, 500, 502, 503, 504],
         allowed_methods=["GET"], raise_on_status=False,
     )
-    session.mount("https://", HTTPAdapter(max_retries=retry))
+    # INCREASE POOL SIZE: Set to 50 to cover all 34 positions comfortably
+    adapter = HTTPAdapter(pool_connections=50, pool_maxsize=50, max_retries=retry)
+    session.mount("https://", adapter)
     return session
 
 
@@ -182,8 +184,12 @@ class PriceService:
 
         return results
 
-    async def _fetch_one_async(self, ticker: str, session, cache_ref) -> PriceResult:
+    async def _gather_aiohttp(self, tickers: list[str], cache_ref) -> dict[str, PriceResult]:
         import aiohttp
+        results: dict[str, PriceResult] = {}
+        # INCREASE LIMITS: Match the pool size for high-speed concurrent fetching
+        connector = aiohttp.TCPConnector(limit=50, limit_per_host=20)
+        timeout = aiohttp.ClientTimeout(total=_TIMEOUT)
         if ticker in _CRYPTO_TICKERS:
             return await self._fetch_crypto_async(ticker, session, cache_ref)
         if self._finnhub_key:

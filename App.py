@@ -206,8 +206,8 @@ with st.sidebar:
     with col1:
         if st.button("🔄 Refresh", width='stretch',
                      help="Fetch live prices — no Plaid call"):
-                     st.cache_data.clear() 
-                     st.rerun()
+            st.cache_data.clear() 
+            st.rerun()
             st.session_state.bust += 1
             with st.spinner("Fetching live prices…"):
                 st.session_state.prices = de.fetch_prices(

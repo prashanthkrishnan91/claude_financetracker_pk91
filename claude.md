@@ -49,24 +49,31 @@
 
 ## Available Internal Libraries
 
-1. ui-ux-pro-max-skill
+1. frontend-design
    - Purpose: UI/UX, layout, styling, Streamlit improvements
 
-2. superpowers
+2. ui-ux-pro-max
+   - Purpose: Design intelligence, database of palettes, styles, UX rules
+
+3. superpowers
    - Purpose: business logic, calculations, optimizations
 
-3. claude-mem
+4. claude-mem
    - Purpose: persistence, session state, memory handling
 
-4. awesome-claude-code
+5. awesome-claude-code
    - Purpose: patterns, architecture, best practices
+
+6. get-shit-done
+   - Purpose: Accomplish given tasks based on provided prompts
 
 ## Decision Framework
 
-- UI task → use ui-ux-pro-max-skill
+- UI task → use  front-end design to build production grade using ui-ux-pro-max-skill to fetch styles and color palettes while adhering to the UX rules
 - Logic/calculation → use superpowers
 - State/memory → use claude-mem
 - Refactor/design → use awesome-claude-code
+- Sequential thinking and prompt based responses - use get-shit-done
 
 ## Rules
 

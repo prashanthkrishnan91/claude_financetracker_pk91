@@ -290,6 +290,8 @@ with st.sidebar:
                 st.session_state.plaid_snap = snap
                 plaid_snap = snap
                 st.success(f"Plaid synced ✅  ${snap['total_equity']:,.2f}")
+                st.session_state.prices = {} 
+                st.rerun()
             else:
                 st.warning("Plaid not configured. Add PLAID_ACCESS_TOKEN to secrets.")
 

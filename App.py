@@ -536,7 +536,7 @@ with tab_intel:
       )
       
       fig_tree.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=400)
-      st.plotly_chart(fig_tree, use_container_width=True)
+      st.plotly_chart(fig_tree, width='stretch')
 # ─────────────────────────────────────────────────────────────
 # TAB 1.1 — Actions
 # ─────────────────────────────────────────────────────────────

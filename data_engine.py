@@ -760,7 +760,7 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         from main_sync import export_json
         export_json(snapshot, str(PLAID_SNAPSHOT_PATH))
         
-        return snapshot.to_dict()
+        return asdict(snapshot)
         
     except Exception as e:
         logger.warning("Smart sync failed: %s", e)

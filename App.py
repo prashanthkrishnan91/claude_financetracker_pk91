@@ -528,8 +528,8 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.1 — Actions
 # ─────────────────────────────────────────────────────────────
-suba, subb, subc,subd = st.tabs(["🎯 Active Recommendations", "📊 Full Holdings List", "📈 Allocation Charts","💸 DRIP Analytics"])
- with suba:
+  suba, subb, subc,subd = st.tabs(["🎯 Active Recommendations", "📊 Full Holdings List", "📈 Allocation Charts","💸 DRIP Analytics"])
+  with suba:
       if not prices:
           st.info("👆 Press **🔄 Refresh** in the sidebar to load live prices and generate recommendations.")
       else:
@@ -764,7 +764,7 @@ suba, subb, subc,subd = st.tabs(["🎯 Active Recommendations", "📊 Full Holdi
 # ─────────────────────────────────────────────────────────────
 with tab_ops:
   # Rebalancing
-sub1, sub2 = st.tabs(["⚖️ Portfolio Rebalancing", "💰 Deposit Allocation"])
+  sub1, sub2 = st.tabs(["⚖️ Portfolio Rebalancing", "💰 Deposit Allocation"])
   with sub1:
       if not targets:
           st.info("Click **✨ Generate AI Targets** in the sidebar first.")

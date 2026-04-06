@@ -204,21 +204,24 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh", width='stretch',
-                     help="Fetch live prices — no Plaid call"):
+        if st.button("🔄 Refresh", width='stretch', help="Fetch live prices"):
             st.cache_data.clear() 
-            st.rerun()
             st.session_state.bust += 1
-            with st.spinner("Fetching live prices…"):
-                st.session_state.prices = de.fetch_prices(
-                    tuple(sorted(portfolio.keys())), _bust=st.session_state.bust
-                )
-            prices = st.session_state.prices
-            st.session_state.recs = de.generate_recs(portfolio, prices)
-            # Reset override state so new prices re-generate clean recs
-            st.session_state.dep_recs_final  = []
-            st.session_state.overrides_applied = False
             st.rerun()
+
+        # This part runs AUTOMATICALLY after the rerun above 
+        # OR on the initial page load
+        with st.spinner("Fetching live prices…"):
+            st.session_state.prices = de.fetch_prices(
+                tuple(sorted(portfolio.keys())), 
+                _bust=st.session_state.bust
+            )
+            prices = st.session_state.prices
+            
+            # Update recommendations with new prices
+            st.session_state.recs = de.generate_recs(portfolio, prices)
+            st.session_state.dep_recs_final = []
+            st.session_state.overrides_applied = False
 
     # FORCE LOAD: This bypasses all Streamlit proxy issues
         # Check for the secret using every possible naming convention
@@ -266,8 +269,9 @@ with st.sidebar:
     st.markdown("---")
 
     # Cash balance
-    # 1. Get the Live Cash from the Plaid Sync
-    plaid_cash = portfolio.get('cash', 0.0)
+    # Ensure we pull 'cash_usd' from the Smart Sync status helper
+    cs = de.get_holdings_cache_status()
+    plaid_cash = portfolio.get('cash_usd', 0.0)
 
     # 2. Setup the Sidebar Input (defaulting to 0.0)
     with st.sidebar:

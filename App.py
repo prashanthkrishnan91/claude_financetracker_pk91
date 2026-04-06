@@ -180,39 +180,32 @@ plaid_snap = st.session_state.plaid_snap
 # Inject CSS to shift sidebar off-screen when closed.
 # Native collapsedControl is hidden (display:none) — our ☰ button is the only toggle,
 # so the sidebar can never be put into Streamlit's internal "collapsed" state.
-# ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR VISIBILITY (SENIOR DEV FIX)
-# ═══════════════════════════════════════════════════════════════════════════════
-# ═══════════════════════════════════════════════════════════════════════════════
-# SIDEBAR VISIBILITY (UI/UX FULLSCREEN FIX)
-# ═══════════════════════════════════════════════════════════════════════════════
 if not st.session_state.sidebar_open:
     st.markdown("""
         <style>
-        /* 1. Reset the app container offset */
+        /* 1. Reset the app container offset entirely */
         [data-testid="stAppViewContainer"] {
             padding-left: 0rem !important;
         }
 
-        /* 2. Fully tuck the sidebar away */
+        /* 2. Fully tuck the sidebar */
         section[data-testid='stSidebar'] {
             margin-left: -21rem !important;
             width: 0 !important;
             transform: translateX(-100%);
         }
 
-        /* 3. ARCHITECT FIX: Kill the 1400px limit and center the dashboard */
+        /* 3. SENIOR DEV FIX: Edge-to-edge expansion */
         [data-testid="stMainView"] .block-container {
-            max-width: 95vw !important; /* Allow expansion up to 95% of screen width */
-            width: 95vw !important;
-            margin-left: auto !important;
-            margin-right: auto !important;
-            padding-left: 5rem !important;
-            padding-right: 5rem !important;
+            max-width: 100% !important;
+            width: 100% !important;
+            margin: 0 !important;
+            padding-left: 2rem !important;  /* Reduced from 5rem to reclaim space */
+            padding-right: 2rem !important; /* Reduced from 5rem to reclaim space */
             transition: all 0.4s ease-in-out;
         }
         
-        /* 4. Fix the top header alignment for the toggle button */
+        /* 4. Ensure header spans the full width */
         header { 
             left: 0 !important; 
             width: 100% !important; 

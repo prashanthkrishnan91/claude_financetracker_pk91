@@ -183,29 +183,35 @@ plaid_snap = st.session_state.plaid_snap
 if not st.session_state.sidebar_open:
     st.markdown("""
         <style>
-        /* 1. Reset the app container offset entirely */
+        /* 1. Remove the left offset from the app container */
         [data-testid="stAppViewContainer"] {
             padding-left: 0rem !important;
         }
 
-        /* 2. Fully tuck the sidebar */
+        /* 2. Hide the sidebar entirely from the layout */
         section[data-testid='stSidebar'] {
-            margin-left: -21rem !important;
-            width: 0 !important;
-            transform: translateX(-100%);
+            display: none !important;
         }
 
-        /* 3. SENIOR DEV FIX: Edge-to-edge expansion */
-        [data-testid="stMainView"] .block-container {
+        /* 3. ARCHITECT FIX: Force the main view to fill 100% of the viewport */
+        [data-testid="stMainView"] {
+            width: 100% !important;
+            max-width: 100% !important;
+        }
+
+        /* 4. Kill all padding and margins on the content block */
+        .main .block-container {
             max-width: 100% !important;
             width: 100% !important;
             margin: 0 !important;
-            padding-left: 2rem !important;  /* Reduced from 5rem to reclaim space */
-            padding-right: 2rem !important; /* Reduced from 5rem to reclaim space */
-            transition: all 0.4s ease-in-out;
+            padding-top: 2rem !important;
+            padding-left: 1.5rem !important;
+            padding-right: 1.5rem !important;
+            padding-bottom: 2rem !important;
+            transition: none !important; /* Instant snap for better responsiveness */
         }
         
-        /* 4. Ensure header spans the full width */
+        /* 5. Stretch the top header across the full width */
         header { 
             left: 0 !important; 
             width: 100% !important; 

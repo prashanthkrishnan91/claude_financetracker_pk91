@@ -1163,8 +1163,8 @@ with tab_archive:
 # TAB 4 — ⚙️ Terminal (Backend & Admin)
 # ─────────────────────────────────────────────────────────────
 with tab_terminal:
-            # Import, Tests
-            sub_a, sub_b = st.tabs(["📥 Import", "🧪 Tests"])
+  # Import, Tests
+  sub_a, sub_b = st.tabs(["📥 Import", "🧪 Tests"])
   with sub_a:
       st.markdown("### 📥 Import Robinhood Activity")
       c_csv, c_pdf = st.columns(2)

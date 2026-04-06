@@ -496,16 +496,16 @@ with tab_intel:
       # Filter out zero values to prevent Plotly errors
       df_plot = df[df["Market Value"] > 0].copy()
       fig_tree = px.treemap(
-        df_plot, 
-        path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
-        values='Market Value', 
-        color='P&L %', 
-        color_continuous_scale='RdYlGn', 
-        color_continuous_midpoint=0,
-        # FIX: Explicitly set the range of the color bar
-        range_color=[-30, 30], 
-        template="plotly_dark",
-        custom_data=['Real P&L %'] # Pass real data to tooltips
+          df_plot, 
+          path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
+          values='Market Value', 
+          color='P&L %', 
+          color_continuous_scale='RdYlGn', 
+          color_continuous_midpoint=0,
+          range_color=[-30, 30], 
+          template="plotly_dark",
+          # This must match the key in the 'rows' list exactly
+          custom_data=['Real P&L %'] 
       )
     
       # Update tooltips to show the actual % even if clamped in the map

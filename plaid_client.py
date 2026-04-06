@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 import plaid
 from plaid.api import plaid_api
+from plaid.model.investments_refresh_request import InvestmentsRefreshRequest
 from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 try:
     # Newer versions of the SDK (like your v39.0.0)
@@ -169,7 +170,23 @@ class PlaidClient:
             logger.error("Plaid API error [%s]: %s", exc.status, exc.body)
             raise
         return self._parse_response(response)
-
+    # ── Refresh Investments ──────────────────────────────────────────────────
+    def refresh_investments(self):
+    """
+    Trigger an on-demand refresh of investment data.
+    This uses the 'Investments Refresh' 200-limit credits.
+    """
+    client = self._get_client()
+    request = InvestmentsRefreshRequest(access_token=self._access_token)
+    
+    try:
+        # This call increments the 0/200 "Investments Refresh" counter
+        response = client.investments_refresh(request)
+        logger.info("Plaid: Investment refresh triggered successfully.")
+        return response.to_dict()
+    except plaid.ApiException as exc:
+        logger.error("Plaid Refresh Error [%s]: %s", exc.status, exc.body)
+        raise
     # ── Response parser ───────────────────────────────────────────────────────
 
     def _parse_response(self, response) -> PlaidPortfolio:

@@ -56,6 +56,7 @@ html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:#07090f;col
     .block-container {
         padding: 1.5rem 2rem;
         max-width: 1400px;
+        margin: 0 auto; /* This keeps the content centered when sidebar disappears */
         transition: all 0.4s ease-in-out; /* Smooths the shift when sidebar toggles */
     }
 

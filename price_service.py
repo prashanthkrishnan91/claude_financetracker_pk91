@@ -24,7 +24,12 @@ import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
 from dataclasses import dataclass
+# ARCHITECT FIX: Force the module name into the global namespace 
+# to prevent the 'NoneType' __dict__ error during Streamlit reruns.
+if __name__ not in sys.modules:
+    sys.modules[__name__] = sys.modules.get(__name__)
 from typing import Optional, TYPE_CHECKING
 
 import requests

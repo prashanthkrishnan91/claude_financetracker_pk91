@@ -745,6 +745,8 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
             logger.info(f"Plaid: Local cache is fresh ({age_hours:.2f}h < 24h). Reading from DISK.")
             if PLAID_SNAPSHOT_PATH.exists():
                 return _load(PLAID_SNAPSHOT_PATH, None)
+            else:
+                logger.info("Plaid: No local snapshot found. Forcing initial API sync.")
             # If file is missing, we fall through to force a sync
       
         # 3. If we are here, we are about to hit the Plaid API (Costs 1-2 Tokens)
@@ -759,7 +761,7 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
             p_client.refresh_investments()
             # Give Plaid's backend 2 seconds to start the worker
             import time
-            time.sleep(2) 
+            time.sleep(3) 
         else:
             logger.info(f"Sync: Age {age_hours}h < 24h. Using Plaid's intraday cache (FREE).")
             

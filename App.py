@@ -521,7 +521,11 @@ if plaid_snap and plaid_snap.get("positions"):
     rows = []
     for p in plaid_snap["positions"]:
         ticker = p["ticker"]
-        raw_pnl = p["unrealised_pct"]
+        mkt_val = float(p.get("market_value", 0.0))
+        raw_pnl = float(p.get("unrealised_pct", 0.0))
+        # Skip positions with no value to prevent treemap math errors
+        if mkt_val <= 0:
+            continue
         # Clamp color-scale P&L between -100% and 100%
         clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
         # CATEGORY LOGIC

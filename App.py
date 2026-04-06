@@ -31,8 +31,6 @@ import plotly.graph_objects as go
 import data_engine as de
 import drip_analytics as drip
 
-if st.sidebar.checkbox("Architect Debug"):
-    st.sidebar.write("Secrets keys found:", list(st.secrets.keys()))
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # PAGE CONFIG

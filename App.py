@@ -452,17 +452,21 @@ live_crypto = 0.0
 total_cost = 0.0
 
 for ticker, pos in active_portfolio.items():
-    qty = pos.get("shares", 0)
-    cost_basis = pos.get("avg_cost", 0)
-    total_cost += (qty * cost_basis)
+    qty = float(pos.get("shares", 0.0) or 0.0)
+    c_basis = float(pos.get("avg_cost", 0.0) or 0.0)
+    # Track cost basis (only add if we have a valid basis > 0)
+    if c_basis > 0:
+        total_cost += (qty * c_basis)
     
     # Use Live Price if available, else fallback to Plaid/Bootstrap cache
-    if prices and ticker in prices and prices[ticker] > 0:
-        pos_val = qty * prices[ticker]
-    else:
-        pos_val = pos.get("market_value", qty * cost_basis)
-            
-    if pos.get("category", "").lower() == "crypto" or ticker in ["BTC", "ETH"]:
+    p_val = float(prices.get(ticker, 0.0) or 0.0)
+    if p_val <= 0:
+        p_val = float(pos.get("market_value", qty * c_basis) or 0.0) / qty if qty > 0 else 0.0
+    
+    pos_val = qty * p_val
+    
+    # Categorize
+    if pos.get("category", "").lower() == "crypto" or ticker in ["BTC", "ETH", "XRP", "SOL", "DOGE"]:
         live_crypto += pos_val
     else:
         live_stocks += pos_val
@@ -593,7 +597,7 @@ with tab_intel:
           df, 
           path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
           values='Market Value', 
-          color='P&L %', 
+          color='Real P&L %', 
           color_continuous_scale='RdYlGn', 
           color_continuous_midpoint=0,
           range_color=[-30, 30], 
@@ -605,7 +609,7 @@ with tab_intel:
       # Update tooltips to show the actual % even if clamped in the map
       fig_tree.update_traces(
           marker_colorscale='RdYlGn',
-          hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}<br>P&L: %{customdata[0]:.1f}%"
+          hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}<br>P&L: %{color:.1f}%"
       )
       
       fig_tree.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=450)

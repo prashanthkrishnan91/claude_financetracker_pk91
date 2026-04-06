@@ -722,16 +722,39 @@ def fetch_prices(tickers: tuple, _bust: int = 0) -> dict[str, float]:
 def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
     if not _V11_AVAILABLE:
         return None
+        
     _load_env_from_secrets()
     if not os.environ.get("PLAID_ACCESS_TOKEN"):
         return None
+        
     try:
+        # 1. Check cache age to decide if we burn an 'Investments Refresh' credit
+        cs = get_holdings_cache_status()
+        age_hours = cs.get("age_hours")
+        
+        # If age_hours is None (no cache), or >= 24, or user clicked force sync, we refresh
+        needs_hard_refresh = force_plaid or (age_hours is None) or (age_hours >= 24)
+        
+        if needs_hard_refresh:
+            logger.info("24h passed or force sync requested: Triggering Plaid hard refresh...")
+            from plaid_client import PlaidClient
+            # This specific call uses 1 of your 200 Refresh credits
+            PlaidClient().refresh_investments()
+            
+        # 2. Proceed with normal aggregation
         mgr      = HoldingsManager(cache_path=HOLDINGS_CACHE_PATH)
         agg      = PortfolioAggregator(holdings_manager=mgr)
-        snapshot = agg.calculate_total_value(force_plaid_refresh=force_plaid)
+        
+        # Always set this to True so the aggregator calls get_holdings() intraday
+        # This pulls from Plaid's cache (uses 0 credits)
+        snapshot = agg.calculate_total_value(force_plaid_refresh=True)
+        
+        # 3. Export the snapshot to your cache
         from main_sync import export_json
         export_json(snapshot, str(PLAID_SNAPSHOT_PATH))
+        
         return _load(PLAID_SNAPSHOT_PATH, None)
+        
     except Exception as e:
         logger.warning("Smart sync failed: %s", e)
         return None

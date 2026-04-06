@@ -65,7 +65,7 @@
    - Purpose: patterns, architecture, best practices
 
 6. get-shit-done
-   - Purpose: Accomplish given tasks based on provided prompts
+   - Purpose: Structured spec-driven workflow for planning and executing software projects with Claude Code.
 
 ## Decision Framework
 
@@ -73,7 +73,7 @@
 - Logic/calculation → use superpowers
 - State/memory → use claude-mem
 - Refactor/design → use awesome-claude-code
-- Sequential thinking and prompt based responses - use get-shit-done
+- Sequential thinking and structured thinking - use get-shit-done
 
 ## Rules
 

@@ -733,11 +733,23 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         cs = get_holdings_cache_status()
         age_hours = cs.get("age_hours", 999)
         
-        # If age_hours is None (no cache), or >= 24, or user clicked force sync, we refresh
+        # 2. Logic Gate: Only proceed to Plaid API if we actually need a refresh
         needs_hard_refresh = force_plaid or (age_hours is None) or (age_hours >= 24)
+        
+        if not needs_hard_refresh:
+            # --- SUCCESS CRITERIA: OFFLINE MODE ---
+            # If cache is fresh, do NOT initialize PlaidClient.
+            # Just read the last snapshot from disk. 0 tokens used.
+            logger.info(f"Plaid: Local cache is fresh ({age_hours:.2f}h < 24h). Reading from DISK.")
+            if PLAID_SNAPSHOT_PATH.exists():
+                return _load(PLAID_SNAPSHOT_PATH, None)
+            # If file is missing, we fall through to force a sync
+      
+        # 3. If we are here, we are about to hit the Plaid API (Costs 1-2 Tokens)
+        logger.info(f"Plaid: Accessing API (Age: {age_hours:.2f}h).")
         from plaid_client import PlaidClient
         p_client = PlaidClient()
-        
+
         if needs_hard_refresh:
             reason = "Manual Force" if force_plaid else f"Age {age_hours:.2f}h >= 24h"
             # This consumes 1 credit from your 'Investments Refresh' (0/200) bucket
@@ -749,15 +761,13 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         else:
             logger.info(f"Sync: Age {age_hours}h < 24h. Using Plaid's intraday cache (FREE).")
             
-        # 2. Proceed with normal aggregation
-        mgr      = HoldingsManager(cache_path=HOLDINGS_CACHE_PATH)
-        agg      = PortfolioAggregator(holdings_manager=mgr)
-        
-        # Always set this to True so the aggregator calls get_holdings() intraday
-        # This pulls from Plaid's cache (uses 0 credits)
+        # Always pull data if we've committed to a Plaid API session (Plaid -> App)
+        # This consumes 1 'Investments' credit (Bucket A) in your tier
+        mgr = HoldingsManager(cache_path=HOLDINGS_CACHE_PATH)
+        agg = PortfolioAggregator(holdings_manager=mgr)
         snapshot = agg.calculate_total_value(force_plaid_refresh=True)
         
-        # 3. Export the snapshot to your cache
+        # 4. Save to Disk and Return
         from main_sync import export_json
         export_json(snapshot, str(PLAID_SNAPSHOT_PATH))
         

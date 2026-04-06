@@ -520,16 +520,25 @@ df = pd.DataFrame()
 if plaid_snap and plaid_snap.get("positions"):
     rows = []
     for p in plaid_snap["positions"]:
+        ticker = p["ticker"]
         raw_pnl = p["unrealised_pct"]
         # Clamp color-scale P&L between -100% and 100%
         clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
-        
+        # CATEGORY LOGIC
+        # 1. Use the category from Plaid if available
+        cat = p.get("category", "Stocks")
+        # 2. Force Crypto category for known coins
+        if ticker in ["BTC", "ETH", "XRP", "SOL", "DOGE"]:
+            cat = "Crypto"
+        # 3. Basic ETF heuristic if Plaid returns 'Stocks' for funds
+        elif any(etf_provider in p.get("name", "").upper() for etf_provider in ["VANGUARD", "ISHARES", "SPDR", "INVESCO"]):
+            cat = "ETFs"
         rows.append({
-            "Ticker": p["ticker"],
+            "Ticker": ticker,
             "Market Value": p["market_value"],
             "P&L %": clamped_pnl,      # Used for the heatmap color
             "Real P&L %": raw_pnl,    # Used for the tooltip (fixes ValueError)
-            "Category": p.get("category", "Stocks")
+            "Category": cat
         })
     df = pd.DataFrame(rows)
     

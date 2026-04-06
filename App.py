@@ -423,49 +423,48 @@ with st.sidebar:
 totals = de.portfolio_totals(portfolio, prices, cash)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HEADER KPIs (LIVE PLAID SYNC FIX)
+# HEADER KPIs (SSOT ARCHITECTURE)
 # ═══════════════════════════════════════════════════════════════════════════════
 is_plaid = bool(plaid_snap and plaid_snap.get("positions"))
+
+# 1. DEFINE ACTIVE PORTFOLIO (Plaid Overwrites Bootstrap)
 active_portfolio = {}
 if is_plaid:
-    # PLAID OVERWRITES BOOTSTRAP
     for p in plaid_snap["positions"]:
         active_portfolio[p["ticker"]] = {
             "shares": p.get("quantity", 0),
-            "market_value": p.get("market_value", 0), # Plaid's cached value
-            "unrealised_pct": p.get("unrealised_pct", 0.0),
+            "market_value": p.get("market_value", 0),
             "category": p.get("category", "Stocks")
         }
     active_cash = plaid_snap.get("cash", 0)
 else:
-    # FALLBACK TO BOOTSTRAP
-    active_portfolio = portfolio 
+    active_portfolio = portfolio
     active_cash = cash
-# ═══════════════════════════════════════════════════════════════════════════════
-# HEADER KPIs (UNIFIED LIVE SYNC)
-# ═══════════════════════════════════════════════════════════════════════════════
+
+# 2. CALCULATE LIVE VS CACHED TOTALS
 live_stocks = 0.0
 live_crypto = 0.0
 
 for ticker, pos in active_portfolio.items():
     qty = pos.get("shares", 0)
     
-    # 1. LIVE PRICE: Always prefer fresh API prices if available
+    # PRIORITY: If we have fresh prices AND we haven't JUST hit 'Sync Plaid'
+    # (Note: You can clear st.session_state.prices inside the Sync button to force this)
     if prices and ticker in prices and prices[ticker] > 0:
         pos_val = qty * prices[ticker]
-    # 2. CACHE FALLBACK: Use Plaid's cached value if Plaid is active
+        source_badge = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">⚡ LIVE PRICE</span>'
     elif is_plaid:
         pos_val = pos.get("market_value", 0)
-    # 3. BOOTSTRAP FALLBACK: Calculate from average cost
+        source_badge = '<span class="tag tag-plaid">Plaid Sync</span>'
     else:
         pos_val = qty * pos.get("avg_cost", 0)
-        
-    # Route into appropriate buckets
+        source_badge = '<span class="tag tag-bootstrap">Bootstrap</span>'
+
     if pos.get("category", "").lower() == "crypto" or ticker in ["BTC", "ETH"]:
         live_crypto += pos_val
     else:
         live_stocks += pos_val
-        
+
 display_total = live_stocks + live_crypto + active_cash
 display_stocks = live_stocks
 display_crypto = live_crypto

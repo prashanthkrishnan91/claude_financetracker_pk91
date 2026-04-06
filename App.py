@@ -19,7 +19,11 @@ import datetime
 import json
 import sys
 import os
-sys.path.append(os.path.abspath("libs"))
+from services.ui_service import render_dashboard
+from services.logic_service import analyze_portfolio, suggest_rebalance
+from services.memory_service import save_user_data, load_user_data
+from services.pattern_service import clean_code
+
 import time
 
 import streamlit as st

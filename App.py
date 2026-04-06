@@ -499,16 +499,25 @@ with tab_intel:
   st.subheader("Portfolio Heatmap")
   if not df.empty:
       # Filter out zero values to prevent Plotly errors
-      df_plot = df[df["Market Value"] > 0]
+      df_plot = df[df["Market Value"] > 0].copy()
       fig_tree = px.treemap(
-          df_plot, 
-          path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
-          values='Market Value', 
-          color='P&L %', 
-          color_continuous_scale='RdYlGn', 
-          color_continuous_midpoint=0,
-          template="plotly_dark"
+        df_plot, 
+        path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
+        values='Market Value', 
+        color='P&L %', 
+        color_continuous_scale='RdYlGn', 
+        color_continuous_midpoint=0,
+        # FIX: Explicitly set the range of the color bar
+        range_color=[-30, 30], 
+        template="plotly_dark",
+        custom_data=['Real P&L %'] # Pass real data to tooltips
       )
+    
+      # Update tooltips to show the actual % even if clamped in the map
+      fig_tree.update_traces(
+          hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}<br>P&L: %{customdata[0]:.1f}%"
+      )
+      
       fig_tree.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=400)
       st.plotly_chart(fig_tree, use_container_width=True)
 # ─────────────────────────────────────────────────────────────

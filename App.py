@@ -528,7 +528,8 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.1 — Actions
 # ─────────────────────────────────────────────────────────────
-  with st.expander("🎯 Active Recommendations", expanded=True):
+suba, subb, subc,subd = st.tabs(["🎯 Active Recommendations", "📊 Full Holdings List", "📈 Allocation Charts","💸 DRIP Analytics"])
+  with suba:
       if not prices:
           st.info("👆 Press **🔄 Refresh** in the sidebar to load live prices and generate recommendations.")
       else:
@@ -600,7 +601,7 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.2 — PORTFOLIO
 # ─────────────────────────────────────────────────────────────
-  with st.expander("📊 Full Holdings List", expanded=False):
+  with subb:
       st.markdown("### Holdings")
   
       if plaid_snap and plaid_snap.get("positions"):
@@ -693,7 +694,7 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.3 — CHARTS
 # ─────────────────────────────────────────────────────────────
-  with st.expander("📈 Allocation Charts", expanded=False):
+  with subc:
       if not prices:
           st.info("Press 🔄 Refresh to load prices.")
       else:
@@ -755,7 +756,7 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  with st.expander("💸 DRIP Analytics", expanded=False):
+  with subd:
       drip.render_drip_dashboard(portfolio, prices)
 
 # ─────────────────────────────────────────────────────────────
@@ -763,7 +764,8 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 with tab_ops:
   # Rebalancing
-  with st.expander("⚖️ Portfolio Rebalancing", expanded=False):
+sub1, sub2 = st.tabs(["⚖️ Portfolio Rebalancing", "💰 Deposit Allocation"])
+  with sub1:
       if not targets:
           st.info("Click **✨ Generate AI Targets** in the sidebar first.")
       elif not prices:
@@ -821,7 +823,7 @@ with tab_ops:
 # ─────────────────────────────────────────────────────────────
 # TAB 2.2 — INVEST $900  (v11.2: cash-informed + override inputs)
 # ─────────────────────────────────────────────────────────────
-  with st.expander("💰 Deposit Allocation", expanded=False):
+  with sub2:
       dep_num  = st.session_state.deposit_num
       fridays  = de.get_biweekly_dates(datetime.date(2026, 4, 3), n=18)
       today    = datetime.date.today()
@@ -1041,8 +1043,8 @@ with tab_ops:
 # ─────────────────────────────────────────────────────────────
 with tab_archive:
   # Decision Log, Schedule, and History
-  sub1, sub2, sub3 = st.tabs(["📋 Decision Log", "📅 Schedule", "🕐 History"])
-  with sub1:
+  sub_1, sub_2, sub_3 = st.tabs(["📋 Decision Log", "📅 Schedule", "🕐 History"])
+  with sub_1:
       st.markdown("### 📋 Decision Log — Manual Override History")
       st.caption(
           "Every time you override an AI recommendation in the Invest tab and "
@@ -1115,7 +1117,7 @@ with tab_archive:
 # ─────────────────────────────────────────────────────────────
 # TAB 3.2 — SCHEDULE
 # ─────────────────────────────────────────────────────────────
-  with sub2:
+  with sub_2:
       st.markdown("### 📅 2026 Action Calendar")
       calendar_events = [
           ("Apr 3",  "SELL",  "VTV, VEA, VWO, BND",  "LT eligible now — pay 15%. Reinvest into VOO+VYM same day."),
@@ -1170,7 +1172,7 @@ with tab_archive:
 # ─────────────────────────────────────────────────────────────
 # TAB 7 — HISTORY
 # ─────────────────────────────────────────────────────────────
-  with sub3:
+  with sub_3:
       st.markdown("### 📸 Recommendation History")
       history = de._load(de.REC_HISTORY_PATH, [])
       if not history:

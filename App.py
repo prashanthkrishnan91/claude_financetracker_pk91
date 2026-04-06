@@ -204,23 +204,25 @@ with st.sidebar:
 
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("🔄 Refresh", width='stretch', help="Fetch live prices"):
-            st.cache_data.clear()
-            st.session_state.bust += 1
-            st.rerun()
-
-    # ARCHITECT FIX: Move the fetching logic OUTSIDE the button click 
-    # but inside the main script flow so it runs after the rerun.
-    with st.spinner("Fetching live prices…"):
-        st.session_state.prices = de.fetch_prices(
-            tuple(sorted(portfolio.keys())), 
-            _bust=st.session_state.bust
-        )
-        prices = st.session_state.prices
-        # Re-generate recommendations with the fresh prices
-        st.session_state.recs = de.generate_recs(portfolio, prices)
-        st.session_state.dep_recs_final = []
-        st.session_state.overrides_applied = False
+      if st.button("🔄 Refresh", width='stretch', help="Fetch live prices"):
+          # 1. Clear cache and increment bust counter
+          st.cache_data.clear()
+          st.session_state.bust += 1
+          
+          # 2. Fetch prices BEFORE rerunning
+          with st.spinner("Fetching live prices…"):
+              new_prices = de.fetch_prices(
+                  tuple(sorted(portfolio.keys())), 
+                  _bust=st.session_state.bust
+              )
+              # 3. Update session state with fresh data
+              st.session_state.prices = new_prices
+              st.session_state.recs = de.generate_recs(portfolio, new_prices)
+              st.session_state.dep_recs_final = []
+              st.session_state.overrides_applied = False
+          
+          # 4. Now safely restart the UI to display the new data
+          st.rerun()
 
     # FORCE LOAD: This bypasses all Streamlit proxy issues
         # Check for the secret using every possible naming convention

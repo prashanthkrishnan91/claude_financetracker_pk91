@@ -205,23 +205,22 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     with col1:
         if st.button("🔄 Refresh", width='stretch', help="Fetch live prices"):
-            st.cache_data.clear() 
+            st.cache_data.clear()
             st.session_state.bust += 1
             st.rerun()
 
-        # This part runs AUTOMATICALLY after the rerun above 
-        # OR on the initial page load
-        with st.spinner("Fetching live prices…"):
-            st.session_state.prices = de.fetch_prices(
-                tuple(sorted(portfolio.keys())), 
-                _bust=st.session_state.bust
-            )
-            prices = st.session_state.prices
-            
-            # Update recommendations with new prices
-            st.session_state.recs = de.generate_recs(portfolio, prices)
-            st.session_state.dep_recs_final = []
-            st.session_state.overrides_applied = False
+    # ARCHITECT FIX: Move the fetching logic OUTSIDE the button click 
+    # but inside the main script flow so it runs after the rerun.
+    with st.spinner("Fetching live prices…"):
+        st.session_state.prices = de.fetch_prices(
+            tuple(sorted(portfolio.keys())), 
+            _bust=st.session_state.bust
+        )
+        prices = st.session_state.prices
+        # Re-generate recommendations with the fresh prices
+        st.session_state.recs = de.generate_recs(portfolio, prices)
+        st.session_state.dep_recs_final = []
+        st.session_state.overrides_applied = False
 
     # FORCE LOAD: This bypasses all Streamlit proxy issues
         # Check for the secret using every possible naming convention
@@ -281,6 +280,9 @@ with st.sidebar:
 
     # 3. If manual is 0, use Plaid. If user types anything else, use Manual.
     total_cash = manual_input if manual_input > 0 else plaid_cash
+  
+    # 4. CRITICAL: Update the 'cash' variable used by the Header KPIs
+    cash = total_cash
 
     st.markdown("---")
 

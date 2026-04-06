@@ -443,7 +443,7 @@ if is_plaid:
             pos_val = p.get("market_value", 0)
             
         # Sort into Crypto vs Stocks
-        if p.get("type") == "cryptocurrency" or ticker in ["BTC", "ETH"]:
+        if p.get("type") == "cryptocurrency" or ticker in ["BTC", "XRP"]:
             live_crypto += pos_val
         else:
             live_stocks += pos_val

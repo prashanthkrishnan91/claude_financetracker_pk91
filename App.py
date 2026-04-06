@@ -527,7 +527,7 @@ if plaid_snap and plaid_snap.get("positions"):
         if mkt_val <= 0:
             continue
         # Clamp color-scale P&L between -100% and 100%
-        clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
+        clamped_pnl = max(min(raw_pnl, 30.0), -30.0)
         # CATEGORY LOGIC
         # 1. Use the category from Plaid if available
         cat = p.get("category", "Stocks")
@@ -581,7 +581,7 @@ with tab_intel:
   st.subheader("Portfolio Heatmap")
   if not df.empty:
       # Filter out zero values to prevent Plotly errors
-      df_plot = df[df["Market Value"] > 0].copy()
+      df_plot = df.sort_values("Market Value", ascending=False)
       fig_tree = px.treemap(
           df_plot, 
           path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
@@ -597,10 +597,11 @@ with tab_intel:
     
       # Update tooltips to show the actual % even if clamped in the map
       fig_tree.update_traces(
+          marker_colorscale='RdYlGn',
           hovertemplate="<b>%{label}</b><br>Value: $%{value:,.2f}<br>P&L: %{customdata[0]:.1f}%"
       )
       
-      fig_tree.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=400)
+      fig_tree.update_layout(margin=dict(t=0, l=0, r=0, b=0), height=450)
       st.plotly_chart(fig_tree, width='stretch')
 # ─────────────────────────────────────────────────────────────
 # TAB 1.1 — Actions

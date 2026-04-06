@@ -451,31 +451,40 @@ for col, label, value, sub, vcol in [
 
 st.markdown("---")
 
-# ARCHITECT FIX: Define 'df' before the tabs start
-df = pd.DataFrame() # Initialize empty
+# ARCHITECT FIX: Ensure 'Real P&L %' exists in BOTH branches
+df = pd.DataFrame()
 if plaid_snap and plaid_snap.get("positions"):
-    rows = [{"Ticker": p["ticker"], "Market Value": p["market_value"], 
-             "P&L %": p["unrealised_pct"], "Category": p.get("category", "Stocks")} 
-            for p in plaid_snap["positions"]]
+    rows = []
+    for p in plaid_snap["positions"]:
+        raw_pnl = p["unrealised_pct"]
+        # Clamp color-scale P&L between -100% and 100%
+        clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
+        
+        rows.append({
+            "Ticker": p["ticker"],
+            "Market Value": p["market_value"],
+            "P&L %": clamped_pnl,      # Used for the heatmap color
+            "Real P&L %": raw_pnl,    # Used for the tooltip (fixes ValueError)
+            "Category": p.get("category", "Stocks")
+        })
     df = pd.DataFrame(rows)
+    
 elif portfolio:
-  rows = []
-  for ticker, pos in portfolio.items():
-      p = de._safe_price(ticker, pos, prices)
-      cost = pos.get("avg_cost", 0)
-      
-      raw_pnl = ((p - cost) / cost * 100) if cost > 0 else 0.0
-      # Clamp for color scale only
-      clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
+    rows = []
+    for ticker, pos in portfolio.items():
+        p = de._safe_price(ticker, pos, prices)
+        cost = pos.get("avg_cost", 0)
+        raw_pnl = ((p - cost) / cost * 100) if cost > 0 else 0.0
+        clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
 
-      rows.append({
-          "Ticker": ticker,
-          "Market Value": p * pos["shares"],
-          "P&L %": clamped_pnl,      # Plotly uses this for color
-          "Real P&L %": raw_pnl,    # Plotly uses this for tooltips
-          "Category": pos.get("category", "Stocks")
-      })
-  df = pd.DataFrame(rows)
+        rows.append({
+            "Ticker": ticker,
+            "Market Value": p * pos["shares"],
+            "P&L %": clamped_pnl,
+            "Real P&L %": raw_pnl,
+            "Category": pos.get("category", "Stocks")
+        })
+    df = pd.DataFrame(rows)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TABS  (4 tabs — DRIP Analytics added)

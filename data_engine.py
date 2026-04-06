@@ -731,7 +731,9 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
     try:
         # 1. Check cache age to decide if we burn an 'Investments Refresh' credit
         cs = get_holdings_cache_status()
-        age_hours = cs.get("age_hours", 999)
+        raw_age = cs.get("age_hours")
+        # If no cache exists, set age to 999 so we force an initial sync
+        age_hours = float(raw_age) if raw_age is not None else 999.0
         
         # 2. Logic Gate: Only proceed to Plaid API if we actually need a refresh
         needs_hard_refresh = force_plaid or (age_hours is None) or (age_hours >= 24)

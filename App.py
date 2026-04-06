@@ -524,10 +524,7 @@ if plaid_snap and plaid_snap.get("positions"):
         mkt_val = float(p.get("market_value", 0.0))
         raw_pnl = float(p.get("unrealised_pct", 0.0))
         # Skip positions with no value to prevent treemap math errors
-        if mkt_val <= 0:
-            continue
-        # Clamp color-scale P&L between -100% and 100%
-        clamped_pnl = max(min(raw_pnl, 30.0), -30.0)
+        if mkt_val <= 0: continue
         # CATEGORY LOGIC
         # 1. Use the category from Plaid if available
         cat = p.get("category", "Stocks")
@@ -539,12 +536,23 @@ if plaid_snap and plaid_snap.get("positions"):
             cat = "ETFs"
         rows.append({
             "Ticker": ticker,
-            "Market Value": p["market_value"],
-            "P&L %": clamped_pnl,      # Used for the heatmap color
+            "Market Value": mkt_val,
+            "P&L %": raw_pnl,      # Used for the heatmap color
             "Real P&L %": raw_pnl,    # Used for the tooltip (fixes ValueError)
             "Category": cat
         })
     df = pd.DataFrame(rows)
+#NEW: Pre-calculate Category Averages to prevent NaN ---
+if not df.empty:
+    # Calculate weighted P&L: (Sum of (P&L * Value)) / Total Value
+    cat_stats = df.groupby("Category").apply(
+        lambda x: (x["Real P&L %"] * x["Market Value"]).sum() / x["Market Value"].sum()
+    ).to_dict()
+    
+    # Map these averages back to a new column for the heatmap color
+    df["Cat_Avg_PnL"] = df["Category"].map(cat_stats)
+    # Clamp for the visual scale
+    df["P&L %"] = df["Real P&L %"].clip(-30, 30)
     
 elif portfolio:
     rows = []
@@ -581,9 +589,8 @@ with tab_intel:
   st.subheader("Portfolio Heatmap")
   if not df.empty:
       # Filter out zero values to prevent Plotly errors
-      df_plot = df.sort_values("Market Value", ascending=False)
       fig_tree = px.treemap(
-          df_plot, 
+          df, 
           path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
           values='Market Value', 
           color='P&L %', 

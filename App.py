@@ -258,7 +258,7 @@ with st.sidebar:
           # 2. Fetch prices BEFORE rerunning
           with st.spinner("Fetching live prices…"):
               new_prices = de.fetch_prices(
-                  tuple(sorted(active_portfolio.keys())), 
+                  tuple(sorted(portfolio.keys())), 
                   _bust=st.session_state.bust
               )
               # 3. Update session state with fresh data

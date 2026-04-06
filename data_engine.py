@@ -731,7 +731,7 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
     try:
         # 1. Check cache age to decide if we burn an 'Investments Refresh' credit
         cs = get_holdings_cache_status()
-        age_hours = cs.get("age_hours")
+        age_hours = cs.get("age_hours", 999)
         
         # If age_hours is None (no cache), or >= 24, or user clicked force sync, we refresh
         needs_hard_refresh = force_plaid or (age_hours is None) or (age_hours >= 24)
@@ -739,8 +739,9 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         p_client = PlaidClient()
         
         if needs_hard_refresh:
+            reason = "Manual Force" if force_plaid else f"Age {age_hours:.2f}h >= 24h"
             # This consumes 1 credit from your 'Investments Refresh' (0/200) bucket
-            logger.info(f"Sync: Age {age_hours}h >= 24h. Triggering hard refresh...")
+            logger.info(f"Plaid: Triggering hard refresh ({reason}). Consuming 1 credit.")
             p_client.refresh_investments()
             # Give Plaid's backend 2 seconds to start the worker
             import time

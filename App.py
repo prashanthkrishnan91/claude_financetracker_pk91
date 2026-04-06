@@ -272,7 +272,7 @@ with st.sidebar:
     # Cash balance
     # Ensure we pull 'cash_usd' from the Smart Sync status helper
     cs = de.get_holdings_cache_status()
-    plaid_cash = portfolio.get('cash_usd', 0.0)
+    plaid_cash = cs.get('cash_usd', 0.0)
 
     # 2. Setup the Sidebar Input (defaulting to 0.0)
     with st.sidebar:

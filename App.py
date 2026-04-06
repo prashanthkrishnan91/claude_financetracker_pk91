@@ -450,8 +450,27 @@ for col, label, value, sub, vcol in [
 
 st.markdown("---")
 
+# ARCHITECT FIX: Define 'df' before the tabs start
+df = pd.DataFrame() # Initialize empty
+if plaid_snap and plaid_snap.get("positions"):
+    rows = [{"Ticker": p["ticker"], "Market Value": p["market_value"], 
+             "P&L %": p["unrealised_pct"], "Category": p.get("category", "Stocks")} 
+            for p in plaid_snap["positions"]]
+    df = pd.DataFrame(rows)
+elif portfolio:
+    rows = []
+    for ticker, pos in portfolio.items():
+        p = de._safe_price(ticker, pos, prices)
+        rows.append({
+            "Ticker": ticker,
+            "Market Value": p * pos["shares"],
+            "P&L %": ((p - pos["avg_cost"]) / pos["avg_cost"] * 100) if pos["avg_cost"] > 0 else 0,
+            "Category": pos.get("category", "Stocks")
+        })
+    df = pd.DataFrame(rows)
+
 # ═══════════════════════════════════════════════════════════════════════════════
-# TABS  (11 tabs — DRIP Analytics added as tab 10)
+# TABS  (4 tabs — DRIP Analytics added)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Consolidated Sector Navigation
 tab_intel, tab_ops, tab_archive, tab_terminal = st.tabs([

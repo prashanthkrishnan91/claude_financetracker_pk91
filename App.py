@@ -270,20 +270,11 @@ with st.sidebar:
     # 2. Setup the Sidebar Input (defaulting to 0.0)
     with st.sidebar:
         st.markdown("### 💵 Cash Balance")
-        manual_cash_override = st.number_input(
-            "Robinhood Cash ($)", 
-            value=0.0, 
-            step=100.0,
-            help="Leave at 0.0 to use live Plaid data. Enter a value to override."
-        )
+        # Use a neutral default or a clear indicator for "No Override"
+        manual_input = st.number_input("Robinhood Cash ($)", value=0.0, step=10.0)
 
-    # 3. ARCHITECT LOGIC: If manual is > 0, override. Otherwise, use Plaid.
-    if manual_cash_override > 0:
-        total_cash = manual_cash_override
-        cash_source = "Manual Override"
-    else:
-        total_cash = plaid_cash
-        cash_source = "Plaid"
+    # 3. If manual is 0, use Plaid. If user types anything else, use Manual.
+    total_cash = manual_input if manual_input > 0 else plaid_cash
 
     st.markdown("---")
 

@@ -47,7 +47,7 @@
 6. **Capture Lessons**: Update `tasks/lessons.md`
 7. **Capture progress**:  Update `tasks/progress_log.md`
 
-## Available Internal Libraries
+## Available Internal skills and libraries (.claude/skills)
 
 1. frontend-design
    - Purpose: UI/UX, layout, styling, Streamlit improvements

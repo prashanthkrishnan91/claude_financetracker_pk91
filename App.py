@@ -52,7 +52,25 @@ st.markdown("""
 html,body,[class*="css"]{font-family:'DM Sans',sans-serif;background:#07090f;color:#e2e8f0}
 .stApp{background:#07090f}
 #MainMenu,footer,header{visibility:hidden}
-.block-container{padding:1.2rem 1.4rem 3rem;max-width:1440px}
+/* FIX: Sidebar Shift & Layout Stability */
+    .block-container {
+        padding: 1.5rem 2rem;
+        max-width: 1400px;
+        transition: all 0.4s ease-in-out; /* Smooths the shift when sidebar toggles */
+    }
+
+    /* UPGRADE: Glassmorphic KPI Cards */
+.kpi {
+    background: rgba(21, 31, 50, 0.7);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+    transition: transform 0.2s ease;
+}
+.kpi:hover {
+    transform: translateY(-2px);
+    border-color: #38bdf8; /* Highlight on hover */
+}
 h1,h2,h3{font-family:'DM Serif Display',serif;letter-spacing:-0.02em}
 code,.mono{font-family:'JetBrains Mono',monospace;font-size:12px}
 

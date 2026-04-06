@@ -465,13 +465,13 @@ tab_intel, tab_ops, tab_archive, tab_terminal = st.tabs([
 # TAB 1 — Intel
 # ─────────────────────────────────────────────────────────────
 with tab_intel:
-            # 1. Add the Heatmap (Recommended UI update)
-            st.subheader("Portfolio Heatmap")
-            if not df.empty:
-                fig_tree = px.treemap(df, path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
-                                    values='Market Value', color='P&L %',
-                                    color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
-                st.plotly_chart(fig_tree, use_container_width=True)
+  # 1. Add the Heatmap (Recommended UI update)
+  st.subheader("Portfolio Heatmap")
+  if not df.empty:
+      fig_tree = px.treemap(df, path=[px.Constant("Portfolio"), 'Category', 'Ticker'], 
+                          values='Market Value', color='P&L %',
+                          color_continuous_scale='RdYlGn', color_continuous_midpoint=0)
+      st.plotly_chart(fig_tree, use_container_width=True)
 # ─────────────────────────────────────────────────────────────
 # TAB 1.1 — Actions
 # ─────────────────────────────────────────────────────────────

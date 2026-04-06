@@ -285,7 +285,7 @@ with st.sidebar:
                      disabled=not plaid_configured,
                      help="Force a refresh from Robinhood (Uses 1 credit if >24h)"):
             with st.spinner("Talking to Plaid..."):
-                snap = de.smart_sync_portfolio(force_plaid=True)
+                snap = de.smart_sync_portfolio(force_plaid=False)
             if snap:
                 st.session_state.plaid_snap = snap
                 plaid_snap = snap

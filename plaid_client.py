@@ -176,21 +176,21 @@ class PlaidClient:
     Trigger an on-demand refresh of investment data.
     This uses the 'Investments Refresh' 200-limit credits.
     """
-    client = self._get_client()
-    request = InvestmentsRefreshRequest(access_token=self._access_token)
-    
-    try:
-        # This call increments the 0/200 "Investments Refresh" counter
-        response = client.investments_refresh(request)
-        logger.info("Plaid: Hard refresh triggered (Consumed 1 Refresh credit).")
-        return True
-    except plaid.ApiException as exc:
-        # Handle the case where a refresh is already in progress
-        if "PRODUCT_NOT_READY" in str(exc.body):
-            logger.info("Plaid: Refresh already in progress, skipping.")
+        client = self._get_client()
+        request = InvestmentsRefreshRequest(access_token=self._access_token)
+        
+        try:
+            # This call increments the 0/200 "Investments Refresh" counter
+            response = client.investments_refresh(request)
+            logger.info("Plaid: Hard refresh triggered (Consumed 1 Refresh credit).")
             return True
-        logger.error("Plaid Refresh Error [%s]: %s", exc.status, exc.body)
-        return False
+        except plaid.ApiException as exc:
+            # Handle the case where a refresh is already in progress
+            if "PRODUCT_NOT_READY" in str(exc.body):
+                logger.info("Plaid: Refresh already in progress, skipping.")
+                return True
+            logger.error("Plaid Refresh Error [%s]: %s", exc.status, exc.body)
+            return False
     # ── Response parser ───────────────────────────────────────────────────────
 
     def _parse_response(self, response) -> PlaidPortfolio:

@@ -172,10 +172,10 @@ class PlaidClient:
         return self._parse_response(response)
     # ── Refresh Investments ──────────────────────────────────────────────────
     def refresh_investments(self):
-    """
-    Trigger an on-demand refresh of investment data.
-    This uses the 'Investments Refresh' 200-limit credits.
-    """
+        """
+        Trigger an on-demand refresh of investment data.
+        This uses the 'Investments Refresh' 200-limit credits.
+        """
         client = self._get_client()
         request = InvestmentsRefreshRequest(access_token=self._access_token)
         

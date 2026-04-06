@@ -289,7 +289,7 @@ with st.sidebar:
             if snap:
                 st.session_state.plaid_snap = snap
                 plaid_snap = snap
-                st.success(f"Plaid synced ✅  ${snap['total_equity']:,.2f}")
+                st.success(f"Plaid synced ✅  ${snap.total_equity:,.2f}")
                 st.session_state.prices = {} 
                 st.rerun()
             else:

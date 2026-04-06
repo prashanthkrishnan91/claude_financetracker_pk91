@@ -283,9 +283,9 @@ with st.sidebar:
     with col2:
         if st.button("🏦 Sync Plaid", width='stretch',
                      disabled=not plaid_configured,
-                     help="Force Plaid refresh. Auto-syncs every 24 h."):
-            with st.spinner("Syncing Plaid holdings…"):
-                snap = de.smart_sync_portfolio(force_plaid=True)
+                     help="Force a refresh from Robinhood (Uses 1 credit if >24h)"):
+            with st.spinner("Talking to Plaid..."):
+                snap = smart_sync_portfolio(force_plaid=True)
             if snap:
                 st.session_state.plaid_snap = snap
                 plaid_snap = snap
@@ -293,7 +293,7 @@ with st.sidebar:
                 st.session_state.prices = {} 
                 st.rerun()
             else:
-                st.warning("Plaid not configured. Add PLAID_ACCESS_TOKEN to secrets.")
+                st.sidebar.error("Sync Failed. Check Logs.")
 
     # Smart Sync status badge
     st.markdown("**📡 Smart Sync Status**")

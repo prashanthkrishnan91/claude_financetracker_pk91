@@ -454,12 +454,12 @@ st.markdown("---")
 # TABS  (11 tabs — DRIP Analytics added as tab 10)
 # ═══════════════════════════════════════════════════════════════════════════════
 # Consolidated Sector Navigation
- tab_intel, tab_ops, tab_archive, tab_terminal = st.tabs([
-      "🛡️ Intel", 
-      "⚔️ Operations", 
-      "📜 Archive", 
-      "⚙️ Terminal"
-  ])
+tab_intel, tab_ops, tab_archive, tab_terminal = st.tabs([
+  "🛡️ Intel", 
+  "⚔️ Operations", 
+  "📜 Archive", 
+  "⚙️ Terminal"
+])
 
 # ─────────────────────────────────────────────────────────────
 # TAB 1 — Intel

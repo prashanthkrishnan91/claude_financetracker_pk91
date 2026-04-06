@@ -47,19 +47,12 @@
 6. **Capture Lessons**: Update `tasks/lessons.md`
 7. **Capture progress**:  Update `tasks/progress_log.md`
 
-# Available Internal Libraries
+# Available services:
 
-1. ui-ux-pro-max-skill
-   - Purpose: UI/UX, layout, styling, Streamlit improvements
-
-2. superpowers
-   - Purpose: business logic, calculations, optimizations
-
-3. claude-mem
-   - Purpose: persistence, session state, memory handling
-
-4. awesome-claude-code
-   - Purpose: patterns, architecture, best practices
+- services/ui_service.py → UI rendering
+- services/logic_service.py → calculations & portfolio logic
+- services/memory_service.py → persistence
+- services/pattern_service.py → code quality
 
 ## Decision Framework
 
@@ -73,3 +66,9 @@
 - Never duplicate logic across modules
 - Always prefer modular reusable code
 - Production-grade output only
+- NEVER import directly from libs/*
+- ALWAYS use services layer
+
+If a required function does not exist:
+→ create it inside the appropriate service file
+→ then call underlying library

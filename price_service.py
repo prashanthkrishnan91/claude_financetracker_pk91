@@ -83,6 +83,10 @@ class PriceResult:
 
 def _make_session() -> requests.Session:
     session = requests.Session()
+    # Mask Python script as a standard browser to prevent 403 Forbidden blocks
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    from requests.adapters import HTTPAdapter
+    from urllib3.util.retry import Retry
     retry = Retry(
         total=3, backoff_factor=0.4,
         status_forcelist=[429, 500, 502, 503, 504],

@@ -45,3 +45,31 @@
 4. **Explain Changes**: High-level summary at each step
 5. **Document Results**: Add review section to `tasks/todo.md`
 6. **Capture Lessons**: Update `tasks/lessons.md`
+7. **Capture progress**:  Update `tasks/progress_log.md`
+
+# Available Internal Libraries
+
+1. ui-ux-pro-max-skill
+   - Purpose: UI/UX, layout, styling, Streamlit improvements
+
+2. superpowers
+   - Purpose: business logic, calculations, optimizations
+
+3. claude-mem
+   - Purpose: persistence, session state, memory handling
+
+4. awesome-claude-code
+   - Purpose: patterns, architecture, best practices
+
+## Decision Framework
+
+- UI task → use ui-ux-pro-max-skill
+- Logic/calculation → use superpowers
+- State/memory → use claude-mem
+- Refactor/design → use awesome-claude-code
+
+## Rules
+
+- Never duplicate logic across modules
+- Always prefer modular reusable code
+- Production-grade output only

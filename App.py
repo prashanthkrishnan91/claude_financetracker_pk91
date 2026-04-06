@@ -1164,7 +1164,7 @@ with tab_archive:
 # ─────────────────────────────────────────────────────────────
 with tab_terminal:
             # Import, Tests
-            sub_a, sub_b = st.tabs(["📥 Import", "🧪 Tests")
+            sub_a, sub_b = st.tabs(["📥 Import", "🧪 Tests"])
   with sub_a:
       st.markdown("### 📥 Import Robinhood Activity")
       c_csv, c_pdf = st.columns(2)

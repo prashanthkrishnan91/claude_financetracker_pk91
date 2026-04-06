@@ -430,15 +430,20 @@ if plaid_snap and plaid_snap.get("total_equity", 0) > 0:
     except Exception:
         use_plaid = True
 
-display_total  = plaid_snap["total_equity"]   if use_plaid else totals["total"]
-display_stocks = plaid_snap["stocks_equity"]  if use_plaid else totals["stocks"]
-display_crypto = plaid_snap["crypto_equity"]  if use_plaid else totals["crypto"]
+# 3. SENIOR DEV FIX: Always show the calculated live total from fresh prices
+# We only use plaid_snap if for some reason our live price fetch failed (prices is empty)
+if not prices and use_plaid:
+    display_total  = plaid_snap["total_equity"]
+    display_stocks = plaid_snap["stocks_equity"]
+    display_crypto = plaid_snap["crypto_equity"]
+    source_badge   = '<span class="tag tag-plaid">Plaid Sync</span>'
+else:
+    display_total  = totals["total"]
+    display_stocks = totals["stocks"]
+    display_crypto = totals["crypto"]
+    source_badge   = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">LIVE PRICE</span>'
 pnl_color      = "#22c55e" if totals["pnl"] >= 0 else "#ef4444"
 pnl_sign       = "+" if totals["pnl"] >= 0 else ""
-source_badge   = (
-    '<span class="tag tag-plaid">Plaid</span>' if use_plaid
-    else '<span style="color:#64748b;font-size:10px">estimated</span>'
-)
 
 _hdr_left, _hdr_right = st.columns([8, 1])
 with _hdr_left:

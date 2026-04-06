@@ -422,26 +422,55 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════════
 totals = de.portfolio_totals(portfolio, prices, cash)
 
-use_plaid = False
-if plaid_snap and plaid_snap.get("total_equity", 0) > 0:
-    try:
-        snap_age = (datetime.datetime.now() - datetime.datetime.fromisoformat(plaid_snap["timestamp"])).total_seconds() / 3600
-        use_plaid = snap_age < 2.0
-    except Exception:
-        use_plaid = True
+# ═══════════════════════════════════════════════════════════════════════════════
+# HEADER KPIs (LIVE PLAID SYNC FIX)
+# ═══════════════════════════════════════════════════════════════════════════════
+is_plaid = bool(plaid_snap and plaid_snap.get("positions"))
 
-# 3. SENIOR DEV FIX: Always show the calculated live total from fresh prices
-# We only use plaid_snap if for some reason our live price fetch failed (prices is empty)
-if not prices and use_plaid:
-    display_total  = plaid_snap["total_equity"]
-    display_stocks = plaid_snap["stocks_equity"]
-    display_crypto = plaid_snap["crypto_equity"]
-    source_badge   = '<span class="tag tag-plaid">Plaid Sync</span>'
+if is_plaid:
+    # Plaid Mode: Calculate live value by matching Plaid shares with Live API Prices
+    live_stocks = 0.0
+    live_crypto = 0.0
+    
+    for p in plaid_snap["positions"]:
+        ticker = p["ticker"]
+        qty = p.get("quantity", 0) # Extract the actual number of shares held
+        
+        # If we have a fresh price from the API, use it. Otherwise, use Plaid's cache.
+        if prices and ticker in prices and prices[ticker] > 0:
+            pos_val = qty * prices[ticker]
+        else:
+            pos_val = p.get("market_value", 0)
+            
+        # Sort into Crypto vs Stocks
+        if p.get("type") == "cryptocurrency" or ticker in ["BTC", "ETH"]:
+            live_crypto += pos_val
+        else:
+            live_stocks += pos_val
+    
+    # Add Plaid's reported cash balance
+    live_cash = plaid_snap.get("cash", 0)
+    live_total = live_stocks + live_crypto + live_cash
+    
+    # Display Logic: Show cached Plaid data by default, switch to Live if prices exist
+    if prices:
+        display_total = live_total
+        display_stocks = live_stocks
+        display_crypto = live_crypto
+        source_badge = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">⚡ LIVE PRICE</span>'
+    else:
+        display_total = plaid_snap.get("total_equity", live_total)
+        display_stocks = plaid_snap.get("stocks_equity", live_stocks)
+        display_crypto = plaid_snap.get("crypto_equity", live_crypto)
+        source_badge = '<span class="tag tag-plaid">Plaid Cache</span>'
+        
 else:
-    display_total  = totals["total"]
+    # Manual / Bootstrap Mode
+    totals = de.portfolio_totals(portfolio, prices, cash)
+    display_total = totals["total"]
     display_stocks = totals["stocks"]
     display_crypto = totals["crypto"]
-    source_badge   = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">LIVE PRICE</span>'
+    source_badge = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">⚡ LIVE PRICE</span>' if prices else '<span class="tag">Offline</span>'
 pnl_color      = "#22c55e" if totals["pnl"] >= 0 else "#ef4444"
 pnl_sign       = "+" if totals["pnl"] >= 0 else ""
 

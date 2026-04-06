@@ -420,22 +420,18 @@ with st.sidebar:
                     st.rerun()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# HEADER KPIs
-# ═══════════════════════════════════════════════════════════════════════════════
-totals = de.portfolio_totals(portfolio, prices, cash)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# HEADER KPIs (SSOT ARCHITECTURE)
+# HEADER KPIs (SSOT UNIFIED FIX)
 # ═══════════════════════════════════════════════════════════════════════════════
 is_plaid = bool(plaid_snap and plaid_snap.get("positions"))
 
-# 1. DEFINE ACTIVE PORTFOLIO (Plaid Overwrites Bootstrap)
+# 1. Route to Active Data
 active_portfolio = {}
 if is_plaid:
     for p in plaid_snap["positions"]:
         active_portfolio[p["ticker"]] = {
             "shares": p.get("quantity", 0),
             "market_value": p.get("market_value", 0),
+            "avg_cost": p.get("avg_cost_basis", 0),
             "category": p.get("category", "Stocks")
         }
     active_cash = plaid_snap.get("cash", 0)
@@ -443,43 +439,56 @@ else:
     active_portfolio = portfolio
     active_cash = cash
 
-# 2. CALCULATE LIVE VS CACHED TOTALS
+# 2. Calculate Unified Totals (Used by all 5 cards)
 live_stocks = 0.0
 live_crypto = 0.0
+total_cost = 0.0
 
 for ticker, pos in active_portfolio.items():
     qty = pos.get("shares", 0)
+    cost_basis = pos.get("avg_cost", 0)
+    total_cost += (qty * cost_basis)
     
-    # PRIORITY: If we have fresh prices AND we haven't JUST hit 'Sync Plaid'
-    # (Note: You can clear st.session_state.prices inside the Sync button to force this)
+    # Use Live Price if available, else fallback to Plaid/Bootstrap cache
     if prices and ticker in prices and prices[ticker] > 0:
         pos_val = qty * prices[ticker]
-        source_badge = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">⚡ LIVE PRICE</span>'
-    elif is_plaid:
-        pos_val = pos.get("market_value", 0)
-        source_badge = '<span class="tag tag-plaid">Plaid Sync</span>'
     else:
-        pos_val = qty * pos.get("avg_cost", 0)
-        source_badge = '<span class="tag tag-bootstrap">Bootstrap</span>'
-
+        pos_val = pos.get("market_value", qty * cost_basis)
+            
     if pos.get("category", "").lower() == "crypto" or ticker in ["BTC", "ETH"]:
         live_crypto += pos_val
     else:
         live_stocks += pos_val
 
+# 3. Set the Final Display Variables
 display_total = live_stocks + live_crypto + active_cash
-display_stocks = live_stocks
-display_crypto = live_crypto
+pnl_abs = display_total - total_cost - active_cash
+pnl_pct = (pnl_abs / total_cost * 100) if total_cost > 0 else 0
 
-# Badge UI
+# UI State Badges
 if prices:
     source_badge = '<span style="color:#38bdf8;font-size:10px;font-weight:bold">⚡ LIVE PRICE</span>'
 elif is_plaid:
     source_badge = '<span class="tag tag-plaid">Plaid Cache</span>'
 else:
     source_badge = '<span class="tag tag-bootstrap">Bootstrap Mode</span>'
-pnl_color      = "#22c55e" if totals["pnl"] >= 0 else "#ef4444"
-pnl_sign       = "+" if totals["pnl"] >= 0 else ""
+
+# 4. Render the 5 Cards using the NEW display_total
+pnl_color = "#22c55e" if pnl_abs >= 0 else "#ef4444"
+pnl_sign = "+" if pnl_abs >= 0 else ""
+
+c1, c2, c3, c4, c5 = st.columns(5)
+for col, label, value, sub, vcol in [
+    (c1, "Total Equity",   f"${display_total:,.2f}",  source_badge,  "#e2e8f0"),
+    (c2, "Stocks & ETFs",  f"${live_stocks:,.2f}",    "",            "#e2e8f0"),
+    (c3, "Crypto",         f"${live_crypto:,.2f}",    "",            "#e2e8f0"),
+    (c4, "Cash",           f"${active_cash:,.2f}",     "",            "#e2e8f0"),
+    (c5, "Unrealised P&L", f"{pnl_sign}{pnl_pct:.1f}%", f"{pnl_sign}${abs(pnl_abs):,.0f}", pnl_color),
+]:
+    with col:
+        st.markdown(f"<div class='kpi'><div class='kpi-label'>{label}</div>"
+                    f"<div class='kpi-value' style='color:{vcol}'>{value}</div>"
+                    f"<div class='kpi-sub'>{sub}</div></div>", unsafe_allow_html=True)
 
 _hdr_left, _hdr_right = st.columns([8, 1])
 with _hdr_left:
@@ -496,25 +505,6 @@ with _hdr_right:
                  width='stretch'):
         st.session_state.sidebar_open = not st.session_state.sidebar_open
         st.rerun()
-
-c1, c2, c3, c4, c5 = st.columns(5)
-for col, label, value, sub, vcol in [
-    (c1, "Total Equity",   f"${display_total:,.2f}",  source_badge,  "#e2e8f0"),
-    (c2, "Stocks & ETFs",  f"${display_stocks:,.2f}", "",            "#e2e8f0"),
-    (c3, "Crypto",         f"${display_crypto:,.2f}", "",            "#e2e8f0"),
-    (c4, "Cash",           f"${cash:,.2f}",            "",            "#e2e8f0"),
-    (c5, "Unrealised P&L", f"{pnl_sign}{totals['pnl_pct']:.1f}%",
-     f"{pnl_sign}${abs(totals['pnl']):,.0f}", pnl_color),
-]:
-    with col:
-        st.markdown(
-            f"<div class='kpi'>"
-            f"<div class='kpi-label'>{label}</div>"
-            f"<div class='kpi-value' style='color:{vcol}'>{value}</div>"
-            f"<div class='kpi-sub'>{sub}</div>"
-            f"</div>",
-            unsafe_allow_html=True,
-        )
 
 st.markdown("---")
 

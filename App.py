@@ -463,20 +463,15 @@ elif portfolio:
       p = de._safe_price(ticker, pos, prices)
       cost = pos.get("avg_cost", 0)
       
-      # Calculate P&L % with a safety check
-      if cost > 0:
-          raw_pnl = ((p - cost) / cost) * 100
-      else:
-          raw_pnl = 0.0
-      
-      # ARCHITECT FIX: Clamp values between -100% and +100% for the legend
-      display_pnl = max(min(raw_pnl, 100.0), -100.0)
+      raw_pnl = ((p - cost) / cost * 100) if cost > 0 else 0.0
+      # Clamp for color scale only
+      clamped_pnl = max(min(raw_pnl, 100.0), -100.0)
 
       rows.append({
           "Ticker": ticker,
           "Market Value": p * pos["shares"],
-          "P&L %": display_pnl, # Use the clamped value for the heatmap
-          "Real P&L %": raw_pnl, # Keep the real value for tooltips
+          "P&L %": clamped_pnl,      # Plotly uses this for color
+          "Real P&L %": raw_pnl,    # Plotly uses this for tooltips
           "Category": pos.get("category", "Stocks")
       })
   df = pd.DataFrame(rows)

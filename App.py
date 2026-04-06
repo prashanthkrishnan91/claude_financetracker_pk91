@@ -181,17 +181,29 @@ plaid_snap = st.session_state.plaid_snap
 # Native collapsedControl is hidden (display:none) — our ☰ button is the only toggle,
 # so the sidebar can never be put into Streamlit's internal "collapsed" state.
 if not st.session_state.sidebar_open:
-    st.markdown(
-        "<style>"
-        "section[data-testid='stSidebar']{"
-        "  margin-left:-21rem !important;"
-        "  min-width:0 !important;"
-        "  width:0 !important;"
-        "  overflow:hidden !important;"
-        "}"
-        "</style>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("""
+        <style>
+        /* 1. Hide the sidebar container */
+        section[data-testid='stSidebar'] {
+            margin-left: -21rem !important;
+            min-width: 0 !important;
+            width: 0 !important;
+            overflow: hidden !important;
+        }
+        /* 2. ARCHITECT FIX: Force the main area to reset its margin and fill the screen */
+        .main {
+            margin-left: 0 !important;
+        }
+        /* 3. Expand the content to occupy the newly available left space */
+        .block-container {
+            max-width: 95% !important; 
+            margin: 0 auto !important;
+            padding-left: 5rem !important;
+            padding-right: 5rem !important;
+            transition: all 0.4s ease-in-out;
+        }
+        </style>
+    """, unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # SIDEBAR

@@ -768,7 +768,7 @@ with tab_ops:
 # ─────────────────────────────────────────────────────────────
 # TAB 2.2 — INVEST $900  (v11.2: cash-informed + override inputs)
 # ─────────────────────────────────────────────────────────────
-  with st.expander("💰 Deposit Allocation"", expanded=False):
+  with st.expander("💰 Deposit Allocation", expanded=False):
       dep_num  = st.session_state.deposit_num
       fridays  = de.get_biweekly_dates(datetime.date(2026, 4, 3), n=18)
       today    = datetime.date.today()

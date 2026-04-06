@@ -281,13 +281,20 @@ with st.sidebar:
     plaid_configured = bool(p_token and len(str(p_token).strip()) > 10)
   
     with col2:
+        # Give the user the choice to spend a token
+        force_pull = st.checkbox("I made a trade (Force API Pull)", 
+                             help="Check this ONLY if you bought/sold shares on Robinhood today. Costs 1 Plaid Token.")
         if st.button("🏦 Sync Plaid", width='stretch',
                      disabled=not plaid_configured,
                      help="Force a refresh from Robinhood (Uses 1 credit if >24h)"):
             with st.spinner("Talking to Plaid..."):
-                snap = de.smart_sync_portfolio(force_plaid=False)
+                snap = de.smart_sync_portfolio(force_plaid=force_pull)
             if snap:
                 st.session_state.plaid_snap = snap
+                if force_pull:
+                    st.success("Plaid API Sync Complete! (1 Token Used)")
+                else:
+                    st.success("Local Cache Synced! (0 Tokens Used)")
                 plaid_snap = snap
                 st.success(f"Plaid synced ✅  ${snap['total_equity']:,.2f}")
                 st.session_state.prices = {} 

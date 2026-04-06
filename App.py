@@ -529,7 +529,7 @@ with tab_intel:
 # TAB 1.1 — Actions
 # ─────────────────────────────────────────────────────────────
 suba, subb, subc,subd = st.tabs(["🎯 Active Recommendations", "📊 Full Holdings List", "📈 Allocation Charts","💸 DRIP Analytics"])
-  with suba:
+ with suba:
       if not prices:
           st.info("👆 Press **🔄 Refresh** in the sidebar to load live prices and generate recommendations.")
       else:

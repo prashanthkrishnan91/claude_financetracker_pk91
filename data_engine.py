@@ -725,6 +725,7 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         
     _load_env_from_secrets()
     if not os.environ.get("PLAID_ACCESS_TOKEN"):
+        logger.error("No PLAID_ACCESS_TOKEN found in secrets.")
         return None
         
     try:
@@ -734,12 +735,18 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         
         # If age_hours is None (no cache), or >= 24, or user clicked force sync, we refresh
         needs_hard_refresh = force_plaid or (age_hours is None) or (age_hours >= 24)
+        from plaid_client import PlaidClient
+        p_client = PlaidClient()
         
         if needs_hard_refresh:
-            logger.info("24h passed or force sync requested: Triggering Plaid hard refresh...")
-            from plaid_client import PlaidClient
-            # This specific call uses 1 of your 200 Refresh credits
-            PlaidClient().refresh_investments()
+            # This consumes 1 credit from your 'Investments Refresh' (0/200) bucket
+            logger.info(f"Sync: Age {age_hours}h >= 24h. Triggering hard refresh...")
+            p_client.refresh_investments()
+            # Give Plaid's backend 2 seconds to start the worker
+            import time
+            time.sleep(2) 
+        else:
+            logger.info(f"Sync: Age {age_hours}h < 24h. Using Plaid's intraday cache (FREE).")
             
         # 2. Proceed with normal aggregation
         mgr      = HoldingsManager(cache_path=HOLDINGS_CACHE_PATH)
@@ -753,7 +760,7 @@ def smart_sync_portfolio(force_plaid: bool = False) -> Optional[dict]:
         from main_sync import export_json
         export_json(snapshot, str(PLAID_SNAPSHOT_PATH))
         
-        return _load(PLAID_SNAPSHOT_PATH, None)
+        return snapshot
         
     except Exception as e:
         logger.warning("Smart sync failed: %s", e)

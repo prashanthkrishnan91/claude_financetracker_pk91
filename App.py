@@ -17,7 +17,13 @@ v11.2 changes:
 
 import datetime
 import json
+import sys
 import os
+sys.path.append(os.path.abspath("libs"))
+from uiux import ...
+from superpowers import ...
+from memory import ...
+from patterns import ...
 import time
 
 import streamlit as st

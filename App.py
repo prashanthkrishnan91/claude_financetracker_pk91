@@ -217,6 +217,8 @@ with st.sidebar:
               )
               # 3. Update session state with fresh data
               st.session_state.prices = new_prices
+              # Record the exact second the API returned data
+              st.session_state.last_price_update = datetime.datetime.now().strftime("%H:%M:%S")
               st.session_state.recs = de.generate_recs(portfolio, new_prices)
               st.session_state.dep_recs_final = []
               st.session_state.overrides_applied = False
@@ -291,6 +293,9 @@ with st.sidebar:
     # Price data health
     st.markdown("**📊 Price Data**")
     if prices:
+        # Display the timestamp to verify the refresh worked
+        up_time = st.session_state.get('last_price_update', 'Unknown')
+        st.caption(f"Last API Fetch: {up_time}")
         live_n  = sum(1 for p in prices.values() if p and p > 0)
         total_n = len(portfolio)
         color   = "#22c55e" if live_n == total_n else ("#f59e0b" if live_n > 0 else "#ef4444")

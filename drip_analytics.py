@@ -40,21 +40,18 @@ _FREQ_THRESHOLDS = [
 # EXTRACTION
 # ─────────────────────────────────────────────────────────────────────────────
 @st.cache_data(ttl=86400) # Cache for 24h so it loads instantly
-def get_live_dividend_rates(tickers: list) -> dict:
-    """Fetches the live Annual Dividend Rate ($ per share) for a list of tickers."""
+def get_live_dividend_rates(tickers):
+    """Fetches annual dividend rates via yfinance."""
     rates = {}
     for t in tickers:
-        # Skip crypto
-        if t in ["BTC", "ETH", "XRP", "SOL", "DOGE"]:
-            rates[t] = 0.0
-            continue
-            
+        if t in ["BTC", "ETH", "XRP", "SOL", "DOGE"]: continue
         try:
-            tk = yf.Ticker(t)
-            # 'dividendRate' is the projected annual cash payout per share
-            rate = tk.info.get("dividendRate", 0.0)
-            rates[t] = float(rate) if rate is not None else 0.0
-        except Exception:
+            # Clean ticker for Yahoo (e.g., BRK-B)
+            yf_ticker = t.replace('-', '.')
+            tk = yf.Ticker(yf_ticker)
+            rate = tk.info.get("dividendRate") or tk.info.get("trailingAnnualDividendRate", 0.0)
+            rates[t] = float(rate) if rate else 0.0
+        except:
             rates[t] = 0.0
     return rates
 
@@ -378,78 +375,74 @@ def _section(title: str) -> None:
 # MAIN DASHBOARD RENDERER
 # ─────────────────────────────────────────────────────────────────────────────
 
-def render_drip_dashboard(portfolio: dict, prices: dict) -> None:
+def render_drip_dashboard(active_portfolio, tx_list=None):
     """
-    A clean, modern DRIP dashboard unifying historical data and future projections.
+    Unified Dividend Dashboard: History (CSV) + Future (Plaid).
     """
-    if tx_list is None:
-        tx_list = []
-    # 1. Process Data (Abstracted for cleanliness)
-    total_historical = sum(float(tx.get('amount', 0)) for tx in tx_list if 'DIV' in str(tx.get('trans_code', '')).upper())
-    
-    # Calculate Forward DRIP (using the yfinance logic we built)
-    total_annual_projected, df_forward = calculate_forward_drip(portfolio)
-    
-    # 2. UI: Top KPI Metrics
     st.markdown("### 💧 Dividend Intelligence")
-    kpi1, kpi2, kpi3 = st.columns(3)
-    kpi1.metric("Lifetime Earned (Historical)", f"${total_historical:,.2f}")
-    kpi2.metric("Projected Annual Income", f"${total_annual_projected:,.2f}")
-    kpi3.metric("Avg Monthly Passive Income", f"${(total_annual_projected / 12):,.2f}")
     
+    # --- DATA PROCESSING ---
+    if tx_list is None: tx_list = []
+    
+    # 1. Historical Insights (from tx_store.json / Robinhood CSV)
+    div_keywords = ['DIV', 'DIVIDEND', 'CDIV']
+    hist_divs = [tx for tx in tx_list if any(k in str(tx.get('trans_code', '')).upper() for k in div_keywords)]
+    total_lifetime = sum(float(tx.get('amount', 0)) for tx in hist_divs)
+    
+    # 2. Future Projections (from Plaid quantities + yfinance)
+    tickers = list(active_portfolio.keys())
+    rates = get_live_dividend_rates(tickers)
+    
+    proj_rows = []
+    total_annual_proj = 0.0
+    
+    for t, pos in active_portfolio.items():
+        shares = float(pos.get('shares', 0))
+        rate = rates.get(t, 0.0)
+        annual = shares * rate
+        if annual > 0:
+            total_annual_proj += annual
+            proj_rows.append({"Ticker": t, "Shares": shares, "Rate": rate, "Annual": annual})
+            
+    df_proj = pd.DataFrame(proj_rows).sort_values("Annual", ascending=False) if proj_rows else pd.DataFrame()
+
+    # --- UI LAYOUT ---
+    # 1. Metric Row
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Lifetime Earned", f"${total_lifetime:,.2f}", help="Sum of all dividends in transaction history")
+    m2.metric("Projected Annual", f"${total_annual_projected:,.2f}", help="Based on current Plaid holdings")
+    m3.metric("Est. Monthly", f"${(total_annual_projected / 12):,.2f}")
+
     st.divider()
 
-    # 3. UI: Monthly Projection Chart
-    # (Assuming you have a function that splits annual into 12 months based on payout frequency)
-    if not df_forward.empty:
-        # Simplified monthly mock for UI demonstration
+    # 2. Visual Insight: Monthly Cash Flow
+    if total_annual_projected > 0:
         months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-        avg_monthly = total_annual_projected / 12
-        df_chart = pd.DataFrame({"Month": months, "Projected Income": [avg_monthly]*12})
-        
-        fig = px.bar(
-            df_chart, 
-            x="Month", 
-            y="Projected Income", 
-            title="Estimated 12-Month Cash Flow",
-            template="plotly_dark",
-            color_discrete_sequence=["#00C805"] # Robinhood Green
-        )
-        fig.update_layout(height=300, margin=dict(t=40, b=0, l=0, r=0))
+        # Simplified monthly distribution (can be refined with actual payout months)
+        df_chart = pd.DataFrame({"Month": months, "Income": [total_annual_projected/12]*12})
+        fig = px.bar(df_chart, x="Month", y="Income", title="Projected Monthly Cash Flow",
+                     template="plotly_dark", color_discrete_sequence=["#00C805"])
+        fig.update_layout(height=250, margin=dict(t=30, b=0, l=0, r=0))
         st.plotly_chart(fig, use_container_width=True)
 
-    # 4. UI: Tabbed Data Tables
-    tab_future, tab_history = st.tabs(["🚀 Projected Payouts (Based on Plaid Holdings)", "📜 Historical Payouts (From Robinhood CSV)"])
+    # 3. Detail Tabs
+    tab_future, tab_hist = st.tabs(["🚀 Future Projections", "📜 Historical Payouts"])
     
     with tab_future:
-        if not df_forward.empty:
-            st.dataframe(
-                df_forward.style.format({
-                    "Shares Owned": "{:.2f}",
-                    "Div Rate ($/sh)": "${:.2f}",
-                    "Projected Annual Income": "${:,.2f}"
-                }),
-                use_container_width=True,
-                hide_index=True
-            )
+        if not df_proj.empty:
+            st.dataframe(df_proj.style.format({"Rate": "${:.2f}", "Annual": "${:,.2f}"}), 
+                         use_container_width=True, hide_index=True)
         else:
-            st.info("No active dividend-paying positions found in your Plaid sync.")
+            st.info("No dividend-paying assets detected in current holdings.")
 
-    with tab_history:
-        # Build clean historical table
-        hist_rows = [
-            {"Date": tx.get("date", "N/A"), "Ticker": tx.get("instrument", "Unknown"), "Amount": float(tx.get("amount", 0))}
-            for tx in tx_list if 'DIV' in str(tx.get('trans_code', '')).upper()
-        ]
-        if hist_rows:
-            df_hist = pd.DataFrame(hist_rows).sort_values("Date", ascending=False)
-            st.dataframe(
-                df_hist.style.format({"Amount": "${:,.2f}"}),
-                use_container_width=True,
-                hide_index=True
-            )
+    with tab_hist:
+        if hist_divs:
+            df_h = pd.DataFrame(hist_divs)[['date', 'instrument', 'amount']]
+            df_h.columns = ['Date', 'Ticker', 'Amount']
+            st.dataframe(df_h.sort_values("Date", ascending=False), 
+                         use_container_width=True, hide_index=True)
         else:
-            st.warning("No historical dividend data found. Upload a Robinhood CSV to populate this view.")
+            st.warning("Upload a Robinhood CSV to view historical payout dates.")
 
     st.markdown(
         "<div style='margin-top:20px;padding:10px;border:1px solid #1e2d47;"

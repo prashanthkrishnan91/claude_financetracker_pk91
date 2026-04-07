@@ -845,10 +845,14 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # Around line 852 in App.py
+  # --- TAB 1.4: DRIP Analytics ---
   with subd:
     raw_tx = de._load(de.TX_STORE_PATH, {})
-    # Render the dashboard
+    
+    # Debug print (remove after verifying)
+    # st.write("Raw TX Count:", len(raw_tx) if isinstance(raw_tx, (dict, list)) else "None")
+    # st.write("Active Portfolio Keys:", list(active_portfolio.keys()) if active_portfolio else "None")
+
     drip.render_drip_dashboard(
         active_portfolio=active_portfolio, 
         tx_list=raw_tx, 

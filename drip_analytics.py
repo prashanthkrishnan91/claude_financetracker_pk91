@@ -1,19 +1,24 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 import yfinance as yf
+from datetime import datetime
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def fetch_live_dividend_market_data(tickers):
+def fetch_dividend_market_intel(tickers):
     """Fetches yield, pay date, and ex-div date from yfinance."""
-    res = {}
+    results = {}
     for t in tickers:
         if t in ["BTC", "ETH", "XRP", "SOL", "DOGE", "USD"]: continue
         try:
-            tk = yf.Ticker(t.replace('-', '.'))
+            yf_ticker = t.replace('-', '.')
+            tk = yf.Ticker(yf_ticker)
             info = tk.info
             
+            # 1. Extraction of Annual Rate
             rate = info.get("dividendRate") or info.get("trailingAnnualDividendRate", 0.0)
             
+            # 2. Extraction of Calendar Dates (Ex-Div & Pay Date)
             pay_date, ex_date = "TBD", "TBD"
             cal = tk.calendar
             if isinstance(cal, dict):
@@ -23,30 +28,28 @@ def fetch_live_dividend_market_data(tickers):
                 if "Dividend Date" in cal.index: pay_date = cal.loc["Dividend Date"].iloc[0]
                 if "Ex-Dividend Date" in cal.index: ex_date = cal.loc["Ex-Dividend Date"].iloc[0]
             
+            # Format to clean string
             if pd.notnull(pay_date) and hasattr(pay_date, 'strftime'): pay_date = pay_date.strftime('%Y-%m-%d')
             if pd.notnull(ex_date) and hasattr(ex_date, 'strftime'): ex_date = ex_date.strftime('%Y-%m-%d')
-            
-            res[t] = {"rate": float(rate) if rate else 0.0, "pay_date": str(pay_date), "ex_date": str(ex_date)}
-        except:
-            res[t] = {"rate": 0.0, "pay_date": "TBD", "ex_date": "TBD"}
-    return res
 
-def clean_amount(val):
-    """Safely converts currency string to float WITHOUT removing negative signs."""
+            results[t] = {"rate": float(rate) if rate else 0.0, "pay": str(pay_date), "ex": str(ex_date)}
+        except:
+            results[t] = {"rate": 0.0, "pay": "TBD", "ex": "TBD"}
+    return results
+
+def clean_amt(val):
+    """Cleans currency strings: '$1,234.56' -> 1234.56."""
     if val is None or val == "": return 0.0
     try:
         s = str(val).replace('$', '').replace(',', '').replace(' ', '')
-        # Handle accounting format for negative numbers: (5.00) -> -5.00
-        if '(' in s and ')' in s:
-            return -float(s.replace('(', '').replace(')', ''))
+        if '(' in s and ')' in s: s = "-" + s.replace('(', '').replace(')', '')
         return float(s)
-    except:
-        return 0.0
+    except: return 0.0
 
 def render_drip_dashboard(active_portfolio, tx_list=None, plaid_snap=None):
     st.markdown("### 💧 Dividend Intelligence")
 
-    # --- 1. HISTORICAL DATA EXTRACTION (STRICT FILTERING) ---
+    # --- 1. HISTORICAL ANALYSIS (Plaid First -> CSV Fallback) ---
     raw_history = []
     if plaid_snap and isinstance(plaid_snap, dict) and "transactions" in plaid_snap:
         raw_history.extend(plaid_snap["transactions"])
@@ -57,58 +60,49 @@ def render_drip_dashboard(active_portfolio, tx_list=None, plaid_snap=None):
     hist_rows = []
     total_lifetime_earned = 0.0
     
+    # Senior Dev Logic: Schema-Agnostic extraction
     for tx in raw_history:
         if not isinstance(tx, dict): continue
         
-        # 1. STRICT MATCH: Isolate the transaction code
-        code = str(tx.get('trans_code', tx.get('Trans Code', tx.get('Activity Type', tx.get('type', ''))))).upper().strip()
-        
-        # We only care if the code is explicitly a cash dividend
-        if code in ['CDIV', 'CASH DIVIDEND']:
-            
-            # 2. STRICT MATH: Get the exact float value (preserving negatives)
-            amt_raw = tx.get('amount', tx.get('Amount', tx.get('Net Amount', 0.0)))
-            amt = clean_amount(amt_raw)
-            
-            # 3. STRICT ADDITION: Only add actual positive cash inflows
-            if amt > 0:
-                total_lifetime_earned += amt
-                
-                # Safely extract Date and Ticker for the UI table
-                d_val = tx.get('date', tx.get('Activity Date', tx.get('Process Date', 'Unknown')))
-                t_val = tx.get('instrument', tx.get('Ticker', tx.get('Symbol', 'Unknown')))
-                
-                hist_rows.append({"Date": d_val, "Ticker": t_val, "Amount": amt})
+        # Determine Code and Amount by scanning all likely keys
+        code, amt = "", 0.0
+        for k, v in tx.items():
+            kl = str(k).lower().strip()
+            if any(x in kl for x in ['code', 'type', 'activity', 'description']):
+                v_str = str(v).upper().strip()
+                if v_str == "CDIV" or "CASH DIVIDEND" in v_str: code = "CDIV"
+            if any(x in kl for x in ['amount', 'net', 'total', 'value']):
+                val = clean_amt(v)
+                if val > 0: amt = val # Ignore reinvestment outflows
 
-    # --- 2. FUTURE PROJECTIONS (Plaid Holdings + Market API) ---
+        if code == "CDIV" and amt > 0:
+            total_lifetime_earned += amt
+            d_val = tx.get('date', tx.get('Activity Date', tx.get('Date', 'Unknown')))
+            t_val = tx.get('instrument', tx.get('Ticker', tx.get('Symbol', 'Unknown')))
+            hist_rows.append({"Date": d_val, "Ticker": t_val, "Amount": amt})
+
+    # --- 2. FUTURE PROJECTIONS & MARKET RESEARCH ---
     tickers = list(active_portfolio.keys()) if active_portfolio else []
-    market_data = fetch_live_dividend_market_data(tickers)
+    market_intel = fetch_dividend_market_intel(tickers)
     
-    proj_rows = []
-    total_annual_projected = 0.0
-
-    for t, pos in (active_portfolio.items() if active_portfolio else {}):
-        # Reliably get share count regardless of Plaid's exact key
-        shares = float(pos.get('shares', pos.get('quantity', pos.get('qty', 0.0))))
-        data = market_data.get(t, {"rate": 0.0, "pay_date": "TBD", "ex_date": "TBD"})
+    proj_rows, total_annual_proj = [], 0.0
+    for t, pos in (active_portfolio.items() if active_portfolio else {}).items():
+        qty = float(pos.get('shares', pos.get('quantity', pos.get('qty', 0.0))))
+        intel = market_intel.get(t, {"rate": 0.0, "pay": "TBD", "ex": "TBD"})
         
-        annual_inc = shares * data["rate"]
-        if annual_inc > 0:
-            total_annual_projected += annual_inc
+        income = qty * intel["rate"]
+        if income > 0:
+            total_annual_proj += income
             proj_rows.append({
-                "Ticker": t,
-                "Ex-Div Date": data["ex_date"],
-                "Projected Pay Date": data["pay_date"],
-                "Annual Income": annual_inc,
-                "Yield ($/sh)": data["rate"],
-                "Shares": shares
+                "Ticker": t, "Ex-Div Date": intel["ex"], "Next Pay Date": intel["pay"],
+                "Annual Income": income, "Yield ($/sh)": intel["rate"], "Shares": qty
             })
 
-    # --- 3. UI RENDERING ---
+    # --- 3. UI: COMMAND CENTER ---
     k1, k2, k3 = st.columns(3)
-    k1.metric("Lifetime Earned", f"${total_lifetime_earned:,.2f}")
-    k2.metric("Annual Projection", f"${total_annual_projected:,.2f}")
-    k3.metric("Est. Monthly Income", f"${(total_annual_projected / 12):,.2f}")
+    k1.metric("Lifetime Earned", f"${total_lifetime_earned:,.2f}", help="Sum of positive CDIV cash inflows.")
+    k2.metric("Annual Projection", f"${total_annual_proj:,.2f}")
+    k3.metric("Est. Monthly Income", f"${(total_annual_proj / 12):,.2f}")
 
     st.divider()
 
@@ -116,20 +110,13 @@ def render_drip_dashboard(active_portfolio, tx_list=None, plaid_snap=None):
     
     with tab_f:
         if proj_rows:
-            df_p = pd.DataFrame(proj_rows).sort_values("Projected Pay Date")
-            st.dataframe(
-                df_p.style.format({"Yield ($/sh)": "${:.2f}", "Annual Income": "${:,.2f}", "Shares": "{:.2f}"}),
-                use_container_width=True, hide_index=True
-            )
-            st.info("💡 **Strategy:** Buy shares *before* the **Ex-Div Date** to qualify for the next payout.")
-        else:
-            st.info("No dividend-paying assets detected in your current holdings.")
+            st.dataframe(pd.DataFrame(proj_rows).sort_values("Next Pay Date"), use_container_width=True, hide_index=True)
+            st.info("💡 **Strategy**: Buy shares before the **Ex-Div Date** to capture the next payment.")
+        else: st.info("No dividend-paying assets in your current sync.")
 
     with tab_h:
         if hist_rows:
             df_h = pd.DataFrame(hist_rows)
             df_h['Date'] = pd.to_datetime(df_h['Date'], errors='coerce')
-            st.dataframe(df_h.sort_values("Date", ascending=False).dropna(subset=['Date']), 
-                         use_container_width=True, hide_index=True)
-        else:
-            st.warning("No historical 'CDIV' payments found.")
+            st.dataframe(df_h.sort_values("Date", ascending=False).dropna(subset=['Date']), use_container_width=True, hide_index=True)
+        else: st.warning("No historical 'CDIV' payments found. Check CSV upload.")

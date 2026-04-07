@@ -16,7 +16,7 @@ import json
 from decimal import Decimal
 from pathlib import Path
 from typing import Optional
-
+import yfinance as yf
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -38,6 +38,57 @@ _FREQ_THRESHOLDS = [
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────
+@st.cache_data(ttl=86400) # Cache for 24h so it loads instantly
+def get_live_dividend_rates(tickers: list) -> dict:
+    """Fetches the live Annual Dividend Rate ($ per share) for a list of tickers."""
+    rates = {}
+    for t in tickers:
+        # Skip crypto
+        if t in ["BTC", "ETH", "XRP", "SOL", "DOGE"]:
+            rates[t] = 0.0
+            continue
+            
+        try:
+            tk = yf.Ticker(t)
+            # 'dividendRate' is the projected annual cash payout per share
+            rate = tk.info.get("dividendRate", 0.0)
+            rates[t] = float(rate) if rate is not None else 0.0
+        except Exception:
+            rates[t] = 0.0
+    return rates
+
+def calculate_forward_drip(active_portfolio: dict) -> tuple[float, pd.DataFrame]:
+    """Projects future DRIP income based on current Plaid holdings."""
+    tickers = list(active_portfolio.keys())
+    div_rates = get_live_dividend_rates(tickers)
+    
+    total_annual = 0.0
+    rows = []
+    
+    for ticker, pos in active_portfolio.items():
+        shares = float(pos.get("shares", 0.0))
+        rate = div_rates.get(ticker, 0.0)
+        
+        annual_income = shares * rate
+        total_annual += annual_income
+        
+        if annual_income > 0:
+            rows.append({
+                "Ticker": ticker,
+                "Shares Owned": shares,
+                "Div Rate ($/sh)": rate,
+                "Projected Annual Income": annual_income
+            })
+            
+    df_forward = pd.DataFrame(rows)
+    if not df_forward.empty:
+        df_forward = df_forward.sort_values("Projected Annual Income", ascending=False)
+        
+    return total_annual, df_forward
+
+# ─────────────────────────────────────────────────────────────────────────────
+# EXTRACTION from csv
 # ─────────────────────────────────────────────────────────────────────────────
 
 def extract_dividends(tx_store_path: Path = TX_STORE_PATH) -> list[dict]:

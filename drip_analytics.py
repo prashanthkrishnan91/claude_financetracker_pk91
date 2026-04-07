@@ -138,7 +138,7 @@ def render_drip_dashboard(active_portfolio, tx_list=None, plaid_snap=None):
         if hist_rows:
             df_h = pd.DataFrame(hist_rows)
             # Try to sort by date if possible
-            try: df_h['Date'] = pd.to_datetime(df_h['Date'])
+            try: df_h['Date'] = pd.to_date(df_h['Date'])
             except: pass
             st.dataframe(df_h.sort_values("Date", ascending=False) if 'Date' in df_h else df_h, 
                          use_container_width=True, hide_index=True)

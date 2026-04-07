@@ -845,7 +845,7 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # Inside Tab 1.4 of App.py
+  # --- TAB 1.4: DRIP Analytics Integration ---
   with subd:
     # 1. Load CSV data (Fallback source)
     raw_tx = de._load(de.TX_STORE_PATH, {})

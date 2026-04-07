@@ -845,16 +845,16 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # --- TAB 1.4: DRIP Analytics Integration ---
+# --- TAB 1.4: DRIP Analytics ---
   with subd:
-    # 1. Load CSV data (Fallback source)
-    raw_tx = de._load(de.TX_STORE_PATH, {})
-    tx_list = list(raw_tx.values()) if isinstance(raw_tx, dict) else raw_tx
+    # 1. Load the transaction store (CSV data)
+    raw_data = de._load(de.TX_STORE_PATH, {})
+    tx_list = list(raw_data.values()) if isinstance(raw_data, dict) else raw_data
     
-    # 2. Call the function, passing Plaid snap directly for "Plaid-First" logic
-    # active_portfolio: current quantities
-    # tx_list: historical CSV data
-    # plaid_snap: the full cache object to check for transactions
+    # 2. Render using the unified logic
+    # active_portfolio: Current Plaid share counts
+    # tx_list: The 603 historical rows
+    # plaid_snap: The full cache object for priority transaction check
     drip.render_drip_dashboard(active_portfolio, tx_list, plaid_snap=plaid_snap)
 
 # ─────────────────────────────────────────────────────────────

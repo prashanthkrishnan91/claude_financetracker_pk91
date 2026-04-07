@@ -846,12 +846,25 @@ with tab_intel:
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
   with subd:
-    # Load raw transactions for the history tab
-    all_tx = de._load(de.TX_STORE_PATH, {})
-    tx_list = list(all_tx.values()) if isinstance(all_tx, dict) else all_tx
+    # 1. Initialize tx_list as an empty list to prevent NameError
+    tx_list = []
     
-    # Render the new, clean dashboard
-    drip.render_drip_dashboard(active_portfolio, tx_list)
+    try:
+        # 2. Attempt to load historical transactions from disk
+        all_tx = de._load(de.TX_STORE_PATH, {})
+        
+        # 3. Handle different data formats (dict vs list) safely
+        if isinstance(all_tx, dict):
+            tx_list = list(all_tx.values())
+        elif isinstance(all_tx, list):
+            tx_list = all_tx
+            
+    except Exception as e:
+        st.warning(f"Could not load transaction history: {e}")
+
+    # 4. Call the dashboard with guaranteed defined variables
+    # We use active_portfolio (Plaid) and the tx_list (History)
+    drip.render_simple_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)

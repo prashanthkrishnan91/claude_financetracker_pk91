@@ -91,4 +91,48 @@ def render_drip_dashboard(active_portfolio, tx_list, plaid_snap=None):
     for t, pos in active_portfolio.items():
         shares = float(pos.get('shares', 0.0))
         data = market_intel.get(t, {"rate": 0.0, "pay_date": "TBD", "ex_date": "TBD"})
-        annual
+        annual_inc = shares * data["rate"]
+        
+        if annual_inc > 0:
+            total_annual_projected += annual_inc
+            proj_rows.append({
+                "Ticker": t,
+                "Ex-Div Date": data["ex_date"],
+                "Projected Pay Date": data["pay_date"],
+                "Annual Income": annual_inc,
+                "Yield ($/sh)": data["rate"],
+                "Shares": shares
+            })
+
+    # --- 3. UI RENDERING ---
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Lifetime Earned", f"${total_lifetime_earned:,.2f}", help="Sum of all 'CDIV' codes found.")
+    k2.metric("Annual Projection", f"${total_annual_projected:,.2f}", help="Forward-looking income based on Plaid holdings.")
+    k3.metric("Est. Monthly Income", f"${(total_annual_projected / 12):,.2f}")
+
+    st.divider()
+
+    tab_f, tab_h = st.tabs(["🚀 Future Projections & Payouts", "📜 Historical Payouts"])
+    
+    with tab_f:
+        if proj_rows:
+            df_p = pd.DataFrame(proj_rows).sort_values("Projected Pay Date")
+            st.dataframe(
+                df_p.style.format({"Yield ($/sh)": "${:.2f}", "Annual Income": "${:,.2f}", "Shares": "{:.2f}"}),
+                use_container_width=True, hide_index=True
+            )
+            st.info("💡 **Ex-Div Date**: You must own shares before this date to receive the next payout.")
+        else:
+            st.info("No dividend-paying assets detected in your current Plaid holdings.")
+
+    with tab_h:
+        if hist_rows:
+            df_h = pd.DataFrame(hist_rows)
+            # Ensure date column is valid for sorting
+            df_h['Date'] = pd.to_datetime(df_h['Date'], errors='coerce')
+            st.dataframe(
+                df_h.sort_values("Date", ascending=False).dropna(subset=['Date']), 
+                use_container_width=True, hide_index=True
+            )
+        else:
+            st.warning("No historical 'CDIV' payments found. Ensure your CSV is uploaded correctly.")

@@ -864,7 +864,7 @@ with tab_intel:
 
     # 4. Call the dashboard with guaranteed defined variables
     # We use active_portfolio (Plaid) and the tx_list (History)
-    drip.render_simple_drip_dashboard(active_portfolio, tx_list)
+    drip.render_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)

@@ -380,330 +380,74 @@ def _section(title: str) -> None:
 
 def render_drip_dashboard(portfolio: dict, prices: dict) -> None:
     """
-    Render the full DRIP Analytics page inside the calling Streamlit context.
-    Reads tx_store.json directly; no external deps beyond data already in memory.
+    A clean, modern DRIP dashboard unifying historical data and future projections.
     """
-    # ── Load + clean data ────────────────────────────────────────────────────
-    raw      = extract_dividends(TX_STORE_PATH)
-    div_df   = clean_dividends(raw)
+    # 1. Process Data (Abstracted for cleanliness)
+    total_historical = sum(float(tx.get('amount', 0)) for tx in tx_list if 'DIV' in str(tx.get('trans_code', '')).upper())
+    
+    # Calculate Forward DRIP (using the yfinance logic we built)
+    total_annual_projected, df_forward = calculate_forward_drip(portfolio)
+    
+    # 2. UI: Top KPI Metrics
+    st.markdown("### 💧 Dividend Intelligence")
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Lifetime Earned (Historical)", f"${total_historical:,.2f}")
+    kpi2.metric("Projected Annual Income", f"${total_annual_projected:,.2f}")
+    kpi3.metric("Avg Monthly Passive Income", f"${(total_annual_projected / 12):,.2f}")
+    
+    st.divider()
 
-    if div_df.empty:
-        st.info(
-            "No dividend records found yet. Upload a Robinhood CSV containing "
-            "CDIV transactions in the **📥 Import** tab to populate DRIP Analytics."
-        )
-        return
-
-    # Serialize for cache-safe projection call
-    proj = calculate_projections(
-        div_df.to_json(orient="records", date_format="iso"),
-        json.dumps(portfolio),
-        json.dumps({k: float(v) if v else 0.0 for k, v in prices.items()}),
-    )
-
-    today = datetime.date.today()
-
-    # ═══ TOP KPI CARDS ═══════════════════════════════════════════════════════
-    _section("💸 Dividend Summary")
-    c1, c2, c3, c4 = st.columns(4)
-
-    with c1:
-        _kpi("Total Dividends (All-Time)",
-             f"${proj['total_all_time']:,.2f}",
-             f"{len(div_df)} payments · {div_df['ticker'].nunique()} tickers")
-
-    with c2:
-        _kpi("This Year",
-             f"${proj['total_this_year']:,.2f}",
-             str(today.year))
-
-    with c3:
-        ld = proj["last_dividend"]
-        if ld:
-            _kpi("Last Dividend",
-                 f"${ld['amount']:,.2f}",
-                 f"{ld['ticker']} · {ld['date']}")
-        else:
-            _kpi("Last Dividend", "—", "")
-
-    with c4:
-        _kpi("Projected Annual Income",
-             f"${proj['projected_annual']:,.2f}",
-             "based on inferred frequency",
-             "#22c55e")
-
-    # ═══ DIVIDEND HISTORY ════════════════════════════════════════════════════
-    _section("📋 Dividend History")
-
-    # Filter controls
-    fc1, fc2, fc3 = st.columns([2, 2, 3])
-    all_tickers = sorted(div_df["ticker"].unique().tolist())
-
-    with fc1:
-        sel_tickers = st.multiselect(
-            "Filter by ticker", all_tickers,
-            default=[], key="drip_ticker_filter",
-            placeholder="All tickers"
-        )
-    with fc2:
-        min_date = div_df["date"].min().date()
-        max_date = div_df["date"].max().date()
-        date_range = st.date_input(
-            "Date range",
-            value=(min_date, max_date),
-            min_value=min_date, max_value=max_date,
-            key="drip_date_filter",
-        )
-    with fc3:
-        sort_col = st.selectbox(
-            "Sort by", ["date", "amount", "ticker"],
-            key="drip_sort_col"
-        )
-
-    # Apply filters
-    filtered = div_df.copy()
-    if sel_tickers:
-        filtered = filtered[filtered["ticker"].isin(sel_tickers)]
-    if isinstance(date_range, (tuple, list)) and len(date_range) == 2:
-        d_from, d_to = date_range
-        filtered = filtered[
-            (filtered["date"].dt.date >= d_from) &
-            (filtered["date"].dt.date <= d_to)
-        ]
-    filtered = filtered.sort_values(sort_col, ascending=(sort_col != "date"))
-
-    display = filtered.copy()
-    display["date"]   = display["date"].dt.strftime("%Y-%m-%d")
-    display["amount"] = display["amount"].apply(lambda x: f"${x:,.4f}")
-    display["shares_gained"] = display["shares_gained"].apply(
-        lambda x: f"{x:.6f}" if x > 0 else "—"
-    )
-    display["price_at_div"] = display["price_at_div"].apply(
-        lambda x: f"${x:,.2f}" if x > 0 else "—"
-    )
-    display = display.rename(columns={
-        "date": "Date", "ticker": "Ticker", "amount": "Amount",
-        "shares_gained": "Shares (DRIP)", "price_at_div": "Price",
-        "type": "Type", "category": "Category",
-    })
-
-    st.dataframe(
-        display[["Date", "Ticker", "Amount", "Shares (DRIP)", "Price", "Type"]],
-        use_container_width=True, hide_index=True,
-        height=min(400, 40 + len(display) * 35),
-    )
-    st.caption(f"Showing {len(display):,} of {len(div_df):,} records · deduplicated by (date, ticker, amount)")
-
-    # ═══ CHARTS ══════════════════════════════════════════════════════════════
-    _section("📈 Dividend Charts")
-
-    ch1, ch2 = st.columns(2)
-
-    with ch1:
-        # Dividends over time — monthly/quarterly/yearly toggle
-        agg_period = st.radio(
-            "Aggregate by", ["Monthly", "Quarterly", "Yearly"],
-            horizontal=True, key="drip_agg_period"
-        )
-        time_df = div_df.copy()
-        if agg_period == "Monthly":
-            time_df["period"] = time_df["date"].dt.to_period("M").astype(str)
-        elif agg_period == "Quarterly":
-            time_df["period"] = time_df["date"].dt.to_period("Q").astype(str)
-        else:
-            time_df["period"] = time_df["date"].dt.year.astype(str)
-
-        time_agg = time_df.groupby("period")["amount"].sum().reset_index()
-        time_agg.columns = ["Period", "Dividends ($)"]
-
-        fig_time = px.bar(
-            time_agg, x="Period", y="Dividends ($)",
-            color_discrete_sequence=["#38bdf8"],
+    # 3. UI: Monthly Projection Chart
+    # (Assuming you have a function that splits annual into 12 months based on payout frequency)
+    if not df_forward.empty:
+        # Simplified monthly mock for UI demonstration
+        months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        avg_monthly = total_annual_projected / 12
+        df_chart = pd.DataFrame({"Month": months, "Projected Income": [avg_monthly]*12})
+        
+        fig = px.bar(
+            df_chart, 
+            x="Month", 
+            y="Projected Income", 
+            title="Estimated 12-Month Cash Flow",
             template="plotly_dark",
-            title=f"Dividend Income — {agg_period}",
+            color_discrete_sequence=["#00C805"] # Robinhood Green
         )
-        fig_time.update_layout(
-            plot_bgcolor="#07090f", paper_bgcolor="#07090f",
-            font_color="#94a3b8", title_font_color="#e2e8f0",
-            margin=dict(l=10, r=10, t=40, b=10),
-            xaxis_tickangle=-45,
-        )
-        st.plotly_chart(fig_time, use_container_width=True)
+        fig.update_layout(height=300, margin=dict(t=40, b=0, l=0, r=0))
+        st.plotly_chart(fig, use_container_width=True)
 
-    with ch2:
-        # Dividend income by stock (total all-time)
-        by_ticker = (
-            div_df.groupby("ticker")["amount"]
-            .sum()
-            .sort_values(ascending=False)
-            .reset_index()
-        )
-        by_ticker.columns = ["Ticker", "Total ($)"]
+    # 4. UI: Tabbed Data Tables
+    tab_future, tab_history = st.tabs(["🚀 Projected Payouts (Based on Plaid Holdings)", "📜 Historical Payouts (From Robinhood CSV)"])
+    
+    with tab_future:
+        if not df_forward.empty:
+            st.dataframe(
+                df_forward.style.format({
+                    "Shares Owned": "{:.2f}",
+                    "Div Rate ($/sh)": "${:.2f}",
+                    "Projected Annual Income": "${:,.2f}"
+                }),
+                use_container_width=True,
+                hide_index=True
+            )
+        else:
+            st.info("No active dividend-paying positions found in your Plaid sync.")
 
-        fig_ticker = px.bar(
-            by_ticker, x="Ticker", y="Total ($)",
-            color="Total ($)",
-            color_continuous_scale=["#1e2d47", "#38bdf8"],
-            template="plotly_dark",
-            title="Total Dividends by Stock",
-        )
-        fig_ticker.update_layout(
-            plot_bgcolor="#07090f", paper_bgcolor="#07090f",
-            font_color="#94a3b8", title_font_color="#e2e8f0",
-            coloraxis_showscale=False,
-            margin=dict(l=10, r=10, t=40, b=10),
-        )
-        st.plotly_chart(fig_ticker, use_container_width=True)
-
-    # ═══ FUTURE PROJECTIONS ══════════════════════════════════════════════════
-    _section("🔮 Future Projections")
-
-    # 30/60/90 day income cards
-    w1, w2, w3 = st.columns(3)
-    with w1:
-        _kpi("Next 30 Days", f"${proj['next_30']:,.2f}",
-             "expected dividends", "#f59e0b")
-    with w2:
-        _kpi("Next 60 Days", f"${proj['next_60']:,.2f}",
-             "expected dividends", "#f59e0b")
-    with w3:
-        _kpi("Next 90 Days", f"${proj['next_90']:,.2f}",
-             "expected dividends", "#f59e0b")
-
-    st.markdown("")
-
-    # Per-ticker projection table
-    if proj["per_ticker"]:
-        proj_rows = []
-        for ticker, p in sorted(proj["per_ticker"].items()):
-            days = p["days_to_next"]
-            urgency = "🟢" if days <= 14 else ("🟡" if days <= 45 else "⚪")
-            proj_rows.append({
-                "": urgency,
-                "Ticker":       ticker,
-                "Frequency":    p["freq"],
-                "Avg Payout":   f"${p['avg_payout']:,.2f}",
-                "Last Payment": p["last_payment"],
-                "Next Est.":    p["next_date"],
-                "Days Away":    f"{max(0, days)}d",
-                "Annual Est.":  f"${p['annual_est']:,.2f}",
-                "# Payments":   p["payments_count"],
-            })
-
-        proj_df = pd.DataFrame(proj_rows)
-        st.dataframe(proj_df, use_container_width=True, hide_index=True)
-        st.caption("🟢 due within 14 days · 🟡 due within 45 days · ⚪ further out")
-
-        # Timeline chart — next payments
-        upcoming = [
-            {"ticker": t, "next_date": p["next_date"], "amount": p["avg_payout"]}
-            for t, p in proj["per_ticker"].items()
-            if p["days_to_next"] <= 120
+    with tab_history:
+        # Build clean historical table
+        hist_rows = [
+            {"Date": tx.get("date", "N/A"), "Ticker": tx.get("instrument", "Unknown"), "Amount": float(tx.get("amount", 0))}
+            for tx in tx_list if 'DIV' in str(tx.get('trans_code', '')).upper()
         ]
-        if upcoming:
-            up_df = pd.DataFrame(upcoming)
-            up_df["next_date"] = pd.to_datetime(up_df["next_date"])
-            up_df = up_df.sort_values("next_date")
-
-            fig_up = px.scatter(
-                up_df, x="next_date", y="ticker",
-                size="amount", color="amount",
-                color_continuous_scale=["#1e2d47", "#22c55e"],
-                size_max=30, template="plotly_dark",
-                title="Upcoming Dividends (next 120 days)",
-                labels={"next_date": "Expected Date", "ticker": "Ticker",
-                        "amount": "Est. Payout ($)"},
+        if hist_rows:
+            df_hist = pd.DataFrame(hist_rows).sort_values("Date", ascending=False)
+            st.dataframe(
+                df_hist.style.format({"Amount": "${:,.2f}"}),
+                use_container_width=True,
+                hide_index=True
             )
-            fig_up.update_layout(
-                plot_bgcolor="#07090f", paper_bgcolor="#07090f",
-                font_color="#94a3b8", title_font_color="#e2e8f0",
-                coloraxis_showscale=False,
-                margin=dict(l=10, r=10, t=40, b=10),
-            )
-            st.plotly_chart(fig_up, use_container_width=True)
-
-    # ═══ DRIP IMPACT ═════════════════════════════════════════════════════════
-    _section("🔄 DRIP Impact")
-
-    total_drip_shares_value = sum(proj["drip_value"].values())
-    total_drip_shares_count = sum(proj["drip_shares"].values())
-
-    di1, di2 = st.columns(2)
-    with di1:
-        _kpi("Total DRIP Shares Gained",
-             f"{total_drip_shares_count:,.4f} shares",
-             "across all dividend-paying positions",
-             "#a78bfa")
-    with di2:
-        _kpi("Current Value of DRIP Shares",
-             f"${total_drip_shares_value:,.2f}",
-             "at live prices (requires Refresh)",
-             "#22c55e")
-
-    # Per-ticker DRIP table
-    if proj["drip_shares"]:
-        drip_rows = []
-        for ticker in sorted(proj["drip_shares"].keys()):
-            shares = proj["drip_shares"][ticker]
-            val    = proj["drip_value"][ticker]
-            pt     = proj["per_ticker"].get(ticker, {})
-            total_recv = pt.get("total_received", 0)
-            curr_price = pt.get("current_price", 0)
-
-            # Value WITH reinvestment = original position value + DRIP shares value
-            pos_shares = portfolio.get(ticker, {}).get("shares", 0)
-            pos_val    = pos_shares * curr_price if curr_price else 0
-            without_drip = pos_val - val  # remove DRIP share value
-
-            drip_rows.append({
-                "Ticker":          ticker,
-                "DRIP Shares":     f"{shares:,.6f}",
-                "DRIP Value":      f"${val:,.2f}",
-                "Cash Received":   f"${total_recv:,.2f}",
-                "Portfolio Value": f"${pos_val:,.2f}",
-                "Without DRIP":    f"${without_drip:,.2f}",
-                "DRIP Boost":      f"+${val:,.2f}",
-            })
-
-        drip_df = pd.DataFrame(drip_rows)
-        st.dataframe(drip_df, use_container_width=True, hide_index=True)
-
-        # DRIP value comparison chart
-        if any(proj["drip_value"].get(t, 0) > 0 for t in proj["drip_shares"]):
-            comp_rows = []
-            for ticker in sorted(proj["drip_shares"].keys()):
-                drip_val = proj["drip_value"].get(ticker, 0)
-                if drip_val <= 0:
-                    continue
-                pt       = proj["per_ticker"].get(ticker, {})
-                curr_p   = pt.get("current_price", 0)
-                pos_s    = portfolio.get(ticker, {}).get("shares", 0)
-                pos_val  = pos_s * curr_p if curr_p else 0
-                wo_drip  = max(0, pos_val - drip_val)
-                comp_rows.extend([
-                    {"Ticker": ticker, "Type": "Original Position", "Value": round(wo_drip, 2)},
-                    {"Ticker": ticker, "Type": "DRIP Shares",       "Value": round(drip_val, 2)},
-                ])
-
-            if comp_rows:
-                comp_df = pd.DataFrame(comp_rows)
-                fig_drip = px.bar(
-                    comp_df, x="Ticker", y="Value", color="Type",
-                    color_discrete_map={
-                        "Original Position": "#1e40af",
-                        "DRIP Shares":       "#22c55e",
-                    },
-                    barmode="stack", template="plotly_dark",
-                    title="Portfolio Value: Original vs DRIP Boost",
-                    labels={"Value": "Value ($)"},
-                )
-                fig_drip.update_layout(
-                    plot_bgcolor="#07090f", paper_bgcolor="#07090f",
-                    font_color="#94a3b8", title_font_color="#e2e8f0",
-                    legend=dict(bgcolor="rgba(0,0,0,0)"),
-                    margin=dict(l=10, r=10, t=40, b=10),
-                )
-                st.plotly_chart(fig_drip, use_container_width=True)
+        else:
+            st.warning("No historical dividend data found. Upload a Robinhood CSV to populate this view.")
 
     st.markdown(
         "<div style='margin-top:20px;padding:10px;border:1px solid #1e2d47;"

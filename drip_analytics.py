@@ -382,6 +382,8 @@ def render_drip_dashboard(portfolio: dict, prices: dict) -> None:
     """
     A clean, modern DRIP dashboard unifying historical data and future projections.
     """
+    if tx_list is None:
+        tx_list = []
     # 1. Process Data (Abstracted for cleanliness)
     total_historical = sum(float(tx.get('amount', 0)) for tx in tx_list if 'DIV' in str(tx.get('trans_code', '')).upper())
     

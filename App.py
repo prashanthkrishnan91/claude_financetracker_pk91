@@ -845,16 +845,15 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-# --- TAB 1.4: DRIP Analytics ---
+  # --- TAB 1.4: DRIP Analytics ---
   with subd:
     # 1. Load the transaction store (The 603 CSV rows)
     raw_tx_data = de._load(de.TX_STORE_PATH, {})
+    # Convert dict format to list for the dashboard logic
     tx_list = list(raw_tx_data.values()) if isinstance(raw_tx_data, dict) else raw_tx_data
     
-    # 2. Render the dashboard with Plaid priority
-    # active_portfolio: uses quantities from Plaid cache (SSOT)
-    # tx_list: uses historical data from Robinhood CSV
-    # plaid_snap: passed directly to check for recent transaction cache
+    # 2. Render using the unified logic
+    # active_portfolio: shares from Plaid | tx_list: history from CSV | plaid_snap: cache transactions
     drip.render_drip_dashboard(active_portfolio, tx_list, plaid_snap=plaid_snap)
 
 # ─────────────────────────────────────────────────────────────

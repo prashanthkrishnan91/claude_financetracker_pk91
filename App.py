@@ -845,20 +845,13 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
+  # Inside Tab 1.4 of App.py
   with subd:
-    tx_list = []
-    try:
-        # Load from disk (603 rows)
-        raw_data = de._load(de.TX_STORE_PATH, {})
-        # Robust conversion of dict-store to list
-        if isinstance(raw_data, dict):
-            tx_list = list(raw_data.values())
-        else:
-            tx_list = raw_data
-    except Exception as e:
-        st.error(f"Error loading tx_store: {e}")
-
-    # Use the 'active_portfolio' (Plaid) for Future and 'tx_list' (CSV) for History
+    raw_tx = de._load(de.TX_STORE_PATH, {})
+    # Convert store dict to list
+    tx_list = list(raw_tx.values()) if isinstance(raw_tx, dict) else raw_tx
+    
+    # Render the unified view
     drip.render_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────

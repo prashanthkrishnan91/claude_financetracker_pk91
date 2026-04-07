@@ -851,7 +851,7 @@ with tab_intel:
     tx_list = list(all_tx.values()) if isinstance(all_tx, dict) else all_tx
     
     # Render the new, clean dashboard
-    drip.render_simple_drip_dashboard(active_portfolio, tx_list)
+    drip.render_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)

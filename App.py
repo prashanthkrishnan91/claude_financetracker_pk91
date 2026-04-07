@@ -846,24 +846,17 @@ with tab_intel:
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
   with subd:
-    # 1. Initialize tx_list as an empty list to prevent NameError
+    # 1. Guaranteed definition of tx_list
     tx_list = []
-    
     try:
-        # 2. Attempt to load historical transactions from disk
+        # Load transactions from your data engine
         all_tx = de._load(de.TX_STORE_PATH, {})
-        
-        # 3. Handle different data formats (dict vs list) safely
-        if isinstance(all_tx, dict):
-            tx_list = list(all_tx.values())
-        elif isinstance(all_tx, list):
-            tx_list = all_tx
-            
+        tx_list = list(all_tx.values()) if isinstance(all_tx, dict) else all_tx
     except Exception as e:
-        st.warning(f"Could not load transaction history: {e}")
+        st.error(f"Error loading transaction store: {e}")
 
-    # 4. Call the dashboard with guaranteed defined variables
-    # We use active_portfolio (Plaid) and the tx_list (History)
+    # 2. Render the unified dashboard
+    # active_portfolio is your live Plaid data; tx_list is your historical Excel data
     drip.render_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────

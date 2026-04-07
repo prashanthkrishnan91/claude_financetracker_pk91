@@ -847,6 +847,42 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
   with subd:
       drip.render_drip_dashboard(portfolio, prices)
+      st.subheader("💧 Forward-Looking DRIP (Plaid Sync)")
+    
+      # 1. Forward Projections (Works instantly with Plaid Sync - No Excel needed)
+      # We use 'active_portfolio' because it contains your latest Plaid share quantities
+      total_annual, df_forward = drip.calculate_forward_drip(active_portfolio)
+      
+      col1, col2, col3 = st.columns(3)
+      col1.metric("Projected Annual Income", f"${total_annual:,.2f}")
+      col2.metric("Estimated Monthly", f"${(total_annual / 12):,.2f}")
+      col3.metric("Estimated Daily", f"${(total_annual / 365):,.2f}")
+      
+      if not df_forward.empty:
+          st.dataframe(
+              df_forward.style.format({
+                  "Shares Owned": "{:.2f}",
+                  "Div Rate ($/sh)": "${:.2f}",
+                  "Projected Annual Income": "${:,.2f}"
+              }),
+              use_container_width=True,
+              hide_index=True
+          )
+      else:
+          st.info("No dividend-paying stocks found in your current Plaid portfolio.")
+  
+      st.divider()
+  
+      # 2. Historical Dividends (Requires Excel Upload)
+      st.subheader("📜 Historical Dividend History (Excel Data)")
+      try:
+          all_tx = de._load(de.TX_STORE_PATH, {})
+          tx_list = list(all_tx.values()) if isinstance(all_tx, dict) else all_tx
+          
+          # Call your existing historical render function
+          drip.render_drip_dashboard(portfolio, prices, tx_list=tx_list)
+      except Exception as e:
+          st.warning(f"Upload a Robinhood CSV to view historical dividend payouts. ({e})")
 
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)

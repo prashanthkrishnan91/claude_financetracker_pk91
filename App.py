@@ -845,21 +845,20 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # --- TAB 1.4: DRIP Analytics Integration ---
   with subd:
-    # 1. Ensure tx_list is ALWAYS defined before calling the function
     tx_list = []
     try:
-        # Load the unified transaction store
+        # Load from disk (603 rows)
         raw_data = de._load(de.TX_STORE_PATH, {})
-        # Flatten dictionary to list if necessary
-        tx_list = list(raw_data.values()) if isinstance(raw_data, dict) else raw_data
+        # Robust conversion of dict-store to list
+        if isinstance(raw_data, dict):
+            tx_list = list(raw_data.values())
+        else:
+            tx_list = raw_data
     except Exception as e:
-        st.error(f"Backend Error: Could not parse tx_store.json: {e}")
+        st.error(f"Error loading tx_store: {e}")
 
-    # 2. Call the verified function
-    # active_portfolio: Plaid holdings (SSOT)
-    # tx_list: Historical activity (SSOT)
+    # Use the 'active_portfolio' (Plaid) for Future and 'tx_list' (CSV) for History
     drip.render_drip_dashboard(active_portfolio, tx_list)
 
 # ─────────────────────────────────────────────────────────────

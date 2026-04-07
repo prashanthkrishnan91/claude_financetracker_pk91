@@ -845,18 +845,13 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # --- TAB 1.4: DRIP Analytics ---
+  # Around line 854 in App.py
   with subd:
-    # 1. Extract raw history from transaction store
-    raw_tx_data = de._load(de.TX_STORE_PATH, {})
-    # Convert store to list regardless of format
-    tx_list = list(raw_tx_data.values()) if isinstance(raw_tx_data, dict) else raw_tx_data
-    
-    # 2. Call the unified renderer
-    # active_portfolio: Plaid quantities | tx_list: CSV history | plaid_snap: session cache
+    raw_tx = de._load(de.TX_STORE_PATH, {})
+    # Ensure tx_list is a list or dict as expected
     drip.render_drip_dashboard(
         active_portfolio=active_portfolio, 
-        tx_list=tx_list, 
+        tx_list=raw_tx, 
         plaid_snap=plaid_snap
     )
 # ─────────────────────────────────────────────────────────────

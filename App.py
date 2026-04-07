@@ -847,17 +847,14 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
   # --- TAB 1.4: DRIP Analytics Integration ---
   with subd:
-    # 1. Load the transaction store (The CSV Data Fallback)
     raw_tx_data = de._load(de.TX_STORE_PATH, {})
     tx_list = list(raw_tx_data.values()) if isinstance(raw_tx_data, dict) else raw_tx_data
     
-    # 2. Render Dashboard (Pass active_portfolio, CSV tx_list, and Plaid cache)
     drip.render_drip_dashboard(
         active_portfolio=active_portfolio, 
         tx_list=tx_list, 
         plaid_snap=plaid_snap
     )
-
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)
 # ─────────────────────────────────────────────────────────────

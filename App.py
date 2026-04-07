@@ -845,10 +845,10 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
 # TAB 1.4 — DRIP ANALYTICS
 # ─────────────────────────────────────────────────────────────
-  # Around line 854 in App.py
+  # Around line 852 in App.py
   with subd:
     raw_tx = de._load(de.TX_STORE_PATH, {})
-    # Ensure tx_list is a list or dict as expected
+    # Render the dashboard
     drip.render_drip_dashboard(
         active_portfolio=active_portfolio, 
         tx_list=raw_tx, 

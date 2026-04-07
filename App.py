@@ -847,12 +847,15 @@ with tab_intel:
 # ─────────────────────────────────────────────────────────────
   # Inside Tab 1.4 of App.py
   with subd:
+    # 1. Load CSV data (Fallback source)
     raw_tx = de._load(de.TX_STORE_PATH, {})
-    # Convert store dict to list
     tx_list = list(raw_tx.values()) if isinstance(raw_tx, dict) else raw_tx
     
-    # Render the unified view
-    drip.render_drip_dashboard(active_portfolio, tx_list)
+    # 2. Call the function, passing Plaid snap directly for "Plaid-First" logic
+    # active_portfolio: current quantities
+    # tx_list: historical CSV data
+    # plaid_snap: the full cache object to check for transactions
+    drip.render_drip_dashboard(active_portfolio, tx_list, plaid_snap=plaid_snap)
 
 # ─────────────────────────────────────────────────────────────
 # TAB 2 — Operations  (v11.2: cash_available wired in)

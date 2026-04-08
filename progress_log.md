@@ -1,8 +1,8 @@
 # ⚡ Portfolio War Room — Project Progress Log
-**Last Updated:** April 5, 2026
+**Last Updated:** April 8, 2026
 **User:** prashanthkrishnan91
 **Repo:** github.com/prashanthkrishnan91/my-portfolio-ai
-**Current Version:** v13 ✅
+**Current Version:** v13.1 ✅
 
 ---
 
@@ -10,7 +10,7 @@
 
 A full-stack personal portfolio intelligence system for tracking, analyzing, and optimizing a Robinhood investment account. Designed for an amateur investor — plain-English recommendations, tax-aware guidance, live prices, and a biweekly $900 deployment plan.
 
-Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints → bootstrap/live mode isolation + sidebar persistence → permanent sidebar fix + DRIP Analytics tab.
+Evolved across many sessions: React artifact → Python/Streamlit → single-file production app → fully modular two-file architecture → real-time Plaid/Finnhub backend → Smart Sync (24h Plaid cache) → cash-informed rebalancing + 3-layer deduplication + decision log → high-integrity SHA-256 hashing engine with canonical fingerprints → bootstrap/live mode isolation + sidebar persistence → permanent sidebar fix + DRIP Analytics tab → DRIP module robustness refactor (defensive data ingestion, yfinance dividend intel).
 
 **Current file count: 10 Python files + 1 requirements.txt + system_state.json (runtime)**
 
@@ -297,6 +297,41 @@ Two upgrades on top of v12:
 
 ---
 
+---
+
+### Phase 21 — DRIP Analytics Robustness Refactor (v13.1, April 6–7, 2026)
+
+#### What was asked
+The DRIP Analytics tab (added in v13) was not reliably rendering dividend history or projections. The root issue was structural fragility: the old module assumed clean, consistently-named fields and a specific list-of-dicts shape. Real data from `tx_store.json` is a dict-of-dicts with varied field names, so the old code silently produced empty results.
+
+#### What was changed
+
+**`drip_analytics.py` — complete rewrite (147 lines, down from 310)**
+
+| Change | Detail |
+|--------|--------|
+| `fetch_dividend_intel(tickers)` | New `@st.cache_data(ttl=86400)` function. For each non-crypto ticker calls `yf.Ticker(t).info` to get `dividendRate` / `trailingAnnualDividendRate` and `calendar` for next pay/ex-dividend dates. Returns `{ticker: {rate, pay, ex}}`. Gracefully handles all yfinance API quirks. |
+| `extract_largest_positive_float(tx_dict)` | Scans every value in a transaction dict, strips `$`/`,` formatting, and returns the highest positive numeric value. Eliminates brittle field-name lookups for cash amounts. |
+| `flatten_history(tx_data)` | Normalises any data shape to a flat list of dicts: handles `dict[str, dict]` (tx_store format), plain `list[dict]`, single `dict`, or `None`. Called before any iteration so downstream code always sees a list. |
+| `render_drip_dashboard()` signature | Changed from `(portfolio, prices)` to `(active_portfolio, tx_list=None, plaid_snap=None)`. Accepts both the current Plaid positions and the raw tx_store blob. |
+| CDIV detection | Replaced field-name lookup with string match: each row is serialised to `"key1:VAL1 \| key2:VAL2"` and checked for `"CDIV"` or `"CASH DIVIDEND"`. Works regardless of how Robinhood labels the field in future CSV exports. |
+| Projections | Now uses `fetch_dividend_intel()` (trailing yield from yfinance) × current shares per ticker. Renders "Upcoming Payouts" table with Ex-Div and Pay dates plus annual income estimate. |
+| UI simplification | Consolidated to 3 KPI cards (Lifetime Earned, Annual Projection, Est. Monthly), a two-column layout (Upcoming Payouts left, Historical Ledger right). Removed complex frequency-inference and stacked bar chart — these were causing render failures before the data layer was stabilised. |
+
+**`App.py` — DRIP tab wiring fix**
+
+| Change | Detail |
+|--------|--------|
+| `tx_list` argument | Changed from `list(raw_data.values())` to `raw_tx` (the full dict). `flatten_history()` inside drip module handles conversion — no pre-processing in App.py. |
+| Keyword args | Call switched to explicit kwargs: `active_portfolio=active_portfolio, tx_list=raw_tx, plaid_snap=plaid_snap`. |
+
+#### Files changed
+- `drip_analytics.py` — full rewrite, −163 lines net
+- `App.py` — 6-line change to DRIP tab call
+- `.claude/skills/` directory — deleted (cleanup)
+
+---
+
 ## Current App Architecture (v13)
 
 ### Tab Structure (11 tabs)
@@ -505,20 +540,45 @@ git push
 | 30 | Holdings doubled after first CSV import | Bootstrap summary rows persisted in tx_store; recompute_portfolio() replayed both bootstrap + real CSV rows | system_state.json bootstrap/live mode; transition_to_live() wipes tx_store on first real import | v12 |
 | 31 | Sidebar permanently disappeared | No persistent state or escape hatch when sidebar collapsed | sidebar_open in session_state; CSS inject to hide; ◀/▶ toggle button always visible in main content | v12 |
 | 32 | Sidebar still unrecoverable after v12 | Native collapsedControl was still visible; clicking it set Streamlit's internal collapsed state which CSS display:none couldn't escape | `[data-testid="collapsedControl"]{display:none !important}` — native button removed; hidden state uses margin-left:-21rem not display:none | v13 |
+| 33 | DRIP tab showed empty history and projections | drip_analytics.py assumed list-of-dicts input and named fields; tx_store.json is a dict-of-dicts with varied key names — silent empty results | Rewrote with `flatten_history()` (normalises any shape) + string-match CDIV detection + `extract_largest_positive_float()` | v13.1 |
+| 34 | DRIP projections used stale/unavailable data | Old `calculate_projections()` relied on manually supplied prices dict; no live dividend rate fetching | New `fetch_dividend_intel(tickers)` fetches trailing yield + pay/ex dates from yfinance with 24h cache | v13.1 |
 
 ---
 
 ## Open Items / Next Steps
 
+### 🔴 Active Bugs (In Progress)
+
+- [ ] **BUG — Bootstrap→Live transition does not fire on Plaid sync**
+  - **Symptom:** The `⚠️ BOOTSTRAP MODE` badge in the sidebar only switches to `✅ LIVE MODE` after a CSV upload. If the user's first interaction is a Plaid sync (not a CSV upload), the app stays in bootstrap mode even though real holdings data is now loaded.
+  - **Root cause:** `transition_to_live()` is only called inside `ingest_csv()` (in `data_engine.py`) and the PDF upload path (in `App.py`). The Plaid sync path (`smart_sync_portfolio()` / "🏦 Sync Plaid" button in `App.py`) never calls `transition_to_live()`.
+  - **Fix needed:** In `App.py`, after a successful Plaid sync (`if snap:`), call `de.transition_to_live()` if `de.get_system_mode() == "bootstrap"`. Also reset `st.session_state.processed_ids` the same way the CSV path does. Update the sidebar badge re-read on the same rerun.
+
+- [ ] **BUG — yfinance stock price fetching is unreliable; prices frequently missing**
+  - **Symptom:** After pressing 🔄 Refresh, many stock tickers show stale or `$0` prices. The sidebar shows "Partial" live coverage. yfinance is rate-limited, returns `None` intermittently, and has no SLA.
+  - **Root cause:** `utils/price_fetcher.py` uses `yfinance` as the sole stock price source. `price_service.py` has a Finnhub → Polygon cascade for real-time prices, but it requires paid API keys (not always configured). For the Streamlit-only path (`data_engine.fetch_prices()`), only yfinance is used with no multi-source fallback.
+  - **Fix needed:** Replace/augment the `fetch_prices()` provider chain with multiple free/open-source APIs tried in order:
+    1. **Alpaca Markets** (`api.alpaca.markets/v2/stocks/{symbol}/quotes/latest`) — free paper trading key; reliable real-time NBBO
+    2. **Polygon.io free tier** (`/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}`) — 5 req/min on free plan
+    3. **Yahoo Finance** (yfinance) — current fallback, keep as last resort
+    4. **CoinGecko** — already wired for crypto; keep as-is
+  - The provider should be tried in order; first non-zero result wins. Cache per-ticker result for 5 min (same as current TTL).
+
+### 📋 Routine Tasks
+
 - [ ] **Upload updated Robinhood CSV** after Apr 3 trades (VTV/VEA/VWO/BND sold, Deposit #1) to keep tx_store current
 - [ ] **Apr 4** — GLD is now LT eligible, trim 25% near $450
 - [ ] **Connect Plaid** — run Plaid Link flow to get production access_token; add to Streamlit secrets
-- [ ] Future: Price alert system — push notification when position hits target price
-- [ ] Future: Historical performance chart — portfolio value over time line graph
-- [ ] Future: Year-end tax-loss harvesting calculator — show which positions to sell to offset gains
-- [ ] Future: Migrate tx_store.json to SQLite for faster replay on large stores (currently ~600 rows, fine as JSON)
-- [ ] Future: Async Streamlit — run `calculate_total_value_async()` natively without run_in_executor
+
+### 🔮 Future Enhancements
+
+- [ ] Price alert system — push notification when position hits target price
+- [ ] Historical performance chart — portfolio value over time line graph
+- [ ] Year-end tax-loss harvesting calculator — show which positions to sell to offset gains
+- [ ] Migrate tx_store.json to SQLite for faster replay on large stores (currently ~600 rows, fine as JSON)
+- [ ] Async Streamlit — run `calculate_total_value_async()` natively without run_in_executor
+- [ ] DRIP Analytics — restore stacked-bar DRIP impact chart and frequency-inference projections now that data layer is stable
 
 ---
 
-*Log updated April 5, 2026 · Portfolio War Room v13 · 34 positions · 11-tab UI · bootstrap/live mode · permanent sidebar fix · DRIP Analytics · high-integrity SHA-256 hashing · canonical fingerprints · 36/36 tests passing*
+*Log updated April 8, 2026 · Portfolio War Room v13.1 · 34 positions · 11-tab UI · bootstrap/live mode · permanent sidebar fix · DRIP Analytics (refactored) · high-integrity SHA-256 hashing · canonical fingerprints · 2 active bugs (bootstrap/Plaid transition · yfinance reliability)*

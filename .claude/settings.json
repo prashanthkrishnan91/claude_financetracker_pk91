@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "agent",
+            "if": "Bash(git push*)",
+            "timeout": 120,
+            "statusMessage": "Updating progress_log.md...",
+            "prompt": "A git push just completed. Your job is to update progress_log.md in /home/user/claude_financetracker_pk91 to reflect what was just pushed.\n\nDo the following steps in order:\n\n1. Run: git -C /home/user/claude_financetracker_pk91 log --oneline -10\n2. Run: git -C /home/user/claude_financetracker_pk91 diff HEAD~3 HEAD --stat 2>/dev/null || git -C /home/user/claude_financetracker_pk91 diff HEAD --stat\n3. Read /home/user/claude_financetracker_pk91/progress_log.md\n4. If the most recent commit message contains 'Auto-update progress_log', examine the commit before it — the log is being updated for the push BEFORE that auto-commit.\n5. Add a new session entry (or extend today's entry if one already exists for today) that includes:\n   - Date and version (infer version from existing log entries or commit messages)\n   - A short 'What was pushed' summary based on commit messages\n   - List of files changed and what each change does\n   - Updated 'Last Updated:' date at the very top of the file\n   - Updated footer line at the very bottom of the file\n6. Write the updated file back to /home/user/claude_financetracker_pk91/progress_log.md\n7. Run: git -C /home/user/claude_financetracker_pk91 add progress_log.md && git -C /home/user/claude_financetracker_pk91 commit -m 'Auto-update progress_log.md'\n   IMPORTANT: Do NOT run git push — commit locally only. This prevents an infinite loop.\n\nMatch the existing style and section format already used in the file. Keep the new entry concise."
+          }
+        ]
+      }
+    ]
+  }
+}

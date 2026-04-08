@@ -98,8 +98,8 @@ SYSTEM_STATE_PATH   = Path("system_state.json")   # ← NEW v12: bootstrap/live 
 # ═══════════════════════════════════════════════════════════════════════════════
 FOREVER_HOLD   = {"VYM", "SCHD", "VTI"}
 DCA_ALWAYS     = {"VOO", "QQQ"}
-SELL_LIST      = {"VTV", "VEA", "VWO", "BND"}
-SELL_PENDING   = {"SPY", "VUG"}
+SELL_LIST: set[str] = set()          # VTV/VEA/VWO/BND sold Apr 3 2026 ✅ — cleared
+SELL_PENDING   = {"SPY", "VUG"}      # swap to VOO/QQQ when LT eligible
 IPO_HOLDS      = {"BLSH", "KLAR", "STUB"}
 CRYPTO_TICKERS = {"BTC", "ETH", "XRP", "SOL", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LTC"}
 ETF_TICKERS    = {
@@ -857,15 +857,64 @@ def days_to_lt(first_buy_date: str) -> int:
     return max(0, 366 - (datetime.date.today() - d).days)
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# RESEARCH-BACKED RATIONALE (April 2026)
+# One-line analyst reasoning shown on every recommendation card.
+# Update when thesis changes materially.
+# ═══════════════════════════════════════════════════════════════════════════════
+RESEARCH_RATIONALE: dict[str, str] = {
+    # ── Core ETFs ──────────────────────────────────────────────────────────────
+    "VOO":   "S&P 500 core; despite macro uncertainty, time in market beats timing — DCA every deposit.",
+    "QQQ":   "Nasdaq-100 AI/tech secular trend dominant; dips are accumulation opportunities — DCA always.",
+    "VYM":   "3%+ trailing yield compounds well; high-dividend stocks resilient in rate environment — DRIP on.",
+    "SCHD":  "3.5%+ dividend yield with consistent dividend-growth track record — hold forever, DRIP on.",
+    "VTI":   "Total US market; broadest diversification — DCA always alongside VOO.",
+    "GLD":   "De-dollarization + Fed rate uncertainty drive safe-haven demand; gold near record highs — hold.",
+    "VGT":   "Tech sector ETF; highest-quality AI-exposed names without single-stock concentration risk.",
+    "XLE":   "Energy cyclical; oil demand outlook uncertain in 2026 — hold, trailing stop near $82.",
+    "VHT":   "Healthcare defensive; aging demographics provide durable structural tailwind — hold.",
+    "VIS":   "Industrials ETF; US reshoring/onshoring manufacturing theme intact — hold.",
+    "VXUS":  "International diversification; dollar weakness and EM recovery add return potential.",
+    "SPY":   "Pending ETF swap to VOO (identical exposure, 0.03% ER vs 0.09%) once LT eligible May 2026.",
+    "VUG":   "Pending ETF swap to QQQ (growth concentration) once LT eligible July 2026.",
+    # ── Core Stocks ────────────────────────────────────────────────────────────
+    "NVDA":  "AI capex supercycle intact; H200/B200 demand exceeds supply — Jensen raised FY26 guidance again.",
+    "META":  "Ad revenue resilient + Llama 4 AI driving 35%+ operating margins — accumulate on any dip.",
+    "GOOGL": "Search + Gemini AI moat intact; YouTube & Cloud growing double-digit — antitrust risk priced in.",
+    "AAPL":  "Services growing 15%+ YoY; iPhone 17 AI cycle approaching; China headwind partially hedged.",
+    "MSFT":  "Azure AI growing 35%+ YoY; Copilot enterprise adoption fastest in company history — top compounder.",
+    "TSM":   "Sole manufacturer of leading-edge AI chips; US fab buildout reduces (not eliminates) Taiwan risk.",
+    "NFLX":  "Ad-supported tier scaling; password crackdown boosted ARPU; gaming optionality not yet priced in.",
+    "CRM":   "Agentforce AI platform gaining enterprise traction; steady FCF growth — accumulate on weakness.",
+    "COST":  "Recession-resistant membership model; global expansion; traffic & renewal rates at all-time highs.",
+    "QCOM":  "Snapdragon AI PC chip cycle + automotive diversification offsetting mobile slowdown.",
+    "WMT":   "Walmart+ membership + ad revenue diversifying from pure retail; defensive in any slowdown.",
+    "BRK-B": "Record $325B+ cash hoard positions Berkshire for opportunistic acquisitions — ultimate defensive.",
+    "AMD":   "MI300X AI accelerator gaining data center share; EPYC server CPU at 25%+ market share.",
+    "RDDT":  "Reddit early monetization phase; DAU growth strong; speculative position, size is small.",
+    "ALK":   "Travel demand resilient; Alaska-Hawaiian merger integration risk is the main overhang.",
+    "SNOW":  "Cloud data platform; retention high but growth normalizing; watch Databricks competition.",
+    # ── IPO Holds ──────────────────────────────────────────────────────────────
+    "BLSH":  "Small-cap biotech IPO — hold until LT eligible Aug 2026; monitor pipeline data closely.",
+    "KLAR":  "Recent fintech IPO — hold until LT eligible Sep 2026; insufficient data for deeper thesis.",
+    "STUB":  "Hold until LT eligible Sep 2026; monitor quarterly results before adding.",
+    # ── Crypto ─────────────────────────────────────────────────────────────────
+    "BTC":   "Post-Apr 2024 halving cycle historically runs 12-18 months; ETF inflows adding institutional demand.",
+    "XRP":   "SEC case settled; Ripple ODL cross-border payment adoption growing; regulatory clarity positive.",
+}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # RECOMMENDATION ENGINE
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def generate_recs(portfolio: dict, prices: dict) -> list[dict]:
-    """Dynamic recs. Returns list sorted: sell→review→buy→trim→hold."""
+    """Dynamic recs — research-backed rationale per ticker. Sorted: sell→review→buy→trim→hold."""
     recs = []
     for ticker, pos in portfolio.items():
-        price   = _safe_price(ticker, pos, prices)
         shares  = pos.get("shares", 0)
+        if shares <= 0:          # defensive: skip fully-sold positions
+            continue
+        price   = _safe_price(ticker, pos, prices)
         cost    = pos.get("avg_cost", price)
         fbd     = pos.get("first_buy_date", "")
         lt      = is_lt_eligible(fbd)
@@ -945,6 +994,11 @@ def generate_recs(portfolio: dict, prices: dict) -> list[dict]:
                 f"Target ${target:,.0f} = {upside:.0f}% upside." if upside > 0 else "No action needed."
             )
             rec.update(action="HOLD", cat="hold", priority=4, plain=msg, why="No action needed today.")
+
+        # Override generic why with research-backed one-liner when available
+        research = RESEARCH_RATIONALE.get(ticker)
+        if research:
+            rec["why"] = research
 
         recs.append(rec)
 

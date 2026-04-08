@@ -156,6 +156,8 @@ def _init():
         "dep_reasons":     {},    # {ticker: reason_text}
         "dep_recs_final":  [],    # after apply_overrides_to_recs()
         "overrides_applied": False,
+        # Active Recommendations filter — empty set = show all categories
+        "rec_filter":      set(),
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -631,24 +633,72 @@ with tab_intel:
           holds   = [r for r in recs if r["cat"] == "hold"]
           reviews = [r for r in recs if r["cat"] == "review"]
   
+          # ── Category filter cards (clickable, multi-select) ──────────────────
+          # CSS: per-card styles injected via marker div + :has() sibling selector.
+          # Empty rec_filter set = no filter = show everything.
+          filt = st.session_state.rec_filter
+          st.markdown("""<style>
+          /* Base style for all rec filter buttons */
+          .rec-filter-btn button {
+              width:100% !important; height:72px !important;
+              background:#0f172a !important; border-radius:10px !important;
+              font-size:13px !important; white-space:pre-line !important;
+              padding:6px 4px !important; cursor:pointer !important;
+              transition: border-color .2s, background .2s !important;
+          }
+          </style>""", unsafe_allow_html=True)
+
           s1, s2, s3, s4, s5 = st.columns(5)
-          for col, lbl, items, color in [
-              (s1, "SELL",   sells,   "#ef4444"),
-              (s2, "BUY",    buys,    "#22c55e"),
-              (s3, "TRIM",   trims,   "#f59e0b"),
-              (s4, "REVIEW", reviews, "#a855f7"),
-              (s5, "HOLD",   holds,   "#64748b"),
+          for col, lbl, cat, items, color in [
+              (s1, "SELL",   "sell",   sells,   "#ef4444"),
+              (s2, "BUY",    "buy",    buys,    "#22c55e"),
+              (s3, "TRIM",   "trim",   trims,   "#f59e0b"),
+              (s4, "REVIEW", "review", reviews, "#a855f7"),
+              (s5, "HOLD",   "hold",   holds,   "#64748b"),
           ]:
               with col:
+                  is_sel = cat in filt
+                  r_c, g_c, b_c = int(color[1:3],16), int(color[3:5],16), int(color[5:7],16)
+                  bg    = f"rgba({r_c},{g_c},{b_c},0.15)" if is_sel else "#0f172a"
+                  bw    = "2px" if is_sel else "1px"
+                  check = "✓ " if is_sel else ""
+                  # Marker div + scoped CSS targeting the immediately-following button
+                  mid = f"rfcard_{cat}"
                   st.markdown(
-                      f"<div style='text-align:center;padding:8px;border-radius:10px;"
-                      f"background:#0f172a;border:1px solid #1e2d47'>"
-                      f"<div style='color:{color};font-weight:700;font-size:20px'>{len(items)}</div>"
-                      f"<div style='font-size:10px;color:#64748b'>{lbl}</div></div>",
+                      f"<style>"
+                      f"div:has(>#{mid}) + div button{{"
+                      f"color:{color} !important;"
+                      f"border:{bw} solid {color} !important;"
+                      f"background:{bg} !important;}}"
+                      f"div:has(>#{mid}) + div button:hover{{"
+                      f"border-width:2px !important;"
+                      f"background:rgba({r_c},{g_c},{b_c},0.22) !important;}}"
+                      f"</style>"
+                      f"<div id='{mid}'></div>",
                       unsafe_allow_html=True,
                   )
-          st.markdown("")
-  
+                  st.markdown(f'<div class="rec-filter-btn">', unsafe_allow_html=True)
+                  if st.button(
+                      f"{check}{len(items)}\n{lbl}",
+                      key=f"filter_{cat}",
+                      use_container_width=True,
+                      help=f"Click to {'deselect' if is_sel else 'filter by'} {lbl} · "
+                           f"{'nothing selected = show all' if not filt else ''}",
+                  ):
+                      if is_sel:
+                          st.session_state.rec_filter.discard(cat)
+                      else:
+                          st.session_state.rec_filter.add(cat)
+                      st.rerun()
+                  st.markdown('</div>', unsafe_allow_html=True)
+
+          # Filter hint
+          if filt:
+              active = " · ".join(c.upper() for c in ["sell","buy","trim","review","hold"] if c in filt)
+              st.caption(f"Filtering: {active} — click a card again to deselect")
+          else:
+              st.caption("Click a card to filter · multi-select supported")
+
           def _rcard(r: dict):
               cat   = r["cat"]
               css   = {"sell":"rec-sell","buy":"rec-buy","trim":"rec-trim",
@@ -670,18 +720,21 @@ with tab_intel:
                   f"</div>",
                   unsafe_allow_html=True,
               )
-  
-          for group, label in [
-              (sells,   "🔴 Sell Now"),
-              (buys,    "🟢 Buy / Accumulate"),
-              (trims,   "🟡 Trim"),
-              (reviews, "🟣 Review"),
-              (holds,   "⚫ Hold"),
-          ]:
-              if group:
-                  st.markdown(f"#### {label}")
-                  for r in group:
-                      _rcard(r)
+
+          # Apply filter: empty filt = show all groups
+          all_groups = [
+              (sells,   "🔴 Sell Now",          "sell"),
+              (buys,    "🟢 Buy / Accumulate",  "buy"),
+              (trims,   "🟡 Trim",              "trim"),
+              (reviews, "🟣 Review",            "review"),
+              (holds,   "⚫ Hold",              "hold"),
+          ]
+          visible = [(g, lbl) for g, lbl, cat in all_groups
+                     if g and (not filt or cat in filt)]
+          for group, label in visible:
+              st.markdown(f"#### {label}")
+              for r in group:
+                  _rcard(r)
   
           if st.button("📸 Save Snapshot", key="snap_btn"):
               de.snapshot_portfolio(portfolio, prices, cash, recs)

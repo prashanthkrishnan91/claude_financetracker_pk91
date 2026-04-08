@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 222 47% 3%;
+    --foreground: 220 14% 91%;
+    --card: 222 27% 6%;
+    --card-foreground: 220 14% 91%;
+    --popover: 222 27% 6%;
+    --popover-foreground: 220 14% 91%;
+    --primary: 152 100% 45%;
+    --primary-foreground: 222 47% 3%;
+    --secondary: 215 14% 14%;
+    --secondary-foreground: 220 14% 91%;
+    --muted: 215 14% 14%;
+    --muted-foreground: 220 5% 53%;
+    --accent: 152 100% 45%;
+    --accent-foreground: 222 47% 3%;
+    --destructive: 0 100% 66%;
+    --destructive-foreground: 220 14% 91%;
+    --border: 215 14% 18%;
+    --input: 215 14% 18%;
+    --ring: 152 100% 45%;
+    --radius: 0.75rem;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-text-primary antialiased;
+    font-family: "Inter", system-ui, sans-serif;
+  }
+}
+
+/* Robinhood-style glassmorphic cards */
+@layer components {
+  .card-glass {
+    @apply bg-surface/80 backdrop-blur-xl border border-border/50 rounded-lg;
+  }
+  .card-elevated {
+    @apply bg-surface-elevated border border-border rounded-lg;
+  }
+  .pnl-positive {
+    @apply text-pnl-positive;
+  }
+  .pnl-negative {
+    @apply text-pnl-negative;
+  }
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: #21262d;
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #30363d;
+}

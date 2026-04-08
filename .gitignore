@@ -1,9 +1,57 @@
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── v1 runtime files (auto-created, never committed) ─────────────────────────
 tx_store.json
 crypto_overrides.json
 rec_history.json
 deposit_log.json
 targets.json
-*.csv
+price_cache.json
+recon_log.json
+holdings_cache.json
+plaid_snapshot.json
+decision_log.json
+system_state.json
+
+# ── v2 backend ────────────────────────────────────────────────────────────────
+v2/backend/.env
+v2/backend/.env.*
+!v2/backend/.env.example
+
+# ── v2 frontend ───────────────────────────────────────────────────────────────
+v2/frontend/node_modules/
+v2/frontend/.next/
+v2/frontend/out/
+v2/frontend/.env.local
+v2/frontend/.env.*.local
+
+# ── Secrets & environment ─────────────────────────────────────────────────────
 .env
+.env.*
+!.env.example
+*.csv
+secrets.toml
+.streamlit/secrets.toml
+
+# ── IDE / OS ──────────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── Test / Coverage ───────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/

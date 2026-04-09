@@ -319,7 +319,7 @@ function ApiKeysSection() {
     field: keyof ApiKeysUpdate;
     label: string;
     hasFlag?: boolean;
-    flagKey?: keyof typeof profile;
+    flagKey?: keyof ProfileType;
   }> = [
     { field: "plaid_client_id", label: "Plaid Client ID", hasFlag: true, flagKey: "has_plaid" },
     { field: "plaid_secret", label: "Plaid Secret", hasFlag: true, flagKey: "has_plaid" },

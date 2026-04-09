@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routers import auth, deposits, portfolio, positions, prices, recommendations, sync
+from .routers import ai, auth, deposits, drip, portfolio, positions, prices, recommendations, sync
 
 
 @asynccontextmanager
@@ -65,6 +65,8 @@ def create_app() -> FastAPI:
     app.include_router(recommendations.router, prefix="/api/v1")
     app.include_router(sync.router, prefix="/api/v1")
     app.include_router(deposits.router, prefix="/api/v1")
+    app.include_router(drip.router, prefix="/api/v1")
+    app.include_router(ai.router, prefix="/api/v1")
 
     @app.get("/health")
     async def health_check():

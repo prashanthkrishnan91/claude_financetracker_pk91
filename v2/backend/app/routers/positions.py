@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from typing import Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..config import get_settings
 from ..database import get_supabase_client
 from ..models.position import (
     PositionCreate,
@@ -16,6 +18,50 @@ from ..models.position import (
 )
 
 router = APIRouter(prefix="/positions", tags=["positions"])
+
+
+def _make_price_service():
+    """Instantiate PriceService from current settings."""
+    from ..services.price_engine import PriceService
+    settings = get_settings()
+    return PriceService(
+        finnhub_key=settings.finnhub_api_key or "",
+        alpaca_key=settings.alpaca_api_key or "",
+        alpaca_secret=settings.alpaca_secret_key or "",
+        polygon_key=settings.polygon_api_key or "",
+    )
+
+
+def _enrich_position(row: dict, prices: dict[str, float]) -> dict:
+    """Add current_price, market_value, unrealised_pnl, unrealised_pnl_pct to a position row."""
+    ticker = row.get("ticker", "")
+    shares = float(row.get("shares") or 0)
+    avg_cost = float(row.get("avg_cost") or 0)
+    cost_basis = shares * avg_cost
+
+    current_price = prices.get(ticker)
+    if current_price is not None:
+        market_value = shares * current_price
+        unrealised_pnl = market_value - cost_basis
+        unrealised_pnl_pct = (
+            (unrealised_pnl / cost_basis * 100) if cost_basis > 0 else 0.0
+        )
+        enriched = {
+            **row,
+            "current_price": round(current_price, 4),
+            "market_value": round(market_value, 2),
+            "unrealised_pnl": round(unrealised_pnl, 2),
+            "unrealised_pnl_pct": round(unrealised_pnl_pct, 4),
+        }
+    else:
+        enriched = {
+            **row,
+            "current_price": None,
+            "market_value": None,
+            "unrealised_pnl": None,
+            "unrealised_pnl_pct": None,
+        }
+    return enriched
 
 
 @router.get("/", response_model=list[PositionWithPrice])
@@ -31,9 +77,24 @@ async def list_positions(
         query = query.eq("category", category)
 
     result = query.order("ticker").execute()
+    rows = result.data or []
 
-    # TODO (Phase 2): Enrich with live prices from price service
-    return result.data
+    if not rows:
+        return []
+
+    # Fetch live prices for all tickers
+    tickers = [r["ticker"] for r in rows]
+    prices: dict[str, float] = {}
+    try:
+        ps = _make_price_service()
+        price_results = await ps.fetch_prices(tickers)
+        for ticker, pr in price_results.items():
+            if pr.is_valid:
+                prices[ticker] = pr.mid_price
+    except Exception:
+        pass  # Degrade gracefully — return positions without live prices
+
+    return [_enrich_position(r, prices) for r in rows]
 
 
 @router.get("/{ticker}", response_model=PositionWithPrice)
@@ -41,7 +102,7 @@ async def get_position(
     ticker: str,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Get a single position by ticker."""
+    """Get a single position by ticker with live price."""
     client = get_supabase_client()
 
     result = (
@@ -56,7 +117,18 @@ async def get_position(
     if not result.data:
         raise HTTPException(status_code=404, detail=f"Position {ticker} not found")
 
-    return result.data
+    row = result.data
+    prices: dict[str, float] = {}
+    try:
+        ps = _make_price_service()
+        price_results = await ps.fetch_prices([ticker.upper()])
+        for t, pr in price_results.items():
+            if pr.is_valid:
+                prices[t] = pr.mid_price
+    except Exception:
+        pass
+
+    return _enrich_position(row, prices)
 
 
 @router.post("/", response_model=PositionResponse, status_code=status.HTTP_201_CREATED)

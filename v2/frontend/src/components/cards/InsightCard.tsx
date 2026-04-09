@@ -11,15 +11,23 @@ const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }
   REVIEW: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
 };
 
-export function InsightCard({ card }: { card: InsightCardData }) {
+export function InsightCard({
+  card,
+  onClick,
+}: {
+  card: InsightCardData;
+  onClick?: () => void;
+}) {
   const styles = ACTION_STYLES[card.action] || ACTION_STYLES.HOLD;
 
   return (
     <div
+      onClick={onClick}
       className={cn(
-        "card-glass p-4 space-y-3 border",
+        "card-glass p-4 space-y-3 border transition-colors",
         styles.border,
-        styles.bg
+        styles.bg,
+        onClick && "cursor-pointer hover:brightness-110 active:scale-[0.99]"
       )}
     >
       {/* Header: Action badge + Ticker */}
@@ -39,11 +47,18 @@ export function InsightCard({ card }: { card: InsightCardData }) {
           </span>
           <span className="text-xs text-text-muted">{card.category}</span>
         </div>
-        {card.current_price && (
-          <span className="font-mono text-sm text-text-secondary">
-            {formatCurrency(card.current_price)}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          {card.current_price && (
+            <span className="font-mono text-sm text-text-secondary">
+              {formatCurrency(card.current_price)}
+            </span>
+          )}
+          {onClick && (
+            <span className="text-text-muted">
+              <ChevronRightIcon className="w-4 h-4" />
+            </span>
+          )}
+        </div>
       </div>
 
       {/* Detail */}
@@ -82,5 +97,13 @@ export function InsightCard({ card }: { card: InsightCardData }) {
         )}
       </div>
     </div>
+  );
+}
+
+function ChevronRightIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path d="M9 18l6-6-6-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }

@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     alpaca_api_key: Optional[str] = None
     alpaca_secret_key: Optional[str] = None
 
+    # ── AI / Anthropic ─────────────────────────────────────────────────────────
+    anthropic_api_key: Optional[str] = None
+
     # ── Plaid ─────────────────────────────────────────────────────────────────
     plaid_client_id: Optional[str] = None
     plaid_secret: Optional[str] = None

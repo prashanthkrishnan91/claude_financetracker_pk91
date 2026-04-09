@@ -5,8 +5,10 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..database import get_supabase_client
 from ..models.portfolio import (
     PortfolioSummary,
     RebalanceResult,
@@ -15,6 +17,11 @@ from ..models.portfolio import (
     TargetAllocationResponse,
 )
 from ..services.portfolio_service import PortfolioService
+
+
+class CashOverrideUpdate(BaseModel):
+    """Body for PATCH /portfolio/cash — set or clear cash override."""
+    amount: Optional[float] = None
 
 router = APIRouter(prefix="/portfolio", tags=["portfolio"])
 
@@ -78,3 +85,81 @@ async def calculate_rebalance(
     """Calculate rebalance suggestions based on targets vs current allocation."""
     service = PortfolioService(user_id=user.id)
     return await service.calculate_rebalance(cash_to_deploy=cash_to_deploy)
+
+
+@router.get("/cash")
+async def get_cash_balance(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Get the current cash balance.
+
+    Checks users.cash_override first (manual override).
+    Falls back to the most recent successful Plaid sync.
+    Returns source indicating where the value came from.
+    """
+    client = get_supabase_client()
+
+    # Check for manual override in users table
+    user_row = (
+        client.table("users")
+        .select("cash_override")
+        .eq("id", str(user.id))
+        .single()
+        .execute()
+    ).data
+
+    manual_override: Optional[float] = None
+    if user_row and user_row.get("cash_override") is not None:
+        manual_override = float(user_row["cash_override"])
+        return {
+            "cash_balance": manual_override,
+            "source": "manual",
+            "manual_override": manual_override,
+        }
+
+    # Fall back to last Plaid sync
+    last_sync = (
+        client.table("plaid_sync_log")
+        .select("cash_balance")
+        .eq("user_id", str(user.id))
+        .eq("status", "success")
+        .order("synced_at", desc=True)
+        .limit(1)
+        .execute()
+    ).data
+
+    if last_sync and last_sync[0].get("cash_balance") is not None:
+        cash = float(last_sync[0]["cash_balance"])
+        return {
+            "cash_balance": cash,
+            "source": "plaid",
+            "manual_override": None,
+        }
+
+    return {
+        "cash_balance": 0.0,
+        "source": "none",
+        "manual_override": None,
+    }
+
+
+@router.patch("/cash")
+async def update_cash_override(
+    body: CashOverrideUpdate,
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Set or clear the manual cash override in users.cash_override.
+
+    Pass amount=null to clear the override and revert to Plaid data.
+    """
+    client = get_supabase_client()
+
+    client.table("users").update(
+        {"cash_override": body.amount}
+    ).eq("id", str(user.id)).execute()
+
+    return {
+        "cash_balance": body.amount,
+        "source": "manual" if body.amount is not None else "none",
+        "manual_override": body.amount,
+    }

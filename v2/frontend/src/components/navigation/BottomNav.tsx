@@ -8,6 +8,7 @@ const NAV_ITEMS = [
   { href: "/dashboard", label: "Portfolio", icon: BarChartIcon },
   { href: "/dashboard/recommendations", label: "Intel", icon: LightbulbIcon },
   { href: "/dashboard/deposits", label: "Deploy", icon: WalletIcon },
+  { href: "/dashboard/drip", label: "DRIP", icon: DropletIcon },
   { href: "/dashboard/import", label: "Import", icon: UploadIcon },
   { href: "/settings", label: "Settings", icon: GearIcon },
 ];
@@ -48,7 +49,7 @@ export function SideNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="hidden lg:flex flex-col w-56 border-r border-border bg-surface/50 p-4 gap-1 min-h-screen">
+    <nav className="hidden lg:flex flex-col w-56 border-r border-border bg-surface/50 p-4 gap-1 min-h-screen sticky top-0 h-screen overflow-y-auto">
       <Link href="/dashboard" className="text-lg font-display text-text-primary mb-6">
         Portfolio Intelligence
       </Link>
@@ -99,6 +100,14 @@ function WalletIcon({ className }: { className?: string }) {
       <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M18 12a2 2 0 0 0 0 4h4v-4h-4z" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DropletIcon({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

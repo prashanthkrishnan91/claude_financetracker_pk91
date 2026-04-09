@@ -58,6 +58,12 @@ export const api = {
       fetchApi<RebalanceResult[]>(
         `/api/v1/portfolio/rebalance${cashToDeploy ? `?cash_to_deploy=${cashToDeploy}` : ""}`
       ),
+    getCash: () => fetchApi<CashBalance>("/api/v1/portfolio/cash"),
+    setCash: (amount: number | null) =>
+      fetchApi<CashBalance>("/api/v1/portfolio/cash", {
+        method: "PATCH",
+        body: JSON.stringify({ amount }),
+      }),
   },
 
   positions: {
@@ -91,6 +97,15 @@ export const api = {
       fetchApi<InsightCardData[]>("/api/v1/recommendations/refresh", {
         method: "POST",
       }),
+    resolve: (recId: string, resolution: string, notes?: string) =>
+      fetchApi<void>(`/api/v1/recommendations/${recId}/resolve`, {
+        method: "PATCH",
+        body: JSON.stringify({ resolution, notes }),
+      }),
+    getDecisions: (limit = 50) =>
+      fetchApi<DecisionLogEntry[]>(
+        `/api/v1/recommendations/decisions?limit=${limit}`
+      ),
   },
 
   sync: {
@@ -108,6 +123,31 @@ export const api = {
       formData.append("file", file);
       return fetchApiForm<ImportResult>("/api/v1/sync/csv/import", formData);
     },
+  },
+
+  drip: {
+    getSummary: () => fetchApi<DripSummary>("/api/v1/drip/summary"),
+    getPositions: () => fetchApi<DripPosition[]>("/api/v1/drip/positions"),
+    getHistory: () => fetchApi<DripHistoryEntry[]>("/api/v1/drip/history"),
+  },
+
+  auth: {
+    me: () => fetchApi<UserProfile>("/api/v1/auth/me"),
+    updateProfile: (data: Partial<UserProfile>) =>
+      fetchApi<UserProfile>("/api/v1/auth/me", {
+        method: "PATCH",
+        body: JSON.stringify(data),
+      }),
+    updateApiKeys: (keys: ApiKeysUpdate) =>
+      fetchApi<{ status: string }>("/api/v1/auth/me/api-keys", {
+        method: "PUT",
+        body: JSON.stringify(keys),
+      }),
+  },
+
+  ai: {
+    rebalance: () =>
+      fetchApi<AiRebalanceResult>("/api/v1/ai/rebalance", { method: "POST" }),
   },
 };
 
@@ -296,4 +336,90 @@ export interface RebalanceResult {
   drift_pct: number;
   suggested_action: string;
   suggested_amount: number;
+}
+
+export interface DripSummary {
+  lifetime_earned: number;
+  annual_projection: number;
+  monthly_estimate: number;
+  top_earner: string | null;
+  positions_with_drip: number;
+}
+
+export interface DripPosition {
+  ticker: string;
+  name: string;
+  shares: number;
+  drip_shares: number;
+  drip_cost: number;
+  drip_value: number;
+  drip_gain: number;
+  annual_income: number;
+  yield_pct: number;
+  ex_date: string;
+  pay_date: string;
+  category: string;
+}
+
+export interface DripHistoryEntry {
+  id: string;
+  ticker: string | null;
+  amount: number;
+  tx_date: string;
+  description: string | null;
+}
+
+export interface CashBalance {
+  cash_balance: number;
+  source: "plaid" | "manual" | "none";
+  manual_override: number | null;
+}
+
+export interface DecisionLogEntry {
+  id: string;
+  recommendation_id: string | null;
+  ticker: string;
+  decision: string;
+  notes: string | null;
+  price_at_decision: number | null;
+  created_at: string;
+}
+
+export interface AiAllocation {
+  ticker: string;
+  name: string;
+  current_pct: number;
+  suggested_pct: number;
+  change_pct: number;
+  rationale: string;
+}
+
+export interface AiRebalanceResult {
+  allocation_table: AiAllocation[];
+  narrative: string;
+  total_value: number;
+  generated_at: string;
+}
+
+export interface UserProfile {
+  id: string;
+  email: string;
+  display_name: string | null;
+  deposit_amount: number;
+  deposit_frequency: string;
+  theme: string;
+  has_plaid: boolean;
+  has_finnhub: boolean;
+  has_polygon: boolean;
+  has_alpaca: boolean;
+}
+
+export interface ApiKeysUpdate {
+  plaid_client_id?: string;
+  plaid_secret?: string;
+  finnhub_api_key?: string;
+  polygon_api_key?: string;
+  alpaca_api_key?: string;
+  alpaca_secret_key?: string;
+  anthropic_api_key?: string;
 }

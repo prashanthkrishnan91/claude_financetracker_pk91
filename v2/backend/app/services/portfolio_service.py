@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
+from ..config import get_settings
 from ..database import get_supabase_client
 from ..models.portfolio import (
     PortfolioSummary,
@@ -27,10 +28,25 @@ class PortfolioService:
         self.client = get_supabase_client()
         self._price_service = price_service
 
+    def _get_price_service(self):
+        """Lazily create PriceService from settings if not provided."""
+        if self._price_service is None:
+            from ..services.price_engine import PriceService
+            settings = get_settings()
+            self._price_service = PriceService(
+                finnhub_key=settings.finnhub_api_key or "",
+                alpaca_key=settings.alpaca_api_key or "",
+                alpaca_secret=settings.alpaca_secret_key or "",
+                polygon_key=settings.polygon_api_key or "",
+            )
+        return self._price_service
+
     async def get_summary(self) -> PortfolioSummary:
         """Compute portfolio summary with live prices.
 
         Uses the concurrent price engine for real-time data.
+        Also computes day_change from price_history previous-close data.
+        Cash balance prefers users.cash_override over Plaid sync log.
         """
         # Fetch all positions
         positions = (
@@ -48,28 +64,28 @@ class PortfolioService:
                 positions_count=0, prices_fresh=0, prices_stale=0,
             )
 
-        # Fetch live prices if price service available
-        prices = {}
+        # Fetch live prices — use lazy-init price service
+        price_service = self._get_price_service()
+        prices: dict[str, float] = {}
         fresh_count = 0
         stale_count = 0
-        sources_used = set()
+        sources_used: set[str] = set()
 
-        if self._price_service:
-            tickers = [p["ticker"] for p in positions]
-            try:
-                price_results = await self._price_service.fetch_prices(tickers)
-                for ticker, pr in price_results.items():
-                    if pr.is_valid:
-                        prices[ticker] = pr.mid_price
-                        if not pr.is_stale:
-                            fresh_count += 1
-                            sources_used.add(pr.source.split("(")[0])
-                        else:
-                            stale_count += 1
+        tickers = [p["ticker"] for p in positions]
+        try:
+            price_results = await price_service.fetch_prices(tickers)
+            for ticker, pr in price_results.items():
+                if pr.is_valid:
+                    prices[ticker] = pr.mid_price
+                    if not pr.is_stale:
+                        fresh_count += 1
+                        sources_used.add(pr.source.split("(")[0])
                     else:
                         stale_count += 1
-            except Exception:
-                stale_count = len(positions)
+                else:
+                    stale_count += 1
+        except Exception:
+            stale_count = len(positions)
 
         # Compute portfolio values
         total_equity = 0.0
@@ -103,19 +119,72 @@ class PortfolioService:
         total_pnl = total_equity - total_cost
         total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
 
-        # Cash balance from last Plaid sync
+        # ── Cash balance — prefer manual override, fallback to Plaid ────────
         cash = 0.0
-        last_sync = (
-            self.client.table("plaid_sync_log")
-            .select("cash_balance")
-            .eq("user_id", str(self.user_id))
-            .eq("status", "success")
-            .order("synced_at", desc=True)
-            .limit(1)
-            .execute()
-        ).data
-        if last_sync:
-            cash = float(last_sync[0].get("cash_balance", 0))
+
+        # 1. Check users.cash_override
+        try:
+            user_row = (
+                self.client.table("users")
+                .select("cash_override")
+                .eq("id", str(self.user_id))
+                .single()
+                .execute()
+            ).data
+            if user_row and user_row.get("cash_override") is not None:
+                cash = float(user_row["cash_override"])
+            else:
+                raise ValueError("no override")
+        except Exception:
+            # 2. Fall back to last Plaid sync
+            try:
+                last_sync = (
+                    self.client.table("plaid_sync_log")
+                    .select("cash_balance")
+                    .eq("user_id", str(self.user_id))
+                    .eq("status", "success")
+                    .order("synced_at", desc=True)
+                    .limit(1)
+                    .execute()
+                ).data
+                if last_sync:
+                    cash = float(last_sync[0].get("cash_balance", 0))
+            except Exception:
+                pass
+
+        # ── Day change — compute from price_history previous close ───────────
+        day_change = 0.0
+        day_change_pct = 0.0
+        try:
+            # Fetch most recent price_history entry per ticker for this user
+            prev_closes: dict[str, float] = {}
+            for ticker in tickers:
+                ph_rows = (
+                    self.client.table("price_history")
+                    .select("close_price, price_date")
+                    .eq("ticker", ticker)
+                    .order("price_date", desc=True)
+                    .limit(1)
+                    .execute()
+                ).data
+                if ph_rows:
+                    prev_closes[ticker] = float(ph_rows[0].get("close_price") or 0)
+
+            # day_change = sum(shares * (current_price - prev_close)) for all positions
+            if prev_closes:
+                for p in positions:
+                    ticker = p["ticker"]
+                    current_price = prices.get(ticker)
+                    prev_close = prev_closes.get(ticker)
+                    if current_price and prev_close and prev_close > 0:
+                        shares = float(p["shares"])
+                        day_change += shares * (current_price - prev_close)
+
+                equity_before_change = total_equity - day_change
+                if equity_before_change > 0:
+                    day_change_pct = day_change / equity_before_change * 100
+        except Exception:
+            pass
 
         return PortfolioSummary(
             total_equity=round(total_equity + cash, 2),
@@ -123,8 +192,8 @@ class PortfolioService:
             total_pnl=round(total_pnl, 2),
             total_pnl_pct=round(total_pnl_pct, 4),
             cash_balance=round(cash, 2),
-            day_change=0,      # TODO: compute from previous close
-            day_change_pct=0,  # TODO: compute from previous close
+            day_change=round(day_change, 2),
+            day_change_pct=round(day_change_pct, 4),
             stocks_value=round(stocks_value, 2),
             etfs_value=round(etfs_value, 2),
             crypto_value=round(crypto_value, 2),

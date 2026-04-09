@@ -1,5 +1,19 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "agent",
+            "if": "Bash(git commit*)",
+            "timeout": 300,
+            "statusMessage": "Running pre-commit code & security review + updating docs...",
+            "prompt": "A git commit is about to happen. Complete ALL steps below in order.\n\nREPO ROOT: /home/user/claude_financetracker_pk91\n\n--- STEP 1: Gather staged changes ---\nRun:\n  git -C /home/user/claude_financetracker_pk91 diff --staged --stat\n  git -C /home/user/claude_financetracker_pk91 diff --staged\n\n--- STEP 2: Extensive Code Review ---\nAnalyze every staged file for:\n- Logic errors, bugs, off-by-one errors, incorrect conditionals\n- Dead code, unreachable branches, infinite loops\n- N+1 queries, inefficient algorithms, missing pagination\n- Missing error handling at system/API/DB boundaries\n- Type mismatches (Python/TypeScript), nullable dereferences\n- Incorrect async/await usage, race conditions\n- Test coverage gaps for changed logic\n- Poor naming that obscures intent\nDocument each finding as: [SEVERITY: LOW/MED/HIGH] File:line — description\n\n--- STEP 3: Extensive Security Review ---\nCheck every staged file for:\n- Hardcoded secrets, API keys, tokens, passwords, connection strings\n- SQL injection (raw string interpolation into queries)\n- XSS (unescaped user input rendered in HTML/JSX)\n- Command injection (user data passed to shell commands)\n- Path traversal (user-controlled file paths)\n- IDOR (missing ownership checks on database queries)\n- Missing auth/authorization on endpoints\n- PII or sensitive data in logs, error responses, or comments\n- Broken crypto (weak algorithms, static IVs, predictable nonces)\n- CORS misconfiguration (wildcard origins with credentials)\n- Missing rate limiting on auth or sensitive endpoints\n- Insecure direct use of eval, exec, or dynamic imports\nDocument each finding as: [SEVERITY: LOW/MED/HIGH/CRITICAL] File:line — description\n\n--- STEP 4: Update v2/progress_log.md ---\nRead /home/user/claude_financetracker_pk91/v2/progress_log.md\nAdd or extend today's entry (April 9, 2026) with:\n- Section header for the commit (use commit message from: git -C /home/user/claude_financetracker_pk91 log --oneline -1 2>/dev/null || echo 'pending')\n- Files changed and what each change accomplishes\n- Code review summary (list findings or 'No issues found')\n- Security review summary (list findings or 'No issues found')\n- Update the top-of-file 'Last Updated:' line to today's date if it exists\nMatch the existing style. Write the file back.\n\n--- STEP 5: Update v2/README.md ---\nRead /home/user/claude_financetracker_pk91/v2/README.md\nMake targeted updates only:\n- Tick [ ] → [x] for any Roadmap items completed by the staged changes\n- Add new files to the Directory Structure tree if staged changes introduce new files\n- Update the API Endpoints table if new routes are added\n- Do NOT rewrite or restructure anything else\nWrite the file back only if changes are needed.\n\n--- STEP 6: Stage the updated docs ---\nRun:\n  git -C /home/user/claude_financetracker_pk91 add v2/progress_log.md v2/README.md\n\nDo NOT run git commit or git push — only stage the files so they are included in the pending commit.\n\nIMPORTANT: If any CRITICAL security finding is found (hardcoded secret, SQL injection, XSS with user input, missing auth on a sensitive endpoint), output the text:\nBLOCK_COMMIT: <brief reason>\nso the developer is warned before proceeding."
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash",

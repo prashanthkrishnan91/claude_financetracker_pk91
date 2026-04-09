@@ -1,47 +1,72 @@
-"""Plaid service — sync holdings from Robinhood via Plaid Investments API.
+"""
+Plaid service — sync holdings from Robinhood via Plaid Investments API.
 
-Phase 2 will implement the full Plaid integration. This is the service
-skeleton that the sync router depends on.
+Design (carried from v1 with improvements):
+  - Call Plaid at most once per 24h (TTL cache in plaid_sync_log table)
+  - Force-pull option for same-day trades
+  - Upsert positions in Supabase (Plaid is authoritative for share quantities)
+  - Log every sync to plaid_sync_log for audit trail
+  - Graceful degradation: if Plaid fails, positions table still has last-known data
 """
 
 from __future__ import annotations
 
+import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
 
-from ..database import get_supabase_client
+logger = logging.getLogger(__name__)
+
+# Plaid ticker → standard ticker normalization
+_PLAID_TICKER_MAP: dict[str, str] = {
+    "BF.B": "BF-B", "BF.A": "BF-A",
+    "BRK.B": "BRK-B", "BRK.A": "BRK-A",
+}
+
+# Default 24-hour cache TTL
+_CACHE_TTL_HOURS = 24
+
+
+@dataclass
+class SyncResult:
+    """Result of a Plaid sync operation."""
+    status: str  # success, cached, error
+    message: str
+    holdings_count: int = 0
+    cash_balance: float = 0.0
+    positions_updated: int = 0
+    positions_created: int = 0
+    synced_at: Optional[datetime] = None
+    duration_ms: int = 0
 
 
 @dataclass
 class SyncStatus:
-    """Plaid sync status summary."""
+    """Current Plaid sync status."""
     synced_at: Optional[datetime] = None
     holdings_count: int = 0
-    cash_balance: float = 0
+    cash_balance: float = 0.0
     status: str = "never_synced"
-    age_hours: float = 0
+    age_hours: float = 0.0
 
     @property
     def is_fresh(self) -> bool:
-        """True if synced within 24 hours."""
-        return self.age_hours < 24
+        return self.synced_at is not None and self.age_hours < _CACHE_TTL_HOURS
 
 
-class PlaidService:
-    """Plaid Investments API integration.
+class PlaidSyncService:
+    """Plaid Investments API integration for Robinhood."""
 
-    Calls Plaid only when cache is stale (>24h) or force=True.
-    Updates the positions table with authoritative share quantities.
-    """
-
-    def __init__(self, user_id: UUID):
+    def __init__(self, user_id: UUID, supabase_client, decrypt_fn=None):
         self.user_id = user_id
-        self.client = get_supabase_client()
+        self.client = supabase_client
+        self._decrypt = decrypt_fn
 
-    async def get_last_sync(self) -> Optional[SyncStatus]:
-        """Get the most recent Plaid sync entry."""
+    async def get_sync_status(self) -> SyncStatus:
+        """Get the current Plaid sync status."""
         result = (
             self.client.table("plaid_sync_log")
             .select("*")
@@ -52,10 +77,10 @@ class PlaidService:
         )
 
         if not result.data:
-            return None
+            return SyncStatus()
 
         row = result.data[0]
-        synced_at = datetime.fromisoformat(row["synced_at"])
+        synced_at = datetime.fromisoformat(row["synced_at"].replace("Z", "+00:00"))
         age = (datetime.now(timezone.utc) - synced_at).total_seconds() / 3600
 
         return SyncStatus(
@@ -66,35 +91,239 @@ class PlaidService:
             age_hours=age,
         )
 
-    async def get_sync_status(self) -> dict:
-        """Get formatted sync status for the frontend."""
-        last = await self.get_last_sync()
-        if not last:
-            return {
-                "status": "never_synced",
-                "message": "No Plaid sync recorded — configure API keys first",
-            }
-
-        return {
-            "status": "fresh" if last.is_fresh else "stale",
-            "last_synced_at": last.synced_at,
-            "age_hours": round(last.age_hours, 1),
-            "holdings_count": last.holdings_count,
-            "cash_balance": last.cash_balance,
-            "next_sync_in_hours": max(0, round(24 - last.age_hours, 1)),
-        }
-
-    async def sync_holdings(self) -> dict:
+    async def sync_holdings(self, force: bool = False) -> SyncResult:
         """Sync holdings from Plaid.
 
-        TODO (Phase 2): Implement full Plaid sync:
-        1. Decrypt user's Plaid credentials
-        2. Call Plaid /investments/holdings/get
-        3. Parse and normalize holdings
-        4. Upsert into positions table
-        5. Log to plaid_sync_log
+        Respects 24h TTL unless force=True.
         """
-        return {
-            "status": "pending",
-            "message": "Plaid sync not yet implemented — Phase 2",
+        start = time.time()
+
+        # Check cache unless forced
+        if not force:
+            status = await self.get_sync_status()
+            if status.is_fresh:
+                return SyncResult(
+                    status="cached",
+                    message=f"Synced {status.age_hours:.1f}h ago — use force=true to re-sync",
+                    holdings_count=status.holdings_count,
+                    cash_balance=status.cash_balance,
+                    synced_at=status.synced_at,
+                )
+
+        # Get user's Plaid credentials
+        user_row = (
+            self.client.table("users")
+            .select("encrypted_plaid_access_token, encrypted_plaid_client_id, encrypted_plaid_secret, plaid_env")
+            .eq("id", str(self.user_id))
+            .single()
+            .execute()
+        )
+
+        if not user_row.data:
+            return SyncResult(status="error", message="User not found")
+
+        user = user_row.data
+        if not user.get("encrypted_plaid_access_token"):
+            return SyncResult(status="error", message="Plaid credentials not configured")
+
+        # Decrypt credentials
+        try:
+            access_token = self._decrypt(user["encrypted_plaid_access_token"])
+            client_id = self._decrypt(user["encrypted_plaid_client_id"])
+            secret = self._decrypt(user["encrypted_plaid_secret"])
+            plaid_env = user.get("plaid_env", "production")
+        except Exception as e:
+            return SyncResult(status="error", message=f"Failed to decrypt credentials: {e}")
+
+        # Call Plaid API
+        try:
+            holdings, cash, account_ids, raw = await self._call_plaid(
+                access_token, client_id, secret, plaid_env
+            )
+        except Exception as e:
+            # Log the error
+            self._log_sync(status="error", error_message=str(e), duration_ms=int((time.time() - start) * 1000))
+            return SyncResult(status="error", message=f"Plaid API error: {e}")
+
+        # Upsert positions
+        created, updated = await self._upsert_positions(holdings)
+
+        duration_ms = int((time.time() - start) * 1000)
+
+        # Log successful sync
+        self._log_sync(
+            status="success",
+            account_ids=account_ids,
+            holdings_count=len(holdings),
+            cash_balance=cash,
+            duration_ms=duration_ms,
+            raw_response=raw,
+        )
+
+        return SyncResult(
+            status="success",
+            message=f"Synced {len(holdings)} holdings from Robinhood",
+            holdings_count=len(holdings),
+            cash_balance=cash,
+            positions_updated=updated,
+            positions_created=created,
+            synced_at=datetime.now(timezone.utc),
+            duration_ms=duration_ms,
+        )
+
+    async def _call_plaid(
+        self, access_token: str, client_id: str, secret: str, env: str
+    ) -> tuple[list[dict], float, list[str], dict]:
+        """Call Plaid /investments/holdings/get and return parsed data.
+
+        Returns: (holdings_list, cash_usd, account_ids, raw_response)
+        """
+        import plaid
+        from plaid.api import plaid_api
+        from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
+
+        # Configure Plaid client
+        host_map = {
+            "sandbox": plaid.Environment.Sandbox,
+            "development": plaid.Environment.Development,
+            "production": plaid.Environment.Production,
         }
+        configuration = plaid.Configuration(
+            host=host_map.get(env, plaid.Environment.Production),
+            api_key={"clientId": client_id, "secret": secret},
+        )
+
+        api_client = plaid.ApiClient(configuration)
+        client = plaid_api.PlaidApi(api_client)
+
+        # Call investments/holdings/get
+        request = InvestmentsHoldingsGetRequest(access_token=access_token)
+        response = client.investments_holdings_get(request)
+
+        # Build security_id → ticker map
+        security_map = {}
+        for sec in response.securities:
+            sid = sec.security_id
+            ticker = getattr(sec, "ticker_symbol", None) or ""
+            name = getattr(sec, "name", "") or ""
+            sec_type = getattr(sec, "type", "equity") or "equity"
+            # Normalize ticker
+            ticker = _PLAID_TICKER_MAP.get(ticker, ticker)
+            security_map[sid] = {
+                "ticker": ticker,
+                "name": name,
+                "type": sec_type,
+            }
+
+        # Parse holdings
+        holdings = []
+        for h in response.holdings:
+            sec_info = security_map.get(h.security_id, {})
+            ticker = sec_info.get("ticker", "")
+            if not ticker or ticker == "CUR:USD":
+                continue
+
+            holdings.append({
+                "ticker": ticker,
+                "name": sec_info.get("name", ticker),
+                "quantity": float(h.quantity),
+                "cost_basis": float(h.cost_basis) / float(h.quantity) if h.quantity else 0,
+                "institution_price": float(h.institution_price),
+                "security_type": sec_info.get("type", "equity"),
+            })
+
+        # Extract cash
+        cash = 0.0
+        for acct in response.accounts:
+            if hasattr(acct, "balances") and acct.balances:
+                cash += float(getattr(acct.balances, "available", 0) or 0)
+
+        account_ids = [str(acct.account_id) for acct in response.accounts]
+
+        # Raw response for audit
+        raw = {"holdings_count": len(holdings), "accounts": len(response.accounts)}
+
+        return holdings, cash, account_ids, raw
+
+    async def _upsert_positions(self, holdings: list[dict]) -> tuple[int, int]:
+        """Upsert holdings into positions table.
+
+        Plaid is authoritative for share quantities.
+        Cost basis is updated only if it differs.
+        Returns (created_count, updated_count).
+        """
+        # Get existing positions
+        existing = (
+            self.client.table("positions")
+            .select("ticker, shares, avg_cost")
+            .eq("user_id", str(self.user_id))
+            .execute()
+        ).data
+        existing_map = {r["ticker"]: r for r in existing}
+
+        created = 0
+        updated = 0
+
+        for h in holdings:
+            ticker = h["ticker"]
+            existing_pos = existing_map.get(ticker)
+
+            # Determine category based on security type
+            sec_type = h.get("security_type", "equity")
+            if sec_type == "cryptocurrency":
+                category = "Crypto"
+            elif sec_type == "etf":
+                category = "ETF"
+            else:
+                category = "Core"  # Will be refined by bootstrap data if available
+
+            if existing_pos:
+                # Update only if shares changed
+                if float(existing_pos["shares"]) != h["quantity"]:
+                    self.client.table("positions").update({
+                        "shares": h["quantity"],
+                        "avg_cost": h["cost_basis"],
+                        "source": "plaid",
+                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                    }).eq("user_id", str(self.user_id)).eq("ticker", ticker).execute()
+                    updated += 1
+            else:
+                # Create new position
+                self.client.table("positions").insert({
+                    "user_id": str(self.user_id),
+                    "ticker": ticker,
+                    "name": h["name"],
+                    "category": category,
+                    "shares": h["quantity"],
+                    "avg_cost": h["cost_basis"],
+                    "source": "plaid",
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                }).execute()
+                created += 1
+
+        return created, updated
+
+    def _log_sync(
+        self,
+        status: str,
+        account_ids: list[str] = None,
+        holdings_count: int = 0,
+        cash_balance: float = 0,
+        duration_ms: int = 0,
+        error_message: str = None,
+        raw_response: dict = None,
+    ):
+        """Write to plaid_sync_log table."""
+        try:
+            self.client.table("plaid_sync_log").insert({
+                "user_id": str(self.user_id),
+                "account_ids": account_ids or [],
+                "holdings_count": holdings_count,
+                "cash_balance": cash_balance,
+                "status": status,
+                "error_message": error_message,
+                "duration_ms": duration_ms,
+                "raw_response": raw_response,
+            }).execute()
+        except Exception as e:
+            logger.error("Failed to log sync: %s", e)

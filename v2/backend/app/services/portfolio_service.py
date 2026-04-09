@@ -1,9 +1,11 @@
-"""Portfolio service — summary computation, snapshots, rebalancing."""
+"""Portfolio service — summary computation, snapshots, rebalancing.
+
+Integrates with the v2 concurrent price engine for live portfolio values.
+"""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
 from typing import Optional
 from uuid import UUID
 
@@ -20,12 +22,16 @@ from ..models.portfolio import (
 class PortfolioService:
     """All portfolio-level business logic."""
 
-    def __init__(self, user_id: UUID):
+    def __init__(self, user_id: UUID, price_service=None):
         self.user_id = user_id
         self.client = get_supabase_client()
+        self._price_service = price_service
 
     async def get_summary(self) -> PortfolioSummary:
-        """Compute portfolio summary from positions + live prices."""
+        """Compute portfolio summary with live prices.
+
+        Uses the concurrent price engine for real-time data.
+        """
         # Fetch all positions
         positions = (
             self.client.table("positions")
@@ -42,32 +48,90 @@ class PortfolioService:
                 positions_count=0, prices_fresh=0, prices_stale=0,
             )
 
-        # TODO (Phase 2): Fetch live prices and compute real values
-        total_cost = sum(float(p["shares"]) * float(p["avg_cost"]) for p in positions)
+        # Fetch live prices if price service available
+        prices = {}
+        fresh_count = 0
+        stale_count = 0
+        sources_used = set()
+
+        if self._price_service:
+            tickers = [p["ticker"] for p in positions]
+            try:
+                price_results = await self._price_service.fetch_prices(tickers)
+                for ticker, pr in price_results.items():
+                    if pr.is_valid:
+                        prices[ticker] = pr.mid_price
+                        if not pr.is_stale:
+                            fresh_count += 1
+                            sources_used.add(pr.source.split("(")[0])
+                        else:
+                            stale_count += 1
+                    else:
+                        stale_count += 1
+            except Exception:
+                stale_count = len(positions)
+
+        # Compute portfolio values
+        total_equity = 0.0
+        total_cost = 0.0
+        stocks_value = 0.0
+        etfs_value = 0.0
+        crypto_value = 0.0
+
+        for p in positions:
+            shares = float(p["shares"])
+            avg_cost = float(p["avg_cost"])
+            cost = shares * avg_cost
+            total_cost += cost
+
+            price = prices.get(p["ticker"])
+            if price:
+                market_value = shares * price
+            else:
+                market_value = cost  # Use cost as fallback
+
+            total_equity += market_value
+
+            cat = p["category"]
+            if cat in ("Core", "Other", "IPO", "SELL"):
+                stocks_value += market_value
+            elif cat == "ETF":
+                etfs_value += market_value
+            elif cat == "Crypto":
+                crypto_value += market_value
+
+        total_pnl = total_equity - total_cost
+        total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0
+
+        # Cash balance from last Plaid sync
+        cash = 0.0
+        last_sync = (
+            self.client.table("plaid_sync_log")
+            .select("cash_balance")
+            .eq("user_id", str(self.user_id))
+            .eq("status", "success")
+            .order("synced_at", desc=True)
+            .limit(1)
+            .execute()
+        ).data
+        if last_sync:
+            cash = float(last_sync[0].get("cash_balance", 0))
 
         return PortfolioSummary(
-            total_equity=total_cost,  # Placeholder until price service is live
-            total_cost=total_cost,
-            total_pnl=0,
-            total_pnl_pct=0,
-            cash_balance=0,
-            day_change=0,
-            day_change_pct=0,
-            stocks_value=sum(
-                float(p["shares"]) * float(p["avg_cost"])
-                for p in positions if p["category"] in ("Core", "Other", "IPO")
-            ),
-            etfs_value=sum(
-                float(p["shares"]) * float(p["avg_cost"])
-                for p in positions if p["category"] == "ETF"
-            ),
-            crypto_value=sum(
-                float(p["shares"]) * float(p["avg_cost"])
-                for p in positions if p["category"] == "Crypto"
-            ),
+            total_equity=round(total_equity + cash, 2),
+            total_cost=round(total_cost, 2),
+            total_pnl=round(total_pnl, 2),
+            total_pnl_pct=round(total_pnl_pct, 4),
+            cash_balance=round(cash, 2),
+            day_change=0,      # TODO: compute from previous close
+            day_change_pct=0,  # TODO: compute from previous close
+            stocks_value=round(stocks_value, 2),
+            etfs_value=round(etfs_value, 2),
+            crypto_value=round(crypto_value, 2),
             positions_count=len(positions),
-            prices_fresh=0,
-            prices_stale=len(positions),
+            prices_fresh=fresh_count,
+            prices_stale=stale_count,
+            last_price_fetch=datetime.now(timezone.utc) if fresh_count > 0 else None,
         )
 
     async def list_snapshots(self, limit: int = 50) -> list[SnapshotResponse]:
@@ -86,7 +150,6 @@ class PortfolioService:
         """Create a point-in-time snapshot using current data."""
         summary = await self.get_summary()
 
-        # Fetch current positions for the snapshot
         positions = (
             self.client.table("positions")
             .select("*")
@@ -113,7 +176,6 @@ class PortfolioService:
         return result.data[0]
 
     async def list_targets(self) -> list[TargetAllocationResponse]:
-        """List all target allocations."""
         result = (
             self.client.table("target_allocations")
             .select("*")
@@ -124,7 +186,6 @@ class PortfolioService:
         return result.data
 
     async def set_targets(self, targets: list[TargetAllocationCreate]) -> list[TargetAllocationResponse]:
-        """Upsert target allocations."""
         results = []
         for t in targets:
             data = {
@@ -151,7 +212,6 @@ class PortfolioService:
         if total <= 0:
             return []
 
-        # Fetch current positions
         positions = (
             self.client.table("positions")
             .select("*")
@@ -159,7 +219,6 @@ class PortfolioService:
             .execute()
         ).data
 
-        # Build current allocation map
         position_map = {p["ticker"]: float(p["shares"]) * float(p["avg_cost"]) for p in positions}
 
         results = []

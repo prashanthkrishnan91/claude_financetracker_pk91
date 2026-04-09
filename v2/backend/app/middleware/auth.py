@@ -1,4 +1,11 @@
-"""JWT authentication middleware — validates Supabase Auth tokens."""
+"""Authentication middleware — single-user/family model.
+
+Simplified from multi-user RLS model:
+  - Supabase Auth still handles login (email/password)
+  - JWT validation ensures the request is authenticated
+  - No RLS — both owner and family member see all data
+  - user_id is still tracked for data ownership clarity
+"""
 
 from __future__ import annotations
 
@@ -19,10 +26,10 @@ class AuthenticatedUser:
 
     __slots__ = ("id", "email", "role")
 
-    def __init__(self, user_id: UUID, email: str, role: str = "authenticated"):
+    def __init__(self, user_id: UUID, email: str, role: str = "owner"):
         self.id = user_id
         self.email = email
-        self.role = role
+        self.role = role  # "owner" or "family"
 
 
 async def get_current_user(
@@ -31,13 +38,8 @@ async def get_current_user(
 ) -> AuthenticatedUser:
     """Validate the Supabase JWT and return the authenticated user.
 
-    The JWT is issued by Supabase Auth on login/signup and contains:
-    - sub: user UUID
-    - email: user email
-    - role: "authenticated"
-    - exp: expiration timestamp
-
-    Raises 401 if token is missing, expired, or invalid.
+    Single-user model: any valid JWT gets full access.
+    No per-row authorization checks needed.
     """
     if credentials is None:
         raise HTTPException(
@@ -70,7 +72,6 @@ async def get_current_user(
 
     user_id = payload.get("sub")
     email = payload.get("email", "")
-    role = payload.get("role", "authenticated")
 
     if not user_id:
         raise HTTPException(
@@ -78,4 +79,4 @@ async def get_current_user(
             detail="Token missing user ID",
         )
 
-    return AuthenticatedUser(user_id=UUID(user_id), email=email, role=role)
+    return AuthenticatedUser(user_id=UUID(user_id), email=email, role="owner")

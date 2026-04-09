@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { cn, formatCurrency, formatPercent } from "@/lib/utils";
+import { cn, formatCurrency } from "@/lib/utils";
 import {
   usePortfolioSummary,
   useCashBalance,
@@ -25,7 +25,6 @@ const DEPOSIT_FORMULA = [
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
-  const aiRebalance = useAiRebalance();
 
   const {
     data: rebalance,

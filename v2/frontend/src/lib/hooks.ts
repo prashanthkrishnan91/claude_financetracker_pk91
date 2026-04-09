@@ -148,3 +148,109 @@ export function useImportCsv() {
     },
   });
 }
+
+// ── DRIP ─────────────────────────────────────────────────────────────────────
+
+export function useDripSummary() {
+  return useQuery({
+    queryKey: ["drip", "summary"],
+    queryFn: api.drip.getSummary,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useDripPositions() {
+  return useQuery({
+    queryKey: ["drip", "positions"],
+    queryFn: api.drip.getPositions,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useDripHistory() {
+  return useQuery({
+    queryKey: ["drip", "history"],
+    queryFn: api.drip.getHistory,
+    staleTime: 10 * 60_000,
+  });
+}
+
+// ── Cash Override ─────────────────────────────────────────────────────────────
+
+export function useCashBalance() {
+  return useQuery({
+    queryKey: ["portfolio", "cash"],
+    queryFn: api.portfolio.getCash,
+    staleTime: 60_000,
+  });
+}
+
+export function useSetCash() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number | null) => api.portfolio.setCash(amount),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
+// ── Recommendations Resolve & Decision Log ────────────────────────────────────
+
+export function useResolveRecommendation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      recId,
+      resolution,
+      notes,
+    }: {
+      recId: string;
+      resolution: string;
+      notes?: string;
+    }) => api.recommendations.resolve(recId, resolution, notes),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["recommendations"] }),
+  });
+}
+
+export function useDecisionLog(limit = 50) {
+  return useQuery({
+    queryKey: ["recommendations", "decisions", limit],
+    queryFn: () => api.recommendations.getDecisions(limit),
+  });
+}
+
+// ── Auth / Profile ────────────────────────────────────────────────────────────
+
+export function useUserProfile() {
+  return useQuery({
+    queryKey: ["auth", "me"],
+    queryFn: api.auth.me,
+    staleTime: 5 * 60_000,
+  });
+}
+
+export function useUpdateProfile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.auth.updateProfile,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] }),
+  });
+}
+
+export function useUpdateApiKeys() {
+  return useMutation({
+    mutationFn: api.auth.updateApiKeys,
+  });
+}
+
+// ── AI ────────────────────────────────────────────────────────────────────────
+
+export function useAiRebalance() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.ai.rebalance,
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] }),
+  });
+}

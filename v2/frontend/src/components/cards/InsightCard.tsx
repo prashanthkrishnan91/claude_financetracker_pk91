@@ -1,7 +1,7 @@
 "use client";
 
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
-import type { InsightCard as InsightCardType } from "@/lib/api";
+import type { InsightCardData } from "@/lib/api";
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY:    { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
@@ -11,7 +11,7 @@ const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }
   REVIEW: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
 };
 
-export function InsightCard({ card }: { card: InsightCardType }) {
+export function InsightCard({ card }: { card: InsightCardData }) {
   const styles = ACTION_STYLES[card.action] || ACTION_STYLES.HOLD;
 
   return (

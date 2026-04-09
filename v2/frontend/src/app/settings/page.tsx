@@ -319,7 +319,7 @@ function ApiKeysSection() {
     field: keyof ApiKeysUpdate;
     label: string;
     hasFlag?: boolean;
-    flagKey?: string;
+    flagKey?: keyof any;
   }> = [
     { field: "plaid_client_id", label: "Plaid Client ID", hasFlag: true, flagKey: "has_plaid" },
     { field: "plaid_secret", label: "Plaid Secret", hasFlag: true, flagKey: "has_plaid" },
@@ -339,7 +339,7 @@ function ApiKeysSection() {
 
         <div className="space-y-3">
           {keyFields.map(({ field, label, hasFlag, flagKey }) => {
-            const isConfigured = hasFlag && flagKey && profile?.[flagKey] === true;
+            const isConfigured = hasFlag && flagKey && (profile as any)?.[flagKey] === true;
             return (
               <div key={field} className="space-y-1.5">
                 <div className="flex items-center gap-2">

@@ -19,17 +19,25 @@ export default function DashboardPage() {
   const { data: summary } = usePortfolioSummary();
   const createSnapshot = useCreateSnapshot();
 
-  // Auto-create a snapshot on first dashboard load when portfolio has positions
-  // but no snapshot history exists yet. This seeds the chart with an initial data point.
+  // Auto-create one snapshot per day when the dashboard loads and the portfolio
+  // has positions. Checks whether the most recent snapshot was taken today to
+  // avoid creating duplicates on page refreshes.
   useEffect(() => {
     if (
-      snapshots !== undefined &&
-      snapshots.length === 0 &&
-      summary &&
-      summary.positions_count > 0 &&
-      !createSnapshot.isPending &&
-      !createSnapshot.isSuccess
+      snapshots === undefined ||
+      summary === undefined ||
+      summary.positions_count === 0 ||
+      createSnapshot.isPending ||
+      createSnapshot.isSuccess
     ) {
+      return;
+    }
+    const today = new Date().toDateString();
+    const latestSnapshotDate =
+      snapshots.length > 0
+        ? new Date(snapshots[0].snapshot_at).toDateString()
+        : null;
+    if (latestSnapshotDate !== today) {
       createSnapshot.mutate();
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps

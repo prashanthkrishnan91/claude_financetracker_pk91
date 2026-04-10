@@ -48,7 +48,7 @@ export function PortfolioChart() {
       pnl: s.total_pnl,
     }));
 
-  const hasData = filtered.length > 1;
+  const hasData = filtered.length >= 1;
 
   return (
     <div className="space-y-4">
@@ -78,10 +78,10 @@ export function PortfolioChart() {
           <div className="h-full flex items-center justify-center rounded-md bg-surface/50">
             <div className="text-center space-y-1">
               <p className="text-text-muted text-sm">
-                Not enough snapshot data yet
+                No snapshot data yet
               </p>
               <p className="text-text-muted text-xs">
-                Snapshots are created when you refresh your portfolio
+                Your first snapshot is created automatically — reload to see it
               </p>
             </div>
           </div>

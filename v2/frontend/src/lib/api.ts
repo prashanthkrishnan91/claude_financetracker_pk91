@@ -5,7 +5,16 @@
 
 import { supabase } from "./supabase";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// Enforce HTTPS when the page is served over HTTPS.
+// Guards against NEXT_PUBLIC_API_URL being set to http:// in production,
+// which causes a browser mixed-content block.
+const _rawBase = process.env.NEXT_PUBLIC_API_URL || "";
+const API_BASE =
+  typeof window !== "undefined" &&
+  window.location.protocol === "https:" &&
+  _rawBase.startsWith("http://")
+    ? _rawBase.replace("http://", "https://")
+    : _rawBase;
 
 async function getAuthHeaders(): Promise<HeadersInit> {
   const {

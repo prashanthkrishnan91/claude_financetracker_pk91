@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS public.users (
     encrypted_polygon_api_key       TEXT,
     encrypted_alpaca_api_key        TEXT,
     encrypted_alpaca_secret_key     TEXT,
+    encrypted_anthropic_api_key     TEXT,
 
     -- Deposit settings
     deposit_amount      NUMERIC(12,2) DEFAULT 900.00,

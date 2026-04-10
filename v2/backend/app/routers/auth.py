@@ -148,5 +148,9 @@ async def update_api_keys(
     if not update_data:
         raise HTTPException(status_code=400, detail="No keys to update")
 
-    client.table("users").update(update_data).eq("id", str(user.id)).execute()
+    try:
+        client.table("users").update(update_data).eq("id", str(user.id)).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save keys: {e}")
+
     return {"status": "ok", "keys_updated": list(update_data.keys())}

@@ -233,12 +233,20 @@ class PlaidSyncService:
             if not ticker or ticker == "CUR:USD":
                 continue
 
+            quantity = float(h.quantity) if h.quantity is not None else 0.0
+            cost_basis_per_share = (
+                float(h.cost_basis) / quantity
+                if (quantity > 0 and h.cost_basis is not None)
+                else 0.0
+            )
+            institution_price = float(h.institution_price) if h.institution_price is not None else 0.0
+
             holdings.append({
                 "ticker": ticker,
                 "name": sec_info.get("name", ticker),
-                "quantity": float(h.quantity),
-                "cost_basis": float(h.cost_basis) / float(h.quantity) if h.quantity else 0,
-                "institution_price": float(h.institution_price),
+                "quantity": quantity,
+                "cost_basis": cost_basis_per_share,
+                "institution_price": institution_price,
                 "security_type": sec_info.get("type", "equity"),
             })
 

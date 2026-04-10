@@ -16,7 +16,7 @@ import {
 import { Spinner } from "@/components/ui/Spinner";
 import { cn, formatCurrency } from "@/lib/utils";
 import Link from "next/link";
-import type { ApiKeysUpdate } from "@/lib/api";
+import type { ApiKeysUpdate, UserProfile } from "@/lib/api";
 
 export default function SettingsPage() {
   const { user, loading, signOut } = useAuth();
@@ -315,19 +315,34 @@ function ApiKeysSection() {
     });
   }
 
-  const keyFields: Array<{
+  type KeyFieldSpec = {
     field: keyof ApiKeysUpdate;
     label: string;
     hasFlag?: boolean;
-    flagKey?: keyof any;
-  }> = [
-    { field: "plaid_client_id", label: "Plaid Client ID", hasFlag: true, flagKey: "has_plaid" },
-    { field: "plaid_secret", label: "Plaid Secret", hasFlag: true, flagKey: "has_plaid" },
+    flagKey?: keyof UserProfile;
+    isSelect?: boolean;
+    selectOptions?: { value: string; label: string }[];
+  };
+
+  const keyFields: KeyFieldSpec[] = [
+    { field: "plaid_access_token", label: "Plaid Access Token", hasFlag: true, flagKey: "has_plaid" },
+    { field: "plaid_client_id", label: "Plaid Client ID" },
+    { field: "plaid_secret", label: "Plaid Secret" },
+    {
+      field: "plaid_env",
+      label: "Plaid Environment",
+      isSelect: true,
+      selectOptions: [
+        { value: "sandbox", label: "Sandbox" },
+        { value: "development", label: "Development" },
+        { value: "production", label: "Production" },
+      ],
+    },
     { field: "finnhub_api_key", label: "Finnhub API Key", hasFlag: true, flagKey: "has_finnhub" },
     { field: "polygon_api_key", label: "Polygon API Key", hasFlag: true, flagKey: "has_polygon" },
     { field: "alpaca_api_key", label: "Alpaca API Key", hasFlag: true, flagKey: "has_alpaca" },
-    { field: "alpaca_secret_key", label: "Alpaca Secret Key", hasFlag: true, flagKey: "has_alpaca" },
-    { field: "anthropic_api_key", label: "Anthropic API Key" },
+    { field: "alpaca_secret_key", label: "Alpaca Secret Key" },
+    { field: "anthropic_api_key", label: "Anthropic API Key", hasFlag: true, flagKey: "has_anthropic" },
   ];
 
   return (
@@ -338,8 +353,8 @@ function ApiKeysSection() {
         </p>
 
         <div className="space-y-3">
-          {keyFields.map(({ field, label, hasFlag, flagKey }) => {
-            const isConfigured = hasFlag && flagKey && (profile as any)?.[flagKey] === true;
+          {keyFields.map(({ field, label, hasFlag, flagKey, isSelect, selectOptions }) => {
+            const isConfigured = hasFlag && flagKey && profile?.[flagKey] === true;
             return (
               <div key={field} className="space-y-1.5">
                 <div className="flex items-center gap-2">
@@ -350,13 +365,26 @@ function ApiKeysSection() {
                     </span>
                   )}
                 </div>
-                <input
-                  type="password"
-                  value={keys[field] ?? ""}
-                  onChange={(e) => setKey(field, e.target.value)}
-                  placeholder={isConfigured ? "••••••••••••" : "Enter key..."}
-                  className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary text-sm font-mono focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
-                />
+                {isSelect ? (
+                  <select
+                    value={keys[field] ?? ""}
+                    onChange={(e) => setKey(field, e.target.value)}
+                    className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    <option value="">Select environment...</option>
+                    {selectOptions?.map((o) => (
+                      <option key={o.value} value={o.value}>{o.label}</option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="password"
+                    value={keys[field] ?? ""}
+                    onChange={(e) => setKey(field, e.target.value)}
+                    placeholder={isConfigured ? "••••••••••••" : "Enter key..."}
+                    className="w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary text-sm font-mono focus:outline-none focus:ring-1 focus:ring-accent placeholder:text-text-muted"
+                  />
+                )}
               </div>
             );
           })}

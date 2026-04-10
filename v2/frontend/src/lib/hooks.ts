@@ -149,6 +149,17 @@ export function useImportCsv() {
   });
 }
 
+export function useImportPdf() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.sync.importPdf(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
 // ── DRIP ─────────────────────────────────────────────────────────────────────
 
 export function useDripSummary() {

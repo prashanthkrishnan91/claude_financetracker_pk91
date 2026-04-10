@@ -216,16 +216,15 @@ function HistoryRow({ entry }: { entry: DripHistoryEntry }) {
   );
 }
 
-function formatDate(dateStr: string): string {
-  try {
-    return new Date(dateStr).toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "2-digit",
-    });
-  } catch {
-    return dateStr;
-  }
+function formatDate(dateStr: string | null | undefined): string {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return dateStr;
+  return d.toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "2-digit",
+  });
 }
 
 function RefreshIcon({ className }: { className?: string }) {

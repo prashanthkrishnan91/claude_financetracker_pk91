@@ -85,6 +85,7 @@ async def get_profile(user: AuthenticatedUser = Depends(get_current_user)):
     data["has_finnhub"] = bool(data.get("encrypted_finnhub_api_key"))
     data["has_polygon"] = bool(data.get("encrypted_polygon_api_key"))
     data["has_alpaca"] = bool(data.get("encrypted_alpaca_api_key"))
+    data["has_anthropic"] = bool(data.get("encrypted_anthropic_api_key"))
 
     return data
 
@@ -132,6 +133,7 @@ async def update_api_keys(
         "polygon_api_key": "encrypted_polygon_api_key",
         "alpaca_api_key": "encrypted_alpaca_api_key",
         "alpaca_secret_key": "encrypted_alpaca_secret_key",
+        "anthropic_api_key": "encrypted_anthropic_api_key",
     }
 
     for input_field, db_field in field_map.items():

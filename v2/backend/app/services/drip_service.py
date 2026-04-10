@@ -157,8 +157,8 @@ class DripService:
                     drip_gain=round(drip_gain, 4),
                     annual_income=round(annual_income, 2),
                     yield_pct=yld,
-                    ex_date="TBD",
-                    pay_date="TBD",
+                    ex_date=None,
+                    pay_date=None,
                     category=p.get("category", ""),
                 )
             )

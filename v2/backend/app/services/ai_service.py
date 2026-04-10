@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -12,6 +13,53 @@ from ..config import get_settings
 from ..database import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract a JSON object from AI response text."""
+    # Strategy 1: Full text is valid JSON
+    try:
+        return json.loads(text.strip())
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2: ```json ... ``` code block
+    m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 3: ``` ... ``` code block (language-agnostic)
+    m = re.search(r"```\s*([\s\S]+?)\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 4: Find outermost { ... } JSON object
+    m = re.search(r"\{[\s\S]+\}", text)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
+
+
+def _clean_ai_text(text: str) -> str:
+    """Strip JSON code blocks and bare JSON objects from AI text, leaving prose."""
+    # Remove ```json ... ``` blocks
+    text = re.sub(r"```json\s*[\s\S]*?```", "", text)
+    # Remove ``` ... ``` blocks
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove standalone JSON objects { ... }
+    text = re.sub(r"\{[\s\S]*?\}", "", text)
+    return text.strip()
+
 
 _FALLBACK_RESPONSE = {
     "allocation_table": [],
@@ -164,25 +212,27 @@ class AiService:
 
             response_text = message.content[0].text if message.content else ""
 
-            # 7. Parse response — find the JSON block
+            # 7. Parse response — try multiple JSON extraction strategies
             allocation_table: list[dict] = []
             narrative: str = ""
 
-            # Try to extract JSON (may be wrapped in markdown code blocks)
-            json_str = response_text.strip()
-            if "```json" in json_str:
-                json_str = json_str.split("```json")[1].split("```")[0].strip()
-            elif "```" in json_str:
-                json_str = json_str.split("```")[1].split("```")[0].strip()
-
-            parsed = json.loads(json_str)
-            allocation_table = parsed.get("allocations", [])
-            narrative = parsed.get("narrative", response_text)
+            parsed = _extract_json(response_text)
+            if parsed:
+                allocation_table = parsed.get("allocations", [])
+                raw_narrative = parsed.get("narrative", "")
+                # narrative may be a list of strings or a single string
+                if isinstance(raw_narrative, list):
+                    narrative = "\n".join(str(item) for item in raw_narrative)
+                else:
+                    narrative = str(raw_narrative)
+            else:
+                # JSON extraction failed — use cleaned text as narrative
+                allocation_table = []
+                narrative = _clean_ai_text(response_text)
 
         except json.JSONDecodeError:
-            # Response was not valid JSON — use raw text as narrative
             allocation_table = []
-            narrative = response_text
+            narrative = _clean_ai_text(response_text)
         except Exception as exc:
             logger.error("Anthropic API call failed: %s", exc)
             return {

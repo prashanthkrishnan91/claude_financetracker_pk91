@@ -19,6 +19,18 @@ from ..services.recommendation_engine import RecommendationService
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
 
 
+def _make_price_service():
+    from ..services.price_engine import PriceService
+    from ..config import get_settings
+    settings = get_settings()
+    return PriceService(
+        finnhub_key=settings.finnhub_api_key or "",
+        alpaca_key=settings.alpaca_api_key or "",
+        alpaca_secret=settings.alpaca_secret_key or "",
+        polygon_key=settings.polygon_api_key or "",
+    )
+
+
 @router.get("/", response_model=list[InsightCard])
 async def list_active_recommendations(
     action: str | None = Query(default=None, description="Filter: BUY|SELL|TRIM|HOLD|REVIEW"),
@@ -29,7 +41,7 @@ async def list_active_recommendations(
     This is the primary recommendations endpoint — combines
     recommendation data with current prices and position context.
     """
-    service = RecommendationService(user_id=user.id)
+    service = RecommendationService(user_id=user.id, price_service=_make_price_service())
     cards = await service.get_insight_cards()
 
     if action:
@@ -46,7 +58,7 @@ async def refresh_recommendations(
 
     Deactivates stale recommendations and generates fresh ones.
     """
-    service = RecommendationService(user_id=user.id)
+    service = RecommendationService(user_id=user.id, price_service=_make_price_service())
     return await service.refresh()
 
 

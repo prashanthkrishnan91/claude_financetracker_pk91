@@ -123,6 +123,11 @@ export const api = {
       formData.append("file", file);
       return fetchApiForm<ImportResult>("/api/v1/sync/csv/import", formData);
     },
+    importPdf: (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return fetchApiForm<PdfImportResult>("/api/v1/sync/pdf/import", formData);
+    },
   },
 
   drip: {
@@ -322,6 +327,13 @@ export interface ImportResult {
   error_details: string[];
 }
 
+export interface PdfImportResult {
+  tickers_found: string[];
+  positions_updated: number;
+  positions_created: number;
+  errors: string[];
+}
+
 export interface TargetAllocation {
   id: string;
   ticker: string;
@@ -356,8 +368,8 @@ export interface DripPosition {
   drip_gain: number;
   annual_income: number;
   yield_pct: number;
-  ex_date: string;
-  pay_date: string;
+  ex_date: string | null;
+  pay_date: string | null;
   category: string;
 }
 
@@ -412,11 +424,14 @@ export interface UserProfile {
   has_finnhub: boolean;
   has_polygon: boolean;
   has_alpaca: boolean;
+  has_anthropic: boolean;
 }
 
 export interface ApiKeysUpdate {
+  plaid_access_token?: string;
   plaid_client_id?: string;
   plaid_secret?: string;
+  plaid_env?: string;
   finnhub_api_key?: string;
   polygon_api_key?: string;
   alpaca_api_key?: string;

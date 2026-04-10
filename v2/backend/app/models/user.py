@@ -60,6 +60,7 @@ class UserResponse(UserBase):
     has_finnhub: bool = False
     has_polygon: bool = False
     has_alpaca: bool = False
+    has_anthropic: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -76,3 +77,4 @@ class UserApiKeysUpdate(BaseModel):
     polygon_api_key: Optional[str] = None
     alpaca_api_key: Optional[str] = None
     alpaca_secret_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None

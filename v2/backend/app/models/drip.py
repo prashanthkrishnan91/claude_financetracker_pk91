@@ -25,8 +25,8 @@ class DripPosition(BaseModel):
     drip_gain: float
     annual_income: float
     yield_pct: float
-    ex_date: str
-    pay_date: str
+    ex_date: Optional[str] = None
+    pay_date: Optional[str] = None
     category: str
 
 

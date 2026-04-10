@@ -1,14 +1,39 @@
 "use client";
 
+import { useEffect } from "react";
 import { PortfolioSummaryCard } from "@/components/holdings/PortfolioSummaryCard";
 import { HoldingsList } from "@/components/holdings/HoldingsList";
 import { PortfolioChart } from "@/components/charts/PortfolioChart";
 import { useAuth } from "@/lib/auth";
-import { usePlaidStatus } from "@/lib/hooks";
+import {
+  usePlaidStatus,
+  useSnapshots,
+  useCreateSnapshot,
+  usePortfolioSummary,
+} from "@/lib/hooks";
 
 export default function DashboardPage() {
   const { signOut } = useAuth();
   const { data: plaidStatus } = usePlaidStatus();
+  const { data: snapshots } = useSnapshots(5);
+  const { data: summary } = usePortfolioSummary();
+  const createSnapshot = useCreateSnapshot();
+
+  // Auto-create a snapshot on first dashboard load when portfolio has positions
+  // but no snapshot history exists yet. This seeds the chart with an initial data point.
+  useEffect(() => {
+    if (
+      snapshots !== undefined &&
+      snapshots.length === 0 &&
+      summary &&
+      summary.positions_count > 0 &&
+      !createSnapshot.isPending &&
+      !createSnapshot.isSuccess
+    ) {
+      createSnapshot.mutate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshots, summary]);
 
   return (
     <>

@@ -9,6 +9,64 @@ from ..database import get_supabase_client
 from ..models.drip import DripHistoryEntry, DripPosition, DripSummary
 from .recommendation_engine import DRIP_YIELD
 
+# Simple in-memory cache: ticker → (ex_date_iso, pay_date_iso)
+_dividend_date_cache: dict[str, tuple[Optional[str], Optional[str]]] = {}
+
+
+def _get_dividend_dates(ticker: str) -> tuple[Optional[str], Optional[str]]:
+    """Fetch (ex_date, pay_date) ISO strings for a ticker from yfinance.
+
+    Returns (None, None) on any failure. Results are cached in-process.
+    """
+    if ticker in _dividend_date_cache:
+        return _dividend_date_cache[ticker]
+
+    ex_date: Optional[str] = None
+    pay_date: Optional[str] = None
+
+    try:
+        import yfinance as yf  # lazy import — optional dependency
+
+        cal = yf.Ticker(ticker).calendar
+
+        # yfinance may return a dict or a DataFrame depending on version
+        if isinstance(cal, dict):
+            ex_raw = cal.get("Ex-Dividend Date") or cal.get("exDividendDate")
+            pay_raw = cal.get("Dividend Date") or cal.get("dividendDate")
+        elif cal is not None and hasattr(cal, "to_dict"):
+            # DataFrame (legacy yfinance ≤ 0.1.x) — transpose to get row dict
+            try:
+                d = cal.T.iloc[0].to_dict()
+                ex_raw = d.get("Ex-Dividend Date")
+                pay_raw = d.get("Dividend Date")
+            except Exception:
+                ex_raw = pay_raw = None
+        else:
+            ex_raw = pay_raw = None
+
+        def _to_iso(raw) -> Optional[str]:  # type: ignore[type-arg]
+            if raw is None:
+                return None
+            # pandas Timestamp / datetime.date / datetime.datetime
+            if hasattr(raw, "date"):
+                return str(raw.date())
+            if hasattr(raw, "strftime"):
+                return raw.strftime("%Y-%m-%d")
+            s = str(raw).strip()
+            if s in ("", "nan", "NaT", "None", "NaN"):
+                return None
+            # Already ISO or close enough — take first 10 chars
+            return s[:10] if len(s) >= 10 else None
+
+        ex_date = _to_iso(ex_raw)
+        pay_date = _to_iso(pay_raw)
+    except Exception:
+        pass
+
+    result: tuple[Optional[str], Optional[str]] = (ex_date, pay_date)
+    _dividend_date_cache[ticker] = result
+    return result
+
 # Ticker display names (best-effort; defaults to ticker if unknown)
 _TICKER_NAMES: dict[str, str] = {
     "VYM": "Vanguard High Dividend Yield ETF",
@@ -146,6 +204,8 @@ class DripService:
             drip_gain = drip_value - drip_cost
             annual_income = shares * price * yld / 100
 
+            ex_date, pay_date = _get_dividend_dates(ticker)
+
             result_list.append(
                 DripPosition(
                     ticker=ticker,
@@ -157,8 +217,8 @@ class DripService:
                     drip_gain=round(drip_gain, 4),
                     annual_income=round(annual_income, 2),
                     yield_pct=yld,
-                    ex_date=None,
-                    pay_date=None,
+                    ex_date=ex_date,
+                    pay_date=pay_date,
                     category=p.get("category", ""),
                 )
             )

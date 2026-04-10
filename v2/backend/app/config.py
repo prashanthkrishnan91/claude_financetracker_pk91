@@ -34,10 +34,14 @@ class Settings(BaseSettings):
     encryption_key: str
 
     # ── CORS ──────────────────────────────────────────────────────────────────
+    # Comma-separated JSON array of allowed origins.
+    # Production: set CORS_ORIGINS=["https://your-app.vercel.app"]
     cors_origins: list[str] = [
         "http://localhost:3000",     # Next.js dev
         "http://localhost:8000",     # FastAPI docs
     ]
+    # Set CORS_ALLOW_ALL=true to allow * (useful in development; disables credentials)
+    cors_allow_all: bool = False
 
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_per_minute: int = 60

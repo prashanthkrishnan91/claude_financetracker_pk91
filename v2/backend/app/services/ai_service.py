@@ -195,7 +195,7 @@ class AiService:
         #    the server-level ANTHROPIC_API_KEY env var.
         anthropic_api_key = settings.anthropic_api_key
         try:
-            from ..services.crypto_service import decrypt_value
+            from .crypto_service import decrypt_value
             user_row = (
                 self.client.table("users")
                 .select("encrypted_anthropic_api_key")

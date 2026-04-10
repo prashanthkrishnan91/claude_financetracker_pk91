@@ -57,6 +57,8 @@ class UserResponse(UserBase):
     """User data returned by API (no secrets)."""
     id: UUID
     has_plaid: bool = False
+    has_plaid_client: bool = False
+    has_plaid_secret: bool = False
     has_finnhub: bool = False
     has_polygon: bool = False
     has_alpaca: bool = False

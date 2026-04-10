@@ -167,28 +167,58 @@ class AiService:
             f"Total Portfolio Value: ${total_value:,.2f}",
             f"Category Breakdown: {json.dumps(category_summary)}",
             "",
-            "Positions:",
+            "Positions (ticker | category | shares @ avg_cost | current_price | market_value | P&L% | portfolio_weight% | LT_eligible | target_price):",
         ]
         for pv in position_values:
             context_lines.append(
                 f"  {pv['ticker']} ({pv['name']}) | {pv['category']} | "
                 f"{pv['shares']} shares @ ${pv['avg_cost']} avg | "
                 f"current ${pv['current_price']} | value ${pv['market_value']} | "
-                f"P&L {pv['pnl_pct']}% | {pv['current_pct']}% of portfolio | "
+                f"P&L {pv['pnl_pct']:+.1f}% | {pv['current_pct']:.1f}% of portfolio | "
                 f"LT eligible: {pv['lt_eligible']} (since {pv['lt_date']}) | "
-                f"target price: ${pv['target_price']}"
+                f"target: ${pv['target_price']}"
             )
 
         context = "\n".join(context_lines)
 
-        prompt = (
-            f"You are a portfolio analyst. Here is the portfolio:\n{context}\n\n"
-            "Task 1: Return a JSON array called \"allocations\" with objects: "
-            "{ticker, name, current_pct, suggested_pct, change_pct, rationale}. "
-            "Keep only positions that need meaningful changes (suggested_pct != current_pct by >1%).\n\n"
-            "Task 2: Provide a \"narrative\" key with a 3-5 bullet point analysis (max 200 words) "
-            "covering: diversification, top risks, opportunities, and one specific action recommendation.\n\n"
-            "Return valid JSON with keys \"allocations\" and \"narrative\"."
+        system_prompt = (
+            "You are a senior portfolio manager at a top-tier Wall Street investment firm. "
+            "You have 20+ years of experience and a CFA charter. You analyze portfolios with "
+            "institutional rigor: concentration risk, sector correlation, tax efficiency "
+            "(LT vs ST capital gains treatment), rebalancing costs, and macro positioning. "
+            "Your recommendations are specific, actionable, and grounded in portfolio theory. "
+            "You cite exact tickers, dollar amounts, and percentages. "
+            "You never give generic advice — every insight references the actual holdings."
+        )
+
+        user_prompt = (
+            f"Analyze this client portfolio and produce a full rebalancing recommendation.\n\n"
+            f"{context}\n\n"
+            "Return ONLY a valid JSON object — no markdown fences, no text before or after the JSON:\n"
+            "{\n"
+            '  "allocations": [\n'
+            "    {\n"
+            '      "ticker": "AAPL",\n'
+            '      "name": "Apple Inc.",\n'
+            '      "current_pct": 8.2,\n'
+            '      "suggested_pct": 10.5,\n'
+            '      "change_pct": 2.3,\n'
+            '      "rationale": "Specific single-sentence reason citing price, P&L, and thesis"\n'
+            "    }\n"
+            "  ],\n"
+            '  "narrative": "Line 1\\nLine 2\\nLine 3\\nLine 4\\nLine 5\\nLine 6"\n'
+            "}\n\n"
+            "Requirements:\n"
+            "- allocations: include only positions where |suggested_pct - current_pct| > 1%. "
+            "Rationale must be specific to this position (mention P&L%, LT status if relevant, sector context).\n"
+            "- narrative: exactly 6 lines separated by \\n (no bullet symbols, no numbers). "
+            "Cover: (1) overall portfolio health and concentration risk, "
+            "(2) biggest overweight to trim with specific reason, "
+            "(3) biggest underweight or missing exposure to add, "
+            "(4) tax efficiency opportunities (flag any LT-eligible positions near sell targets), "
+            "(5) sector/category balance assessment, "
+            "(6) single highest-priority action to take this week with exact ticker and size.\n"
+            "- Be direct and specific. Mention actual tickers, percentages, and dollar values."
         )
 
         # 5. Resolve Anthropic API key — user's stored key takes precedence over
@@ -222,11 +252,13 @@ class AiService:
             anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
             message = anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4096,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
             )
 
             response_text = message.content[0].text if message.content else ""
+            logger.info("Anthropic response (%d chars): %.200s", len(response_text), response_text)
 
             # 7. Parse response — try multiple JSON extraction strategies
             allocation_table: list[dict] = []

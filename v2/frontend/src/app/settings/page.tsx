@@ -326,8 +326,8 @@ function ApiKeysSection() {
 
   const keyFields: KeyFieldSpec[] = [
     { field: "plaid_access_token", label: "Plaid Access Token", hasFlag: true, flagKey: "has_plaid" },
-    { field: "plaid_client_id", label: "Plaid Client ID" },
-    { field: "plaid_secret", label: "Plaid Secret" },
+    { field: "plaid_client_id", label: "Plaid Client ID", hasFlag: true, flagKey: "has_plaid_client" },
+    { field: "plaid_secret", label: "Plaid Secret", hasFlag: true, flagKey: "has_plaid_secret" },
     {
       field: "plaid_env",
       label: "Plaid Environment",

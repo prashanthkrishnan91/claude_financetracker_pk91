@@ -54,7 +54,13 @@ class SyncStatus:
 
     @property
     def is_fresh(self) -> bool:
-        return self.synced_at is not None and self.age_hours < _CACHE_TTL_HOURS
+        # Only treat as fresh if the last sync was successful — error syncs
+        # must not block retries even within the 24h window.
+        return (
+            self.synced_at is not None
+            and self.age_hours < _CACHE_TTL_HOURS
+            and self.status == "success"
+        )
 
 
 class PlaidSyncService:
@@ -182,14 +188,18 @@ class PlaidSyncService:
         from plaid.api import plaid_api
         from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
 
-        # Configure Plaid client
+        # Configure Plaid client.
+        # NOTE: plaid-python v24+ dropped Environment.Development (Plaid deprecated it).
+        # "development" is mapped to Production for live-account access.
+        sandbox_host = plaid.Environment.Sandbox
+        production_host = plaid.Environment.Production
         host_map = {
-            "sandbox": plaid.Environment.Sandbox,
-            "development": plaid.Environment.Development,
-            "production": plaid.Environment.Production,
+            "sandbox": sandbox_host,
+            "development": production_host,  # Development env retired by Plaid
+            "production": production_host,
         }
         configuration = plaid.Configuration(
-            host=host_map.get(env, plaid.Environment.Production),
+            host=host_map.get(env, production_host),
             api_key={"clientId": client_id, "secret": secret},
         )
 

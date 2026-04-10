@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://localhost:3000",     # Next.js dev
         "http://localhost:8000",     # FastAPI docs
+        "https://claude-financetracker-pk91-bku3zw5wg.vercel.app",  # Production Vercel
     ]
     # Set CORS_ALLOW_ALL=true to allow * (useful in development; disables credentials)
     cors_allow_all: bool = False

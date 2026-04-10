@@ -352,65 +352,67 @@ class PriceService:
     # ── yfinance (most reliable, slightly delayed) ────────────────────────────
 
     async def _fetch_yfinance(self, ticker: str) -> PriceResult:
-        """Fetch via yfinance download endpoint (no API key needed).
+        """Fetch via the yfinance Python library in a thread-pool executor.
 
-        Uses the Yahoo Finance v8 JSON API directly via HTTP for async support,
-        avoiding the synchronous yfinance library in the async context.
+        Yahoo Finance now requires cookies/crumbs for their HTTP API. The
+        yfinance library (v0.2.38+) handles this automatically, so we run it
+        synchronously in an executor rather than making raw HTTP calls.
         """
+        import asyncio
+        import yfinance as yf
+
         yf_ticker = _YFINANCE_MAP.get(ticker, ticker)
-        client = await self._get_client()
 
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_ticker}"
-        params = {"interval": "1d", "range": "1d"}
+        def _sync_fetch() -> float:
+            t = yf.Ticker(yf_ticker)
+            price = t.fast_info.last_price
+            return float(price) if price else 0.0
 
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-        chart = data.get("chart", {}).get("result", [{}])[0]
-        meta = chart.get("meta", {})
-
-        price = float(meta.get("regularMarketPrice", 0))
-        prev_close = float(meta.get("previousClose", 0))
-
-        if price <= 0:
-            return self._error_result(ticker, "yfinance", "Zero price")
-
-        # Yahoo doesn't give live bid/ask in chart endpoint
-        # Use the price as last_trade
-        return PriceResult(
-            ticker=ticker,
-            mid_price=price,
-            bid=None,
-            ask=None,
-            last_trade=price,
-            source="yfinance",
-            timestamp=time.time(),
-        )
+        try:
+            loop = asyncio.get_event_loop()
+            price = await loop.run_in_executor(None, _sync_fetch)
+            if price <= 0:
+                return self._error_result(ticker, "yfinance", "Zero price")
+            return PriceResult(
+                ticker=ticker,
+                mid_price=price,
+                bid=None,
+                ask=None,
+                last_trade=price,
+                source="yfinance",
+                timestamp=time.time(),
+            )
+        except Exception as e:
+            return self._error_result(ticker, "yfinance", str(e))
 
     async def _fetch_yfinance_crypto(self, ticker: str) -> PriceResult:
-        """Fetch crypto price via Yahoo Finance (BTC-USD, XRP-USD)."""
+        """Fetch crypto price via yfinance library (BTC-USD, XRP-USD, etc.)."""
+        import asyncio
+        import yfinance as yf
+
         yf_symbol = f"{ticker}-USD"
-        client = await self._get_client()
 
-        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}"
-        params = {"interval": "1d", "range": "1d"}
+        def _sync_fetch() -> float:
+            t = yf.Ticker(yf_symbol)
+            price = t.fast_info.last_price
+            return float(price) if price else 0.0
 
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-
-        chart = data.get("chart", {}).get("result", [{}])[0]
-        meta = chart.get("meta", {})
-        price = float(meta.get("regularMarketPrice", 0))
-
-        if price <= 0:
-            return self._error_result(ticker, "yfinance", "Zero crypto price")
-
-        return PriceResult(
-            ticker=ticker, mid_price=price, bid=None, ask=None,
-            last_trade=price, source="yfinance", timestamp=time.time(),
-        )
+        try:
+            loop = asyncio.get_event_loop()
+            price = await loop.run_in_executor(None, _sync_fetch)
+            if price <= 0:
+                return self._error_result(ticker, "yfinance", "Zero crypto price")
+            return PriceResult(
+                ticker=ticker,
+                mid_price=price,
+                bid=None,
+                ask=None,
+                last_trade=price,
+                source="yfinance",
+                timestamp=time.time(),
+            )
+        except Exception as e:
+            return self._error_result(ticker, "yfinance", str(e))
 
     # ── Finnhub (real-time bid/ask — best for Robinhood mid-price match) ──────
 

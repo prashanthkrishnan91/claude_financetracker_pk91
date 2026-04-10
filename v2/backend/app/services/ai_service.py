@@ -191,8 +191,24 @@ class AiService:
             "Return valid JSON with keys \"allocations\" and \"narrative\"."
         )
 
-        # 5. Check API key
-        if not settings.anthropic_api_key:
+        # 5. Resolve Anthropic API key — user's stored key takes precedence over
+        #    the server-level ANTHROPIC_API_KEY env var.
+        anthropic_api_key = settings.anthropic_api_key
+        try:
+            from ..services.crypto_service import decrypt_value
+            user_row = (
+                self.client.table("users")
+                .select("encrypted_anthropic_api_key")
+                .eq("id", str(user_id))
+                .single()
+                .execute()
+            )
+            if user_row.data and user_row.data.get("encrypted_anthropic_api_key"):
+                anthropic_api_key = decrypt_value(user_row.data["encrypted_anthropic_api_key"])
+        except Exception as exc:
+            logger.warning("Could not fetch user Anthropic API key: %s", exc)
+
+        if not anthropic_api_key:
             return {
                 **_FALLBACK_RESPONSE,
                 "total_value": round(total_value, 2),
@@ -203,7 +219,7 @@ class AiService:
         try:
             import anthropic
 
-            anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
             message = anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=1024,

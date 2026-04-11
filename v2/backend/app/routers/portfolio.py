@@ -41,7 +41,7 @@ async def get_portfolio_summary(
 
 @router.get("/snapshots", response_model=list[SnapshotResponse])
 async def list_snapshots(
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, le=1000),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List portfolio snapshots, newest first."""
@@ -141,6 +141,20 @@ async def get_cash_balance(
         "source": "none",
         "manual_override": None,
     }
+
+
+@router.post("/snapshots/backfill")
+async def backfill_snapshots(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> dict:
+    """Reconstruct historical portfolio snapshots from transaction history.
+
+    Walks through all Buy/Sell transactions and creates weekly portfolio
+    snapshots using price_history close prices, enabling historical chart
+    data to populate after a CSV import.
+    """
+    service = PortfolioService(user_id=user.id)
+    return await service.backfill_snapshots_from_transactions()
 
 
 @router.patch("/cash")

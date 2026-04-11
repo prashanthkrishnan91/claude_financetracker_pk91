@@ -1,14 +1,47 @@
 "use client";
 
+import { useEffect } from "react";
 import { PortfolioSummaryCard } from "@/components/holdings/PortfolioSummaryCard";
 import { HoldingsList } from "@/components/holdings/HoldingsList";
 import { PortfolioChart } from "@/components/charts/PortfolioChart";
 import { useAuth } from "@/lib/auth";
-import { usePlaidStatus } from "@/lib/hooks";
+import {
+  usePlaidStatus,
+  useSnapshots,
+  useCreateSnapshot,
+  usePortfolioSummary,
+} from "@/lib/hooks";
 
 export default function DashboardPage() {
   const { signOut } = useAuth();
   const { data: plaidStatus } = usePlaidStatus();
+  const { data: snapshots } = useSnapshots(5);
+  const { data: summary } = usePortfolioSummary();
+  const createSnapshot = useCreateSnapshot();
+
+  // Auto-create one snapshot per day when the dashboard loads and the portfolio
+  // has positions. Checks whether the most recent snapshot was taken today to
+  // avoid creating duplicates on page refreshes.
+  useEffect(() => {
+    if (
+      snapshots === undefined ||
+      summary === undefined ||
+      summary.positions_count === 0 ||
+      createSnapshot.isPending ||
+      createSnapshot.isSuccess
+    ) {
+      return;
+    }
+    const today = new Date().toDateString();
+    const latestSnapshotDate =
+      snapshots.length > 0
+        ? new Date(snapshots[0].snapshot_at).toDateString()
+        : null;
+    if (latestSnapshotDate !== today) {
+      createSnapshot.mutate();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshots, summary]);
 
   return (
     <>

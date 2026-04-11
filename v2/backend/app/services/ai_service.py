@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 from uuid import UUID
@@ -12,6 +13,53 @@ from ..config import get_settings
 from ..database import get_supabase_client
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_json(text: str) -> dict | None:
+    """Try multiple strategies to extract a JSON object from AI response text."""
+    # Strategy 1: Full text is valid JSON
+    try:
+        return json.loads(text.strip())
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Strategy 2: ```json ... ``` code block
+    m = re.search(r"```json\s*([\s\S]+?)\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 3: ``` ... ``` code block (language-agnostic)
+    m = re.search(r"```\s*([\s\S]+?)\s*```", text)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Strategy 4: Find outermost { ... } JSON object
+    m = re.search(r"\{[\s\S]+\}", text)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    return None
+
+
+def _clean_ai_text(text: str) -> str:
+    """Strip JSON code blocks and bare JSON objects from AI text, leaving prose."""
+    # Remove ```json ... ``` blocks
+    text = re.sub(r"```json\s*[\s\S]*?```", "", text)
+    # Remove ``` ... ``` blocks
+    text = re.sub(r"```[\s\S]*?```", "", text)
+    # Remove standalone JSON objects { ... }
+    text = re.sub(r"\{[\s\S]*?\}", "", text)
+    return text.strip()
+
 
 _FALLBACK_RESPONSE = {
     "allocation_table": [],
@@ -119,32 +167,78 @@ class AiService:
             f"Total Portfolio Value: ${total_value:,.2f}",
             f"Category Breakdown: {json.dumps(category_summary)}",
             "",
-            "Positions:",
+            "Positions (ticker | category | shares @ avg_cost | current_price | market_value | P&L% | portfolio_weight% | LT_eligible | target_price):",
         ]
         for pv in position_values:
             context_lines.append(
                 f"  {pv['ticker']} ({pv['name']}) | {pv['category']} | "
                 f"{pv['shares']} shares @ ${pv['avg_cost']} avg | "
                 f"current ${pv['current_price']} | value ${pv['market_value']} | "
-                f"P&L {pv['pnl_pct']}% | {pv['current_pct']}% of portfolio | "
+                f"P&L {pv['pnl_pct']:+.1f}% | {pv['current_pct']:.1f}% of portfolio | "
                 f"LT eligible: {pv['lt_eligible']} (since {pv['lt_date']}) | "
-                f"target price: ${pv['target_price']}"
+                f"target: ${pv['target_price']}"
             )
 
         context = "\n".join(context_lines)
 
-        prompt = (
-            f"You are a portfolio analyst. Here is the portfolio:\n{context}\n\n"
-            "Task 1: Return a JSON array called \"allocations\" with objects: "
-            "{ticker, name, current_pct, suggested_pct, change_pct, rationale}. "
-            "Keep only positions that need meaningful changes (suggested_pct != current_pct by >1%).\n\n"
-            "Task 2: Provide a \"narrative\" key with a 3-5 bullet point analysis (max 200 words) "
-            "covering: diversification, top risks, opportunities, and one specific action recommendation.\n\n"
-            "Return valid JSON with keys \"allocations\" and \"narrative\"."
+        system_prompt = (
+            "You are a senior portfolio manager at a top-tier Wall Street investment firm. "
+            "You have 20+ years of experience and a CFA charter. You analyze portfolios with "
+            "institutional rigor: concentration risk, sector correlation, tax efficiency "
+            "(LT vs ST capital gains treatment), rebalancing costs, and macro positioning. "
+            "Your recommendations are specific, actionable, and grounded in portfolio theory. "
+            "You cite exact tickers, dollar amounts, and percentages. "
+            "You never give generic advice — every insight references the actual holdings."
         )
 
-        # 5. Check API key
-        if not settings.anthropic_api_key:
+        user_prompt = (
+            f"Analyze this client portfolio and produce a full rebalancing recommendation.\n\n"
+            f"{context}\n\n"
+            "Return ONLY a valid JSON object — no markdown fences, no text before or after the JSON:\n"
+            "{\n"
+            '  "allocations": [\n'
+            "    {\n"
+            '      "ticker": "AAPL",\n'
+            '      "name": "Apple Inc.",\n'
+            '      "current_pct": 8.2,\n'
+            '      "suggested_pct": 10.5,\n'
+            '      "change_pct": 2.3,\n'
+            '      "rationale": "Specific single-sentence reason citing price, P&L, and thesis"\n'
+            "    }\n"
+            "  ],\n"
+            '  "narrative": "Line 1\\nLine 2\\nLine 3\\nLine 4\\nLine 5\\nLine 6"\n'
+            "}\n\n"
+            "Requirements:\n"
+            "- allocations: include only positions where |suggested_pct - current_pct| > 1%. "
+            "Rationale must be specific to this position (mention P&L%, LT status if relevant, sector context).\n"
+            "- narrative: exactly 6 lines separated by \\n (no bullet symbols, no numbers). "
+            "Cover: (1) overall portfolio health and concentration risk, "
+            "(2) biggest overweight to trim with specific reason, "
+            "(3) biggest underweight or missing exposure to add, "
+            "(4) tax efficiency opportunities (flag any LT-eligible positions near sell targets), "
+            "(5) sector/category balance assessment, "
+            "(6) single highest-priority action to take this week with exact ticker and size.\n"
+            "- Be direct and specific. Mention actual tickers, percentages, and dollar values."
+        )
+
+        # 5. Resolve Anthropic API key — user's stored key takes precedence over
+        #    the server-level ANTHROPIC_API_KEY env var.
+        anthropic_api_key = settings.anthropic_api_key
+        try:
+            from .crypto_service import decrypt_value
+            user_row = (
+                self.client.table("users")
+                .select("encrypted_anthropic_api_key")
+                .eq("id", str(user_id))
+                .single()
+                .execute()
+            )
+            if user_row.data and user_row.data.get("encrypted_anthropic_api_key"):
+                anthropic_api_key = decrypt_value(user_row.data["encrypted_anthropic_api_key"])
+        except Exception as exc:
+            logger.warning("Could not fetch user Anthropic API key: %s", exc)
+
+        if not anthropic_api_key:
             return {
                 **_FALLBACK_RESPONSE,
                 "total_value": round(total_value, 2),
@@ -155,34 +249,38 @@ class AiService:
         try:
             import anthropic
 
-            anthropic_client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
+            anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
             message = anthropic_client.messages.create(
                 model="claude-sonnet-4-6",
-                max_tokens=1024,
-                messages=[{"role": "user", "content": prompt}],
+                max_tokens=4096,
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
             )
 
             response_text = message.content[0].text if message.content else ""
+            logger.info("Anthropic response (%d chars): %.200s", len(response_text), response_text)
 
-            # 7. Parse response — find the JSON block
+            # 7. Parse response — try multiple JSON extraction strategies
             allocation_table: list[dict] = []
             narrative: str = ""
 
-            # Try to extract JSON (may be wrapped in markdown code blocks)
-            json_str = response_text.strip()
-            if "```json" in json_str:
-                json_str = json_str.split("```json")[1].split("```")[0].strip()
-            elif "```" in json_str:
-                json_str = json_str.split("```")[1].split("```")[0].strip()
-
-            parsed = json.loads(json_str)
-            allocation_table = parsed.get("allocations", [])
-            narrative = parsed.get("narrative", response_text)
+            parsed = _extract_json(response_text)
+            if parsed:
+                allocation_table = parsed.get("allocations", [])
+                raw_narrative = parsed.get("narrative", "")
+                # narrative may be a list of strings or a single string
+                if isinstance(raw_narrative, list):
+                    narrative = "\n".join(str(item) for item in raw_narrative)
+                else:
+                    narrative = str(raw_narrative)
+            else:
+                # JSON extraction failed — use cleaned text as narrative
+                allocation_table = []
+                narrative = _clean_ai_text(response_text)
 
         except json.JSONDecodeError:
-            # Response was not valid JSON — use raw text as narrative
             allocation_table = []
-            narrative = response_text
+            narrative = _clean_ai_text(response_text)
         except Exception as exc:
             logger.error("Anthropic API call failed: %s", exc)
             return {
@@ -195,9 +293,47 @@ class AiService:
                 "generated_at": generated_at,
             }
 
-        return {
+        result = {
             "allocation_table": allocation_table,
             "narrative": narrative,
             "total_value": round(total_value, 2),
             "generated_at": generated_at,
         }
+
+        # Persist to ai_analyses table so it survives tab/app restarts
+        try:
+            self.client.table("ai_analyses").insert({
+                "user_id": str(user_id),
+                "allocation_table": allocation_table,
+                "narrative": narrative,
+                "total_value": round(total_value, 2),
+                "generated_at": generated_at,
+            }).execute()
+        except Exception as exc:
+            logger.warning("Failed to persist AI analysis: %s", exc)
+
+        return result
+
+    async def get_latest_analysis(self, user_id: UUID) -> dict | None:
+        """Fetch the most recently stored AI analysis for the user."""
+        try:
+            rows = (
+                self.client.table("ai_analyses")
+                .select("allocation_table, narrative, total_value, generated_at")
+                .eq("user_id", str(user_id))
+                .order("generated_at", desc=True)
+                .limit(1)
+                .execute()
+            ).data
+            if not rows:
+                return None
+            row = rows[0]
+            return {
+                "allocation_table": row.get("allocation_table") or [],
+                "narrative": row.get("narrative") or "",
+                "total_value": float(row.get("total_value") or 0),
+                "generated_at": row.get("generated_at") or "",
+            }
+        except Exception as exc:
+            logger.warning("Failed to fetch latest AI analysis: %s", exc)
+            return None

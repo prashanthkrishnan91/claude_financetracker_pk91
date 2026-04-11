@@ -57,9 +57,12 @@ class UserResponse(UserBase):
     """User data returned by API (no secrets)."""
     id: UUID
     has_plaid: bool = False
+    has_plaid_client: bool = False
+    has_plaid_secret: bool = False
     has_finnhub: bool = False
     has_polygon: bool = False
     has_alpaca: bool = False
+    has_anthropic: bool = False
     created_at: datetime
     updated_at: datetime
 
@@ -76,3 +79,4 @@ class UserApiKeysUpdate(BaseModel):
     polygon_api_key: Optional[str] = None
     alpaca_api_key: Optional[str] = None
     alpaca_secret_key: Optional[str] = None
+    anthropic_api_key: Optional[str] = None

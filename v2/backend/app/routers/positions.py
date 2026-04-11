@@ -64,7 +64,7 @@ def _enrich_position(row: dict, prices: dict[str, float]) -> dict:
     return enriched
 
 
-@router.get("/", response_model=list[PositionWithPrice])
+@router.get("", response_model=list[PositionWithPrice])
 async def list_positions(
     category: str | None = Query(default=None, description="Filter by category"),
     user: AuthenticatedUser = Depends(get_current_user),
@@ -131,7 +131,7 @@ async def get_position(
     return _enrich_position(row, prices)
 
 
-@router.post("/", response_model=PositionResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=PositionResponse, status_code=status.HTTP_201_CREATED)
 async def create_position(
     position: PositionCreate,
     user: AuthenticatedUser = Depends(get_current_user),

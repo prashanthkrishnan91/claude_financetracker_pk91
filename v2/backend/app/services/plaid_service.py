@@ -54,7 +54,13 @@ class SyncStatus:
 
     @property
     def is_fresh(self) -> bool:
-        return self.synced_at is not None and self.age_hours < _CACHE_TTL_HOURS
+        # Only treat as fresh if the last sync was successful — error syncs
+        # must not block retries even within the 24h window.
+        return (
+            self.synced_at is not None
+            and self.age_hours < _CACHE_TTL_HOURS
+            and self.status == "success"
+        )
 
 
 class PlaidSyncService:
@@ -174,75 +180,89 @@ class PlaidSyncService:
     async def _call_plaid(
         self, access_token: str, client_id: str, secret: str, env: str
     ) -> tuple[list[dict], float, list[str], dict]:
-        """Call Plaid /investments/holdings/get and return parsed data.
+        """Call Plaid /investments/holdings/get via direct HTTP.
+
+        Uses httpx instead of the plaid-python SDK to avoid pydantic v2
+        composed-schema validation errors (e.g. InvestmentAccount.balances
+        mismatch) that occur with certain Plaid API response shapes.
 
         Returns: (holdings_list, cash_usd, account_ids, raw_response)
         """
-        import plaid
-        from plaid.api import plaid_api
-        from plaid.model.investments_holdings_get_request import InvestmentsHoldingsGetRequest
+        import httpx
 
-        # Configure Plaid client
         host_map = {
-            "sandbox": plaid.Environment.Sandbox,
-            "development": plaid.Environment.Development,
-            "production": plaid.Environment.Production,
+            "sandbox": "https://sandbox.plaid.com",
+            "development": "https://production.plaid.com",  # Development retired
+            "production": "https://production.plaid.com",
         }
-        configuration = plaid.Configuration(
-            host=host_map.get(env, plaid.Environment.Production),
-            api_key={"clientId": client_id, "secret": secret},
-        )
+        base_url = host_map.get(env, "https://production.plaid.com")
 
-        api_client = plaid.ApiClient(configuration)
-        client = plaid_api.PlaidApi(api_client)
-
-        # Call investments/holdings/get
-        request = InvestmentsHoldingsGetRequest(access_token=access_token)
-        response = client.investments_holdings_get(request)
+        async with httpx.AsyncClient(timeout=30.0) as http:
+            resp = await http.post(
+                f"{base_url}/investments/holdings/get",
+                json={
+                    "client_id": client_id,
+                    "secret": secret,
+                    "access_token": access_token,
+                },
+            )
+            if not resp.is_success:
+                err_data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+                raise RuntimeError(err_data.get("error_message") or resp.text)
+            data = resp.json()
 
         # Build security_id → ticker map
-        security_map = {}
-        for sec in response.securities:
-            sid = sec.security_id
-            ticker = getattr(sec, "ticker_symbol", None) or ""
-            name = getattr(sec, "name", "") or ""
-            sec_type = getattr(sec, "type", "equity") or "equity"
-            # Normalize ticker
+        security_map: dict[str, dict] = {}
+        for sec in data.get("securities", []):
+            sid = sec.get("security_id")
+            if not sid:
+                continue
+            ticker = sec.get("ticker_symbol") or ""
+            name = sec.get("name") or ""
+            sec_type = sec.get("type") or "equity"
             ticker = _PLAID_TICKER_MAP.get(ticker, ticker)
-            security_map[sid] = {
-                "ticker": ticker,
-                "name": name,
-                "type": sec_type,
-            }
+            security_map[sid] = {"ticker": ticker, "name": name, "type": sec_type}
 
         # Parse holdings
-        holdings = []
-        for h in response.holdings:
-            sec_info = security_map.get(h.security_id, {})
+        holdings: list[dict] = []
+        for h in data.get("holdings", []):
+            sec_info = security_map.get(h.get("security_id") or "", {})
             ticker = sec_info.get("ticker", "")
             if not ticker or ticker == "CUR:USD":
                 continue
 
+            raw_qty = h.get("quantity")
+            raw_cost = h.get("cost_basis")
+            raw_price = h.get("institution_price")
+
+            quantity = float(raw_qty) if raw_qty is not None else 0.0
+            cost_basis_per_share = (
+                float(raw_cost) / quantity
+                if (quantity > 0 and raw_cost is not None)
+                else 0.0
+            )
+            institution_price = float(raw_price) if raw_price is not None else 0.0
+
             holdings.append({
                 "ticker": ticker,
                 "name": sec_info.get("name", ticker),
-                "quantity": float(h.quantity),
-                "cost_basis": float(h.cost_basis) / float(h.quantity) if h.quantity else 0,
-                "institution_price": float(h.institution_price),
+                "quantity": quantity,
+                "cost_basis": cost_basis_per_share,
+                "institution_price": institution_price,
                 "security_type": sec_info.get("type", "equity"),
             })
 
-        # Extract cash
+        # Extract cash balance from accounts
         cash = 0.0
-        for acct in response.accounts:
-            if hasattr(acct, "balances") and acct.balances:
-                cash += float(getattr(acct.balances, "available", 0) or 0)
+        account_ids: list[str] = []
+        for acct in data.get("accounts", []):
+            account_ids.append(acct.get("account_id") or "")
+            balances = acct.get("balances") or {}
+            available = balances.get("available")
+            if available is not None:
+                cash += float(available)
 
-        account_ids = [str(acct.account_id) for acct in response.accounts]
-
-        # Raw response for audit
-        raw = {"holdings_count": len(holdings), "accounts": len(response.accounts)}
-
+        raw = {"holdings_count": len(holdings), "accounts": len(data.get("accounts", []))}
         return holdings, cash, account_ids, raw
 
     async def _upsert_positions(self, holdings: list[dict]) -> tuple[int, int]:
@@ -250,16 +270,22 @@ class PlaidSyncService:
 
         Plaid is authoritative for share quantities.
         Cost basis is updated only if it differs.
+        After upserting, removes positions sourced from Plaid or CSV that are
+        no longer in the current Plaid holdings (i.e., they were sold).
+        Manually-added positions (source='manual') and crypto PDF imports are preserved.
         Returns (created_count, updated_count).
         """
-        # Get existing positions
+        # Get existing positions (fetch source too for cleanup logic)
         existing = (
             self.client.table("positions")
-            .select("ticker, shares, avg_cost")
+            .select("ticker, shares, avg_cost, source, category")
             .eq("user_id", str(self.user_id))
             .execute()
         ).data
         existing_map = {r["ticker"]: r for r in existing}
+
+        # Build set of tickers that Plaid currently knows about
+        plaid_tickers = {h["ticker"] for h in holdings}
 
         created = 0
         updated = 0
@@ -278,15 +304,14 @@ class PlaidSyncService:
                 category = "Core"  # Will be refined by bootstrap data if available
 
             if existing_pos:
-                # Update only if shares changed
-                if float(existing_pos["shares"]) != h["quantity"]:
-                    self.client.table("positions").update({
-                        "shares": h["quantity"],
-                        "avg_cost": h["cost_basis"],
-                        "source": "plaid",
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("user_id", str(self.user_id)).eq("ticker", ticker).execute()
-                    updated += 1
+                # Always update shares and cost from Plaid — Plaid is authoritative
+                self.client.table("positions").update({
+                    "shares": h["quantity"],
+                    "avg_cost": h["cost_basis"],
+                    "source": "plaid",
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("user_id", str(self.user_id)).eq("ticker", ticker).execute()
+                updated += 1
             else:
                 # Create new position
                 self.client.table("positions").insert({
@@ -300,6 +325,36 @@ class PlaidSyncService:
                     "last_synced_at": datetime.now(timezone.utc).isoformat(),
                 }).execute()
                 created += 1
+
+        # ── Remove stale positions that Plaid no longer reports ──────────────
+        # Positions with source in (plaid, csv_import, bootstrap) that are NOT
+        # in the current Plaid response have been sold or are no longer held.
+        # Preserve source='manual' and Crypto PDF imports (category='Crypto',
+        # source='pdf_import') since Plaid may not track those.
+        for ticker, pos in existing_map.items():
+            if ticker in plaid_tickers:
+                continue  # Still held — skip
+
+            source = pos.get("source", "manual")
+            category = pos.get("category", "Core")
+
+            # Preserve manual entries and crypto PDF imports
+            if source == "manual":
+                continue
+            if source == "pdf_import" and category == "Crypto":
+                continue
+
+            # Delete — position no longer in Plaid (sold or transferred out)
+            try:
+                self.client.table("positions").delete().eq(
+                    "user_id", str(self.user_id)
+                ).eq("ticker", ticker).execute()
+                logger.info(
+                    "Removed stale position %s (source=%s) — not in Plaid response",
+                    ticker, source,
+                )
+            except Exception as exc:
+                logger.warning("Failed to remove stale position %s: %s", ticker, exc)
 
         return created, updated
 

@@ -28,6 +28,14 @@ export function useCreateSnapshot() {
   });
 }
 
+export function useBackfillSnapshots() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.portfolio.backfillSnapshots,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio", "snapshots"] }),
+  });
+}
+
 export function useRebalance(cashToDeploy?: number) {
   return useQuery({
     queryKey: ["portfolio", "rebalance", cashToDeploy],
@@ -149,6 +157,17 @@ export function useImportCsv() {
   });
 }
 
+export function useImportPdf() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (file: File) => api.sync.importPdf(file),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["positions"] });
+      qc.invalidateQueries({ queryKey: ["portfolio"] });
+    },
+  });
+}
+
 // ── DRIP ─────────────────────────────────────────────────────────────────────
 
 export function useDripSummary() {
@@ -239,18 +258,30 @@ export function useUpdateProfile() {
 }
 
 export function useUpdateApiKeys() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: api.auth.updateApiKeys,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] }),
   });
 }
 
 // ── AI ────────────────────────────────────────────────────────────────────────
 
+export function useAiLatestAnalysis() {
+  return useQuery({
+    queryKey: ["ai", "latest"],
+    queryFn: api.ai.getLatest,
+    staleTime: 5 * 60_000,
+  });
+}
+
 export function useAiRebalance() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.ai.rebalance,
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] });
+      qc.invalidateQueries({ queryKey: ["ai", "latest"] });
+    },
   });
 }

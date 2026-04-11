@@ -5,7 +5,16 @@
 
 import { supabase } from "./supabase";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
+// Enforce HTTPS when the page is served over HTTPS.
+// Guards against NEXT_PUBLIC_API_URL being set to http:// in production,
+// which causes a browser mixed-content block.
+const _rawBase = process.env.NEXT_PUBLIC_API_URL || "";
+const API_BASE =
+  typeof window !== "undefined" &&
+  window.location.protocol === "https:" &&
+  _rawBase.startsWith("http://")
+    ? _rawBase.replace("http://", "https://")
+    : _rawBase;
 
 async function getAuthHeaders(): Promise<HeadersInit> {
   const {
@@ -47,6 +56,8 @@ export const api = {
       fetchApi<Snapshot[]>(`/api/v1/portfolio/snapshots?limit=${limit}`),
     createSnapshot: () =>
       fetchApi<Snapshot>("/api/v1/portfolio/snapshots", { method: "POST" }),
+    backfillSnapshots: () =>
+      fetchApi<BackfillResult>("/api/v1/portfolio/snapshots/backfill", { method: "POST" }),
     getTargets: () =>
       fetchApi<TargetAllocation[]>("/api/v1/portfolio/targets"),
     setTargets: (targets: { ticker: string; target_pct: number }[]) =>
@@ -123,6 +134,11 @@ export const api = {
       formData.append("file", file);
       return fetchApiForm<ImportResult>("/api/v1/sync/csv/import", formData);
     },
+    importPdf: (file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return fetchApiForm<PdfImportResult>("/api/v1/sync/pdf/import", formData);
+    },
   },
 
   drip: {
@@ -148,6 +164,8 @@ export const api = {
   ai: {
     rebalance: () =>
       fetchApi<AiRebalanceResult>("/api/v1/ai/rebalance", { method: "POST" }),
+    getLatest: () =>
+      fetchApi<AiRebalanceResult | null>("/api/v1/ai/rebalance/latest"),
   },
 };
 
@@ -322,6 +340,13 @@ export interface ImportResult {
   error_details: string[];
 }
 
+export interface PdfImportResult {
+  tickers_found: string[];
+  positions_updated: number;
+  positions_created: number;
+  errors: string[];
+}
+
 export interface TargetAllocation {
   id: string;
   ticker: string;
@@ -356,8 +381,8 @@ export interface DripPosition {
   drip_gain: number;
   annual_income: number;
   yield_pct: number;
-  ex_date: string;
-  pay_date: string;
+  ex_date: string | null;
+  pay_date: string | null;
   category: string;
 }
 
@@ -409,14 +434,25 @@ export interface UserProfile {
   deposit_frequency: string;
   theme: string;
   has_plaid: boolean;
+  has_plaid_client: boolean;
+  has_plaid_secret: boolean;
   has_finnhub: boolean;
   has_polygon: boolean;
   has_alpaca: boolean;
+  has_anthropic: boolean;
+}
+
+export interface BackfillResult {
+  created: number;
+  skipped: number;
+  message: string;
 }
 
 export interface ApiKeysUpdate {
+  plaid_access_token?: string;
   plaid_client_id?: string;
   plaid_secret?: string;
+  plaid_env?: string;
   finnhub_api_key?: string;
   polygon_api_key?: string;
   alpaca_api_key?: string;

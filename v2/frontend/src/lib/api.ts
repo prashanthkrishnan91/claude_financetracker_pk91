@@ -430,6 +430,8 @@ export interface UserProfile {
   deposit_frequency: string;
   theme: string;
   has_plaid: boolean;
+  has_plaid_client: boolean;
+  has_plaid_secret: boolean;
   has_finnhub: boolean;
   has_polygon: boolean;
   has_alpaca: boolean;

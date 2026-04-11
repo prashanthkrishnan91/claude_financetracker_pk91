@@ -340,8 +340,11 @@ function AiRebalanceSection() {
               </h3>
               <div className="space-y-1.5">
                 {aiRebalance.data.narrative
-                  .split(/\n|•|·/)
-                  .map((line) => line.trim())
+                  .split(/\n|[•·]/)
+                  .map((line) =>
+                    // Strip leading numbering (1. 2) 3: etc.) and bullet chars
+                    line.replace(/^\s*[\d]+[.):\s]+/, "").replace(/^[-–—*]\s+/, "").trim()
+                  )
                   .filter(Boolean)
                   .map((line, i) => (
                     <p key={i} className="text-xs text-text-secondary leading-relaxed flex gap-2">

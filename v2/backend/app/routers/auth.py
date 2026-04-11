@@ -82,6 +82,8 @@ async def get_profile(user: AuthenticatedUser = Depends(get_current_user)):
     # Add flags for which API keys are configured
     data = result.data
     data["has_plaid"] = bool(data.get("encrypted_plaid_access_token"))
+    data["has_plaid_client"] = bool(data.get("encrypted_plaid_client_id"))
+    data["has_plaid_secret"] = bool(data.get("encrypted_plaid_secret"))
     data["has_finnhub"] = bool(data.get("encrypted_finnhub_api_key"))
     data["has_polygon"] = bool(data.get("encrypted_polygon_api_key"))
     data["has_alpaca"] = bool(data.get("encrypted_alpaca_api_key"))

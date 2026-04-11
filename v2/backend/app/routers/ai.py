@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
@@ -21,6 +23,20 @@ def _make_price_service():
     )
 
 
+@router.get("/rebalance/latest")
+async def ai_rebalance_latest(
+    user: AuthenticatedUser = Depends(get_current_user),
+) -> Optional[dict]:
+    """Fetch the most recently stored AI portfolio analysis.
+
+    Returns null if no analysis has been generated yet.
+    Used to restore AI analysis state when the user returns to the page.
+    """
+    from ..services.ai_service import AiService
+    service = AiService()
+    return await service.get_latest_analysis(user_id=user.id)
+
+
 @router.post("/rebalance")
 async def ai_rebalance(
     user: AuthenticatedUser = Depends(get_current_user),
@@ -29,6 +45,7 @@ async def ai_rebalance(
 
     Returns allocation suggestions and a narrative analysis.
     Requires anthropic_api_key to be set in application settings.
+    Result is persisted to the database so it can be restored on page reload.
     """
     from ..services.ai_service import AiService
     service = AiService()

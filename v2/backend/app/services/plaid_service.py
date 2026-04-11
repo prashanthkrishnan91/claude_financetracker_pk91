@@ -270,16 +270,22 @@ class PlaidSyncService:
 
         Plaid is authoritative for share quantities.
         Cost basis is updated only if it differs.
+        After upserting, removes positions sourced from Plaid or CSV that are
+        no longer in the current Plaid holdings (i.e., they were sold).
+        Manually-added positions (source='manual') and crypto PDF imports are preserved.
         Returns (created_count, updated_count).
         """
-        # Get existing positions
+        # Get existing positions (fetch source too for cleanup logic)
         existing = (
             self.client.table("positions")
-            .select("ticker, shares, avg_cost")
+            .select("ticker, shares, avg_cost, source, category")
             .eq("user_id", str(self.user_id))
             .execute()
         ).data
         existing_map = {r["ticker"]: r for r in existing}
+
+        # Build set of tickers that Plaid currently knows about
+        plaid_tickers = {h["ticker"] for h in holdings}
 
         created = 0
         updated = 0
@@ -298,15 +304,14 @@ class PlaidSyncService:
                 category = "Core"  # Will be refined by bootstrap data if available
 
             if existing_pos:
-                # Update only if shares changed
-                if float(existing_pos["shares"]) != h["quantity"]:
-                    self.client.table("positions").update({
-                        "shares": h["quantity"],
-                        "avg_cost": h["cost_basis"],
-                        "source": "plaid",
-                        "last_synced_at": datetime.now(timezone.utc).isoformat(),
-                    }).eq("user_id", str(self.user_id)).eq("ticker", ticker).execute()
-                    updated += 1
+                # Always update shares and cost from Plaid — Plaid is authoritative
+                self.client.table("positions").update({
+                    "shares": h["quantity"],
+                    "avg_cost": h["cost_basis"],
+                    "source": "plaid",
+                    "last_synced_at": datetime.now(timezone.utc).isoformat(),
+                }).eq("user_id", str(self.user_id)).eq("ticker", ticker).execute()
+                updated += 1
             else:
                 # Create new position
                 self.client.table("positions").insert({
@@ -320,6 +325,36 @@ class PlaidSyncService:
                     "last_synced_at": datetime.now(timezone.utc).isoformat(),
                 }).execute()
                 created += 1
+
+        # ── Remove stale positions that Plaid no longer reports ──────────────
+        # Positions with source in (plaid, csv_import, bootstrap) that are NOT
+        # in the current Plaid response have been sold or are no longer held.
+        # Preserve source='manual' and Crypto PDF imports (category='Crypto',
+        # source='pdf_import') since Plaid may not track those.
+        for ticker, pos in existing_map.items():
+            if ticker in plaid_tickers:
+                continue  # Still held — skip
+
+            source = pos.get("source", "manual")
+            category = pos.get("category", "Core")
+
+            # Preserve manual entries and crypto PDF imports
+            if source == "manual":
+                continue
+            if source == "pdf_import" and category == "Crypto":
+                continue
+
+            # Delete — position no longer in Plaid (sold or transferred out)
+            try:
+                self.client.table("positions").delete().eq(
+                    "user_id", str(self.user_id)
+                ).eq("ticker", ticker).execute()
+                logger.info(
+                    "Removed stale position %s (source=%s) — not in Plaid response",
+                    ticker, source,
+                )
+            except Exception as exc:
+                logger.warning("Failed to remove stale position %s: %s", ticker, exc)
 
         return created, updated
 

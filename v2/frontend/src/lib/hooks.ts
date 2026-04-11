@@ -28,6 +28,14 @@ export function useCreateSnapshot() {
   });
 }
 
+export function useBackfillSnapshots() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.portfolio.backfillSnapshots,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["portfolio", "snapshots"] }),
+  });
+}
+
 export function useRebalance(cashToDeploy?: number) {
   return useQuery({
     queryKey: ["portfolio", "rebalance", cashToDeploy],
@@ -259,11 +267,21 @@ export function useUpdateApiKeys() {
 
 // ── AI ────────────────────────────────────────────────────────────────────────
 
+export function useAiLatestAnalysis() {
+  return useQuery({
+    queryKey: ["ai", "latest"],
+    queryFn: api.ai.getLatest,
+    staleTime: 5 * 60_000,
+  });
+}
+
 export function useAiRebalance() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: api.ai.rebalance,
-    onSuccess: () =>
-      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] });
+      qc.invalidateQueries({ queryKey: ["ai", "latest"] });
+    },
   });
 }

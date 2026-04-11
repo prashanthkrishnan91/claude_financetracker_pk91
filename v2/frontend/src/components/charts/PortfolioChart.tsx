@@ -2,8 +2,9 @@
 
 import { useState } from "react";
 import { cn, formatCurrency } from "@/lib/utils";
-import { useSnapshots } from "@/lib/hooks";
+import { useSnapshots, useBackfillSnapshots } from "@/lib/hooks";
 import { InlineLoader } from "@/components/ui/Spinner";
+import { Spinner } from "@/components/ui/Spinner";
 import {
   ResponsiveContainer,
   AreaChart,
@@ -14,7 +15,7 @@ import {
   CartesianGrid,
 } from "recharts";
 
-const PERIODS = ["1W", "1M", "3M", "6M", "1Y"] as const;
+const PERIODS = ["1W", "1M", "3M", "6M", "1Y", "ALL"] as const;
 type Period = (typeof PERIODS)[number];
 
 const PERIOD_DAYS: Record<Period, number> = {
@@ -23,11 +24,14 @@ const PERIOD_DAYS: Record<Period, number> = {
   "3M": 90,
   "6M": 180,
   "1Y": 365,
+  "ALL": 99999,
 };
 
 export function PortfolioChart() {
   const [period, setPeriod] = useState<Period>("1Y");
-  const { data: snapshots, isLoading } = useSnapshots(100);
+  const [backfillMsg, setBackfillMsg] = useState<string | null>(null);
+  const { data: snapshots, isLoading, refetch } = useSnapshots(500);
+  const backfill = useBackfillSnapshots();
 
   // Filter snapshots by period
   const cutoff = new Date();
@@ -52,23 +56,57 @@ export function PortfolioChart() {
 
   return (
     <div className="space-y-4">
-      {/* Period selector */}
-      <div className="flex gap-1">
-        {PERIODS.map((p) => (
-          <button
-            key={p}
-            onClick={() => setPeriod(p)}
-            className={cn(
-              "px-3 py-1 text-xs rounded-md transition-colors",
-              period === p
-                ? "bg-accent text-background font-semibold"
-                : "text-text-muted hover:text-text-primary hover:bg-surface-elevated"
-            )}
-          >
-            {p}
-          </button>
-        ))}
+      {/* Period selector + rebuild history button */}
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex gap-1">
+          {PERIODS.map((p) => (
+            <button
+              key={p}
+              onClick={() => setPeriod(p)}
+              className={cn(
+                "px-3 py-1 text-xs rounded-md transition-colors",
+                period === p
+                  ? "bg-accent text-background font-semibold"
+                  : "text-text-muted hover:text-text-primary hover:bg-surface-elevated"
+              )}
+            >
+              {p}
+            </button>
+          ))}
+        </div>
+        <button
+          onClick={() => {
+            setBackfillMsg(null);
+            backfill.mutate(undefined, {
+              onSuccess: (data) => {
+                refetch();
+                setBackfillMsg(
+                  data.created > 0
+                    ? `Rebuilt ${data.created} historical snapshots`
+                    : "History already up to date"
+                );
+              },
+              onError: () => setBackfillMsg("Rebuild failed — try again"),
+            });
+          }}
+          disabled={backfill.isPending}
+          title="Rebuild chart history from your transaction data"
+          className="flex items-center gap-1.5 px-2.5 py-1 text-[10px] rounded-md border border-border text-text-muted hover:text-text-primary hover:bg-surface-elevated transition-colors disabled:opacity-50 shrink-0"
+        >
+          {backfill.isPending ? (
+            <Spinner className="h-3 w-3" />
+          ) : (
+            <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+              <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" strokeLinecap="round" strokeLinejoin="round" />
+              <path d="M3 3v5h5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          )}
+          Rebuild History
+        </button>
       </div>
+      {backfillMsg && (
+        <p className="text-[10px] text-text-muted">{backfillMsg}</p>
+      )}
 
       {/* Chart */}
       <div className="h-[200px] lg:h-[300px]">

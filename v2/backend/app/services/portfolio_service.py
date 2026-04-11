@@ -5,9 +5,13 @@ Integrates with the v2 concurrent price engine for live portfolio values.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from collections import defaultdict
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from ..config import get_settings
 from ..database import get_supabase_client
@@ -320,3 +324,207 @@ class PortfolioService:
             ))
 
         return sorted(results, key=lambda r: r.drift_pct)
+
+    async def backfill_snapshots_from_transactions(self) -> dict:
+        """Reconstruct historical portfolio snapshots from transaction history.
+
+        Algorithm:
+        1. Load all Buy/Sell transactions sorted by date.
+        2. Walk forward day-by-day and maintain running share counts per ticker.
+        3. For each week-end boundary (Saturday) within the transaction range,
+           look up close prices from price_history and compute total_equity.
+        4. Insert portfolio_snapshots for dates not already recorded.
+
+        Returns {created, skipped, message}.
+        """
+        # ── 1. Load all buy/sell transactions ───────────────────────────────
+        tx_rows = (
+            self.client.table("transactions")
+            .select("ticker, tx_type, quantity, price, tx_date")
+            .eq("user_id", str(self.user_id))
+            .in_("tx_type", ["Buy", "Sell"])
+            .order("tx_date", desc=False)
+            .execute()
+        ).data
+
+        if not tx_rows:
+            return {"created": 0, "skipped": 0, "message": "No Buy/Sell transactions found"}
+
+        # ── 2. Build daily position state ────────────────────────────────────
+        # shares[ticker] = running share count
+        shares: dict[str, float] = defaultdict(float)
+        # cost[ticker] = running total cost (for avg_cost)
+        total_cost_map: dict[str, float] = defaultdict(float)
+
+        # date_str -> snapshot of shares at end of that day
+        # We capture state after every transaction date
+        daily_states: dict[str, dict[str, dict]] = {}  # date -> {ticker: {shares, avg_cost}}
+
+        for tx in tx_rows:
+            ticker = (tx.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            qty = float(tx.get("quantity") or 0)
+            price = float(tx.get("price") or 0)
+            tx_type = tx.get("tx_type", "")
+            tx_date = tx.get("tx_date", "")[:10]
+
+            if tx_type == "Buy":
+                shares[ticker] += qty
+                total_cost_map[ticker] += qty * price
+            elif tx_type == "Sell":
+                current = shares[ticker]
+                if current > 0:
+                    # Reduce cost proportionally
+                    sell_fraction = min(qty / current, 1.0)
+                    total_cost_map[ticker] -= total_cost_map[ticker] * sell_fraction
+                shares[ticker] = max(0.0, current - qty)
+                if shares[ticker] < 0.0001:
+                    shares[ticker] = 0.0
+                    total_cost_map[ticker] = 0.0
+
+            # Save state snapshot for this date
+            daily_states[tx_date] = {
+                t: {
+                    "shares": s,
+                    "avg_cost": (total_cost_map[t] / s) if s > 0 else 0.0,
+                }
+                for t, s in shares.items()
+                if s > 0.0001
+            }
+
+        if not daily_states:
+            return {"created": 0, "skipped": 0, "message": "No valid position states computed"}
+
+        first_date = date.fromisoformat(min(daily_states.keys()))
+        last_date = date.today()
+
+        # ── 3. Determine target snapshot dates (weekly on Saturdays) ─────────
+        snapshot_dates: list[date] = []
+        cursor = first_date
+        # Advance to nearest Saturday
+        days_to_sat = (5 - cursor.weekday()) % 7
+        cursor += timedelta(days=days_to_sat)
+        while cursor <= last_date:
+            snapshot_dates.append(cursor)
+            cursor += timedelta(weeks=1)
+
+        # ── 4. Get existing snapshot dates to avoid duplicates ───────────────
+        existing = (
+            self.client.table("portfolio_snapshots")
+            .select("snapshot_at")
+            .eq("user_id", str(self.user_id))
+            .execute()
+        ).data
+        existing_date_strs = {r["snapshot_at"][:10] for r in existing}
+
+        # ── 5. Fetch all price_history for all tickers in one query ──────────
+        all_tickers = list({t for state in daily_states.values() for t in state})
+        # Prices: {ticker: {date_str: close_price}}
+        price_lookup: dict[str, dict[str, float]] = defaultdict(dict)
+
+        if all_tickers:
+            start_str = first_date.isoformat()
+            ph_rows = (
+                self.client.table("price_history")
+                .select("ticker, price_date, close_price")
+                .in_("ticker", all_tickers)
+                .gte("price_date", start_str)
+                .execute()
+            ).data
+            for row in ph_rows:
+                t = row["ticker"]
+                d_str = str(row["price_date"])[:10]
+                cp = float(row.get("close_price") or 0)
+                if cp > 0:
+                    price_lookup[t][d_str] = cp
+
+        def _get_price(ticker: str, date_str: str) -> Optional[float]:
+            """Get close price for ticker on or before date_str."""
+            if ticker not in price_lookup:
+                return None
+            # Look for closest date on or before date_str
+            prices = price_lookup[ticker]
+            candidates = [d for d in prices if d <= date_str]
+            if not candidates:
+                return None
+            return prices[max(candidates)]
+
+        def _get_position_state(target_date_str: str) -> dict[str, dict]:
+            """Get most recent position state on or before target_date_str."""
+            candidates = [d for d in daily_states if d <= target_date_str]
+            if not candidates:
+                return {}
+            return daily_states[max(candidates)]
+
+        # ── 6. Create snapshots ───────────────────────────────────────────────
+        created = 0
+        skipped = 0
+        to_insert = []
+
+        for snap_date in snapshot_dates:
+            date_str = snap_date.isoformat()
+            if date_str in existing_date_strs:
+                skipped += 1
+                continue
+
+            position_state = _get_position_state(date_str)
+            if not position_state:
+                skipped += 1
+                continue
+
+            total_equity = 0.0
+            total_cost = 0.0
+            priced_count = 0
+
+            for ticker, state in position_state.items():
+                s = state["shares"]
+                ac = state["avg_cost"]
+                total_cost += s * ac
+
+                p = _get_price(ticker, date_str)
+                if p:
+                    total_equity += s * p
+                    priced_count += 1
+                else:
+                    # Fallback to cost basis for unpriced tickers
+                    total_equity += s * ac
+
+            if total_equity <= 0 or priced_count == 0:
+                skipped += 1
+                continue
+
+            total_pnl = total_equity - total_cost
+            total_pnl_pct = (total_pnl / total_cost * 100) if total_cost > 0 else 0.0
+
+            to_insert.append({
+                "user_id": str(self.user_id),
+                "snapshot_at": f"{date_str}T20:00:00+00:00",  # ~4pm ET close
+                "total_equity": round(total_equity, 2),
+                "total_cost": round(total_cost, 2),
+                "total_pnl": round(total_pnl, 2),
+                "total_pnl_pct": round(total_pnl_pct, 4),
+                "cash_balance": 0.0,
+                "positions_data": [
+                    {"ticker": t, "shares": s["shares"], "avg_cost": s["avg_cost"]}
+                    for t, s in position_state.items()
+                ],
+                "metadata": {"source": "backfill_from_transactions"},
+            })
+            existing_date_strs.add(date_str)
+
+        # Batch insert
+        for i in range(0, len(to_insert), 50):
+            batch = to_insert[i:i + 50]
+            try:
+                self.client.table("portfolio_snapshots").insert(batch).execute()
+                created += len(batch)
+            except Exception as exc:
+                logger.error("Backfill batch insert failed: %s", exc)
+                skipped += len(batch)
+
+        return {
+            "created": created,
+            "skipped": skipped,
+            "message": f"Backfilled {created} weekly snapshots from transaction history",
+        }

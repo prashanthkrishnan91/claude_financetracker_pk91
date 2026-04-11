@@ -7,6 +7,7 @@ import {
   useCashBalance,
   useSetCash,
   useAiRebalance,
+  useAiLatestAnalysis,
 } from "@/lib/hooks";
 import { api, type RebalanceResult, type AiAllocation } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
@@ -264,6 +265,12 @@ function CashOverrideWidget() {
 
 function AiRebalanceSection() {
   const aiRebalance = useAiRebalance();
+  const { data: latestAnalysis, isLoading: isLoadingLatest } = useAiLatestAnalysis();
+
+  // Show the freshly-generated result if available, otherwise fall back to the
+  // latest stored analysis fetched from the DB on page load.
+  const displayData = aiRebalance.data ?? latestAnalysis ?? null;
+  const isFreshGeneration = !!aiRebalance.data;
 
   return (
     <div className="card-glass p-4 space-y-4">
@@ -273,10 +280,14 @@ function AiRebalanceSection() {
         </h2>
       </div>
 
-      {!aiRebalance.data && !aiRebalance.isPending && !aiRebalance.isError && (
+      {!displayData && !aiRebalance.isPending && !aiRebalance.isError && !isLoadingLatest && (
         <p className="text-xs text-text-muted">
           Generate AI-powered portfolio allocation suggestions based on your current holdings.
         </p>
+      )}
+
+      {isLoadingLatest && !displayData && (
+        <p className="text-xs text-text-muted">Loading last analysis...</p>
       )}
 
       <button
@@ -292,7 +303,7 @@ function AiRebalanceSection() {
         ) : (
           <>
             <span>✨</span>
-            Generate AI Targets
+            {displayData ? "Regenerate AI Targets" : "Generate AI Targets"}
           </>
         )}
       </button>
@@ -305,7 +316,7 @@ function AiRebalanceSection() {
         </div>
       )}
 
-      {aiRebalance.data && (
+      {displayData && (
         <div className="space-y-5">
           {/* Allocation table */}
           <div className="space-y-2">
@@ -324,7 +335,7 @@ function AiRebalanceSection() {
                   </tr>
                 </thead>
                 <tbody>
-                  {aiRebalance.data.allocation_table.map((row) => (
+                  {displayData.allocation_table.map((row) => (
                     <AiAllocationRow key={row.ticker} row={row} />
                   ))}
                 </tbody>
@@ -333,13 +344,13 @@ function AiRebalanceSection() {
           </div>
 
           {/* Narrative */}
-          {aiRebalance.data.narrative && (
+          {displayData.narrative && (
             <div className="space-y-2">
               <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
                 Analysis
               </h3>
               <div className="space-y-1.5">
-                {aiRebalance.data.narrative
+                {displayData.narrative
                   .split(/\n|[•·]/)
                   .map((line) =>
                     // Strip leading numbering (1. 2) 3: etc.) and bullet chars
@@ -358,13 +369,15 @@ function AiRebalanceSection() {
 
           {/* Timestamp */}
           <p className="text-[10px] text-text-muted">
-            Generated:{" "}
-            {new Date(aiRebalance.data.generated_at).toLocaleString("en-US", {
-              month: "short",
-              day: "numeric",
-              hour: "2-digit",
-              minute: "2-digit",
-            })}
+            {isFreshGeneration ? "Just generated" : "Last generated"}:{" "}
+            {displayData.generated_at
+              ? new Date(displayData.generated_at).toLocaleString("en-US", {
+                  month: "short",
+                  day: "numeric",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })
+              : "—"}
           </p>
         </div>
       )}

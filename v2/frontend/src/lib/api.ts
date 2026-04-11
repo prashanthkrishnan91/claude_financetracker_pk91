@@ -56,6 +56,8 @@ export const api = {
       fetchApi<Snapshot[]>(`/api/v1/portfolio/snapshots?limit=${limit}`),
     createSnapshot: () =>
       fetchApi<Snapshot>("/api/v1/portfolio/snapshots", { method: "POST" }),
+    backfillSnapshots: () =>
+      fetchApi<BackfillResult>("/api/v1/portfolio/snapshots/backfill", { method: "POST" }),
     getTargets: () =>
       fetchApi<TargetAllocation[]>("/api/v1/portfolio/targets"),
     setTargets: (targets: { ticker: string; target_pct: number }[]) =>
@@ -162,6 +164,8 @@ export const api = {
   ai: {
     rebalance: () =>
       fetchApi<AiRebalanceResult>("/api/v1/ai/rebalance", { method: "POST" }),
+    getLatest: () =>
+      fetchApi<AiRebalanceResult | null>("/api/v1/ai/rebalance/latest"),
   },
 };
 
@@ -436,6 +440,12 @@ export interface UserProfile {
   has_polygon: boolean;
   has_alpaca: boolean;
   has_anthropic: boolean;
+}
+
+export interface BackfillResult {
+  created: number;
+  skipped: number;
+  message: string;
 }
 
 export interface ApiKeysUpdate {

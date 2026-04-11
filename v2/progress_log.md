@@ -2,6 +2,46 @@
 
 ---
 
+## v2.1.0 — Bug Fixes & Test Coverage (April 11, 2026)
+
+### Fixed: API Key Configuration Badges Not Refreshing
+- **Issue**: After saving API keys (Plaid, Finnhub, Alpaca, Anthropic) in Settings, the "Configured" badges remained stale until page reload
+- **Root Cause**: `useUpdateApiKeys()` hook in `hooks.ts` was not invalidating the `["auth", "me"]` query cache after `PUT /api/v1/auth/me/api-keys` succeeded
+- **Fix**: Added `onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] })` to `useUpdateApiKeys()` mutation
+- **Impact**: Badges now update immediately after saving (same pattern as `useUpdateProfile`)
+
+### Test Coverage: Comprehensive Plaid Service Tests
+- **Expanded**: `test_plaid_service.py` from 9 to **32 unit tests** (all passing)
+- **New `TestCallPlaid` class** (15 tests):
+  - Success path: 2 holdings, per-share cost basis calculation, cash summing across accounts
+  - URL routing: sandbox → `sandbox.plaid.com`, production/development → `production.plaid.com`
+  - Error handling: Non-2xx response raises `RuntimeError` with Plaid's `error_message`
+  - Edge cases: `None` quantity/cost/price/balance → defaults to 0.0 (no crashes)
+  - Filtering: `CUR:USD` cash holdings skipped, no-ticker holdings skipped
+  - Normalization: `BRK.B` → `BRK-B`, `BF.A` → `BF-A`
+  - Request structure: Verifies JSON body has `access_token`, `client_id`, `secret`
+  - Crypto: `security_type` preserved as "cryptocurrency"
+  - Multi-account: Cash from multiple accounts summed correctly
+  - Missing/None keys: Account without `balances` key doesn't crash
+- **New `TestSyncHoldings` class** (5 tests):
+  - Cache hit: Fresh sync returns cached result without calling Plaid API
+  - Cache miss: Never-synced or stale sync triggers API call
+  - Force flag: `force=True` bypasses cache
+  - Credentials: Missing `encrypted_plaid_access_token` returns error
+  - API errors: Plaid failures logged and returned as `error` SyncResult
+
+### Removed Dependency
+- Removed `plaid-python>=22.0.0` from `requirements.txt` — v2 backend now uses direct httpx POST calls to `/investments/holdings/get` instead of the plaid-python SDK
+  - Resolves the pydantic v2 composed-schema validation error: "Values stored for property balances in InvestmentAccount differ..."
+  - httpx approach gives full control over None-safety for Robinhood's quirky response shapes
+
+### Files Modified
+- `v2/frontend/src/lib/hooks.ts`: +2 lines (cache invalidation in `useUpdateApiKeys`)
+- `v2/backend/tests/test_plaid_service.py`: +588 lines (expanded test suite with docstrings)
+- `v2/backend/requirements.txt`: -1 line (removed `plaid-python`)
+
+---
+
 ## v2.0.0 — Phase 1: Database & Architecture Setup (April 8, 2026)
 
 ### Repository Reorganization

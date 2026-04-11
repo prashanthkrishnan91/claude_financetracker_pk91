@@ -38,33 +38,39 @@ See [docs/architecture.md](docs/architecture.md) for detailed system design.
 - [ ] **BLOCKED**: Supabase project creation (needs user account setup)
 
 ### Phase 2: High-Performance Financial Engine
-- [ ] Plaid integration (sync Robinhood holdings)
-- [ ] Alpaca Markets integration (real-time price updates)
-- [ ] yfinance integration (1-year historical OHLCV)
-- [ ] Async price fetching engine (gather + fallback chain)
-- [ ] Price caching in Supabase price_history table
-- [ ] CSV import service (SHA-256 dedup from v1)
-- [ ] Unit + integration tests for all services
+- [x] Plaid integration (sync Robinhood holdings) — httpx-based, bypasses plaid-python SDK
+- [x] yfinance integration (1-year historical OHLCV)
+- [x] Alpaca Markets integration (real-time price updates)
+- [x] Async price fetching engine (gather + fallback chain: yfinance → Finnhub → Polygon → Alpaca → CoinGecko)
+- [x] Price caching in Supabase price_history table
+- [x] CSV import service (SHA-256 dedup from v1)
+- [x] PDF statement import (crypto gains tracking)
+- [x] Unit + integration tests for all services (70+ test cases)
+- [x] Deposit tracking and frequency config
+- [x] DRIP analytics (dividend reinvestment tracking)
 
 ### Phase 3: The "Robinhood" UI/UX
-- [ ] Supabase Auth integration (signup/login flow)
-- [ ] Recharts portfolio performance line chart
-- [ ] Holdings list with live prices and green/red indicators
-- [ ] Insight Cards with recommendation actions
-- [ ] Mobile-responsive bottom nav + tablet sidebar
-- [ ] React Query integration with all FastAPI endpoints
-- [ ] Settings page (API key management, deposit config)
+- [x] Supabase Auth integration (signup/login flow)
+- [x] Recharts portfolio performance line chart
+- [x] Holdings list with live prices and green/red indicators
+- [x] Insight Cards with AI-powered recommendations (Claude API)
+- [x] Mobile-responsive bottom nav + tablet sidebar
+- [x] React Query integration with all FastAPI endpoints
+- [x] Settings page (API key management, deposit config, Plaid/Alpaca/Finnhub sync controls)
+- [x] Dashboard: Summary, Holdings, Deposits, DRIP, Insights tabs
 - [ ] Deploy to Vercel/Netlify
 
 ### Phase 4: Recommendation Engine & Polish
-- [ ] Full recommendation engine port from v1
+- [x] Claude AI-powered portfolio analysis (senior PM persona)
+- [x] Rebalancing recommendations with 6-line narrative
+- [x] InsightCards with specific buy/sell/trim actions
+- [x] DRIP analytics dashboard (lifetime earnings, annual projections)
+- [x] Deposit deployment calculator
+- [x] Tax-aware recommendations (LT-eligible tracking)
 - [ ] Market trend analysis module
-- [ ] Buy/Sell/Trim/Hold InsightCards on frontend
-- [ ] DRIP analytics dashboard
-- [ ] Deposit deployment calculator
 - [ ] End-to-end testing
 - [ ] Performance optimization
-- [ ] Security audit
+- [ ] Security audit + CORS hardening
 
 ---
 

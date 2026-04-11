@@ -293,9 +293,47 @@ class AiService:
                 "generated_at": generated_at,
             }
 
-        return {
+        result = {
             "allocation_table": allocation_table,
             "narrative": narrative,
             "total_value": round(total_value, 2),
             "generated_at": generated_at,
         }
+
+        # Persist to ai_analyses table so it survives tab/app restarts
+        try:
+            self.client.table("ai_analyses").insert({
+                "user_id": str(user_id),
+                "allocation_table": allocation_table,
+                "narrative": narrative,
+                "total_value": round(total_value, 2),
+                "generated_at": generated_at,
+            }).execute()
+        except Exception as exc:
+            logger.warning("Failed to persist AI analysis: %s", exc)
+
+        return result
+
+    async def get_latest_analysis(self, user_id: UUID) -> dict | None:
+        """Fetch the most recently stored AI analysis for the user."""
+        try:
+            rows = (
+                self.client.table("ai_analyses")
+                .select("allocation_table, narrative, total_value, generated_at")
+                .eq("user_id", str(user_id))
+                .order("generated_at", desc=True)
+                .limit(1)
+                .execute()
+            ).data
+            if not rows:
+                return None
+            row = rows[0]
+            return {
+                "allocation_table": row.get("allocation_table") or [],
+                "narrative": row.get("narrative") or "",
+                "total_value": float(row.get("total_value") or 0),
+                "generated_at": row.get("generated_at") or "",
+            }
+        except Exception as exc:
+            logger.warning("Failed to fetch latest AI analysis: %s", exc)
+            return None

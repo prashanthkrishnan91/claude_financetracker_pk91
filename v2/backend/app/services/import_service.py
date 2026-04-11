@@ -12,6 +12,7 @@ import hashlib
 import io
 import logging
 import re
+from collections import defaultdict
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Optional
@@ -191,10 +192,112 @@ class CsvImportService:
                     new_count -= len(batch)
                     error_details.append(f"Batch insert error: {str(e)[:200]}")
 
-        return {
+        result = {
             "total_rows": total,
             "new_rows": new_count,
             "duplicates_skipped": dupes,
             "errors": errors,
             "error_details": error_details[:10],  # Cap at 10 error messages
         }
+
+        # After inserting transactions, reconcile positions table so that sold
+        # positions are removed and share counts reflect the full transaction history.
+        try:
+            await self.reconcile_positions_from_transactions()
+        except Exception as exc:
+            logger.warning("Position reconciliation failed (non-fatal): %s", exc)
+
+        return result
+
+    async def reconcile_positions_from_transactions(self) -> dict:
+        """Recompute net positions from all transactions and sync to positions table.
+
+        Computes net shares per ticker across all Buy/Sell transactions.
+        Deletes positions with source='csv_import' (or 'bootstrap') where the
+        net shares have dropped to zero (position fully sold).
+        Updates remaining CSV-sourced positions with correct share counts.
+
+        Manual positions (source='manual') and Plaid positions (source='plaid')
+        are not modified — only CSV-imported positions are reconciled.
+        """
+        # Load all buy/sell transactions for the user
+        tx_rows = (
+            self.client.table("transactions")
+            .select("ticker, tx_type, quantity, price, tx_date")
+            .eq("user_id", str(self.user_id))
+            .in_("tx_type", ["Buy", "Sell"])
+            .execute()
+        ).data
+
+        if not tx_rows:
+            return {"reconciled": 0, "removed": 0}
+
+        # Compute net shares and weighted-average cost per ticker
+        net_shares: dict[str, float] = defaultdict(float)
+        net_cost: dict[str, float] = defaultdict(float)
+
+        for tx in tx_rows:
+            ticker = (tx.get("ticker") or "").strip().upper()
+            if not ticker:
+                continue
+            qty = float(tx.get("quantity") or 0)
+            price = float(tx.get("price") or 0)
+            tx_type = tx.get("tx_type", "")
+
+            if tx_type == "Buy":
+                net_shares[ticker] += qty
+                net_cost[ticker] += qty * price
+            elif tx_type == "Sell":
+                current = net_shares[ticker]
+                if current > 0:
+                    sell_fraction = min(qty / current, 1.0)
+                    net_cost[ticker] -= net_cost[ticker] * sell_fraction
+                net_shares[ticker] = max(0.0, current - qty)
+                if net_shares[ticker] < 0.0001:
+                    net_shares[ticker] = 0.0
+                    net_cost[ticker] = 0.0
+
+        # Load existing positions for this user
+        existing = (
+            self.client.table("positions")
+            .select("id, ticker, source, category")
+            .eq("user_id", str(self.user_id))
+            .execute()
+        ).data
+
+        reconciled = 0
+        removed = 0
+
+        for pos in existing:
+            ticker = pos["ticker"]
+            source = pos.get("source", "manual")
+            category = pos.get("category", "Core")
+
+            # Only touch CSV-imported or bootstrap positions
+            if source not in ("csv_import", "bootstrap"):
+                continue
+
+            shares = net_shares.get(ticker, 0.0)
+
+            if shares < 0.0001:
+                # Position fully sold — remove from positions table
+                try:
+                    self.client.table("positions").delete().eq(
+                        "id", pos["id"]
+                    ).execute()
+                    removed += 1
+                    logger.info("Removed fully-sold CSV position: %s", ticker)
+                except Exception as exc:
+                    logger.warning("Failed to remove position %s: %s", ticker, exc)
+            else:
+                avg_cost = (net_cost[ticker] / shares) if shares > 0 else 0.0
+                try:
+                    self.client.table("positions").update({
+                        "shares": round(shares, 6),
+                        "avg_cost": round(avg_cost, 6),
+                    }).eq("id", pos["id"]).execute()
+                    reconciled += 1
+                except Exception as exc:
+                    logger.warning("Failed to update position %s: %s", ticker, exc)
+
+        return {"reconciled": reconciled, "removed": removed}

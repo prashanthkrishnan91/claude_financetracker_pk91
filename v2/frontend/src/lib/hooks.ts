@@ -250,8 +250,10 @@ export function useUpdateProfile() {
 }
 
 export function useUpdateApiKeys() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: api.auth.updateApiKeys,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["auth", "me"] }),
   });
 }
 

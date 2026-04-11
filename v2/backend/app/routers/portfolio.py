@@ -41,7 +41,7 @@ async def get_portfolio_summary(
 
 @router.get("/snapshots", response_model=list[SnapshotResponse])
 async def list_snapshots(
-    limit: int = Query(default=50, le=200),
+    limit: int = Query(default=50, le=500),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     """List portfolio snapshots, newest first."""

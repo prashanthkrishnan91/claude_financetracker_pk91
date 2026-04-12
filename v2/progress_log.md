@@ -2,6 +2,19 @@
 
 ## Recent Changes
 
+### Fix: Deploy tab calculates deposit allocations without requiring manual target setup
+- **Commit**: `b586d8a` (PR #19)
+- **Date**: April 12, 2026
+- `calculate_rebalance()` now falls back to built-in deposit formula (NVDA 28% / VOO 22% / VYM 17% / QQQ 17% / ROTATING 16%) when no user-defined targets exist in the DB — eliminates the "No target allocations set" error
+- ROTATING slot is auto-resolved to the highest-urgency active Intel BUY recommendation not already in the formula; falls back to a placeholder with guidance if no qualifying signal found
+- In deposit mode, `suggested_amount` is the direct formula split of cash to deploy (e.g. $900 × 28% = $252 for NVDA)
+- Results enriched with Intel action/urgency badges and DRIP yield notes sourced from active recommendations and yield map
+- `RebalanceResult` backend model gains 5 optional enrichment fields; TypeScript interface updated to match
+- Deploy page shows a formula-mode banner, dynamic section heading ("Deposit Allocation — $900"), `IntelBadge` component, rationale text, and DRIP note per row
+- **Files**: `v2/backend/app/models/portfolio.py`, `v2/backend/app/services/portfolio_service.py`, `v2/frontend/src/app/dashboard/deposits/page.tsx`, `v2/frontend/src/lib/api.ts`
+
+---
+
 ### Add git hooks: pre-commit validation and post-commit doc auto-update
 - **Commit**: `31d3e3f`
 - **Date**: April 11, 2026

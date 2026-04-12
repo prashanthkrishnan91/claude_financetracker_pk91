@@ -4,6 +4,8 @@ A ground-up rebuild of the Portfolio War Room as a production-grade serverless p
 
 **Stack:** FastAPI (Python) + Next.js 14 (TypeScript) + Supabase (PostgreSQL) + Tailwind CSS
 
+> **Branch policy**: All development commits go directly to `main`. No feature branches.
+
 ---
 
 ## Architecture
@@ -65,8 +67,9 @@ See [docs/architecture.md](docs/architecture.md) for detailed system design.
 - [x] Rebalancing recommendations with 6-line narrative
 - [x] InsightCards with specific buy/sell/trim actions
 - [x] DRIP analytics dashboard (lifetime earnings, annual projections)
-- [x] Deposit deployment calculator
+- [x] Deposit deployment calculator — formula-mode fallback (no manual targets required)
 - [x] Tax-aware recommendations (LT-eligible tracking)
+- [x] Deploy tab: built-in allocation formula (NVDA/VOO/VYM/QQQ/ROTATING) with Intel badge enrichment
 - [ ] Market trend analysis module
 - [ ] End-to-end testing
 - [ ] Performance optimization

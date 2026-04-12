@@ -135,11 +135,20 @@ export default function DepositsPage() {
 
         {/* Rebalance results */}
         {isLoading || isFetching ? (
-          <InlineLoader text="Calculating rebalance..." />
+          <InlineLoader text="Calculating deposit allocation..." />
         ) : rebalance && rebalance.length > 0 ? (
           <div className="space-y-3">
+            {rebalance[0]?.is_default_formula && (
+              <div className="px-3 py-2 rounded-lg bg-accent/5 border border-accent/20">
+                <p className="text-xs text-accent">
+                  Using built-in deposit formula · ROTATING slot filled by highest-urgency Intel BUY signal
+                </p>
+              </div>
+            )}
             <h2 className="text-sm text-text-secondary font-medium">
-              Suggested Allocation
+              {rebalance[0]?.is_default_formula
+                ? `Deposit Allocation — ${formatCurrency(amount)}`
+                : "Suggested Allocation"}
             </h2>
             <div className="space-y-1.5">
               {rebalance.map((r) => (
@@ -149,8 +158,8 @@ export default function DepositsPage() {
           </div>
         ) : rebalance && rebalance.length === 0 ? (
           <EmptyState
-            title="No target allocations set"
-            description="Set target allocations in Settings to see rebalance suggestions."
+            title="No positions found"
+            description="Add positions to your portfolio to see deposit allocation suggestions."
           />
         ) : null}
 
@@ -420,52 +429,84 @@ function AiAllocationRow({ row }: { row: AiAllocation }) {
   );
 }
 
+function IntelBadge({ action, urgency }: { action: string; urgency?: number }) {
+  const colorMap: Record<string, string> = {
+    BUY:    "bg-green-500/10 text-green-400",
+    SELL:   "bg-red-500/10 text-red-400",
+    TRIM:   "bg-orange-500/10 text-orange-400",
+    HOLD:   "bg-blue-500/10 text-blue-400",
+    REVIEW: "bg-purple-500/10 text-purple-400",
+  };
+  const color = colorMap[action] ?? "bg-surface-elevated text-text-muted";
+  const dots = urgency && urgency > 0 ? "•".repeat(Math.min(urgency, 5)) : "";
+  return (
+    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-semibold", color)}>
+      Intel: {action}{dots ? ` ${dots}` : ""}
+    </span>
+  );
+}
+
 function RebalanceRow({ result }: { result: RebalanceResult }) {
   const isBuy = result.suggested_amount > 0;
   const onTarget = result.suggested_action === "ON TARGET";
 
   return (
-    <div className="card-glass px-4 py-3 flex items-center justify-between">
-      <div className="flex-1">
-        <div className="flex items-center gap-2">
-          <span className="font-mono font-semibold text-text-primary text-sm">
-            {result.ticker}
-          </span>
-          <span
-            className={cn(
-              "text-[10px] px-1.5 py-0.5 rounded",
-              onTarget
-                ? "bg-accent/10 text-accent"
-                : isBuy
-                ? "bg-green-500/10 text-green-400"
-                : "bg-red-500/10 text-red-400"
+    <div className="card-glass px-4 py-3 space-y-1.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-mono font-semibold text-text-primary text-sm">
+              {result.ticker}
+            </span>
+            <span
+              className={cn(
+                "text-[10px] px-1.5 py-0.5 rounded",
+                onTarget
+                  ? "bg-accent/10 text-accent"
+                  : isBuy
+                  ? "bg-green-500/10 text-green-400"
+                  : "bg-red-500/10 text-red-400"
+              )}
+            >
+              {result.suggested_action}
+            </span>
+            {result.intel_action && (
+              <IntelBadge action={result.intel_action} urgency={result.intel_urgency} />
             )}
-          >
-            {result.suggested_action}
-          </span>
+          </div>
+          {result.rationale && (
+            <p className="text-xs text-text-muted mt-1 leading-relaxed">
+              {result.rationale}
+            </p>
+          )}
+          {result.drip_note && (
+            <p className="text-xs text-blue-400/80 mt-0.5 leading-relaxed">
+              {result.drip_note}
+            </p>
+          )}
         </div>
-        <div className="flex gap-3 mt-1 text-xs text-text-muted">
-          <span>Current: {result.current_pct.toFixed(1)}%</span>
-          <span>Target: {result.target_pct.toFixed(1)}%</span>
-          <span
-            className={cn(
-              result.drift_pct > 0.5
-                ? "text-red-400"
-                : result.drift_pct < -0.5
-                ? "text-green-400"
-                : "text-text-muted"
-            )}
-          >
-            Drift: {result.drift_pct > 0 ? "+" : ""}
-            {result.drift_pct.toFixed(1)}%
-          </span>
-        </div>
+        {!onTarget && (
+          <p className="font-mono text-sm font-semibold text-text-primary shrink-0">
+            {formatCurrency(Math.abs(result.suggested_amount))}
+          </p>
+        )}
       </div>
-      {!onTarget && (
-        <p className="font-mono text-sm text-text-primary ml-4">
-          {formatCurrency(Math.abs(result.suggested_amount))}
-        </p>
-      )}
+      <div className="flex gap-3 text-xs text-text-muted">
+        <span>Current: {result.current_pct.toFixed(1)}%</span>
+        <span>Target: {result.target_pct.toFixed(1)}%</span>
+        <span
+          className={cn(
+            result.drift_pct > 0.5
+              ? "text-red-400"
+              : result.drift_pct < -0.5
+              ? "text-green-400"
+              : "text-text-muted"
+          )}
+        >
+          Drift: {result.drift_pct > 0 ? "+" : ""}
+          {result.drift_pct.toFixed(1)}%
+        </span>
+      </div>
     </div>
   );
 }

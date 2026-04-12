@@ -95,3 +95,9 @@ class RebalanceResult(BaseModel):
     drift_pct: float
     suggested_action: str  # "BUY $X" or "SELL $X" or "ON TARGET"
     suggested_amount: float
+    # Enrichment — present when Intel/DRIP data is available
+    intel_action: Optional[str] = None    # BUY | SELL | TRIM | HOLD | REVIEW
+    intel_urgency: Optional[int] = None   # 0-5 urgency score
+    drip_note: Optional[str] = None       # DRIP yield / compounding note
+    rationale: Optional[str] = None       # Why this allocation
+    is_default_formula: bool = False      # True when using built-in deposit formula

@@ -24,6 +24,32 @@ from ..models.portfolio import (
 )
 
 
+# ── Deposit formula constants ─────────────────────────────────────────────────
+
+_DEPOSIT_FORMULA = [
+    ("NVDA",     28.0),
+    ("VOO",      22.0),
+    ("VYM",      17.0),
+    ("QQQ",      17.0),
+    ("ROTATING", 16.0),
+]
+
+_FORMULA_RATIONALE: dict[str, str] = {
+    "NVDA": "AI/GPU infrastructure leader — high-conviction core holding",
+    "VOO":  "S&P 500 index core — DCA every deposit, never sell",
+    "VYM":  "High-yield dividend ETF — income + DRIP compounding, hold forever",
+    "QQQ":  "NASDAQ-100 — tech and growth index exposure",
+}
+
+# Annual dividend yield estimates (used as DRIP fallback when no Intel drip_note)
+_DRIP_YIELD_MAP: dict[str, float] = {
+    "VYM": 2.8, "SCHD": 3.5, "BND": 3.2, "VWO": 2.1, "VXUS": 1.8,
+    "VOO": 1.2, "QQQ": 0.5, "VTI": 1.3, "SPY": 1.2, "QCOM": 2.1,
+    "AAPL": 0.5, "MSFT": 0.7, "META": 0.4, "COST": 0.7, "WMT": 0.9,
+    "NVDA": 0.1, "TSM": 1.4, "BMWYY": 4.5,
+}
+
+
 class PortfolioService:
     """All portfolio-level business logic."""
 
@@ -275,10 +301,27 @@ class PortfolioService:
         return results
 
     async def calculate_rebalance(self, cash_to_deploy: Optional[float] = None) -> list[RebalanceResult]:
-        """Calculate rebalance suggestions based on targets vs current allocation."""
-        targets = await self.list_targets()
-        if not targets:
-            return []
+        """Calculate rebalance suggestions based on targets vs current allocation.
+
+        Falls back to the built-in deposit formula (NVDA 28% / VOO 22% / VYM 17% /
+        QQQ 17% / ROTATING 16%) when no user targets are set.  Results are enriched
+        with Intel recommendation signals and DRIP yield data.
+        """
+        targets_raw = await self.list_targets()
+        using_default_formula = not targets_raw
+
+        if using_default_formula:
+            formula_targets: list[dict] = [
+                {"ticker": tkr, "target_pct": pct} for tkr, pct in _DEPOSIT_FORMULA
+            ]
+        else:
+            formula_targets = [
+                {
+                    "ticker": (t["ticker"] if isinstance(t, dict) else t.ticker),
+                    "target_pct": float(t["target_pct"] if isinstance(t, dict) else t.target_pct),
+                }
+                for t in targets_raw
+            ]
 
         summary = await self.get_summary()
         total = summary.total_equity + (cash_to_deploy or 0)
@@ -287,32 +330,111 @@ class PortfolioService:
 
         positions = (
             self.client.table("positions")
-            .select("*")
+            .select("ticker, shares, avg_cost")
             .eq("user_id", str(self.user_id))
             .execute()
-        ).data
+        ).data or []
 
-        position_map = {p["ticker"]: float(p["shares"]) * float(p["avg_cost"]) for p in positions}
+        position_map: dict[str, float] = {
+            p["ticker"]: float(p["shares"]) * float(p["avg_cost"])
+            for p in positions
+        }
 
-        results = []
-        for t in targets:
-            ticker = t["ticker"] if isinstance(t, dict) else t.ticker
-            target_pct = float(t["target_pct"] if isinstance(t, dict) else t.target_pct)
-            current_value = position_map.get(ticker, 0)
-            current_pct = (current_value / total * 100) if total else 0
+        # ── Fetch active Intel recommendations ───────────────────────────────
+        intel_map: dict[str, dict] = {}
+        try:
+            recs = (
+                self.client.table("recommendations")
+                .select("ticker, action, urgency, detail, drip_note")
+                .eq("user_id", str(self.user_id))
+                .eq("is_active", True)
+                .execute()
+            ).data or []
+            for r in recs:
+                intel_map[r["ticker"].upper()] = {
+                    "action":    r.get("action", "HOLD"),
+                    "urgency":   int(r.get("urgency") or 0),
+                    "detail":    r.get("detail") or "",
+                    "drip_note": r.get("drip_note") or "",
+                }
+        except Exception as exc:
+            logger.debug("Could not fetch Intel recs for rebalance: %s", exc)
+
+        # ── Resolve ROTATING slot to best Intel BUY pick ─────────────────────
+        formula_ticker_set = {
+            t["ticker"].upper() for t in formula_targets
+            if t["ticker"].upper() != "ROTATING"
+        }
+        rotating_resolved: Optional[str] = None
+
+        for i, t in enumerate(formula_targets):
+            if t["ticker"].upper() == "ROTATING":
+                best: Optional[str] = None
+                best_urgency = -1
+                for tkr, sig in intel_map.items():
+                    if (
+                        tkr not in formula_ticker_set
+                        and sig["action"] == "BUY"
+                        and sig["urgency"] > best_urgency
+                    ):
+                        best = tkr
+                        best_urgency = sig["urgency"]
+                if best:
+                    rotating_resolved = best
+                    formula_targets[i] = {"ticker": best, "target_pct": t["target_pct"]}
+                break  # only one ROTATING slot
+
+        # ── Build results ─────────────────────────────────────────────────────
+        results: list[RebalanceResult] = []
+        for t in formula_targets:
+            ticker = t["ticker"]
+            target_pct = float(t["target_pct"])
+            current_value = position_map.get(ticker, 0.0)
+            current_pct = (current_value / total * 100) if total else 0.0
             drift = current_pct - target_pct
-            target_value = total * target_pct / 100
-            diff = target_value - current_value
 
-            if abs(drift) < 0.5:
-                action = "ON TARGET"
-                amount = 0
-            elif drift < 0:
-                action = f"BUY ${abs(diff):.2f}"
-                amount = abs(diff)
+            if using_default_formula and cash_to_deploy:
+                # Deposit mode: split the new cash directly by formula percentage
+                deploy_amount = cash_to_deploy * target_pct / 100
+                action = f"BUY ${deploy_amount:.2f}"
+                amount = deploy_amount
             else:
-                action = f"SELL ${abs(diff):.2f}"
-                amount = -abs(diff)
+                target_value = total * target_pct / 100
+                diff = target_value - current_value
+                if abs(drift) < 0.5:
+                    action = "ON TARGET"
+                    amount = 0.0
+                elif drift < 0:
+                    action = f"BUY ${abs(diff):.2f}"
+                    amount = abs(diff)
+                else:
+                    action = f"SELL ${abs(diff):.2f}"
+                    amount = -abs(diff)
+
+            # Intel enrichment
+            intel = intel_map.get(ticker.upper(), {})
+            intel_action: Optional[str] = intel.get("action")
+            intel_urgency: Optional[int] = intel.get("urgency")
+
+            # DRIP note — prefer live Intel drip_note, fall back to yield map
+            drip_note: Optional[str] = intel.get("drip_note") or None
+            if not drip_note:
+                yield_pct = _DRIP_YIELD_MAP.get(ticker.upper())
+                if yield_pct:
+                    drip_note = f"{yield_pct:.1f}% annual dividend yield"
+
+            # Rationale
+            rationale: Optional[str] = None
+            if using_default_formula:
+                ticker_up = ticker.upper()
+                if rotating_resolved and ticker_up == rotating_resolved.upper():
+                    rationale = (
+                        f"Intel rotating pick: {intel.get('detail') or 'Best active BUY signal'}"
+                    )
+                elif ticker_up == "ROTATING":
+                    rationale = "Rotating slot — no active Intel BUY signal found. Check Intel tab."
+                else:
+                    rationale = _FORMULA_RATIONALE.get(ticker_up)
 
             results.append(RebalanceResult(
                 ticker=ticker,
@@ -321,9 +443,16 @@ class PortfolioService:
                 drift_pct=round(drift, 2),
                 suggested_action=action,
                 suggested_amount=round(amount, 2),
+                intel_action=intel_action,
+                intel_urgency=intel_urgency,
+                drip_note=drip_note,
+                rationale=rationale,
+                is_default_formula=using_default_formula,
             ))
 
-        return sorted(results, key=lambda r: r.drift_pct)
+        if not using_default_formula:
+            results.sort(key=lambda r: r.drift_pct)
+        return results
 
     async def backfill_snapshots_from_transactions(self) -> dict:
         """Reconstruct historical portfolio snapshots from transaction history.

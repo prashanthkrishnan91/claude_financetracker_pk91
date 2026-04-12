@@ -361,6 +361,12 @@ export interface RebalanceResult {
   drift_pct: number;
   suggested_action: string;
   suggested_amount: number;
+  // Enrichment fields
+  intel_action?: string;
+  intel_urgency?: number;
+  drip_note?: string;
+  rationale?: string;
+  is_default_formula?: boolean;
 }
 
 export interface DripSummary {

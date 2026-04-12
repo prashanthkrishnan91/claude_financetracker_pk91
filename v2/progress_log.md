@@ -2,6 +2,31 @@
 
 ## Recent Changes
 
+### fix: repair pre/post-commit hooks and Claude Code hook guards
+- **Commit**: `4bf42d7`
+- **Date**: April 12, 2026
+Git hooks (.githooks/):
+- Register core.hooksPath via git config (hooks were never running)
+- pre-commit: tighten secrets check to match actual value assignments
+  (api_key = "long_value") instead of just the word "secret/token",
+  eliminating false positives on API management code
+- post-commit: add .git/POST_COMMIT_RUNNING flag file guard to prevent
+  infinite amend loop (amend was re-triggering post-commit forever)
+
+Claude Code hooks (.claude/settings.json):
+- PreToolUse: add skip guard — exits immediately if commit message
+  contains 'Auto-update docs' or only docs files are staged, preventing
+  recursive code review on the docs-update commit
+- PreToolUse: replace hardcoded date "April 9, 2026" with dynamic
+  `date '+%B %d, %Y'` shell call
+- PostToolUse: add skip guard — exits if HEAD is already 'Auto-update
+  docs' (breaks the push→hook→push→hook infinite loop)
+- PostToolUse: now commits AND pushes the docs update (previously
+  committed locally only, leaving an orphaned unpushed commit after
+  every push)
+
+https://claude.ai/code/session_016tyJuMoVnVHK7EC5gHiFkZ
+
 ### Fix: Deploy tab calculates deposit allocations without requiring manual target setup
 - **Commit**: `b586d8a` (PR #19)
 - **Date**: April 12, 2026

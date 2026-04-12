@@ -14,11 +14,14 @@ NC='\033[0m' # No Color
 
 echo -e "${YELLOW}Running pre-commit checks...${NC}"
 
-# 1. Check for secrets (prevent committing API keys, tokens, etc.)
+# 1. Check for secrets (prevent committing actual secret values, not just key names)
 echo -n "Checking for secrets... "
-if git diff --cached | grep -iE "(api.?key|password|secret|token|credential)" >/dev/null 2>&1; then
+# Match assignment patterns: key = "value" where value looks like a real secret (20+ chars)
+# Avoids false positives on variable names, docstrings, and comments
+if git diff --cached | grep -E '^\+' | grep -v '^\+\+\+' | \
+    grep -iE '(api.?key|password|secret|token|credential)\s*[=:]\s*["\x27][a-zA-Z0-9+/._-]{20,}["\x27]' >/dev/null 2>&1; then
     echo -e "${RED}FAILED${NC}"
-    echo "  ✗ Detected potential secrets in staged changes. Do not commit API keys!"
+    echo "  ✗ Detected potential hardcoded secret value in staged changes. Do not commit API keys!"
     EXIT_CODE=1
 else
     echo -e "${GREEN}OK${NC}"

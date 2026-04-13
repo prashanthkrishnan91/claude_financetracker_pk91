@@ -104,10 +104,19 @@ export const api = {
       fetchApi<InsightCardData[]>(
         `/api/v1/recommendations${action ? `?action=${action}` : ""}`
       ),
-    refresh: () =>
-      fetchApi<InsightCardData[]>("/api/v1/recommendations/refresh", {
+    refresh: (body?: { deposit_amount?: number; sale_proceeds?: number }) =>
+      fetchApi<AgentRunQueued>("/api/v1/recommendations/refresh", {
         method: "POST",
+        body: JSON.stringify(body || {}),
       }),
+    getJob: (jobId: string) =>
+      fetchApi<AgentRunStatus>(`/api/v1/recommendations/jobs/${jobId}`),
+    getJobInsights: (jobId: string) =>
+      fetchApi<AgentInsightData[]>(
+        `/api/v1/recommendations/jobs/${jobId}/insights`
+      ),
+    getLatestInsights: () =>
+      fetchApi<AgentInsightData[]>("/api/v1/recommendations/insights/latest"),
     resolve: (recId: string, resolution: string, notes?: string) =>
       fetchApi<void>(`/api/v1/recommendations/${recId}/resolve`, {
         method: "PATCH",
@@ -251,6 +260,51 @@ export interface InsightCardData {
   current_price?: number;
   pnl_pct?: number;
   category: string;
+  // Multi-agent enrichment (nullable for legacy rows)
+  investment_thesis?: string | null;
+  sentiment_score?: number | null;
+  technical_signal?: string | null;
+  conviction_score?: number | null;
+  suggested_allocation?: number | null;
+  agent_run_id?: string | null;
+}
+
+export interface AgentRunQueued {
+  job_id: string;
+  status: string;
+  message: string;
+}
+
+export interface AgentRunStatus {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed";
+  current_agent: string | null;
+  progress_pct: number;
+  tickers: string[];
+  deposit_amount: number;
+  sale_proceeds: number;
+  allocation: Record<string, number>;
+  summary: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface AgentInsightData {
+  id: string;
+  run_id: string | null;
+  ticker: string;
+  investment_thesis: string | null;
+  sentiment_score: number | null;
+  sentiment_label: string | null;
+  technical_signal: string | null;
+  technical_summary: string | null;
+  fundamental_score: number | null;
+  fundamental_summary: string | null;
+  conviction_score: number | null;
+  suggested_allocation: number | null;
+  suggested_action: string | null;
+  created_at: string | null;
 }
 
 export interface PriceQuote {

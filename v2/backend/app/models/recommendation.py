@@ -54,6 +54,61 @@ class InsightCard(BaseModel):
     pnl_pct: Optional[float] = None
     category: str       # Core, ETF, Crypto, etc.
 
+    # Multi-agent fields (populated from the agent pipeline)
+    investment_thesis: Optional[str] = None
+    sentiment_score: Optional[float] = None
+    technical_signal: Optional[str] = None
+    conviction_score: Optional[float] = None
+    suggested_allocation: Optional[float] = None
+    agent_run_id: Optional[UUID] = None
+
+
+class AgentRunStatus(BaseModel):
+    """Status snapshot of an in-flight or completed agent run."""
+    id: UUID
+    status: str                 # queued | running | completed | failed
+    current_agent: Optional[str] = None
+    progress_pct: int = 0
+    tickers: list[str] = []
+    deposit_amount: float = 0
+    sale_proceeds: float = 0
+    allocation: dict = {}
+    summary: Optional[str] = None
+    error_message: Optional[str] = None
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+
+
+class AgentRunCreate(BaseModel):
+    """Payload for POST /recommendations/refresh — kicks off a pipeline run."""
+    deposit_amount: Optional[float] = None   # defaults to user.deposit_amount
+    sale_proceeds: Optional[float] = 0.0
+
+
+class AgentRunQueued(BaseModel):
+    """Immediate response from POST /recommendations/refresh."""
+    job_id: UUID
+    status: str
+    message: str
+
+
+class AgentInsight(BaseModel):
+    """Full per-ticker agent output for the drill-down view."""
+    id: UUID
+    run_id: Optional[UUID] = None
+    ticker: str
+    investment_thesis: Optional[str] = None
+    sentiment_score: Optional[float] = None
+    sentiment_label: Optional[str] = None
+    technical_signal: Optional[str] = None
+    technical_summary: Optional[str] = None
+    fundamental_score: Optional[float] = None
+    fundamental_summary: Optional[str] = None
+    conviction_score: Optional[float] = None
+    suggested_allocation: Optional[float] = None
+    suggested_action: Optional[str] = None
+    created_at: Optional[str] = None
+
 
 class DecisionLogEntry(BaseModel):
     """Decision log entry returned by API."""

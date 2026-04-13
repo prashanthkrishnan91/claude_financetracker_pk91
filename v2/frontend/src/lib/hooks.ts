@@ -106,10 +106,41 @@ export function useRecommendations(action?: string) {
 }
 
 export function useRefreshRecommendations() {
-  const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.recommendations.refresh,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["recommendations"] }),
+    mutationFn: (body?: { deposit_amount?: number; sale_proceeds?: number }) =>
+      api.recommendations.refresh(body),
+  });
+}
+
+export function useAgentJob(jobId: string | null) {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: ["recommendations", "job", jobId],
+    queryFn: async () => {
+      if (!jobId) return null;
+      const status = await api.recommendations.getJob(jobId);
+      // When the pipeline finishes, refresh the card list so the UI catches up.
+      if (status.status === "completed" || status.status === "failed") {
+        qc.invalidateQueries({ queryKey: ["recommendations"] });
+        qc.invalidateQueries({ queryKey: ["recommendations", "insights"] });
+      }
+      return status;
+    },
+    enabled: !!jobId,
+    // Poll every 1.5s until the run is terminal.
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return 1500;
+      return data.status === "completed" || data.status === "failed" ? false : 1500;
+    },
+  });
+}
+
+export function useLatestAgentInsights() {
+  return useQuery({
+    queryKey: ["recommendations", "insights", "latest"],
+    queryFn: api.recommendations.getLatestInsights,
+    staleTime: 30_000,
   });
 }
 

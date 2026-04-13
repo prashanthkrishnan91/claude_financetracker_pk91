@@ -16,6 +16,8 @@ from uuid import UUID
 
 from ..database import get_supabase_client
 from ..models.recommendation import (
+    AgentInsight,
+    AgentRunStatus,
     DecisionLogCreate,
     DecisionLogEntry,
     InsightCard,
@@ -404,92 +406,124 @@ class RecommendationService:
                 current_price=price,
                 pnl_pct=pnl_pct,
                 category=pos.get("category", "Unknown"),
+                # Agent fields (may be null for legacy rule-based rows)
+                investment_thesis=rec.get("investment_thesis"),
+                sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
+                technical_signal=rec.get("technical_signal"),
+                conviction_score=float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None,
+                suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,
+                agent_run_id=rec.get("agent_run_id"),
             ))
 
         return cards
 
-    async def refresh(self) -> list[InsightCard]:
-        """Re-run the recommendation engine against current positions and prices.
+    async def queue_agent_run(
+        self,
+        deposit_amount: Optional[float] = None,
+        sale_proceeds: float = 0.0,
+    ) -> str:
+        """Create an `agent_runs` row and return its job_id.
 
-        1. Fetch all positions
-        2. Fetch live prices
-        3. Run generate_rec() for each position
-        4. Deactivate old recommendations
-        5. Insert fresh recommendations
-        6. Return as InsightCards
+        The router then dispatches the pipeline via FastAPI BackgroundTasks.
         """
-        # 1. Fetch positions
-        positions = (
-            self.client.table("positions")
+        # Default deposit from user row if not supplied
+        if deposit_amount is None:
+            try:
+                row = (
+                    self.client.table("users")
+                    .select("deposit_amount")
+                    .eq("id", str(self.user_id))
+                    .single()
+                    .execute()
+                )
+                deposit_amount = float(row.data.get("deposit_amount") or 900.0)
+            except Exception:
+                deposit_amount = 900.0
+
+        from .agents.job_runner import build_orchestrator
+        orch = build_orchestrator(
+            user_id=self.user_id,
+            deposit_amount=deposit_amount,
+            sale_proceeds=sale_proceeds,
+        )
+        return await orch.create_run()
+
+    async def get_job_status(self, job_id: UUID) -> AgentRunStatus:
+        """Fetch the status of an agent run. Used by the UI progress tracker."""
+        from fastapi import HTTPException
+        row = (
+            self.client.table("agent_runs")
             .select("*")
+            .eq("id", str(job_id))
+            .eq("user_id", str(self.user_id))
+            .single()
+            .execute()
+        )
+        if not row.data:
+            raise HTTPException(status_code=404, detail="Agent run not found")
+        d = row.data
+        return AgentRunStatus(
+            id=d["id"],
+            status=d["status"],
+            current_agent=d.get("current_agent"),
+            progress_pct=int(d.get("progress_pct") or 0),
+            tickers=d.get("tickers") or [],
+            deposit_amount=float(d.get("deposit_amount") or 0),
+            sale_proceeds=float(d.get("sale_proceeds") or 0),
+            allocation=d.get("allocation") or {},
+            summary=d.get("summary"),
+            error_message=d.get("error_message"),
+            started_at=d.get("started_at"),
+            finished_at=d.get("finished_at"),
+        )
+
+    async def get_agent_insights(self, run_id: Optional[UUID] = None) -> list[AgentInsight]:
+        """Fetch the per-ticker agent insights for a run.
+
+        If `run_id` is None, returns the insights from the most recent
+        completed run for this user.
+        """
+        if run_id is None:
+            latest = (
+                self.client.table("agent_runs")
+                .select("id")
+                .eq("user_id", str(self.user_id))
+                .eq("status", "completed")
+                .order("started_at", desc=True)
+                .limit(1)
+                .execute()
+            ).data
+            if not latest:
+                return []
+            run_id = latest[0]["id"]
+
+        rows = (
+            self.client.table("agent_insights")
+            .select("*")
+            .eq("run_id", str(run_id))
             .eq("user_id", str(self.user_id))
             .execute()
-        ).data
+        ).data or []
 
-        if not positions:
-            return []
-
-        # 2. Fetch live prices
-        prices: dict[str, float] = {}
-        if self._price_service:
-            try:
-                tickers = [p["ticker"] for p in positions]
-                price_results = await self._price_service.fetch_prices(tickers)
-                for t, pr in price_results.items():
-                    if pr.is_valid:
-                        prices[t] = pr.mid_price
-            except Exception:
-                pass
-
-        # 3. Generate recommendations for each position
-        new_recs = []
-        for pos in positions:
-            ticker = pos["ticker"]
-            price = prices.get(ticker)
-
-            rec = generate_rec(
-                cat=pos["category"],
-                ticker=ticker,
-                cost=float(pos["avg_cost"]),
-                target=float(pos["target_price"]) if pos.get("target_price") else None,
-                bear=float(pos["bear_price"]) if pos.get("bear_price") else None,
-                bull=float(pos["bull_price"]) if pos.get("bull_price") else None,
-                lt_ready=bool(pos.get("lt_eligible", False)),
-                lt_date=str(pos.get("lt_date", "")) if pos.get("lt_date") else "",
-                price=price,
-                drip_shares=float(pos.get("drip_shares", 0)),
-                drip_cost=float(pos.get("drip_cost", 0)),
-                divs_received=float(pos.get("divs_received", 0)),
+        return [
+            AgentInsight(
+                id=r["id"],
+                run_id=r.get("run_id"),
+                ticker=r["ticker"],
+                investment_thesis=r.get("investment_thesis"),
+                sentiment_score=float(r["sentiment_score"]) if r.get("sentiment_score") is not None else None,
+                sentiment_label=r.get("sentiment_label"),
+                technical_signal=r.get("technical_signal"),
+                technical_summary=r.get("technical_summary"),
+                fundamental_score=float(r["fundamental_score"]) if r.get("fundamental_score") is not None else None,
+                fundamental_summary=r.get("fundamental_summary"),
+                conviction_score=float(r["conviction_score"]) if r.get("conviction_score") is not None else None,
+                suggested_allocation=float(r["suggested_allocation"]) if r.get("suggested_allocation") is not None else None,
+                suggested_action=r.get("suggested_action"),
+                created_at=r.get("created_at"),
             )
-
-            new_recs.append({
-                "user_id": str(self.user_id),
-                "ticker": ticker,
-                "action": rec.action,
-                "detail": rec.detail,
-                "rationale": rec.action_label,
-                "urgency": rec.urgency,
-                "tax_note": rec.tax_note,
-                "drip_note": rec.drip_note,
-                "is_active": True,
-            })
-
-        # 4. Deactivate all current active recommendations
-        self.client.table("recommendations").update({
-            "is_active": False,
-            "resolution": "expired",
-            "resolved_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("user_id", str(self.user_id)).eq("is_active", True).execute()
-
-        # 5. Batch insert fresh recommendations
-        if new_recs:
-            batch_size = 50
-            for i in range(0, len(new_recs), batch_size):
-                batch = new_recs[i:i + batch_size]
-                self.client.table("recommendations").insert(batch).execute()
-
-        # 6. Return as InsightCards
-        return await self.get_insight_cards()
+            for r in rows
+        ]
 
     async def resolve(self, rec_id: UUID, resolution: RecommendationResolve) -> dict:
         """Resolve a recommendation — accept, reject, defer, or expire."""

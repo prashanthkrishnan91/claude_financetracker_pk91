@@ -7,8 +7,10 @@ import {
   useRefreshRecommendations,
   useResolveRecommendation,
   useDecisionLog,
+  useAgentJob,
 } from "@/lib/hooks";
-import { InsightCard } from "@/components/cards/InsightCard";
+import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
+import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
@@ -42,11 +44,21 @@ export default function RecommendationsPage() {
   const [selectedCard, setSelectedCard] = useState<InsightCardData | null>(null);
   const [toast, setToast] = useState<string | null>(null);
   const [decisionLogOpen, setDecisionLogOpen] = useState(false);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
 
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
+  const { data: jobStatus } = useAgentJob(activeJobId);
+
+  // Clear the tracker shortly after a run completes so it doesn't linger.
+  useEffect(() => {
+    if (jobStatus?.status === "completed" || jobStatus?.status === "failed") {
+      const t = setTimeout(() => setActiveJobId(null), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [jobStatus?.status]);
 
   const filtered =
     filter === "ALL"
@@ -98,20 +110,32 @@ export default function RecommendationsPage() {
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <h1 className="text-xl font-display text-text-primary">Intel</h1>
           <button
-            onClick={() => refreshRecs.mutate()}
-            disabled={refreshRecs.isPending}
+            onClick={() =>
+              refreshRecs.mutate(undefined, {
+                onSuccess: (data) => {
+                  setActiveJobId(data.job_id);
+                  setToast("Agent pipeline queued");
+                },
+              })
+            }
+            disabled={refreshRecs.isPending || (jobStatus?.status === "running")}
             className="text-xs px-3 py-1.5 rounded-md bg-accent text-background font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50"
           >
-            {refreshRecs.isPending ? (
+            {refreshRecs.isPending || jobStatus?.status === "running" ? (
               <Spinner className="h-3 w-3" />
             ) : (
-              "Refresh"
+              "Run Agents"
             )}
           </button>
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-4">
+        {/* Agent Pipeline Progress Tracker */}
+        {activeJobId && jobStatus && (
+          <AgentProgressTracker status={jobStatus} />
+        )}
+
         {/* Filter cards */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
           {ACTION_FILTERS.map((f) => (
@@ -156,7 +180,7 @@ export default function RecommendationsPage() {
         ) : (
           <div className="space-y-3">
             {filtered.map((card) => (
-              <InsightCard
+              <AgentInsightCard
                 key={card.id}
                 card={card}
                 onClick={() => setSelectedCard(card)}

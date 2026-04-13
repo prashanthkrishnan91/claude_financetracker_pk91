@@ -48,7 +48,7 @@ class LLMClient:
             msg = client.messages.create(
                 model=self.model,
                 max_tokens=max_tokens,
-                system=system,
+                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": user}],
             )
             return msg.content[0].text if msg.content else ""

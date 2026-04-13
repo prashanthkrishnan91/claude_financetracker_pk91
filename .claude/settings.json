@@ -13,20 +13,6 @@
         ]
       }
     ],
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "agent",
-            "if": "Bash(git commit*)",
-            "timeout": 300,
-            "statusMessage": "Running pre-commit code & security review + updating docs...",
-            "prompt": "A git commit is about to happen. The exact Bash command is: $ARGUMENTS\n\nREPO ROOT: /home/user/claude_financetracker_pk91\n\n--- GUARD: Skip auto-update commits ---\nIf the commit message in $ARGUMENTS contains 'Auto-update docs' OR 'auto-update docs' OR 'update docs', output exactly:\nSKIP: docs-only commit\nThen stop. Do nothing else.\n\nAlso skip if the only staged files are v2/progress_log.md and/or v2/README.md:\n  Run: git -C /home/user/claude_financetracker_pk91 diff --staged --name-only\n  If the result contains ONLY progress_log.md and/or README.md, output SKIP: docs-only and stop.\n\n--- STEP 1: Gather staged changes ---\nRun:\n  git -C /home/user/claude_financetracker_pk91 diff --staged --stat\n  git -C /home/user/claude_financetracker_pk91 diff --staged\n\n--- STEP 1b: Load Code Graph ---\nRead /home/user/claude_financetracker_pk91/graphify-out/GRAPH_REPORT.md\nNote the god nodes table and which communities the changed files belong to.\nUse this context in Steps 2-3: flag extra-carefully any changes to god nodes or cross-community imports.\nIf a changed module has in-degree >= 5, note its blast radius in the review.\n\n--- STEP 2: Extensive Code Review ---\nAnalyze every staged file for:\n- Logic errors, bugs, off-by-one errors, incorrect conditionals\n- Dead code, unreachable branches, infinite loops\n- N+1 queries, inefficient algorithms, missing pagination\n- Missing error handling at system/API/DB boundaries\n- Type mismatches (Python/TypeScript), nullable dereferences\n- Incorrect async/await usage, race conditions\n- Test coverage gaps for changed logic\n- Poor naming that obscures intent\n- Graph impact: if a changed module is a god node (high in-degree), note blast radius\nDocument each finding as: [SEVERITY: LOW/MED/HIGH] File:line -- description\n\n--- STEP 3: Extensive Security Review ---\nCheck every staged file for:\n- Hardcoded secrets, API keys, tokens, passwords, connection strings\n- SQL injection (raw string interpolation into queries)\n- XSS (unescaped user input rendered in HTML/JSX)\n- Command injection (user data passed to shell commands)\n- Path traversal (user-controlled file paths)\n- IDOR (missing ownership checks on database queries)\n- Missing auth/authorization on endpoints\n- PII or sensitive data in logs, error responses, or comments\n- Broken crypto (weak algorithms, static IVs, predictable nonces)\n- CORS misconfiguration (wildcard origins with credentials)\n- Missing rate limiting on auth or sensitive endpoints\n- Insecure direct use of eval, exec, or dynamic imports\nDocument each finding as: [SEVERITY: LOW/MED/HIGH/CRITICAL] File:line -- description\n\n--- STEP 4: Update v2/progress_log.md ---\nGet today's date by running: date '+%B %d, %Y'\nRead /home/user/claude_financetracker_pk91/v2/progress_log.md\nAdd or extend today's entry with:\n- Section header for the commit (use commit message from $ARGUMENTS)\n- Files changed and what each change accomplishes\n- Code review summary (list findings or 'No issues found')\n- Security review summary (list findings or 'No issues found')\nMatch the existing style. Write the file back.\n\n--- STEP 5: Update v2/README.md ---\nRead /home/user/claude_financetracker_pk91/v2/README.md\nMake targeted updates only:\n- Tick [ ] -> [x] for any Roadmap items completed by the staged changes\n- Add new files to the Directory Structure tree if staged changes introduce new files\n- Update the API Endpoints table if new routes are added\n- Do NOT rewrite or restructure anything else\nWrite the file back only if changes are needed.\n\n--- STEP 6: Stage the updated docs ---\nRun:\n  git -C /home/user/claude_financetracker_pk91 add v2/progress_log.md v2/README.md\n\nDo NOT run git commit or git push -- only stage the files so they are included in the pending commit.\n\nIMPORTANT: If any CRITICAL security finding is found (hardcoded secret, SQL injection, XSS with user input, missing auth on a sensitive endpoint), output the text:\nBLOCK_COMMIT: <brief reason>\nso the developer is warned before proceeding."
-          }
-        ]
-      }
-    ],
     "PostToolUse": [
       {
         "matcher": "Write|Edit",
@@ -37,18 +23,6 @@
             "timeout": 60,
             "statusMessage": "Updating code graph…",
             "async": true
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "agent",
-            "if": "Bash(git push*)",
-            "timeout": 180,
-            "statusMessage": "Updating v2/README.md and v2/progress_log.md...",
-            "prompt": "A git push just completed. The exact Bash command was: $ARGUMENTS\n\nREPO ROOT: /home/user/claude_financetracker_pk91\n\n--- GUARD: Skip if already an auto-update push ---\nRun: git -C /home/user/claude_financetracker_pk91 log --oneline -1\nIf the HEAD commit message contains 'Auto-update docs', output:\nSKIP: already an auto-update commit\nThen stop immediately. Do nothing else.\n\n--- STEP 1: Gather context ---\nRun: git -C /home/user/claude_financetracker_pk91 log --oneline -5\nRun: git -C /home/user/claude_financetracker_pk91 diff HEAD~1 HEAD --stat 2>/dev/null || git -C /home/user/claude_financetracker_pk91 show --stat HEAD\n\n--- STEP 2: Update v2/progress_log.md ---\nGet today's date by running: date '+%B %d, %Y'\nRead /home/user/claude_financetracker_pk91/v2/progress_log.md\nAdd or extend today's entry with:\n- A section header matching the push (use commit messages as the title)\n- Date and version (infer from existing entries or commit messages)\n- List of files changed and what each change accomplishes\nMatch the existing style exactly. Write the file back.\n\n--- STEP 3: Update v2/README.md ---\nRead /home/user/claude_financetracker_pk91/v2/README.md\nMake targeted updates only:\n- Tick [ ] -> [x] for any Roadmap items completed or advanced by the pushed commits\n- Add new files to the Directory Structure tree if new files were introduced\n- Update the API Endpoints table if new routes were added\n- Do NOT rewrite or restructure anything else\nWrite the file back only if changes are needed.\n\n--- STEP 4: Commit and push updated docs ---\nCheck if docs changed:\n  git -C /home/user/claude_financetracker_pk91 diff --quiet v2/progress_log.md v2/README.md\nIf there are changes, run:\n  git -C /home/user/claude_financetracker_pk91 add v2/progress_log.md v2/README.md\n  git -C /home/user/claude_financetracker_pk91 commit -m 'Auto-update docs: progress_log + README'\n  git -C /home/user/claude_financetracker_pk91 push -u origin main\n\nIMPORTANT: The push in step 4 will re-trigger this PostToolUse hook. The GUARD at the top will detect HEAD is 'Auto-update docs' and exit immediately -- no infinite loop."
           }
         ]
       }

@@ -295,7 +295,10 @@ def write_graph_report(
         community_groups[cid].append(mod)
     community_groups = {
         cid: sorted(mods)
-        for cid, mods in sorted(community_groups.items(), key=lambda x: -len(x[1]))
+        for cid, mods in sorted(
+            community_groups.items(),
+            key=lambda x: (-len(x[1]), sorted(x[1])[0]),
+        )
     }
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -332,8 +335,8 @@ def write_graph_report(
 
     # Communities section
     lines += ["## Communities", "", "Clusters of tightly coupled modules (union-find on import graph).", ""]
-    for cid, mods in list(community_groups.items())[:10]:
-        lines.append(f"### Community {cid} ({len(mods)} modules)")
+    for idx, (_, mods) in enumerate(list(community_groups.items())[:10], start=1):
+        lines.append(f"### Community {idx} ({len(mods)} modules)")
         lines.append("")
         for m in mods[:15]:
             info = meta.get(m, {})
@@ -351,7 +354,15 @@ def write_graph_report(
     lines += ["```", ""]
 
     report_path = out_dir / "GRAPH_REPORT.md"
-    report_path.write_text("\n".join(lines), encoding="utf-8")
+    new_content = "\n".join(lines)
+    # Skip write if only the timestamp changed (avoids noisy git diffs every session)
+    if report_path.exists():
+        existing = report_path.read_text(encoding="utf-8")
+        ts_pattern = r"_Generated: [^_]+_"
+        if re.sub(ts_pattern, "", existing) == re.sub(ts_pattern, "", new_content):
+            print(f"[code-review-graph] No changes — skipped {report_path}")
+            return
+    report_path.write_text(new_content, encoding="utf-8")
     print(f"[code-review-graph] Wrote {report_path}")
 
 
@@ -381,8 +392,13 @@ def write_wiki_index(
             f"",
         ]
 
-    (wiki_dir / "index.md").write_text("\n".join(index_lines), encoding="utf-8")
-    print(f"[code-review-graph] Wrote {wiki_dir / 'index.md'}")
+    index_path = wiki_dir / "index.md"
+    new_content = "\n".join(index_lines)
+    if index_path.exists() and index_path.read_text(encoding="utf-8") == new_content:
+        print(f"[code-review-graph] No changes — skipped {index_path}")
+        return
+    index_path.write_text(new_content, encoding="utf-8")
+    print(f"[code-review-graph] Wrote {index_path}")
 
 
 # ---------------------------------------------------------------------------

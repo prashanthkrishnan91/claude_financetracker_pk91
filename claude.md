@@ -7,6 +7,7 @@
 - **Concise Code Outputs**: When modifying files, do NOT output the entire file in the chat unless specifically requested. Use snippet replacements, exact line references, or git diff formats.
 - **Proactive Compaction**: After completing a discrete feature or fixing a complex bug, immediately prompt the user to run `/compact` before moving to the next task.
 - **Zero Filler**: Skip polite conversational filler. Deliver only the technical plan, the exact code modifications, or the error resolution.
+- **Use code graph**: Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure. If graphify-out/wiki/index.md exists, navigate it instead of reading raw files. After modifying code files in this session, run python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))" to keep the graph current
 
 ## 2. Workflow Orchestration
 - **Plan Mode Default**: For ANY non-trivial task (>2 steps or architectural changes), write a detailed, step-by-step spec upfront. Await approval before writing code to prevent expensive rewrites.

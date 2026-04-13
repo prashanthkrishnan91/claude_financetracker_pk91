@@ -1,6 +1,6 @@
 # Code Graph Report
 
-_Generated: 2026-04-13 22:42_  |  _Root: /home/user/claude_financetracker_pk91_
+_Generated: 2026-04-13 22:59_  |  _Root: /home/user/claude_financetracker_pk91_
 
 ## Summary
 
@@ -96,11 +96,11 @@ Clusters of tightly coupled modules (union-find on import graph).
 
 ### Community 4 (1 modules)
 
-- `v2.backend.app.middleware` (1 LoC, 0 deps)
+- `v1.data` (1 LoC, 0 deps)
 
 ### Community 5 (1 modules)
 
-- `scripts.build_code_graph` (411 LoC, 0 deps)
+- `v1.data.portfolio` (139 LoC, 0 deps)
 
 ### Community 6 (1 modules)
 
@@ -108,15 +108,15 @@ Clusters of tightly coupled modules (union-find on import graph).
 
 ### Community 7 (1 modules)
 
-- `v1.data.portfolio` (139 LoC, 0 deps)
+- `v2.backend.app.middleware` (1 LoC, 0 deps)
 
 ### Community 8 (1 modules)
 
-- `v1.utils.price_fetcher` (155 LoC, 0 deps)
+- `v2.backend.tests` (1 LoC, 0 deps)
 
 ### Community 9 (1 modules)
 
-- `scripts.update_docs` (79 LoC, 0 deps)
+- `v1.utils.csv_parser` (382 LoC, 0 deps)
 
 ## Edge List (internal imports)
 

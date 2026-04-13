@@ -13,7 +13,7 @@ Auto-generated index of internal modules.
 ## `scripts.build_code_graph`
 
 - **Path**: `scripts/build_code_graph.py`
-- **LoC**: 411
+- **LoC**: 427
 - **In-degree**: 0
 - **Imports**: _none_
 - **Functions/methods**: `repo_root`, `collect_py_files`, `module_name`, `build_short_name_map`, `resolve_import`, `resolve_relative_import`, `parse_imports`, `count_lines`, `extract_functions`, `build_graph`

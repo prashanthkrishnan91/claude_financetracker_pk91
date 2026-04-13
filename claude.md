@@ -10,10 +10,13 @@ Vercel (serverless) · Supabase (DB) · Python/JS frontend
 - No conversational filler. Plan → Code → Verify. Nothing else.
 - Max 2 fix attempts before stopping and asking the user what to try next.
 
-## Code Graph (use instead of raw file reads)
-- Architecture/codebase questions → read `graphify-out/GRAPH_REPORT.md` first (god nodes + community structure). If `graphify-out/wiki/index.md` exists, navigate it instead.
-- After modifying any code file → run: `python3 -c "from graphify.watch import _rebuild_code; from pathlib import Path; _rebuild_code(Path('.'))"`
-- Never read raw source files to answer structural questions if the graph exists.
+## Code Graph (auto-loaded at session start)
+Both files below are injected into context automatically — no need to ask Claude to read them.
+- Never read raw source files to answer structural questions; use the graph data already in context.
+- After modifying any code file the graph is rebuilt automatically by the PostToolUse hook.
+
+@graphify-out/GRAPH_REPORT.md
+@graphify-out/wiki/index.md
 
 ## Workflow
 - Tasks >2 steps: write plan to `tasks/todo.md`, await approval, then execute.

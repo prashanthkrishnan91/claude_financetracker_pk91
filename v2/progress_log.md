@@ -2,6 +2,42 @@
 
 ## Recent Changes
 
+### fix(code-graph): resolve relative and short-name imports correctly
+- **Commit**: `9f5bab1`
+- **Date**: April 13, 2026
+
+Fixed two import-resolution bugs in `scripts/build_code_graph.py` that caused god-node modules (`database`, `config`, `middleware.auth`) to appear as unresolved ghost nodes with `?` LoC:
+
+1. **Relative imports** (`from ..database import get_db`, level=2) were being appended raw as `"database"` instead of resolved. Added `resolve_relative_import()` implementing Python's importlib `rsplit('.', level-1)` algorithm.
+2. **Short-name imports** (FastAPI pattern where `v2/backend/app/` is on sys.path, so `from database import …` works without the full dotted path) now resolved via `build_short_name_map()` leaf-index lookup.
+
+Result: 79 real modules (down from 123 ghost+real), 133 edges, 15 communities, all god nodes show correct LoC and file paths.
+
+**Code review:** [LOW] Return type annotation on `build_short_name_map` says `dict[str, str]` but returns `dict[str, list[str]]` — no runtime impact. [LOW] `os.path.commonprefix` does character-level prefix ranking (not dotted-component). No blocking issues.
+**Security review:** No secrets, no injection surfaces. `ast.parse` used (not `exec`). All clear.
+
+**Files**: `scripts/build_code_graph.py` (+105 lines), `graphify-out/GRAPH_REPORT.md` (regenerated), `graphify-out/wiki/index.md` (regenerated)
+
+---
+
+### feat: install code-review-graph for Claude Code platform
+- **Commit**: `abfc393`
+- **Date**: April 13, 2026
+
+Installed a lightweight code-review-graph pipeline wired into Claude Code's `.claude/settings.json` hooks:
+
+- `scripts/build_code_graph.py`: Pure-Python AST walker that scans all `.py` files, builds an import dependency graph, and writes `graphify-out/GRAPH_REPORT.md` (god nodes, communities, edge list) and `graphify-out/wiki/index.md` (per-module stub wiki).
+- `scripts/rebuild_graph_on_edit.sh`: Thin hook wrapper that reads stdin JSON and rebuilds the graph only when edited file ends in `.py`.
+- `.claude/settings.json` updated with three new hooks:
+  - `SessionStart` → builds graph at session start (async, non-blocking)
+  - `PostToolUse Write|Edit` → rebuilds graph on `.py` edits (async)
+  - `PreToolUse Bash(git commit*)` → existing agent hook extended with Step 1b: loads `GRAPH_REPORT.md` and surfaces god-node blast radius in code review
+- `graphify-out/GRAPH_REPORT.md` and `graphify-out/wiki/index.md` generated (initial run: 79 modules, 22 god nodes, 15 communities).
+
+**Code review:** No issues. **Security review:** No issues.
+
+---
+
 ### Integrate multi-agent trading reasoning engine
 - **Commit**: `9564c8c`
 - **Date**: April 13, 2026

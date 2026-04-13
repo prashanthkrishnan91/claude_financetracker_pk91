@@ -31,6 +31,7 @@ v2/backend/.env.*
 v2/frontend/node_modules/
 v2/frontend/.next/
 v2/frontend/out/
+v2/frontend/tsconfig.tsbuildinfo
 v2/frontend/.env.local
 v2/frontend/.env.*.local
 

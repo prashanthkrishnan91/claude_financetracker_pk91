@@ -1,19 +1,28 @@
-"""Recommendations router — insight cards, decision log."""
+"""Recommendations router — insight cards, agent runs, decision log.
+
+The `refresh` endpoint no longer runs a synchronous rule engine — it queues
+a multi-agent pipeline via FastAPI BackgroundTasks and returns a job_id.
+The UI polls `/recommendations/jobs/{job_id}` to drive the progress tracker.
+"""
 
 from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.recommendation import (
+    AgentInsight,
+    AgentRunCreate,
+    AgentRunQueued,
+    AgentRunStatus,
     DecisionLogCreate,
     DecisionLogEntry,
     InsightCard,
     RecommendationResolve,
-    RecommendationResponse,
 )
+from ..services.agents.job_runner import run_agent_pipeline
 from ..services.recommendation_engine import RecommendationService
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
@@ -36,11 +45,7 @@ async def list_active_recommendations(
     action: str | None = Query(default=None, description="Filter: BUY|SELL|TRIM|HOLD|REVIEW"),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Get all active recommendations as frontend-ready InsightCards.
-
-    This is the primary recommendations endpoint — combines
-    recommendation data with current prices and position context.
-    """
+    """Get all active recommendations as frontend-ready InsightCards."""
     service = RecommendationService(user_id=user.id, price_service=_make_price_service())
     cards = await service.get_insight_cards()
 
@@ -50,16 +55,66 @@ async def list_active_recommendations(
     return cards
 
 
-@router.post("/refresh", response_model=list[InsightCard])
+@router.post("/refresh", response_model=AgentRunQueued, status_code=202)
 async def refresh_recommendations(
+    background_tasks: BackgroundTasks,
+    payload: AgentRunCreate | None = None,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Re-run the recommendation engine against current positions and prices.
+    """Queue a multi-agent pipeline run.
 
-    Deactivates stale recommendations and generates fresh ones.
+    Returns immediately with a job_id. The pipeline runs in the background
+    and writes progress to the agent_runs table; poll
+    `/recommendations/jobs/{job_id}` for live status.
     """
-    service = RecommendationService(user_id=user.id, price_service=_make_price_service())
-    return await service.refresh()
+    payload = payload or AgentRunCreate()
+    service = RecommendationService(user_id=user.id)
+    job_id = await service.queue_agent_run(
+        deposit_amount=payload.deposit_amount,
+        sale_proceeds=payload.sale_proceeds or 0.0,
+    )
+    # Hand off to FastAPI BackgroundTasks — fire-and-forget, UI polls for status.
+    background_tasks.add_task(
+        run_agent_pipeline,
+        user.id,
+        job_id,
+        payload.deposit_amount if payload.deposit_amount is not None else 900.0,
+        payload.sale_proceeds or 0.0,
+    )
+    return AgentRunQueued(
+        job_id=job_id,
+        status="queued",
+        message="Agent pipeline queued — poll /recommendations/jobs/{job_id}",
+    )
+
+
+@router.get("/jobs/{job_id}", response_model=AgentRunStatus)
+async def get_job_status(
+    job_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Poll an in-flight or completed agent run. Drives the progress tracker UI."""
+    service = RecommendationService(user_id=user.id)
+    return await service.get_job_status(job_id)
+
+
+@router.get("/jobs/{job_id}/insights", response_model=list[AgentInsight])
+async def get_run_insights(
+    job_id: UUID,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Get the full per-ticker agent insights for a specific run."""
+    service = RecommendationService(user_id=user.id)
+    return await service.get_agent_insights(run_id=job_id)
+
+
+@router.get("/insights/latest", response_model=list[AgentInsight])
+async def get_latest_insights(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Get the agent insights from the most recent completed run."""
+    service = RecommendationService(user_id=user.id)
+    return await service.get_agent_insights(run_id=None)
 
 
 @router.patch("/{rec_id}/resolve")

@@ -61,31 +61,110 @@ def module_name(path: Path, root: Path) -> str:
     return ".".join(parts)
 
 
-def parse_imports(path: Path, root: Path) -> list[str]:
+def build_short_name_map(files: list[Path], root: Path) -> dict[str, str]:
+    """
+    Map short bare names (e.g. 'config', 'database') to their full dotted
+    module name (e.g. 'v2.backend.app.config').
+
+    This handles the common FastAPI pattern where a package directory is
+    added to sys.path so files can do `from database import ...` instead of
+    `from v2.backend.app.database import ...`.
+
+    When multiple files share the same basename (e.g. v1/config.py and
+    v2/.../config.py) we keep all mappings; resolution will prefer the one
+    in the same sub-tree as the importing file.
+    """
+    short_map: dict[str, list[str]] = defaultdict(list)
+    for f in files:
+        mod = module_name(f, root)
+        # The "short" name is the last component (leaf module name)
+        leaf = mod.split(".")[-1]
+        short_map[leaf].append(mod)
+    # Collapse to single entry when unambiguous; keep list when ambiguous
+    return {k: v for k, v in short_map.items()}
+
+
+def resolve_import(name: str, path: Path, root: Path, short_map: dict[str, list[str]]) -> str | None:
+    """
+    Try to resolve an imported name to a full dotted module name that
+    exists in this project.  Returns None if it looks external.
+    """
+    top = name.split(".")[0]
+    own_parts = module_name(path, root).split(".")
+
+    # 1. Direct match: top-level package or file at repo root
+    if (root / top).is_dir() or (root / (top + ".py")).exists():
+        return name
+
+    # 2. Own package
+    if top == own_parts[0]:
+        return name
+
+    # 3. Short-name lookup (sys.path-style, e.g. FastAPI app dir on path)
+    if top in short_map:
+        candidates = short_map[top]
+        if len(candidates) == 1:
+            return candidates[0]
+        # Prefer the candidate sharing the longest common prefix with the importer
+        own_prefix = ".".join(own_parts[:-1])
+        best = max(candidates, key=lambda c: len(os.path.commonprefix([c, own_prefix])))
+        return best
+
+    return None
+
+
+def resolve_relative_import(module: str, level: int, path: Path, root: Path) -> str:
+    """
+    Resolve a relative import (from .module or from ..module) to its
+    absolute dotted module name using the same algorithm as Python's importlib.
+    """
+    own = module_name(path, root)
+    # For __init__.py the package IS the module; for normal files strip last part
+    if path.name == "__init__.py":
+        package = own
+    else:
+        parts = own.rsplit(".", 1)
+        package = parts[0] if len(parts) > 1 else ""
+
+    if not package:
+        return module  # top-level — can't go further up
+
+    # Python's _resolve_name: rsplit('.', level - 1)
+    bits = package.rsplit(".", level - 1)
+    base = bits[0]
+    return f"{base}.{module}" if module else base
+
+
+def parse_imports(path: Path, root: Path, short_map: dict[str, list[str]] | None = None) -> list[str]:
     """Return list of internal module names imported by `path`."""
+    if short_map is None:
+        short_map = {}
     try:
         source = path.read_text(encoding="utf-8", errors="ignore")
         tree = ast.parse(source, filename=str(path))
     except SyntaxError:
         return []
 
-    own_pkg = module_name(path, root).split(".")[0]
     imports: list[str] = []
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             for alias in node.names:
-                top = alias.name.split(".")[0]
-                if top == own_pkg or (root / top).is_dir() or (root / (top + ".py")).exists():
-                    imports.append(alias.name)
+                resolved = resolve_import(alias.name, path, root, short_map)
+                if resolved:
+                    imports.append(resolved)
         elif isinstance(node, ast.ImportFrom):
-            if node.module is None:
+            if node.module is None and node.level == 0:
                 continue
-            top = node.module.split(".")[0]
-            if node.level > 0:  # relative import
-                imports.append(node.module)
-            elif top == own_pkg or (root / top).is_dir() or (root / (top + ".py")).exists():
-                imports.append(node.module)
+            mod = node.module or ""
+            if node.level > 0:
+                # Relative import: resolve to absolute name then verify it's internal
+                abs_name = resolve_relative_import(mod, node.level, path, root)
+                imports.append(abs_name)
+            else:
+                resolved = resolve_import(mod, path, root, short_map)
+                if resolved:
+                    imports.append(resolved)
 
     return imports
 
@@ -115,6 +194,8 @@ def build_graph(root: Path):
     if not files:
         return {}, {}, {}
 
+    short_map = build_short_name_map(files, root)
+
     # module → set of modules it imports
     edges: dict[str, set[str]] = defaultdict(set)
     meta: dict[str, dict] = {}
@@ -124,7 +205,7 @@ def build_graph(root: Path):
         loc = count_lines(f)
         fns = extract_functions(f)
         meta[mod] = {"path": str(f.relative_to(root)), "loc": loc, "functions": fns}
-        for imp in parse_imports(f, root):
+        for imp in parse_imports(f, root, short_map):
             if imp != mod:
                 edges[mod].add(imp)
 

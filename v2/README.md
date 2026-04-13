@@ -75,6 +75,18 @@ See [docs/architecture.md](docs/architecture.md) for detailed system design.
 - [ ] Performance optimization
 - [ ] Security audit + CORS hardening
 
+### Phase 5: Multi-Agent Trading Intelligence
+- [x] Hand-rolled async agent orchestrator (Sentiment → Technical → Fundamental → Portfolio Manager)
+- [x] Sentiment Agent: Finnhub + yfinance news, CoinGecko social data for crypto
+- [x] Technical Agent: yfinance history (SMA20/50 crossover) + Polygon daily bars
+- [x] Fundamental Agent: yfinance financials (P/E, PEG, margins, beta) + CoinGecko market data
+- [x] Portfolio Manager: conviction blend (Fund 50% / Tech 30% / Sent 20%), concentration penalty, cash allocation
+- [x] FastAPI BackgroundTasks pipeline returning job_id (202 pattern)
+- [x] Live progress tracking via Supabase `agent_runs` table (polling every 1.5s)
+- [x] `agent_insights` table: per-ticker thesis, scores, signal, conviction, allocation
+- [x] `AgentInsightCard`: investment thesis, conviction bar, sentiment/technical badges
+- [x] `AgentProgressTracker`: 5-step live pipeline UI with pulse animation
+
 ---
 
 ## Setup
@@ -133,6 +145,7 @@ v2/
 │   │   ├── models/              # Pydantic models (7 files)
 │   │   ├── routers/             # API routes (7 files)
 │   │   ├── services/            # Business logic (6 files)
+│   │   │   └── agents/          # Multi-agent pipeline (10 files)
 │   │   └── middleware/          # Auth (JWT validation)
 │   ├── tests/                   # pytest suite
 │   ├── migrations/              # SQL (not used — schema in database/)
@@ -150,7 +163,8 @@ v2/
 │   └── .env.local.example
 │
 ├── database/
-│   └── 001_initial_schema.sql   # Full PostgreSQL schema
+│   ├── 001_initial_schema.sql   # Full PostgreSQL schema
+│   └── 002_agent_insights.sql   # agent_runs + agent_insights tables
 │
 ├── docs/
 │   └── architecture.md          # System design
@@ -174,7 +188,10 @@ v2/
 | POST | `/api/v1/prices/batch` | Batch price fetch |
 | GET | `/api/v1/prices/{ticker}/history` | OHLCV chart data |
 | GET | `/api/v1/recommendations/` | Active InsightCards |
-| POST | `/api/v1/recommendations/refresh` | Re-run engine |
+| POST | `/api/v1/recommendations/refresh` | Queue agent pipeline → `{job_id}` (202) |
+| GET | `/api/v1/recommendations/jobs/{id}` | Poll AgentRunStatus |
+| GET | `/api/v1/recommendations/jobs/{id}/insights` | Per-ticker agent insights |
+| GET | `/api/v1/recommendations/insights/latest` | Latest completed run insights |
 | POST | `/api/v1/sync/plaid` | Sync Robinhood |
 | POST | `/api/v1/sync/csv/import` | Import CSV |
 | GET | `/api/v1/deposits/schedule` | Deposit plan |

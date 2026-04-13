@@ -2,6 +2,58 @@
 
 ## Recent Changes
 
+### Integrate multi-agent trading reasoning engine
+- **Commit**: `9564c8c`
+- **Date**: April 13, 2026
+Replaces the rule-based recommendation refresh with a TradingAgents-style
+pipeline (Sentiment → Technical → Fundamental → Portfolio Manager) running
+as a FastAPI BackgroundTask with Supabase-tracked progress.
+
+**Backend (`v2/backend/app/services/agents/`)**
+- Hand-rolled async orchestrator with `asyncio.Semaphore(6)` bounded concurrency
+- Per-agent Claude Sonnet (claude-sonnet-4-6) prompts with deterministic pre-scoring
+- Portfolio Manager blends conviction (Fund 0.50 / Tech 0.30 / Sent 0.20) with
+  concentration penalty (10% soft cap / 20% hard cap) and proportional cash allocation
+- Data sources: Finnhub + yfinance news (sentiment), yfinance history + Polygon aggs
+  (technicals), yfinance fundamentals / CoinGecko (fundamentals + crypto)
+
+**Router / API**
+- `POST /recommendations/refresh` → 202 `{job_id}` via FastAPI BackgroundTasks
+- `GET /recommendations/jobs/{id}` → live AgentRunStatus polling
+- `GET /recommendations/jobs/{id}/insights` → per-ticker agent insights
+- `GET /recommendations/insights/latest` → latest completed run insights
+
+**Database (`v2/database/002_agent_insights.sql`)**
+- New `agent_runs` table (status, current_agent, progress_pct, allocation JSONB)
+- New `agent_insights` table (investment_thesis, sentiment/technical/fundamental scores,
+  conviction_score, suggested_allocation per ticker)
+- `recommendations` enriched with thesis, sentiment, technical, conviction, allocation
+
+**Frontend**
+- `AgentInsightCard`: investment thesis, sentiment label + score, conviction bar (−1..+1),
+  allocation pill, P&L pill, tax note
+- `AgentProgressTracker`: live 5-step pipeline (Loading → Sentiment → Technicals →
+  Fundamentals → Portfolio Mgr) driven by `current_agent` regex, progress bar, summary
+- Recommendations page polls `useAgentJob(jobId)` every 1.5s; auto-clears 4s after
+  completion; swapped InsightCard → AgentInsightCard
+
+**Files**
+- New: `agents/__init__, data_sources, llm, state, sentiment_agent, technical_agent,
+  fundamental_agent, portfolio_manager, orchestrator, job_runner`
+- New: `database/002_agent_insights.sql`
+- New: `frontend/src/components/cards/AgentInsightCard.tsx`
+- New: `frontend/src/components/cards/AgentProgressTracker.tsx`
+- Modified: `models/recommendation.py`, `routers/recommendations.py`,
+  `services/recommendation_engine.py`, `frontend/src/lib/api.ts`,
+  `frontend/src/lib/hooks.ts`, `frontend/src/app/dashboard/recommendations/page.tsx`
+
+https://claude.ai/code/session_01NZTEYaJy3iF3Vzxpqp6t4x
+
+### Ignore tsconfig.tsbuildinfo (TypeScript incremental build artifact)
+- **Commit**: `0034696`
+- **Date**: April 13, 2026
+https://claude.ai/code/session_01NZTEYaJy3iF3Vzxpqp6t4x
+
 ### fix: repair pre/post-commit hooks and Claude Code hook guards
 - **Commit**: `4bf42d7`
 - **Date**: April 12, 2026

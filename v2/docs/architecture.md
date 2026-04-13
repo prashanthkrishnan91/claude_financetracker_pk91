@@ -32,6 +32,44 @@ User → Supabase Auth (email/password or OAuth)
 3. **Recommendations**: FastAPI reads positions + prices → Runs rec engine → Writes to `recommendations`
 4. **Frontend**: Next.js reads from Supabase (direct via JS client for reads, FastAPI for writes/compute)
 
+## Multi-Agent Pipeline (Phase 5)
+
+```
+POST /recommendations/refresh
+        │
+        ▼ (202 → job_id)
+FastAPI BackgroundTasks
+        │
+        ▼
+AgentOrchestrator.run(run_id)
+  ├── Phase 1: Bootstrap — load positions + batch prices
+  ├── Phase 2: Sentiment Agent (progress 20%)
+  │     ├── Finnhub company-news + yfinance news headlines
+  │     ├── CoinGecko sentiment_votes_up_percentage (crypto)
+  │     └── Claude Sonnet → {sentiment_score, label, summary}
+  ├── Phase 3: Technical Agent (progress 45%)
+  │     ├── yfinance 1Y OHLCV → SMA20/SMA50 crossover signals
+  │     ├── Polygon daily aggs (pct_5d / pct_30d)
+  │     └── Claude Sonnet → {signal, score, summary}
+  ├── Phase 4: Fundamental Agent (progress 70%)
+  │     ├── yfinance: P/E, PEG, EPS, profit margin, debt/equity, beta
+  │     ├── CoinGecko: market_cap_rank, pct_24h/7d/30d (crypto)
+  │     └── Claude Sonnet → {score, summary}
+  ├── Phase 5: Portfolio Manager (progress 85%)
+  │     ├── Conviction = Fund×0.50 + Tech×0.30 + Sent×0.20
+  │     ├── Concentration penalty (soft 10%, hard 20% of portfolio)
+  │     ├── Cash allocation: proportional to conviction × under-weight bonus
+  │     └── Batched Claude Sonnet → investment theses + portfolio summary
+  └── Phase 6: Persist (progress 100%)
+        ├── Write agent_insights rows (one per ticker)
+        ├── Expire old recommendations
+        └── Insert new recommendations linked to agent_run_id
+```
+
+**Polling pattern**: Frontend polls `GET /recommendations/jobs/{id}` every 1.5s.
+`AgentProgressTracker` maps `current_agent` string → step chip via regex.
+Auto-stops polling when status is `completed` or `failed`.
+
 ## API Key Security
 
 - All API keys encrypted with AES-256-GCM at the application layer
@@ -61,3 +99,5 @@ User → Supabase Auth (email/password or OAuth)
 | `deposit_plans` | Biweekly deployment schedule | Own data |
 | `target_allocations` | Target % per ticker | Own data |
 | `plaid_sync_log` | Plaid API audit trail | Own data |
+| `agent_runs` | Agent pipeline job status + progress | Own data |
+| `agent_insights` | Per-ticker thesis, scores, signals | Own data |

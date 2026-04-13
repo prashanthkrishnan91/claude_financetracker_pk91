@@ -1,6 +1,6 @@
 # Code Graph Report
 
-_Generated: 2026-04-13 22:59_  |  _Root: /home/user/claude_financetracker_pk91_
+_Generated: 2026-04-13 23:10_  |  _Root: /home/user/claude_financetracker_pk91_
 
 ## Summary
 
@@ -43,7 +43,7 @@ Modules with the highest combined in+out degree — highest blast radius for cha
 
 Clusters of tightly coupled modules (union-find on import graph).
 
-### Community 2 (45 modules)
+### Community 1 (45 modules)
 
 - `v2.backend.app.config` (74 LoC, 0 deps)
 - `v2.backend.app.database` (40 LoC, 1 deps)
@@ -62,7 +62,7 @@ Clusters of tightly coupled modules (union-find on import graph).
 - `v2.backend.app.routers.ai` (55 LoC, 4 deps)
 - … and 30 more
 
-### Community 3 (11 modules)
+### Community 2 (11 modules)
 
 - `v2.backend.app` (1 LoC, 0 deps)
 - `v2.backend.tests.test_auth` (27 LoC, 1 deps)
@@ -76,7 +76,7 @@ Clusters of tightly coupled modules (union-find on import graph).
 - `v2.backend.tests.test_recommendation_engine` (554 LoC, 1 deps)
 - `v2.backend.tests.test_sync` (527 LoC, 1 deps)
 
-### Community 0 (10 modules)
+### Community 3 (10 modules)
 
 - `v1.App` (1595 LoC, 2 deps)
 - `v1.data_engine` (1355 LoC, 5 deps)
@@ -89,32 +89,32 @@ Clusters of tightly coupled modules (union-find on import graph).
 - `v1.test_portfolio_sync` (419 LoC, 4 deps)
 - `v1.test_smart_sync` (165 LoC, 3 deps)
 
-### Community 1 (2 modules)
+### Community 4 (2 modules)
 
 - `v1.tests.test_all` (406 LoC, 1 deps)
 - `v1.utils` (1 LoC, 0 deps)
 
-### Community 4 (1 modules)
-
-- `v1.data` (1 LoC, 0 deps)
-
 ### Community 5 (1 modules)
-
-- `v1.data.portfolio` (139 LoC, 0 deps)
-
-### Community 6 (1 modules)
 
 - `App` (21 LoC, 0 deps)
 
+### Community 6 (1 modules)
+
+- `scripts.build_code_graph` (427 LoC, 0 deps)
+
 ### Community 7 (1 modules)
 
-- `v2.backend.app.middleware` (1 LoC, 0 deps)
+- `scripts.update_docs` (79 LoC, 0 deps)
 
 ### Community 8 (1 modules)
 
-- `v2.backend.tests` (1 LoC, 0 deps)
+- `v1.data` (1 LoC, 0 deps)
 
 ### Community 9 (1 modules)
+
+- `v1.data.portfolio` (139 LoC, 0 deps)
+
+### Community 10 (1 modules)
 
 - `v1.utils.csv_parser` (382 LoC, 0 deps)
 

@@ -32,16 +32,6 @@
             "timeout": 10000
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'exec node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/hook-handler.cjs\" post-bash'",
-            "timeout": 5000
-          }
-        ]
       }
     ],
     "UserPromptSubmit": [
@@ -123,17 +113,6 @@
         ]
       }
     ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'exec node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/hook-handler.cjs\" status'",
-            "timeout": 3000
-          }
-        ]
-      }
-    ],
     "SubagentStop": [
       {
         "hooks": [
@@ -145,17 +124,7 @@
         ]
       }
     ],
-    "Notification": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "sh -c 'exec node \"${CLAUDE_PROJECT_DIR:-.}/.claude/helpers/hook-handler.cjs\" notify'",
-            "timeout": 3000
-          }
-        ]
-      }
-    ]
+    "Notification": []
   },
   "statusLine": {
     "type": "command",
@@ -191,8 +160,9 @@
       "shell": "bash"
     },
     "modelPreferences": {
-      "default": "claude-opus-4-6",
-      "routing": "claude-haiku-4-5-20251001"
+      "default": "claude-sonnet-4-6",
+      "routing": "claude-haiku-4-5-20251001",
+      "simple": "claude-haiku-4-5-20251001"
     },
     "agentTeams": {
       "enabled": true,

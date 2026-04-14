@@ -153,7 +153,7 @@ const handlers = {
         process.exit(1);
       }
     }
-    console.log('[OK] Command validated');
+    // silent on success — no noise injected into context
   },
 
   'post-edit': () => {
@@ -169,7 +169,7 @@ const handlers = {
         intelligence.recordEdit(file);
       } catch (e) { /* non-fatal */ }
     }
-    console.log('[OK] Edit recorded');
+    // silent — no noise injected into context
   },
 
   'session-restore': async () => {
@@ -240,7 +240,7 @@ const handlers = {
         intelligence.feedback(true);
       } catch (e) { /* non-fatal */ }
     }
-    console.log('[OK] Task completed');
+    // silent — no noise injected into context
   },
 
   'stats': () => {
@@ -261,8 +261,7 @@ const handlers = {
       console.log(`[WARN] Hook ${command} encountered an error: ${e.message}`);
     }
   } else if (command) {
-    // Unknown command - pass through without error
-    console.log(`[OK] Hook: ${command}`);
+    // Unknown command - pass through silently
   } else {
     console.log('Usage: hook-handler.cjs <route|pre-bash|post-edit|session-restore|session-end|pre-task|post-task|stats>');
   }

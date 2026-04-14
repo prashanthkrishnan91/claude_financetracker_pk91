@@ -1,7 +1,6 @@
 Purpose: Encodes expert DB management logic.
 
 SKILL: SUPABASE_FINANCE_DB
-SECURITY: EVERY table must have RLS. User ID must be checked for every query.
 
 AUTH: Use app_metadata for investor tiers; NEVER user_metadata.
 

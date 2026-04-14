@@ -16,3 +16,10 @@ shared/ (Zod schemas, Shared Types)
 supabase/ (Migrations, Edge Functions)
 -.claude/ (Production Intelligence Library)
 </repo_structure>
+
+KEY DATA FLOWS
+Robinhood Data -> Python API -> Supabase DB
+
+Supabase DB -> Next.js Frontend (Server Components)
+
+News/Analyst Reports -> Firecrawl -> Python Analyzer -> Recommendation UI

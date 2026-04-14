@@ -1,33 +1,35 @@
-# Claude Code Configuration - RuFlo V3
+# Claude Code — RuFlo V3
 
 ## Stack
 Vercel (serverless) · Supabase (DB) · Python/JS frontend
 
-## Token Efficiency Rules (CRITICAL — enforced every turn)
-
-- Read ONLY files needed for the immediate task — never index directories, `node_modules/`, `.next/`, `venv/`, `*.csv`, `*.pdf` unless commanded
-- Output ONLY changed snippets or diffs — never full files unless asked
-- After each discrete feature or bug fix, stop and prompt: "Run /compact before next task."
-- No conversational filler. Plan → Code → Verify. Nothing else.
-- Max 2 fix attempts before stopping and asking the user what to try next.
-
-## Code Graph (auto-loaded at session start)
-
-Both files below are injected into context automatically — no need to ask Claude to read them.
-- Never read raw source files to answer structural questions; use the graph data already in context.
-- After modifying any code file the graph is rebuilt automatically by the PostToolUse hook.
-
+## Code Graph
+Auto-loaded — never re-read raw source for structural questions; graph is rebuilt automatically after code edits.
 @graphify-out/GRAPH_REPORT.md
 @graphify-out/wiki/index.md
 
+## Core Rules
+- Do only what was asked — nothing more, nothing less
+- Read only files needed for the task; never index `node_modules/`, `.next/`, `venv/`, `*.csv`, `*.pdf`
+- Output only diffs/snippets — never full files unless asked
+- Prefer editing existing files; never create files unless strictly required
+- Never save to root — use `/src`, `/tests`, `/docs`, `/config`, `/scripts`, `/examples`
+- Always read a file before editing it
+- Always run tests after code changes; verify build before committing
+- Never hardcode API keys, credentials, or commit `.env` files
+- Always validate user input and sanitize file paths at system boundaries
+- Run `npx @claude-flow/cli@latest security scan` after security-related changes
+- Max 2 fix attempts before asking the user what to try next
+- After each feature/bug fix, prompt: "Run /compact before next task."
+- No conversational filler. Plan → Code → Verify.
+
 ## Workflow
+- Tasks >2 steps: write plan to `tasks/todo.md`, await approval, then execute
+- One objective at a time — log unrelated bugs to `tasks/todo.md`, do NOT fix mid-task
+- Never mark done without running tests or diffing behavior — show proof
+- After any user correction, log the pattern in `tasks/lessons.md`; review at session start
 
-- Tasks >2 steps: write plan to `tasks/todo.md`, await approval, then execute.
-- One objective at a time. Log unrelated bugs to `tasks/todo.md` — do NOT fix mid-task.
-- Never mark done without running tests or diffing behavior. Show proof.
-- After any user correction, log the pattern in `tasks/lessons.md`. Review at session start.
-
-## Skill Loading (load ONLY when task type matches — no preloading)
+## Skill Loading (load only when task matches — no preloading)
 
 | Task Type | Skill |
 |---|---|
@@ -41,105 +43,38 @@ Both files below are injected into context automatically — no need to ask Clau
 | About to claim task complete | `/mnt/skills/user/verification-before-completion/SKILL.md` |
 | Word / PDF / Excel output | `/mnt/skills/public/{docx\|pdf\|xlsx}/SKILL.md` |
 
-## Behavioral Rules (Always Enforced)
+## Architecture
+- Domain-Driven Design with bounded contexts
+- Typed interfaces for all public APIs
+- TDD London School (mock-first) for new code
+- Event sourcing for state changes
+- Input validation at system boundaries
 
-- Do what has been asked; nothing more, nothing less
-- NEVER create files unless they're absolutely necessary for achieving your goal
-- ALWAYS prefer editing an existing file to creating a new one
-- NEVER proactively create documentation files (*.md) or README files unless explicitly requested
-- NEVER save working files, text/mds, or tests to the root folder
-- Never continuously check status after spawning a swarm — wait for results
-- ALWAYS read a file before editing it
-- NEVER commit secrets, credentials, or .env files
-
-## File Organization
-
-- NEVER save to root folder — use the directories below
-- Use `/src` for source code files
-- Use `/tests` for test files
-- Use `/docs` for documentation and markdown files
-- Use `/config` for configuration files
-- Use `/scripts` for utility scripts
-- Use `/examples` for example code
-
-## Project Architecture
-
-- Follow Domain-Driven Design with bounded contexts
-- Use typed interfaces for all public APIs
-- Prefer TDD London School (mock-first) for new code
-- Use event sourcing for state changes
-- Ensure input validation at system boundaries
-
-### Project Config
-
-- **Topology**: hierarchical-mesh
-- **Max Agents**: 15
-- **Memory**: hybrid
-- **HNSW**: Enabled
-- **Neural**: Enabled
+**Config**: topology `hierarchical-mesh` · maxAgents `15` · memory `hybrid` · HNSW `on` · Neural `on`
 
 ## Build & Test
-
 ```bash
-# Build
-npm run build
-
-# Test
-npm test
-
-# Lint
-npm run lint
+npm run build  # build
+npm test       # test
+npm run lint   # lint
 ```
 
-- ALWAYS run tests after making code changes
-- ALWAYS verify build succeeds before committing
+## Concurrency — 1 message = all related operations
+- Batch ALL file reads/writes/edits in one message
+- Batch ALL Bash commands in one message
+- Spawn ALL agents in one message via Agent tool
 
-## Security Rules
+## Swarm
+- Init swarm with CLI tools for complex tasks; Agent tool does the actual work — call BOTH in ONE message
+- Use hierarchical topology; maxAgents 6–8; specialized strategy; `raft` consensus
+- Shared memory namespace for all agents; run checkpoints via `post-task` hooks
+- Set `run_in_background: true` for all Agent calls
+- After spawning, STOP — do not poll or check status; review ALL results before proceeding
 
-- NEVER hardcode API keys, secrets, or credentials in source files
-- NEVER commit .env files or any file containing secrets
-- Always validate user input at system boundaries
-- Always sanitize file paths to prevent directory traversal
-- Run `npx @claude-flow/cli@latest security scan` after security-related changes
+## 3-Tier Model Routing (ADR-026)
 
-## Concurrency: 1 MESSAGE = ALL RELATED OPERATIONS
-
-- All operations MUST be concurrent/parallel in a single message
-- Use Claude Code's Agent tool for spawning agents, not just MCP
-- ALWAYS spawn ALL agents in ONE message with full instructions via Agent tool
-- ALWAYS batch ALL file reads/writes/edits in ONE message
-- ALWAYS batch ALL Bash commands in ONE message
-
-## Swarm Orchestration
-
-- MUST initialize the swarm using CLI tools when starting complex tasks
-- MUST spawn concurrent agents using Claude Code's Agent tool
-- Never use CLI tools alone for execution — Agent tool agents do the actual work
-- MUST call CLI tools AND Agent tool in ONE message for complex work
-
-### 3-Tier Model Routing (ADR-026)
-
-| Tier | Handler | Latency | Cost | Use Cases |
-|------|---------|---------|------|-----------|
-| **1** | Agent Booster (WASM) | <1ms | $0 | Simple transforms (var→const, add types) — Skip LLM |
-| **2** | Haiku | ~500ms | $0.0002 | Simple tasks, low complexity (<30%) |
-| **3** | Sonnet/Opus | 2-5s | $0.003-0.015 | Complex reasoning, architecture, security (>30%) |
-
-- For Tier 1 simple transforms, use Edit tool directly — no LLM agent needed
-
-## Swarm Configuration & Anti-Drift
-
-- ALWAYS use hierarchical topology for coding swarms
-- Keep maxAgents at 6-8 for tight coordination
-- Use specialized strategy for clear role boundaries
-- Use `raft` consensus for hive-mind (leader maintains authoritative state)
-- Run frequent checkpoints via `post-task` hooks
-- Keep shared memory namespace for all agents
-
-## Swarm Execution Rules
-
-- ALWAYS use `run_in_background: true` for all Agent tool calls
-- ALWAYS put ALL Agent calls in ONE message for parallel execution
-- After spawning, STOP — do NOT add more tool calls or check status
-- Never poll agent status repeatedly — trust agents to return
-- When agent results arrive, review ALL results before proceeding
+| Tier | Handler | Use Cases |
+|---|---|---|
+| 1 | Agent Booster WASM (<1ms, $0) | Simple transforms — use Edit tool directly, skip LLM |
+| 2 | Haiku (~500ms) | Low complexity (<30%) |
+| 3 | Sonnet/Opus (2–5s) | Complex reasoning, architecture, security (>30%) |

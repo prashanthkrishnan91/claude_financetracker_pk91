@@ -184,13 +184,30 @@ class DepositService:
         from .decision_explainer import explain_decision
         from .personalization_engine import get_user_profile
         from .personalized_decision_engine import adjust_decision_plan
+        from .strategy_engine import apply_strategy
 
+        # Layer 1 — personalize
         user_profile = await get_user_profile(self.user_id)
-        adjusted_decision_plan = adjust_decision_plan(decision_plan, user_profile)
+        personalized_plan = adjust_decision_plan(decision_plan, user_profile)
+
+        # Fetch user's strategy_mode from DB (defaults to "balanced" if absent)
+        user_row = (
+            self.client.table("users")
+            .select("strategy_mode")
+            .eq("id", str(self.user_id))
+            .maybe_single()
+            .execute()
+        )
+        strategy_mode: str = (
+            (user_row.data or {}).get("strategy_mode") or "balanced"
+        )
+
+        # Layer 2 — apply strategy on top of personalized plan
+        strategy_adjusted_plan = apply_strategy(personalized_plan, strategy_mode)
 
         explanation = await explain_decision(
             snapshot=snapshot or {},
-            decision_plan=adjusted_decision_plan,
+            decision_plan=strategy_adjusted_plan,
             api_key=api_key,
         )
 
@@ -201,19 +218,31 @@ class DepositService:
             "rotating_pick": rotating_pick,
         }
 
-        adjusted_allocation = {
-            a["symbol"]: a["amount"] for a in adjusted_decision_plan.get("actions", [])
+        personalized_allocation = {
+            a["symbol"]: a["amount"] for a in personalized_plan.get("actions", [])
         }
+        strategy_allocation = {
+            a["symbol"]: a["amount"] for a in strategy_adjusted_plan.get("actions", [])
+        }
+
+        deposit_date = _next_biweekly_friday(_date.today()).isoformat()
 
         return {
             "decision_id": str(uuid.uuid4()),
             "plan": {
-                "deposit_date": original_plan["deposit_date"],
+                "deposit_date": deposit_date,
                 "amount": _DEPOSIT_AMOUNT,
-                "allocation": adjusted_allocation,
+                "allocation": strategy_allocation,
                 "rotating_pick": rotating_pick,
             },
             "original_plan": original_plan,
+            "personalized_plan": {
+                "deposit_date": deposit_date,
+                "amount": _DEPOSIT_AMOUNT,
+                "allocation": personalized_allocation,
+                "rotating_pick": rotating_pick,
+            },
+            "strategy_mode": strategy_mode,
             "explanation": explanation,
         }
 

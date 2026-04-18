@@ -148,6 +148,58 @@ class DepositService:
         row = result.data[0]
         return DepositPlanResponse(**row)
 
+    async def get_deposit_plan(
+        self,
+        snapshot: dict | None = None,
+        api_key: str = "",
+    ) -> dict:
+        """Compute next deposit allocation and return it with an AI explanation."""
+        import uuid
+        from datetime import date as _date
+
+        result = (
+            self.client.table("deposit_plans")
+            .select("id")
+            .eq("user_id", str(self.user_id))
+            .eq("executed", True)
+            .execute()
+        )
+        executed_count = len(result.data or [])
+        rotating_pick = _ROTATION_ORDER[executed_count % len(_ROTATION_ORDER)]
+
+        pct_map: dict[str, float] = {
+            (rotating_pick if sym == "ROTATING" else sym): pct
+            for sym, pct in _BREAKDOWN.items()
+        }
+        allocation: dict[str, float] = {
+            sym: round(_DEPOSIT_AMOUNT * pct, 2) for sym, pct in pct_map.items()
+        }
+        decision_plan = {
+            "actions": [
+                {"symbol": sym, "amount": amt, "delta_weight": pct_map[sym]}
+                for sym, amt in allocation.items()
+            ]
+        }
+
+        from .decision_explainer import explain_decision
+
+        explanation = await explain_decision(
+            snapshot=snapshot or {},
+            decision_plan=decision_plan,
+            api_key=api_key,
+        )
+
+        return {
+            "decision_id": str(uuid.uuid4()),
+            "plan": {
+                "deposit_date": _next_biweekly_friday(_date.today()).isoformat(),
+                "amount": _DEPOSIT_AMOUNT,
+                "allocation": allocation,
+                "rotating_pick": rotating_pick,
+            },
+            "explanation": explanation,
+        }
+
     async def execute_plan(self, plan_id: UUID, execution: DepositPlanExecute) -> DepositPlanResponse:
         """Mark a deposit plan as executed."""
         executed_at = execution.executed_at or datetime.now(timezone.utc)

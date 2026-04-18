@@ -38,6 +38,10 @@ class UserBase(BaseModel):
     deposit_frequency: str = Field(default="biweekly", pattern="^(weekly|biweekly|monthly)$")
     theme: str = Field(default="dark", pattern="^(dark|light)$")
     default_currency: str = "USD"
+    strategy_mode: str = Field(
+        default="balanced",
+        pattern="^(growth|income|conservative|balanced)$",
+    )
 
 
 class UserCreate(UserBase):

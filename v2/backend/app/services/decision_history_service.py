@@ -5,6 +5,8 @@ from __future__ import annotations
 from typing import Any, Optional
 from uuid import UUID
 
+from fastapi import HTTPException, status
+
 from ..database import get_supabase_client
 
 
@@ -55,3 +57,58 @@ def get_decision_history(user_id: UUID, limit: int = 20) -> list[dict[str, Any]]
         .execute()
     )
     return result.data
+
+
+def get_decision(decision_id: str) -> dict[str, Any]:
+    """Fetch a single decision record by id. Raises 404 if not found."""
+    client = get_supabase_client()
+    result = (
+        client.table("decision_history")
+        .select("*")
+        .eq("id", decision_id)
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Decision {decision_id} not found",
+        )
+    return result.data[0]
+
+
+def submit_user_feedback(
+    decision_id: str,
+    feedback: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply user feedback to a decision record and return the updated row.
+
+    Behavior by feedback type:
+    - "accept"  → final_actions = generated_actions, status = "accept"
+    - "modify"  → final_actions = feedback["modified_actions"], status = "modify"
+    - "reject"  → final_actions = [], status = "reject"
+    """
+    record = get_decision(decision_id)
+
+    feedback_type = feedback["type"]
+
+    if feedback_type == "accept":
+        final_actions = record.get("generated_actions") or []
+    elif feedback_type == "modify":
+        final_actions = feedback.get("modified_actions") or []
+    else:  # reject
+        final_actions = []
+
+    client = get_supabase_client()
+    payload: dict[str, Any] = {
+        "status": feedback_type,
+        "final_actions": final_actions,
+        "user_feedback": feedback,
+    }
+    result = (
+        client.table("decision_history")
+        .update(payload)
+        .eq("id", decision_id)
+        .execute()
+    )
+    return result.data[0]

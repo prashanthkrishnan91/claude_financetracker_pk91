@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 logger = logging.getLogger(__name__)
@@ -657,3 +657,67 @@ class PortfolioService:
             "skipped": skipped,
             "message": f"Backfilled {created} weekly snapshots from transaction history",
         }
+
+
+# ── Portfolio engine adapter ──────────────────────────────────────────────────
+
+async def get_portfolio_snapshot(user_id: UUID) -> dict[str, Any]:
+    """Fetch transactions and positions from Supabase, then compute a snapshot.
+
+    Orchestrates the pure functions in portfolio_engine:
+      1. Load raw transactions from Supabase.
+      2. Normalise and aggregate into positions via portfolio_engine.
+      3. Fetch live prices via the price engine.
+      4. Return the full snapshot dict produced by build_portfolio_snapshot().
+    """
+    from .portfolio_engine import normalize_transactions, build_positions, build_portfolio_snapshot
+    from .price_engine import PriceService
+    from ..config import get_settings
+    from ..database import get_supabase_client
+
+    client = get_supabase_client()
+    settings = get_settings()
+
+    # 1. Fetch raw transactions (Buy/Sell only)
+    tx_rows: list[dict[str, Any]] = (
+        client.table("transactions")
+        .select("ticker, tx_type, quantity, price, tx_date, category")
+        .eq("user_id", str(user_id))
+        .in_("tx_type", ["Buy", "Sell"])
+        .order("tx_date", desc=False)
+        .execute()
+    ).data or []
+
+    # 2. Normalise and build positions using pure engine functions
+    normalised = normalize_transactions(tx_rows)
+    positions = build_positions(normalised)
+
+    if not positions:
+        return {
+            "total_value": 0.0,
+            "total_cost": 0.0,
+            "total_pnl": 0.0,
+            "total_pnl_percent": 0.0,
+            "positions": [],
+        }
+
+    # 3. Fetch live prices for all symbols
+    symbols = [p["symbol"] for p in positions]
+    price_service = PriceService(
+        finnhub_key=settings.finnhub_api_key or "",
+        alpaca_key=settings.alpaca_api_key or "",
+        alpaca_secret=settings.alpaca_secret_key or "",
+        polygon_key=settings.polygon_api_key or "",
+    )
+
+    prices: dict[str, float] = {}
+    try:
+        price_results = await price_service.fetch_prices(symbols)
+        for sym, pr in price_results.items():
+            if pr.is_valid:
+                prices[sym] = pr.mid_price
+    except Exception:
+        logger.warning("Price fetch failed for portfolio snapshot; using cost basis fallback")
+
+    # 4. Compute and return snapshot
+    return build_portfolio_snapshot(positions, prices)

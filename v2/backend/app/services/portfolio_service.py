@@ -721,3 +721,14 @@ async def get_portfolio_snapshot(user_id: UUID) -> dict[str, Any]:
 
     # 4. Compute and return snapshot
     return build_portfolio_snapshot(positions, prices)
+
+
+async def get_deposit_plan(user_id: UUID, cash_to_invest: float) -> dict[str, Any]:
+    """Return a deterministic deposit allocation plan for the given user.
+
+    Calls get_portfolio_snapshot then passes the result to generate_deposit_plan.
+    """
+    from .decision_engine import generate_deposit_plan
+
+    snapshot = await get_portfolio_snapshot(user_id)
+    return generate_deposit_plan(snapshot, cash_to_invest)

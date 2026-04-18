@@ -729,6 +729,21 @@ async def get_deposit_plan(user_id: UUID, cash_to_invest: float) -> dict[str, An
     Calls get_portfolio_snapshot then passes the result to generate_deposit_plan.
     """
     from .decision_engine import generate_deposit_plan
+    from .decision_history_service import create_decision_record
 
     snapshot = await get_portfolio_snapshot(user_id)
-    return generate_deposit_plan(snapshot, cash_to_invest)
+    plan = generate_deposit_plan(snapshot, cash_to_invest)
+
+    try:
+        decision_id = create_decision_record(
+            user_id=user_id,
+            decision_type="deposit_plan",
+            input_snapshot=snapshot,
+            input_params={"cash_to_invest": cash_to_invest},
+            generated_actions=plan,
+        )
+    except Exception:
+        logger.warning("Failed to record decision history for deposit_plan", exc_info=True)
+        decision_id = None
+
+    return {"decision_id": decision_id, "plan": plan}

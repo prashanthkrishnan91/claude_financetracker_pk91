@@ -182,21 +182,38 @@ class DepositService:
         }
 
         from .decision_explainer import explain_decision
+        from .personalization_engine import get_user_profile
+        from .personalized_decision_engine import adjust_decision_plan
+
+        user_profile = await get_user_profile(self.user_id)
+        adjusted_decision_plan = adjust_decision_plan(decision_plan, user_profile)
 
         explanation = await explain_decision(
             snapshot=snapshot or {},
-            decision_plan=decision_plan,
+            decision_plan=adjusted_decision_plan,
             api_key=api_key,
         )
+
+        original_plan = {
+            "deposit_date": _next_biweekly_friday(_date.today()).isoformat(),
+            "amount": _DEPOSIT_AMOUNT,
+            "allocation": allocation,
+            "rotating_pick": rotating_pick,
+        }
+
+        adjusted_allocation = {
+            a["symbol"]: a["amount"] for a in adjusted_decision_plan.get("actions", [])
+        }
 
         return {
             "decision_id": str(uuid.uuid4()),
             "plan": {
-                "deposit_date": _next_biweekly_friday(_date.today()).isoformat(),
+                "deposit_date": original_plan["deposit_date"],
                 "amount": _DEPOSIT_AMOUNT,
-                "allocation": allocation,
+                "allocation": adjusted_allocation,
                 "rotating_pick": rotating_pick,
             },
+            "original_plan": original_plan,
             "explanation": explanation,
         }
 

@@ -270,6 +270,14 @@ export function useDecisionLog(limit = 50) {
   });
 }
 
+export function useDepositPlan(cashToInvest = 900) {
+  return useQuery({
+    queryKey: ["deposits", "plan", cashToInvest],
+    queryFn: () => api.deposits.getPlan(cashToInvest),
+    staleTime: 60_000,
+  });
+}
+
 // ── Auth / Profile ────────────────────────────────────────────────────────────
 
 export function useUserProfile() {

@@ -8,14 +8,12 @@ import {
   useResolveRecommendation,
   useDecisionLog,
   useAgentJob,
-  useDepositPlan,
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
-import { mapPlanToUI } from "@/lib/api";
 import type { InsightCardData, DecisionLogEntry } from "@/lib/api";
 
 const ACTION_FILTERS = [
@@ -47,33 +45,12 @@ export default function RecommendationsPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [decisionLogOpen, setDecisionLogOpen] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [planView, setPlanView] = useState<"original" | "personalized" | "final">("final");
-  const [debugOpen, setDebugOpen] = useState(false);
-  const [decisionId, setDecisionId] = useState<string | null>(null);
-  const [cashToInvest, setCashToInvest] = useState(900);
 
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
   const { data: jobStatus } = useAgentJob(activeJobId);
-  const { data: depositPlan } = useDepositPlan(cashToInvest);
-
-  useEffect(() => {
-    if (depositPlan) {
-      setDecisionId(depositPlan.decision_id ?? null);
-      const layers = [
-        { name: "original_plan", plan: depositPlan.original_plan },
-        { name: "personalized_plan", plan: depositPlan.personalized_plan },
-        { name: "final_plan", plan: depositPlan.plan },
-      ] as const;
-      for (const { name, plan } of layers) {
-        const rawActions = plan?.actions ?? [];
-        const computedTotal = rawActions.reduce((sum, a) => sum + Number(a.amount), 0);
-        console.log({ layer: name, computedTotal, rawActions });
-      }
-    }
-  }, [depositPlan]);
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
   useEffect(() => {
@@ -158,133 +135,6 @@ export default function RecommendationsPage() {
         {activeJobId && jobStatus && (
           <AgentProgressTracker status={jobStatus} />
         )}
-
-        {/* Deposit Plan — error fallback */}
-        {!depositPlan && (
-          <div className="card-glass rounded-xl px-4 py-3 text-xs text-text-muted">
-            Deployment plan unavailable. Check API connection.
-          </div>
-        )}
-
-        {/* Strategy mode + Deposit Plan */}
-        {depositPlan && (() => {
-          const activePlan =
-            planView === "original"
-              ? depositPlan.original_plan
-              : planView === "personalized"
-              ? depositPlan.personalized_plan
-              : depositPlan.plan;
-          const rows = mapPlanToUI(
-            activePlan ?? { actions: [] },
-            depositPlan.explanation?.actions as Record<string, string> | undefined
-          );
-          const computedTotal = (activePlan?.actions ?? []).reduce(
-            (sum, a) => sum + Number(a.amount),
-            0
-          );
-          const originalTotal = (depositPlan.original_plan?.actions ?? []).reduce(
-            (sum, a) => sum + Number(a.amount),
-            0
-          );
-          const delta = computedTotal - originalTotal;
-          return (
-            <div className="card-glass rounded-xl overflow-hidden">
-              {/* Header: title + amount input + strategy badge */}
-              <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
-                <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-                  Deployment Plan
-                </span>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="number"
-                    value={cashToInvest}
-                    onChange={(e) => setCashToInvest(Math.max(0, Number(e.target.value)))}
-                    className="w-20 px-2 py-0.5 bg-surface border border-border rounded text-xs font-mono text-right text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-                    min={0}
-                    step={50}
-                    aria-label="Cash to invest"
-                  />
-                  <span className="text-[10px] text-text-muted">to deploy</span>
-                  <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
-                    {depositPlan.strategy_mode}
-                  </span>
-                </div>
-              </div>
-
-              {/* Plan layer toggle + total badge */}
-              <div className="px-4 py-2 flex items-center justify-between gap-2 border-b border-border/50">
-                <div className="flex gap-1.5">
-                  {(
-                    [
-                      { key: "original" as const, label: "Original" },
-                      { key: "personalized" as const, label: "Personalized" },
-                      { key: "final" as const, label: "Final" },
-                    ]
-                  ).map(({ key, label }) => (
-                    <button
-                      key={key}
-                      onClick={() => setPlanView(key)}
-                      className={cn(
-                        "text-xs px-2.5 py-1 rounded-md font-semibold transition-colors",
-                        planView === key
-                          ? "bg-accent text-background"
-                          : "bg-surface-elevated text-text-muted hover:text-text-secondary"
-                      )}
-                    >
-                      {label}
-                    </button>
-                  ))}
-                </div>
-                {/* Total per layer badge */}
-                <div className="flex items-center gap-1.5 shrink-0">
-                  <span className="font-mono text-xs font-bold text-text-primary">
-                    {formatCurrency(computedTotal)}
-                  </span>
-                  {planView === "final" && Math.abs(delta) >= 0.01 && (
-                    <span className={cn(
-                      "text-[10px] font-semibold font-mono",
-                      delta > 0 ? "text-green-400" : "text-red-400"
-                    )}>
-                      {delta > 0 ? "+" : ""}{formatCurrency(delta)} vs original
-                    </span>
-                  )}
-                </div>
-              </div>
-
-              {/* Rows */}
-              {rows.length === 0 ? (
-                <div className="px-4 py-4 text-xs text-text-muted">
-                  No allocation data for this plan layer.
-                </div>
-              ) : (
-                <div className="divide-y divide-border/50">
-                  {rows.map((row) => (
-                    <div
-                      key={row.symbol}
-                      className="flex items-start gap-3 px-4 py-3"
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-sm font-bold text-text-primary">
-                            {row.symbol}
-                          </span>
-                          <span className="text-sm font-semibold text-green-400">
-                            {formatCurrency(row.amount)}
-                          </span>
-                        </div>
-                        {row.explanation && (
-                          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                            {row.explanation}
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })()}
 
         {/* Filter cards */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
@@ -375,51 +225,6 @@ export default function RecommendationsPage() {
             </div>
           )}
         </div>
-        {/* Debug panel — deposit plan layers */}
-        {depositPlan && (
-          <div className="card-glass overflow-hidden">
-            <button
-              onClick={() => setDebugOpen((o) => !o)}
-              className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
-            >
-              <span className="font-semibold uppercase tracking-wide text-xs">
-                Debug: Plan Layers
-              </span>
-              <ChevronIcon
-                className={cn(
-                  "w-4 h-4 transition-transform",
-                  debugOpen ? "rotate-180" : ""
-                )}
-              />
-            </button>
-
-            {debugOpen && (
-              <div className="border-t border-border p-4 space-y-4">
-                {decisionId && (
-                  <p className="text-xs text-text-muted font-mono break-all">
-                    decision_id: {decisionId}
-                  </p>
-                )}
-                {(
-                  [
-                    { label: "original_plan", data: depositPlan.original_plan },
-                    { label: "personalized_plan", data: depositPlan.personalized_plan },
-                    { label: "final plan (strategy-adjusted)", data: depositPlan.plan },
-                  ] as const
-                ).map(({ label, data }) => (
-                  <div key={label}>
-                    <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1">
-                      {label}
-                    </p>
-                    <pre className="text-[10px] text-text-muted bg-surface-elevated rounded-lg p-3 overflow-x-auto leading-relaxed whitespace-pre-wrap">
-                      {JSON.stringify(data, null, 2)}
-                    </pre>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
       </main>
 
       {/* Recommendation Modal */}

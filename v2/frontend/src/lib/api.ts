@@ -548,35 +548,29 @@ export interface ApiKeysUpdate {
   anthropic_api_key?: string;
 }
 
-export interface DepositPlanAction {
+export interface DepositRecommendation {
   symbol: string;
+  action: string;
   amount: number;
-  [key: string]: unknown;
-}
-
-/** Adapter: map a deposit plan layer to a flat UI-ready list. */
-export function mapPlanToUI(
-  plan: { actions: DepositPlanAction[] } | null | undefined,
-  explanations?: Record<string, string>
-): Array<{ symbol: string; amount: number; explanation: string }> {
-  if (!plan?.actions) return [];
-  return plan.actions.map((a) => ({
-    symbol: a.symbol,
-    amount: a.amount,
-    explanation: explanations?.[a.symbol] ?? "",
-  }));
-}
-
-export interface DepositPlanExplanation {
-  actions?: Record<string, string>;
-  [key: string]: unknown;
+  target_weight: number;
+  rationale: string;
+  confidence: number;
+  deposit_date: string;
 }
 
 export interface DepositPlanResult {
-  decision_id: string;
-  plan: { actions: DepositPlanAction[] };
-  original_plan: { actions: DepositPlanAction[] } | null;
-  personalized_plan: { actions: DepositPlanAction[] } | null;
-  strategy_mode: string;
-  explanation: DepositPlanExplanation;
+  plan: {
+    total_amount: number;
+    strategy: string;
+    generated_at: string;
+  };
+  recommendations: DepositRecommendation[];
+  summary: {
+    positions_count: number;
+    total_deployed: number;
+    fully_allocated: boolean;
+    strategy_mode: string;
+    rotating_pick: string;
+  };
+  debug: Record<string, unknown>;
 }

@@ -176,6 +176,13 @@ export const api = {
     getLatest: () =>
       fetchApi<AiRebalanceResult | null>("/api/v1/ai/rebalance/latest"),
   },
+
+  deposits: {
+    getPlan: (cashToInvest = 900) =>
+      fetchApi<DepositPlanResult>(
+        `/api/v1/deposits/deposit-plan?cash_to_invest=${cashToInvest}`
+      ),
+  },
 };
 
 /** Form data upload (no JSON content-type) */
@@ -518,4 +525,24 @@ export interface ApiKeysUpdate {
   alpaca_api_key?: string;
   alpaca_secret_key?: string;
   anthropic_api_key?: string;
+}
+
+export interface DepositPlanAction {
+  symbol: string;
+  amount: number;
+  [key: string]: unknown;
+}
+
+export interface DepositPlanExplanation {
+  actions?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+export interface DepositPlanResult {
+  decision_id: string;
+  plan: { actions: DepositPlanAction[] };
+  original_plan: { actions: DepositPlanAction[] } | null;
+  personalized_plan: { actions: DepositPlanAction[] } | null;
+  strategy_mode: string;
+  explanation: DepositPlanExplanation;
 }

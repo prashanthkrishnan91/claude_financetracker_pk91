@@ -8,6 +8,7 @@ import {
   useResolveRecommendation,
   useDecisionLog,
   useAgentJob,
+  useDepositPlan,
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
@@ -51,6 +52,16 @@ export default function RecommendationsPage() {
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
   const { data: jobStatus } = useAgentJob(activeJobId);
+  const { data: depositPlan } = useDepositPlan(900);
+
+  // Debug: log original_plan vs personalized plan for visibility
+  useEffect(() => {
+    if (depositPlan) {
+      console.log("[DepositPlan] original_plan:", depositPlan.original_plan);
+      console.log("[DepositPlan] plan (final):", depositPlan.plan);
+      console.log("[DepositPlan] strategy_mode:", depositPlan.strategy_mode);
+    }
+  }, [depositPlan]);
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
   useEffect(() => {
@@ -134,6 +145,48 @@ export default function RecommendationsPage() {
         {/* Agent Pipeline Progress Tracker */}
         {activeJobId && jobStatus && (
           <AgentProgressTracker status={jobStatus} />
+        )}
+
+        {/* Strategy mode + Deposit Plan */}
+        {depositPlan && (
+          <div className="card-glass rounded-xl overflow-hidden">
+            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+                Deployment Plan
+              </span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
+                {depositPlan.strategy_mode}
+              </span>
+            </div>
+            <div className="divide-y divide-border/50">
+              {depositPlan.plan.actions.map((action) => {
+                const explanation =
+                  depositPlan.explanation?.actions?.[action.symbol];
+                return (
+                  <div
+                    key={action.symbol}
+                    className="flex items-start gap-3 px-4 py-3"
+                  >
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-sm font-bold text-text-primary">
+                          {action.symbol}
+                        </span>
+                        <span className="text-sm font-semibold text-green-400">
+                          {formatCurrency(action.amount)}
+                        </span>
+                      </div>
+                      {explanation && (
+                        <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+                          {explanation}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {/* Filter cards */}

@@ -47,6 +47,27 @@ async function fetchApi<T>(
   return response.json();
 }
 
+/** Fetch a local Next.js API route (relative URL), forwarding auth headers. */
+async function fetchLocal<T>(
+  endpoint: string,
+  options: RequestInit = {}
+): Promise<T> {
+  const headers = await getAuthHeaders();
+  const response = await fetch(endpoint, {
+    ...options,
+    headers: { ...headers, ...options.headers },
+  });
+
+  if (!response.ok) {
+    const error = await response
+      .json()
+      .catch(() => ({ detail: "Request failed" }));
+    throw new Error(error.detail || `API error: ${response.status}`);
+  }
+
+  return response.json();
+}
+
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
 export const api = {
@@ -179,8 +200,8 @@ export const api = {
 
   deposits: {
     getPlan: (cashToInvest = 900) =>
-      fetchApi<DepositPlanResult>(
-        `/api/v1/deposits/deposit-plan?cash_to_invest=${cashToInvest}`
+      fetchLocal<DepositPlanResult>(
+        `/api/deposit-plan?cash_to_invest=${cashToInvest}`
       ),
   },
 };
@@ -531,6 +552,19 @@ export interface DepositPlanAction {
   symbol: string;
   amount: number;
   [key: string]: unknown;
+}
+
+/** Adapter: map a deposit plan layer to a flat UI-ready list. */
+export function mapPlanToUI(
+  plan: { actions: DepositPlanAction[] } | null | undefined,
+  explanations?: Record<string, string>
+): Array<{ symbol: string; amount: number; explanation: string }> {
+  if (!plan?.actions) return [];
+  return plan.actions.map((a) => ({
+    symbol: a.symbol,
+    amount: a.amount,
+    explanation: explanations?.[a.symbol] ?? "",
+  }));
 }
 
 export interface DepositPlanExplanation {

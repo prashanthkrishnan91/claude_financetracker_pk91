@@ -18,6 +18,20 @@ from ..models.deposit import (
 router = APIRouter(prefix="/deposits", tags=["deposits"])
 
 
+@router.get("/deposit-plan")
+async def get_deposit_plan_route(
+    cash_to_invest: float = Query(default=900.0, ge=0),
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Compute next deposit plan with personalization and strategy layers."""
+    from ..services.deposit_service import DepositService
+    from ..services.agents.job_runner import _user_keys
+
+    keys = _user_keys(user.id)
+    service = DepositService(user_id=user.id)
+    return await service.get_deposit_plan(snapshot={}, api_key=keys.get("anthropic", ""))
+
+
 @router.get("/schedule", response_model=DepositSchedule)
 async def get_deposit_schedule(
     user: AuthenticatedUser = Depends(get_current_user),

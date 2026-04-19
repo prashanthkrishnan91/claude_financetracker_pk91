@@ -29,7 +29,11 @@ async def get_deposit_plan_route(
 
     keys = _user_keys(user.id)
     service = DepositService(user_id=user.id)
-    return await service.get_deposit_plan(snapshot={}, api_key=keys.get("anthropic", ""))
+    return await service.get_deposit_plan(
+        snapshot={},
+        api_key=keys.get("anthropic", ""),
+        cash_to_invest=cash_to_invest,
+    )
 
 
 @router.get("/schedule", response_model=DepositSchedule)

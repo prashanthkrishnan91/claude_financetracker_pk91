@@ -152,6 +152,7 @@ class DepositService:
         self,
         snapshot: dict | None = None,
         api_key: str = "",
+        cash_to_invest: float = _DEPOSIT_AMOUNT,
     ) -> dict:
         """Compute next deposit allocation and return it with an AI explanation."""
         import uuid
@@ -172,7 +173,7 @@ class DepositService:
             for sym, pct in _BREAKDOWN.items()
         }
         allocation: dict[str, float] = {
-            sym: round(_DEPOSIT_AMOUNT * pct, 2) for sym, pct in pct_map.items()
+            sym: round(cash_to_invest * pct, 2) for sym, pct in pct_map.items()
         }
         decision_plan = {
             "actions": [
@@ -211,36 +212,21 @@ class DepositService:
             api_key=api_key,
         )
 
-        original_plan = {
-            "deposit_date": _next_biweekly_friday(_date.today()).isoformat(),
-            "amount": _DEPOSIT_AMOUNT,
-            "allocation": allocation,
-            "rotating_pick": rotating_pick,
-        }
-
-        personalized_allocation = {
-            a["symbol"]: a["amount"] for a in personalized_plan.get("actions", [])
-        }
-        strategy_allocation = {
-            a["symbol"]: a["amount"] for a in strategy_adjusted_plan.get("actions", [])
-        }
-
         deposit_date = _next_biweekly_friday(_date.today()).isoformat()
 
         return {
             "decision_id": str(uuid.uuid4()),
             "plan": {
-                "deposit_date": deposit_date,
-                "amount": _DEPOSIT_AMOUNT,
-                "allocation": strategy_allocation,
-                "rotating_pick": rotating_pick,
+                "actions": strategy_adjusted_plan.get("actions", []),
             },
-            "original_plan": original_plan,
+            "original_plan": {
+                "actions": [
+                    {"symbol": sym, "amount": amt, "delta_weight": pct_map[sym]}
+                    for sym, amt in allocation.items()
+                ],
+            },
             "personalized_plan": {
-                "deposit_date": deposit_date,
-                "amount": _DEPOSIT_AMOUNT,
-                "allocation": personalized_allocation,
-                "rotating_pick": rotating_pick,
+                "actions": personalized_plan.get("actions", []),
             },
             "strategy_mode": strategy_mode,
             "explanation": explanation,

@@ -50,22 +50,28 @@ export default function RecommendationsPage() {
   const [planView, setPlanView] = useState<"original" | "personalized" | "final">("final");
   const [debugOpen, setDebugOpen] = useState(false);
   const [decisionId, setDecisionId] = useState<string | null>(null);
+  const [cashToInvest, setCashToInvest] = useState(900);
 
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
   const { data: jobStatus } = useAgentJob(activeJobId);
-  const { data: depositPlan } = useDepositPlan(900);
+  const { data: depositPlan } = useDepositPlan(cashToInvest);
 
   useEffect(() => {
     if (depositPlan) {
       setDecisionId(depositPlan.decision_id ?? null);
-      console.log("[DepositPlan] decision_id:", depositPlan.decision_id);
-      console.log("[DepositPlan] strategy_mode:", depositPlan.strategy_mode);
-      console.log("[DepositPlan] original_plan:", depositPlan.original_plan);
-      console.log("[DepositPlan] personalized_plan:", depositPlan.personalized_plan);
-      console.log("[DepositPlan] final plan:", depositPlan.plan);
+      const layers = [
+        { name: "original_plan", plan: depositPlan.original_plan },
+        { name: "personalized_plan", plan: depositPlan.personalized_plan },
+        { name: "final_plan", plan: depositPlan.plan },
+      ] as const;
+      for (const { name, plan } of layers) {
+        const rawActions = plan?.actions ?? [];
+        const computedTotal = rawActions.reduce((sum, a) => sum + Number(a.amount), 0);
+        console.log({ layer: name, computedTotal, rawActions });
+      }
     }
   }, [depositPlan]);
 
@@ -169,43 +175,80 @@ export default function RecommendationsPage() {
               ? depositPlan.personalized_plan
               : depositPlan.plan;
           const rows = mapPlanToUI(
-            activePlan,
+            activePlan ?? { actions: [] },
             depositPlan.explanation?.actions as Record<string, string> | undefined
           );
+          const computedTotal = (activePlan?.actions ?? []).reduce(
+            (sum, a) => sum + Number(a.amount),
+            0
+          );
+          const originalTotal = (depositPlan.original_plan?.actions ?? []).reduce(
+            (sum, a) => sum + Number(a.amount),
+            0
+          );
+          const delta = computedTotal - originalTotal;
           return (
             <div className="card-glass rounded-xl overflow-hidden">
-              {/* Header: title + strategy badge */}
-              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+              {/* Header: title + amount input + strategy badge */}
+              <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
                 <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
                   Deployment Plan
                 </span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
-                  {depositPlan.strategy_mode}
-                </span>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    value={cashToInvest}
+                    onChange={(e) => setCashToInvest(Math.max(0, Number(e.target.value)))}
+                    className="w-20 px-2 py-0.5 bg-surface border border-border rounded text-xs font-mono text-right text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                    min={0}
+                    step={50}
+                    aria-label="Cash to invest"
+                  />
+                  <span className="text-[10px] text-text-muted">to deploy</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
+                    {depositPlan.strategy_mode}
+                  </span>
+                </div>
               </div>
 
-              {/* Plan layer toggle */}
-              <div className="px-4 py-2 flex gap-1.5 border-b border-border/50">
-                {(
-                  [
-                    { key: "original" as const, label: "Original" },
-                    { key: "personalized" as const, label: "Personalized" },
-                    { key: "final" as const, label: "Final" },
-                  ]
-                ).map(({ key, label }) => (
-                  <button
-                    key={key}
-                    onClick={() => setPlanView(key)}
-                    className={cn(
-                      "text-xs px-2.5 py-1 rounded-md font-semibold transition-colors",
-                      planView === key
-                        ? "bg-accent text-background"
-                        : "bg-surface-elevated text-text-muted hover:text-text-secondary"
-                    )}
-                  >
-                    {label}
-                  </button>
-                ))}
+              {/* Plan layer toggle + total badge */}
+              <div className="px-4 py-2 flex items-center justify-between gap-2 border-b border-border/50">
+                <div className="flex gap-1.5">
+                  {(
+                    [
+                      { key: "original" as const, label: "Original" },
+                      { key: "personalized" as const, label: "Personalized" },
+                      { key: "final" as const, label: "Final" },
+                    ]
+                  ).map(({ key, label }) => (
+                    <button
+                      key={key}
+                      onClick={() => setPlanView(key)}
+                      className={cn(
+                        "text-xs px-2.5 py-1 rounded-md font-semibold transition-colors",
+                        planView === key
+                          ? "bg-accent text-background"
+                          : "bg-surface-elevated text-text-muted hover:text-text-secondary"
+                      )}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {/* Total per layer badge */}
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="font-mono text-xs font-bold text-text-primary">
+                    {formatCurrency(computedTotal)}
+                  </span>
+                  {planView === "final" && Math.abs(delta) >= 0.01 && (
+                    <span className={cn(
+                      "text-[10px] font-semibold font-mono",
+                      delta > 0 ? "text-green-400" : "text-red-400"
+                    )}>
+                      {delta > 0 ? "+" : ""}{formatCurrency(delta)} vs original
+                    </span>
+                  )}
+                </div>
               </div>
 
               {/* Rows */}

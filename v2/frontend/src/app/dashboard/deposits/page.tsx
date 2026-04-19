@@ -1,42 +1,22 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { cn, formatCurrency } from "@/lib/utils";
 import {
   usePortfolioSummary,
   useCashBalance,
   useSetCash,
-  useAiRebalance,
-  useAiLatestAnalysis,
+  useDepositPlan,
 } from "@/lib/hooks";
-import { api, type RebalanceResult, type AiAllocation } from "@/lib/api";
+import type { DepositRecommendation, DepositPlanResult } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
-import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
-import { useQuery } from "@tanstack/react-query";
-
-const DEPOSIT_FORMULA = [
-  { ticker: "NVDA", pct: 28 },
-  { ticker: "VOO", pct: 22 },
-  { ticker: "VYM", pct: 17 },
-  { ticker: "QQQ", pct: 17 },
-  { ticker: "ROTATING", pct: 16 },
-];
 
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
-
-  const {
-    data: rebalance,
-    isLoading,
-    refetch,
-    isFetching,
-  } = useQuery({
-    queryKey: ["portfolio", "rebalance", amount],
-    queryFn: () => api.portfolio.getRebalance(amount),
-    enabled: false,
-  });
+  const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount);
 
   return (
     <>
@@ -47,24 +27,6 @@ export default function DepositsPage() {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
-        {/* Section 1: Deposit Formula */}
-        <div className="card-glass p-4 space-y-3">
-          <p className="text-xs text-text-muted uppercase tracking-wide font-semibold">
-            Deposit Formula
-          </p>
-          <div className="flex flex-wrap gap-2">
-            {DEPOSIT_FORMULA.map((item) => (
-              <span
-                key={item.ticker}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-accent/10 border border-accent/20 text-accent text-xs font-semibold"
-              >
-                {item.ticker}
-                <span className="opacity-70">{item.pct}%</span>
-              </span>
-            ))}
-          </div>
-        </div>
-
         {/* KPI row */}
         {summary && (
           <div className="grid grid-cols-3 gap-3">
@@ -89,31 +51,24 @@ export default function DepositsPage() {
           </div>
         )}
 
-        {/* Section 2: Cash Override */}
+        {/* Cash Override */}
         <CashOverrideWidget />
 
         {/* Deploy amount input */}
         <div className="card-glass p-4 space-y-3">
-          <p className="text-sm text-text-secondary">Deposit Amount</p>
+          <p className="text-sm text-text-secondary font-medium">Deposit Amount</p>
           <div className="flex gap-3 items-center">
             <div className="relative flex-1">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted">
-                $
-              </span>
+              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted">$</span>
               <input
                 type="number"
                 value={amount}
-                onChange={(e) => setAmount(Number(e.target.value))}
+                onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
                 className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border rounded-lg text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                min={0}
+                step={50}
               />
             </div>
-            <button
-              onClick={() => refetch()}
-              disabled={isFetching || amount <= 0}
-              className="px-4 py-2.5 bg-accent text-background font-semibold rounded-lg hover:bg-accent-hover transition-colors disabled:opacity-50"
-            >
-              {isFetching ? "..." : "Calculate"}
-            </button>
           </div>
           <div className="flex gap-2">
             {[500, 900, 1200, 1800].map((preset) => (
@@ -133,40 +88,173 @@ export default function DepositsPage() {
           </div>
         </div>
 
-        {/* Rebalance results */}
-        {isLoading || isFetching ? (
-          <InlineLoader text="Calculating deposit allocation..." />
-        ) : rebalance && rebalance.length > 0 ? (
-          <div className="space-y-3">
-            {rebalance[0]?.is_default_formula && (
-              <div className="px-3 py-2 rounded-lg bg-accent/5 border border-accent/20">
-                <p className="text-xs text-accent">
-                  Using built-in deposit formula · ROTATING slot filled by highest-urgency Intel BUY signal
-                </p>
-              </div>
-            )}
-            <h2 className="text-sm text-text-secondary font-medium">
-              {rebalance[0]?.is_default_formula
-                ? `Deposit Allocation — ${formatCurrency(amount)}`
-                : "Suggested Allocation"}
-            </h2>
-            <div className="space-y-1.5">
-              {rebalance.map((r) => (
-                <RebalanceRow key={r.ticker} result={r} />
-              ))}
-            </div>
-          </div>
-        ) : rebalance && rebalance.length === 0 ? (
-          <EmptyState
-            title="No positions found"
-            description="Add positions to your portfolio to see deposit allocation suggestions."
-          />
+        {/* Deployment Plan */}
+        {isPlanLoading ? (
+          <InlineLoader text="Building deployment plan..." />
+        ) : deployPlan ? (
+          <DeploymentPlan deployPlan={deployPlan} />
         ) : null}
-
-        {/* Section 3: AI Rebalance */}
-        <AiRebalanceSection />
       </main>
     </>
+  );
+}
+
+function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
+  const [debugOpen, setDebugOpen] = useState(false);
+  const { plan, recommendations, summary, debug } = deployPlan;
+
+  return (
+    <div className="space-y-4">
+      {/* Plan Summary */}
+      <PlanSummary plan={plan} summary={summary} />
+
+      {/* Link to Intel tab */}
+      <Link
+        href="/dashboard/recommendations"
+        className="flex items-center gap-1.5 text-xs text-accent hover:text-accent-hover transition-colors font-semibold"
+      >
+        View full AI analysis
+        <ArrowRightIcon className="w-3.5 h-3.5" />
+      </Link>
+
+      {/* Recommendation List */}
+      {recommendations.length === 0 ? (
+        <div className="card-glass px-4 py-6 text-center text-sm text-text-muted">
+          No action needed. Portfolio is aligned with targets.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {recommendations.map((rec) => (
+            <RecommendationCard key={rec.symbol} rec={rec} />
+          ))}
+        </div>
+      )}
+
+      {/* Debug Toggle */}
+      <div className="card-glass overflow-hidden">
+        <button
+          onClick={() => setDebugOpen((o) => !o)}
+          className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
+        >
+          <span className="text-xs font-semibold uppercase tracking-wide">
+            Show Advanced
+          </span>
+          <ChevronIcon
+            className={cn(
+              "w-4 h-4 transition-transform",
+              debugOpen ? "rotate-180" : ""
+            )}
+          />
+        </button>
+        {debugOpen && (
+          <div className="border-t border-border p-4">
+            <pre className="text-[10px] text-text-muted bg-surface-elevated rounded-lg p-3 overflow-x-auto leading-relaxed whitespace-pre-wrap">
+              {JSON.stringify(debug, null, 2)}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PlanSummary({
+  plan,
+  summary,
+}: {
+  plan: DepositPlanResult["plan"];
+  summary: DepositPlanResult["summary"];
+}) {
+  return (
+    <div className="card-glass p-4 space-y-3">
+      <div className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <p className="text-lg font-display text-text-primary">
+            Investing {formatCurrency(plan.total_amount)}
+          </p>
+          <p className="text-xs text-text-muted mt-0.5">{plan.strategy}</p>
+        </div>
+        <span
+          className={cn(
+            "text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wide",
+            summary.fully_allocated
+              ? "bg-green-500/10 text-green-400 border border-green-500/20"
+              : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
+          )}
+        >
+          {summary.fully_allocated ? "Fully Allocated" : "Partial"}
+        </span>
+      </div>
+      <div className="flex gap-4 text-xs text-text-muted">
+        <span>{summary.positions_count} positions</span>
+        <span>Rotating: {summary.rotating_pick}</span>
+        <span className="capitalize">{summary.strategy_mode} mode</span>
+      </div>
+    </div>
+  );
+}
+
+function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
+  return (
+    <div className="card-glass px-4 py-4 space-y-3">
+      {/* Header row */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <span className="font-mono font-bold text-text-primary text-base">
+            {rec.symbol}
+          </span>
+          <span className="text-xs px-2 py-0.5 rounded bg-green-500/10 text-green-400 font-bold uppercase">
+            {rec.action}
+          </span>
+        </div>
+        <span className="font-mono font-semibold text-text-primary">
+          {formatCurrency(rec.amount)}
+        </span>
+      </div>
+
+      {/* Allocation bar */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[10px] text-text-muted">
+          <span>Target weight</span>
+          <span className="font-mono">{rec.target_weight.toFixed(1)}%</span>
+        </div>
+        <div className="h-1.5 bg-surface-elevated rounded-full overflow-hidden">
+          <div
+            className="h-full bg-accent rounded-full transition-all"
+            style={{ width: `${Math.min(100, rec.target_weight)}%` }}
+          />
+        </div>
+      </div>
+
+      {/* Rationale */}
+      <ul className="space-y-0.5">
+        <li className="flex gap-2 text-xs text-text-secondary leading-relaxed">
+          <span className="text-accent shrink-0 mt-0.5">•</span>
+          <span>{rec.rationale}</span>
+        </li>
+      </ul>
+
+      {/* Confidence bar */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between text-[10px] text-text-muted">
+          <span>Confidence</span>
+          <span className="font-mono">{rec.confidence}%</span>
+        </div>
+        <div className="h-1 bg-surface-elevated rounded-full overflow-hidden">
+          <div
+            className={cn(
+              "h-full rounded-full transition-all",
+              rec.confidence >= 80
+                ? "bg-green-400"
+                : rec.confidence >= 60
+                ? "bg-yellow-400"
+                : "bg-text-muted"
+            )}
+            style={{ width: `${rec.confidence}%` }}
+          />
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -272,242 +360,20 @@ function CashOverrideWidget() {
   );
 }
 
-function AiRebalanceSection() {
-  const aiRebalance = useAiRebalance();
-  const { data: latestAnalysis, isLoading: isLoadingLatest } = useAiLatestAnalysis();
-
-  // Show the freshly-generated result if available, otherwise fall back to the
-  // latest stored analysis fetched from the DB on page load.
-  const displayData = aiRebalance.data ?? latestAnalysis ?? null;
-  const isFreshGeneration = !!aiRebalance.data;
-
+// Icons
+function ChevronIcon({ className }: { className?: string }) {
   return (
-    <div className="card-glass p-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-text-secondary uppercase tracking-wide">
-          AI Portfolio Analysis
-        </h2>
-      </div>
-
-      {!displayData && !aiRebalance.isPending && !aiRebalance.isError && !isLoadingLatest && (
-        <p className="text-xs text-text-muted">
-          Generate AI-powered portfolio allocation suggestions based on your current holdings.
-        </p>
-      )}
-
-      {isLoadingLatest && !displayData && (
-        <p className="text-xs text-text-muted">Loading last analysis...</p>
-      )}
-
-      <button
-        onClick={() => aiRebalance.mutate()}
-        disabled={aiRebalance.isPending}
-        className="flex items-center gap-2 px-4 py-2.5 bg-surface-elevated text-text-primary font-semibold text-sm rounded-lg hover:bg-border transition-colors disabled:opacity-50 border border-border"
-      >
-        {aiRebalance.isPending ? (
-          <>
-            <Spinner className="h-4 w-4" />
-            Analyzing portfolio...
-          </>
-        ) : (
-          <>
-            <span>✨</span>
-            {displayData ? "Regenerate AI Targets" : "Generate AI Targets"}
-          </>
-        )}
-      </button>
-
-      {aiRebalance.isError && (
-        <div className="px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
-          <p className="text-xs text-yellow-300">
-            Configure Anthropic API key in Settings to use AI features.
-          </p>
-        </div>
-      )}
-
-      {displayData && (
-        <div className="space-y-5">
-          {/* Allocation table */}
-          <div className="space-y-2">
-            <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-              Suggested Allocations
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-border text-text-muted">
-                    <th className="text-left py-2 pr-3 font-medium">Ticker</th>
-                    <th className="text-right py-2 px-3 font-medium">Current %</th>
-                    <th className="text-right py-2 px-3 font-medium">Suggested %</th>
-                    <th className="text-right py-2 px-3 font-medium">Change</th>
-                    <th className="text-left py-2 pl-3 font-medium">Rationale</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {displayData.allocation_table.map((row) => (
-                    <AiAllocationRow key={row.ticker} row={row} />
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-
-          {/* Narrative */}
-          {displayData.narrative && (
-            <div className="space-y-2">
-              <h3 className="text-xs font-semibold text-text-muted uppercase tracking-wide">
-                Analysis
-              </h3>
-              <div className="space-y-1.5">
-                {displayData.narrative
-                  .split(/\n|[•·]/)
-                  .map((line) =>
-                    // Strip leading numbering (1. 2) 3: etc.) and bullet chars
-                    line.replace(/^\s*[\d]+[.):\s]+/, "").replace(/^[-–—*]\s+/, "").trim()
-                  )
-                  .filter(Boolean)
-                  .map((line, i) => (
-                    <p key={i} className="text-xs text-text-secondary leading-relaxed flex gap-2">
-                      <span className="text-accent shrink-0 mt-0.5">•</span>
-                      <span>{line}</span>
-                    </p>
-                  ))}
-              </div>
-            </div>
-          )}
-
-          {/* Timestamp */}
-          <p className="text-[10px] text-text-muted">
-            {isFreshGeneration ? "Just generated" : "Last generated"}:{" "}
-            {displayData.generated_at
-              ? new Date(displayData.generated_at).toLocaleString("en-US", {
-                  month: "short",
-                  day: "numeric",
-                  hour: "2-digit",
-                  minute: "2-digit",
-                })
-              : "—"}
-          </p>
-        </div>
-      )}
-    </div>
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
+      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
-function AiAllocationRow({ row }: { row: AiAllocation }) {
-  const changePositive = row.change_pct > 0;
-  const changeNegative = row.change_pct < 0;
-
+function ArrowRightIcon({ className }: { className?: string }) {
   return (
-    <tr className="border-b border-border/50 hover:bg-surface-elevated/50 transition-colors">
-      <td className="py-2 pr-3">
-        <span className="font-mono font-semibold text-text-primary">{row.ticker}</span>
-      </td>
-      <td className="py-2 px-3 text-right font-mono text-text-muted">
-        {row.current_pct.toFixed(1)}%
-      </td>
-      <td className="py-2 px-3 text-right font-mono text-text-primary">
-        {row.suggested_pct.toFixed(1)}%
-      </td>
-      <td className="py-2 px-3 text-right">
-        <span
-          className={cn(
-            "font-mono font-semibold",
-            changePositive ? "text-accent" : changeNegative ? "text-danger" : "text-text-muted"
-          )}
-        >
-          {row.change_pct > 0 ? "+" : ""}
-          {row.change_pct.toFixed(1)}%
-        </span>
-      </td>
-      <td className="py-2 pl-3 text-text-muted max-w-[200px]">
-        <span className="truncate block" title={row.rationale}>
-          {row.rationale}
-        </span>
-      </td>
-    </tr>
-  );
-}
-
-function IntelBadge({ action, urgency }: { action: string; urgency?: number }) {
-  const colorMap: Record<string, string> = {
-    BUY:    "bg-green-500/10 text-green-400",
-    SELL:   "bg-red-500/10 text-red-400",
-    TRIM:   "bg-orange-500/10 text-orange-400",
-    HOLD:   "bg-blue-500/10 text-blue-400",
-    REVIEW: "bg-purple-500/10 text-purple-400",
-  };
-  const color = colorMap[action] ?? "bg-surface-elevated text-text-muted";
-  const dots = urgency && urgency > 0 ? "•".repeat(Math.min(urgency, 5)) : "";
-  return (
-    <span className={cn("text-[10px] px-1.5 py-0.5 rounded font-semibold", color)}>
-      Intel: {action}{dots ? ` ${dots}` : ""}
-    </span>
-  );
-}
-
-function RebalanceRow({ result }: { result: RebalanceResult }) {
-  const isBuy = result.suggested_amount > 0;
-  const onTarget = result.suggested_action === "ON TARGET";
-
-  return (
-    <div className="card-glass px-4 py-3 space-y-1.5">
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-mono font-semibold text-text-primary text-sm">
-              {result.ticker}
-            </span>
-            <span
-              className={cn(
-                "text-[10px] px-1.5 py-0.5 rounded",
-                onTarget
-                  ? "bg-accent/10 text-accent"
-                  : isBuy
-                  ? "bg-green-500/10 text-green-400"
-                  : "bg-red-500/10 text-red-400"
-              )}
-            >
-              {result.suggested_action}
-            </span>
-            {result.intel_action && (
-              <IntelBadge action={result.intel_action} urgency={result.intel_urgency} />
-            )}
-          </div>
-          {result.rationale && (
-            <p className="text-xs text-text-muted mt-1 leading-relaxed">
-              {result.rationale}
-            </p>
-          )}
-          {result.drip_note && (
-            <p className="text-xs text-blue-400/80 mt-0.5 leading-relaxed">
-              {result.drip_note}
-            </p>
-          )}
-        </div>
-        {!onTarget && (
-          <p className="font-mono text-sm font-semibold text-text-primary shrink-0">
-            {formatCurrency(Math.abs(result.suggested_amount))}
-          </p>
-        )}
-      </div>
-      <div className="flex gap-3 text-xs text-text-muted">
-        <span>Current: {result.current_pct.toFixed(1)}%</span>
-        <span>Target: {result.target_pct.toFixed(1)}%</span>
-        <span
-          className={cn(
-            result.drift_pct > 0.5
-              ? "text-red-400"
-              : result.drift_pct < -0.5
-              ? "text-green-400"
-              : "text-text-muted"
-          )}
-        >
-          Drift: {result.drift_pct > 0 ? "+" : ""}
-          {result.drift_pct.toFixed(1)}%
-        </span>
-      </div>
-    </div>
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+      <path d="M5 12h14M12 5l7 7-7 7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 

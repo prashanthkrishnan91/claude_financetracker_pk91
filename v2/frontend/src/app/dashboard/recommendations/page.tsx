@@ -15,6 +15,7 @@ import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
+import { mapPlanToUI } from "@/lib/api";
 import type { InsightCardData, DecisionLogEntry } from "@/lib/api";
 
 const ACTION_FILTERS = [
@@ -46,6 +47,9 @@ export default function RecommendationsPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [decisionLogOpen, setDecisionLogOpen] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [planView, setPlanView] = useState<"original" | "personalized" | "final">("final");
+  const [debugOpen, setDebugOpen] = useState(false);
+  const [decisionId, setDecisionId] = useState<string | null>(null);
 
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
@@ -54,12 +58,14 @@ export default function RecommendationsPage() {
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: depositPlan } = useDepositPlan(900);
 
-  // Debug: log original_plan vs personalized plan for visibility
   useEffect(() => {
     if (depositPlan) {
-      console.log("[DepositPlan] original_plan:", depositPlan.original_plan);
-      console.log("[DepositPlan] plan (final):", depositPlan.plan);
+      setDecisionId(depositPlan.decision_id ?? null);
+      console.log("[DepositPlan] decision_id:", depositPlan.decision_id);
       console.log("[DepositPlan] strategy_mode:", depositPlan.strategy_mode);
+      console.log("[DepositPlan] original_plan:", depositPlan.original_plan);
+      console.log("[DepositPlan] personalized_plan:", depositPlan.personalized_plan);
+      console.log("[DepositPlan] final plan:", depositPlan.plan);
     }
   }, [depositPlan]);
 
@@ -147,47 +153,95 @@ export default function RecommendationsPage() {
           <AgentProgressTracker status={jobStatus} />
         )}
 
-        {/* Strategy mode + Deposit Plan */}
-        {depositPlan && (
-          <div className="card-glass rounded-xl overflow-hidden">
-            <div className="px-4 py-3 border-b border-border flex items-center justify-between">
-              <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
-                Deployment Plan
-              </span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
-                {depositPlan.strategy_mode}
-              </span>
-            </div>
-            <div className="divide-y divide-border/50">
-              {depositPlan.plan.actions.map((action) => {
-                const explanation =
-                  depositPlan.explanation?.actions?.[action.symbol];
-                return (
-                  <div
-                    key={action.symbol}
-                    className="flex items-start gap-3 px-4 py-3"
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-sm font-bold text-text-primary">
-                          {action.symbol}
-                        </span>
-                        <span className="text-sm font-semibold text-green-400">
-                          {formatCurrency(action.amount)}
-                        </span>
-                      </div>
-                      {explanation && (
-                        <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
-                          {explanation}
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+        {/* Deposit Plan — error fallback */}
+        {!depositPlan && (
+          <div className="card-glass rounded-xl px-4 py-3 text-xs text-text-muted">
+            Deployment plan unavailable. Check API connection.
           </div>
         )}
+
+        {/* Strategy mode + Deposit Plan */}
+        {depositPlan && (() => {
+          const activePlan =
+            planView === "original"
+              ? depositPlan.original_plan
+              : planView === "personalized"
+              ? depositPlan.personalized_plan
+              : depositPlan.plan;
+          const rows = mapPlanToUI(
+            activePlan,
+            depositPlan.explanation?.actions as Record<string, string> | undefined
+          );
+          return (
+            <div className="card-glass rounded-xl overflow-hidden">
+              {/* Header: title + strategy badge */}
+              <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+                <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+                  Deployment Plan
+                </span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-accent/10 text-accent font-semibold uppercase tracking-wide">
+                  {depositPlan.strategy_mode}
+                </span>
+              </div>
+
+              {/* Plan layer toggle */}
+              <div className="px-4 py-2 flex gap-1.5 border-b border-border/50">
+                {(
+                  [
+                    { key: "original" as const, label: "Original" },
+                    { key: "personalized" as const, label: "Personalized" },
+                    { key: "final" as const, label: "Final" },
+                  ]
+                ).map(({ key, label }) => (
+                  <button
+                    key={key}
+                    onClick={() => setPlanView(key)}
+                    className={cn(
+                      "text-xs px-2.5 py-1 rounded-md font-semibold transition-colors",
+                      planView === key
+                        ? "bg-accent text-background"
+                        : "bg-surface-elevated text-text-muted hover:text-text-secondary"
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Rows */}
+              {rows.length === 0 ? (
+                <div className="px-4 py-4 text-xs text-text-muted">
+                  No allocation data for this plan layer.
+                </div>
+              ) : (
+                <div className="divide-y divide-border/50">
+                  {rows.map((row) => (
+                    <div
+                      key={row.symbol}
+                      className="flex items-start gap-3 px-4 py-3"
+                    >
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-sm font-bold text-text-primary">
+                            {row.symbol}
+                          </span>
+                          <span className="text-sm font-semibold text-green-400">
+                            {formatCurrency(row.amount)}
+                          </span>
+                        </div>
+                        {row.explanation && (
+                          <p className="text-xs text-text-muted mt-0.5 leading-relaxed">
+                            {row.explanation}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Filter cards */}
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
@@ -278,6 +332,51 @@ export default function RecommendationsPage() {
             </div>
           )}
         </div>
+        {/* Debug panel — deposit plan layers */}
+        {depositPlan && (
+          <div className="card-glass overflow-hidden">
+            <button
+              onClick={() => setDebugOpen((o) => !o)}
+              className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
+            >
+              <span className="font-semibold uppercase tracking-wide text-xs">
+                Debug: Plan Layers
+              </span>
+              <ChevronIcon
+                className={cn(
+                  "w-4 h-4 transition-transform",
+                  debugOpen ? "rotate-180" : ""
+                )}
+              />
+            </button>
+
+            {debugOpen && (
+              <div className="border-t border-border p-4 space-y-4">
+                {decisionId && (
+                  <p className="text-xs text-text-muted font-mono break-all">
+                    decision_id: {decisionId}
+                  </p>
+                )}
+                {(
+                  [
+                    { label: "original_plan", data: depositPlan.original_plan },
+                    { label: "personalized_plan", data: depositPlan.personalized_plan },
+                    { label: "final plan (strategy-adjusted)", data: depositPlan.plan },
+                  ] as const
+                ).map(({ label, data }) => (
+                  <div key={label}>
+                    <p className="text-xs font-semibold text-text-secondary uppercase tracking-wide mb-1">
+                      {label}
+                    </p>
+                    <pre className="text-[10px] text-text-muted bg-surface-elevated rounded-lg p-3 overflow-x-auto leading-relaxed whitespace-pre-wrap">
+                      {JSON.stringify(data, null, 2)}
+                    </pre>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </main>
 
       {/* Recommendation Modal */}

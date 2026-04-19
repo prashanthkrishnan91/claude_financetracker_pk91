@@ -36,8 +36,10 @@ function toISODate(d: Date): string {
   return d.toISOString().split("T")[0];
 }
 
-export async function GET() {
-  // Hardcoded: no DB call, executed_count = 0
+export async function GET(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const depositAmount = Number(searchParams.get("cash_to_invest") || DEPOSIT_AMOUNT);
+
   const executedCount = 0;
   const rotatingPick = ROTATION_ORDER[executedCount % ROTATION_ORDER.length];
 
@@ -48,27 +50,16 @@ export async function GET() {
     ])
   );
 
-  const allocation: Record<string, number> = Object.fromEntries(
-    Object.entries(pctMap).map(([sym, pct]) => [
-      sym,
-      Math.round(DEPOSIT_AMOUNT * pct * 100) / 100,
-    ])
-  );
-
   const depositDate = toISODate(nextBiweeklyFriday(new Date()));
 
-  const planShape = {
-    deposit_date: depositDate,
-    amount: DEPOSIT_AMOUNT,
-    allocation,
-    rotating_pick: rotatingPick,
-  };
-
-  const actions = Object.entries(allocation).map(([symbol, amount]) => ({
+  const actions = Object.entries(pctMap).map(([symbol, pct]) => ({
     symbol,
-    amount,
-    delta_weight: pctMap[symbol],
+    amount: Math.round(depositAmount * pct * 100) / 100,
+    delta_weight: pct,
+    deposit_date: depositDate,
   }));
+
+  const planShape = { actions };
 
   const explanation = {
     summary:
@@ -81,6 +72,8 @@ export async function GET() {
       ])
     ),
   };
+
+  console.log("[deposit-plan] depositAmount:", depositAmount, "actions:", actions);
 
   return NextResponse.json({
     decision_id: crypto.randomUUID(),

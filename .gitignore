@@ -56,3 +56,6 @@ secrets.toml
 .coverage
 htmlcov/
 .mypy_cache/
+
+# ── Claude / tooling internals ────────────────────────────────────────────────
+.claude-flow/

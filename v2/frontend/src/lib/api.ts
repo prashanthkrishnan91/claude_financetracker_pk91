@@ -600,6 +600,12 @@ export interface DepositPlanResult {
       }>;
     };
     personalized_plan: { actions: Array<Record<string, unknown>> };
-    signals: { growth_bias: string[]; income_trim: string[]; rotating_pick: string };
+    signals: {
+      ai_driven: boolean;
+      insights_count: number;
+      rotating_pick: string;
+      growth_bias: string[];
+      income_trim: string[];
+    };
   };
 }

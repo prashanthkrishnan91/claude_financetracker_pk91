@@ -218,11 +218,18 @@ export const api = {
       reasoning?: string;
       source?: string;
       metadata?: Record<string, unknown>;
+      strategy_tag?: string;
+      confidence_score?: number;
     }) =>
       fetchApi<Record<string, unknown>>("/api/v1/decision/logs", {
         method: "POST",
         body: JSON.stringify(entry),
       }),
+  },
+
+  analytics: {
+    getStrategyPerformance: () =>
+      fetchApi<StrategyPerformance[]>("/api/v1/analytics/strategy-performance"),
   },
 };
 
@@ -521,6 +528,15 @@ export interface DecisionLogEntry {
   status: "active" | "closed";
   closed_at: string | null;
   created_at: string;
+  strategy_tag: string | null;
+  confidence_score: number | null;
+}
+
+export interface StrategyPerformance {
+  strategy_tag: string;
+  avg_return: number | null;
+  win_rate: number | null;
+  total_trades: number;
 }
 
 export interface AiAllocation {

@@ -340,3 +340,13 @@ export function useAiRebalance() {
     },
   });
 }
+
+// ── Analytics ─────────────────────────────────────────────────────────────────
+
+export function useStrategyPerformance() {
+  return useQuery({
+    queryKey: ["analytics", "strategy-performance"],
+    queryFn: api.analytics.getStrategyPerformance,
+    staleTime: 5 * 60_000,
+  });
+}

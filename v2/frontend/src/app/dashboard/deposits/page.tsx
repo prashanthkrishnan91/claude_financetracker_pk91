@@ -107,7 +107,7 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
   return (
     <div className="space-y-4">
       {/* Plan Summary */}
-      <PlanSummary plan={plan} summary={summary} />
+      <PlanSummary plan={plan} summary={summary} aiDriven={debug.signals.ai_driven} />
 
       {/* Link to Intel tab */}
       <Link
@@ -179,17 +179,26 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
 function PlanSummary({
   plan,
   summary,
+  aiDriven,
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
+  aiDriven: boolean;
 }) {
   return (
     <div className="card-glass p-4 space-y-3">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <p className="text-lg font-display text-text-primary">
-            Investing {formatCurrency(plan.total_amount)}
-          </p>
+          <div className="flex items-center gap-2 flex-wrap">
+            <p className="text-lg font-display text-text-primary">
+              Investing {formatCurrency(plan.total_amount)}
+            </p>
+            {aiDriven && (
+              <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                AI-Driven
+              </span>
+            )}
+          </div>
           <p className="text-xs text-text-muted mt-0.5">{plan.strategy}</p>
         </div>
         <span

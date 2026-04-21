@@ -8,6 +8,7 @@ import {
   useCashBalance,
   useSetCash,
   useDepositPlan,
+  useLogDecision,
 } from "@/lib/hooks";
 import type { DepositRecommendation, DepositPlanResult } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
@@ -212,6 +213,35 @@ function PlanSummary({
 }
 
 function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
+  const [logOpen, setLogOpen] = useState(false);
+  const [ticker, setTicker] = useState(rec.symbol);
+  const [amount, setAmount] = useState(rec.amount);
+  const [saved, setSaved] = useState(false);
+  const logDecision = useLogDecision();
+
+  function handleLog() {
+    logDecision.mutate(
+      {
+        ticker,
+        action: rec.action,
+        amount,
+        confidence: rec.confidence,
+        reasoning: rec.rationale,
+        source: "manual",
+        metadata: { original_symbol: rec.symbol, original_amount: rec.amount },
+      },
+      {
+        onSuccess: () => {
+          setSaved(true);
+          setTimeout(() => {
+            setLogOpen(false);
+            setSaved(false);
+          }, 1500);
+        },
+      }
+    );
+  }
+
   return (
     <div className="card-glass px-4 py-4 space-y-3">
       {/* Header row */}
@@ -271,6 +301,60 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
           />
         </div>
       </div>
+
+      {/* Log Decision */}
+      {!logOpen ? (
+        <button
+          onClick={() => setLogOpen(true)}
+          className="w-full text-xs text-text-muted hover:text-accent transition-colors pt-1 text-left"
+        >
+          + Log this decision
+        </button>
+      ) : (
+        <div className="border-t border-border pt-3 space-y-2">
+          <p className="text-[10px] text-text-muted uppercase tracking-wide font-semibold">
+            Log Decision
+          </p>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={ticker}
+              onChange={(e) => setTicker(e.target.value.toUpperCase())}
+              placeholder="Ticker"
+              className="w-24 px-2 py-1.5 bg-surface border border-border rounded text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent uppercase"
+            />
+            <div className="relative flex-1">
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted text-xs">$</span>
+              <input
+                type="number"
+                value={amount}
+                onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
+                className="w-full pl-5 pr-2 py-1.5 bg-surface border border-border rounded text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                min={0}
+                step={10}
+              />
+            </div>
+            <button
+              onClick={handleLog}
+              disabled={logDecision.isPending || saved}
+              className={cn(
+                "px-3 py-1.5 rounded text-xs font-semibold transition-colors",
+                saved
+                  ? "bg-green-500/20 text-green-400"
+                  : "bg-accent text-background hover:bg-accent-hover disabled:opacity-50"
+              )}
+            >
+              {saved ? "Saved" : logDecision.isPending ? "..." : "Save"}
+            </button>
+            <button
+              onClick={() => { setLogOpen(false); setTicker(rec.symbol); setAmount(rec.amount); }}
+              className="text-xs text-text-muted hover:text-text-primary transition-colors px-1"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

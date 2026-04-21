@@ -5,7 +5,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
-from ..models.decision import DecisionFeedbackRequest, DecisionResponse
+from ..models.decision import DecisionFeedbackRequest, DecisionResponse, ManualDecisionLogCreate
 from ..services.decision_history_service import get_decision, submit_user_feedback
 from ..services.decision_log_service import DecisionLogService
 
@@ -20,6 +20,17 @@ async def get_decision_logs(
     """List deploy-plan decision log entries, newest first."""
     svc = DecisionLogService()
     return svc.list(limit).data
+
+
+@router.post("/logs", status_code=201)
+async def create_decision_log(
+    body: ManualDecisionLogCreate,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Manually log a deploy decision (with optional ticker/amount edits)."""
+    svc = DecisionLogService()
+    result = svc.log({**body.model_dump(), "user_id": str(user.id)})
+    return result.data[0] if result.data else {}
 
 
 @router.get("/{decision_id}", response_model=DecisionResponse)

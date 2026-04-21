@@ -204,6 +204,24 @@ export const api = {
         `/api/deposit-plan?cash_to_invest=${cashToInvest}`
       ),
   },
+
+  decisionLogs: {
+    list: (limit = 50) =>
+      fetchApi<Record<string, unknown>[]>(`/api/v1/decision/logs?limit=${limit}`),
+    create: (entry: {
+      ticker: string;
+      action: string;
+      amount: number;
+      confidence?: number;
+      reasoning?: string;
+      source?: string;
+      metadata?: Record<string, unknown>;
+    }) =>
+      fetchApi<Record<string, unknown>>("/api/v1/decision/logs", {
+        method: "POST",
+        body: JSON.stringify(entry),
+      }),
+  },
 };
 
 /** Form data upload (no JSON content-type) */

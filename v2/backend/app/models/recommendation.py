@@ -119,6 +119,10 @@ class DecisionLogEntry(BaseModel):
     notes: Optional[str] = None
     price_at_decision: Optional[float] = None
     shares_at_decision: Optional[float] = None
+    current_price: Optional[float] = None
+    return_pct: Optional[float] = None
+    status: str = "active"
+    closed_at: Optional[datetime] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

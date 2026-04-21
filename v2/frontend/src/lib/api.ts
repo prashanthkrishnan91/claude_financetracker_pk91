@@ -147,6 +147,8 @@ export const api = {
       fetchApi<DecisionLogEntry[]>(
         `/api/v1/recommendations/decisions?limit=${limit}`
       ),
+    getOutcomes: () =>
+      fetchApi<DecisionLogEntry[]>("/api/v1/recommendations/decisions/outcomes"),
   },
 
   sync: {
@@ -513,6 +515,11 @@ export interface DecisionLogEntry {
   decision: string;
   notes: string | null;
   price_at_decision: number | null;
+  shares_at_decision: number | null;
+  current_price: number | null;
+  return_pct: number | null;
+  status: "active" | "closed";
+  closed_at: string | null;
   created_at: string;
 }
 

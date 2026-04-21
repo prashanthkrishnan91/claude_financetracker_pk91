@@ -9,8 +9,9 @@ import {
   useSetCash,
   useDepositPlan,
   useLogDecision,
+  useDecisionOutcomes,
 } from "@/lib/hooks";
-import type { DepositRecommendation, DepositPlanResult } from "@/lib/api";
+import type { DepositRecommendation, DepositPlanResult, DecisionLogEntry } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 
@@ -18,6 +19,7 @@ export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
   const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount);
+  const { data: outcomes } = useDecisionOutcomes();
 
   return (
     <>
@@ -50,6 +52,11 @@ export default function DepositsPage() {
               </p>
             </div>
           </div>
+        )}
+
+        {/* Position P/L tracker */}
+        {outcomes && outcomes.some((o) => o.return_pct != null) && (
+          <OutcomePLSection outcomes={outcomes} />
         )}
 
         {/* Cash Override */}
@@ -364,6 +371,83 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function OutcomePLSection({ outcomes }: { outcomes: DecisionLogEntry[] }) {
+  const tracked = outcomes.filter((o) => o.return_pct != null);
+  if (tracked.length === 0) return null;
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted px-0.5">
+        Decision P&amp;L
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {tracked.map((entry) => {
+          const isGain = (entry.return_pct ?? 0) >= 0;
+          const daysHeld = Math.round(
+            (Date.now() - new Date(entry.created_at).getTime()) / 86_400_000
+          );
+          const statusLabel =
+            entry.status === "closed"
+              ? (isGain ? "WIN" : "LOSS")
+              : "ACTIVE";
+          const statusStyle =
+            entry.status === "closed"
+              ? isGain
+                ? "bg-green-500/10 text-green-400 border-green-500/30"
+                : "bg-red-500/10 text-red-400 border-red-500/30"
+              : "bg-blue-500/10 text-blue-400 border-blue-500/30";
+
+          return (
+            <div
+              key={entry.id}
+              className={cn(
+                "card-glass p-3 border-l-2",
+                isGain ? "border-l-green-500" : "border-l-red-500"
+              )}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="font-mono font-bold text-text-primary text-sm">
+                    {entry.ticker}
+                  </span>
+                  <span
+                    className={cn(
+                      "text-[10px] px-1.5 py-0.5 rounded-full border font-semibold uppercase shrink-0",
+                      statusStyle
+                    )}
+                  >
+                    {statusLabel}
+                  </span>
+                </div>
+                <span
+                  className={cn(
+                    "font-mono font-bold text-sm shrink-0",
+                    isGain ? "text-green-400" : "text-red-400"
+                  )}
+                >
+                  {isGain ? "+" : ""}
+                  {entry.return_pct!.toFixed(2)}%
+                </span>
+              </div>
+              <div className="flex items-center justify-between mt-1.5 text-[10px] text-text-muted">
+                <span>
+                  {entry.price_at_decision != null && (
+                    <>{formatCurrency(entry.price_at_decision)}</>
+                  )}
+                  {entry.current_price != null && entry.price_at_decision != null && (
+                    <> → {formatCurrency(entry.current_price)}</>
+                  )}
+                </span>
+                <span>{daysHeld}d held</span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }

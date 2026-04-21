@@ -34,6 +34,22 @@ _DEPOSIT_AMOUNT = 900.00
 _DEPOSITS_PER_YEAR = 26  # biweekly
 
 
+def calculate_position_size(confidence_score: float, portfolio_balance: float) -> float:
+    """Return dollar position size based on confidence score tier and portfolio balance.
+
+    confidence > 0.8  → 5% of portfolio
+    0.5 – 0.8        → 2% of portfolio
+    < 0.5            → 1% of portfolio
+    """
+    if confidence_score > 0.8:
+        pct = 0.05
+    elif confidence_score >= 0.5:
+        pct = 0.02
+    else:
+        pct = 0.01
+    return round(portfolio_balance * pct, 2)
+
+
 def _next_biweekly_friday(from_date: date) -> date:
     """Return the next biweekly Friday from *from_date*.
 
@@ -153,6 +169,7 @@ class DepositService:
         snapshot: dict | None = None,
         api_key: str = "",
         cash_to_invest: float = _DEPOSIT_AMOUNT,
+        portfolio_balance: float = 0.0,
     ) -> dict:
         """Compute next deposit allocation and return it with an AI explanation."""
         import uuid
@@ -228,10 +245,22 @@ class DepositService:
 
         deposit_date = _next_biweekly_friday(_date.today()).isoformat()
 
+        # Attach position sizing to each action in the final plan
+        final_actions = []
+        for step in strategy_adjusted_plan.get("actions", []):
+            confidence = float(step.get("confidence") or 0.0)
+            pos_size = calculate_position_size(confidence, portfolio_balance) if portfolio_balance > 0 else None
+            pos_pct = round(pos_size / portfolio_balance * 100, 2) if pos_size and portfolio_balance > 0 else None
+            final_actions.append({
+                **step,
+                "position_size_amount": pos_size,
+                "position_size_pct": pos_pct,
+            })
+
         return {
             "decision_id": str(uuid.uuid4()),
             "plan": {
-                "actions": strategy_adjusted_plan.get("actions", []),
+                "actions": final_actions,
             },
             "original_plan": {
                 "actions": [

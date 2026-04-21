@@ -286,10 +286,10 @@ export function useLogDecision() {
   });
 }
 
-export function useDepositPlan(cashToInvest = 900) {
+export function useDepositPlan(cashToInvest = 0, portfolioBalance = 0) {
   return useQuery({
-    queryKey: ["deposits", "plan", cashToInvest],
-    queryFn: () => api.deposits.getPlan(cashToInvest),
+    queryKey: ["deposits", "plan", cashToInvest, portfolioBalance],
+    queryFn: () => api.deposits.getPlan(cashToInvest, portfolioBalance),
     staleTime: 60_000,
   });
 }

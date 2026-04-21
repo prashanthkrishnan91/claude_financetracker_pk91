@@ -22,6 +22,7 @@ from ..models.recommendation import (
     DecisionLogEntry,
     InsightCard,
     RecommendationResolve,
+    StrategyPerformance,
 )
 
 
@@ -656,3 +657,32 @@ class RecommendationService:
                 updated.append(entry)
 
         return updated
+
+    async def get_strategy_performance(self) -> list[StrategyPerformance]:
+        """Aggregate decision log entries by strategy_tag."""
+        entries = (
+            self.client.table("decision_log")
+            .select("strategy_tag, return_pct, status")
+            .eq("user_id", str(self.user_id))
+            .execute()
+        ).data or []
+
+        groups: dict[str, list] = {}
+        for entry in entries:
+            tag = entry.get("strategy_tag") or "untagged"
+            groups.setdefault(tag, []).append(entry)
+
+        result = []
+        for tag, rows in groups.items():
+            returns = [float(r["return_pct"]) for r in rows if r.get("return_pct") is not None]
+            avg_return = round(sum(returns) / len(returns), 2) if returns else None
+            wins = sum(1 for r in returns if r > 0)
+            win_rate = round(wins / len(returns) * 100, 1) if returns else None
+            result.append(StrategyPerformance(
+                strategy_tag=tag,
+                avg_return=avg_return,
+                win_rate=win_rate,
+                total_trades=len(rows),
+            ))
+
+        return sorted(result, key=lambda x: x.total_trades, reverse=True)

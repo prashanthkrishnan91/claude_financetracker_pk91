@@ -124,6 +124,8 @@ class DecisionLogEntry(BaseModel):
     status: str = "active"
     closed_at: Optional[datetime] = None
     created_at: datetime
+    strategy_tag: Optional[str] = None
+    confidence_score: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -136,3 +138,13 @@ class DecisionLogCreate(BaseModel):
     notes: Optional[str] = None
     price_at_decision: Optional[float] = None
     shares_at_decision: Optional[float] = None
+    strategy_tag: Optional[str] = None
+    confidence_score: Optional[float] = None
+
+
+class StrategyPerformance(BaseModel):
+    """Aggregated performance stats grouped by strategy_tag."""
+    strategy_tag: str
+    avg_return: Optional[float] = None
+    win_rate: Optional[float] = None
+    total_trades: int

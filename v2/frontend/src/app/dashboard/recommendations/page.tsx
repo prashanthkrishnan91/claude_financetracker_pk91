@@ -8,13 +8,14 @@ import {
   useResolveRecommendation,
   useDecisionLog,
   useAgentJob,
+  useStrategyPerformance,
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
-import type { InsightCardData, DecisionLogEntry } from "@/lib/api";
+import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/lib/api";
 
 const ACTION_FILTERS = [
   { key: "ALL", label: "All", color: "bg-surface-elevated text-text-primary" },
@@ -39,7 +40,10 @@ const DECISION_STYLES: Record<string, string> = {
   rejected: "bg-red-500/10 text-red-400 border-red-500/30",
 };
 
+type ViewMode = "recommendations" | "performance";
+
 export default function RecommendationsPage() {
+  const [view, setView] = useState<ViewMode>("recommendations");
   const [filter, setFilter] = useState("ALL");
   const [selectedCard, setSelectedCard] = useState<InsightCardData | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -51,6 +55,7 @@ export default function RecommendationsPage() {
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
   const { data: jobStatus } = useAgentJob(activeJobId);
+  const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
   useEffect(() => {
@@ -108,123 +113,157 @@ export default function RecommendationsPage() {
     <>
       <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border px-4 py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <h1 className="text-xl font-display text-text-primary">Intel</h1>
-          <button
-            onClick={() =>
-              refreshRecs.mutate(undefined, {
-                onSuccess: (data) => {
-                  setActiveJobId(data.job_id);
-                  setToast("Agent pipeline queued");
-                },
-              })
-            }
-            disabled={refreshRecs.isPending || (jobStatus?.status === "running")}
-            className="text-xs px-3 py-1.5 rounded-md bg-accent text-background font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50"
-          >
-            {refreshRecs.isPending || jobStatus?.status === "running" ? (
-              <Spinner className="h-3 w-3" />
-            ) : (
-              "Run Agents"
-            )}
-          </button>
+          <div className="flex items-center gap-3">
+            <h1 className="text-xl font-display text-text-primary">Intel</h1>
+            <div className="flex rounded-md border border-border overflow-hidden text-xs">
+              <button
+                onClick={() => setView("recommendations")}
+                className={cn(
+                  "px-3 py-1 font-semibold transition-colors",
+                  view === "recommendations"
+                    ? "bg-accent text-background"
+                    : "text-text-muted hover:text-text-primary"
+                )}
+              >
+                Signals
+              </button>
+              <button
+                onClick={() => setView("performance")}
+                className={cn(
+                  "px-3 py-1 font-semibold transition-colors border-l border-border",
+                  view === "performance"
+                    ? "bg-accent text-background"
+                    : "text-text-muted hover:text-text-primary"
+                )}
+              >
+                Performance
+              </button>
+            </div>
+          </div>
+          {view === "recommendations" && (
+            <button
+              onClick={() =>
+                refreshRecs.mutate(undefined, {
+                  onSuccess: (data) => {
+                    setActiveJobId(data.job_id);
+                    setToast("Agent pipeline queued");
+                  },
+                })
+              }
+              disabled={refreshRecs.isPending || (jobStatus?.status === "running")}
+              className="text-xs px-3 py-1.5 rounded-md bg-accent text-background font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50"
+            >
+              {refreshRecs.isPending || jobStatus?.status === "running" ? (
+                <Spinner className="h-3 w-3" />
+              ) : (
+                "Run Agents"
+              )}
+            </button>
+          )}
         </div>
       </header>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-4">
-        {/* Agent Pipeline Progress Tracker */}
-        {activeJobId && jobStatus && (
-          <AgentProgressTracker status={jobStatus} />
-        )}
-
-        {/* Filter cards */}
-        <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
-          {ACTION_FILTERS.map((f) => (
-            <button
-              key={f.key}
-              onClick={() => setFilter(f.key)}
-              className={cn(
-                "px-3 py-2 rounded-lg text-xs font-semibold text-center border transition-colors",
-                filter === f.key
-                  ? cn(f.color, "border-current")
-                  : "border-border text-text-muted hover:bg-surface-elevated"
-              )}
-            >
-              {f.label}
-              {counts[f.key] ? (
-                <span className="block text-lg font-display mt-0.5">
-                  {counts[f.key]}
-                </span>
-              ) : (
-                <span className="block text-lg font-display mt-0.5 opacity-30">
-                  0
-                </span>
-              )}
-            </button>
-          ))}
-        </div>
-
-        {/* Recommendations list */}
-        {isLoading ? (
-          <InlineLoader text="Loading recommendations..." />
-        ) : error ? (
-          <EmptyState title="Failed to load recommendations" />
-        ) : filtered.length === 0 ? (
-          <EmptyState
-            title="No recommendations"
-            description={
-              filter === "ALL"
-                ? "Hit Refresh to generate recommendations for your portfolio."
-                : `No ${filter} recommendations right now.`
-            }
-          />
+        {view === "performance" ? (
+          <StrategyPerformanceTable data={strategyPerf} isLoading={perfLoading} />
         ) : (
-          <div className="space-y-3">
-            {filtered.map((card) => (
-              <AgentInsightCard
-                key={card.id}
-                card={card}
-                onClick={() => setSelectedCard(card)}
+          <>
+            {/* Agent Pipeline Progress Tracker */}
+            {activeJobId && jobStatus && (
+              <AgentProgressTracker status={jobStatus} />
+            )}
+
+            {/* Filter cards */}
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+              {ACTION_FILTERS.map((f) => (
+                <button
+                  key={f.key}
+                  onClick={() => setFilter(f.key)}
+                  className={cn(
+                    "px-3 py-2 rounded-lg text-xs font-semibold text-center border transition-colors",
+                    filter === f.key
+                      ? cn(f.color, "border-current")
+                      : "border-border text-text-muted hover:bg-surface-elevated"
+                  )}
+                >
+                  {f.label}
+                  {counts[f.key] ? (
+                    <span className="block text-lg font-display mt-0.5">
+                      {counts[f.key]}
+                    </span>
+                  ) : (
+                    <span className="block text-lg font-display mt-0.5 opacity-30">
+                      0
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+
+            {/* Recommendations list */}
+            {isLoading ? (
+              <InlineLoader text="Loading recommendations..." />
+            ) : error ? (
+              <EmptyState title="Failed to load recommendations" />
+            ) : filtered.length === 0 ? (
+              <EmptyState
+                title="No recommendations"
+                description={
+                  filter === "ALL"
+                    ? "Hit Refresh to generate recommendations for your portfolio."
+                    : `No ${filter} recommendations right now.`
+                }
               />
-            ))}
-          </div>
+            ) : (
+              <div className="space-y-3">
+                {filtered.map((card) => (
+                  <AgentInsightCard
+                    key={card.id}
+                    card={card}
+                    onClick={() => setSelectedCard(card)}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Decision Log */}
+            <div className="card-glass overflow-hidden">
+              <button
+                onClick={() => setDecisionLogOpen((o) => !o)}
+                className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
+              >
+                <span className="font-semibold uppercase tracking-wide text-xs">Decision Log</span>
+                <div className="flex items-center gap-2">
+                  {decisions && decisions.length > 0 && (
+                    <span className="text-xs text-text-muted">{decisions.length} entries</span>
+                  )}
+                  <ChevronIcon
+                    className={cn(
+                      "w-4 h-4 transition-transform",
+                      decisionLogOpen ? "rotate-180" : ""
+                    )}
+                  />
+                </div>
+              </button>
+
+              {decisionLogOpen && (
+                <div className="border-t border-border">
+                  {!decisions || decisions.length === 0 ? (
+                    <div className="px-4 py-8 text-center text-xs text-text-muted">
+                      No decisions recorded yet. Accept, defer, or reject recommendations to log them.
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-border/50 max-h-80 overflow-y-auto">
+                      {decisions.map((entry) => (
+                        <DecisionRow key={entry.id} entry={entry} />
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
         )}
-
-        {/* Decision Log */}
-        <div className="card-glass overflow-hidden">
-          <button
-            onClick={() => setDecisionLogOpen((o) => !o)}
-            className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
-          >
-            <span className="font-semibold uppercase tracking-wide text-xs">Decision Log</span>
-            <div className="flex items-center gap-2">
-              {decisions && decisions.length > 0 && (
-                <span className="text-xs text-text-muted">{decisions.length} entries</span>
-              )}
-              <ChevronIcon
-                className={cn(
-                  "w-4 h-4 transition-transform",
-                  decisionLogOpen ? "rotate-180" : ""
-                )}
-              />
-            </div>
-          </button>
-
-          {decisionLogOpen && (
-            <div className="border-t border-border">
-              {!decisions || decisions.length === 0 ? (
-                <div className="px-4 py-8 text-center text-xs text-text-muted">
-                  No decisions recorded yet. Accept, defer, or reject recommendations to log them.
-                </div>
-              ) : (
-                <div className="divide-y divide-border/50 max-h-80 overflow-y-auto">
-                  {decisions.map((entry) => (
-                    <DecisionRow key={entry.id} entry={entry} />
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
       </main>
 
       {/* Recommendation Modal */}
@@ -244,6 +283,108 @@ export default function RecommendationsPage() {
         </div>
       )}
     </>
+  );
+}
+
+type SortKey = "strategy_tag" | "avg_return" | "win_rate" | "total_trades";
+
+function StrategyPerformanceTable({
+  data,
+  isLoading,
+}: {
+  data: StrategyPerformance[] | undefined;
+  isLoading: boolean;
+}) {
+  const [sortKey, setSortKey] = useState<SortKey>("total_trades");
+  const [sortAsc, setSortAsc] = useState(false);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortAsc((a) => !a);
+    } else {
+      setSortKey(key);
+      setSortAsc(false);
+    }
+  };
+
+  const sorted = [...(data || [])].sort((a, b) => {
+    const av = a[sortKey] ?? (sortKey === "strategy_tag" ? "" : -Infinity);
+    const bv = b[sortKey] ?? (sortKey === "strategy_tag" ? "" : -Infinity);
+    if (av < bv) return sortAsc ? -1 : 1;
+    if (av > bv) return sortAsc ? 1 : -1;
+    return 0;
+  });
+
+  const ColHeader = ({ col, label }: { col: SortKey; label: string }) => (
+    <th
+      className="px-4 py-2 text-left text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer select-none hover:text-text-primary transition-colors"
+      onClick={() => handleSort(col)}
+    >
+      {label}
+      {sortKey === col && (
+        <span className="ml-1">{sortAsc ? "↑" : "↓"}</span>
+      )}
+    </th>
+  );
+
+  if (isLoading) return <InlineLoader text="Loading strategy data..." />;
+  if (!data || data.length === 0)
+    return (
+      <EmptyState
+        title="No strategy data"
+        description="Tag decisions with a strategy_tag to see performance grouped here."
+      />
+    );
+
+  return (
+    <div className="card-glass overflow-hidden rounded-xl">
+      <div className="px-4 py-3 border-b border-border">
+        <span className="text-xs font-semibold uppercase tracking-wide text-text-secondary">
+          Strategy Performance
+        </span>
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-surface-elevated/50">
+            <tr>
+              <ColHeader col="strategy_tag" label="Strategy" />
+              <ColHeader col="avg_return" label="Avg Return" />
+              <ColHeader col="win_rate" label="Win Rate" />
+              <ColHeader col="total_trades" label="Trades" />
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-border/50">
+            {sorted.map((row) => (
+              <tr key={row.strategy_tag} className="hover:bg-surface-elevated/30 transition-colors">
+                <td className="px-4 py-3 font-mono text-xs text-text-primary font-semibold">
+                  {row.strategy_tag}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs">
+                  {row.avg_return == null ? (
+                    <span className="text-text-muted">—</span>
+                  ) : (
+                    <span className={row.avg_return >= 0 ? "text-green-400" : "text-red-400"}>
+                      {row.avg_return >= 0 ? "+" : ""}
+                      {row.avg_return.toFixed(2)}%
+                    </span>
+                  )}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs">
+                  {row.win_rate == null ? (
+                    <span className="text-text-muted">—</span>
+                  ) : (
+                    <span className="text-text-primary">{row.win_rate.toFixed(1)}%</span>
+                  )}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-text-secondary">
+                  {row.total_trades}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }
 

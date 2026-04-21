@@ -43,3 +43,5 @@ class ManualDecisionLogCreate(BaseModel):
     reasoning: Optional[str] = None
     source: str = "manual"
     metadata: Optional[dict] = None
+    strategy_tag: Optional[str] = None
+    confidence_score: Optional[float] = None

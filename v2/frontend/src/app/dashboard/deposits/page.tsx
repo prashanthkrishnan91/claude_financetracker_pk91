@@ -148,7 +148,7 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         </button>
         {debugOpen && debug?.original_plan?.actions && (
           <div className="border-t border-border p-4 space-y-3">
-            {debug.original_plan.actions.map((a: { symbol: string; amount: number; delta_weight: number; deposit_date: string }, i: number) => (
+            {debug.original_plan.actions.map((a, i) => (
               <div key={i} className="p-3 rounded-xl border border-border bg-neutral-900">
                 <div className="flex justify-between">
                   <span className="font-semibold text-text-primary">{a.symbol}</span>

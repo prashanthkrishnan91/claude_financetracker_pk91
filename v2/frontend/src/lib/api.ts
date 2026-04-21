@@ -201,9 +201,9 @@ export const api = {
   },
 
   deposits: {
-    getPlan: (cashToInvest = 900) =>
+    getPlan: (cashToInvest = 0, portfolioBalance = 0) =>
       fetchLocal<DepositPlanResult>(
-        `/api/deposit-plan?cash_to_invest=${cashToInvest}`
+        `/api/deposit-plan?cash_to_invest=${cashToInvest}&portfolio_balance=${portfolioBalance}`
       ),
   },
 
@@ -597,6 +597,8 @@ export interface DepositRecommendation {
   rationale: string;
   confidence: number;
   deposit_date: string;
+  position_size_amount: number | null;
+  position_size_pct: number | null;
 }
 
 export interface DepositPlanResult {

@@ -67,9 +67,15 @@ async function fetchLatestInsights(authHeader: string): Promise<InsightSlim[]> {
   }
 }
 
+function calculatePositionSize(confidenceScore: number, portfolioBalance: number): { amount: number; pct: number } {
+  const pct = confidenceScore > 0.8 ? 0.05 : confidenceScore >= 0.5 ? 0.02 : 0.01;
+  return { amount: Math.round(portfolioBalance * pct * 100) / 100, pct: pct * 100 };
+}
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const depositAmount = Math.max(0, Number(searchParams.get("cash_to_invest") || 900));
+  const depositAmount = Math.max(0, Number(searchParams.get("cash_to_invest") || 0));
+  const portfolioBalance = Math.max(0, Number(searchParams.get("portfolio_balance") || 0));
 
   // Attempt to load AI insights
   const authHeader = req.headers.get("Authorization") ?? "";
@@ -156,6 +162,9 @@ export async function GET(req: Request) {
       insight?.thesis ||
       `Allocate ${(a.delta_weight * 100).toFixed(0)}% of deposit ($${a.amount.toFixed(2)}) into ${a.symbol} per ${strategyLabel} strategy.`;
 
+    const confidenceNorm = confidence / 100;
+    const posSize = portfolioBalance > 0 ? calculatePositionSize(confidenceNorm, portfolioBalance) : null;
+
     return {
       symbol: a.symbol,
       action: "BUY",
@@ -164,6 +173,8 @@ export async function GET(req: Request) {
       rationale,
       confidence,
       deposit_date: a.deposit_date,
+      position_size_amount: posSize?.amount ?? null,
+      position_size_pct: posSize?.pct ?? null,
     };
   });
 

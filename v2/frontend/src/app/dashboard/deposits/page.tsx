@@ -16,9 +16,10 @@ import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 
 export default function DepositsPage() {
-  const [amount, setAmount] = useState(900);
+  const [amount, setAmount] = useState(0);
   const { data: summary } = usePortfolioSummary();
-  const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount);
+  const portfolioBalance = summary?.total_equity ?? 0;
+  const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount, portfolioBalance);
   const { data: outcomes } = useDecisionOutcomes();
 
   return (
@@ -79,7 +80,7 @@ export default function DepositsPage() {
             </div>
           </div>
           <div className="flex gap-2">
-            {[500, 900, 1200, 1800].map((preset) => (
+            {[500, 1000, 1500, 2000].map((preset) => (
               <button
                 key={preset}
                 onClick={() => setAmount(preset)}
@@ -232,6 +233,9 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
   const [logOpen, setLogOpen] = useState(false);
   const [ticker, setTicker] = useState(rec.symbol);
   const [amount, setAmount] = useState(rec.amount);
+  const [overrideAmount, setOverrideAmount] = useState<number | "">(
+    rec.position_size_amount ?? rec.amount
+  );
   const [saved, setSaved] = useState(false);
   const logDecision = useLogDecision();
 
@@ -317,6 +321,43 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
           />
         </div>
       </div>
+
+      {/* Position Sizing */}
+      {rec.position_size_amount != null && (
+        <div className="border-t border-border pt-3 space-y-1.5">
+          <p className="text-[10px] text-text-muted uppercase tracking-wide font-semibold">
+            Recommended Allocation
+          </p>
+          <div className="flex items-center justify-between text-xs text-text-secondary">
+            <span>
+              {formatCurrency(rec.position_size_amount)}
+              {rec.position_size_pct != null && (
+                <span className="text-text-muted ml-1">({rec.position_size_pct.toFixed(1)}% of portfolio)</span>
+              )}
+            </span>
+          </div>
+          <div className="flex gap-2 items-center mt-1">
+            <div className="relative flex-1">
+              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted text-xs">$</span>
+              <input
+                type="number"
+                value={overrideAmount}
+                onChange={(e) => setOverrideAmount(e.target.value === "" ? "" : Math.max(0, Number(e.target.value)))}
+                placeholder={rec.position_size_amount.toFixed(2)}
+                className="w-full pl-5 pr-2 py-1.5 bg-surface border border-border rounded text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
+                min={0}
+                step={10}
+              />
+            </div>
+            <button
+              onClick={() => setOverrideAmount(rec.position_size_amount!)}
+              className="px-2 py-1.5 text-[10px] text-text-muted bg-surface-elevated rounded hover:text-text-primary transition-colors whitespace-nowrap"
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Log Decision */}
       {!logOpen ? (

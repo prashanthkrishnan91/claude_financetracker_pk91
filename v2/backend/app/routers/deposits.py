@@ -20,10 +20,11 @@ router = APIRouter(prefix="/deposits", tags=["deposits"])
 
 @router.get("/deposit-plan")
 async def get_deposit_plan_route(
-    cash_to_invest: float = Query(default=900.0, ge=0),
+    cash_to_invest: float = Query(default=0.0, ge=0),
+    portfolio_balance: float = Query(default=0.0, ge=0),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Compute next deposit plan with personalization and strategy layers."""
+    """Compute next deposit plan with personalization, strategy, and position sizing."""
     from ..services.deposit_service import DepositService
     from ..services.agents.job_runner import _user_keys
 
@@ -33,6 +34,7 @@ async def get_deposit_plan_route(
         snapshot={},
         api_key=keys.get("anthropic", ""),
         cash_to_invest=cash_to_invest,
+        portfolio_balance=portfolio_balance,
     )
 
 

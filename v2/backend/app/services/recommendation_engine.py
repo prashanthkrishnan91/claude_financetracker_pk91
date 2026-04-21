@@ -414,6 +414,7 @@ class RecommendationService:
                 conviction_score=float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None,
                 suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,
                 agent_run_id=rec.get("agent_run_id"),
+                what_changed=rec.get("what_changed"),
             ))
 
         return cards
@@ -522,6 +523,7 @@ class RecommendationService:
                 suggested_allocation=float(r["suggested_allocation"]) if r.get("suggested_allocation") is not None else None,
                 suggested_action=r.get("suggested_action"),
                 created_at=r.get("created_at"),
+                what_changed=r.get("what_changed"),
             )
             for r in rows
         ]

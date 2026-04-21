@@ -146,11 +146,28 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
             )}
           />
         </button>
-        {debugOpen && (
-          <div className="border-t border-border p-4">
-            <pre className="text-[10px] text-text-muted bg-surface-elevated rounded-lg p-3 overflow-x-auto leading-relaxed whitespace-pre-wrap">
-              {JSON.stringify(debug, null, 2)}
-            </pre>
+        {debugOpen && debug?.original_plan?.actions && (
+          <div className="border-t border-border p-4 space-y-3">
+            {debug.original_plan.actions.map((a: { symbol: string; amount: number; delta_weight: number; deposit_date: string }, i: number) => (
+              <div key={i} className="p-3 rounded-xl border border-border bg-neutral-900">
+                <div className="flex justify-between">
+                  <span className="font-semibold text-text-primary">{a.symbol}</span>
+                  <span className="font-mono text-text-primary">${a.amount.toFixed(2)}</span>
+                </div>
+                <div className="text-sm text-gray-400 mt-1">
+                  Target Change: {(a.delta_weight * 100).toFixed(1)}%
+                </div>
+                <div className="w-full bg-gray-800 h-2 rounded mt-2 overflow-hidden">
+                  <div
+                    className="bg-green-500 h-2 rounded"
+                    style={{ width: `${Math.min(100, a.delta_weight * 100)}%` }}
+                  />
+                </div>
+                <div className="text-xs text-gray-500 mt-1">
+                  Date: {a.deposit_date}
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

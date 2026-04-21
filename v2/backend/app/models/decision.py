@@ -33,3 +33,13 @@ class DecisionResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ManualDecisionLogCreate(BaseModel):
+    ticker: str
+    action: str = "BUY"
+    amount: float
+    confidence: Optional[float] = None
+    reasoning: Optional[str] = None
+    source: str = "manual"
+    metadata: Optional[dict] = None

@@ -270,6 +270,14 @@ export function useDecisionLog(limit = 50) {
   });
 }
 
+export function useLogDecision() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.decisionLogs.create,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["decisionLogs"] }),
+  });
+}
+
 export function useDepositPlan(cashToInvest = 900) {
   return useQuery({
     queryKey: ["deposits", "plan", cashToInvest],

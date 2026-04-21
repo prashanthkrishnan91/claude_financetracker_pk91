@@ -206,6 +206,20 @@ class DepositService:
         # Layer 2 — apply strategy on top of personalized plan
         strategy_adjusted_plan = apply_strategy(personalized_plan, strategy_mode)
 
+        from .decision_log_service import DecisionLogService
+        _dls = DecisionLogService()
+        for step in strategy_adjusted_plan.get("actions", []):
+            _dls.log({
+                "ticker": step.get("symbol"),
+                "action": step.get("action", "BUY"),
+                "amount": step.get("amount"),
+                "confidence": step.get("confidence"),
+                "reasoning": step.get("reasoning"),
+                "source": "deploy_plan",
+                "metadata": step,
+                "user_id": str(self.user_id),
+            })
+
         explanation = await explain_decision(
             snapshot=snapshot or {},
             decision_plan=strategy_adjusted_plan,

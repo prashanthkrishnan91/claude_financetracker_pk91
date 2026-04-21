@@ -88,6 +88,21 @@ export function AgentInsightCard({
         <p className="text-sm text-text-primary leading-relaxed">{thesis}</p>
       )}
 
+      {/* What Changed */}
+      {card.what_changed && (
+        <div className="rounded-md bg-surface-elevated border border-border px-3 py-2 space-y-1">
+          <span className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">What Changed</span>
+          <ul className="space-y-0.5">
+            {card.what_changed.split("\n").filter(Boolean).map((line, i) => (
+              <li key={i} className="flex items-start gap-1.5 text-xs text-text-secondary">
+                <span className="mt-0.5 shrink-0 text-text-muted">•</span>
+                <span>{line}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {/* Analyst score strip */}
       <div className="flex flex-wrap items-center gap-2 pt-1">
         <span className="text-[10px] uppercase tracking-wide text-text-muted">Sentiment</span>

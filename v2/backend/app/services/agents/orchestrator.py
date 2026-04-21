@@ -279,11 +279,43 @@ class AgentOrchestrator:
         """Write agent_insights + refresh the recommendations table."""
         now = datetime.now(timezone.utc).isoformat()
 
+        # 0. Fetch previous insights per ticker for diff computation (before inserting new rows)
+        prev_insights: dict[str, dict] = {}
+        tickers = list(state.insights.keys())
+        if tickers:
+            try:
+                rows = (
+                    self.db.table("agent_insights")
+                    .select("ticker,suggested_action,sentiment_label,technical_signal,conviction_score,sentiment_score")
+                    .eq("user_id", state.user_id)
+                    .in_("ticker", tickers)
+                    .order("created_at", desc=True)
+                    .execute()
+                ).data or []
+                for row in rows:
+                    if row["ticker"] not in prev_insights:
+                        prev_insights[row["ticker"]] = row
+            except Exception as exc:
+                logger.warning("Failed to fetch previous insights for diff: %s", exc)
+
+        # Build per-ticker what_changed strings
+        what_changed_map: dict[str, str] = {}
+        for ticker, insight in state.insights.items():
+            prev = prev_insights.get(ticker)
+            if prev:
+                diff = _compute_what_changed(prev, insight)
+                if diff:
+                    what_changed_map[ticker] = diff
+
         # 1. agent_insights rows
-        insight_rows = [
-            i.to_insight_row(run_id=state.run_id, user_id=state.user_id)
-            for i in state.insights.values()
-        ]
+        insight_rows = []
+        for insight in state.insights.values():
+            row = insight.to_insight_row(run_id=state.run_id, user_id=state.user_id)
+            wc = what_changed_map.get(insight.ticker)
+            if wc:
+                row["what_changed"] = wc
+            insight_rows.append(row)
+
         if insight_rows:
             try:
                 self.db.table("agent_insights").insert(insight_rows).execute()
@@ -322,6 +354,7 @@ class AgentOrchestrator:
                 "technical_signal": insight.technical_signal,
                 "conviction_score": _round(insight.conviction_score),
                 "suggested_allocation": round(insight.suggested_allocation, 2),
+                "what_changed": what_changed_map.get(insight.ticker),
             })
         if rec_rows:
             try:
@@ -401,3 +434,42 @@ class AgentOrchestrator:
 
 def _round(v):
     return round(v, 2) if v is not None else None
+
+
+def _compute_what_changed(prev: dict, curr: "TickerInsight") -> str:
+    """Return a newline-separated list of meaningful changes vs the previous insight row.
+
+    Compares action, sentiment label, technical signal, and numeric scores.
+    Returns an empty string when nothing significant changed.
+    """
+    bullets: list[str] = []
+
+    prev_action = prev.get("suggested_action")
+    if prev_action and prev_action != curr.suggested_action:
+        bullets.append(f"Action: {prev_action} → {curr.suggested_action}")
+
+    prev_sent = prev.get("sentiment_label")
+    if prev_sent and prev_sent != curr.sentiment_label and curr.sentiment_label:
+        bullets.append(f"Sentiment: {prev_sent} → {curr.sentiment_label}")
+
+    prev_tech = prev.get("technical_signal")
+    if prev_tech and prev_tech != curr.technical_signal and curr.technical_signal:
+        bullets.append(f"Technical: {prev_tech} → {curr.technical_signal}")
+
+    prev_conv = prev.get("conviction_score")
+    curr_conv = curr.conviction_score
+    if prev_conv is not None and curr_conv is not None:
+        delta = curr_conv - float(prev_conv)
+        if abs(delta) >= 0.10:
+            sign = "+" if delta >= 0 else ""
+            bullets.append(f"Conviction: {float(prev_conv):+.2f} → {curr_conv:+.2f} ({sign}{delta:.2f})")
+
+    prev_ss = prev.get("sentiment_score")
+    curr_ss = curr.sentiment_score
+    if prev_ss is not None and curr_ss is not None:
+        delta = curr_ss - float(prev_ss)
+        if abs(delta) >= 0.15:
+            sign = "+" if delta >= 0 else ""
+            bullets.append(f"Sentiment score: {float(prev_ss):+.2f} → {curr_ss:+.2f} ({sign}{delta:.2f})")
+
+    return "\n".join(bullets)

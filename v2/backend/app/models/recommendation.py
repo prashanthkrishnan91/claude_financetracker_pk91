@@ -61,6 +61,7 @@ class InsightCard(BaseModel):
     conviction_score: Optional[float] = None
     suggested_allocation: Optional[float] = None
     agent_run_id: Optional[UUID] = None
+    what_changed: Optional[str] = None
 
 
 class AgentRunStatus(BaseModel):
@@ -108,6 +109,7 @@ class AgentInsight(BaseModel):
     suggested_allocation: Optional[float] = None
     suggested_action: Optional[str] = None
     created_at: Optional[str] = None
+    what_changed: Optional[str] = None
 
 
 class DecisionLogEntry(BaseModel):

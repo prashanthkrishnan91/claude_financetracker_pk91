@@ -198,6 +198,8 @@ export const api = {
       fetchApi<AiRebalanceResult>("/api/v1/ai/rebalance", { method: "POST" }),
     getLatest: () =>
       fetchApi<AiRebalanceResult | null>("/api/v1/ai/rebalance/latest"),
+    getChanges: (ticker: string) =>
+      fetchApi<AnalysisChangesResponse>(`/api/v1/ai/analysis/changes?ticker=${encodeURIComponent(ticker)}`),
   },
 
   deposits: {
@@ -322,6 +324,7 @@ export interface InsightCardData {
   conviction_score?: number | null;
   suggested_allocation?: number | null;
   agent_run_id?: string | null;
+  what_changed?: string | null;
 }
 
 export interface AgentRunQueued {
@@ -359,6 +362,14 @@ export interface AgentInsightData {
   conviction_score: number | null;
   suggested_allocation: number | null;
   suggested_action: string | null;
+  created_at: string | null;
+  what_changed: string | null;
+}
+
+export interface AnalysisChangesResponse {
+  ticker: string;
+  what_changed: string | null;
+  run_id: string | null;
   created_at: string | null;
 }
 

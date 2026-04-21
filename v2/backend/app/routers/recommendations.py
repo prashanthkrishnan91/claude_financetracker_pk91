@@ -138,6 +138,19 @@ async def list_decisions(
     return await service.list_decisions(limit=limit)
 
 
+@router.get("/decisions/outcomes", response_model=list[DecisionLogEntry])
+async def get_decision_outcomes(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Refresh and return outcome tracking for all decision log entries.
+
+    Updates current_price, return_pct, and closed status using live prices,
+    then returns the full decision log with outcome data.
+    """
+    service = RecommendationService(user_id=user.id, price_service=_make_price_service())
+    return await service.update_outcomes()
+
+
 @router.post("/decisions", response_model=DecisionLogEntry, status_code=201)
 async def log_decision(
     entry: DecisionLogCreate,

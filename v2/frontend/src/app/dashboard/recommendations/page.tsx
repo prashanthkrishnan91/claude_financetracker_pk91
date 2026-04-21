@@ -401,8 +401,19 @@ function RecommendationModal({
   );
 }
 
+function outcomeLabel(entry: DecisionLogEntry): { label: string; style: string } | null {
+  if (entry.return_pct == null) return null;
+  if (entry.status === "closed") {
+    return entry.return_pct >= 0
+      ? { label: "WIN", style: "bg-green-500/10 text-green-400 border-green-500/30" }
+      : { label: "LOSS", style: "bg-red-500/10 text-red-400 border-red-500/30" };
+  }
+  return { label: "ACTIVE", style: "bg-blue-500/10 text-blue-400 border-blue-500/30" };
+}
+
 function DecisionRow({ entry }: { entry: DecisionLogEntry }) {
   const decisionStyle = DECISION_STYLES[entry.decision.toLowerCase()] || "bg-surface-elevated text-text-muted";
+  const outcome = outcomeLabel(entry);
 
   return (
     <div className="flex items-start gap-3 px-4 py-3 hover:bg-surface-elevated/30 transition-colors">
@@ -419,6 +430,27 @@ function DecisionRow({ entry }: { entry: DecisionLogEntry }) {
           >
             {entry.decision}
           </span>
+          {outcome && (
+            <span
+              className={cn(
+                "text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase",
+                outcome.style
+              )}
+            >
+              {outcome.label}
+            </span>
+          )}
+          {entry.return_pct != null && (
+            <span
+              className={cn(
+                "text-xs font-mono font-semibold",
+                entry.return_pct >= 0 ? "text-green-400" : "text-red-400"
+              )}
+            >
+              {entry.return_pct >= 0 ? "+" : ""}
+              {entry.return_pct.toFixed(2)}%
+            </span>
+          )}
           {entry.notes && (
             <span className="text-xs text-text-muted italic truncate">{entry.notes}</span>
           )}
@@ -429,8 +461,13 @@ function DecisionRow({ entry }: { entry: DecisionLogEntry }) {
             day: "numeric",
             year: "numeric",
           })}
-          {entry.price_at_decision !== null && entry.price_at_decision !== undefined && (
+          {entry.price_at_decision != null && (
             <span className="ml-2 font-mono">{formatCurrency(entry.price_at_decision)}</span>
+          )}
+          {entry.current_price != null && entry.price_at_decision != null && (
+            <span className="ml-1 font-mono text-text-muted">
+              {" "}→ {formatCurrency(entry.current_price)}
+            </span>
           )}
         </p>
       </div>

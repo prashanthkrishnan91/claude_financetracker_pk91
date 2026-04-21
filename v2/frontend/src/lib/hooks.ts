@@ -270,6 +270,14 @@ export function useDecisionLog(limit = 50) {
   });
 }
 
+export function useDecisionOutcomes() {
+  return useQuery({
+    queryKey: ["recommendations", "outcomes"],
+    queryFn: api.recommendations.getOutcomes,
+    staleTime: 60_000,
+  });
+}
+
 export function useLogDecision() {
   const qc = useQueryClient();
   return useMutation({

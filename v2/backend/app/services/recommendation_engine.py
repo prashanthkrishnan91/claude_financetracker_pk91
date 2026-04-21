@@ -568,8 +568,91 @@ class RecommendationService:
         return result.data
 
     async def log_decision(self, entry: DecisionLogCreate) -> DecisionLogEntry:
-        """Create a decision log entry."""
+        """Create a decision log entry with outcome tracking initialised."""
         data = entry.model_dump(mode="json")
         data["user_id"] = str(self.user_id)
+        data.setdefault("status", "active")
         result = self.client.table("decision_log").insert(data).execute()
         return result.data[0]
+
+    async def update_outcomes(self) -> list[DecisionLogEntry]:
+        """Refresh current_price, return_pct, and status for all active decision log entries.
+
+        Reuses the existing price service. Marks an entry closed when the
+        position for that ticker no longer holds any shares.
+        """
+        entries = (
+            self.client.table("decision_log")
+            .select("*")
+            .eq("user_id", str(self.user_id))
+            .order("created_at", desc=True)
+            .execute()
+        ).data or []
+
+        if not entries:
+            return []
+
+        # Current share counts per ticker
+        positions = {
+            p["ticker"]: float(p.get("shares", 0))
+            for p in (
+                self.client.table("positions")
+                .select("ticker, shares")
+                .eq("user_id", str(self.user_id))
+                .execute()
+            ).data or []
+        }
+
+        # Fetch live prices for active entries that have an entry price
+        active_tickers = {
+            e["ticker"] for e in entries
+            if e.get("status", "active") == "active" and e.get("price_at_decision")
+        }
+        prices: dict[str, float] = {}
+        if self._price_service and active_tickers:
+            try:
+                results = await self._price_service.fetch_prices(list(active_tickers))
+                for t, pr in results.items():
+                    if pr.is_valid:
+                        prices[t] = pr.mid_price
+            except Exception:
+                pass
+
+        updated: list[DecisionLogEntry] = []
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        for entry in entries:
+            if entry.get("status", "active") == "closed":
+                updated.append(entry)
+                continue
+
+            ticker = entry["ticker"]
+            entry_price = entry.get("price_at_decision")
+            patch: dict = {}
+
+            current_price = prices.get(ticker)
+            if current_price is not None:
+                patch["current_price"] = current_price
+                if entry_price and float(entry_price) > 0:
+                    patch["return_pct"] = round(
+                        (current_price - float(entry_price)) / float(entry_price) * 100, 4
+                    )
+
+            # Close the entry when the position has been fully exited
+            shares = positions.get(ticker)
+            if shares is None or float(shares) == 0:
+                patch["status"] = "closed"
+                patch["closed_at"] = now_iso
+
+            if patch:
+                row = (
+                    self.client.table("decision_log")
+                    .update(patch)
+                    .eq("id", entry["id"])
+                    .execute()
+                ).data
+                updated.append(row[0] if row else entry)
+            else:
+                updated.append(entry)
+
+        return updated

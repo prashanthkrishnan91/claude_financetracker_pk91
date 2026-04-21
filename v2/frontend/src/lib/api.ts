@@ -572,5 +572,16 @@ export interface DepositPlanResult {
     strategy_mode: string;
     rotating_pick: string;
   };
-  debug: Record<string, unknown>;
+  debug: {
+    original_plan: {
+      actions: Array<{
+        symbol: string;
+        amount: number;
+        delta_weight: number;
+        deposit_date: string;
+      }>;
+    };
+    personalized_plan: { actions: Array<Record<string, unknown>> };
+    signals: { growth_bias: string[]; income_trim: string[]; rotating_pick: string };
+  };
 }

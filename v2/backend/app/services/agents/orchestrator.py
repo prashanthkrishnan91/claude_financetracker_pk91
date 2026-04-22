@@ -48,9 +48,15 @@ You receive a JSON object with these keys:
     filled with deterministic fallbacks and the gaps are recorded in
     `data_quality.missing_fields`.
   - "data_quality": {"completeness_score": 0..1, "missing_fields": [...],
-    "fallbacks_used": bool} — portfolio-wide trust dial. Scale your own
-    confidence language down when completeness_score is low.
-  - "macro": {"summary": string describing the current market regime}
+    "fallbacks_used": bool, "missing_prices": [tickers],
+    "missing_news": [tickers], "missing_fundamentals": [tickers],
+    "missing_technicals": [tickers]} — portfolio-wide trust dial. Scale
+    your own confidence language down when completeness_score is low;
+    for tickers that appear in a missing_* list, explicitly call out the
+    data gap in the reasoning (e.g. "no fresh news available").
+  - "macro": {"summary": string describing the current market regime,
+    "regime", "inflation", "rates", "sentiment", "fallback"}. When
+    "fallback" is true, you must not fabricate specific macro figures.
   - "sentiment": portfolio-level sentiment roll-up {bullish_count,
     neutral_count, bearish_count, average_score}
   - "insights": array of prior-run signals per ticker (sentiment/technical/
@@ -63,6 +69,11 @@ sentiment / technical / fundamental context where available. For tickers
 whose `confidence_label` is "watchlist only" or "low confidence signal",
 default to HOLD and note the data gap in the thesis — NEVER emit the
 string "insufficient data" in any field.
+
+HARD REQUIREMENT — you MUST return a card for EVERY ticker in the
+"portfolio" array. If signal data is thin, still emit a card with a
+conservative HOLD action, a low-confidence label, and a thesis that
+honestly names the missing inputs.
 
 Return ONLY this JSON — no preamble, no code fences, no trailing text:
 {
@@ -429,7 +440,15 @@ class AgentOrchestrator:
             insight.fundamental_score = _to_float_or_none(card.get("fundamental_score"))
             insight.fundamental_summary = card.get("fundamental_summary") or ""
             thesis = card.get("thesis") or card.get("reasoning") or ""
-            insight.investment_thesis = str(thesis)[:500]
+            thesis = str(thesis)[:500]
+            if not thesis:
+                # The LLM returned a card but skipped the thesis. Fill a
+                # deterministic explanation so the UI card is never blank.
+                thesis = (
+                    f"{ticker}: {insight.suggested_action} — "
+                    "portfolio agent signal without a detailed rationale."
+                )
+            insight.investment_thesis = thesis
 
         self._allocate_cash(state)
 
@@ -554,8 +573,10 @@ class AgentOrchestrator:
         for insight in state.insights.values():
             action = insight.suggested_action or "HOLD"
             reasoning = insight.investment_thesis or f"{action} signal from portfolio agent."
-            if action == "HOLD" and not insight.investment_thesis:
-                continue
+            # Guarantee one recommendation row per ticker — the UI contract
+            # mandates that every position gets a card (even degraded).
+            # ``_apply_advice_to_insights`` now fills the thesis in every
+            # branch, so no ticker is dropped at persist time.
             rec_rows.append({
                 "user_id": state.user_id,
                 "ticker": insight.ticker,

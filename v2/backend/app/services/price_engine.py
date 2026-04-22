@@ -61,6 +61,22 @@ _CRYPTO_IDS: dict[str, str] = {
 }
 _CRYPTO_TICKERS = set(_CRYPTO_IDS.keys())
 
+# Per-provider concurrency caps — free-tier rate limits (BTC/XRP CoinGecko
+# 429s, Finnhub bidask 429s, Polygon 403s) were all amplified by unlimited
+# parallelism across a 40-ticker portfolio. Global semaphores here cap
+# in-flight upstream requests regardless of how many tickers race for the
+# same source at once.
+_PROVIDER_SEMAPHORE_LIMITS: dict[str, int] = {
+    "finnhub": 3,
+    "coingecko": 2,
+    "polygon": 2,
+    "alpaca": 4,
+}
+_PROVIDER_SEMAPHORES: dict[str, asyncio.Semaphore] = {
+    name: asyncio.Semaphore(limit)
+    for name, limit in _PROVIDER_SEMAPHORE_LIMITS.items()
+}
+
 # Ticker normalization (Plaid/Robinhood vs API providers)
 _TICKER_MAP: dict[str, str] = {
     "BRK.B": "BRK-B", "BRK.A": "BRK-A", "BF.B": "BF-B", "BF.A": "BF-A",
@@ -471,11 +487,15 @@ class PriceService:
         bidask_url = f"{_FINNHUB_BASE}/stock/bidask"
         params = {"symbol": ticker, "token": self._finnhub_key}
 
-        quote_resp, bidask_resp = await asyncio.gather(
-            client.get(quote_url, params=params),
-            client.get(bidask_url, params=params),
-            return_exceptions=True,
-        )
+        # Cap concurrent Finnhub requests — bidask is optional enrichment
+        # and must never hold up the main quote fetch when the free-tier
+        # rate-limit window saturates.
+        async with _PROVIDER_SEMAPHORES["finnhub"]:
+            quote_resp, bidask_resp = await asyncio.gather(
+                client.get(quote_url, params=params),
+                client.get(bidask_url, params=params),
+                return_exceptions=True,
+            )
 
         # Parse quote
         if isinstance(quote_resp, Exception):
@@ -522,7 +542,8 @@ class PriceService:
             "APCA-API-SECRET-KEY": self._alpaca_secret,
         }
 
-        resp = await client.get(url, headers=headers)
+        async with _PROVIDER_SEMAPHORES["alpaca"]:
+            resp = await client.get(url, headers=headers)
         if resp.status_code == 422:
             return self._error_result(ticker, "alpaca", f"Unknown symbol {ticker}")
         if resp.status_code == 429:
@@ -563,7 +584,8 @@ class PriceService:
         client = await self._get_client()
 
         url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
-        resp = await client.get(url, params={"apiKey": self._polygon_key})
+        async with _PROVIDER_SEMAPHORES["polygon"]:
+            resp = await client.get(url, params={"apiKey": self._polygon_key})
         if resp.status_code == 429:
             return self._error_result(ticker, "polygon", "Rate limited (429)")
         if resp.status_code >= 400:
@@ -615,7 +637,8 @@ class PriceService:
         url = f"{_COINGECKO_BASE}/simple/price"
         params = {"ids": coin_id, "vs_currencies": "usd"}
 
-        resp = await client.get(url, params=params)
+        async with _PROVIDER_SEMAPHORES["coingecko"]:
+            resp = await client.get(url, params=params)
         if resp.status_code == 429:
             return self._error_result(ticker, "coingecko", "Rate limited (429)")
         if resp.status_code >= 400:

@@ -179,10 +179,26 @@ def build_context_from_inputs(
     else:
         completeness_score = 0.0
 
+    # Per-bucket ticker-level quality flags — the LLM gets a precise list of
+    # which tickers are missing which upstream signal, so its reasoning can
+    # degrade gracefully (e.g. "tech signal unavailable for X, weighted
+    # sentiment instead") instead of defaulting to a generic refusal.
+    data_quality_flags = _compute_data_quality_flags(
+        portfolio=portfolio,
+        news_map=news_map,
+        fundamentals_map=fundamentals_map,
+        price_action_map=price_action_map,
+    )
+
     data_quality = {
         "completeness_score": completeness_score,
         "missing_fields": portfolio_missing,
         "fallbacks_used": any_fallback,
+        # Per-bucket ticker lists (may be empty when everything is complete).
+        "missing_prices": data_quality_flags["missing_prices"],
+        "missing_news": data_quality_flags["missing_news"],
+        "missing_fundamentals": data_quality_flags["missing_fundamentals"],
+        "missing_technicals": data_quality_flags["missing_technicals"],
     }
 
     sentiment_block = _aggregate_sentiment(portfolio)
@@ -193,6 +209,42 @@ def build_context_from_inputs(
         "macro": macro,
         "sentiment": sentiment_block,
         "insights": insights,
+    }
+
+
+def _compute_data_quality_flags(
+    *,
+    portfolio: list[dict[str, Any]],
+    news_map: dict[str, Any],
+    fundamentals_map: dict[str, Any],
+    price_action_map: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Return per-bucket lists of tickers missing that slice of data.
+
+    Missing-prices uses the ``price_source`` attribute so an ``avg_cost``
+    fallback still counts as missing from the live-quote perspective.
+    """
+    missing_prices: list[str] = []
+    missing_news: list[str] = []
+    missing_fundamentals: list[str] = []
+    missing_technicals: list[str] = []
+    for entry in portfolio:
+        ticker = entry.get("ticker") or ""
+        if not ticker:
+            continue
+        if entry.get("price_source") != "live":
+            missing_prices.append(ticker)
+        if not news_map.get(ticker):
+            missing_news.append(ticker)
+        if not fundamentals_map.get(ticker):
+            missing_fundamentals.append(ticker)
+        if not price_action_map.get(ticker):
+            missing_technicals.append(ticker)
+    return {
+        "missing_prices": missing_prices,
+        "missing_news": missing_news,
+        "missing_fundamentals": missing_fundamentals,
+        "missing_technicals": missing_technicals,
     }
 
 

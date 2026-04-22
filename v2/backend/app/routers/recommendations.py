@@ -69,22 +69,30 @@ async def refresh_recommendations(
     """
     payload = payload or AgentRunCreate()
     service = RecommendationService(user_id=user.id)
-    job_id = await service.queue_agent_run(
+    job_id, is_new = await service.queue_agent_run(
         deposit_amount=payload.deposit_amount,
         sale_proceeds=payload.sale_proceeds or 0.0,
     )
-    # Hand off to FastAPI BackgroundTasks — fire-and-forget, UI polls for status.
-    background_tasks.add_task(
-        run_agent_pipeline,
-        user.id,
-        job_id,
-        payload.deposit_amount if payload.deposit_amount is not None else 900.0,
-        payload.sale_proceeds or 0.0,
-    )
+    if is_new:
+        # Hand off to FastAPI BackgroundTasks — fire-and-forget, UI polls status.
+        background_tasks.add_task(
+            run_agent_pipeline,
+            user.id,
+            job_id,
+            payload.deposit_amount if payload.deposit_amount is not None else 900.0,
+            payload.sale_proceeds or 0.0,
+        )
+        return AgentRunQueued(
+            job_id=job_id,
+            status="queued",
+            message="Agent pipeline queued — poll /recommendations/jobs/{job_id}",
+        )
+    # Single-run lock or light cache hit — return the existing run without
+    # dispatching a new pipeline. Frontend polls the same job_id.
     return AgentRunQueued(
         job_id=job_id,
-        status="queued",
-        message="Agent pipeline queued — poll /recommendations/jobs/{job_id}",
+        status="reused",
+        message="Reusing recent agent run — poll /recommendations/jobs/{job_id}",
     )
 
 

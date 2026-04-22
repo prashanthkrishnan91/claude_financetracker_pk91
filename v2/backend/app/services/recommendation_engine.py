@@ -10,7 +10,7 @@ Ported from v1 utils/rec_engine.py (v4) with improvements:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
 
@@ -423,11 +423,53 @@ class RecommendationService:
         self,
         deposit_amount: Optional[float] = None,
         sale_proceeds: float = 0.0,
-    ) -> str:
-        """Create an `agent_runs` row and return its job_id.
+    ) -> tuple[str, bool]:
+        """Return ``(job_id, is_new)`` for the agent run to drive.
 
-        The router then dispatches the pipeline via FastAPI BackgroundTasks.
+        Reuses an existing run instead of creating a new one when either:
+          * a run is already ``queued`` / ``running`` for this user — prevents
+            concurrent executions (SEV-1 single-run lock), OR
+          * the most recent ``completed`` run finished less than 2 minutes
+            ago — light cache to stop retry storms on re-mount.
+
+        Callers (the router) must only dispatch the background pipeline when
+        ``is_new`` is True; reused runs already have their lifecycle handled.
         """
+        # ── Lock / cache: reuse recent runs when possible ─────────────────
+        try:
+            recent = (
+                self.client.table("agent_runs")
+                .select("id, status, started_at, finished_at")
+                .eq("user_id", str(self.user_id))
+                .order("started_at", desc=True)
+                .limit(1)
+                .execute()
+            ).data or []
+        except Exception:
+            recent = []
+
+        if recent:
+            last = recent[0]
+            status = last.get("status")
+            # 1) Single-run lock: another run is in-flight for this user.
+            if status in ("queued", "running"):
+                import logging
+                logging.getLogger(__name__).info(
+                    "Single-run lock hit — reusing in-flight job %s (status=%s)",
+                    last["id"], status,
+                )
+                return last["id"], False
+            # 2) Light cache: completed within the last 2 minutes.
+            if status == "completed":
+                finished = last.get("finished_at") or last.get("started_at")
+                if finished and _within_last(finished, seconds=120):
+                    import logging
+                    logging.getLogger(__name__).info(
+                        "Cache hit — reusing run %s finished at %s",
+                        last["id"], finished,
+                    )
+                    return last["id"], False
+
         # Default deposit from user row if not supplied
         if deposit_amount is None:
             try:
@@ -448,7 +490,7 @@ class RecommendationService:
             deposit_amount=deposit_amount,
             sale_proceeds=sale_proceeds,
         )
-        return await orch.create_run()
+        return await orch.create_run(), True
 
     async def get_job_status(self, job_id: UUID) -> AgentRunStatus:
         """Fetch the status of an agent run. Used by the UI progress tracker."""
@@ -716,3 +758,16 @@ class RecommendationService:
             ))
 
         return sorted(result, key=lambda x: x.total_trades, reverse=True)
+
+
+def _within_last(iso_ts: str, *, seconds: int) -> bool:
+    """True if ``iso_ts`` is a timestamp within the last ``seconds`` seconds."""
+    if not iso_ts:
+        return False
+    try:
+        ts = datetime.fromisoformat(iso_ts.replace("Z", "+00:00"))
+    except (ValueError, AttributeError):
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - ts) <= timedelta(seconds=seconds)

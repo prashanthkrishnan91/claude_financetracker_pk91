@@ -98,7 +98,8 @@ class AgentOrchestrator:
     async def run(self, run_id: str) -> AgentPipelineResult:
         """Execute the full pipeline for a given run_id."""
         try:
-            logger.info("Starting agent run %s", run_id)
+            logger.info("Agent run started — id=%s user=%s", run_id, self.user_id)
+            logger.info("Using model: %s (fallback: %s)", self._llm.model, self._llm.fallback_model)
             await self._update_run(run_id, status="running", current_agent="Loading portfolio", progress=5)
 
             state = await self._bootstrap(run_id)
@@ -146,35 +147,46 @@ class AgentOrchestrator:
                 for i in state.insights.values()
                 if i.suggested_allocation > 0
             }
+            # Guarantee the run row always has a human-readable summary so
+            # the UI never renders a blank Intel panel on completion.
+            final_summary = (state.pm_summary or "").strip()
+            if not final_summary:
+                final_summary = (
+                    f"Pipeline processed {len(state.insights)} positions "
+                    "— full narrative unavailable."
+                )
             await self._update_run(
                 run_id,
                 status="completed",
                 current_agent="Completed",
                 progress=100,
-                summary=state.pm_summary,
+                summary=final_summary,
                 allocation=allocation_map,
             )
+            logger.info("Agent run completed — id=%s insights=%d", run_id, len(state.insights))
 
             return AgentPipelineResult(
                 run_id=run_id,
                 status="completed",
-                summary=state.pm_summary,
+                summary=final_summary,
                 insights=list(state.insights.values()),
             )
 
         except Exception as exc:
-            logger.exception("Agent pipeline failed for run %s", run_id)
+            logger.exception("Agent run failed for run %s", run_id)
+            fallback_summary = "Analysis temporarily unavailable — please retry."
             await self._update_run(
                 run_id,
                 status="failed",
                 current_agent="Failed",
                 progress=100,
                 error_message=str(exc)[:500],
+                summary=fallback_summary,
             )
             return AgentPipelineResult(
                 run_id=run_id,
                 status="failed",
-                summary=f"Pipeline error: {exc}",
+                summary=fallback_summary,
                 insights=[],
             )
 

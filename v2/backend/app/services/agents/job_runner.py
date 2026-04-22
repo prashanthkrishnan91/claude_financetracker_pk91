@@ -93,8 +93,43 @@ async def run_agent_pipeline(
     deposit_amount: float,
     sale_proceeds: float,
 ) -> None:
-    """Entry point for FastAPI BackgroundTasks."""
-    logger.info("Starting agent run %s for user %s", run_id, user_id)
-    orch = build_orchestrator(user_id, deposit_amount, sale_proceeds)
-    result = await orch.run(run_id)
-    logger.info("Agent run %s finished with status=%s", run_id, result.status)
+    """Entry point for FastAPI BackgroundTasks — always marks the run terminal.
+
+    Any error in ``build_orchestrator`` (e.g., missing API keys, Supabase
+    outage) is caught and written to the ``agent_runs`` row as a ``failed``
+    terminal state with a fallback summary. This guarantees the frontend
+    poller eventually sees ``status`` in ``(completed, failed)`` and never
+    leaves a run stuck in ``running``.
+    """
+    logger.info("Agent run started — id=%s user=%s", run_id, user_id)
+    try:
+        orch = build_orchestrator(user_id, deposit_amount, sale_proceeds)
+    except Exception as exc:
+        logger.exception("Failed to build orchestrator for run %s", run_id)
+        await _force_fail_run(run_id, str(exc))
+        return
+    try:
+        result = await orch.run(run_id)
+        logger.info("Agent run finished — id=%s status=%s", run_id, result.status)
+    except Exception as exc:
+        # Defensive — orch.run has its own try/except, but if BackgroundTasks
+        # ever swallows an error below the orchestrator we still mark the row.
+        logger.exception("Unhandled error in agent run %s", run_id)
+        await _force_fail_run(run_id, str(exc))
+
+
+async def _force_fail_run(run_id: str, error: str) -> None:
+    """Mark an agent_runs row failed with a fallback summary, best-effort."""
+    from datetime import datetime, timezone
+    try:
+        db = get_supabase_client()
+        db.table("agent_runs").update({
+            "status": "failed",
+            "current_agent": "Failed",
+            "progress_pct": 100,
+            "error_message": error[:500],
+            "summary": "Analysis temporarily unavailable — please retry.",
+            "finished_at": datetime.now(timezone.utc).isoformat(),
+        }).eq("id", run_id).execute()
+    except Exception as exc:
+        logger.warning("Failed to mark run %s as failed: %s", run_id, exc)

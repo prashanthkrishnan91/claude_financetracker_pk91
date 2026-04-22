@@ -114,9 +114,36 @@ async def get_job_status(
     job_id: UUID,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Poll an in-flight or completed agent run. Drives the progress tracker UI."""
+    """Poll an in-flight or completed agent run. Drives the progress tracker UI.
+
+    Returns safe fallback JSON if job row is missing/corrupted — never throws 500.
+    """
+    from fastapi import HTTPException
     service = RecommendationService(user_id=user.id)
-    return await service.get_job_status(job_id)
+    try:
+        return await service.get_job_status(job_id)
+    except HTTPException:
+        raise  # Re-raise 404 from service
+    except Exception as exc:
+        # Job row corrupted or DB issue — return safe default instead of 500
+        import logging
+        logging.getLogger(__name__).warning(
+            "Failed to fetch job status %s: %s — returning safe default", job_id, exc
+        )
+        return AgentRunStatus(
+            id=str(job_id),
+            status="unknown",
+            current_agent="Status unavailable",
+            progress_pct=0,
+            tickers=[],
+            deposit_amount=0.0,
+            sale_proceeds=0.0,
+            allocation={},
+            summary="Job status temporarily unavailable — please retry.",
+            error_message=None,
+            started_at=None,
+            finished_at=None,
+        )
 
 
 @router.get("/jobs/{job_id}/insights", response_model=list[AgentInsight])

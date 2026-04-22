@@ -530,6 +530,9 @@ class RecommendationService:
           * the most recent ``completed`` run finished less than 2 minutes
             ago — light cache to stop retry storms on re-mount.
 
+        STALE JOB RECOVERY: If a 'running' job is >10 minutes old,
+        marks it as 'failed' and creates a new run instead.
+
         Callers (the router) must only dispatch the background pipeline when
         ``is_new`` is True; reused runs already have their lifecycle handled.
         """
@@ -549,20 +552,49 @@ class RecommendationService:
         if recent:
             last = recent[0]
             status = last.get("status")
-            # 1) Single-run lock: another run is in-flight for this user.
-            if status in ("queued", "running"):
-                import logging
-                logging.getLogger(__name__).info(
+            started = last.get("started_at")
+
+            # 1) Stale job recovery: if running >10 min, mark failed and create new
+            if status == "running" and started:
+                if not _within_last(started, seconds=600):
+                    logger.warning(
+                        "Stale job recovery — marking run %s as failed (running >10 min, started %s)",
+                        last["id"], started,
+                    )
+                    try:
+                        self.client.table("agent_runs").update({
+                            "status": "failed",
+                            "current_agent": "Failed",
+                            "progress_pct": 100,
+                            "error_message": "Job timeout — running >10 minutes with no progress update",
+                            "summary": "Analysis temporarily unavailable — please retry.",
+                            "finished_at": datetime.now(timezone.utc).isoformat(),
+                        }).eq("id", last["id"]).execute()
+                        logger.info("Stale job recovery completed — id=%s", last["id"])
+                    except Exception as exc:
+                        logger.warning("Failed to mark stale job failed: %s", exc)
+                    # Fall through to create new run
+                else:
+                    # Running but fresh — single-run lock
+                    logger.info(
+                        "Single-run lock hit — reusing in-flight job %s (status=%s)",
+                        last["id"], status,
+                    )
+                    return last["id"], False
+
+            # 2) Single-run lock (queued): reuse queued job
+            elif status == "queued":
+                logger.info(
                     "Single-run lock hit — reusing in-flight job %s (status=%s)",
                     last["id"], status,
                 )
                 return last["id"], False
-            # 2) Light cache: completed within the last 2 minutes.
-            if status == "completed":
+
+            # 3) Light cache: completed within the last 2 minutes.
+            elif status == "completed":
                 finished = last.get("finished_at") or last.get("started_at")
                 if finished and _within_last(finished, seconds=120):
-                    import logging
-                    logging.getLogger(__name__).info(
+                    logger.info(
                         "Cache hit — reusing run %s finished at %s",
                         last["id"], finished,
                     )

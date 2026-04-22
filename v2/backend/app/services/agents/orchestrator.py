@@ -97,7 +97,14 @@ class AgentOrchestrator:
         return result.data[0]["id"]
 
     async def run(self, run_id: str) -> AgentPipelineResult:
-        """Execute the full pipeline for a given run_id."""
+        """Execute the full pipeline for a given run_id.
+
+        Guaranteed lifecycle: NEVER leaves job in 'running' state.
+        - status='running' at start
+        - ALWAYS transitions to 'completed' or 'failed' before return
+        - Finally block ensures status update even on unexpected crash
+        """
+        terminal_status_set = False
         try:
             logger.info("Agent run started — id=%s user=%s", run_id, self.user_id)
             logger.info("Using model: %s (fallback: %s)", self._llm.model, self._llm.fallback_model)
@@ -112,6 +119,8 @@ class AgentOrchestrator:
                     progress=100,
                     summary="No positions in portfolio; nothing to analyse.",
                 )
+                logger.info("Agent run completed (no positions) — id=%s", run_id)
+                terminal_status_set = True
                 return AgentPipelineResult(run_id=run_id, status="completed",
                                            summary="No positions.", insights=[])
 
@@ -170,7 +179,8 @@ class AgentOrchestrator:
                 summary=final_summary,
                 allocation=allocation_map,
             )
-            logger.info("Agent run completed — id=%s insights=%d", run_id, len(state.insights))
+            logger.info("Agent run completed — id=%s status=completed insights=%d", run_id, len(state.insights))
+            terminal_status_set = True
 
             return AgentPipelineResult(
                 run_id=run_id,
@@ -190,12 +200,31 @@ class AgentOrchestrator:
                 error_message=str(exc)[:500],
                 summary=fallback_summary,
             )
+            logger.info("Agent run completed — id=%s status=failed error=%s", run_id, str(exc)[:100])
+            terminal_status_set = True
             return AgentPipelineResult(
                 run_id=run_id,
                 status="failed",
                 summary=fallback_summary,
                 insights=[],
             )
+
+        finally:
+            # Guarantee terminal state — if exception bypassed both paths above,
+            # mark job as failed. Should never happen, but defense-in-depth.
+            if not terminal_status_set:
+                logger.warning("LIFECYCLE VIOLATION: run %s did not reach terminal state — forcing failed", run_id)
+                try:
+                    await self._update_run(
+                        run_id,
+                        status="failed",
+                        current_agent="Failed",
+                        progress=100,
+                        error_message="Internal orchestrator error",
+                        summary="Analysis temporarily unavailable — please retry.",
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning("Failed to mark run %s failed in finally block: %s", run_id, cleanup_exc)
 
     # ── Internal phases ───────────────────────────────────────────────────────
 

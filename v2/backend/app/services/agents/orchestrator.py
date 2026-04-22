@@ -307,7 +307,7 @@ class AgentOrchestrator:
         from ..recommendation_engine import portfolio_advisor
 
         try:
-            # Build portfolio positions from current insights
+            # Build portfolio positions from current insights (post-agent enrichment)
             portfolio_positions = []
             for insight in state.insights.values():
                 pos = {
@@ -318,6 +318,10 @@ class AgentOrchestrator:
                     "pnl_pct": insight.pnl_pct,
                     "category": insight.category,
                     "weight_pct": insight.current_weight_pct,
+                    "sentiment_label": insight.sentiment_label,
+                    "technical_signal": insight.technical_signal,
+                    "suggested_action": insight.suggested_action,
+                    "conviction_score": round(insight.conviction_score, 2) if insight.conviction_score is not None else None,
                 }
                 portfolio_positions.append(pos)
 

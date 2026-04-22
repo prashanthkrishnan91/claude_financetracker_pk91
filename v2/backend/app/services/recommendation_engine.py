@@ -10,10 +10,13 @@ Ported from v1 utils/rec_engine.py (v4) with improvements:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from ..database import get_supabase_client
 from ..models.recommendation import (
@@ -363,10 +366,25 @@ async def portfolio_advisor(
     """
     from .agents.llm import LLMClient
 
-    # ── System prompt (advisor role) ─────────────────────────────────────
+    # Guard: never call the LLM with an empty portfolio
+    if not portfolio_positions:
+        logger.error("portfolio_advisor: portfolio_positions is empty — skipping LLM call")
+        return {
+            "summary": "No portfolio positions to analyze.",
+            "risks": [],
+            "opportunities": [],
+            "cards": [],
+            "top_buys": [],
+        }
+
+    # ── System prompt: role + output schema (no runtime data) ────────────
     system_prompt = """You are a personal portfolio advisor for a long-term retail investor.
 
 Your goal: Provide clear, simple, and actionable investment guidance.
+
+You will receive a JSON object with two keys:
+- "macro_summary": string describing current portfolio context
+- "portfolio_positions": array of position objects
 
 For each ticker, decide: BUY / HOLD / SELL with high/medium/low confidence.
 - SELL = weakening outlook or better opportunities exist
@@ -374,43 +392,34 @@ For each ticker, decide: BUY / HOLD / SELL with high/medium/low confidence.
 - HOLD = neutral or unclear
 
 Keep explanations simple (2 sentences max per ticker).
-Return ONLY valid JSON. Do not include any text before or after the JSON."""
 
-    # ── Format portfolio and macro into user prompt ──────────────────────
-    positions_text = "\n".join([
-        f"- {p.get('ticker', 'N/A')}: {p.get('shares', 0)} shares, "
-        f"price ${p.get('current_price', '?')}, "
-        f"what_changed: {p.get('what_changed', 'N/A')}"
-        for p in portfolio_positions
-    ])
-
-    user_prompt = f"""MACRO SUMMARY:
-{macro_summary}
-
-PORTFOLIO:
-{positions_text}
-
-Provide portfolio advice in the following strict JSON format:
-{{
+Return ONLY this valid JSON structure, no other text:
+{
   "summary": "2-3 sentence overview in simple language",
   "risks": ["risk1", "risk2"],
   "opportunities": ["opportunity1", "opportunity2"],
   "cards": [
-    {{
+    {
       "ticker": "AAPL",
       "action": "BUY | HOLD | SELL",
       "confidence": "high | medium | low",
       "reasoning": "2 sentences max"
-    }}
+    }
   ],
   "top_buys": ["ticker1", "ticker2", "ticker3"]
-}}"""
+}"""
+
+    # ── User message: runtime data as JSON (no template substitution) ─────
+    user_payload = json.dumps({
+        "macro_summary": macro_summary,
+        "portfolio_positions": portfolio_positions,
+    })
 
     # ── Call LLM with fallback handling ──────────────────────────────────
     llm = LLMClient(api_key=api_key)
     result = await llm.ask_json(
         system=system_prompt,
-        user=user_prompt,
+        user=user_payload,
         max_tokens=1024,
     )
 

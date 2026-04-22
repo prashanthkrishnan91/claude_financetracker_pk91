@@ -88,11 +88,13 @@ async def refresh_recommendations(
             message="Agent pipeline queued — poll /recommendations/jobs/{job_id}",
         )
     # Single-run lock or light cache hit — return the existing run without
-    # dispatching a new pipeline. Frontend polls the same job_id.
+    # dispatching a new pipeline. Frontend polls the same job_id. We return
+    # ``in_progress`` (per Portfolio Engine v2 dedup contract) so concurrent
+    # callers can distinguish reuse from a brand-new queued run.
     return AgentRunQueued(
         job_id=job_id,
-        status="reused",
-        message="Reusing recent agent run — poll /recommendations/jobs/{job_id}",
+        status="in_progress",
+        message="Reusing active agent run — poll /recommendations/jobs/{job_id}",
     )
 
 

@@ -132,6 +132,8 @@ export const api = {
       }),
     getJob: (jobId: string) =>
       fetchApi<AgentRunStatus>(`/api/v1/recommendations/jobs/${jobId}`),
+    getLatestJob: () =>
+      fetchApi<AgentRunStatus | null>("/api/v1/recommendations/jobs/latest"),
     getJobInsights: (jobId: string) =>
       fetchApi<AgentInsightData[]>(
         `/api/v1/recommendations/jobs/${jobId}/insights`

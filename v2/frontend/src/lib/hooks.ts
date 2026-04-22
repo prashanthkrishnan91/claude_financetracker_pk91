@@ -102,6 +102,7 @@ export function useRecommendations(action?: string) {
   return useQuery({
     queryKey: ["recommendations", action],
     queryFn: () => api.recommendations.list(action),
+    staleTime: 0,
   });
 }
 
@@ -141,6 +142,26 @@ export function useLatestAgentInsights() {
     queryKey: ["recommendations", "insights", "latest"],
     queryFn: api.recommendations.getLatestInsights,
     staleTime: 30_000,
+  });
+}
+
+export function useLatestAgentRun() {
+  const qc = useQueryClient();
+  return useQuery({
+    queryKey: ["recommendations", "job", "latest"],
+    queryFn: async () => {
+      const job = await api.recommendations.getLatestJob();
+      if (job?.status === "completed" || job?.status === "failed") {
+        qc.invalidateQueries({ queryKey: ["recommendations"] });
+      }
+      return job;
+    },
+    staleTime: 0,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (!data) return false;
+      return data.status === "running" || data.status === "queued" ? 2000 : false;
+    },
   });
 }
 

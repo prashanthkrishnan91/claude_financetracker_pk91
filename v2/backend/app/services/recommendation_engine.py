@@ -479,6 +479,34 @@ class RecommendationService:
             finished_at=d.get("finished_at"),
         )
 
+    async def get_latest_job(self) -> Optional[AgentRunStatus]:
+        """Return the most recent agent run for this user, or None if none exists."""
+        rows = (
+            self.client.table("agent_runs")
+            .select("*")
+            .eq("user_id", str(self.user_id))
+            .order("started_at", desc=True)
+            .limit(1)
+            .execute()
+        ).data
+        if not rows:
+            return None
+        d = rows[0]
+        return AgentRunStatus(
+            id=d["id"],
+            status=d["status"],
+            current_agent=d.get("current_agent"),
+            progress_pct=int(d.get("progress_pct") or 0),
+            tickers=d.get("tickers") or [],
+            deposit_amount=float(d.get("deposit_amount") or 0),
+            sale_proceeds=float(d.get("sale_proceeds") or 0),
+            allocation=d.get("allocation") or {},
+            summary=d.get("summary"),
+            error_message=d.get("error_message"),
+            started_at=d.get("started_at"),
+            finished_at=d.get("finished_at"),
+        )
+
     async def get_agent_insights(self, run_id: Optional[UUID] = None) -> list[AgentInsight]:
         """Fetch the per-ticker agent insights for a run.
 

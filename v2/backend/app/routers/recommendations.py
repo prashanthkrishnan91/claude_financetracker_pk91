@@ -88,6 +88,19 @@ async def refresh_recommendations(
     )
 
 
+@router.get("/jobs/latest", response_model=AgentRunStatus | None)
+async def get_latest_job(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Return the most recent agent run for this user (any status).
+
+    Used by the UI on mount to restore the progress tracker if a job is still
+    running, or to confirm the last completed run.
+    """
+    service = RecommendationService(user_id=user.id)
+    return await service.get_latest_job()
+
+
 @router.get("/jobs/{job_id}", response_model=AgentRunStatus)
 async def get_job_status(
     job_id: UUID,

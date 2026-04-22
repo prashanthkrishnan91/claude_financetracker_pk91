@@ -16,13 +16,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
 from ...database import get_supabase_client
-from ..ai.context_builder import build_portfolio_context
+from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
+from ..ai import io_layer
 from .llm import LLMClient
 from .state import AgentState, TickerInsight
 
@@ -100,6 +102,9 @@ class AgentOrchestrator:
         self._polygon_key = polygon_key
         self._llm = LLMClient(api_key=anthropic_api_key)
         self.db = get_supabase_client()
+        # Hard guarantee: exactly one LLM call per orchestrator run. Asserted
+        # inside ``_single_llm_call`` and logged on ``run`` completion.
+        self._llm_call_count = 0
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -121,21 +126,33 @@ class AgentOrchestrator:
 
         Terminal-status guarantee: the agent_runs row always transitions to
         'completed' or 'failed' before returning, even on unexpected errors.
+
+        Execution DAG (each stage logs perf_counter timings):
+          1. fetch_live_prices   — cache-backed IO layer (parallel)
+          2. build_context       — pure transform, no IO
+          3. single_llm_call     — one Claude call behind LLM_SEMAPHORE
+          4. persist             — DB writes (agent_insights + recommendations)
         """
         terminal_status_set = False
+        run_start = time.perf_counter()
+        timings: dict[str, float] = {}
         try:
             logger.info("Agent run started — id=%s user=%s", run_id, self.user_id)
             await self._update_run(
                 run_id, status="running", current_agent="Loading portfolio", progress=5
             )
 
+            t0 = time.perf_counter()
             live_prices = await self._fetch_live_prices_for_user()
+            timings["fetch_live_prices_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             await self._update_run(run_id, current_agent="Building context", progress=25)
+            t0 = time.perf_counter()
             context = build_portfolio_context(
                 user_id=str(self.user_id),
                 live_prices=live_prices,
             )
+            timings["build_context_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # Safety guard: empty portfolio → no LLM call.
             if not context.get("portfolio"):
@@ -161,14 +178,19 @@ class AgentOrchestrator:
                 run_id, current_agent="Portfolio Agent", progress=60
             )
 
+            t0 = time.perf_counter()
             advice = await self._single_llm_call(context)
+            timings["llm_call_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
             state.portfolio_advice = advice or {}
             state.pm_summary = (advice or {}).get("summary", "")
 
             self._apply_advice_to_insights(state, advice or {})
 
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
+            t0 = time.perf_counter()
             await self._persist(state)
+            timings["persist_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             allocation_map = {
                 i.ticker: i.suggested_allocation
@@ -189,9 +211,19 @@ class AgentOrchestrator:
                 summary=final_summary,
                 allocation=allocation_map,
             )
+            timings["total_ms"] = round((time.perf_counter() - run_start) * 1000, 1)
             logger.info(
-                "Agent run completed — id=%s insights=%d", run_id, len(state.insights)
+                "Agent run completed — id=%s insights=%d llm_calls=%d timings=%s",
+                run_id, len(state.insights), self._llm_call_count, timings,
             )
+            # Hard assertion: the orchestrator must never invoke the LLM
+            # more than once per run. The semaphore + this counter are a
+            # belt-and-suspenders guarantee against future regressions.
+            if self._llm_call_count > 1:
+                logger.error(
+                    "LLM CALL COUNT VIOLATION — run=%s made %d calls (expected ≤ 1)",
+                    run_id, self._llm_call_count,
+                )
             terminal_status_set = True
 
             return AgentPipelineResult(
@@ -247,11 +279,23 @@ class AgentOrchestrator:
     async def _single_llm_call(self, context: dict[str, Any]) -> dict[str, Any]:
         """Execute the one-and-only Claude call for this run.
 
-        Serialised behind `LLM_SEMAPHORE`. Retries live inside LLMClient at the
-        HTTP level; the orchestration layer never re-enters this function.
+        Serialised behind ``LLM_SEMAPHORE``. Retries live inside ``LLMClient``
+        at the HTTP level — the orchestration layer never re-enters this
+        function. ``self._llm_call_count`` is incremented atomically so the
+        ``run`` epilogue can detect any future regression that re-invokes
+        this method from within a single run.
         """
         if not self._llm.api_key:
             logger.warning("Skipping LLM call — no anthropic_api_key configured")
+            return {}
+
+        # Reinforce the semaphore contract with an in-instance counter —
+        # the semaphore protects the process; the counter protects this run.
+        self._llm_call_count += 1
+        if self._llm_call_count > 1:
+            logger.error(
+                "Orchestrator attempted a second LLM call within one run — blocked"
+            )
             return {}
 
         user_message = json.dumps(context, default=str)
@@ -398,9 +442,17 @@ class AgentOrchestrator:
                 remaining -= dollars
             insight.suggested_allocation = max(0.0, dollars)
 
-    # ── Live price bootstrap (DB read + price service fan-out is NOT an LLM call) ─
+    # ── Live price bootstrap (cache-first via io_layer) ──────────────────────
 
     async def _fetch_live_prices_for_user(self) -> dict[str, float]:
+        """Return ``{ticker: mid_price}`` for the user's positions.
+
+        Routed through the shared market cache so repeated requests for the
+        same ticker within the TTL window collapse to a single upstream call.
+        Failures are isolated — any broken upstream returns an empty dict, the
+        context builder still produces a usable LLM prompt, and the pipeline
+        is never retried.
+        """
         if not self._price_service:
             return {}
         try:
@@ -421,15 +473,16 @@ class AgentOrchestrator:
         if not tickers:
             return {}
         try:
-            results = await self._price_service.fetch_prices(tickers)
-        except Exception as exc:
-            logger.warning("Price fetch failed during bootstrap: %s", exc)
+            bundle = await io_layer.fetch_market_bundle(
+                tickers,
+                price_service=self._price_service,
+                finnhub_key=self._finnhub_key,
+                polygon_key=self._polygon_key,
+            )
+            return dict(bundle.get("live_prices") or {})
+        except Exception as exc:  # noqa: BLE001 — absolute failure isolation
+            logger.warning("io_layer price fetch failed, degrading gracefully: %s", exc)
             return {}
-        out: dict[str, float] = {}
-        for t, pr in (results or {}).items():
-            if getattr(pr, "is_valid", False):
-                out[t] = pr.mid_price
-        return out
 
     # ── Persistence ─────────────────────────────────────────────────────────
 

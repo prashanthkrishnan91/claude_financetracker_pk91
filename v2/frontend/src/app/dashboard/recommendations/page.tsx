@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import {
   useRecommendations,
@@ -55,21 +55,59 @@ export default function RecommendationsPage() {
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
-  const { data: latestRun } = useLatestAgentRun();
+  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun();
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
+  const hasAutoTriggered = useRef(false);
 
-  // Restore the progress tracker from the last run if it's still in-flight
-  // (e.g. user navigated away and came back while agents were running).
+  // Restore the progress tracker from the last run if it's still in-flight.
   useEffect(() => {
     if (!activeJobId && latestRun && (latestRun.status === "running" || latestRun.status === "queued")) {
       setActiveJobId(latestRun.id);
     }
   }, [latestRun, activeJobId]);
 
+  // Auto-trigger a new run when the tab loads if there's no recent completed run.
+  useEffect(() => {
+    if (latestRunLoading) return;
+    if (hasAutoTriggered.current) return;
+    if (activeJobId) return;
+    if (refreshRecs.isPending) return;
+
+    const isStale = (isoDate: string | null | undefined) => {
+      if (!isoDate) return true;
+      return Date.now() - new Date(isoDate).getTime() > 5 * 60_000;
+    };
+
+    const shouldTrigger =
+      !latestRun ||
+      latestRun.status !== "completed" ||
+      isStale(latestRun.finished_at);
+
+    if (shouldTrigger) {
+      const reason = !latestRun
+        ? "no run exists"
+        : latestRun.status !== "completed"
+        ? `status=${latestRun.status}`
+        : "run is older than 5 min";
+      console.log(`[Intel] Auto-triggering agent run. Reason: ${reason}`);
+      hasAutoTriggered.current = true;
+      refreshRecs.mutate(undefined, {
+        onSuccess: (data) => {
+          console.log("[Intel] Polling started for job:", data.job_id);
+          setActiveJobId(data.job_id);
+        },
+        onError: (err) => {
+          console.error("[Intel] Failed to trigger agent run:", err);
+        },
+      });
+    }
+  }, [latestRun, latestRunLoading, activeJobId, refreshRecs.isPending]);
+
   // Clear the tracker shortly after a run completes so it doesn't linger.
   useEffect(() => {
     if (jobStatus?.status === "completed" || jobStatus?.status === "failed") {
+      console.log(`[Intel] Polling stopped — run finished with status: ${jobStatus.status}`);
       const t = setTimeout(() => setActiveJobId(null), 4000);
       return () => clearTimeout(t);
     }
@@ -214,12 +252,17 @@ export default function RecommendationsPage() {
             {isLoading ? (
               <SkeletonCards />
             ) : error ? (
-              <EmptyState title="Failed to load recommendations" />
+              <EmptyState title="Failed to load recommendations" description="Check your connection and try again." />
             ) : filtered.length === 0 ? (
               jobStatus?.status === "running" || jobStatus?.status === "queued" ? (
                 <EmptyState
                   title="AI agents analyzing..."
                   description="Signals will appear here once the pipeline completes."
+                />
+              ) : latestRun?.status === "completed" && !activeJobId && filter === "ALL" ? (
+                <EmptyState
+                  title="No analysis available"
+                  description="The last run completed but produced no signals. Check your Anthropic API key or run agents again."
                 />
               ) : (
                 <EmptyState

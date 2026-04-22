@@ -94,5 +94,7 @@ async def run_agent_pipeline(
     sale_proceeds: float,
 ) -> None:
     """Entry point for FastAPI BackgroundTasks."""
+    logger.info("Starting agent run %s for user %s", run_id, user_id)
     orch = build_orchestrator(user_id, deposit_amount, sale_proceeds)
-    await orch.run(run_id)
+    result = await orch.run(run_id)
+    logger.info("Agent run %s finished with status=%s", run_id, result.status)

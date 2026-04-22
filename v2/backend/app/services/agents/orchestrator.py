@@ -98,6 +98,7 @@ class AgentOrchestrator:
     async def run(self, run_id: str) -> AgentPipelineResult:
         """Execute the full pipeline for a given run_id."""
         try:
+            logger.info("Starting agent run %s", run_id)
             await self._update_run(run_id, status="running", current_agent="Loading portfolio", progress=5)
 
             state = await self._bootstrap(run_id)
@@ -128,10 +129,15 @@ class AgentOrchestrator:
 
                 # Phase 5: Portfolio Manager synthesis
                 await self._update_run(run_id, current_agent="Portfolio Manager Deliberating", progress=85)
+                logger.info("Calling LLM for portfolio manager (run %s)", run_id)
                 await run_portfolio_manager(state, self._llm)
+                if not state.pm_summary:
+                    logger.warning("Portfolio manager returned empty summary for run %s — LLM key may be missing", run_id)
+                    await self._update_run(run_id, error_message="LLM returned empty summary; check Anthropic API key.")
 
             # Phase 6: Persist results
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
+            logger.info("Saving result for run %s (%d insights)", run_id, len(state.insights))
             await self._persist(state)
 
             # Build allocation map for the run row

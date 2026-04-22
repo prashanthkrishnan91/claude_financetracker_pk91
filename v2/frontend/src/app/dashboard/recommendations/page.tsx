@@ -8,6 +8,7 @@ import {
   useResolveRecommendation,
   useDecisionLog,
   useAgentJob,
+  useLatestAgentRun,
   useStrategyPerformance,
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
@@ -54,8 +55,17 @@ export default function RecommendationsPage() {
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
+  const { data: latestRun } = useLatestAgentRun();
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
+
+  // Restore the progress tracker from the last run if it's still in-flight
+  // (e.g. user navigated away and came back while agents were running).
+  useEffect(() => {
+    if (!activeJobId && latestRun && (latestRun.status === "running" || latestRun.status === "queued")) {
+      setActiveJobId(latestRun.id);
+    }
+  }, [latestRun, activeJobId]);
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
   useEffect(() => {
@@ -202,18 +212,25 @@ export default function RecommendationsPage() {
 
             {/* Recommendations list */}
             {isLoading ? (
-              <InlineLoader text="Loading recommendations..." />
+              <SkeletonCards />
             ) : error ? (
               <EmptyState title="Failed to load recommendations" />
             ) : filtered.length === 0 ? (
-              <EmptyState
-                title="No recommendations"
-                description={
-                  filter === "ALL"
-                    ? "Hit Refresh to generate recommendations for your portfolio."
-                    : `No ${filter} recommendations right now.`
-                }
-              />
+              jobStatus?.status === "running" || jobStatus?.status === "queued" ? (
+                <EmptyState
+                  title="AI agents analyzing..."
+                  description="Signals will appear here once the pipeline completes."
+                />
+              ) : (
+                <EmptyState
+                  title={filter === "ALL" ? "No analysis yet" : `No ${filter} signals`}
+                  description={
+                    filter === "ALL"
+                      ? "Run agents to generate AI-powered signals for your portfolio."
+                      : `No ${filter} recommendations right now.`
+                  }
+                />
+              )
             ) : (
               <div className="space-y-3">
                 {filtered.map((card) => (
@@ -612,6 +629,32 @@ function DecisionRow({ entry }: { entry: DecisionLogEntry }) {
           )}
         </p>
       </div>
+    </div>
+  );
+}
+
+function SkeletonCards() {
+  return (
+    <div className="space-y-3">
+      {[1, 2, 3].map((n) => (
+        <div
+          key={n}
+          className="card-glass rounded-xl p-4 animate-pulse space-y-3"
+        >
+          <div className="flex items-center gap-3">
+            <div className="h-5 w-12 rounded bg-surface-elevated" />
+            <div className="h-5 w-16 rounded bg-surface-elevated" />
+            <div className="h-5 w-24 rounded bg-surface-elevated ml-auto" />
+          </div>
+          <div className="h-4 w-full rounded bg-surface-elevated" />
+          <div className="h-4 w-3/4 rounded bg-surface-elevated" />
+          <div className="flex gap-4 pt-1">
+            <div className="h-3 w-20 rounded bg-surface-elevated" />
+            <div className="h-3 w-20 rounded bg-surface-elevated" />
+            <div className="h-3 w-20 rounded bg-surface-elevated" />
+          </div>
+        </div>
+      ))}
     </div>
   );
 }

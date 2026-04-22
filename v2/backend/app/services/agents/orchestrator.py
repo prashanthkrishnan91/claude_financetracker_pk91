@@ -113,25 +113,17 @@ class AgentOrchestrator:
                                            summary="No positions.", insights=[])
 
             async with await _build_http_client() as http_client:
-                # Phase 2: Sentiment
-                await self._update_run(run_id, current_agent="Analyzing Sentiment", progress=20)
-                await self._fanout(
-                    state,
-                    lambda i: run_sentiment_agent(i, self._llm, http_client, self._finnhub_key),
-                )
-
-                # Phase 3: Technical
-                await self._update_run(run_id, current_agent="Evaluating Technicals", progress=45)
-                await self._fanout(
-                    state,
-                    lambda i: run_technical_agent(i, self._llm, http_client, self._polygon_key),
-                )
-
-                # Phase 4: Fundamentals
-                await self._update_run(run_id, current_agent="Reviewing Fundamentals", progress=70)
-                await self._fanout(
-                    state,
-                    lambda i: run_fundamental_agent(i, self._llm, http_client),
+                # Phases 2-4: run all three analysis phases concurrently.
+                # Each agent writes to different fields on TickerInsight so
+                # concurrent access is safe. ~3x faster than sequential baseline.
+                await self._update_run(run_id, current_agent="Analyzing portfolio", progress=20)
+                _fk = self._finnhub_key
+                _pk = self._polygon_key
+                _llm = self._llm
+                await asyncio.gather(
+                    self._fanout(state, lambda i: run_sentiment_agent(i, _llm, http_client, _fk)),
+                    self._fanout(state, lambda i: run_technical_agent(i, _llm, http_client, _pk)),
+                    self._fanout(state, lambda i: run_fundamental_agent(i, _llm, http_client)),
                 )
 
                 # Phase 5: Portfolio Manager synthesis
@@ -140,7 +132,7 @@ class AgentOrchestrator:
 
             # Phase 6: Persist results
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
-            self._persist(state)
+            await self._persist(state)
 
             # Build allocation map for the run row
             allocation_map = {
@@ -263,23 +255,37 @@ class AgentOrchestrator:
         state: AgentState,
         coro_factory: Callable[[TickerInsight], Awaitable[None]],
     ) -> None:
-        """Run `coro_factory(insight)` for each ticker with bounded concurrency."""
+        """Run `coro_factory(insight)` for each ticker with bounded concurrency.
+
+        Each agent call is capped at 8 s so a single slow ticker cannot stall
+        the whole phase when phases run concurrently.
+        """
         sem = asyncio.Semaphore(_AGENT_CONCURRENCY)
 
         async def _wrap(insight: TickerInsight):
             async with sem:
                 try:
-                    await coro_factory(insight)
+                    await asyncio.wait_for(coro_factory(insight), timeout=8.0)
+                except asyncio.TimeoutError:
+                    logger.warning("Agent timed out for %s: skipping", insight.ticker)
                 except Exception as exc:
                     logger.warning("Agent failed for %s: %s", insight.ticker, exc)
 
         await asyncio.gather(*[_wrap(i) for i in state.insights.values()])
 
-    def _persist(self, state: AgentState) -> None:
-        """Write agent_insights + refresh the recommendations table."""
+    async def _persist(self, state: AgentState) -> None:
+        """Write agent_insights + refresh the recommendations table.
+
+        Runs in a thread so synchronous Supabase calls don't block the event loop.
+        Inserts new recommendations BEFORE deactivating old ones to prevent a
+        blank-state window if the deactivation call fails.
+        """
+        await asyncio.to_thread(self._persist_sync, state)
+
+    def _persist_sync(self, state: AgentState) -> None:
         now = datetime.now(timezone.utc).isoformat()
 
-        # 0. Fetch previous insights per ticker for diff computation (before inserting new rows)
+        # 0. Fetch previous insights per ticker for diff computation
         prev_insights: dict[str, dict] = {}
         tickers = list(state.insights.keys())
         if tickers:
@@ -307,7 +313,7 @@ class AgentOrchestrator:
                 if diff:
                     what_changed_map[ticker] = diff
 
-        # 1. agent_insights rows
+        # 1. Insert agent_insights — errors propagate to mark the run as failed
         insight_rows = []
         for insight in state.insights.values():
             row = insight.to_insight_row(run_id=state.run_id, user_id=state.user_id)
@@ -317,22 +323,9 @@ class AgentOrchestrator:
             insight_rows.append(row)
 
         if insight_rows:
-            try:
-                self.db.table("agent_insights").insert(insight_rows).execute()
-            except Exception as exc:
-                logger.warning("agent_insights insert failed: %s", exc)
+            self.db.table("agent_insights").insert(insight_rows).execute()
 
-        # 2. Deactivate previous active recommendations
-        try:
-            self.db.table("recommendations").update({
-                "is_active": False,
-                "resolution": "expired",
-                "resolved_at": now,
-            }).eq("user_id", state.user_id).eq("is_active", True).execute()
-        except Exception as exc:
-            logger.warning("Failed to expire old recommendations: %s", exc)
-
-        # 3. Insert fresh recommendations linked to this run
+        # 2. Build fresh recommendation rows
         rec_rows = []
         for insight in state.insights.values():
             if not insight.investment_thesis and insight.suggested_action == "HOLD":
@@ -356,12 +349,33 @@ class AgentOrchestrator:
                 "suggested_allocation": round(insight.suggested_allocation, 2),
                 "what_changed": what_changed_map.get(insight.ticker),
             })
+
+        # 3. Insert new recommendations FIRST — errors propagate to mark run failed.
+        #    Doing this before deactivating old ones prevents a blank-state window.
         if rec_rows:
-            try:
-                for i in range(0, len(rec_rows), 50):
-                    self.db.table("recommendations").insert(rec_rows[i:i + 50]).execute()
-            except Exception as exc:
-                logger.warning("recommendations insert failed: %s", exc)
+            for i in range(0, len(rec_rows), 50):
+                self.db.table("recommendations").insert(rec_rows[i:i + 50]).execute()
+
+        # 4. Deactivate previous recommendations (excluding this run's new rows).
+        #    Two passes: one for rows with a different run_id, one for legacy NULL rows.
+        try:
+            self.db.table("recommendations").update({
+                "is_active": False,
+                "resolution": "expired",
+                "resolved_at": now,
+            }).eq("user_id", state.user_id).eq("is_active", True).neq(
+                "agent_run_id", state.run_id
+            ).execute()
+            self.db.table("recommendations").update({
+                "is_active": False,
+                "resolution": "expired",
+                "resolved_at": now,
+            }).eq("user_id", state.user_id).eq("is_active", True).filter(
+                "agent_run_id", "is", "null"
+            ).execute()
+        except Exception as exc:
+            logger.warning("Failed to expire old recommendations: %s", exc)
+            # New recs are already inserted — deactivation is best-effort cleanup.
 
     async def _update_run(
         self,

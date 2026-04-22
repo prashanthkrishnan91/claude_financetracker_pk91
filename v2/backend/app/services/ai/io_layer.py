@@ -32,12 +32,39 @@ from ..market_data.request_coalescer import (
     get_request_coalescer,
     make_key,
 )
+from ..market_data.system_mode import (
+    SystemMode,
+    SystemModeManager,
+    get_system_mode_manager,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # Exponential-backoff schedule for HTTP-layer retries. 3 retries max.
 _HTTP_BACKOFF_S = (0.25, 0.5, 1.0)
+
+
+def _safe_response(
+    *,
+    value: Any,
+    source: str,
+    state: str,
+    reason: str = "",
+) -> dict[str, Any]:
+    """Build the structured safe-failure envelope (v4 spec, task #6).
+
+    Every external IO in the pipeline conforms to this shape so downstream
+    code can reason about degraded paths without try/except around each
+    call. The envelope is used internally for propagation — higher layers
+    may still flatten it back to a raw value once they've inspected state.
+    """
+    return {
+        "value": value,
+        "source": source,
+        "state": state,
+        "reason": reason,
+    }
 
 
 # ── Retry with cache fallback ────────────────────────────────────────────────
@@ -116,15 +143,54 @@ async def _coalesced(
     factory: Callable[[], Awaitable[Any]],
     *,
     params: Optional[dict[str, Any]] = None,
+    distributed: bool = True,
 ) -> Any:
     """Run ``factory`` through the shared request coalescer.
 
     Concurrent callers for the same ``(provider, endpoint, ticker, params)``
     tuple await a single in-flight Future, so the upstream API sees exactly
     one request regardless of concurrency.
+
+    ``distributed=True`` routes the dispatch through the cross-worker
+    distributed lock (Redis/Supabase) so peer Railway workers don't duplicate
+    the call either. When no backend is available the coalescer logs a
+    ``CRITICAL_DUPLICATE_CALL`` and runs locally, honouring the
+    "never raise, always return" contract.
     """
     key = make_key(provider, endpoint, ticker, params)
-    return await coalescer.coalesce(key, factory, provider=provider, ticker=ticker)
+    return await coalescer.coalesce(
+        key, factory,
+        provider=provider, ticker=ticker,
+        distributed=distributed,
+    )
+
+
+def _mode_allows_external(
+    provider: str, mode_mgr: SystemModeManager
+) -> tuple[bool, str]:
+    """Return ``(allowed, reason)`` for a given provider in the current mode.
+
+    NORMAL      — every provider allowed.
+    DEGRADED    — Polygon is skipped (enrichment-only); Finnhub/CoinGecko
+                  still allowed but batch sizes shrink (handled by caller).
+    LIGHTWEIGHT — NO external calls. Everything falls back to cache.
+    """
+    state = mode_mgr.current()
+    if state.mode == SystemMode.LIGHTWEIGHT:
+        return False, f"system_mode=LIGHTWEIGHT ({state.reason})"
+    if state.mode == SystemMode.DEGRADED and provider == "polygon":
+        return False, "system_mode=DEGRADED — polygon skipped"
+    return True, ""
+
+
+def _breaker_allows(provider: str) -> tuple[bool, str]:
+    """Return ``(allowed, reason)`` based on the per-provider breaker state."""
+    breaker = ds._BREAKERS.get(provider)  # noqa: SLF001
+    if breaker is None:
+        return True, ""
+    if breaker.is_open():
+        return False, f"{provider} breaker open ({breaker.last_reason})"
+    return True, ""
 
 
 async def _fetch_news(
@@ -345,11 +411,45 @@ async def fetch_market_bundle(
     """
     cache = cache or get_market_cache()
     coalescer = get_request_coalescer()
+    mode_mgr = get_system_mode_manager()
+    mode_state = mode_mgr.current()
     stage_start = time.perf_counter()
 
     unique_tickers = [t for t in {t.upper() for t in (tickers or []) if t}]
     if not unique_tickers:
-        return _empty_bundle()
+        bundle = _empty_bundle()
+        bundle["system_mode"] = mode_state.to_dict()
+        return bundle
+
+    # ── System-mode gate ────────────────────────────────────────────────
+    # DEGRADED halves the batch — spec rule for load-shedding. LIGHTWEIGHT
+    # skips external calls entirely and reads only from cache.
+    batch_factor = mode_mgr.batch_size_factor()
+    if batch_factor < 1.0 and len(unique_tickers) > 1:
+        limit = max(1, int(len(unique_tickers) * batch_factor))
+        if limit < len(unique_tickers):
+            logger.info(
+                "io_layer mode=%s reducing batch %d→%d (factor=%.2f)",
+                mode_state.mode.value, len(unique_tickers), limit, batch_factor,
+            )
+            unique_tickers = unique_tickers[:limit]
+
+    if mode_mgr.should_skip_external_calls():
+        logger.info(
+            "io_layer mode=LIGHTWEIGHT — serving bundle from cache only (%d tickers)",
+            len(unique_tickers),
+        )
+        bundle = await _cache_only_bundle(
+            unique_tickers, cache,
+            include_news=include_news,
+            include_fundamentals=include_fundamentals,
+            include_price_action=include_price_action,
+        )
+        elapsed_ms = round((time.perf_counter() - stage_start) * 1000, 2)
+        bundle["timings_ms"] = {"total": elapsed_ms}
+        bundle["system_mode"] = mode_state.to_dict()
+        bundle["source_status"] = ds.get_provider_status()
+        return bundle
 
     # ── Provider-batched execution ────────────────────────────────────────
     # Grouping by provider keeps load predictable: one batch per upstream
@@ -369,11 +469,21 @@ async def fetch_market_bundle(
     if include_news or include_fundamentals or include_price_action:
         async with await ds._get_client() as client:  # noqa: SLF001 — internal helper
             provider_batches: list[Awaitable[Any]] = []
-            if include_news:
+            # Per-provider gates: breaker OPEN or mode-forbidden → return the
+            # neutral shape immediately so one flaky upstream doesn't stall the
+            # whole bundle. These checks are O(1) so they're cheap to do
+            # redundantly before the actual batch kicks off.
+            news_allowed, news_reason = _mode_allows_external("finnhub", mode_mgr)
+            if include_news and news_allowed:
                 provider_batches.append(
                     _fetch_news_batch(
                         client, unique_tickers, finnhub_key, cache, coalescer
                     )
+                )
+            elif include_news:
+                logger.info("io_layer news skipped: %s", news_reason)
+                provider_batches.append(
+                    _cached_only_dict(unique_tickers, cache, "news", default=[])
                 )
             if include_fundamentals:
                 provider_batches.append(
@@ -395,6 +505,10 @@ async def fetch_market_bundle(
             if include_price_action:
                 price_action = _unwrap_batch(results[idx], default={})
                 idx += 1
+    # NB: ``include_news`` can short-circuit to the cached-only dict above
+    # when the mode gate is closed; ``fundamentals`` and ``price_action``
+    # still go through the normal path since they don't call Polygon and
+    # degrade through the breaker independently.
 
     # Prices finish outside the httpx scope — they use the price_service's
     # own HTTP client, so ordering w.r.t. the heavy fetch scope doesn't matter.
@@ -451,10 +565,95 @@ async def fetch_market_bundle(
         "price_action": price_action,
         "macro": _macro_fallback(),
         "source_status": source_status,
+        "system_mode": mode_state.to_dict(),
         "missing_fields": missing_fields,
         "completeness_score": completeness_score,
         "timings_ms": {"total": elapsed_ms},
     }
+
+
+async def _cache_only_bundle(
+    tickers: list[str],
+    cache: MarketCache,
+    *,
+    include_news: bool,
+    include_fundamentals: bool,
+    include_price_action: bool,
+) -> dict[str, Any]:
+    """LIGHTWEIGHT-mode bundle — read-only, serves whatever the cache has.
+
+    Expired entries are still surfaced (we peek directly at ``cache._store``
+    rather than going through ``get`` which purges expired keys) because
+    stale-but-valid data is preferable to a crash during a provider outage.
+    """
+    prices: dict[str, float] = {}
+    news: dict[str, list[Any]] = {}
+    funds: dict[str, dict[str, Any]] = {}
+    action: dict[str, dict[str, Any]] = {}
+
+    def _peek(key: str) -> Any:
+        entry = cache._store.get(key)  # noqa: SLF001 — intentional stale peek
+        return entry.value if entry is not None else None
+
+    for t in tickers:
+        p = _peek(f"price:{t}")
+        if isinstance(p, (int, float)):
+            prices[t] = float(p)
+        if include_news:
+            n = _peek(f"news:{t}")
+            if n:
+                news[t] = n
+        if include_fundamentals:
+            f = _peek(f"fundamentals:{t}")
+            if f:
+                funds[t] = f
+        if include_price_action:
+            a = _peek(f"price_action:{t}")
+            if a:
+                action[t] = a
+
+    requested_buckets: list[tuple[str, bool, dict[str, Any]]] = [
+        ("prices", True, prices),
+        ("news", include_news, news),
+        ("fundamentals", include_fundamentals, funds),
+        ("price_action", include_price_action, action),
+    ]
+    completeness_score, missing_fields = _compute_completeness(
+        tickers, requested_buckets
+    )
+    return {
+        "tickers": tickers,
+        "prices": prices,
+        "live_prices": prices,
+        "news": news,
+        "fundamentals": funds,
+        "funds": funds,
+        "price_action": action,
+        "macro": _macro_fallback(),
+        "source_status": ds.get_provider_status(),
+        "missing_fields": missing_fields,
+        "completeness_score": completeness_score,
+    }
+
+
+async def _cached_only_dict(
+    tickers: list[str],
+    cache: MarketCache,
+    family: str,
+    *,
+    default: Any,
+) -> dict[str, Any]:
+    """Helper — build a {ticker: cached-value} dict, no upstream calls.
+
+    Used when a per-provider gate is closed but the bundle still needs
+    some shape for that bucket (e.g. news during DEGRADED mode).
+    """
+    out: dict[str, Any] = {}
+    for t in tickers:
+        entry = cache._store.get(f"{family}:{t}")  # noqa: SLF001
+        if entry is not None and entry.value:
+            out[t] = entry.value
+    return out
 
 
 def _unwrap_batch(result: Any, *, default: dict) -> dict:
@@ -469,6 +668,10 @@ def _unwrap_batch(result: Any, *, default: dict) -> dict:
 
 def _empty_bundle() -> dict[str, Any]:
     """Canonical empty bundle — returned when no tickers are supplied."""
+    try:
+        mode_snapshot = get_system_mode_manager().current().to_dict()
+    except Exception:  # noqa: BLE001
+        mode_snapshot = {"mode": "NORMAL", "reason": "unknown"}
     return {
         "tickers": [],
         "prices": {},
@@ -479,6 +682,7 @@ def _empty_bundle() -> dict[str, Any]:
         "price_action": {},
         "macro": _macro_fallback(),
         "source_status": ds.get_provider_status(),
+        "system_mode": mode_snapshot,
         "missing_fields": [],
         "completeness_score": 1.0,
         "timings_ms": {"total": 0.0},

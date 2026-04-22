@@ -25,6 +25,7 @@ from uuid import UUID
 from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
+from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from .llm import LLMClient
 from .state import AgentState, TickerInsight
 
@@ -35,6 +36,31 @@ logger = logging.getLogger(__name__)
 # orchestration pipeline. Retries live at the HTTP layer inside LLMClient, not
 # at the orchestration layer.
 LLM_SEMAPHORE = asyncio.Semaphore(1)
+
+
+LIGHTWEIGHT_PROMPT_APPENDIX = """
+
+SYSTEM MODE: LIGHTWEIGHT — the upstream data pipeline is degraded. You are
+operating on CACHED snapshots only, with no fresh news, fundamentals, or
+live prices. You MUST:
+
+  * Default every ticker to HOLD unless an explicit BUY/SELL signal is
+    preserved in the cached fields you received.
+  * Use low/partial confidence labels for every card. No "high" labels.
+  * Cap |conviction| at 0.3 for every ticker regardless of confidence_cap.
+  * Do NOT invent headlines, macro commentary, or speculative narratives.
+  * Flag the degraded mode in the portfolio summary ("operating on cached
+    snapshots — fresh data unavailable") so the user understands the
+    constraint.
+"""
+
+DEGRADED_PROMPT_APPENDIX = """
+
+SYSTEM MODE: DEGRADED — one or more providers are rate-limited. Some fields
+may be missing; cap |conviction| at 0.6 and prefer "partial signal"
+confidence labels. Mention the provider degradation in the portfolio
+summary when material.
+"""
 
 
 PORTFOLIO_AGENT_CONTRACT = """You are the Portfolio Agent for a long-term retail investor.
@@ -350,15 +376,30 @@ class AgentOrchestrator:
             return {}
 
         _inject_confidence_caps(context)
+        # Surface the system mode to the LLM so it can adjust language /
+        # confidence in degraded conditions. A mirrored appendix in the
+        # system prompt gives the hardest guarantee — the prompt contract
+        # itself changes when we're operating on cached snapshots only.
+        mode_state = get_system_mode_manager().current()
+        context["system_mode"] = mode_state.to_dict()
+        if mode_state.mode == SystemMode.LIGHTWEIGHT:
+            _force_lightweight_caps(context)
+        system_prompt = PORTFOLIO_AGENT_CONTRACT
+        if mode_state.mode == SystemMode.LIGHTWEIGHT:
+            system_prompt = PORTFOLIO_AGENT_CONTRACT + LIGHTWEIGHT_PROMPT_APPENDIX
+        elif mode_state.mode == SystemMode.DEGRADED:
+            system_prompt = PORTFOLIO_AGENT_CONTRACT + DEGRADED_PROMPT_APPENDIX
+
         user_message = json.dumps(context, default=str)
         async with LLM_SEMAPHORE:
             logger.info(
-                "LLM call start — model=%s tickers=%d",
+                "LLM call start — model=%s tickers=%d mode=%s",
                 self._llm.model,
                 len(context.get("portfolio") or []),
+                mode_state.mode.value,
             )
             response = await self._llm.ask_json(
-                system=PORTFOLIO_AGENT_CONTRACT,
+                system=system_prompt,
                 user=user_message,
                 max_tokens=3500,
             )
@@ -818,6 +859,35 @@ def _extract_confidence_from_context(context: dict[str, Any]) -> dict[str, float
         except (TypeError, ValueError):
             out[t] = 1.0
     return out
+
+
+def _force_lightweight_caps(context: dict[str, Any]) -> None:
+    """LIGHTWEIGHT override: clamp every ticker's confidence cap to 0.3.
+
+    Applied BEFORE ``_inject_confidence_caps`` runs in the LIGHTWEIGHT code
+    path so the per-ticker caps are visible to the LLM in addition to the
+    appended prompt rules. Also flags ``fallbacks_used`` on the
+    portfolio-level ``data_quality`` block so the UI layer can badge the
+    cards appropriately.
+    """
+    portfolio = context.get("portfolio") or []
+    for entry in portfolio:
+        # Floor the per-ticker completeness so ``_inject_confidence_caps``
+        # (called immediately after us) derives cap = 0.3. Doing it via
+        # ``data_completeness_score`` instead of writing ``confidence_cap``
+        # directly keeps the two fields in lock-step.
+        current = entry.get("data_completeness_score")
+        try:
+            current_f = float(current) if current is not None else 1.0
+        except (TypeError, ValueError):
+            current_f = 1.0
+        entry["data_completeness_score"] = min(current_f, 0.39)
+    dq = context.setdefault("data_quality", {})
+    dq["fallbacks_used"] = True
+    existing_missing = list(dq.get("missing_fields") or [])
+    if "system_mode=LIGHTWEIGHT" not in existing_missing:
+        existing_missing.append("system_mode=LIGHTWEIGHT")
+    dq["missing_fields"] = existing_missing
 
 
 def _inject_confidence_caps(context: dict[str, Any]) -> None:

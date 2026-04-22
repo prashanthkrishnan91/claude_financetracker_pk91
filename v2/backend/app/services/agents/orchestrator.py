@@ -1,45 +1,74 @@
-"""Hand-rolled async orchestrator for the multi-agent trading pipeline.
+"""Agent orchestrator — enforces DB → Context Builder → Single LLM → Persist.
 
-No LangGraph. Just asyncio.gather with status hooks that write progress to
-the `agent_runs` table so the UI can poll for live updates.
+Pipeline guarantees (see tasks/todo.md):
+  1. Positions + latest insights + macro are aggregated into ONE structured
+     context object by `services.ai.context_builder.build_portfolio_context`.
+  2. That context feeds a SINGLE Claude call, serialised behind a module-level
+     semaphore. No per-ticker loops. No asyncio.gather over LLM calls.
+  3. Results are persisted to agent_insights + recommendations in one pass.
 
-Pipeline phases:
-  1. bootstrap         — load positions, prices, build AgentState
-  2. sentiment         — fan out sentiment agent per ticker
-  3. technical         — fan out technical agent per ticker
-  4. fundamental       — fan out fundamental agent per ticker
-  5. portfolio_mgr     — single LLM call, deposit allocation
-  5.5. portfolio_advisor — comprehensive portfolio analysis via LLM
-  6. persist           — write agent_insights + recommendations rows
-
-Phases 2-4 run sequentially (not parallel) so the UI progress bar shows
-meaningful states. Within a phase, tickers are processed concurrently with
-a small semaphore to respect Anthropic / Finnhub rate limits.
+If the context builder returns an empty portfolio the run completes with
+status='no_data' and the LLM is not invoked.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Optional
-from uuid import UUID, uuid4
+from typing import Any, Optional
+from uuid import UUID
 
 from ...database import get_supabase_client
-from .data_sources import _get_client as _build_http_client
-from .fundamental_agent import run_fundamental_agent
+from ..ai.context_builder import build_portfolio_context
 from .llm import LLMClient
-from .portfolio_manager import run_portfolio_manager
-from .sentiment_agent import run_sentiment_agent
 from .state import AgentState, TickerInsight
-from .technical_agent import run_technical_agent
 
 logger = logging.getLogger(__name__)
 
 
-# Bounded concurrency for the fan-out agents. Tuned for free-tier API limits.
-_AGENT_CONCURRENCY = 6
+# Module-level lock: enforces a single LLM call in flight per process for the
+# orchestration pipeline. Retries live at the HTTP layer inside LLMClient, not
+# at the orchestration layer.
+LLM_SEMAPHORE = asyncio.Semaphore(1)
+
+
+PORTFOLIO_AGENT_CONTRACT = """You are the Portfolio Agent for a long-term retail investor.
+
+You receive a JSON object with three keys:
+  - "portfolio": array of position objects (ticker, shares, avg_cost, current_price, category, what_changed)
+  - "macro": {"summary": string describing the current market regime}
+  - "insights": array of prior-run signals per ticker (sentiment/technical/fundamental labels)
+
+Analyse the full portfolio as a whole — you do NOT get a second call. For
+each ticker decide BUY / HOLD / SELL with a confidence (high/medium/low),
+a conviction score in [-1.0, +1.0], and a 2-sentence reasoning that cites
+sentiment / technical / fundamental context where available.
+
+Return ONLY this JSON — no preamble, no code fences, no trailing text:
+{
+  "summary": "2-3 sentence portfolio-level overview in plain language",
+  "risks": ["risk 1", "risk 2"],
+  "opportunities": ["opportunity 1", "opportunity 2"],
+  "top_buys": ["TICKER1", "TICKER2", "TICKER3"],
+  "cards": [
+    {
+      "ticker": "AAPL",
+      "action": "BUY",
+      "confidence": "high",
+      "conviction": 0.65,
+      "sentiment_label": "bullish",
+      "sentiment_score": 0.4,
+      "technical_signal": "BUY",
+      "fundamental_score": 0.5,
+      "thesis": "2-sentence thesis citing analyst points and action",
+      "reasoning": "2-sentence explanation for the action"
+    }
+  ]
+}
+"""
 
 
 @dataclass
@@ -51,11 +80,7 @@ class AgentPipelineResult:
 
 
 class AgentOrchestrator:
-    """Drives a single agent run end-to-end.
-
-    Status updates write to the `agent_runs` table so that the FastAPI
-    /recommendations/jobs/{id} endpoint can surface progress.
-    """
+    """Drives a single agent run end-to-end with exactly one LLM call."""
 
     def __init__(
         self,
@@ -79,11 +104,6 @@ class AgentOrchestrator:
     # ── Public API ────────────────────────────────────────────────────────────
 
     async def create_run(self, tickers: Optional[list[str]] = None) -> str:
-        """Insert a queued agent_runs row and return the job_id.
-
-        The UI calls this synchronously via the router; the actual pipeline
-        is dispatched via FastAPI BackgroundTasks.
-        """
         row = {
             "user_id": str(self.user_id),
             "status": "queued",
@@ -97,21 +117,28 @@ class AgentOrchestrator:
         return result.data[0]["id"]
 
     async def run(self, run_id: str) -> AgentPipelineResult:
-        """Execute the full pipeline for a given run_id.
+        """Execute the full pipeline for ``run_id`` with exactly one LLM call.
 
-        Guaranteed lifecycle: NEVER leaves job in 'running' state.
-        - status='running' at start
-        - ALWAYS transitions to 'completed' or 'failed' before return
-        - Finally block ensures status update even on unexpected crash
+        Terminal-status guarantee: the agent_runs row always transitions to
+        'completed' or 'failed' before returning, even on unexpected errors.
         """
         terminal_status_set = False
         try:
             logger.info("Agent run started — id=%s user=%s", run_id, self.user_id)
-            logger.info("Using model: %s (fallback: %s)", self._llm.model, self._llm.fallback_model)
-            await self._update_run(run_id, status="running", current_agent="Loading portfolio", progress=5)
+            await self._update_run(
+                run_id, status="running", current_agent="Loading portfolio", progress=5
+            )
 
-            state = await self._bootstrap(run_id)
-            if not state.insights:
+            live_prices = await self._fetch_live_prices_for_user()
+
+            await self._update_run(run_id, current_agent="Building context", progress=25)
+            context = build_portfolio_context(
+                user_id=str(self.user_id),
+                live_prices=live_prices,
+            )
+
+            # Safety guard: empty portfolio → no LLM call.
+            if not context.get("portfolio"):
                 await self._update_run(
                     run_id,
                     status="completed",
@@ -119,52 +146,35 @@ class AgentOrchestrator:
                     progress=100,
                     summary="No positions in portfolio; nothing to analyse.",
                 )
-                logger.info("Agent run completed (no positions) — id=%s", run_id)
+                logger.info("Agent run completed (no_data) — id=%s", run_id)
                 terminal_status_set = True
-                return AgentPipelineResult(run_id=run_id, status="completed",
-                                           summary="No positions.", insights=[])
-
-            async with await _build_http_client() as http_client:
-                # Phases 2-4: run all three analysis phases concurrently.
-                # Each agent writes to different fields on TickerInsight so
-                # concurrent access is safe. ~3x faster than sequential baseline.
-                await self._update_run(run_id, current_agent="Analyzing portfolio", progress=20)
-                _fk = self._finnhub_key
-                _pk = self._polygon_key
-                _llm = self._llm
-                await asyncio.gather(
-                    self._fanout(state, lambda i: run_sentiment_agent(i, _llm, http_client, _fk)),
-                    self._fanout(state, lambda i: run_technical_agent(i, _llm, http_client, _pk)),
-                    self._fanout(state, lambda i: run_fundamental_agent(i, _llm, http_client)),
+                return AgentPipelineResult(
+                    run_id=run_id,
+                    status="no_data",
+                    summary="No positions.",
+                    insights=[],
                 )
 
-                # Phase 5: Portfolio Manager synthesis
-                await self._update_run(run_id, current_agent="Portfolio Manager Deliberating", progress=85)
-                logger.info("Calling LLM for portfolio manager (run %s)", run_id)
-                await run_portfolio_manager(state, self._llm)
-                if not state.pm_summary:
-                    logger.warning("Portfolio manager returned empty summary for run %s — LLM key may be missing", run_id)
-                    await self._update_run(run_id, error_message="LLM returned empty summary; check Anthropic API key.")
+            state = self._build_state(run_id, context, live_prices)
 
-                # Phase 5.5: Portfolio Advisor (comprehensive portfolio analysis)
-                await self._update_run(run_id, current_agent="Portfolio Advisor", progress=90)
-                logger.info("Calling portfolio advisor for run %s", run_id)
-                await self._call_portfolio_advisor(state)
+            await self._update_run(
+                run_id, current_agent="Portfolio Agent", progress=60
+            )
 
-            # Phase 6: Persist results
+            advice = await self._single_llm_call(context)
+            state.portfolio_advice = advice or {}
+            state.pm_summary = (advice or {}).get("summary", "")
+
+            self._apply_advice_to_insights(state, advice or {})
+
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
-            logger.info("Saving result for run %s (%d insights)", run_id, len(state.insights))
             await self._persist(state)
 
-            # Build allocation map for the run row
             allocation_map = {
                 i.ticker: i.suggested_allocation
                 for i in state.insights.values()
                 if i.suggested_allocation > 0
             }
-            # Guarantee the run row always has a human-readable summary so
-            # the UI never renders a blank Intel panel on completion.
-            # Prefer portfolio advisor summary if available
             final_summary = (state.portfolio_advice.get("summary", "") or state.pm_summary or "").strip()
             if not final_summary:
                 final_summary = (
@@ -179,7 +189,9 @@ class AgentOrchestrator:
                 summary=final_summary,
                 allocation=allocation_map,
             )
-            logger.info("Agent run completed — id=%s status=completed insights=%d", run_id, len(state.insights))
+            logger.info(
+                "Agent run completed — id=%s insights=%d", run_id, len(state.insights)
+            )
             terminal_status_set = True
 
             return AgentPipelineResult(
@@ -200,7 +212,6 @@ class AgentOrchestrator:
                 error_message=str(exc)[:500],
                 summary=fallback_summary,
             )
-            logger.info("Agent run completed — id=%s status=failed error=%s", run_id, str(exc)[:100])
             terminal_status_set = True
             return AgentPipelineResult(
                 run_id=run_id,
@@ -210,10 +221,11 @@ class AgentOrchestrator:
             )
 
         finally:
-            # Guarantee terminal state — if exception bypassed both paths above,
-            # mark job as failed. Should never happen, but defense-in-depth.
             if not terminal_status_set:
-                logger.warning("LIFECYCLE VIOLATION: run %s did not reach terminal state — forcing failed", run_id)
+                logger.warning(
+                    "LIFECYCLE VIOLATION: run %s did not reach terminal state — forcing failed",
+                    run_id,
+                )
                 try:
                     await self._update_run(
                         run_id,
@@ -224,51 +236,67 @@ class AgentOrchestrator:
                         summary="Analysis temporarily unavailable — please retry.",
                     )
                 except Exception as cleanup_exc:
-                    logger.warning("Failed to mark run %s failed in finally block: %s", run_id, cleanup_exc)
+                    logger.warning(
+                        "Failed to mark run %s failed in finally block: %s",
+                        run_id,
+                        cleanup_exc,
+                    )
 
-    # ── Internal phases ───────────────────────────────────────────────────────
+    # ── Single LLM call ──────────────────────────────────────────────────────
 
-    async def _bootstrap(self, run_id: str) -> AgentState:
-        """Load positions + live prices and build the per-ticker AgentState."""
-        positions = (
-            self.db.table("positions")
-            .select("*")
-            .eq("user_id", str(self.user_id))
-            .execute()
-        ).data or []
+    async def _single_llm_call(self, context: dict[str, Any]) -> dict[str, Any]:
+        """Execute the one-and-only Claude call for this run.
+
+        Serialised behind `LLM_SEMAPHORE`. Retries live inside LLMClient at the
+        HTTP level; the orchestration layer never re-enters this function.
+        """
+        if not self._llm.api_key:
+            logger.warning("Skipping LLM call — no anthropic_api_key configured")
+            return {}
+
+        user_message = json.dumps(context, default=str)
+        async with LLM_SEMAPHORE:
+            logger.info(
+                "LLM call start — model=%s tickers=%d",
+                self._llm.model,
+                len(context.get("portfolio") or []),
+            )
+            response = await self._llm.ask_json(
+                system=PORTFOLIO_AGENT_CONTRACT,
+                user=user_message,
+                max_tokens=3500,
+            )
+        return response or {}
+
+    # ── State construction ──────────────────────────────────────────────────
+
+    def _build_state(
+        self,
+        run_id: str,
+        context: dict[str, Any],
+        live_prices: dict[str, float],
+    ) -> AgentState:
+        portfolio = context.get("portfolio") or []
+        prior_insights = {i["ticker"]: i for i in (context.get("insights") or []) if i.get("ticker")}
+
+        tickers = [p["ticker"] for p in portfolio if p.get("ticker")]
 
         state = AgentState(
             user_id=str(self.user_id),
             run_id=run_id,
-            tickers=[p["ticker"] for p in positions],
+            tickers=tickers,
             deposit_amount=self.deposit_amount,
             sale_proceeds=self.sale_proceeds,
         )
 
-        if not positions:
-            return state
-
-        # Live prices (best-effort)
-        prices: dict[str, float] = {}
-        if self._price_service:
-            try:
-                results = await self._price_service.fetch_prices(
-                    [p["ticker"] for p in positions]
-                )
-                for t, pr in results.items():
-                    if pr.is_valid:
-                        prices[t] = pr.mid_price
-            except Exception as exc:
-                logger.warning("Price fetch failed during bootstrap: %s", exc)
-
-        # Compute totals and build insights
+        # Portfolio totals + category weights
         total = 0.0
         category_totals: dict[str, float] = {}
-        rows: list[tuple[dict, float, float]] = []
-        for p in positions:
+        rows: list[tuple[dict[str, Any], float, float]] = []
+        for p in portfolio:
             shares = float(p.get("shares") or 0)
             avg_cost = float(p.get("avg_cost") or 0)
-            price = prices.get(p["ticker"], avg_cost)
+            price = p.get("current_price") or live_prices.get(p["ticker"]) or avg_cost
             mv = shares * price
             total += mv
             cat = p.get("category") or "Other"
@@ -282,15 +310,17 @@ class AgentOrchestrator:
         }
 
         for p, mv, price in rows:
+            ticker = p["ticker"]
             shares = float(p.get("shares") or 0)
             avg_cost = float(p.get("avg_cost") or 0)
             pnl_pct = None
             if avg_cost > 0 and price:
                 pnl_pct = round((price - avg_cost) / avg_cost * 100, 2)
             weight = round((mv / total * 100) if total > 0 else 0, 2)
+            prior = prior_insights.get(ticker, {})
             insight = TickerInsight(
-                ticker=p["ticker"],
-                name=p.get("name", p["ticker"]),
+                ticker=ticker,
+                name=p.get("name", ticker),
                 category=p.get("category", "Other"),
                 shares=shares,
                 avg_cost=avg_cost,
@@ -298,110 +328,126 @@ class AgentOrchestrator:
                 current_weight_pct=weight,
                 pnl_pct=pnl_pct,
                 lt_eligible=bool(p.get("lt_eligible", False)),
-                target_price=float(p["target_price"]) if p.get("target_price") else None,
+                target_price=p.get("target_price"),
+                sentiment_label=prior.get("sentiment") or None,
+                technical_signal=prior.get("technical") or None,
             )
-            state.insights[insight.ticker] = insight
+            state.insights[ticker] = insight
 
         return state
 
-    async def _fanout(
-        self,
-        state: AgentState,
-        coro_factory: Callable[[TickerInsight], Awaitable[None]],
-    ) -> None:
-        """Run `coro_factory(insight)` for each ticker with bounded concurrency.
+    def _apply_advice_to_insights(self, state: AgentState, advice: dict[str, Any]) -> None:
+        """Project the single LLM response onto per-ticker TickerInsight rows."""
+        cards = advice.get("cards") or []
+        card_map: dict[str, dict[str, Any]] = {}
+        for card in cards:
+            t = (card.get("ticker") or "").upper()
+            if t:
+                card_map[t] = card
 
-        Each agent call is capped at 8 s so a single slow ticker cannot stall
-        the whole phase when phases run concurrently.
-        """
-        sem = asyncio.Semaphore(_AGENT_CONCURRENCY)
+        for ticker, insight in state.insights.items():
+            card = card_map.get(ticker.upper())
+            if not card:
+                # No per-ticker guidance → safe HOLD default.
+                insight.suggested_action = insight.suggested_action or "HOLD"
+                if not insight.investment_thesis:
+                    insight.investment_thesis = (
+                        f"{ticker}: insufficient signal from portfolio agent — holding position."
+                    )
+                continue
 
-        async def _wrap(insight: TickerInsight):
-            async with sem:
-                try:
-                    await asyncio.wait_for(coro_factory(insight), timeout=8.0)
-                except asyncio.TimeoutError:
-                    logger.warning("Agent timed out for %s: skipping", insight.ticker)
-                except Exception as exc:
-                    logger.warning("Agent failed for %s: %s", insight.ticker, exc)
+            insight.suggested_action = _normalize_action(card.get("action"))
+            insight.conviction_score = _clamp(card.get("conviction"), -1.0, 1.0)
+            insight.sentiment_label = card.get("sentiment_label") or insight.sentiment_label
+            insight.sentiment_score = _to_float_or_none(card.get("sentiment_score"))
+            insight.sentiment_summary = card.get("sentiment_summary") or ""
+            insight.technical_signal = card.get("technical_signal") or insight.technical_signal
+            insight.technical_summary = card.get("technical_summary") or ""
+            insight.fundamental_score = _to_float_or_none(card.get("fundamental_score"))
+            insight.fundamental_summary = card.get("fundamental_summary") or ""
+            thesis = card.get("thesis") or card.get("reasoning") or ""
+            insight.investment_thesis = str(thesis)[:500]
 
-        await asyncio.gather(*[_wrap(i) for i in state.insights.values()])
+        self._allocate_cash(state)
 
-    async def _call_portfolio_advisor(self, state: AgentState) -> None:
-        """Call the portfolio advisor LLM with current state.
+    def _allocate_cash(self, state: AgentState) -> None:
+        """Distribute deposit + sale_proceeds across BUY-rated tickers by conviction."""
+        cash = state.cash_to_deploy
+        if cash <= 0:
+            return
+        candidates: list[tuple[TickerInsight, float]] = []
+        for insight in state.insights.values():
+            if insight.suggested_action != "BUY":
+                continue
+            conviction = insight.conviction_score or 0.0
+            if conviction <= 0:
+                continue
+            candidates.append((insight, conviction))
+        if not candidates:
+            return
+        total_weight = sum(w for _, w in candidates)
+        if total_weight <= 0:
+            return
+        remaining = cash
+        last_idx = len(candidates) - 1
+        for i, (insight, weight) in enumerate(candidates):
+            if i == last_idx:
+                dollars = round(remaining, 2)
+            else:
+                dollars = round(cash * (weight / total_weight), 2)
+                remaining -= dollars
+            insight.suggested_allocation = max(0.0, dollars)
 
-        Builds portfolio_positions from insights and generates a macro_summary,
-        then calls portfolio_advisor. Result stored in state.portfolio_advice.
-        """
-        from ..recommendation_engine import portfolio_advisor
+    # ── Live price bootstrap (DB read + price service fan-out is NOT an LLM call) ─
 
+    async def _fetch_live_prices_for_user(self) -> dict[str, float]:
+        if not self._price_service:
+            return {}
         try:
-            # Build portfolio positions from current insights (post-agent enrichment)
-            portfolio_positions = []
-            for insight in state.insights.values():
-                pos = {
-                    "ticker": insight.ticker,
-                    "shares": insight.shares,
-                    "current_price": insight.current_price,
-                    "avg_cost": insight.avg_cost,
-                    "pnl_pct": insight.pnl_pct,
-                    "category": insight.category,
-                    "weight_pct": insight.current_weight_pct,
-                    "sentiment_label": insight.sentiment_label,
-                    "technical_signal": insight.technical_signal,
-                    "suggested_action": insight.suggested_action,
-                    "conviction_score": round(insight.conviction_score, 2) if insight.conviction_score is not None else None,
-                }
-                portfolio_positions.append(pos)
-
-            # Build macro summary from state + agent insights
-            portfolio_value = f"${state.total_portfolio_value:,.2f}"
-            categories = " / ".join([
-                f"{k}: {v:.1f}%"
-                for k, v in sorted(state.category_weights.items())
-            ])
-            bullish_count = sum(
-                1 for i in state.insights.values()
-                if i.suggested_action in ("BUY", "ACCUMULATE", "DCA")
-            )
-            macro_summary = (
-                f"Portfolio: {portfolio_value} · Allocation: {categories} · "
-                f"Cash to deploy: ${state.cash_to_deploy:,.2f} · "
-                f"Bullish signals: {bullish_count}/{len(state.insights)}"
-            )
-
-            # Call portfolio advisor
-            advice = await portfolio_advisor(
-                portfolio_positions=portfolio_positions,
-                macro_summary=macro_summary,
-                api_key=self._llm.api_key,
-            )
-            state.portfolio_advice = advice
-            logger.info("Portfolio advisor returned advice for run %s", state.run_id)
+            tickers = [
+                p["ticker"]
+                for p in (
+                    self.db.table("positions")
+                    .select("ticker")
+                    .eq("user_id", str(self.user_id))
+                    .execute()
+                ).data
+                or []
+                if p.get("ticker")
+            ]
         except Exception as exc:
-            logger.warning("Portfolio advisor failed for run %s: %s", state.run_id, exc)
-            state.portfolio_advice = {}  # Safe default
+            logger.warning("Failed to list tickers for price fetch: %s", exc)
+            return {}
+        if not tickers:
+            return {}
+        try:
+            results = await self._price_service.fetch_prices(tickers)
+        except Exception as exc:
+            logger.warning("Price fetch failed during bootstrap: %s", exc)
+            return {}
+        out: dict[str, float] = {}
+        for t, pr in (results or {}).items():
+            if getattr(pr, "is_valid", False):
+                out[t] = pr.mid_price
+        return out
+
+    # ── Persistence ─────────────────────────────────────────────────────────
 
     async def _persist(self, state: AgentState) -> None:
-        """Write agent_insights + refresh the recommendations table.
-
-        Runs in a thread so synchronous Supabase calls don't block the event loop.
-        Inserts new recommendations BEFORE deactivating old ones to prevent a
-        blank-state window if the deactivation call fails.
-        """
         await asyncio.to_thread(self._persist_sync, state)
 
     def _persist_sync(self, state: AgentState) -> None:
         now = datetime.now(timezone.utc).isoformat()
 
-        # 0. Fetch previous insights per ticker for diff computation
         prev_insights: dict[str, dict] = {}
         tickers = list(state.insights.keys())
         if tickers:
             try:
                 rows = (
                     self.db.table("agent_insights")
-                    .select("ticker,suggested_action,sentiment_label,technical_signal,conviction_score,sentiment_score")
+                    .select(
+                        "ticker,suggested_action,sentiment_label,technical_signal,conviction_score,sentiment_score"
+                    )
                     .eq("user_id", state.user_id)
                     .in_("ticker", tickers)
                     .order("created_at", desc=True)
@@ -413,7 +459,6 @@ class AgentOrchestrator:
             except Exception as exc:
                 logger.warning("Failed to fetch previous insights for diff: %s", exc)
 
-        # Build per-ticker what_changed strings
         what_changed_map: dict[str, str] = {}
         for ticker, insight in state.insights.items():
             prev = prev_insights.get(ticker)
@@ -422,8 +467,7 @@ class AgentOrchestrator:
                 if diff:
                     what_changed_map[ticker] = diff
 
-        # 1. Insert agent_insights — errors propagate to mark the run as failed
-        insight_rows = []
+        insight_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
             row = insight.to_insight_row(run_id=state.run_id, user_id=state.user_id)
             wc = what_changed_map.get(insight.ticker)
@@ -434,37 +478,17 @@ class AgentOrchestrator:
         if insight_rows:
             self.db.table("agent_insights").insert(insight_rows).execute()
 
-        # 2. Build fresh recommendation rows
-        # Map portfolio advice cards by ticker for lookup
-        advice_cards_map: dict[str, dict] = {}
-        if state.portfolio_advice and state.portfolio_advice.get("cards"):
-            for card in state.portfolio_advice["cards"]:
-                advice_cards_map[card.get("ticker", "")] = card
-
-        rec_rows = []
+        rec_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
-            # Get portfolio advisor's card for this ticker if available
-            advice_card = advice_cards_map.get(insight.ticker)
-
-            # Use portfolio advisor action if available, otherwise use insight action
-            action = insight.suggested_action
-            reasoning = ""
-            if advice_card:
-                action = advice_card.get("action", action)
-                reasoning = advice_card.get("reasoning", "")
-
-            if not insight.investment_thesis and action == "HOLD" and not reasoning:
-                # Keep the table slim — skip pure HOLDs with no narrative
+            action = insight.suggested_action or "HOLD"
+            reasoning = insight.investment_thesis or f"{action} signal from portfolio agent."
+            if action == "HOLD" and not insight.investment_thesis:
                 continue
-
-            # Prefer portfolio advisor reasoning, fall back to investment thesis
-            detail = reasoning or insight.investment_thesis[:600] or f"{action} signal from agent pipeline."
-
             rec_rows.append({
                 "user_id": state.user_id,
                 "ticker": insight.ticker,
                 "action": action,
-                "detail": detail,
+                "detail": reasoning[:600],
                 "rationale": self._rationale_line(insight),
                 "urgency": self._urgency(insight),
                 "tax_note": self._tax_note(insight),
@@ -479,14 +503,10 @@ class AgentOrchestrator:
                 "what_changed": what_changed_map.get(insight.ticker),
             })
 
-        # 3. Insert new recommendations FIRST — errors propagate to mark run failed.
-        #    Doing this before deactivating old ones prevents a blank-state window.
         if rec_rows:
             for i in range(0, len(rec_rows), 50):
                 self.db.table("recommendations").insert(rec_rows[i:i + 50]).execute()
 
-        # 4. Deactivate previous recommendations (excluding this run's new rows).
-        #    Two passes: one for rows with a different run_id, one for legacy NULL rows.
         try:
             self.db.table("recommendations").update({
                 "is_active": False,
@@ -504,7 +524,6 @@ class AgentOrchestrator:
             ).execute()
         except Exception as exc:
             logger.warning("Failed to expire old recommendations: %s", exc)
-            # New recs are already inserted — deactivation is best-effort cleanup.
 
     async def _update_run(
         self,
@@ -545,12 +564,16 @@ class AgentOrchestrator:
     def _rationale_line(insight: TickerInsight) -> str:
         parts = []
         if insight.sentiment_label:
-            parts.append(f"sent {insight.sentiment_label}({insight.sentiment_score})")
+            parts.append(
+                f"sent {insight.sentiment_label}"
+                + (f"({insight.sentiment_score})" if insight.sentiment_score is not None else "")
+            )
         if insight.technical_signal:
             parts.append(f"tech {insight.technical_signal}")
         if insight.fundamental_score is not None:
             parts.append(f"fund {insight.fundamental_score:+.2f}")
-        parts.append(f"conviction {insight.conviction_score:+.2f}")
+        if insight.conviction_score is not None:
+            parts.append(f"conviction {insight.conviction_score:+.2f}")
         if insight.suggested_allocation > 0:
             parts.append(f"alloc ${insight.suggested_allocation:.0f}")
         return " · ".join(parts)
@@ -571,20 +594,53 @@ class AgentOrchestrator:
     @staticmethod
     def _tax_note(insight: TickerInsight) -> str:
         if insight.suggested_action in ("SELL", "TRIM") and insight.shares > 0:
-            return "LT eligible — 15-20% cap gains" if insight.lt_eligible else "ST status — 37% ordinary income tax"
+            return (
+                "LT eligible — 15-20% cap gains"
+                if insight.lt_eligible
+                else "ST status — 37% ordinary income tax"
+            )
         return ""
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────
 
 
 def _round(v):
     return round(v, 2) if v is not None else None
 
 
-def _compute_what_changed(prev: dict, curr: "TickerInsight") -> str:
-    """Return a newline-separated list of meaningful changes vs the previous insight row.
+def _clamp(v: Any, lo: float, hi: float) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:  # NaN guard
+        return None
+    return max(lo, min(hi, f))
 
-    Compares action, sentiment label, technical signal, and numeric scores.
-    Returns an empty string when nothing significant changed.
-    """
+
+def _to_float_or_none(v: Any) -> Optional[float]:
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    if f != f:
+        return None
+    return f
+
+
+def _normalize_action(action: Any) -> str:
+    if not action:
+        return "HOLD"
+    a = str(action).upper().strip()
+    if a in {"BUY", "SELL", "HOLD", "TRIM", "REVIEW", "ACCUMULATE", "DCA"}:
+        if a in {"ACCUMULATE", "DCA"}:
+            return "BUY"
+        return a
+    return "HOLD"
+
+
+def _compute_what_changed(prev: dict, curr: "TickerInsight") -> str:
     bullets: list[str] = []
 
     prev_action = prev.get("suggested_action")
@@ -605,7 +661,9 @@ def _compute_what_changed(prev: dict, curr: "TickerInsight") -> str:
         delta = curr_conv - float(prev_conv)
         if abs(delta) >= 0.10:
             sign = "+" if delta >= 0 else ""
-            bullets.append(f"Conviction: {float(prev_conv):+.2f} → {curr_conv:+.2f} ({sign}{delta:.2f})")
+            bullets.append(
+                f"Conviction: {float(prev_conv):+.2f} → {curr_conv:+.2f} ({sign}{delta:.2f})"
+            )
 
     prev_ss = prev.get("sentiment_score")
     curr_ss = curr.sentiment_score
@@ -613,6 +671,8 @@ def _compute_what_changed(prev: dict, curr: "TickerInsight") -> str:
         delta = curr_ss - float(prev_ss)
         if abs(delta) >= 0.15:
             sign = "+" if delta >= 0 else ""
-            bullets.append(f"Sentiment score: {float(prev_ss):+.2f} → {curr_ss:+.2f} ({sign}{delta:.2f})")
+            bullets.append(
+                f"Sentiment score: {float(prev_ss):+.2f} → {curr_ss:+.2f} ({sign}{delta:.2f})"
+            )
 
     return "\n".join(bullets)

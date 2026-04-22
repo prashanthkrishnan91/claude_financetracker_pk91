@@ -9,9 +9,20 @@ directly. The facade guarantees:
   * a deterministic return schema — even when every upstream fails
 """
 
+from .request_coalescer import (
+    RequestCoalescer,
+    get_request_coalescer,
+    make_key,
+)
 from .resilient_provider import (
     ResilientMarketProvider,
     get_market_snapshot,
 )
 
-__all__ = ["ResilientMarketProvider", "get_market_snapshot"]
+__all__ = [
+    "RequestCoalescer",
+    "ResilientMarketProvider",
+    "get_market_snapshot",
+    "get_request_coalescer",
+    "make_key",
+]

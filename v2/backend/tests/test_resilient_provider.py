@@ -80,10 +80,19 @@ async def test_coingecko_breaker_short_circuits_when_open(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_finnhub_news_returns_empty_on_429(monkeypatch):
-    """A 429 from Finnhub records a failure but never raises."""
+    """A 429 from Finnhub retries with backoff then records a failure; never raises.
+
+    Hardening spec (v3 stability pass): 429 is transient so the client
+    retries with exponential backoff + jitter. All retries happen inside a
+    single call, and a single breaker failure is recorded for the whole
+    cycle. The test shrinks the backoff schedule to near-zero so retries
+    run in milliseconds.
+    """
     from app.services.agents import data_sources as ds
 
     ds.reset_breakers()
+    # Shrink backoff for a fast test — real schedule is 1s → 2s → 4s.
+    monkeypatch.setattr(ds, "_BACKOFF_BASE_DELAYS_S", (0.001, 0.001, 0.001))
     call_count = 0
 
     class _Resp:
@@ -102,10 +111,44 @@ async def test_finnhub_news_returns_empty_on_429(monkeypatch):
 
     out = await ds.fetch_finnhub_news(client, "AAPL", api_key="fake-key")
     assert out == []
-    assert call_count == 1
-    # One failure recorded, breaker still closed (threshold = 3)
+    # Initial attempt + 3 retries per the backoff schedule (429 is transient).
+    assert call_count == 4
+    # One breaker failure recorded for the full retry cycle; threshold is 3
+    # so the breaker stays closed until subsequent calls confirm the outage.
     assert ds._BREAKERS["finnhub"].failures == 1
     assert not ds._BREAKERS["finnhub"].is_open()
+
+    ds.reset_breakers()
+
+
+@pytest.mark.asyncio
+async def test_finnhub_news_does_not_retry_on_403(monkeypatch):
+    """403 is a hard block (revoked key / plan issue) — MUST NOT retry."""
+    from app.services.agents import data_sources as ds
+
+    ds.reset_breakers()
+    monkeypatch.setattr(ds, "_BACKOFF_BASE_DELAYS_S", (0.001, 0.001, 0.001))
+    call_count = 0
+
+    class _Resp:
+        status_code = 403
+
+        def json(self):
+            return []
+
+    async def fake_get(url, params=None):  # noqa: ARG001
+        nonlocal call_count
+        call_count += 1
+        return _Resp()
+
+    client = MagicMock()
+    client.get = fake_get
+
+    out = await ds.fetch_finnhub_news(client, "AAPL", api_key="fake-key")
+    assert out == []
+    # 403 is non-transient → ZERO retries.
+    assert call_count == 1
+    assert ds._BREAKERS["finnhub"].failures == 1
 
     ds.reset_breakers()
 

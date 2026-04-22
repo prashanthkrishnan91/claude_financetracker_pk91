@@ -43,10 +43,13 @@ You receive a JSON object with these keys:
   - "portfolio": array of position objects (ticker, shares, avg_cost,
     current_price, category, sentiment_label, technical_signal,
     fundamental_score, trend, confidence_score, confidence_label,
+    data_completeness_score, missing_fields, confidence_cap,
     data_quality, what_changed). Every ticker is GUARANTEED to have a
     value for each signal field — missing upstream data has already been
     filled with deterministic fallbacks and the gaps are recorded in
-    `data_quality.missing_fields`.
+    `data_quality.missing_fields`. ``confidence_cap`` is the maximum
+    absolute value ``conviction`` may take for that ticker — you MUST
+    respect it.
   - "data_quality": {"completeness_score": 0..1, "missing_fields": [...],
     "fallbacks_used": bool, "missing_prices": [tickers],
     "missing_news": [tickers], "missing_fundamentals": [tickers],
@@ -62,13 +65,25 @@ You receive a JSON object with these keys:
   - "insights": array of prior-run signals per ticker (sentiment/technical/
     fundamental labels)
 
+Rules (MANDATORY):
+  * Do NOT infer missing market data. Only reason on the fields provided —
+    if a ticker has no news, do not invent headlines; if fundamentals are
+    empty, do not estimate P/E, margins, or growth.
+  * Respect every ticker's ``confidence_cap``:
+      - data_completeness_score < 0.4  →  |conviction| ≤ 0.3
+      - data_completeness_score 0.4-0.7 → |conviction| ≤ 0.6
+      - data_completeness_score > 0.7   → normal range [-1.0, +1.0]
+  * When a ticker's ``confidence_cap`` is ≤ 0.3, default to HOLD unless an
+    explicit signal survives in the data you DO have.
+
 Analyse the full portfolio as a whole — you do NOT get a second call. For
 each ticker decide BUY / HOLD / SELL with a confidence (high/medium/low),
-a conviction score in [-1.0, +1.0], and a 2-sentence reasoning that cites
-sentiment / technical / fundamental context where available. For tickers
-whose `confidence_label` is "watchlist only" or "low confidence signal",
-default to HOLD and note the data gap in the thesis — NEVER emit the
-string "insufficient data" in any field.
+a conviction score in [-1.0, +1.0] (capped by ``confidence_cap``), and a
+2-sentence reasoning that cites sentiment / technical / fundamental
+context where available. For tickers whose `confidence_label` is
+"watchlist only" or "low confidence signal", default to HOLD and note
+the data gap in the thesis — NEVER emit the string "insufficient data"
+in any field.
 
 HARD REQUIREMENT — you MUST return a card for EVERY ticker in the
 "portfolio" array. If signal data is thin, still emit a card with a
@@ -211,6 +226,10 @@ class AgentOrchestrator:
             state.portfolio_advice = advice or {}
             state.pm_summary = (advice or {}).get("summary", "")
 
+            # Stash the per-ticker completeness so ``_apply_advice_to_insights``
+            # can enforce the confidence cap regardless of what the LLM returned.
+            self._confidence_by_ticker = _extract_confidence_from_context(context)
+
             self._apply_advice_to_insights(state, advice or {})
 
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
@@ -310,6 +329,12 @@ class AgentOrchestrator:
         function. ``self._llm_call_count`` is incremented atomically so the
         ``run`` epilogue can detect any future regression that re-invokes
         this method from within a single run.
+
+        Confidence-gating: the context is augmented with ``confidence_cap``
+        per ticker before serialisation so the LLM is on the hook for
+        respecting it. Post-call, ``_clamp_conviction_by_confidence`` is a
+        deterministic enforcement layer — even if the LLM ignores the cap,
+        the downstream allocation + persistence code sees a clamped value.
         """
         if not self._llm.api_key:
             logger.warning("Skipping LLM call — no anthropic_api_key configured")
@@ -324,6 +349,7 @@ class AgentOrchestrator:
             )
             return {}
 
+        _inject_confidence_caps(context)
         user_message = json.dumps(context, default=str)
         async with LLM_SEMAPHORE:
             logger.info(
@@ -407,13 +433,24 @@ class AgentOrchestrator:
         return state
 
     def _apply_advice_to_insights(self, state: AgentState, advice: dict[str, Any]) -> None:
-        """Project the single LLM response onto per-ticker TickerInsight rows."""
+        """Project the single LLM response onto per-ticker TickerInsight rows.
+
+        Confidence gating is enforced post-hoc here: for each ticker we clamp
+        the absolute conviction score to the cap derived from the per-ticker
+        ``data_completeness_score``. This is deterministic — the LLM can
+        ignore the cap in its system prompt and we still never surface a
+        high-conviction action on low-data tickers.
+        """
         cards = advice.get("cards") or []
         card_map: dict[str, dict[str, Any]] = {}
         for card in cards:
             t = (card.get("ticker") or "").upper()
             if t:
                 card_map[t] = card
+
+        # Source-of-truth for confidence is the context we sent to the LLM —
+        # fall back to whatever ``_single_llm_call`` captured for this run.
+        confidence_by_ticker = getattr(self, "_confidence_by_ticker", {}) or {}
 
         for ticker, insight in state.insights.items():
             card = card_map.get(ticker.upper())
@@ -431,7 +468,9 @@ class AgentOrchestrator:
                 continue
 
             insight.suggested_action = _normalize_action(card.get("action"))
-            insight.conviction_score = _clamp(card.get("conviction"), -1.0, 1.0)
+            raw_conviction = _clamp(card.get("conviction"), -1.0, 1.0)
+            cap = _confidence_cap_for(confidence_by_ticker.get(ticker.upper(), 1.0))
+            insight.conviction_score = _apply_cap(raw_conviction, cap)
             insight.sentiment_label = card.get("sentiment_label") or insight.sentiment_label
             insight.sentiment_score = _to_float_or_none(card.get("sentiment_score"))
             insight.sentiment_summary = card.get("sentiment_summary") or ""
@@ -720,6 +759,95 @@ def _to_float_or_none(v: Any) -> Optional[float]:
     if f != f:
         return None
     return f
+
+
+# ── Confidence gating helpers ───────────────────────────────────────────────
+
+
+def _confidence_cap_for(completeness: float) -> float:
+    """Map a ``data_completeness_score`` to the max |conviction| allowed.
+
+    Rules (per v3 stability spec):
+      * completeness < 0.4 → 0.3 (watchlist-tier)
+      * completeness 0.4–0.7 → 0.6 (partial signal)
+      * completeness > 0.7 → 1.0 (full signal, no clamp)
+    """
+    try:
+        c = float(completeness)
+    except (TypeError, ValueError):
+        return 0.3
+    if c != c:  # NaN guard
+        return 0.3
+    if c < 0.4:
+        return 0.3
+    if c <= 0.7:
+        return 0.6
+    return 1.0
+
+
+def _apply_cap(conviction: Optional[float], cap: float) -> Optional[float]:
+    """Clamp |conviction| to ``cap`` while preserving sign. Returns None if input is None."""
+    if conviction is None:
+        return None
+    if cap <= 0:
+        return 0.0
+    if conviction > cap:
+        return cap
+    if conviction < -cap:
+        return -cap
+    return conviction
+
+
+def _extract_confidence_from_context(context: dict[str, Any]) -> dict[str, float]:
+    """Return ``{ticker: data_completeness_score}`` from the outgoing LLM context.
+
+    Uses the context we JUST built so the cap enforced after the LLM call
+    matches exactly what the LLM was told — no chance of drift between the
+    prompt contract and the deterministic enforcement layer.
+    """
+    out: dict[str, float] = {}
+    for entry in (context.get("portfolio") or []):
+        t = (entry.get("ticker") or "").upper()
+        if not t:
+            continue
+        score = entry.get("data_completeness_score")
+        if score is None:
+            score = entry.get("confidence_score")
+        try:
+            out[t] = float(score) if score is not None else 1.0
+        except (TypeError, ValueError):
+            out[t] = 1.0
+    return out
+
+
+def _inject_confidence_caps(context: dict[str, Any]) -> None:
+    """Mutate ``context`` in place: add ``confidence_cap`` + per-ticker
+    completeness mirrors to every portfolio entry.
+
+    The context builder already produces ``confidence_score`` per ticker —
+    we promote that to the explicit ``data_completeness_score`` / ``missing_
+    fields`` / ``confidence_cap`` triple the LLM prompt references, so the
+    prompt contract and the payload stay in lock-step.
+    """
+    portfolio = context.get("portfolio") or []
+    portfolio_missing = ((context.get("data_quality") or {}).get("missing_fields") or [])
+    for entry in portfolio:
+        score = entry.get("data_completeness_score")
+        if score is None:
+            score = entry.get("confidence_score", 1.0)
+        try:
+            score_f = float(score)
+        except (TypeError, ValueError):
+            score_f = 1.0
+        entry["data_completeness_score"] = round(score_f, 3)
+        # Promote the per-ticker missing-field list up one level so it's
+        # visible alongside the cap without the LLM having to drill into
+        # ``data_quality``.
+        dq = entry.get("data_quality") or {}
+        entry["missing_fields"] = list(
+            dq.get("missing_fields") or portfolio_missing or []
+        )
+        entry["confidence_cap"] = _confidence_cap_for(score_f)
 
 
 def _normalize_action(action: Any) -> str:

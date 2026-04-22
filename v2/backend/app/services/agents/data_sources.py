@@ -3,6 +3,15 @@
 All network calls are sandboxed here so the agents themselves stay pure.
 Every helper degrades gracefully — the agent can still reason on partial
 data rather than crash the pipeline.
+
+Resilience layer (shared across helpers):
+  * Per-provider circuit breakers — 429/403/5xx streaks open the breaker
+    for a cool-off window; subsequent calls short-circuit to the neutral
+    fallback instead of hammering the upstream.
+  * Per-provider concurrency semaphores — cap in-flight requests per
+    provider so a burst of tickers doesn't trip free-tier rate limits.
+  * Every helper catches network exceptions and returns an empty value
+    so the orchestrator never sees a raised 429/403.
 """
 
 from __future__ import annotations
@@ -10,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
@@ -23,6 +33,102 @@ _COINGECKO_BASE = "https://api.coingecko.com/api/v3"
 
 # Small, unbounded client reused per-orchestrator-run.
 _HTTP_TIMEOUT = 8.0
+
+
+# ── Circuit breaker + concurrency guard ─────────────────────────────────────
+# These limit upstream load across the whole process. The breaker opens on
+# repeated 429/403/5xx signals and auto-resets after the cool-off window so
+# a transient rate-limit burst doesn't permanently disable the source.
+
+_BREAKER_THRESHOLD = 3
+_BREAKER_COOLDOWN_S = 90.0  # 60-120s per spec; 90s middle-of-the-road
+
+
+@dataclass
+class _ProviderBreaker:
+    name: str
+    failures: int = 0
+    opened_at: float = 0.0
+    last_reason: str = ""
+
+    def is_open(self) -> bool:
+        if self.failures < _BREAKER_THRESHOLD:
+            return False
+        if time.time() - self.opened_at >= _BREAKER_COOLDOWN_S:
+            # Cool-off expired — give the provider another chance. The
+            # next success resets; another failure re-opens.
+            self.failures = 0
+            self.opened_at = 0.0
+            return False
+        return True
+
+    def record_failure(self, reason: str) -> None:
+        self.failures += 1
+        self.last_reason = reason[:120]
+        if self.failures >= _BREAKER_THRESHOLD:
+            self.opened_at = time.time()
+
+    def record_success(self) -> None:
+        self.failures = 0
+        self.opened_at = 0.0
+        self.last_reason = ""
+
+    def status(self) -> str:
+        if self.is_open():
+            reason = (self.last_reason or "").lower()
+            if "429" in reason or "rate" in reason:
+                return "rate_limited"
+            if "403" in reason or "forbidden" in reason or "blocked" in reason:
+                return "blocked"
+            return "failed"
+        return "ok"
+
+
+# Per-provider breakers — shared across all helpers in this module.
+_BREAKERS: dict[str, _ProviderBreaker] = {
+    "finnhub": _ProviderBreaker("finnhub"),
+    "polygon": _ProviderBreaker("polygon"),
+    "coingecko": _ProviderBreaker("coingecko"),
+    "yfinance": _ProviderBreaker("yfinance"),
+}
+
+# Per-provider concurrency caps. Values tuned to free-tier limits so a
+# burst of tickers (e.g. 40+ positions) never exceeds provider quotas.
+_SEMAPHORE_LIMITS: dict[str, int] = {
+    "finnhub": 3,
+    "polygon": 2,
+    "coingecko": 2,
+    "yfinance": 6,
+}
+_SEMAPHORES: dict[str, asyncio.Semaphore] = {
+    name: asyncio.Semaphore(limit) for name, limit in _SEMAPHORE_LIMITS.items()
+}
+
+
+def _classify_http_error(status_code: int) -> str:
+    if status_code == 429:
+        return "429 rate_limited"
+    if status_code == 403:
+        return "403 forbidden"
+    if status_code >= 500:
+        return f"{status_code} server_error"
+    return f"{status_code} error"
+
+
+def get_provider_status() -> dict[str, str]:
+    """Return the current provider health — ok / rate_limited / blocked / failed.
+
+    Callers (io_layer, resilient_provider) embed this in the bundle so the
+    orchestrator and UI can reason about degraded sources without having to
+    touch the upstream itself.
+    """
+    return {name: breaker.status() for name, breaker in _BREAKERS.items()}
+
+
+def reset_breakers() -> None:
+    """Test hook — clear every breaker back to healthy state."""
+    for breaker in _BREAKERS.values():
+        breaker.record_success()
 
 
 async def _get_client() -> httpx.AsyncClient:
@@ -42,8 +148,17 @@ async def fetch_finnhub_news(
     lookback_days: int = 7,
     limit: int = 8,
 ) -> list[dict[str, Any]]:
-    """Return a list of {headline, summary, datetime} dicts."""
+    """Return a list of {headline, summary, datetime} dicts.
+
+    Gated by the shared Finnhub circuit breaker + semaphore — when the breaker
+    is open (e.g. sustained 429s from the free tier) this is a no-op that
+    returns an empty list instead of firing another request.
+    """
     if not api_key:
+        return []
+    breaker = _BREAKERS["finnhub"]
+    if breaker.is_open():
+        logger.debug("Finnhub breaker open — skipping news fetch for %s", ticker)
         return []
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=lookback_days)
@@ -54,10 +169,13 @@ async def fetch_finnhub_news(
         "token": api_key,
     }
     try:
-        resp = await client.get(f"{_FINNHUB_BASE}/company-news", params=params)
+        async with _SEMAPHORES["finnhub"]:
+            resp = await client.get(f"{_FINNHUB_BASE}/company-news", params=params)
         if resp.status_code != 200:
+            breaker.record_failure(_classify_http_error(resp.status_code))
             logger.debug("Finnhub news %s → %s", ticker, resp.status_code)
             return []
+        breaker.record_success()
         data = resp.json() or []
         return [
             {
@@ -70,6 +188,7 @@ async def fetch_finnhub_news(
             if item.get("headline")
         ]
     except Exception as exc:
+        breaker.record_failure(str(exc))
         logger.debug("Finnhub news failed for %s: %s", ticker, exc)
         return []
 
@@ -181,8 +300,17 @@ async def fetch_polygon_aggs(
     api_key: str,
     days: int = 30,
 ) -> dict[str, Any]:
-    """Polygon daily aggregates — used as a secondary source."""
+    """Polygon daily aggregates — used as a secondary source.
+
+    Treated as OPTIONAL enrichment: when the breaker is open (403 Forbidden
+    is the dominant failure mode on free/paused plans) this returns an
+    empty dict so the orchestrator's IO bundle still completes.
+    """
     if not api_key:
+        return {}
+    breaker = _BREAKERS["polygon"]
+    if breaker.is_open():
+        logger.debug("Polygon breaker open — skipping aggs for %s", ticker)
         return {}
     end = datetime.now(timezone.utc).date()
     start = end - timedelta(days=days)
@@ -191,9 +319,12 @@ async def fetch_polygon_aggs(
         f"{start.isoformat()}/{end.isoformat()}"
     )
     try:
-        resp = await client.get(url, params={"apiKey": api_key, "adjusted": "true"})
+        async with _SEMAPHORES["polygon"]:
+            resp = await client.get(url, params={"apiKey": api_key, "adjusted": "true"})
         if resp.status_code != 200:
+            breaker.record_failure(_classify_http_error(resp.status_code))
             return {}
+        breaker.record_success()
         data = resp.json()
         results = data.get("results") or []
         if not results:
@@ -207,6 +338,7 @@ async def fetch_polygon_aggs(
             "polygon_bars": len(results),
         }
     except Exception as exc:
+        breaker.record_failure(str(exc))
         logger.debug("Polygon aggs failed for %s: %s", ticker, exc)
         return {}
 
@@ -265,24 +397,37 @@ async def fetch_coingecko_market(
     client: httpx.AsyncClient,
     ticker: str,
 ) -> dict[str, Any]:
-    """Rich market data for crypto — fills in for fundamentals + sentiment."""
+    """Rich market data for crypto — fills in for fundamentals + sentiment.
+
+    Gated by the shared CoinGecko breaker + semaphore. Free-tier rate limits
+    are the primary failure mode (HTTP 429 on BTC/XRP lookups); an open
+    breaker means the next call short-circuits to {} instead of contending
+    for the rate-limit window.
+    """
     coin_id = _COINGECKO_IDS.get(ticker.upper())
     if not coin_id:
         return {}
+    breaker = _BREAKERS["coingecko"]
+    if breaker.is_open():
+        logger.debug("CoinGecko breaker open — skipping %s", ticker)
+        return {}
     try:
-        resp = await client.get(
-            f"{_COINGECKO_BASE}/coins/{coin_id}",
-            params={
-                "localization": "false",
-                "tickers": "false",
-                "market_data": "true",
-                "community_data": "true",
-                "developer_data": "false",
-                "sparkline": "false",
-            },
-        )
+        async with _SEMAPHORES["coingecko"]:
+            resp = await client.get(
+                f"{_COINGECKO_BASE}/coins/{coin_id}",
+                params={
+                    "localization": "false",
+                    "tickers": "false",
+                    "market_data": "true",
+                    "community_data": "true",
+                    "developer_data": "false",
+                    "sparkline": "false",
+                },
+            )
         if resp.status_code != 200:
+            breaker.record_failure(_classify_http_error(resp.status_code))
             return {}
+        breaker.record_success()
         data = resp.json()
         md = data.get("market_data", {}) or {}
         return {
@@ -296,6 +441,7 @@ async def fetch_coingecko_market(
             "sentiment_down_pct": _safe_float(data.get("sentiment_votes_down_percentage")),
         }
     except Exception as exc:
+        breaker.record_failure(str(exc))
         logger.debug("CoinGecko fetch failed for %s: %s", ticker, exc)
         return {}
 

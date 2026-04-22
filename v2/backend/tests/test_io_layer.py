@@ -82,13 +82,20 @@ async def test_empty_ticker_list_returns_empty_bundle():
     from app.services.ai import io_layer
 
     bundle = await io_layer.fetch_market_bundle([], price_service=None)
-    assert bundle == {
-        "live_prices": {},
-        "news": {},
-        "fundamentals": {},
-        "price_action": {},
-        "timings_ms": {"total": 0.0},
-    }
+    # Every bundle key must exist even with no tickers — downstream
+    # consumers destructure without defensive ``.get``.
+    for key in (
+        "tickers", "prices", "live_prices", "news", "fundamentals",
+        "funds", "price_action", "macro", "source_status",
+        "missing_fields", "completeness_score", "timings_ms",
+    ):
+        assert key in bundle, f"missing key: {key}"
+    assert bundle["tickers"] == []
+    assert bundle["prices"] == {}
+    assert bundle["live_prices"] == {}  # legacy alias still populated
+    assert bundle["completeness_score"] == 1.0  # nothing requested ⇒ nothing missing
+    assert bundle["macro"]["fallback"] is True
+    assert bundle["macro"]["regime"] == "unknown"
 
 
 @pytest.mark.asyncio

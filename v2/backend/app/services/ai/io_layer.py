@@ -172,7 +172,26 @@ async def fetch_market_bundle(
     include_fundamentals: bool = False,
     include_price_action: bool = False,
 ) -> dict[str, Any]:
-    """Return ``{live_prices: {ticker: float}, news: {...}, ...}`` — never raises.
+    """Return a fully-populated market bundle — never raises.
+
+    Always returns the following structure (values may be empty/neutral, but
+    the keys are guaranteed present so downstream consumers can destructure
+    without ``KeyError``):
+
+    ``{
+        "tickers": [str, ...],
+        "prices": {ticker: float},
+        "live_prices": {ticker: float},   # legacy alias for ``prices``
+        "news": {ticker: [items]},
+        "fundamentals": {ticker: {...}},
+        "funds": {ticker: {...}},          # legacy alias for ``fundamentals``
+        "price_action": {ticker: {...}},
+        "macro": {regime, sentiment, fallback, ...},
+        "source_status": {coingecko, finnhub, polygon, ...},
+        "missing_fields": [str, ...],
+        "completeness_score": float [0..1],
+        "timings_ms": {"total": float},
+    }``
 
     Defaults to prices-only (the minimum the single-LLM pipeline needs). The
     orchestrator may opt into heavier fetches when the LLM context warrants it.
@@ -185,13 +204,7 @@ async def fetch_market_bundle(
 
     unique_tickers = [t for t in {t.upper() for t in (tickers or []) if t}]
     if not unique_tickers:
-        return {
-            "live_prices": {},
-            "news": {},
-            "fundamentals": {},
-            "price_action": {},
-            "timings_ms": {"total": 0.0},
-        }
+        return _empty_bundle()
 
     # Prices — always fetched when a price_service is provided.
     price_tasks = {
@@ -250,18 +263,113 @@ async def fetch_market_bundle(
     fundamentals = _collect(fundamentals_tasks, default={}) if fundamentals_tasks else {}
     price_action = _collect(price_action_tasks, default={}) if price_action_tasks else {}
 
+    # Filter prices to numeric-only before reporting completeness.
+    prices = {k: v for k, v in live_prices.items() if isinstance(v, (int, float))}
+
+    # ── Completeness + source-status reporting ──────────────────────────────
+    # Completeness reflects how much of the REQUESTED data actually arrived.
+    # When heavier fetches aren't requested those buckets don't count against
+    # the score — e.g. a prices-only bundle is 100% complete when every
+    # ticker has a price, independent of news/funds.
+    requested_buckets: list[tuple[str, bool, dict[str, Any]]] = [
+        ("prices", True, prices),
+        ("news", include_news, news),
+        ("fundamentals", include_fundamentals, fundamentals),
+        ("price_action", include_price_action, price_action),
+    ]
+    completeness_score, missing_fields = _compute_completeness(
+        unique_tickers, requested_buckets
+    )
+
+    source_status = ds.get_provider_status()
+
     elapsed_ms = round((time.perf_counter() - stage_start) * 1000, 2)
     logger.info(
-        "io_layer bundle ready — tickers=%d prices=%d news=%d funds=%d elapsed_ms=%.1f",
-        len(unique_tickers), len(live_prices), len(news), len(fundamentals), elapsed_ms,
+        "io_layer bundle ready — tickers=%d prices=%d news=%d funds=%d "
+        "completeness=%.2f elapsed_ms=%.1f sources=%s",
+        len(unique_tickers), len(prices), len(news), len(fundamentals),
+        completeness_score, elapsed_ms, source_status,
     )
 
     return {
-        "live_prices": {k: v for k, v in live_prices.items() if isinstance(v, (int, float))},
+        "tickers": unique_tickers,
+        "prices": prices,
+        "live_prices": prices,  # legacy alias — keep callers that read this key working
         "news": news,
         "fundamentals": fundamentals,
+        "funds": fundamentals,  # legacy alias
         "price_action": price_action,
+        "macro": _macro_fallback(),
+        "source_status": source_status,
+        "missing_fields": missing_fields,
+        "completeness_score": completeness_score,
         "timings_ms": {"total": elapsed_ms},
+    }
+
+
+def _empty_bundle() -> dict[str, Any]:
+    """Canonical empty bundle — returned when no tickers are supplied."""
+    return {
+        "tickers": [],
+        "prices": {},
+        "live_prices": {},
+        "news": {},
+        "fundamentals": {},
+        "funds": {},
+        "price_action": {},
+        "macro": _macro_fallback(),
+        "source_status": ds.get_provider_status(),
+        "missing_fields": [],
+        "completeness_score": 1.0,
+        "timings_ms": {"total": 0.0},
+    }
+
+
+def _compute_completeness(
+    tickers: list[str],
+    requested_buckets: list[tuple[str, bool, dict[str, Any]]],
+) -> tuple[float, list[str]]:
+    """Return ``(score, missing_fields)`` for the bundle.
+
+    Score is the mean of per-bucket coverage ratios across the buckets the
+    caller actually requested. A bucket with zero tickers covered adds its
+    field name to ``missing_fields`` so the LLM can see exactly which slice
+    of the data is degraded.
+    """
+    total = len(tickers) or 1
+    ratios: list[float] = []
+    missing: list[str] = []
+    for name, requested, values in requested_buckets:
+        if not requested:
+            continue
+        have = sum(1 for t in tickers if values.get(t))
+        ratio = have / total
+        ratios.append(ratio)
+        if have == 0:
+            missing.append(name)
+        elif have < total:
+            missing.append(f"{name}(partial)")
+    score = round(sum(ratios) / len(ratios), 3) if ratios else 1.0
+    return score, missing
+
+
+def _macro_fallback() -> dict[str, Any]:
+    """Default macro object — returned when ``macro_cache`` is missing/404.
+
+    Kept as a stable shape so the LLM contract can reference macro fields
+    without ever checking for existence. ``fallback=True`` signals degraded
+    mode so reasoning can reflect the uncertainty.
+    """
+    return {
+        "regime": "unknown",
+        "inflation": None,
+        "rates": None,
+        "sentiment": "neutral",
+        "fallback": True,
+        "summary": (
+            "Macro context unavailable — evaluate each ticker on its own merits "
+            "and existing portfolio concentration."
+        ),
     }
 
 

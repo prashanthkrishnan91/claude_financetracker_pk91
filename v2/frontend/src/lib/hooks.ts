@@ -113,6 +113,15 @@ export function useRefreshRecommendations() {
   });
 }
 
+// Polling interval (ms) while an agent run is in-flight. Matches the SEV-1
+// spec — 3s cadence strikes a balance between perceived responsiveness and
+// avoiding request storms on slow networks.
+export const AGENT_JOB_POLL_MS = 3000;
+// Give up polling after this many attempts (~2 min) and fall through to the
+// UI's "failed" degraded view. The backend always marks runs terminal, so
+// this is a belt-and-braces timeout against network / CDN caching issues.
+export const AGENT_JOB_MAX_POLLS = 40;
+
 export function useAgentJob(jobId: string | null) {
   const qc = useQueryClient();
   return useQuery({
@@ -128,11 +137,15 @@ export function useAgentJob(jobId: string | null) {
       return status;
     },
     enabled: !!jobId,
-    // Poll every 1.5s until the run is terminal.
+    // Poll on a 3s cadence until the run is terminal, capped at
+    // AGENT_JOB_MAX_POLLS attempts to prevent runaway polling.
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (!data) return 1500;
-      return data.status === "completed" || data.status === "failed" ? false : 1500;
+      const terminal = data?.status === "completed" || data?.status === "failed";
+      if (terminal) return false;
+      const attempts = query.state.dataUpdateCount ?? 0;
+      if (attempts >= AGENT_JOB_MAX_POLLS) return false;
+      return AGENT_JOB_POLL_MS;
     },
   });
 }

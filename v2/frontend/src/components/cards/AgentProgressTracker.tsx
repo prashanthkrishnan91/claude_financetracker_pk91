@@ -122,16 +122,26 @@ export function AgentProgressTracker({
         })}
       </div>
 
-      {/* Summary + error */}
-      {done && status.summary && (
+      {/* Summary — shown on both completed and failed so the Intel panel
+          is NEVER blank. Falls back to a degraded message when the summary
+          is missing (shouldn't happen after backend hardening, but belt
+          and braces for any legacy in-flight rows). */}
+      {done && (
         <p className="text-xs text-text-secondary leading-relaxed pt-1 border-t border-border/50">
-          {status.summary}
+          {status.summary || "Analysis completed."}
         </p>
       )}
-      {failed && status.error_message && (
-        <p className="text-xs text-red-400 leading-relaxed pt-1 border-t border-red-500/20">
-          {status.error_message}
-        </p>
+      {failed && (
+        <div className="space-y-1 pt-1 border-t border-red-500/20">
+          <p className="text-xs text-text-secondary leading-relaxed">
+            {status.summary || "Analysis temporarily unavailable — please retry."}
+          </p>
+          {status.error_message && (
+            <p className="text-[10px] text-red-400/80 font-mono leading-relaxed">
+              {status.error_message}
+            </p>
+          )}
+        </div>
       )}
     </div>
   );

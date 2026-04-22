@@ -67,7 +67,10 @@ export default function RecommendationsPage() {
     }
   }, [latestRun, activeJobId]);
 
-  // Auto-trigger a new run when the tab loads if there's no recent completed run.
+  // Auto-trigger a new run when the tab loads if there's no recent COMPLETED
+  // run. The `hasAutoTriggered` ref guards against re-renders firing duplicate
+  // POSTs, and the backend enforces a single-run lock + 2-minute cache so the
+  // worst-case duplicate call still short-circuits to the existing run.
   useEffect(() => {
     if (latestRunLoading) return;
     if (hasAutoTriggered.current) return;
@@ -79,6 +82,9 @@ export default function RecommendationsPage() {
       return Date.now() - new Date(isoDate).getTime() > 5 * 60_000;
     };
 
+    // Trigger when: no run exists, the last run was not completed (including
+    // `failed` — retrying is fine, backend cache dedupes), or the last
+    // completed run is older than 5 minutes.
     const shouldTrigger =
       !latestRun ||
       latestRun.status !== "completed" ||
@@ -94,21 +100,30 @@ export default function RecommendationsPage() {
       hasAutoTriggered.current = true;
       refreshRecs.mutate(undefined, {
         onSuccess: (data) => {
-          console.log("[Intel] Polling started for job:", data.job_id);
+          console.log(`[Intel] ${data.status === "reused" ? "Reusing" : "Polling"} job:`, data.job_id);
           setActiveJobId(data.job_id);
         },
         onError: (err) => {
           console.error("[Intel] Failed to trigger agent run:", err);
+          // Allow a manual retry via the Run Agents button.
+          hasAutoTriggered.current = false;
         },
       });
     }
   }, [latestRun, latestRunLoading, activeJobId, refreshRecs.isPending]);
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
+  // Keep it visible slightly longer on failure so the user can read the
+  // degraded summary before it disappears.
   useEffect(() => {
-    if (jobStatus?.status === "completed" || jobStatus?.status === "failed") {
-      console.log(`[Intel] Polling stopped — run finished with status: ${jobStatus.status}`);
+    if (jobStatus?.status === "completed") {
+      console.log("[Intel] Polling stopped — completed");
       const t = setTimeout(() => setActiveJobId(null), 4000);
+      return () => clearTimeout(t);
+    }
+    if (jobStatus?.status === "failed") {
+      console.log("[Intel] Polling stopped — failed");
+      const t = setTimeout(() => setActiveJobId(null), 8000);
       return () => clearTimeout(t);
     }
   }, [jobStatus?.status]);
@@ -248,7 +263,9 @@ export default function RecommendationsPage() {
               ))}
             </div>
 
-            {/* Recommendations list */}
+            {/* Recommendations list — the UI must NEVER show a blank Intel
+                panel. Below we always render either the SkeletonCards,
+                a targeted EmptyState tied to run status, or the cards. */}
             {isLoading ? (
               <SkeletonCards />
             ) : error ? (
@@ -259,10 +276,22 @@ export default function RecommendationsPage() {
                   title="AI agents analyzing..."
                   description="Signals will appear here once the pipeline completes."
                 />
+              ) : jobStatus?.status === "failed" || latestRun?.status === "failed" ? (
+                <EmptyState
+                  title="Analysis temporarily unavailable"
+                  description={
+                    jobStatus?.summary ||
+                    latestRun?.summary ||
+                    "The agent pipeline hit an error. Tap Run Agents to retry."
+                  }
+                />
               ) : latestRun?.status === "completed" && !activeJobId && filter === "ALL" ? (
                 <EmptyState
                   title="No analysis available"
-                  description="The last run completed but produced no signals. Check your Anthropic API key or run agents again."
+                  description={
+                    latestRun?.summary ||
+                    "The last run completed but produced no signals. Check your Anthropic API key or run agents again."
+                  }
                 />
               ) : (
                 <EmptyState

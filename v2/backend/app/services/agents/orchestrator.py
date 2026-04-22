@@ -4,12 +4,13 @@ No LangGraph. Just asyncio.gather with status hooks that write progress to
 the `agent_runs` table so the UI can poll for live updates.
 
 Pipeline phases:
-  1. bootstrap       — load positions, prices, build AgentState
-  2. sentiment       — fan out sentiment agent per ticker
-  3. technical       — fan out technical agent per ticker
-  4. fundamental     — fan out fundamental agent per ticker
-  5. portfolio_mgr   — single LLM call, deposit allocation
-  6. persist         — write agent_insights + recommendations rows
+  1. bootstrap         — load positions, prices, build AgentState
+  2. sentiment         — fan out sentiment agent per ticker
+  3. technical         — fan out technical agent per ticker
+  4. fundamental       — fan out fundamental agent per ticker
+  5. portfolio_mgr     — single LLM call, deposit allocation
+  5.5. portfolio_advisor — comprehensive portfolio analysis via LLM
+  6. persist           — write agent_insights + recommendations rows
 
 Phases 2-4 run sequentially (not parallel) so the UI progress bar shows
 meaningful states. Within a phase, tickers are processed concurrently with
@@ -136,6 +137,11 @@ class AgentOrchestrator:
                     logger.warning("Portfolio manager returned empty summary for run %s — LLM key may be missing", run_id)
                     await self._update_run(run_id, error_message="LLM returned empty summary; check Anthropic API key.")
 
+                # Phase 5.5: Portfolio Advisor (comprehensive portfolio analysis)
+                await self._update_run(run_id, current_agent="Portfolio Advisor", progress=90)
+                logger.info("Calling portfolio advisor for run %s", run_id)
+                await self._call_portfolio_advisor(state)
+
             # Phase 6: Persist results
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
             logger.info("Saving result for run %s (%d insights)", run_id, len(state.insights))
@@ -149,7 +155,8 @@ class AgentOrchestrator:
             }
             # Guarantee the run row always has a human-readable summary so
             # the UI never renders a blank Intel panel on completion.
-            final_summary = (state.pm_summary or "").strip()
+            # Prefer portfolio advisor summary if available
+            final_summary = (state.portfolio_advice.get("summary", "") or state.pm_summary or "").strip()
             if not final_summary:
                 final_summary = (
                     f"Pipeline processed {len(state.insights)} positions "
@@ -291,6 +298,57 @@ class AgentOrchestrator:
 
         await asyncio.gather(*[_wrap(i) for i in state.insights.values()])
 
+    async def _call_portfolio_advisor(self, state: AgentState) -> None:
+        """Call the portfolio advisor LLM with current state.
+
+        Builds portfolio_positions from insights and generates a macro_summary,
+        then calls portfolio_advisor. Result stored in state.portfolio_advice.
+        """
+        from ..recommendation_engine import portfolio_advisor
+
+        try:
+            # Build portfolio positions from current insights
+            portfolio_positions = []
+            for insight in state.insights.values():
+                pos = {
+                    "ticker": insight.ticker,
+                    "shares": insight.shares,
+                    "current_price": insight.current_price,
+                    "avg_cost": insight.avg_cost,
+                    "pnl_pct": insight.pnl_pct,
+                    "category": insight.category,
+                    "weight_pct": insight.current_weight_pct,
+                }
+                portfolio_positions.append(pos)
+
+            # Build macro summary from state + agent insights
+            portfolio_value = f"${state.total_portfolio_value:,.2f}"
+            categories = " / ".join([
+                f"{k}: {v:.1f}%"
+                for k, v in sorted(state.category_weights.items())
+            ])
+            bullish_count = sum(
+                1 for i in state.insights.values()
+                if i.suggested_action in ("BUY", "ACCUMULATE", "DCA")
+            )
+            macro_summary = (
+                f"Portfolio: {portfolio_value} · Allocation: {categories} · "
+                f"Cash to deploy: ${state.cash_to_deploy:,.2f} · "
+                f"Bullish signals: {bullish_count}/{len(state.insights)}"
+            )
+
+            # Call portfolio advisor
+            advice = await portfolio_advisor(
+                portfolio_positions=portfolio_positions,
+                macro_summary=macro_summary,
+                api_key=self._llm.api_key,
+            )
+            state.portfolio_advice = advice
+            logger.info("Portfolio advisor returned advice for run %s", state.run_id)
+        except Exception as exc:
+            logger.warning("Portfolio advisor failed for run %s: %s", state.run_id, exc)
+            state.portfolio_advice = {}  # Safe default
+
     async def _persist(self, state: AgentState) -> None:
         """Write agent_insights + refresh the recommendations table.
 
@@ -344,16 +402,36 @@ class AgentOrchestrator:
             self.db.table("agent_insights").insert(insight_rows).execute()
 
         # 2. Build fresh recommendation rows
+        # Map portfolio advice cards by ticker for lookup
+        advice_cards_map: dict[str, dict] = {}
+        if state.portfolio_advice and state.portfolio_advice.get("cards"):
+            for card in state.portfolio_advice["cards"]:
+                advice_cards_map[card.get("ticker", "")] = card
+
         rec_rows = []
         for insight in state.insights.values():
-            if not insight.investment_thesis and insight.suggested_action == "HOLD":
+            # Get portfolio advisor's card for this ticker if available
+            advice_card = advice_cards_map.get(insight.ticker)
+
+            # Use portfolio advisor action if available, otherwise use insight action
+            action = insight.suggested_action
+            reasoning = ""
+            if advice_card:
+                action = advice_card.get("action", action)
+                reasoning = advice_card.get("reasoning", "")
+
+            if not insight.investment_thesis and action == "HOLD" and not reasoning:
                 # Keep the table slim — skip pure HOLDs with no narrative
                 continue
+
+            # Prefer portfolio advisor reasoning, fall back to investment thesis
+            detail = reasoning or insight.investment_thesis[:600] or f"{action} signal from agent pipeline."
+
             rec_rows.append({
                 "user_id": state.user_id,
                 "ticker": insight.ticker,
-                "action": insight.suggested_action,
-                "detail": insight.investment_thesis[:600] or f"{insight.suggested_action} signal from agent pipeline.",
+                "action": action,
+                "detail": detail,
                 "rationale": self._rationale_line(insight),
                 "urgency": self._urgency(insight),
                 "tax_note": self._tax_note(insight),

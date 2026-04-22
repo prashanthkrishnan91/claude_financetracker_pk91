@@ -84,6 +84,7 @@ class AgentState:
     total_portfolio_value: float = 0.0
     category_weights: dict[str, float] = field(default_factory=dict)
     pm_summary: str = ""
+    portfolio_advice: dict[str, Any] = field(default_factory=dict)
 
     @property
     def cash_to_deploy(self) -> float:

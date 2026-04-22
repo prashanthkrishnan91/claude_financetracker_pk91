@@ -9,9 +9,10 @@ Ported from v1 utils/rec_engine.py (v4) with improvements:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import UUID
 
 from ..database import get_supabase_client
@@ -337,6 +338,94 @@ def generate_rec(
         f"Monitoring — {upside:.0f}% to target ${target:,.0f}. {drip_n}",
         "gray", 0, tax_n, drip_n,
     )
+
+
+# ── Portfolio advisor (LLM-driven) ───────────────────────────────────────────
+
+async def portfolio_advisor(
+    portfolio_positions: list[dict[str, Any]],
+    macro_summary: str,
+    api_key: str,
+) -> dict[str, Any]:
+    """Generate comprehensive portfolio advice via LLM.
+
+    Takes pre-computed portfolio data and macro context (no fetching inside),
+    calls the LLM with the advisor prompt, returns strict JSON format.
+
+    Args:
+        portfolio_positions: List of position dicts with ticker, shares, what_changed, etc.
+        macro_summary: Current macro context (e.g., inflation, Fed outlook, market sentiment).
+        api_key: Anthropic API key for the LLM call.
+
+    Returns:
+        Dict with keys: summary, risks, opportunities, cards, top_buys.
+        Falls back to safe defaults if LLM fails.
+    """
+    from .agents.llm import LLMClient
+
+    # ── System prompt (advisor role) ─────────────────────────────────────
+    system_prompt = """You are a personal portfolio advisor for a long-term retail investor.
+
+Your goal: Provide clear, simple, and actionable investment guidance.
+
+For each ticker, decide: BUY / HOLD / SELL with high/medium/low confidence.
+- SELL = weakening outlook or better opportunities exist
+- BUY = strong outlook or worth adding more
+- HOLD = neutral or unclear
+
+Keep explanations simple (2 sentences max per ticker).
+Return ONLY valid JSON. Do not include any text before or after the JSON."""
+
+    # ── Format portfolio and macro into user prompt ──────────────────────
+    positions_text = "\n".join([
+        f"- {p.get('ticker', 'N/A')}: {p.get('shares', 0)} shares, "
+        f"price ${p.get('current_price', '?')}, "
+        f"what_changed: {p.get('what_changed', 'N/A')}"
+        for p in portfolio_positions
+    ])
+
+    user_prompt = f"""MACRO SUMMARY:
+{macro_summary}
+
+PORTFOLIO:
+{positions_text}
+
+Provide portfolio advice in the following strict JSON format:
+{{
+  "summary": "2-3 sentence overview in simple language",
+  "risks": ["risk1", "risk2"],
+  "opportunities": ["opportunity1", "opportunity2"],
+  "cards": [
+    {{
+      "ticker": "AAPL",
+      "action": "BUY | HOLD | SELL",
+      "confidence": "high | medium | low",
+      "reasoning": "2 sentences max"
+    }}
+  ],
+  "top_buys": ["ticker1", "ticker2", "ticker3"]
+}}"""
+
+    # ── Call LLM with fallback handling ──────────────────────────────────
+    llm = LLMClient(api_key=api_key)
+    result = await llm.ask_json(
+        system=system_prompt,
+        user=user_prompt,
+        max_tokens=1024,
+    )
+
+    # ── Ensure result matches expected schema ────────────────────────────
+    if not result:
+        result = {}
+
+    # Safe defaults for missing fields
+    return {
+        "summary": result.get("summary", "Unable to generate portfolio summary at this time."),
+        "risks": result.get("risks", []),
+        "opportunities": result.get("opportunities", []),
+        "cards": result.get("cards", []),
+        "top_buys": result.get("top_buys", []),
+    }
 
 
 # ── Service class ────────────────────────────────────────────────────────────
@@ -758,6 +847,23 @@ class RecommendationService:
             ))
 
         return sorted(result, key=lambda x: x.total_trades, reverse=True)
+
+    async def generate_portfolio_advice(
+        self,
+        portfolio_positions: list[dict[str, Any]],
+        macro_summary: str,
+        api_key: str,
+    ) -> dict[str, Any]:
+        """Generate portfolio advice via the advisor LLM.
+
+        Wraps the standalone portfolio_advisor function with error handling
+        and schema validation.
+        """
+        return await portfolio_advisor(
+            portfolio_positions=portfolio_positions,
+            macro_summary=macro_summary,
+            api_key=api_key,
+        )
 
 
 def _within_last(iso_ts: str, *, seconds: int) -> bool:

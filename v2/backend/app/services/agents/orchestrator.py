@@ -39,15 +39,30 @@ LLM_SEMAPHORE = asyncio.Semaphore(1)
 
 PORTFOLIO_AGENT_CONTRACT = """You are the Portfolio Agent for a long-term retail investor.
 
-You receive a JSON object with three keys:
-  - "portfolio": array of position objects (ticker, shares, avg_cost, current_price, category, what_changed)
+You receive a JSON object with these keys:
+  - "portfolio": array of position objects (ticker, shares, avg_cost,
+    current_price, category, sentiment_label, technical_signal,
+    fundamental_score, trend, confidence_score, confidence_label,
+    data_quality, what_changed). Every ticker is GUARANTEED to have a
+    value for each signal field — missing upstream data has already been
+    filled with deterministic fallbacks and the gaps are recorded in
+    `data_quality.missing_fields`.
+  - "data_quality": {"completeness_score": 0..1, "missing_fields": [...],
+    "fallbacks_used": bool} — portfolio-wide trust dial. Scale your own
+    confidence language down when completeness_score is low.
   - "macro": {"summary": string describing the current market regime}
-  - "insights": array of prior-run signals per ticker (sentiment/technical/fundamental labels)
+  - "sentiment": portfolio-level sentiment roll-up {bullish_count,
+    neutral_count, bearish_count, average_score}
+  - "insights": array of prior-run signals per ticker (sentiment/technical/
+    fundamental labels)
 
 Analyse the full portfolio as a whole — you do NOT get a second call. For
 each ticker decide BUY / HOLD / SELL with a confidence (high/medium/low),
 a conviction score in [-1.0, +1.0], and a 2-sentence reasoning that cites
-sentiment / technical / fundamental context where available.
+sentiment / technical / fundamental context where available. For tickers
+whose `confidence_label` is "watchlist only" or "low confidence signal",
+default to HOLD and note the data gap in the thesis — NEVER emit the
+string "insufficient data" in any field.
 
 Return ONLY this JSON — no preamble, no code fences, no trailing text:
 {
@@ -392,11 +407,15 @@ class AgentOrchestrator:
         for ticker, insight in state.insights.items():
             card = card_map.get(ticker.upper())
             if not card:
-                # No per-ticker guidance → safe HOLD default.
+                # No per-ticker guidance → safe HOLD default. Never surface
+                # "insufficient data" — UI contract mandates one of:
+                # high confidence / partial signal / low confidence signal /
+                # watchlist only.
                 insight.suggested_action = insight.suggested_action or "HOLD"
                 if not insight.investment_thesis:
                     insight.investment_thesis = (
-                        f"{ticker}: insufficient signal from portfolio agent — holding position."
+                        f"{ticker}: partial signal from portfolio agent — "
+                        "holding position pending richer data."
                     )
                 continue
 

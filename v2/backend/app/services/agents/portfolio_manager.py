@@ -215,7 +215,9 @@ def _fallback_thesis(insight: TickerInsight) -> str:
     if insight.fundamental_summary:
         bits.append(f"Fundamentals: {insight.fundamental_summary}")
     if not bits:
-        return f"{insight.ticker}: insufficient data — holding position."
+        # UI contract: never surface "insufficient data". A thesis with no
+        # analyst support is a watchlist-only card.
+        return f"{insight.ticker}: watchlist only — holding position."
     return " · ".join(bits)[:500]
 
 

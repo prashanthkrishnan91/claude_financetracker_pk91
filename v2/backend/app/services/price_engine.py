@@ -147,6 +147,14 @@ class PriceService:
         # In-memory cache with TTL
         self._cache: dict[str, _CacheEntry] = {}
 
+        # Per-ticker async locks for in-flight request coalescing. When N
+        # callers race for the same ticker within the TTL window they all
+        # wait behind a single lock; the first wakes the upstream, the rest
+        # read the cache populated under the lock. Caps upstream load at
+        # 1 call per ticker per TTL window regardless of concurrency.
+        self._ticker_locks: dict[str, asyncio.Lock] = {}
+        self._locks_guard = asyncio.Lock()
+
         # Circuit breakers per source
         self._circuits: dict[str, _CircuitState] = {
             "yfinance": _CircuitState(),
@@ -219,24 +227,75 @@ class PriceService:
     # ── Core: concurrent fetch per ticker ─────────────────────────────────────
 
     async def _fetch_one(self, ticker: str) -> PriceResult:
-        """Race multiple sources for a single ticker. First valid wins."""
+        """Race multiple sources for a single ticker. First valid wins.
 
-        # Check cache first
+        Guarantees request coalescing — N concurrent callers for the same
+        ticker collapse to a single upstream call. Under 429 rate-limit
+        pressure from CoinGecko / Polygon / Finnhub this is the primary
+        defence against cascading retries.
+        """
+        # Fast path: fresh cache, no lock needed.
         cached = self._cache.get(ticker)
         if cached and (time.time() - cached.fetched_at) < _CACHE_TTL:
             return cached.result
 
-        # Build list of source coroutines based on ticker type
-        if ticker in _CRYPTO_TICKERS:
-            sources = self._crypto_sources(ticker)
-        else:
-            sources = self._stock_sources(ticker)
+        # Coalesce concurrent requests for this ticker behind a per-ticker
+        # lock. First caller fetches + caches; the rest return the cached
+        # value as soon as the lock releases.
+        lock = await self._get_ticker_lock(ticker)
+        async with lock:
+            cached = self._cache.get(ticker)
+            if cached and (time.time() - cached.fetched_at) < _CACHE_TTL:
+                return cached.result
 
-        if not sources:
-            return self._error_result(ticker, "none", "No sources available")
+            # Build list of source coroutines based on ticker type
+            if ticker in _CRYPTO_TICKERS:
+                sources = self._crypto_sources(ticker)
+            else:
+                sources = self._stock_sources(ticker)
 
-        # Race all sources — first valid result wins
-        return await self._race_sources(ticker, sources)
+            if not sources:
+                # All sources are circuit-broken. Degrade to cached value if
+                # we have any (even expired) — NEVER fail the pipeline.
+                return self._stale_or_error(
+                    ticker, reason="all sources circuit-broken"
+                )
+
+            # Race all sources — first valid result wins
+            return await self._race_sources(ticker, sources)
+
+    async def _get_ticker_lock(self, ticker: str) -> asyncio.Lock:
+        """Return the per-ticker coalescing lock, creating it under a guard."""
+        async with self._locks_guard:
+            lock = self._ticker_locks.get(ticker)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._ticker_locks[ticker] = lock
+            return lock
+
+    def _stale_or_error(self, ticker: str, *, reason: str) -> PriceResult:
+        """Last-resort fallback: serve any cached value (even expired).
+
+        Used when every live source is unavailable — 429 rate limits, open
+        circuit breakers, or DNS failures. Returning stale data is strictly
+        better than returning an error because the ticker card still renders
+        and the LLM still has a price anchor to reason about.
+        """
+        cached = self._cache.get(ticker)
+        if cached:
+            logger.warning(
+                "%s: serving stale cache ($%.2f from %s) — reason=%s",
+                ticker, cached.result.mid_price, cached.result.source, reason,
+            )
+            return PriceResult(
+                ticker=ticker, mid_price=cached.result.mid_price,
+                bid=cached.result.bid, ask=cached.result.ask,
+                last_trade=cached.result.last_trade,
+                source=f"cache({cached.result.source})",
+                timestamp=cached.result.timestamp,
+                error=f"STALE — {reason}",
+            )
+        return self._error_result(ticker, "none", reason)
 
     async def _race_sources(
         self, ticker: str, sources: list[tuple[str, asyncio.coroutine]]
@@ -295,22 +354,9 @@ class PriceService:
         except Exception as e:
             logger.error("Race error for %s: %s", ticker, e)
 
-        # All sources failed — fall back to cache
-        if cached := self._cache.get(ticker):
-            logger.warning(
-                "%s: all sources failed, using cache ($%.2f from %s)",
-                ticker, cached.result.mid_price, cached.result.source,
-            )
-            return PriceResult(
-                ticker=ticker, mid_price=cached.result.mid_price,
-                bid=cached.result.bid, ask=cached.result.ask,
-                last_trade=cached.result.last_trade,
-                source=f"cache({cached.result.source})",
-                timestamp=cached.result.timestamp,
-                error="STALE — all live sources failed",
-            )
-
-        return self._error_result(ticker, "none", "All sources failed")
+        # All sources failed — degrade to cache (even expired) so the
+        # ticker card still renders. Pipeline must NEVER fail on price.
+        return self._stale_or_error(ticker, reason="all live sources failed")
 
     # ── Source builders ───────────────────────────────────────────────────────
 
@@ -479,7 +525,12 @@ class PriceService:
         resp = await client.get(url, headers=headers)
         if resp.status_code == 422:
             return self._error_result(ticker, "alpaca", f"Unknown symbol {ticker}")
-        resp.raise_for_status()
+        if resp.status_code == 429:
+            return self._error_result(ticker, "alpaca", "Rate limited (429)")
+        if resp.status_code >= 400:
+            return self._error_result(
+                ticker, "alpaca", f"HTTP {resp.status_code}"
+            )
         data = resp.json()
 
         latest_trade = data.get("latestTrade", {})
@@ -508,12 +559,17 @@ class PriceService:
     # ── Polygon ───────────────────────────────────────────────────────────────
 
     async def _fetch_polygon(self, ticker: str) -> PriceResult:
-        """Fetch from Polygon snapshot API."""
+        """Fetch from Polygon snapshot API. 429 returns a soft error."""
         client = await self._get_client()
 
         url = f"https://api.polygon.io/v2/snapshot/locale/us/markets/stocks/tickers/{ticker}"
         resp = await client.get(url, params={"apiKey": self._polygon_key})
-        resp.raise_for_status()
+        if resp.status_code == 429:
+            return self._error_result(ticker, "polygon", "Rate limited (429)")
+        if resp.status_code >= 400:
+            return self._error_result(
+                ticker, "polygon", f"HTTP {resp.status_code}"
+            )
         data = resp.json()
 
         snap = data.get("ticker", {})
@@ -544,7 +600,13 @@ class PriceService:
     # ── CoinGecko (crypto) ────────────────────────────────────────────────────
 
     async def _fetch_coingecko(self, ticker: str) -> PriceResult:
-        """Fetch crypto price from CoinGecko (free, no key)."""
+        """Fetch crypto price from CoinGecko (free, no key).
+
+        429 is the rate-limit signal CoinGecko returns on the free tier. We
+        record the failure (which opens the circuit after 3 hits) and return
+        an error result — ``_race_sources`` then falls back to cached data
+        or a sibling source (yfinance) without failing the pipeline.
+        """
         coin_id = _CRYPTO_IDS.get(ticker)
         if not coin_id:
             return self._error_result(ticker, "coingecko", f"No ID for {ticker}")
@@ -554,7 +616,12 @@ class PriceService:
         params = {"ids": coin_id, "vs_currencies": "usd"}
 
         resp = await client.get(url, params=params)
-        resp.raise_for_status()
+        if resp.status_code == 429:
+            return self._error_result(ticker, "coingecko", "Rate limited (429)")
+        if resp.status_code >= 400:
+            return self._error_result(
+                ticker, "coingecko", f"HTTP {resp.status_code}"
+            )
         data = resp.json()
 
         price = float(data.get(coin_id, {}).get("usd") or 0)

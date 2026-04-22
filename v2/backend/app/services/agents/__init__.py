@@ -1,18 +1,11 @@
-"""Multi-agent reasoning engine — TradingAgents-inspired.
+"""Portfolio agent pipeline.
 
-Hand-rolled async orchestrator. No LangGraph dependency.
+Pipeline shape:
 
-Graph shape (linear with final join):
+    DB → context_builder → single Claude call → persist
 
-    ┌── sentiment_agent ──┐
-    │                     │
-    ├── technical_agent ──┼──→ portfolio_manager ──→ allocations
-    │                     │
-    └── fundamental_agent ┘
-
-Each analyst node runs in parallel per ticker; the portfolio manager
-synthesises a conviction score, thesis, and dollar allocation against
-the user's deposit + sale proceeds and current concentration.
+See `services/ai/context_builder.py` for the data aggregation layer and
+`orchestrator.py` for the single-LLM-call contract.
 """
 
 from .orchestrator import AgentOrchestrator, AgentPipelineResult

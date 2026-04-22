@@ -273,3 +273,82 @@ class TestMidPriceCalculation:
         else:
             mid = last
         assert mid == 875.15
+
+
+# ── 429 / rate-limit resilience ──────────────────────────────────────────────
+
+
+class TestRateLimitResilience:
+    @pytest.mark.asyncio
+    async def test_429_degrades_to_stale_cache_never_fails(self):
+        """When every live source 429s, serve the last cached value."""
+        svc = PriceService()
+
+        # Seed cache with an expired-but-usable entry for NVDA.
+        stale = PriceResult(
+            ticker="NVDA", mid_price=800.0, bid=None, ask=None,
+            last_trade=800.0, source="yfinance", timestamp=time.time(),
+        )
+        svc._cache["NVDA"] = _CacheEntry(
+            result=stale, fetched_at=time.time() - 9999,
+        )
+
+        async def always_rate_limited(ticker):
+            return svc._error_result(ticker, "yfinance", "Rate limited (429)")
+
+        svc._fetch_yfinance = always_rate_limited
+
+        result = await svc.fetch_one("NVDA")
+        assert result.mid_price == 800.0
+        assert result.source.startswith("cache(")
+        assert "STALE" in (result.error or "")
+        await svc.close()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_requests_for_same_ticker_coalesce(self):
+        """10 parallel fetch_one calls for same ticker → at most 1 upstream call."""
+        svc = PriceService()
+        upstream_calls = 0
+
+        async def fake_yfinance(ticker):
+            nonlocal upstream_calls
+            upstream_calls += 1
+            await asyncio.sleep(0.01)
+            return PriceResult(
+                ticker=ticker, mid_price=123.0, bid=None, ask=None,
+                last_trade=123.0, source="yfinance", timestamp=time.time(),
+            )
+
+        svc._fetch_yfinance = fake_yfinance
+
+        results = await asyncio.gather(
+            *[svc.fetch_one("AAPL") for _ in range(10)]
+        )
+        assert all(r.mid_price == 123.0 for r in results)
+        # Per-ticker lock must coalesce N concurrent fetches into 1 upstream.
+        assert upstream_calls == 1
+        await svc.close()
+
+    @pytest.mark.asyncio
+    async def test_all_sources_circuit_broken_falls_back_to_cache(self):
+        """Every source circuit-broken → stale cache, never an error result."""
+        svc = PriceService()
+
+        # Seed cache.
+        cached = PriceResult(
+            ticker="AAPL", mid_price=200.0, bid=None, ask=None,
+            last_trade=200.0, source="yfinance", timestamp=time.time(),
+        )
+        svc._cache["AAPL"] = _CacheEntry(
+            result=cached, fetched_at=time.time() - 9999,
+        )
+
+        # Trip every breaker.
+        for name in ("yfinance", "finnhub", "alpaca", "polygon", "coingecko"):
+            for _ in range(_CIRCUIT_BREAKER_THRESHOLD):
+                svc._circuits[name].record_failure()
+
+        result = await svc.fetch_one("AAPL")
+        assert result.mid_price == 200.0
+        assert result.source.startswith("cache(")
+        await svc.close()

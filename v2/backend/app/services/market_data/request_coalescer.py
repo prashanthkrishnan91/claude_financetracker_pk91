@@ -11,22 +11,26 @@ Problem solved:
   SINGLE in-flight Future.
 
 Scope:
-  * Per-process singleton (``get_request_coalescer``). Each Railway worker
-    still makes its own in-flight set — true cross-worker coalescing would
-    require Redis with SETNX-style locks. For workers backed by the same
-    ``MarketCache`` cache the post-fetch cache write + sub-minute TTL does
-    99% of cross-worker dedupe.
+  * Per-process coalescing: the ``_in_flight`` map collapses concurrent
+    callers in the SAME event loop to a single Future. This is the fast
+    path — no network, no serialisation.
+  * Cross-worker coalescing (v4): when a ``DistributedLock`` backend is
+    configured (Redis preferred, Supabase fallback) the first worker to
+    dispatch a (provider, endpoint, ticker, params) key holds a TTL'd
+    distributed lock; concurrent Railway workers block on that lock and
+    receive the dispatcher's published result. If every backend is
+    unavailable (local dev, tests) the lock degrades to an in-memory no-op
+    and callers fall back to the process-local behaviour.
   * TTL cleanup after completion — when a Future completes it's removed
     from the in-flight map so the next request goes to the live provider.
   * Failure semantics — when the upstream raises, ALL waiters see the same
     exception. The caller decides whether to fall back to cached data.
 
 Invariant:
-  For a given ``(provider, endpoint, ticker, params_hash)`` tuple, at most
-  ONE external call is in flight per process at any time. Log ``violation``
-  when a concurrent call would have slipped through (shouldn't happen —
-  this is a defensive assertion for the global "no duplicate external
-  calls" invariant in the stability spec).
+  "At most ONE external API call per (provider, endpoint, ticker, params)
+  per time window across ALL workers." A violation is logged as
+  ``CRITICAL_DUPLICATE_CALL`` with the offending ``worker_id``/``provider``/
+  ``key`` so operators can correlate log lines with upstream billing.
 """
 
 from __future__ import annotations
@@ -38,6 +42,14 @@ import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Optional
+
+from .distributed_lock import (
+    DEFAULT_LOCK_TTL_S,
+    DEFAULT_WAIT_TIMEOUT_S,
+    DistributedLock,
+    get_distributed_lock,
+    get_worker_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -79,24 +91,37 @@ class _InFlightEntry:
 
 
 class RequestCoalescer:
-    """Process-wide in-flight external-call deduplicator.
+    """In-flight external-call deduplicator — process-local + cross-worker.
 
     Thread-safety model: single asyncio event loop per process. The master
     ``_map_lock`` guards the dict mutation; individual awaits on
     ``entry.future`` happen OUTSIDE that lock so coalesced callers don't
     serialize.
+
+    When a ``DistributedLock`` is injected (or the module default singleton
+    is used), dispatcher coroutines first acquire a cross-worker lock on the
+    same key so a second Railway worker doesn't duplicate the external call.
+    The distributed lock auto-expires (TTL ~45s by default) to bound the
+    dispatcher-crashed blast radius.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self, distributed_lock: Optional[DistributedLock] = None
+    ) -> None:
         self._in_flight: dict[str, _InFlightEntry] = {}
         self._map_lock = asyncio.Lock()
         # Minute-window tracker: {(provider, ticker, minute_bucket): count}.
         # Incremented when a NEW external call is dispatched. Any count > 1
         # in the same bucket is logged as a duplicate-call violation.
         self._minute_counts: dict[tuple[str, str, int], int] = {}
+        self._distributed_lock = distributed_lock
         self.coalesced = 0
         self.dispatched = 0
         self.violations = 0
+        # Cross-worker dispatch/await counters — operators use these to
+        # confirm that the distributed lock is actually collapsing calls.
+        self.distributed_awaited = 0
+        self.distributed_dispatched = 0
 
     async def coalesce(
         self,
@@ -105,6 +130,9 @@ class RequestCoalescer:
         *,
         provider: Optional[str] = None,
         ticker: Optional[str] = None,
+        distributed: bool = False,
+        lock_ttl_s: float = DEFAULT_LOCK_TTL_S,
+        wait_s: float = DEFAULT_WAIT_TIMEOUT_S,
     ) -> Any:
         """Run ``factory()`` at most once per ``key`` while concurrent.
 
@@ -115,6 +143,12 @@ class RequestCoalescer:
         the minute-window invariant logging. When both are provided and a
         new external call is dispatched, the coalescer records the hit in
         a 60s minute bucket and logs any duplicate within the same bucket.
+
+        When ``distributed=True`` the dispatcher wraps ``factory`` in a
+        cross-worker lock (Redis or Supabase). Concurrent Railway workers
+        see the lock and await the dispatcher's published result so the
+        upstream API sees exactly one call per key per time window across
+        the entire deployment.
         """
         async with self._map_lock:
             entry = self._in_flight.get(key)
@@ -137,8 +171,15 @@ class RequestCoalescer:
         if entry is None:
             # Dispatcher path — run the factory and resolve the future.
             self.dispatched += 1
+            dispatch_fn = factory
+            if distributed:
+                dispatch_fn = self._wrap_distributed(
+                    key, factory,
+                    provider=provider, ticker=ticker,
+                    ttl_s=lock_ttl_s, wait_s=wait_s,
+                )
             try:
-                value = await factory()
+                value = await dispatch_fn()
                 if not future.done():
                     future.set_result(value)
                 return value
@@ -155,9 +196,71 @@ class RequestCoalescer:
                     current = self._in_flight.get(key)
                     if current is not None and current.future is future:
                         self._in_flight.pop(key, None)
+                # Drain any unconsumed exception on the future so asyncio
+                # doesn't emit "Future exception was never retrieved"
+                # warnings when no waiters existed. ``.exception()`` is
+                # non-destructive for consumers that already awaited.
+                if future.done() and not future.cancelled():
+                    try:
+                        future.exception()
+                    except BaseException:
+                        pass
 
         # Waiter path — the dispatcher resolves (or raises) for us.
         return await future
+
+    def _wrap_distributed(
+        self,
+        key: str,
+        factory: Callable[[], Awaitable[Any]],
+        *,
+        provider: Optional[str],
+        ticker: Optional[str],
+        ttl_s: float,
+        wait_s: float,
+    ) -> Callable[[], Awaitable[Any]]:
+        """Return a no-arg coroutine that runs ``factory`` behind the
+        cross-worker lock.
+
+        Result-propagation contract:
+          * ``source='dispatched'`` — this worker ran the factory; publish
+            the real value to the shared store and return it locally.
+          * ``source='awaited'``    — another worker ran the factory;
+            return the shared-store value as-if we'd fetched it.
+          * ``source='local'``      — backend unavailable / wait timed out;
+            we ran the factory locally as a safety net. Log a
+            ``CRITICAL_DUPLICATE_CALL`` because this path can let two
+            workers hit the upstream if it happens alongside a real
+            dispatch elsewhere.
+          * ``source='error'``      — factory raised; convert the published
+            error into an exception for the local waiter so the existing
+            cache-fallback path kicks in.
+        """
+        lock = self._distributed_lock or get_distributed_lock()
+
+        async def _runner() -> Any:
+            result = await lock.acquire_or_wait(
+                key, factory, ttl_s=ttl_s, wait_s=wait_s,
+            )
+            if result.source == "dispatched":
+                self.distributed_dispatched += 1
+            elif result.source == "awaited":
+                self.distributed_awaited += 1
+            elif result.source == "local":
+                self.violations += 1
+                logger.warning(
+                    "CRITICAL_DUPLICATE_CALL worker=%s provider=%s ticker=%s "
+                    "key=%s — distributed lock unavailable, ran locally "
+                    "(risk of cross-worker duplicate upstream hit)",
+                    get_worker_id(), provider or "?", ticker or "?", key,
+                )
+            if result.error:
+                # Reraise with the same string the dispatcher saw so the
+                # caller's existing cache-fallback path engages uniformly.
+                raise RuntimeError(result.error)
+            return result.value
+
+        return _runner
 
     def _record_minute_window(
         self, provider: str, ticker: str, key: str
@@ -194,6 +297,8 @@ class RequestCoalescer:
             "coalesced": self.coalesced,
             "dispatched": self.dispatched,
             "violations": self.violations,
+            "distributed_dispatched": self.distributed_dispatched,
+            "distributed_awaited": self.distributed_awaited,
         }
 
     def reset(self) -> None:
@@ -203,6 +308,8 @@ class RequestCoalescer:
         self.coalesced = 0
         self.dispatched = 0
         self.violations = 0
+        self.distributed_awaited = 0
+        self.distributed_dispatched = 0
 
 
 # ── Module-level singleton ─────────────────────────────────────────────────

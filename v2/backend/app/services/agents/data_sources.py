@@ -61,31 +61,48 @@ class _ProviderBreaker:
 
     def is_open(self) -> bool:
         # Hydrate from the distributed store so cross-worker state is
-        # visible here. If no store is configured this is a no-op.
+        # visible here. The RPC also flips OPEN→HALF_OPEN server-side
+        # when the cool-off window elapses, which is reflected back into
+        # our local ``failures``/``opened_at`` fields atomically.
         _STORE.hydrate(self)
         if self.failures < _BREAKER_THRESHOLD:
             return False
         if time.time() - self.opened_at >= _BREAKER_COOLDOWN_S:
-            # Cool-off expired — give the provider another chance. The
-            # next success resets; another failure re-opens.
+            # Local cool-off elapsed — close the breaker and let the next
+            # success / failure reset or re-open via the atomic RPCs.
             self.failures = 0
             self.opened_at = 0.0
-            _STORE.publish(self)
+            _STORE.reset(self)
+            _invalidate_system_mode()
             return False
         return True
 
     def record_failure(self, reason: str) -> None:
-        self.failures += 1
-        self.last_reason = reason[:120]
-        if self.failures >= _BREAKER_THRESHOLD:
-            self.opened_at = time.time()
-        _STORE.publish(self)
+        # Atomic update: try the RPC first — when available it bumps the
+        # counter server-side and mirrors the post-update row back into
+        # our local fields. When the store is unavailable (no Supabase
+        # env, missing migration, local dev) the RPC is a no-op; we then
+        # apply the legacy in-process increment so single-worker
+        # deployments still have a working breaker.
+        reason_str = (reason or "")[:200]
+        before = self.failures
+        _STORE.increment_failure(self, reason_str)
+        # The RPC populated our fields if it succeeded. If the store was
+        # already unavailable OR the RPC failed without mutating state,
+        # fall back to a local increment so the breaker still trips.
+        if self.failures == before:
+            self.failures = before + 1
+            self.last_reason = reason_str[:120]
+            if self.failures >= _BREAKER_THRESHOLD and not self.opened_at:
+                self.opened_at = time.time()
+        _invalidate_system_mode()
 
     def record_success(self) -> None:
         self.failures = 0
         self.opened_at = 0.0
         self.last_reason = ""
-        _STORE.publish(self)
+        _STORE.reset(self)
+        _invalidate_system_mode()
 
     def status(self) -> str:
         if self.is_open():
@@ -109,32 +126,38 @@ class _ProviderBreaker:
 
 
 class _ProviderHealthStore:
-    """Distributed breaker-state sink — Supabase-backed with in-memory fallback.
+    """Atomic breaker-state sink — Supabase RPC primary + in-memory fallback.
+
+    v4 contract: application code NEVER performs read-modify-write on
+    ``provider_health`` rows. All mutations go through two RPCs:
+
+      * ``increment_failure(provider, reason, threshold)`` — atomic counter
+        bump + state=OPEN escalation. Returns the post-update row so the
+        caller's local breaker can sync without a second roundtrip.
+      * ``reset_failure(provider)`` — atomic reset to state=CLOSED.
+
+    ``get_provider_health(provider, cooldown_s)`` performs the OPEN →
+    HALF_OPEN transition server-side when the cool-off window elapses,
+    keeping the timer atomic too.
 
     Graceful-degradation contract:
-      * When ``SUPABASE_*`` env is missing, this is a pure no-op.
-      * When the Supabase table doesn't exist (first deploy / untouched
-        environment), we flip a local flag and stop writing — the process
-        reverts to purely local breakers. No exception surfaces to the
-        orchestrator.
-      * Hydrate + publish are both synchronous / non-blocking — we swallow
-        every error so a flaky ``provider_health`` table can't degrade the
-        agent pipeline.
+      * When ``SUPABASE_*`` env is missing, every method is a no-op and the
+        per-process breaker acts as the sole source of truth.
+      * When an RPC is missing (e.g. migration 007 not applied yet) the
+        first failure disables the sink for the process lifetime — no
+        exception surfaces to the orchestrator.
     """
 
     TABLE = "provider_health"
 
-    # Coalesce publishes to at most one write per provider per N seconds so
-    # a burst of record_failure() calls doesn't hammer Supabase.
-    _PUBLISH_MIN_INTERVAL_S = 5.0
-    # Re-read the shared store at most once per N seconds (the in-process
-    # state is the source of truth between hydrations).
+    # Hydrate rate-limit: re-read the shared state no more than once per
+    # window so a hot loop doesn't pound Supabase. The write path is
+    # unconditional (atomic RPCs are cheap and the authoritative source).
     _HYDRATE_MIN_INTERVAL_S = 10.0
 
     def __init__(self) -> None:
         # Guard so Supabase import failures never crash the module.
         self._available = self._detect_availability()
-        self._last_publish: dict[str, float] = {}
         self._last_hydrate: dict[str, float] = {}
 
     @staticmethod
@@ -158,8 +181,59 @@ class _ProviderHealthStore:
             self._available = False
             return None
 
-    def hydrate(self, breaker: _ProviderBreaker) -> None:
-        """Merge shared-store state into the in-process breaker (rate-limited)."""
+    # ── Atomic writes ────────────────────────────────────────────────────
+
+    def increment_failure(self, breaker: "_ProviderBreaker", reason: str) -> None:
+        """Atomic failure bump via the ``increment_failure`` RPC.
+
+        Syncs the in-process breaker from the RPC's return row so concurrent
+        workers converge on the same failure count without racing.
+        """
+        client = self._client()
+        if client is None:
+            return
+        try:
+            res = client.rpc("increment_failure", {
+                "p_provider": breaker.name,
+                "p_reason": reason[:200],
+                "p_threshold": _BREAKER_THRESHOLD,
+            }).execute()
+            row = _coerce_rpc_row(res.data)
+            if row is None:
+                return
+            breaker.failures = int(row.get("failures") or breaker.failures)
+            breaker.last_reason = (row.get("last_reason") or breaker.last_reason)[:120]
+            if row.get("opened_at") is not None:
+                breaker.opened_at = float(row["opened_at"])
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "provider_health.increment_failure skipped for %s: %s",
+                breaker.name, exc,
+            )
+            self._available = False
+
+    def reset(self, breaker: "_ProviderBreaker") -> None:
+        """Atomic reset via the ``reset_failure`` RPC."""
+        client = self._client()
+        if client is None:
+            return
+        try:
+            client.rpc("reset_failure", {"p_provider": breaker.name}).execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider_health.reset skipped for %s: %s", breaker.name, exc)
+            self._available = False
+
+    # ── Atomic reads ─────────────────────────────────────────────────────
+
+    def hydrate(self, breaker: "_ProviderBreaker") -> None:
+        """Refresh local breaker state from the shared store (rate-limited).
+
+        Calls ``get_provider_health`` which also performs the OPEN →
+        HALF_OPEN transition server-side when the cool-off expired. We only
+        ADOPT state that's more conservative than local — a stale local
+        breaker that already closed shouldn't be re-opened from a lagging
+        remote read.
+        """
         now = time.monotonic()
         if now - self._last_hydrate.get(breaker.name, 0.0) < self._HYDRATE_MIN_INTERVAL_S:
             return
@@ -169,53 +243,58 @@ class _ProviderHealthStore:
         if client is None:
             return
         try:
-            res = (
-                client.table(self.TABLE)
-                .select("failures, opened_at, last_reason")
-                .eq("provider", breaker.name)
-                .limit(1)
-                .execute()
-            )
-            rows = res.data or []
+            res = client.rpc("get_provider_health", {
+                "p_provider": breaker.name,
+                "p_cooldown_s": _BREAKER_COOLDOWN_S,
+            }).execute()
+            row = _coerce_rpc_row(res.data)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("provider_health hydrate skipped for %s: %s", breaker.name, exc)
-            # First failure disables subsequent reads this process-lifetime.
+            logger.debug(
+                "provider_health.hydrate skipped for %s: %s",
+                breaker.name, exc,
+            )
             self._available = False
             return
-        if not rows:
+        if not row:
             return
-        row = rows[0]
-        # Adopt remote state when it's MORE conservative than local state —
-        # prevents a flappy local breaker from blowing past a globally-open
-        # one. We only downgrade (re-open) locally, never upgrade (force
-        # close) based on remote data.
         remote_failures = int(row.get("failures") or 0)
+        state = row.get("state")
+        if state == "CLOSED":
+            # Shared store says healthy — trust it enough to clear our
+            # local counters, which may have ticked up in isolation.
+            breaker.failures = 0
+            breaker.opened_at = 0.0
+            breaker.last_reason = ""
+            return
         if remote_failures > breaker.failures:
             breaker.failures = remote_failures
             breaker.opened_at = float(row.get("opened_at") or breaker.opened_at)
             breaker.last_reason = (row.get("last_reason") or breaker.last_reason)[:120]
 
-    def publish(self, breaker: _ProviderBreaker) -> None:
-        """Push in-process breaker state to the shared store (rate-limited)."""
-        now = time.monotonic()
-        if now - self._last_publish.get(breaker.name, 0.0) < self._PUBLISH_MIN_INTERVAL_S:
-            return
-        self._last_publish[breaker.name] = now
+    # ── Back-compat alias — callers may still invoke ``publish`` ─────────
+    # The old ``publish(breaker)`` method was a bulk upsert. New code uses
+    # ``increment_failure`` / ``reset`` for atomic updates. This shim keeps
+    # any stray caller working while it's migrated.
+    def publish(self, breaker: "_ProviderBreaker") -> None:
+        # No-op: atomic writes are performed directly from record_failure /
+        # record_success via the dedicated methods above.
+        return None
 
-        client = self._client()
-        if client is None:
-            return
-        try:
-            client.table(self.TABLE).upsert({
-                "provider": breaker.name,
-                "failures": breaker.failures,
-                "opened_at": breaker.opened_at,
-                "last_reason": breaker.last_reason,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }, on_conflict="provider").execute()
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("provider_health publish skipped for %s: %s", breaker.name, exc)
-            self._available = False
+
+def _coerce_rpc_row(data: Any) -> Optional[dict[str, Any]]:
+    """Normalise an RPC response into a single row dict.
+
+    Supabase RPCs returning ``RETURNS row_type`` may come back as a dict,
+    a list of dicts, or something else depending on the client version.
+    """
+    if data is None:
+        return None
+    if isinstance(data, dict):
+        return data
+    if isinstance(data, list) and data:
+        first = data[0]
+        return first if isinstance(first, dict) else None
+    return None
 
 
 # Module-level singleton. Replace via ``_set_store_for_testing`` in tests.
@@ -332,6 +411,21 @@ async def _retry_http(
             # Exhausted retries.
             return resp
     return last_resp
+
+
+def _invalidate_system_mode() -> None:
+    """Hint to the system-mode manager that provider health just changed.
+
+    Kept lazy / best-effort so a missing manager (import failures, tests
+    without the market_data package loaded) can never crash the breaker
+    record path.
+    """
+    try:
+        from ..market_data.system_mode import get_system_mode_manager
+
+        get_system_mode_manager().invalidate_cache()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def get_provider_status() -> dict[str, str]:

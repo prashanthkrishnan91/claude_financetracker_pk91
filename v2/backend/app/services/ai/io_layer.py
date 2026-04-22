@@ -27,6 +27,11 @@ import httpx
 
 from ..cache.market_cache import MarketCache, get_market_cache
 from ..agents import data_sources as ds
+from ..market_data.request_coalescer import (
+    RequestCoalescer,
+    get_request_coalescer,
+    make_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +98,33 @@ async def _with_retry_and_cache_fallback(
         return neutral
 
 
-# ── Individual fetchers (all cache-backed) ──────────────────────────────────
+# ── Individual fetchers (all cache-backed + coalesced) ─────────────────────
+# Each per-ticker fetcher goes through:
+#   1. ``MarketCache.get_or_fetch`` — coarse dedup + TTL window cache
+#   2. ``RequestCoalescer.coalesce`` — fine-grained in-flight dedup
+#      on the EXACT ``(provider, endpoint, ticker, params)`` tuple
+#
+# The coalescer adds a belt-and-suspenders guarantee that duplicate HTTP
+# calls never escape the same process even when the cache is cold.
+
+
+async def _coalesced(
+    coalescer: RequestCoalescer,
+    provider: str,
+    endpoint: str,
+    ticker: str,
+    factory: Callable[[], Awaitable[Any]],
+    *,
+    params: Optional[dict[str, Any]] = None,
+) -> Any:
+    """Run ``factory`` through the shared request coalescer.
+
+    Concurrent callers for the same ``(provider, endpoint, ticker, params)``
+    tuple await a single in-flight Future, so the upstream API sees exactly
+    one request regardless of concurrency.
+    """
+    key = make_key(provider, endpoint, ticker, params)
+    return await coalescer.coalesce(key, factory, provider=provider, ticker=ticker)
 
 
 async def _fetch_news(
@@ -101,10 +132,16 @@ async def _fetch_news(
     ticker: str,
     finnhub_key: str,
     cache: MarketCache,
+    coalescer: RequestCoalescer,
 ) -> list[dict[str, Any]]:
+    async def _factory():
+        return await _coalesced(
+            coalescer, "finnhub", "company-news", ticker,
+            lambda: ds.fetch_news_for_ticker(client, ticker, finnhub_key),
+        )
     return await _with_retry_and_cache_fallback(
         key=f"news:{ticker.upper()}",
-        fetch=lambda: ds.fetch_news_for_ticker(client, ticker, finnhub_key),
+        fetch=_factory,
         cache=cache,
         neutral=[],
     )
@@ -113,10 +150,16 @@ async def _fetch_news(
 async def _fetch_fundamentals(
     ticker: str,
     cache: MarketCache,
+    coalescer: RequestCoalescer,
 ) -> dict[str, Any]:
+    async def _factory():
+        return await _coalesced(
+            coalescer, "yfinance", "fundamentals", ticker,
+            lambda: ds.fetch_fundamentals(ticker),
+        )
     return await _with_retry_and_cache_fallback(
         key=f"fundamentals:{ticker.upper()}",
-        fetch=lambda: ds.fetch_fundamentals(ticker),
+        fetch=_factory,
         cache=cache,
         neutral={},
     )
@@ -125,10 +168,16 @@ async def _fetch_fundamentals(
 async def _fetch_price_action(
     ticker: str,
     cache: MarketCache,
+    coalescer: RequestCoalescer,
 ) -> dict[str, Any]:
+    async def _factory():
+        return await _coalesced(
+            coalescer, "yfinance", "history", ticker,
+            lambda: ds.fetch_price_action(ticker),
+        )
     return await _with_retry_and_cache_fallback(
         key=f"price_action:{ticker.upper()}",
-        fetch=lambda: ds.fetch_price_action(ticker),
+        fetch=_factory,
         cache=cache,
         neutral={},
     )
@@ -138,6 +187,7 @@ async def _fetch_live_price(
     ticker: str,
     price_service: Any,
     cache: MarketCache,
+    coalescer: RequestCoalescer,
 ) -> Optional[float]:
     """Fetch a single mid-price via the shared PriceService, cache-first."""
     if price_service is None:
@@ -150,12 +200,106 @@ async def _fetch_live_price(
             return float(pr.mid_price)
         return None
 
+    async def _factory():
+        return await _coalesced(
+            coalescer, "price_service", "quote", ticker, _one,
+        )
+
     return await _with_retry_and_cache_fallback(
         key=f"price:{ticker.upper()}",
-        fetch=_one,
+        fetch=_factory,
         cache=cache,
         neutral=None,
     )
+
+
+# ── Provider-batched helpers ──────────────────────────────────────────────
+# Replace per-ticker fan-out with grouped execution so upstream load spikes
+# are bounded by the per-provider semaphore rather than the ticker count.
+# Free-tier providers (Finnhub, CoinGecko) don't expose true batch
+# endpoints, so these helpers are *logical* batches: they dispatch all
+# ticker fetches concurrently, coalesce duplicates, and return a
+# ``{ticker: value}`` dict — the semaphore inside ``data_sources`` keeps
+# the actual concurrent HTTP load to 2–3 per provider regardless of the
+# batch size.
+
+
+async def _fetch_news_batch(
+    client: httpx.AsyncClient,
+    tickers: list[str],
+    finnhub_key: str,
+    cache: MarketCache,
+    coalescer: RequestCoalescer,
+) -> dict[str, list[dict[str, Any]]]:
+    """Batch news fetch — one logical group for the finnhub provider."""
+    tasks = {
+        t: asyncio.create_task(_fetch_news(client, t, finnhub_key, cache, coalescer))
+        for t in tickers
+    }
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return _collect_tasks(tasks, default=[])
+
+
+async def _fetch_fundamentals_batch(
+    tickers: list[str],
+    cache: MarketCache,
+    coalescer: RequestCoalescer,
+) -> dict[str, dict[str, Any]]:
+    """Batch fundamentals fetch — one logical group for the yfinance provider."""
+    tasks = {
+        t: asyncio.create_task(_fetch_fundamentals(t, cache, coalescer))
+        for t in tickers
+    }
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return _collect_tasks(tasks, default={})
+
+
+async def _fetch_price_action_batch(
+    tickers: list[str],
+    cache: MarketCache,
+    coalescer: RequestCoalescer,
+) -> dict[str, dict[str, Any]]:
+    """Batch price-action fetch — one logical group for the yfinance provider."""
+    tasks = {
+        t: asyncio.create_task(_fetch_price_action(t, cache, coalescer))
+        for t in tickers
+    }
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return _collect_tasks(tasks, default={})
+
+
+async def _fetch_prices_batch(
+    tickers: list[str],
+    price_service: Any,
+    cache: MarketCache,
+    coalescer: RequestCoalescer,
+) -> dict[str, Optional[float]]:
+    """Batch price fetch — delegates to the shared PriceService."""
+    tasks = {
+        t: asyncio.create_task(_fetch_live_price(t, price_service, cache, coalescer))
+        for t in tickers
+    }
+    await asyncio.gather(*tasks.values(), return_exceptions=True)
+    return _collect_tasks(tasks, default=None)
+
+
+def _collect_tasks(
+    tasks: dict[str, asyncio.Task],
+    *,
+    default: Any,
+) -> dict[str, Any]:
+    """Drain task map into a ``{ticker: value}`` dict, swallowing exceptions."""
+    out: dict[str, Any] = {}
+    for t, task in tasks.items():
+        try:
+            val = task.result()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("io_layer batch task %s failed: %s", t, exc)
+            val = default
+        if val is None:
+            continue
+        out[t] = val
+    return out
 
 
 # ── Bundle fetcher (orchestrator entry point) ───────────────────────────────
@@ -200,68 +344,65 @@ async def fetch_market_bundle(
     neutral/empty values so the pipeline never retries orchestration.
     """
     cache = cache or get_market_cache()
+    coalescer = get_request_coalescer()
     stage_start = time.perf_counter()
 
     unique_tickers = [t for t in {t.upper() for t in (tickers or []) if t}]
     if not unique_tickers:
         return _empty_bundle()
 
-    # Prices — always fetched when a price_service is provided.
-    price_tasks = {
-        t: asyncio.create_task(_fetch_live_price(t, price_service, cache))
-        for t in unique_tickers
-    }
+    # ── Provider-batched execution ────────────────────────────────────────
+    # Grouping by provider keeps load predictable: one batch per upstream
+    # (prices, finnhub-news, yfinance-fundamentals, yfinance-history). The
+    # per-provider semaphore inside ``data_sources`` throttles concurrent
+    # HTTP calls within each batch; the coalescer + cache collapse
+    # duplicates across concurrent callers.
+    live_prices: dict[str, Optional[float]] = {}
+    news: dict[str, list[dict[str, Any]]] = {}
+    fundamentals: dict[str, dict[str, Any]] = {}
+    price_action: dict[str, dict[str, Any]] = {}
 
-    # Optional heavier fetches — wrapped in a short-lived httpx client.
-    news_tasks: dict[str, asyncio.Task] = {}
-    fundamentals_tasks: dict[str, asyncio.Task] = {}
-    price_action_tasks: dict[str, asyncio.Task] = {}
+    price_batch_task = asyncio.create_task(
+        _fetch_prices_batch(unique_tickers, price_service, cache, coalescer)
+    )
 
     if include_news or include_fundamentals or include_price_action:
         async with await ds._get_client() as client:  # noqa: SLF001 — internal helper
+            provider_batches: list[Awaitable[Any]] = []
             if include_news:
-                news_tasks = {
-                    t: asyncio.create_task(_fetch_news(client, t, finnhub_key, cache))
-                    for t in unique_tickers
-                }
+                provider_batches.append(
+                    _fetch_news_batch(
+                        client, unique_tickers, finnhub_key, cache, coalescer
+                    )
+                )
             if include_fundamentals:
-                fundamentals_tasks = {
-                    t: asyncio.create_task(_fetch_fundamentals(t, cache))
-                    for t in unique_tickers
-                }
+                provider_batches.append(
+                    _fetch_fundamentals_batch(unique_tickers, cache, coalescer)
+                )
             if include_price_action:
-                price_action_tasks = {
-                    t: asyncio.create_task(_fetch_price_action(t, cache))
-                    for t in unique_tickers
-                }
+                provider_batches.append(
+                    _fetch_price_action_batch(unique_tickers, cache, coalescer)
+                )
 
-            # Gather heavy tasks inside the client scope so httpx isn't closed
-            # while requests are still in flight.
-            all_heavy = list(news_tasks.values()) + list(fundamentals_tasks.values()) \
-                + list(price_action_tasks.values())
-            if all_heavy:
-                await asyncio.gather(*all_heavy, return_exceptions=True)
+            results = await asyncio.gather(*provider_batches, return_exceptions=True)
+            idx = 0
+            if include_news:
+                news = _unwrap_batch(results[idx], default={})
+                idx += 1
+            if include_fundamentals:
+                fundamentals = _unwrap_batch(results[idx], default={})
+                idx += 1
+            if include_price_action:
+                price_action = _unwrap_batch(results[idx], default={})
+                idx += 1
 
-    # Prices can finish outside the httpx scope (they use their own client).
-    await asyncio.gather(*price_tasks.values(), return_exceptions=True)
-
-    def _collect(tasks: dict[str, asyncio.Task], default: Any) -> dict[str, Any]:
-        out: dict[str, Any] = {}
-        for t, task in tasks.items():
-            try:
-                val = task.result()
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("io_layer task %s failed: %s", t, exc)
-                val = default
-            if val is None:
-                continue
-            out[t] = val
-        return out
-
-    live_prices = _collect(price_tasks, default=None)
-    news = _collect(news_tasks, default=[]) if news_tasks else {}
-    fundamentals = _collect(fundamentals_tasks, default={}) if fundamentals_tasks else {}
-    price_action = _collect(price_action_tasks, default={}) if price_action_tasks else {}
+    # Prices finish outside the httpx scope — they use the price_service's
+    # own HTTP client, so ordering w.r.t. the heavy fetch scope doesn't matter.
+    try:
+        live_prices = await price_batch_task
+    except Exception as exc:  # noqa: BLE001 — absolute failure isolation
+        logger.debug("io_layer price batch failed: %s", exc)
+        live_prices = {}
 
     # Filter prices to numeric-only before reporting completeness.
     prices = {k: v for k, v in live_prices.items() if isinstance(v, (int, float))}
@@ -284,11 +425,20 @@ async def fetch_market_bundle(
     source_status = ds.get_provider_status()
 
     elapsed_ms = round((time.perf_counter() - stage_start) * 1000, 2)
+    # Number of provider batches actually dispatched this run. Prices are
+    # always a batch when a price_service is available; news/funds/price_
+    # action are opt-in. 3–6 batches is the target per the stability spec.
+    batches = 1 + int(include_news) + int(include_fundamentals) + int(include_price_action)
+    coalescer_stats = coalescer.stats()
     logger.info(
-        "io_layer bundle ready — tickers=%d prices=%d news=%d funds=%d "
-        "completeness=%.2f elapsed_ms=%.1f sources=%s",
-        len(unique_tickers), len(prices), len(news), len(fundamentals),
-        completeness_score, elapsed_ms, source_status,
+        "io_layer bundle ready — tickers=%d batches=%d prices=%d news=%d "
+        "funds=%d completeness=%.2f elapsed_ms=%.1f coalesced=%d "
+        "violations=%d sources=%s",
+        len(unique_tickers), batches, len(prices), len(news),
+        len(fundamentals), completeness_score, elapsed_ms,
+        coalescer_stats.get("coalesced", 0),
+        coalescer_stats.get("violations", 0),
+        source_status,
     )
 
     return {
@@ -305,6 +455,16 @@ async def fetch_market_bundle(
         "completeness_score": completeness_score,
         "timings_ms": {"total": elapsed_ms},
     }
+
+
+def _unwrap_batch(result: Any, *, default: dict) -> dict:
+    """Turn a batch task result (or exception) into a plain dict."""
+    if isinstance(result, BaseException):
+        logger.debug("io_layer provider batch raised: %s", result)
+        return dict(default)
+    if not isinstance(result, dict):
+        return dict(default)
+    return result
 
 
 def _empty_bundle() -> dict[str, Any]:

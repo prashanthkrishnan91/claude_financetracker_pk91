@@ -8,8 +8,14 @@ Resilience layer (shared across helpers):
   * Per-provider circuit breakers — 429/403/5xx streaks open the breaker
     for a cool-off window; subsequent calls short-circuit to the neutral
     fallback instead of hammering the upstream.
+  * Optional distributed breaker state (``ProviderHealthStore``) mirrors
+    the per-process breaker counters to a shared backend (Supabase table
+    ``provider_health``) so all Railway workers agree on provider health.
+    Falls back to pure in-memory state when no backend is configured.
   * Per-provider concurrency semaphores — cap in-flight requests per
     provider so a burst of tickers doesn't trip free-tier rate limits.
+  * Exponential backoff + jitter for transient upstream errors (429/5xx)
+    — 403 is treated as a hard block and is NEVER retried.
   * Every helper catches network exceptions and returns an empty value
     so the orchestrator never sees a raised 429/403.
 """
@@ -18,10 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import random
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 
@@ -52,6 +60,9 @@ class _ProviderBreaker:
     last_reason: str = ""
 
     def is_open(self) -> bool:
+        # Hydrate from the distributed store so cross-worker state is
+        # visible here. If no store is configured this is a no-op.
+        _STORE.hydrate(self)
         if self.failures < _BREAKER_THRESHOLD:
             return False
         if time.time() - self.opened_at >= _BREAKER_COOLDOWN_S:
@@ -59,6 +70,7 @@ class _ProviderBreaker:
             # next success resets; another failure re-opens.
             self.failures = 0
             self.opened_at = 0.0
+            _STORE.publish(self)
             return False
         return True
 
@@ -67,11 +79,13 @@ class _ProviderBreaker:
         self.last_reason = reason[:120]
         if self.failures >= _BREAKER_THRESHOLD:
             self.opened_at = time.time()
+        _STORE.publish(self)
 
     def record_success(self) -> None:
         self.failures = 0
         self.opened_at = 0.0
         self.last_reason = ""
+        _STORE.publish(self)
 
     def status(self) -> str:
         if self.is_open():
@@ -82,6 +96,136 @@ class _ProviderBreaker:
                 return "blocked"
             return "failed"
         return "ok"
+
+
+# ── Distributed breaker state ────────────────────────────────────────────────
+# Optional cross-worker breaker state. When no backend is configured the
+# store is a no-op and breakers behave as per-process (legacy) state.
+# Supabase is the fallback backend (Redis preferred in prod when wired up).
+#
+# The ``provider_health`` Supabase table (when present) has one row per
+# provider with columns: provider TEXT PK, failures INT, opened_at FLOAT,
+# last_reason TEXT, updated_at TIMESTAMP.
+
+
+class _ProviderHealthStore:
+    """Distributed breaker-state sink — Supabase-backed with in-memory fallback.
+
+    Graceful-degradation contract:
+      * When ``SUPABASE_*`` env is missing, this is a pure no-op.
+      * When the Supabase table doesn't exist (first deploy / untouched
+        environment), we flip a local flag and stop writing — the process
+        reverts to purely local breakers. No exception surfaces to the
+        orchestrator.
+      * Hydrate + publish are both synchronous / non-blocking — we swallow
+        every error so a flaky ``provider_health`` table can't degrade the
+        agent pipeline.
+    """
+
+    TABLE = "provider_health"
+
+    # Coalesce publishes to at most one write per provider per N seconds so
+    # a burst of record_failure() calls doesn't hammer Supabase.
+    _PUBLISH_MIN_INTERVAL_S = 5.0
+    # Re-read the shared store at most once per N seconds (the in-process
+    # state is the source of truth between hydrations).
+    _HYDRATE_MIN_INTERVAL_S = 10.0
+
+    def __init__(self) -> None:
+        # Guard so Supabase import failures never crash the module.
+        self._available = self._detect_availability()
+        self._last_publish: dict[str, float] = {}
+        self._last_hydrate: dict[str, float] = {}
+
+    @staticmethod
+    def _detect_availability() -> bool:
+        # Allow ops to force-disable the distributed store via env.
+        if os.getenv("PROVIDER_HEALTH_STORE", "auto").lower() in {"off", "disabled"}:
+            return False
+        if not (os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_ROLE_KEY")):
+            return False
+        return True
+
+    def _client(self):
+        """Return a supabase client or None — never raises."""
+        if not self._available:
+            return None
+        try:
+            from ...database import get_supabase_client
+            return get_supabase_client()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider_health store unavailable: %s", exc)
+            self._available = False
+            return None
+
+    def hydrate(self, breaker: _ProviderBreaker) -> None:
+        """Merge shared-store state into the in-process breaker (rate-limited)."""
+        now = time.monotonic()
+        if now - self._last_hydrate.get(breaker.name, 0.0) < self._HYDRATE_MIN_INTERVAL_S:
+            return
+        self._last_hydrate[breaker.name] = now
+
+        client = self._client()
+        if client is None:
+            return
+        try:
+            res = (
+                client.table(self.TABLE)
+                .select("failures, opened_at, last_reason")
+                .eq("provider", breaker.name)
+                .limit(1)
+                .execute()
+            )
+            rows = res.data or []
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider_health hydrate skipped for %s: %s", breaker.name, exc)
+            # First failure disables subsequent reads this process-lifetime.
+            self._available = False
+            return
+        if not rows:
+            return
+        row = rows[0]
+        # Adopt remote state when it's MORE conservative than local state —
+        # prevents a flappy local breaker from blowing past a globally-open
+        # one. We only downgrade (re-open) locally, never upgrade (force
+        # close) based on remote data.
+        remote_failures = int(row.get("failures") or 0)
+        if remote_failures > breaker.failures:
+            breaker.failures = remote_failures
+            breaker.opened_at = float(row.get("opened_at") or breaker.opened_at)
+            breaker.last_reason = (row.get("last_reason") or breaker.last_reason)[:120]
+
+    def publish(self, breaker: _ProviderBreaker) -> None:
+        """Push in-process breaker state to the shared store (rate-limited)."""
+        now = time.monotonic()
+        if now - self._last_publish.get(breaker.name, 0.0) < self._PUBLISH_MIN_INTERVAL_S:
+            return
+        self._last_publish[breaker.name] = now
+
+        client = self._client()
+        if client is None:
+            return
+        try:
+            client.table(self.TABLE).upsert({
+                "provider": breaker.name,
+                "failures": breaker.failures,
+                "opened_at": breaker.opened_at,
+                "last_reason": breaker.last_reason,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            }, on_conflict="provider").execute()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("provider_health publish skipped for %s: %s", breaker.name, exc)
+            self._available = False
+
+
+# Module-level singleton. Replace via ``_set_store_for_testing`` in tests.
+_STORE = _ProviderHealthStore()
+
+
+def _set_store_for_testing(store: _ProviderHealthStore) -> None:
+    """Test hook — swap the distributed store (use ``_ProviderHealthStore()`` subclass)."""
+    global _STORE
+    _STORE = store
 
 
 # Per-provider breakers — shared across all helpers in this module.
@@ -113,6 +257,81 @@ def _classify_http_error(status_code: int) -> str:
     if status_code >= 500:
         return f"{status_code} server_error"
     return f"{status_code} error"
+
+
+# ── Exponential backoff with jitter ────────────────────────────────────────
+# Retry schedule: 1s → 2s → 4s (max 8s ceiling as per stability spec).
+# Jitter ±30% keeps concurrent callers from synchronising retries and
+# re-hitting the same rate-limit window.
+_BACKOFF_BASE_DELAYS_S = (1.0, 2.0, 4.0)
+_BACKOFF_MAX_DELAY_S = 8.0
+_BACKOFF_JITTER_FRACTION = 0.3  # ±30%
+
+
+def _is_transient_status(status_code: int) -> bool:
+    """Should we retry this HTTP status code?
+
+    429 = rate limited (transient) → yes, back off.
+    5xx = server error (transient) → yes, back off.
+    403 = forbidden / blocked / key revoked → NO, hard fail, don't retry.
+    Everything else (4xx client errors) → NO, won't improve with retry.
+    """
+    return status_code == 429 or 500 <= status_code < 600
+
+
+def _jittered_delay(base_s: float) -> float:
+    """Apply ±30% jitter to ``base_s`` and clamp to the max ceiling."""
+    frac = 1.0 + random.uniform(-_BACKOFF_JITTER_FRACTION, _BACKOFF_JITTER_FRACTION)
+    return min(base_s * frac, _BACKOFF_MAX_DELAY_S)
+
+
+async def _retry_http(
+    provider: str,
+    ticker: str,
+    perform: Callable[[], Awaitable["httpx.Response"]],
+) -> Optional["httpx.Response"]:
+    """Execute an HTTP call with exponential-backoff retries for transient errors.
+
+    Returns the final ``httpx.Response`` (success or non-retryable error) or
+    ``None`` when an exception escaped the last attempt (already logged +
+    breaker-recorded by the caller).
+
+    Retry policy:
+      * 429 / 5xx → retry up to 3 times with 1s → 2s → 4s base delays + jitter.
+      * 403 → NEVER retry (hard block, usually credentials / plan issue).
+      * Network exceptions → retry (treated as transient by default).
+    """
+    last_resp: Optional[httpx.Response] = None
+    for attempt, base in enumerate((0.0, *_BACKOFF_BASE_DELAYS_S)):
+        if base > 0:
+            delay = _jittered_delay(base)
+            logger.debug(
+                "%s retry %s attempt=%d delay=%.2fs",
+                provider, ticker, attempt, delay,
+            )
+            await asyncio.sleep(delay)
+        try:
+            resp = await perform()
+        except Exception as exc:  # noqa: BLE001 — network error is transient
+            logger.debug(
+                "%s network error on %s attempt=%d: %s",
+                provider, ticker, attempt, exc,
+            )
+            if attempt == len(_BACKOFF_BASE_DELAYS_S):
+                raise
+            continue
+
+        last_resp = resp
+        status = resp.status_code
+        if status == 200:
+            return resp
+        if not _is_transient_status(status):
+            # Hard fail (e.g. 403) — don't retry.
+            return resp
+        if attempt == len(_BACKOFF_BASE_DELAYS_S):
+            # Exhausted retries.
+            return resp
+    return last_resp
 
 
 def get_provider_status() -> dict[str, str]:
@@ -153,6 +372,8 @@ async def fetch_finnhub_news(
     Gated by the shared Finnhub circuit breaker + semaphore — when the breaker
     is open (e.g. sustained 429s from the free tier) this is a no-op that
     returns an empty list instead of firing another request.
+
+    Retries 429/5xx with exponential backoff + jitter; 403 fails fast.
     """
     if not api_key:
         return []
@@ -168,12 +389,17 @@ async def fetch_finnhub_news(
         "to": today.isoformat(),
         "token": api_key,
     }
-    try:
+
+    async def _perform():
         async with _SEMAPHORES["finnhub"]:
-            resp = await client.get(f"{_FINNHUB_BASE}/company-news", params=params)
-        if resp.status_code != 200:
-            breaker.record_failure(_classify_http_error(resp.status_code))
-            logger.debug("Finnhub news %s → %s", ticker, resp.status_code)
+            return await client.get(f"{_FINNHUB_BASE}/company-news", params=params)
+
+    try:
+        resp = await _retry_http("finnhub", ticker, _perform)
+        if resp is None or resp.status_code != 200:
+            status = resp.status_code if resp is not None else 0
+            breaker.record_failure(_classify_http_error(status))
+            logger.debug("Finnhub news %s → %s", ticker, status)
             return []
         breaker.record_success()
         data = resp.json() or []
@@ -318,11 +544,17 @@ async def fetch_polygon_aggs(
         f"{_POLYGON_BASE}/v2/aggs/ticker/{ticker}/range/1/day/"
         f"{start.isoformat()}/{end.isoformat()}"
     )
-    try:
+    async def _perform():
         async with _SEMAPHORES["polygon"]:
-            resp = await client.get(url, params={"apiKey": api_key, "adjusted": "true"})
-        if resp.status_code != 200:
-            breaker.record_failure(_classify_http_error(resp.status_code))
+            return await client.get(
+                url, params={"apiKey": api_key, "adjusted": "true"}
+            )
+
+    try:
+        resp = await _retry_http("polygon", ticker, _perform)
+        if resp is None or resp.status_code != 200:
+            status = resp.status_code if resp is not None else 0
+            breaker.record_failure(_classify_http_error(status))
             return {}
         breaker.record_success()
         data = resp.json()
@@ -411,9 +643,9 @@ async def fetch_coingecko_market(
     if breaker.is_open():
         logger.debug("CoinGecko breaker open — skipping %s", ticker)
         return {}
-    try:
+    async def _perform():
         async with _SEMAPHORES["coingecko"]:
-            resp = await client.get(
+            return await client.get(
                 f"{_COINGECKO_BASE}/coins/{coin_id}",
                 params={
                     "localization": "false",
@@ -424,8 +656,12 @@ async def fetch_coingecko_market(
                     "sparkline": "false",
                 },
             )
-        if resp.status_code != 200:
-            breaker.record_failure(_classify_http_error(resp.status_code))
+
+    try:
+        resp = await _retry_http("coingecko", ticker, _perform)
+        if resp is None or resp.status_code != 200:
+            status = resp.status_code if resp is not None else 0
+            breaker.record_failure(_classify_http_error(status))
             return {}
         breaker.record_success()
         data = resp.json()

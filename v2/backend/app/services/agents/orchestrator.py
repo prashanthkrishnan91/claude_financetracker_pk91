@@ -26,9 +26,13 @@ from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
 from ..intelligence import (
+    AnalystVerdict,
+    action_to_suggested_action,
+    analyze_portfolio,
     build_features,
     build_market_snapshots,
     fetch_benchmark_price_action,
+    format_thesis,
     persist_features,
     persist_snapshots,
 )
@@ -280,9 +284,28 @@ class AgentOrchestrator:
             state = self._build_state(run_id, context, live_prices)
 
             await self._update_run(
-                run_id, current_agent="Portfolio Agent", progress=60
+                run_id, current_agent="Per-ticker analyst", progress=50
             )
 
+            # Phase 3 — per-ticker LLM analyst replaces the monolithic
+            # portfolio-agent call as the primary signal path. Each
+            # ticker gets a strictly-validated AnalystVerdict with one
+            # retry on malformed JSON, falling back to
+            # INSUFFICIENT_DATA (never empty dict).
+            t0 = time.perf_counter()
+            self._verdicts = await self._run_per_ticker_analyst()
+            timings["per_ticker_analyst_ms"] = round(
+                (time.perf_counter() - t0) * 1000, 1
+            )
+
+            await self._update_run(
+                run_id, current_agent="Portfolio synthesis", progress=70
+            )
+
+            # Portfolio synthesis — single LLM call (Phase 4 will
+            # formalise this as a dedicated synthesis layer). For now,
+            # the existing monolithic call supplies the portfolio-level
+            # narrative. Per-ticker verdicts always take precedence.
             t0 = time.perf_counter()
             advice = await self._single_llm_call(context)
             timings["llm_call_ms"] = round((time.perf_counter() - t0) * 1000, 1)
@@ -295,6 +318,12 @@ class AgentOrchestrator:
             self._confidence_by_ticker = _extract_confidence_from_context(context)
 
             self._apply_advice_to_insights(state, advice or {})
+
+            # Apply per-ticker analyst verdicts on top of the monolithic
+            # advice. The analyst call is closer to the structured data
+            # so it wins on action, conviction, drivers, and risks. The
+            # monolithic pass still contributes the portfolio narrative.
+            self._apply_verdicts_to_insights(state, self._verdicts)
 
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
             t0 = time.perf_counter()
@@ -849,10 +878,148 @@ class AgentOrchestrator:
 
         return features
 
+    # ── Per-ticker analyst stage (Phase 3) ──────────────────────────────────
+
+    async def _run_per_ticker_analyst(self) -> dict[str, "AnalystVerdict"]:
+        """Run the per-ticker analyst over the Phase 2 FeatureSets.
+
+        Returns ``{ticker: AnalystVerdict}``. Every ticker is guaranteed
+        to have an entry — unrecoverable failures produce an
+        ``INSUFFICIENT_DATA`` verdict, never an empty map.
+        """
+        snapshots = getattr(self, "_snapshots", {}) or {}
+        features = getattr(self, "_features", {}) or {}
+        if not snapshots or not features:
+            logger.info(
+                "per-ticker analyst skipped — snapshots=%d features=%d",
+                len(snapshots), len(features),
+            )
+            return {}
+
+        if not self._llm.api_key:
+            logger.warning(
+                "per-ticker analyst skipped — no anthropic_api_key; "
+                "every ticker will carry an INSUFFICIENT_DATA verdict",
+            )
+            from ..intelligence import insufficient_data_verdict
+            return {
+                t: insufficient_data_verdict(t, error="no_api_key")
+                for t in snapshots.keys()
+            }
+
+        verdicts = await analyze_portfolio(
+            snapshots=snapshots,
+            features=features,
+            llm=self._llm,
+            max_concurrency=3,
+        )
+
+        action_counts: dict[str, int] = {}
+        fallback_count = 0
+        for ticker, v in verdicts.items():
+            action_counts[v.action] = action_counts.get(v.action, 0) + 1
+            if v.used_fallback:
+                fallback_count += 1
+            logger.info(
+                "analyst ticker=%s action=%s conviction=%.2f confidence=%.2f "
+                "drivers=%d risks=%d fallback=%s",
+                ticker, v.action, v.conviction, v.confidence,
+                len(v.key_drivers), len(v.risks), v.used_fallback,
+            )
+
+        failure_rate = fallback_count / max(1, len(verdicts))
+        logger.info(
+            "per-ticker analyst done — tickers=%d actions=%s fallback_rate=%.2f",
+            len(verdicts), action_counts, failure_rate,
+        )
+        return verdicts
+
+    def _apply_verdicts_to_insights(
+        self,
+        state: AgentState,
+        verdicts: dict[str, "AnalystVerdict"],
+    ) -> None:
+        """Project per-ticker verdicts onto the existing TickerInsight rows.
+
+        Takes precedence over the monolithic Portfolio Agent output for
+        action / conviction / thesis / drivers / risks — those fields
+        are closer to the structured Phase 2 features. Falls back to
+        whatever the monolithic call set when a verdict is missing.
+        """
+        if not verdicts:
+            return
+
+        for ticker, insight in state.insights.items():
+            verdict = verdicts.get(ticker)
+            if verdict is None:
+                continue
+
+            insight.suggested_action = action_to_suggested_action(verdict.action)
+            # ``conviction_score`` stays in [-1, +1]; BUY/REDUCE map to
+            # signed conviction so the downstream allocator preserves
+            # direction. HOLD / INSUFFICIENT_DATA collapse to 0 so the
+            # allocator never funnels cash into a neutral verdict.
+            if verdict.action == "BUY":
+                insight.conviction_score = verdict.conviction
+            elif verdict.action == "REDUCE":
+                insight.conviction_score = -verdict.conviction
+            else:
+                insight.conviction_score = 0.0
+
+            # Compose the thesis: analyst drivers/risks first, then the
+            # monolithic narrative (if any) for portfolio-level colour.
+            existing = (insight.investment_thesis or "").strip()
+            analyst_line = format_thesis(verdict)
+            if existing and existing != analyst_line:
+                insight.investment_thesis = (analyst_line + " " + existing)[:500]
+            else:
+                insight.investment_thesis = analyst_line
+
+        # Re-run the cash allocator with the updated conviction scores
+        # so BUY verdicts get deposit share and REDUCE verdicts don't.
+        self._allocate_cash(state)
+
     # ── Persistence ─────────────────────────────────────────────────────────
 
     async def _persist(self, state: AgentState) -> None:
         await asyncio.to_thread(self._persist_sync, state)
+
+    def _insert_insights_with_schema_fallback(
+        self, insight_rows: list[dict[str, Any]],
+    ) -> None:
+        """Insert ``agent_insights`` rows, degrading on missing Phase 3 columns.
+
+        When migration 010 hasn't been applied the insert raises with a
+        schema-cache error naming the missing column; we strip the
+        Phase-3-only fields and retry ONCE so deployments without the
+        new columns keep persisting the core fields.
+        """
+        try:
+            self.db.table("agent_insights").insert(insight_rows).execute()
+            return
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc).lower()
+            retryable = (
+                "analyst_verdict" in msg
+                or "analyst_confidence" in msg
+                or "schema cache" in msg
+                or "does not exist" in msg
+                or "column" in msg
+            )
+            if not retryable:
+                logger.warning("agent_insights insert failed: %s", exc)
+                raise
+            logger.warning(
+                "agent_insights missing Phase 3 columns — retrying without "
+                "analyst_verdict/analyst_confidence (apply migrations/"
+                "010_analyst_verdict.sql to enable). err=%s", exc,
+            )
+        stripped = [
+            {k: v for k, v in row.items()
+             if k not in {"analyst_verdict", "analyst_confidence"}}
+            for row in insight_rows
+        ]
+        self.db.table("agent_insights").insert(stripped).execute()
 
     def _persist_sync(self, state: AgentState) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -885,16 +1052,24 @@ class AgentOrchestrator:
                 if diff:
                     what_changed_map[ticker] = diff
 
+        verdicts = getattr(self, "_verdicts", {}) or {}
         insight_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
             row = insight.to_insight_row(run_id=state.run_id, user_id=state.user_id)
             wc = what_changed_map.get(insight.ticker)
             if wc:
                 row["what_changed"] = wc
+            # Phase 3 — attach the raw analyst verdict when available.
+            # Missing column ``analyst_verdict`` is swallowed at insert
+            # time by the fallback path below.
+            verdict = verdicts.get(insight.ticker)
+            if verdict is not None:
+                row["analyst_verdict"] = verdict.to_dict()
+                row["analyst_confidence"] = round(verdict.confidence, 2)
             insight_rows.append(row)
 
         if insight_rows:
-            self.db.table("agent_insights").insert(insight_rows).execute()
+            self._insert_insights_with_schema_fallback(insight_rows)
 
         rec_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():

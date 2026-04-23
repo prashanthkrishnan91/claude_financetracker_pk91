@@ -766,6 +766,7 @@ class RecommendationService:
         # without a second round-trip per ticker. Degrades gracefully when
         # the column is missing (pre-migration-010 deployments).
         analyst_lookup: dict[tuple[str, str], dict] = {}
+        run_lookup: dict[str, dict] = {}
         run_ids_needed = {r.get("agent_run_id") for r in recs if r.get("agent_run_id")}
         if run_ids_needed:
             try:
@@ -789,6 +790,22 @@ class RecommendationService:
                     "get_insight_cards: analyst_verdict lookup failed (likely "
                     "pre-Phase-3 schema): %s", exc,
                 )
+            try:
+                run_rows = (
+                    self._db(
+                        "agent_runs.select_for_cards",
+                        lambda: self.client.table("agent_runs")
+                        .select("id, status, cost_metrics")
+                        .eq("user_id", str(self.user_id))
+                        .in_("id", [str(r) for r in run_ids_needed])
+                        .execute(),
+                    )
+                ).data or []
+                for row in run_rows:
+                    if row.get("id"):
+                        run_lookup[str(row["id"])] = row
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_insight_cards: run metadata lookup failed: %s", exc)
 
         # Fetch live prices if price service available
         prices: dict[str, float] = {}
@@ -804,6 +821,7 @@ class RecommendationService:
 
         cards = []
         normalized_count = degraded_count = skipped_count = 0
+        fallback_cards = reused_cached_cards = 0
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -839,6 +857,18 @@ class RecommendationService:
                 normalized_count += 1
                 if "reasoning_unavailable" in reasoning.get("fallback_flags", []):
                     degraded_count += 1
+                is_fallback = bool(analyst_fields["used_fallback"]) or "reasoning_unavailable" in (
+                    reasoning.get("fallback_flags") or []
+                )
+                if is_fallback:
+                    fallback_cards += 1
+                run_meta = run_lookup.get(str(rec.get("agent_run_id"))) or {}
+                run_cost = run_meta.get("cost_metrics") or {}
+                actual_calls = int(run_cost.get("actual_llm_calls") or run_cost.get("attempted_llm_calls") or 0)
+                source = "deterministic_fallback" if is_fallback else "live_llm"
+                if run_meta.get("status") == "completed" and actual_calls == 0:
+                    source = "cached_run"
+                    reused_cached_cards += 1
 
                 card = InsightCard(
                     id=rec["id"],
@@ -882,6 +912,7 @@ class RecommendationService:
                     supporting_evidence=reasoning.get("supporting_evidence"),
                     plain_language_explanation=reasoning.get("plain_language_explanation"),
                     fallback_flags=reasoning.get("fallback_flags"),
+                    analysis_source=source,
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",
@@ -922,8 +953,14 @@ class RecommendationService:
                 continue
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0
+        for row in run_lookup.values():
+            cm = row.get("cost_metrics") or {}
+            attempted_llm_calls += int(cm.get("attempted_llm_calls") or cm.get("actual_llm_calls") or cm.get("total_calls") or 0)
+            successful_llm_calls += int(cm.get("successful_llm_calls") or cm.get("total_calls") or 0)
+            failed_llm_calls += int(cm.get("failed_llm_calls") or 0)
         logger.info(
-            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d",
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d fallback_cards=%d reused_cached_cards=%d",
             self.user_id,
             len(recs),
             len(cards),
@@ -933,6 +970,11 @@ class RecommendationService:
             degraded_count,
             skipped_count,
             elapsed_ms,
+            attempted_llm_calls,
+            successful_llm_calls,
+            failed_llm_calls,
+            fallback_cards,
+            reused_cached_cards,
         )
         return cards
 
@@ -940,6 +982,7 @@ class RecommendationService:
         self,
         deposit_amount: Optional[float] = None,
         sale_proceeds: float = 0.0,
+        allow_completed_reuse: bool = False,
     ) -> tuple[str, bool]:
         """Return ``(job_id, is_new)`` for the agent run to drive.
 
@@ -1010,7 +1053,7 @@ class RecommendationService:
                 return last["id"], False
 
             # 3) Light cache: completed within the last 2 minutes.
-            elif status == "completed":
+            elif status == "completed" and allow_completed_reuse:
                 finished = last.get("finished_at") or last.get("started_at")
                 if finished and _within_last(finished, seconds=120):
                     logger.info(
@@ -1018,6 +1061,12 @@ class RecommendationService:
                         last["id"], finished,
                     )
                     return last["id"], False
+            elif status == "completed":
+                logger.info(
+                    "Fresh run requested — not reusing completed run %s (allow_completed_reuse=%s)",
+                    last["id"],
+                    allow_completed_reuse,
+                )
 
         # Default deposit from user row if not supplied
         if deposit_amount is None:

@@ -271,7 +271,7 @@ async def analyze_ticker(
     # Saves tokens and guarantees the verdict shape the spec mandates.
     if snapshot.data_quality_score < 0.25:
         logger.info(
-            "analyst bypass (quality<0.25) ticker=%s quality=%.2f",
+            "analyst_stage.fallback_used ticker=%s reason=data_quality_below_threshold quality=%.2f",
             snapshot.ticker, snapshot.data_quality_score,
         )
         return insufficient_data_verdict(
@@ -281,7 +281,7 @@ async def analyze_ticker(
     payload = build_analyst_inputs(snapshot=snapshot, feature_set=feature_set)
     user_msg = json.dumps(payload, default=str)
     logger.info(
-        "analyst_trace checkpoint=pre_llm ticker=%s payload=%s",
+        "analyst_stage.prompt_built ticker=%s payload=%s",
         snapshot.ticker,
         user_msg[:1500],
     )
@@ -302,9 +302,10 @@ async def analyze_ticker(
 
     # ── Attempt 1 ──────────────────────────────────────────────────────
     try:
+        logger.info("analyst_stage.llm_request.start ticker=%s", snapshot.ticker)
         raw = await _call_once()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("analyst attempt 1 raised ticker=%s err=%s",
+        logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=1 err=%s",
                        snapshot.ticker, exc)
         raw = {}
 
@@ -316,7 +317,7 @@ async def analyze_ticker(
     verdict = validate_verdict(raw, ticker=snapshot.ticker)
     if verdict is not None:
         logger.info(
-            "analyst_trace checkpoint=parsed ticker=%s verdict=%s",
+            "analyst_stage.llm_request.success ticker=%s verdict=%s",
             snapshot.ticker,
             json.dumps(verdict.to_dict(), default=str)[:1500],
         )
@@ -331,9 +332,10 @@ async def analyze_ticker(
     logger.info("analyst retry ticker=%s raw=%s", snapshot.ticker,
                 str(raw)[:120])
     try:
+        logger.info("analyst_stage.llm_request.start ticker=%s attempt=2", snapshot.ticker)
         raw = await _call_once()
     except Exception as exc:  # noqa: BLE001
-        logger.warning("analyst attempt 2 raised ticker=%s err=%s",
+        logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=2 err=%s",
                        snapshot.ticker, exc)
         raw = {}
 
@@ -345,14 +347,14 @@ async def analyze_ticker(
     verdict = validate_verdict(raw, ticker=snapshot.ticker)
     if verdict is not None:
         logger.info(
-            "analyst_trace checkpoint=parsed_retry ticker=%s verdict=%s",
+            "analyst_stage.llm_request.success ticker=%s attempt=2 verdict=%s",
             snapshot.ticker,
             json.dumps(verdict.to_dict(), default=str)[:1500],
         )
         return verdict
 
     logger.warning(
-        "analyst exhausted retries ticker=%s — returning INSUFFICIENT_DATA",
+        "analyst_stage.fallback_used ticker=%s reason=schema_validation_failed",
         snapshot.ticker,
     )
     return insufficient_data_verdict(

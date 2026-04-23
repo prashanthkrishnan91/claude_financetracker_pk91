@@ -199,6 +199,15 @@ export function AgentInsightCard({
               Data {QUALITY_STYLES[card.data_quality_label].label}
             </span>
           )}
+          {card.analysis_source && (
+            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase border border-border text-text-muted">
+              {card.analysis_source === "live_llm"
+                ? "Live analysis"
+                : card.analysis_source === "cached_run"
+                ? "Cached analysis"
+                : "Deterministic fallback"}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {card.current_price !== undefined && card.current_price !== null && (

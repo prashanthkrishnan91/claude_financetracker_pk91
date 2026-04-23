@@ -327,12 +327,58 @@ export interface InsightCardData {
   suggested_allocation?: number | null;
   agent_run_id?: string | null;
   what_changed?: string | null;
+  // Data-quality UX (populated on Phase 6+)
+  data_confidence_score?: number | null;
+  data_quality_label?: "HIGH" | "MEDIUM" | "LOW" | string | null;
+  reason_tags?: string[] | null;
+  // Phase 3 analyst verdict projection (nullable on pre-Phase-3 rows)
+  analyst_action?: string | null;
+  analyst_conviction?: number | null;
+  analyst_confidence?: number | null;
+  analyst_drivers?: string[] | null;
+  analyst_risks?: string[] | null;
+  analyst_used_fallback?: boolean | null;
 }
 
 export interface AgentRunQueued {
   job_id: string;
   status: string;
   message: string;
+}
+
+export interface PortfolioSynthesisPayload {
+  portfolio_bias: "bullish" | "neutral" | "defensive" | string;
+  key_themes: string[];
+  risk_concentrations: string[];
+  overexposure_flags: string[];
+  rebalancing_suggestions: string[];
+  summary: string;
+  used_fallback?: boolean;
+  error?: string | null;
+}
+
+export interface ModeDecisionPayload {
+  mode: "FULL" | "DEGRADED" | string;
+  avg_quality: number;
+  insufficient_count: number;
+  total_tickers: number;
+  reason: string;
+  explanation: string;
+}
+
+export interface CostMetricsPayload {
+  mode: "FULL" | "DEGRADED" | string;
+  total_calls: number;
+  total_cost_usd: number;
+  calls_by_kind: Record<string, number>;
+  calls_by_model: Record<string, number>;
+  entries: Array<{
+    kind: string;
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    cost_usd: number;
+  }>;
 }
 
 export interface AgentRunStatus {
@@ -348,6 +394,24 @@ export interface AgentRunStatus {
   error_message: string | null;
   started_at: string | null;
   finished_at: string | null;
+  // Phase 4 — portfolio synthesis
+  portfolio_synthesis?: PortfolioSynthesisPayload | null;
+  synthesis_used_fallback?: boolean | null;
+  // Phase 5 — run mode + cost
+  run_mode?: "FULL" | "DEGRADED" | null;
+  run_mode_decision?: ModeDecisionPayload | null;
+  cost_metrics?: CostMetricsPayload | null;
+}
+
+export interface AnalystVerdictPayload {
+  ticker: string;
+  action: "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA" | string;
+  conviction: number;
+  key_drivers: string[];
+  risks: string[];
+  confidence: number;
+  used_fallback: boolean;
+  error?: string | null;
 }
 
 export interface AgentInsightData {
@@ -366,6 +430,9 @@ export interface AgentInsightData {
   suggested_action: string | null;
   created_at: string | null;
   what_changed: string | null;
+  // Phase 3 — per-ticker analyst
+  analyst_verdict: AnalystVerdictPayload | null;
+  analyst_confidence: number | null;
 }
 
 export interface AnalysisChangesResponse {

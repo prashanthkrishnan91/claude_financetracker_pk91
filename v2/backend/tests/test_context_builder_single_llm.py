@@ -154,7 +154,14 @@ class TestOrchestratorSingleCall:
         assert result.insights == []
 
     @pytest.mark.asyncio
-    async def test_non_empty_portfolio_calls_llm_exactly_once(self, monkeypatch):
+    async def test_non_empty_portfolio_runs_staged_pipeline(self, monkeypatch):
+        """Phase 4: non-empty portfolio runs analyst + synthesis exactly once each.
+
+        The old single-monolithic-LLM contract was replaced by the
+        staged intelligence pipeline (Phase 3 per-ticker analyst + Phase 4
+        portfolio synthesis). Guard that each stage fires exactly once
+        per run and the pipeline completes with a usable result.
+        """
         from app.services.agents import orchestrator as orch_mod
 
         mock_db = MagicMock()
@@ -173,36 +180,54 @@ class TestOrchestratorSingleCall:
             user_id=uuid4(), anthropic_api_key="fake"
         )
 
-        call_count = 0
+        analyst_calls = 0
+        synthesis_calls = 0
 
-        async def _one_call(context):
-            nonlocal call_count
-            call_count += 1
+        async def _fake_analyst():
+            nonlocal analyst_calls
+            analyst_calls += 1
+            from app.services.intelligence import (
+                AnalystVerdict,
+                insufficient_data_verdict,
+            )
             return {
-                "summary": "Looks fine.",
-                "cards": [{
-                    "ticker": "AAPL",
-                    "action": "HOLD",
-                    "conviction": 0.1,
-                    "thesis": "Steady.",
-                }],
+                "AAPL": AnalystVerdict(
+                    ticker="AAPL", action="HOLD", conviction=0.1,
+                    key_drivers=["range"], risks=["noise"], confidence=0.5,
+                ),
             }
 
-        monkeypatch.setattr(orch, "_single_llm_call", _one_call)
+        async def _fake_synthesis(*, context):
+            nonlocal synthesis_calls
+            synthesis_calls += 1
+            from app.services.intelligence import PortfolioSynthesis
+            return PortfolioSynthesis(
+                portfolio_bias="neutral",
+                key_themes=["single-ticker book", "tech exposure"],
+                risk_concentrations=["single-ticker concentration"],
+                summary="Single-ticker book.",
+            )
+
+        monkeypatch.setattr(orch, "_run_per_ticker_analyst", _fake_analyst)
+        monkeypatch.setattr(orch, "_run_portfolio_synthesis", _fake_synthesis)
 
         async def _noop_persist(state):
             return None
 
         monkeypatch.setattr(orch, "_persist", _noop_persist)
 
-        async def _no_prices():
-            return {}
+        async def _no_bundle():
+            return {"tickers": [], "prices": {}, "live_prices": {}, "news": {},
+                    "fundamentals": {}, "funds": {}, "price_action": {},
+                    "macro": {"summary": ""}, "source_status": {},
+                    "missing_fields": [], "completeness_score": 1.0}
 
-        monkeypatch.setattr(orch, "_fetch_live_prices_for_user", _no_prices)
+        monkeypatch.setattr(orch, "_fetch_market_bundle_for_user", _no_bundle)
 
         result = await orch.run("run-2")
 
-        assert call_count == 1
+        assert analyst_calls == 1
+        assert synthesis_calls == 1
         assert result.status == "completed"
         assert any(i.ticker == "AAPL" for i in result.insights)
 

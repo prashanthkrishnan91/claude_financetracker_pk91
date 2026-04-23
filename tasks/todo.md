@@ -86,4 +86,62 @@ The existing pipeline already has a lot of the plumbing:
 ---
 
 ## Phases 2–6
-See spec in the original task description. Not started until Phase 1 acceptance gates are green and the user approves.
+See spec in the original task description.
+
+---
+
+## Phase 2 — Feature Engine Layer (no LLM)
+
+Deterministic, per-ticker feature generation over the persisted `MarketSnapshot`
+rows + the io_layer bundle.
+
+### Deliverables
+1. `services/intelligence/feature_engine.py`
+   - `FeatureSet` dataclass per ticker:
+     - `trend_regime` ∈ {uptrend, range, downtrend}
+     - `momentum_score` (float, blended 5d + 30d normalized returns)
+     - `volatility_regime` ∈ {low, medium, high}
+     - `relative_strength_30d` (float, delta vs SPY return_30d)
+     - `relative_strength_label` ∈ {outperforming, inline, underperforming}
+     - `sector`, `industry`, `category`
+     - `data_quality_score` (propagated from MarketSnapshot)
+   - `build_features(snapshots, bundle, benchmark) -> dict[str, FeatureSet]`
+     - Pure transform. No IO. Uses SMA20/SMA50 from `bundle["price_action"]`
+       for trend_regime.
+2. `services/intelligence/feature_store.py`
+   - Best-effort insert into `agent_features` table.
+   - Missing table → single WARN, run continues.
+3. `services/intelligence/benchmark.py`
+   - Thin async helper: `fetch_benchmark_price_action(cache, coalescer, symbol="SPY")`
+   - Cache-backed, coalesced. Failure → neutral `{}` so features still compute
+     (relative strength falls back to absolute momentum).
+4. `v2/backend/migrations/009_agent_features.sql` — idempotent schema + RLS.
+5. Orchestrator wires in feature build + persist AFTER the snapshot stage and
+   BEFORE the LLM stage. The LLM stage itself is unchanged in Phase 2.
+6. Tests: `tests/test_feature_engine.py`
+   - `test_every_snapshot_produces_a_feature_set`
+   - `test_trend_regime_derivation` (uptrend / range / downtrend cases)
+   - `test_volatility_regime_thresholds` (low / medium / high boundaries)
+   - `test_relative_strength_vs_spy`
+   - `test_three_distinct_regimes_across_mixed_portfolio`
+   - `test_data_quality_score_propagates`
+   - `test_missing_benchmark_falls_back_to_absolute`
+
+### Acceptance gates (Phase 2)
+- [ ] Every ticker has a FeatureSet and a row in `agent_features` when the
+      table is present.
+- [ ] At least 3 distinct `trend_regime` values appear across a mixed-test
+      portfolio (e.g. uptrend + range + downtrend).
+- [ ] Features are not identical across tickers (momentum_score,
+      volatility_regime, relative_strength differ).
+- [ ] No LLM call is introduced by Phase 2.
+
+### Out of scope
+- LLM changes (Phase 3).
+- UI changes (Phase 6).
+- Feature persistence format changes to Phase 1 `market_snapshots` table.
+
+---
+
+## Phases 3–6
+Not started until Phase 2 gates green + user approval.

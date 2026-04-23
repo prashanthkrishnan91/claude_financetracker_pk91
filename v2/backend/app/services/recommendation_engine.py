@@ -64,6 +64,16 @@ _aggregate_inflight: dict[str, asyncio.Future] = {}
 _aggregate_lock = asyncio.Lock()
 
 
+def invalidate_recommendations_aggregate_cache(user_id: UUID | str) -> None:
+    """Drop per-user aggregate cache/in-flight state so next read is fresh."""
+    key = str(user_id)
+    _aggregate_cache.pop(key, None)
+    inflight = _aggregate_inflight.pop(key, None)
+    if inflight is not None and not inflight.done():
+        inflight.cancel()
+    logger.info("recommendations.aggregate.invalidated user_id=%s", key)
+
+
 # ── Rec generation (ported from v1 generate_rec) ────────────────────────────
 
 @dataclass
@@ -912,6 +922,8 @@ class RecommendationService:
             except Exception:
                 deposit_amount = 900.0
 
+        # A fresh run should never serve stale aggregate cards while queued.
+        invalidate_recommendations_aggregate_cache(self.user_id)
         from .agents.job_runner import build_orchestrator
         orch = build_orchestrator(
             user_id=self.user_id,
@@ -934,7 +946,10 @@ class RecommendationService:
         )
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
-        return _agent_run_row_to_status(row.data)
+        status = _agent_run_row_to_status(row.data)
+        if status.status in {"completed", "failed", "cancelled"}:
+            invalidate_recommendations_aggregate_cache(self.user_id)
+        return status
 
     async def get_latest_job(self) -> Optional[AgentRunStatus]:
         """Return the most recent agent run for this user, or None if none exists."""
@@ -1033,6 +1048,7 @@ class RecommendationService:
                 notes=resolution.notes,
             ))
 
+        invalidate_recommendations_aggregate_cache(self.user_id)
         return result.data[0]
 
     async def list_decisions(self, limit: int = 50) -> list[DecisionLogEntry]:

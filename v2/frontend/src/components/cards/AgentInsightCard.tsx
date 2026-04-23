@@ -59,6 +59,55 @@ function technicalBadge(signal?: string | null): { cls: string } {
   return { cls: "text-text-muted border-border" };
 }
 
+function looksReadableThesis(text?: string | null): boolean {
+  if (!text) return false;
+  const t = text.trim().toLowerCase();
+  if (!t) return false;
+  return !(
+    t.startsWith("analyst:")
+    || t.includes("fallback: insufficient_data")
+    || t.includes("drivers:")
+    || t.includes("missing fields:")
+  );
+}
+
+function cleanClause(text: string): string {
+  return text.replace(/\.$/, "").trim();
+}
+
+function synthesizeExplanation(card: InsightCardData): string {
+  if (looksReadableThesis(card.investment_thesis)) {
+    return card.investment_thesis!.trim().split(/\s+/).slice(0, 38).join(" ");
+  }
+
+  const driver = card.analyst_drivers?.[0];
+  const risk = (card.analyst_risks || []).find(
+    (r) => !/missing fields?:\s*sentiment/i.test(r)
+  );
+  const changed = card.what_changed?.split("\n").filter(Boolean)[0];
+  const hasEvidence =
+    Boolean(driver || risk || changed || card.technical_signal || card.conviction_score);
+
+  if (card.analyst_action === "INSUFFICIENT_DATA" && hasEvidence) {
+    return "The AI did not have enough external evidence for a high-confidence call, so this remains a watchlist-style hold for now.";
+  }
+
+  if (driver) {
+    const but = risk ? `, but ${cleanClause(risk)}` : "";
+    return `${card.ticker} still looks ${card.action === "BUY" ? "constructive" : "mixed"} because ${cleanClause(driver)}${but}.`;
+  }
+  if (changed) {
+    return `${card.ticker} remains ${card.action.toLowerCase()} after the latest run: ${cleanClause(changed)}.`;
+  }
+  return (card.detail || `${card.ticker} remains on watch.`).trim().split(/\s+/).slice(0, 35).join(" ");
+}
+
+function visibleRisks(risks?: string[] | null): string[] {
+  if (!risks || risks.length === 0) return [];
+  const filtered = risks.filter((r) => !/missing fields?:\s*sentiment/i.test(r));
+  return filtered.length > 0 ? filtered : [];
+}
+
 export function AgentInsightCard({
   card,
   onClick,
@@ -67,10 +116,11 @@ export function AgentInsightCard({
   onClick?: () => void;
 }) {
   const styles = ACTION_STYLES[card.action] || ACTION_STYLES.HOLD;
-  const thesis = card.investment_thesis || card.detail;
+  const thesis = synthesizeExplanation(card);
   const sent = sentimentBadge(card.sentiment_score, card.sentiment_label);
   const tech = technicalBadge(card.technical_signal);
   const conviction = card.conviction_score;
+  const shownRisks = visibleRisks(card.analyst_risks);
 
   return (
     <div
@@ -166,13 +216,13 @@ export function AgentInsightCard({
               </ul>
             </div>
           )}
-          {card.analyst_risks && card.analyst_risks.length > 0 && (
+          {shownRisks.length > 0 && (
             <div className="space-y-0.5">
               <span className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">
                 Risks
               </span>
               <ul className="space-y-0.5">
-                {card.analyst_risks.slice(0, 2).map((r, i) => (
+                {shownRisks.slice(0, 2).map((r, i) => (
                   <li
                     key={i}
                     className="flex items-start gap-1.5 text-xs text-text-secondary"

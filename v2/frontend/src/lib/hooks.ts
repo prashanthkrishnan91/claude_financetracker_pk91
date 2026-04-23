@@ -1,6 +1,6 @@
 "use client";
 
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
@@ -98,6 +98,12 @@ export function usePriceHealth() {
 
 // ── Recommendations ──────────────────────────────────────────────────────────
 
+export function invalidateRecommendationAggregateQueries(qc: QueryClient) {
+  qc.invalidateQueries({ queryKey: ["recommendations"] });
+  qc.invalidateQueries({ queryKey: ["recommendations", "insights"] });
+  qc.invalidateQueries({ queryKey: ["recommendations", "job"] });
+}
+
 export function useRecommendations(action?: string) {
   return useQuery({
     queryKey: ["recommendations", action],
@@ -108,9 +114,17 @@ export function useRecommendations(action?: string) {
 }
 
 export function useRefreshRecommendations() {
+  const qc = useQueryClient();
   return useMutation({
     mutationFn: (body?: { deposit_amount?: number; sale_proceeds?: number }) =>
       api.recommendations.refresh(body),
+    onMutate: async () => {
+      // A fresh run was requested — don't wait for staleTime/TTL to elapse.
+      invalidateRecommendationAggregateQueries(qc);
+    },
+    onSuccess: () => {
+      invalidateRecommendationAggregateQueries(qc);
+    },
   });
 }
 
@@ -133,8 +147,7 @@ export function useAgentJob(jobId: string | null) {
       const status = await api.recommendations.getJob(jobId);
       // When the pipeline finishes, refresh the card list so the UI catches up.
       if (TERMINAL_AGENT_STATUSES.has(status.status)) {
-        qc.invalidateQueries({ queryKey: ["recommendations"] });
-        qc.invalidateQueries({ queryKey: ["recommendations", "insights"] });
+        invalidateRecommendationAggregateQueries(qc);
       }
       return status;
     },
@@ -170,7 +183,7 @@ export function useLatestAgentRun(enabled = true) {
     queryFn: async () => {
       const job = await api.recommendations.getLatestJob();
       if (job?.status && TERMINAL_AGENT_STATUSES.has(job.status)) {
-        qc.invalidateQueries({ queryKey: ["recommendations"] });
+        invalidateRecommendationAggregateQueries(qc);
       }
       return job;
     },

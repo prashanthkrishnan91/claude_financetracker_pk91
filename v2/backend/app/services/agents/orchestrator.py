@@ -45,6 +45,7 @@ from ..intelligence import (
     projected_full_mode_cost,
     synthesize_portfolio,
 )
+from ..recommendation_engine import invalidate_recommendations_aggregate_cache
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from .data_sources import get_provider_status
 from .llm import LLMClient, FALLBACK_MODEL
@@ -1305,6 +1306,10 @@ class AgentOrchestrator:
             ).execute()
         except Exception as exc:
             logger.warning("Failed to expire old recommendations: %s", exc)
+        finally:
+            # Recommendations / insights changed; drop aggregate cache now so
+            # the next GET /recommendations immediately reflects this run.
+            invalidate_recommendations_aggregate_cache(state.user_id)
 
     async def _update_run(
         self,
@@ -1349,6 +1354,8 @@ class AgentOrchestrator:
         if not patch:
             return
         self._run_agent_runs_update(run_id, patch)
+        if status in ("completed", "failed"):
+            invalidate_recommendations_aggregate_cache(self.user_id)
 
     def _run_agent_runs_update(self, run_id: str, patch: dict) -> None:
         """Execute the ``agent_runs`` update with Phase 4 + 5 column fallbacks.

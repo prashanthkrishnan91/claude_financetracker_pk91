@@ -372,20 +372,30 @@ def action_to_suggested_action(action: str) -> str:
 
 
 def format_thesis(verdict: AnalystVerdict) -> str:
-    """Render a verdict into a short prose thesis for agent_insights."""
-    bits: list[str] = []
-    bits.append(f"Analyst: {verdict.action} (conviction {verdict.conviction:.2f},"
-                f" confidence {verdict.confidence:.2f}).")
+    """Render a plain-English thesis (max ~2 short sentences)."""
+    lead_by_action = {
+        "BUY": "The setup still looks constructive",
+        "REDUCE": "Risk now looks elevated versus reward",
+        "HOLD": "The setup looks balanced for now",
+        "INSUFFICIENT_DATA": "Evidence is limited right now",
+    }
+    lead = lead_by_action.get(verdict.action, "The setup is mixed right now")
+
+    sentence_1 = lead
     if verdict.key_drivers:
-        drivers = "; ".join(verdict.key_drivers[:3])
-        bits.append(f"Drivers: {drivers}.")
+        sentence_1 += f" because {verdict.key_drivers[0].rstrip('.')}."
+    else:
+        sentence_1 += "."
+
+    sentence_2 = ""
     if verdict.risks:
-        risks = "; ".join(verdict.risks[:2])
-        bits.append(f"Risks: {risks}.")
-    if verdict.used_fallback:
-        bits.append("Fallback: INSUFFICIENT_DATA — analyst could not reason on"
-                    " the provided inputs.")
-    return " ".join(bits)[:500]
+        sentence_2 = f"Main watch item: {verdict.risks[0].rstrip('.')}."
+    elif verdict.action == "INSUFFICIENT_DATA" or verdict.used_fallback:
+        sentence_2 = (
+            "This is a watchlist-style view until more external evidence is available."
+        )
+
+    return f"{sentence_1} {sentence_2}".strip()[:500]
 
 
 # ── Small helpers ──────────────────────────────────────────────────────────

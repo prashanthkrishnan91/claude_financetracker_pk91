@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import {
   useRecommendations,
@@ -10,6 +11,7 @@ import {
   useAgentJob,
   useLatestAgentRun,
   useStrategyPerformance,
+  invalidateRecommendationAggregateQueries,
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
@@ -52,6 +54,8 @@ export default function RecommendationsPage() {
   const [toast, setToast] = useState<string | null>(null);
   const [decisionLogOpen, setDecisionLogOpen] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
+  const [finalizingJob, setFinalizingJob] = useState(false);
+  const queryClient = useQueryClient();
 
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
@@ -60,10 +64,11 @@ export default function RecommendationsPage() {
   // Only one poll owner at a time:
   // - while a specific job is active, useAgentJob owns polling
   // - otherwise, useLatestAgentRun can restore any in-flight run on mount
-  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun(!activeJobId);
+  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun(!activeJobId && !finalizingJob);
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
   const hasAutoTriggered = useRef(false);
+  const finalizedJobRef = useRef<string | null>(null);
 
   // Restore the progress tracker from the last run if it's still in-flight.
   useEffect(() => {
@@ -106,6 +111,8 @@ export default function RecommendationsPage() {
       refreshRecs.mutate(undefined, {
         onSuccess: (data) => {
           console.log(`[Intel] ${data.status === "reused" ? "Reusing" : "Polling"} job:`, data.job_id);
+          finalizedJobRef.current = null;
+          setFinalizingJob(false);
           setActiveJobId(data.job_id);
         },
         onError: (err) => {
@@ -121,17 +128,34 @@ export default function RecommendationsPage() {
   // Keep it visible slightly longer on failure so the user can read the
   // degraded summary before it disappears.
   useEffect(() => {
-    if (jobStatus?.status === "completed") {
-      console.log("[Intel] Polling stopped — completed");
-      const t = setTimeout(() => setActiveJobId(null), 4000);
-      return () => clearTimeout(t);
-    }
-    if (jobStatus?.status === "failed") {
-      console.log("[Intel] Polling stopped — failed");
-      const t = setTimeout(() => setActiveJobId(null), 8000);
-      return () => clearTimeout(t);
-    }
-  }, [jobStatus?.status]);
+    if (!activeJobId || !jobStatus) return;
+    if (!["completed", "failed", "cancelled"].includes(jobStatus.status)) return;
+    if (finalizedJobRef.current === activeJobId) return;
+    finalizedJobRef.current = activeJobId;
+    setFinalizingJob(true);
+    console.log(`[Intel] Polling stopped — ${jobStatus.status}`);
+
+    (async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["recommendations"] }),
+        queryClient.invalidateQueries({ queryKey: ["recommendations", "insights"] }),
+      ]);
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ["recommendations"], type: "active" }),
+        queryClient.refetchQueries({ queryKey: ["recommendations", "insights"], type: "active" }),
+      ]);
+      setTimeout(() => {
+        setActiveJobId(null);
+        setFinalizingJob(false);
+      }, 300);
+    })().catch((err) => {
+      console.error("[Intel] Final run refresh failed:", err);
+      setTimeout(() => {
+        setActiveJobId(null);
+        setFinalizingJob(false);
+      }, 500);
+    });
+  }, [activeJobId, jobStatus, queryClient]);
 
   const filtered =
     filter === "ALL"
@@ -213,6 +237,9 @@ export default function RecommendationsPage() {
               onClick={() =>
                 refreshRecs.mutate(undefined, {
                   onSuccess: (data) => {
+                    invalidateRecommendationAggregateQueries(queryClient);
+                    finalizedJobRef.current = null;
+                    setFinalizingJob(false);
                     setActiveJobId(data.job_id);
                     setToast("Agent pipeline queued");
                   },

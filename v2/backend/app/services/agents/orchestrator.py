@@ -32,7 +32,7 @@ from ..intelligence import (
     RunCostTracker,
     RunMode,
     action_to_suggested_action,
-    build_full_mode_verdicts,
+    analyze_portfolio,
     build_degraded_verdicts,
     build_features,
     build_market_snapshots,
@@ -198,6 +198,13 @@ class AgentOrchestrator:
         self._llm_skipped = False    # True when LLM was bypassed entirely
         self._fallback_used = False  # True when deterministic recs were returned
         self._trace_persist_logged = False
+        self._analyst_stage_stats = {
+            "attempted_llm_calls": 0,
+            "successful_llm_calls": 0,
+            "failed_llm_calls": 0,
+            "fallback_cards": 0,
+            "reused_cached_cards": 0,
+        }
 
     def _db(self, op_name: str, fn):
         return run_with_retry_sync(fn, op_name=op_name)
@@ -1038,6 +1045,11 @@ class AgentOrchestrator:
         llm_for_call = self._llm if self._llm.api_key else None
         if decision is not None and decision.mode == RunMode.DEGRADED:
             llm_for_call = None
+        if llm_for_call is None:
+            logger.info("analyst_stage.fallback_used reason=synthesis_llm_unavailable")
+        else:
+            self._analyst_stage_stats["attempted_llm_calls"] += 1
+            logger.info("analyst_stage.llm_request.start stage=portfolio_synthesis model=%s", self._llm.model)
 
         synthesis = await synthesize_portfolio(
             verdicts=verdicts,
@@ -1057,6 +1069,10 @@ class AgentOrchestrator:
 
         if tracker is not None and not synthesis.used_fallback:
             tracker.record(kind="synthesis", model=self._llm.model)
+            self._analyst_stage_stats["successful_llm_calls"] += 1
+        elif llm_for_call is not None and synthesis.used_fallback:
+            self._analyst_stage_stats["failed_llm_calls"] += 1
+            logger.warning("analyst_stage.llm_request.failure stage=portfolio_synthesis reason=used_fallback")
 
         logger.info(
             "portfolio_synthesis done — bias=%s themes=%d risks=%d "
@@ -1092,21 +1108,26 @@ class AgentOrchestrator:
                 len(snapshots), len(features),
             )
             return {}
+        logger.info(
+            "analyst_stage.begin tickers=%d snapshots=%d features=%d",
+            len(snapshots), len(snapshots), len(features),
+        )
 
         decision: Optional[ModeDecision] = getattr(self, "_mode_decision", None)
         if decision is not None and decision.mode == RunMode.DEGRADED:
             verdicts = build_degraded_verdicts(snapshots, decision=decision)
+            self._analyst_stage_stats["fallback_cards"] += len(verdicts)
             logger.info(
-                "per-ticker analyst DEGRADED — tickers=%d reason=%s "
-                "(0 LLM calls made)",
+                "analyst_stage.fallback_used reason=degraded_mode tickers=%d mode_reason=%s",
                 len(verdicts), decision.reason,
             )
             return verdicts
 
         if not self._llm.api_key:
+            self._analyst_stage_stats["fallback_cards"] += len(snapshots)
             logger.warning(
-                "per-ticker analyst skipped — no anthropic_api_key; "
-                "every ticker will carry an INSUFFICIENT_DATA verdict",
+                "analyst_stage.fallback_used reason=no_anthropic_api_key tickers=%d",
+                len(snapshots),
             )
             from ..intelligence import insufficient_data_verdict
             return {
@@ -1114,9 +1135,36 @@ class AgentOrchestrator:
                 for t in snapshots.keys()
             }
 
-        verdicts = build_full_mode_verdicts(
+        logger.info(
+            "analyst_stage.prompt_built tickers=%d mode=%s",
+            len(snapshots),
+            decision.mode.value if decision else "unknown",
+        )
+        self._analyst_stage_stats["attempted_llm_calls"] += len(snapshots)
+        logger.info(
+            "analyst_stage.llm_request.start tickers=%d model=%s",
+            len(snapshots),
+            self._llm.model,
+        )
+        verdicts = await analyze_portfolio(
             snapshots=snapshots,
             features=features,
+            llm=self._llm,
+        )
+        self._analyst_stage_stats["successful_llm_calls"] += sum(
+            1 for v in verdicts.values() if not v.used_fallback
+        )
+        self._analyst_stage_stats["failed_llm_calls"] += sum(
+            1 for v in verdicts.values() if v.used_fallback
+        )
+        self._analyst_stage_stats["fallback_cards"] += sum(
+            1 for v in verdicts.values() if v.used_fallback
+        )
+        logger.info(
+            "analyst_stage.llm_request.success tickers=%d successful=%d fallback=%d",
+            len(verdicts),
+            self._analyst_stage_stats["successful_llm_calls"],
+            self._analyst_stage_stats["fallback_cards"],
         )
 
         action_counts: dict[str, int] = {}
@@ -1135,7 +1183,7 @@ class AgentOrchestrator:
 
         failure_rate = fallback_count / max(1, len(verdicts))
         logger.info(
-            "per-ticker analyst done (deterministic) — tickers=%d actions=%s fallback_rate=%.2f",
+            "analyst_stage.output.normalized tickers=%d actions=%s fallback_rate=%.2f",
             len(verdicts), action_counts, failure_rate,
         )
         return verdicts
@@ -1396,7 +1444,10 @@ class AgentOrchestrator:
             patch["run_mode"] = mode_decision.mode.value
             patch["run_mode_decision"] = mode_decision.to_dict()
         if cost_tracker is not None:
-            patch["cost_metrics"] = cost_tracker.to_dict()
+            payload = cost_tracker.to_dict()
+            payload.update(self._analyst_stage_stats)
+            payload["actual_llm_calls"] = self._analyst_stage_stats.get("attempted_llm_calls", 0)
+            patch["cost_metrics"] = payload
         if status in ("completed", "failed"):
             patch["finished_at"] = datetime.now(timezone.utc).isoformat()
         if not patch:

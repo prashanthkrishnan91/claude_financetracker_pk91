@@ -351,6 +351,7 @@ export interface InsightCardData {
   supporting_evidence?: string[] | null;
   plain_language_explanation?: string | null;
   fallback_flags?: string[] | null;
+  analysis_source?: "live_llm" | "cached_run" | "deterministic_fallback" | null;
 }
 
 export interface AgentRunQueued {
@@ -382,6 +383,12 @@ export interface ModeDecisionPayload {
 export interface CostMetricsPayload {
   mode: "FULL" | "DEGRADED" | string;
   total_calls: number;
+  actual_llm_calls?: number;
+  attempted_llm_calls?: number;
+  successful_llm_calls?: number;
+  failed_llm_calls?: number;
+  fallback_cards?: number;
+  reused_cached_cards?: number;
   total_cost_usd: number;
   calls_by_kind: Record<string, number>;
   calls_by_model: Record<string, number>;

@@ -94,6 +94,7 @@ class InsightCard(BaseModel):
     supporting_evidence: Optional[list[str]] = None
     plain_language_explanation: Optional[str] = None
     fallback_flags: Optional[list[str]] = None
+    analysis_source: Optional[str] = None  # live_llm | cached_run | deterministic_fallback
 
 
 class AgentRunStatus(BaseModel):

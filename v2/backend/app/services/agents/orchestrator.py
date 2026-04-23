@@ -1275,6 +1275,20 @@ class AgentOrchestrator:
             if verdict is not None:
                 row["analyst_verdict"] = verdict.to_dict()
                 row["analyst_confidence"] = round(verdict.confidence, 2)
+                logger.info(
+                    "analyst_trace checkpoint=pre_db_write ticker=%s row=%s",
+                    insight.ticker,
+                    json.dumps(
+                        {
+                            "ticker": row.get("ticker"),
+                            "suggested_action": row.get("suggested_action"),
+                            "investment_thesis": row.get("investment_thesis"),
+                            "analyst_verdict": row.get("analyst_verdict"),
+                            "analyst_confidence": row.get("analyst_confidence"),
+                        },
+                        default=str,
+                    )[:1500],
+                )
             insight_rows.append(row)
 
         if insight_rows:

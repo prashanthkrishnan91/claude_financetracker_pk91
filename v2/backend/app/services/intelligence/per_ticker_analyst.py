@@ -55,6 +55,11 @@ class AnalystVerdict:
     key_drivers: list[str] = field(default_factory=list)
     risks: list[str] = field(default_factory=list)
     confidence: float = 0.0
+    summary: str = ""
+    thesis: str = ""
+    reasoning: str = ""
+    sentiment: Optional[str] = None
+    citations: list[str] = field(default_factory=list)
     used_fallback: bool = False
     raw_response: Optional[dict[str, Any]] = None
     error: Optional[str] = None
@@ -99,9 +104,14 @@ OUTPUT — return ONLY this JSON, no preamble, no code fences:
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
+  "summary": "one plain-English sentence",
+  "thesis": "2 short sentences explaining the call",
+  "reasoning": "plain-language why this action fits now",
   "key_drivers": ["driver 1", "driver 2"],
   "risks": ["risk 1"],
-  "confidence": 0.00
+  "confidence": 0.00,
+  "sentiment": "optional short label",
+  "citations": ["optional source pointer"]
 }
 """
 
@@ -165,7 +175,12 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     if not isinstance(raw, dict):
         return None
 
-    action = str(raw.get("action") or "").strip().upper()
+    action = str(
+        raw.get("action")
+        or raw.get("suggested_action")
+        or raw.get("recommendation")
+        or ""
+    ).strip().upper()
     if action not in ALLOWED_ACTIONS:
         return None
 
@@ -180,8 +195,22 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     conviction = max(0.0, min(1.0, conviction))
     confidence = max(0.0, min(1.0, confidence))
 
-    key_drivers = _coerce_string_list(raw.get("key_drivers"), max_items=3)
-    risks = _coerce_string_list(raw.get("risks"), max_items=2)
+    key_drivers = _coerce_string_list(
+        raw.get("key_drivers") or raw.get("drivers"),
+        max_items=3,
+    )
+    risks = _coerce_string_list(
+        raw.get("risks") or raw.get("main_risks"),
+        max_items=2,
+    )
+    summary = _coerce_short_text(raw.get("summary"), max_len=360)
+    thesis = _coerce_short_text(raw.get("thesis"), max_len=600)
+    reasoning = _coerce_short_text(
+        raw.get("reasoning") or raw.get("reasoning_summary"),
+        max_len=600,
+    )
+    sentiment = _coerce_short_text(raw.get("sentiment"), max_len=80) or None
+    citations = _coerce_string_list(raw.get("citations"), max_items=4)
 
     if action == INSUFFICIENT_DATA_VERDICT_MARKER:
         conviction = 0.0
@@ -193,6 +222,11 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
         key_drivers=key_drivers,
         risks=risks,
         confidence=confidence,
+        summary=summary,
+        thesis=thesis,
+        reasoning=reasoning,
+        sentiment=sentiment,
+        citations=citations,
         raw_response=raw,
     )
 
@@ -246,6 +280,11 @@ async def analyze_ticker(
 
     payload = build_analyst_inputs(snapshot=snapshot, feature_set=feature_set)
     user_msg = json.dumps(payload, default=str)
+    logger.info(
+        "analyst_trace checkpoint=pre_llm ticker=%s payload=%s",
+        snapshot.ticker,
+        user_msg[:1500],
+    )
 
     async def _call_once() -> Any:
         if semaphore is not None:
@@ -269,8 +308,18 @@ async def analyze_ticker(
                        snapshot.ticker, exc)
         raw = {}
 
+    logger.info(
+        "analyst_trace checkpoint=raw_response ticker=%s raw=%s",
+        snapshot.ticker,
+        json.dumps(raw, default=str)[:1500],
+    )
     verdict = validate_verdict(raw, ticker=snapshot.ticker)
     if verdict is not None:
+        logger.info(
+            "analyst_trace checkpoint=parsed ticker=%s verdict=%s",
+            snapshot.ticker,
+            json.dumps(verdict.to_dict(), default=str)[:1500],
+        )
         logger.debug(
             "reasoning_contract_trace normalized_keys=%s ticker=%s",
             sorted(verdict.to_dict().keys()),
@@ -288,8 +337,18 @@ async def analyze_ticker(
                        snapshot.ticker, exc)
         raw = {}
 
+    logger.info(
+        "analyst_trace checkpoint=raw_response_retry ticker=%s raw=%s",
+        snapshot.ticker,
+        json.dumps(raw, default=str)[:1500],
+    )
     verdict = validate_verdict(raw, ticker=snapshot.ticker)
     if verdict is not None:
+        logger.info(
+            "analyst_trace checkpoint=parsed_retry ticker=%s verdict=%s",
+            snapshot.ticker,
+            json.dumps(verdict.to_dict(), default=str)[:1500],
+        )
         return verdict
 
     logger.warning(
@@ -378,6 +437,14 @@ def action_to_suggested_action(action: str) -> str:
 
 def format_thesis(verdict: AnalystVerdict) -> str:
     """Render a plain-English thesis (max ~2 short sentences)."""
+    preferred = (
+        verdict.reasoning.strip()
+        or verdict.thesis.strip()
+        or verdict.summary.strip()
+    )
+    if preferred:
+        return preferred[:500]
+
     lead_by_action = {
         "BUY": "The setup still looks constructive",
         "REDUCE": "Risk now looks elevated versus reward",
@@ -419,3 +486,9 @@ def _coerce_string_list(v: Any, *, max_items: int) -> list[str]:
         if len(out) >= max_items:
             break
     return out
+
+
+def _coerce_short_text(v: Any, *, max_len: int) -> str:
+    if isinstance(v, str):
+        return v.strip()[:max_len]
+    return ""

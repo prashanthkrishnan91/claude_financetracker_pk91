@@ -6,13 +6,30 @@ Entry point: uvicorn app.main:app --reload
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
 from .routers import ai, analytics, auth, decisions, deposits, drip, portfolio, positions, prices, recommendations, sync
+
+
+def _configure_yfinance_cache() -> None:
+    """Set a writable yfinance tz-cache path to suppress noisy warnings."""
+    cache_dir = Path(os.getenv("YFINANCE_CACHE_DIR", "/tmp/yfinance-cache"))
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        import yfinance as yf  # lazy optional dependency
+
+        set_cache = getattr(yf, "set_tz_cache_location", None)
+        if callable(set_cache):
+            set_cache(str(cache_dir))
+    except Exception:
+        # Keep startup resilient even when yfinance is unavailable.
+        return
 
 
 @asynccontextmanager
@@ -26,6 +43,7 @@ async def lifespan(app: FastAPI):
     logger = logging.getLogger("app")
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     logger.info(f"Debug mode: {settings.debug}")
+    _configure_yfinance_cache()
 
     yield
 

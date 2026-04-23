@@ -132,11 +132,9 @@ export function useRefreshRecommendations() {
 // spec — 3s cadence strikes a balance between perceived responsiveness and
 // avoiding request storms on slow networks.
 export const AGENT_JOB_POLL_MS = 3000;
-// Give up polling after this many attempts (~2 min) and fall through to the
-// UI's "failed" degraded view. The backend always marks runs terminal, so
-// this is a belt-and-braces timeout against network / CDN caching issues.
-export const AGENT_JOB_MAX_POLLS = 40;
-const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled"]);
+// Max poll duration is 10 minutes.
+export const AGENT_JOB_MAX_POLLS = Math.ceil((10 * 60 * 1000) / AGENT_JOB_POLL_MS);
+const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled", "stale_failed", "no_data"]);
 
 export function useAgentJob(jobId: string | null) {
   return useQuery({

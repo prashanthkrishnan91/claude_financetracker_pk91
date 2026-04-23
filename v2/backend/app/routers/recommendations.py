@@ -86,6 +86,11 @@ async def refresh_recommendations(
         sale_proceeds=payload.sale_proceeds or 0.0,
     )
     if is_new:
+        logger.info(
+            "recommendations.pipeline.dispatched user_id=%s job_id=%s",
+            user.id,
+            job_id,
+        )
         # Hand off to FastAPI BackgroundTasks — fire-and-forget, UI polls status.
         background_tasks.add_task(
             run_agent_pipeline,

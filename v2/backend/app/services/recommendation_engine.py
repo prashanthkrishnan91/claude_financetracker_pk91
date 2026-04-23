@@ -651,6 +651,11 @@ def _resolve_card_analysis_source(
     return "live_llm", False
 
 
+ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress"}
+TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "stale_failed", "no_data"}
+STALE_RUN_MAX_AGE_SECONDS = 600
+
+
 def _agent_run_row_to_status(d: dict) -> AgentRunStatus:
     """Map an ``agent_runs`` row into :class:`AgentRunStatus`.
 
@@ -977,13 +982,16 @@ class RecommendationService:
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0
+        llm_enriched_cards = discarded_llm_calls = 0
         for row in run_lookup.values():
             cm = row.get("cost_metrics") or {}
             attempted_llm_calls += int(cm.get("attempted_llm_calls") or cm.get("actual_llm_calls") or cm.get("total_calls") or 0)
-            successful_llm_calls += int(cm.get("successful_llm_calls") or cm.get("total_calls") or 0)
+            successful_llm_calls += int(cm.get("successful_llm_calls") or 0)
             failed_llm_calls += int(cm.get("failed_llm_calls") or 0)
+            llm_enriched_cards += int(cm.get("llm_enriched_cards") or 0)
+            discarded_llm_calls += int(cm.get("discarded_llm_calls") or 0)
         logger.info(
-            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d fallback_cards=%d reused_cached_cards=%d",
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d",
             self.user_id,
             len(recs),
             len(cards),
@@ -996,6 +1004,8 @@ class RecommendationService:
             attempted_llm_calls,
             successful_llm_calls,
             failed_llm_calls,
+            llm_enriched_cards,
+            discarded_llm_calls,
             fallback_cards,
             reused_cached_cards,
         )
@@ -1025,7 +1035,7 @@ class RecommendationService:
         try:
             recent = (
                 self.client.table("agent_runs")
-                .select("id, status, started_at, finished_at")
+                .select("id, status, started_at, finished_at, updated_at, created_at, heartbeat_at")
                 .eq("user_id", str(self.user_id))
                 .order("started_at", desc=True)
                 .limit(1)
@@ -1037,43 +1047,27 @@ class RecommendationService:
         if recent:
             last = recent[0]
             status = last.get("status")
-            started = last.get("started_at")
-
-            # 1) Stale job recovery: if running >10 min, mark failed and create new
-            if status == "running" and started:
-                if not _within_last(started, seconds=600):
-                    logger.warning(
-                        "Stale job recovery — marking run %s as failed (running >10 min, started %s)",
-                        last["id"], started,
-                    )
+            if status in ACTIVE_RUN_STATUSES:
+                if _is_stale_active_run(last):
                     try:
-                        self.client.table("agent_runs").update({
-                            "status": "failed",
-                            "current_agent": "Failed",
-                            "progress_pct": 100,
-                            "error_message": "Job timeout — running >10 minutes with no progress update",
-                            "summary": "Analysis temporarily unavailable — please retry.",
-                            "finished_at": datetime.now(timezone.utc).isoformat(),
-                        }).eq("id", last["id"]).execute()
-                        logger.info("Stale job recovery completed — id=%s", last["id"])
+                        self._mark_stale_run_failed(last["id"])
+                        logger.info(
+                            "recommendations.queue.stale_active_marked_failed user_id=%s job_id=%s status=%s",
+                            self.user_id,
+                            last["id"],
+                            status,
+                        )
                     except Exception as exc:
-                        logger.warning("Failed to mark stale job failed: %s", exc)
-                    # Fall through to create new run
+                        logger.warning("Failed to mark stale active job failed: %s", exc)
+                    # fall through to create a new run
                 else:
-                    # Running but fresh — single-run lock
                     logger.info(
-                        "Single-run lock hit — reusing in-flight job %s (status=%s)",
-                        last["id"], status,
+                        "recommendations.queue.reuse_active user_id=%s job_id=%s status=%s",
+                        self.user_id,
+                        last["id"],
+                        status,
                     )
                     return last["id"], False
-
-            # 2) Single-run lock (queued): reuse queued job
-            elif status == "queued":
-                logger.info(
-                    "Single-run lock hit — reusing in-flight job %s (status=%s)",
-                    last["id"], status,
-                )
-                return last["id"], False
 
             # 3) Light cache: completed within the last 2 minutes.
             elif status == "completed" and allow_completed_reuse:
@@ -1113,7 +1107,13 @@ class RecommendationService:
             deposit_amount=deposit_amount,
             sale_proceeds=sale_proceeds,
         )
-        return await orch.create_run(), True
+        run_id = await orch.create_run()
+        logger.info(
+            "recommendations.queue.created user_id=%s job_id=%s",
+            self.user_id,
+            run_id,
+        )
+        return run_id, True
 
     async def get_job_status(self, job_id: UUID) -> AgentRunStatus:
         """Fetch the status of an agent run. Used by the UI progress tracker."""
@@ -1136,8 +1136,42 @@ class RecommendationService:
         )
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
-        status = _agent_run_row_to_status(row.data)
+        raw = row.data
+        if raw.get("status") in ACTIVE_RUN_STATUSES and _is_stale_active_run(raw):
+            try:
+                self._mark_stale_run_failed(str(job_id))
+                raw["status"] = "stale_failed"
+                raw["current_agent"] = "Stale run auto-failed"
+                raw["progress_pct"] = 100
+                raw["summary"] = "Previous run got stuck; start a new run."
+                raw["error_message"] = (
+                    raw.get("error_message")
+                    or "Job exceeded stale timeout (>10m without activity)."
+                )
+                raw["finished_at"] = datetime.now(timezone.utc).isoformat()
+            except Exception as exc:
+                logger.warning("Failed stale auto-fail for job %s: %s", job_id, exc)
+                raw["status"] = "failed"
+                raw["summary"] = "Previous run got stuck; start a new run."
+        status = _agent_run_row_to_status(raw)
         return status
+
+    def _mark_stale_run_failed(self, run_id: str) -> None:
+        self._db(
+            "agent_runs.mark_stale_failed",
+            lambda: self.client.table("agent_runs")
+            .update({
+                "status": "stale_failed",
+                "current_agent": "Stale run auto-failed",
+                "progress_pct": 100,
+                "error_message": "Job timeout — no status update for over 10 minutes.",
+                "summary": "Previous run got stuck; start a new run.",
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+            })
+            .eq("id", str(run_id))
+            .eq("user_id", str(self.user_id))
+            .execute(),
+        )
 
     async def get_latest_job(self) -> Optional[AgentRunStatus]:
         """Return the most recent agent run for this user, or None if none exists."""
@@ -1403,3 +1437,22 @@ def _within_last(iso_ts: str, *, seconds: int) -> bool:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - ts) <= timedelta(seconds=seconds)
+
+
+def _latest_run_activity_ts(row: dict[str, Any]) -> str:
+    """Best-effort heartbeat timestamp from an ``agent_runs`` row."""
+    return (
+        row.get("updated_at")
+        or row.get("heartbeat_at")
+        or row.get("started_at")
+        or row.get("created_at")
+        or ""
+    )
+
+
+def _is_stale_active_run(row: dict[str, Any], *, max_age_seconds: int = STALE_RUN_MAX_AGE_SECONDS) -> bool:
+    """True when an active run has no heartbeat/update inside max_age_seconds."""
+    if row.get("status") not in ACTIVE_RUN_STATUSES:
+        return False
+    latest = _latest_run_activity_ts(row)
+    return not _within_last(latest, seconds=max_age_seconds)

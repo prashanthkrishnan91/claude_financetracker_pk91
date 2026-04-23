@@ -50,6 +50,7 @@ export function DataQualityBanner({
   const band = avg !== null ? qualityBandFromAvg(avg) : null;
   const isDegraded = runMode === "DEGRADED";
   const llmCalls = cost?.actual_llm_calls ?? cost?.attempted_llm_calls ?? cost?.total_calls ?? 0;
+  const llmEnriched = cost?.llm_enriched_cards ?? 0;
 
   return (
     <section
@@ -91,9 +92,17 @@ export function DataQualityBanner({
             <span>
               {llmCalls} LLM call{llmCalls === 1 ? "" : "s"} · ${cost.total_cost_usd.toFixed(4)}
             </span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded border border-border uppercase">
+              {llmEnriched} enriched
+            </span>
             {(cost.fallback_cards ?? 0) > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded border border-border uppercase">
                 {cost.fallback_cards} fallback
+              </span>
+            )}
+            {(cost.discarded_llm_calls ?? 0) > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded border border-border uppercase">
+                {cost.discarded_llm_calls} discarded
               </span>
             )}
             {(cost.reused_cached_cards ?? 0) > 0 && (

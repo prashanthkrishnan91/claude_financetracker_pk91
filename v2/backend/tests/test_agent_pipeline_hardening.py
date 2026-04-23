@@ -90,7 +90,10 @@ class TestQueueAgentRunLock:
         )
 
         svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
+        job_id, is_new = await svc.queue_agent_run(
+            deposit_amount=500.0,
+            allow_completed_reuse=True,
+        )
 
         assert job_id == existing_id
         assert is_new is False
@@ -113,7 +116,10 @@ class TestQueueAgentRunLock:
         )
 
         svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
+        job_id, is_new = await svc.queue_agent_run(
+            deposit_amount=500.0,
+            allow_completed_reuse=True,
+        )
 
         assert job_id == existing_id
         assert is_new is False
@@ -137,7 +143,10 @@ class TestQueueAgentRunLock:
         )
 
         svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
+        job_id, is_new = await svc.queue_agent_run(
+            deposit_amount=500.0,
+            allow_completed_reuse=True,
+        )
 
         assert job_id == existing_id
         assert is_new is False

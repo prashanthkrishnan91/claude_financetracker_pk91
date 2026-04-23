@@ -676,9 +676,9 @@ export interface DepositRecommendation {
   target_weight: number;
   rationale: string;
   confidence: number;
-  deposit_date: string;
-  position_size_amount: number | null;
-  position_size_pct: number | null;
+  portfolio_weight?: number;
+  conviction_score?: number;
+  linked_intel?: string;
 }
 
 export interface DepositPlanResult {
@@ -686,6 +686,7 @@ export interface DepositPlanResult {
     total_amount: number;
     strategy: string;
     generated_at: string;
+    intel_summary?: string;
   };
   recommendations: DepositRecommendation[];
   summary: {
@@ -693,24 +694,24 @@ export interface DepositPlanResult {
     total_deployed: number;
     fully_allocated: boolean;
     strategy_mode: string;
-    rotating_pick: string;
+    ranked_candidates: number;
   };
+  funding: {
+    deposit_amount: number;
+    sale_proceeds: number;
+    total_cash: number;
+  };
+  trims: Array<{
+    ticker: string;
+    action: string;
+    tax_note: string;
+    market_note: string;
+  }>;
+  notes: string[];
   debug: {
-    original_plan: {
-      actions: Array<{
-        symbol: string;
-        amount: number;
-        delta_weight: number;
-        deposit_date: string;
-      }>;
-    };
-    personalized_plan: { actions: Array<Record<string, unknown>> };
-    signals: {
-      ai_driven: boolean;
-      insights_count: number;
-      rotating_pick: string;
-      growth_bias: string[];
-      income_trim: string[];
-    };
+    latest_run_id: string | null;
+    latest_run_status: string | null;
+    insights_considered: number;
+    recommendations_considered: number;
   };
 }

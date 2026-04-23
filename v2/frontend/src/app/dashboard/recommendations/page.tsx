@@ -81,21 +81,26 @@ export default function RecommendationsPage() {
   // degraded summary before it disappears.
   useEffect(() => {
     if (!activeJobId || !jobStatus) return;
-    if (!["completed", "failed", "cancelled"].includes(jobStatus.status)) return;
+    if (!["completed", "failed", "cancelled", "stale_failed", "no_data"].includes(jobStatus.status)) return;
     if (finalizedJobRef.current === activeJobId) return;
     finalizedJobRef.current = activeJobId;
     setFinalizingJob(true);
     console.log(`[Intel] Polling stopped — ${jobStatus.status}`);
 
     (async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["recommendations"] }),
-        queryClient.invalidateQueries({ queryKey: ["recommendations", "insights"] }),
-      ]);
-      await Promise.all([
-        queryClient.refetchQueries({ queryKey: ["recommendations"], type: "active" }),
-        queryClient.refetchQueries({ queryKey: ["recommendations", "insights"], type: "active" }),
-      ]);
+      if (jobStatus.status === "completed") {
+        await Promise.all([
+          queryClient.invalidateQueries({ queryKey: ["recommendations"] }),
+          queryClient.invalidateQueries({ queryKey: ["recommendations", "insights"] }),
+        ]);
+        await Promise.all([
+          queryClient.refetchQueries({ queryKey: ["recommendations"], type: "active" }),
+          queryClient.refetchQueries({ queryKey: ["recommendations", "insights"], type: "active" }),
+        ]);
+      }
+      if (jobStatus.status === "stale_failed") {
+        setToast("Previous run got stuck; start a new run");
+      }
       setTimeout(() => {
         setActiveJobId(null);
         setFinalizingJob(false);
@@ -279,6 +284,11 @@ export default function RecommendationsPage() {
                 <EmptyState
                   title="AI agents analyzing..."
                   description="Signals will appear here once the pipeline completes."
+                />
+              ) : jobStatus?.status === "stale_failed" ? (
+                <EmptyState
+                  title="Previous run got stuck"
+                  description="Previous run got stuck; start a new run."
                 />
               ) : jobStatus?.status === "failed" || latestRun?.status === "failed" ? (
                 <EmptyState

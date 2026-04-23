@@ -106,7 +106,7 @@ async def run_agent_pipeline(
         orch = build_orchestrator(user_id, deposit_amount, sale_proceeds)
     except Exception as exc:
         logger.exception("Failed to build orchestrator for run %s", run_id)
-        await _force_fail_run(run_id, str(exc))
+        await _force_fail_run(run_id, str(exc), user_id=user_id)
         return
     try:
         result = await orch.run(run_id)
@@ -115,21 +115,32 @@ async def run_agent_pipeline(
         # Defensive — orch.run has its own try/except, but if BackgroundTasks
         # ever swallows an error below the orchestrator we still mark the row.
         logger.exception("Unhandled error in agent run %s", run_id)
-        await _force_fail_run(run_id, str(exc))
+        await _force_fail_run(run_id, str(exc), user_id=user_id)
 
 
-async def _force_fail_run(run_id: str, error: str) -> None:
+async def _force_fail_run(run_id: str, error: str, *, user_id: UUID | None = None) -> None:
     """Mark an agent_runs row failed with a fallback summary, best-effort."""
     from datetime import datetime, timezone
     try:
         db = get_supabase_client()
-        db.table("agent_runs").update({
+        query = db.table("agent_runs").update({
             "status": "failed",
             "current_agent": "Failed",
             "progress_pct": 100,
             "error_message": error[:500],
             "summary": "Analysis temporarily unavailable — please retry.",
             "finished_at": datetime.now(timezone.utc).isoformat(),
-        }).eq("id", run_id).execute()
+        }).eq("id", run_id)
+        if user_id is not None:
+            query = query.eq("user_id", str(user_id))
+        res = query.select("id").execute()
+        matched_rows = len(res.data or [])
+        logger.info(
+            "agent_run.terminal_update status=failed job_id=%s matched_rows=%d",
+            run_id,
+            matched_rows,
+        )
+        if matched_rows == 0:
+            raise RuntimeError(f"agent_runs terminal failed update matched zero rows for {run_id}")
     except Exception as exc:
         logger.warning("Failed to mark run %s as failed: %s", run_id, exc)

@@ -387,6 +387,8 @@ export interface CostMetricsPayload {
   attempted_llm_calls?: number;
   successful_llm_calls?: number;
   failed_llm_calls?: number;
+  llm_enriched_cards?: number;
+  discarded_llm_calls?: number;
   fallback_cards?: number;
   reused_cached_cards?: number;
   total_cost_usd: number;
@@ -403,7 +405,7 @@ export interface CostMetricsPayload {
 
 export interface AgentRunStatus {
   id: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "stale_failed" | "no_data";
   current_agent: string | null;
   progress_pct: number;
   tickers: string[];

@@ -202,6 +202,8 @@ class AgentOrchestrator:
             "attempted_llm_calls": 0,
             "successful_llm_calls": 0,
             "failed_llm_calls": 0,
+            "llm_enriched_cards": 0,
+            "discarded_llm_calls": 0,
             "fallback_cards": 0,
             "reused_cached_cards": 0,
         }
@@ -1069,9 +1071,8 @@ class AgentOrchestrator:
 
         if tracker is not None and not synthesis.used_fallback:
             tracker.record(kind="synthesis", model=self._llm.model)
-            self._analyst_stage_stats["successful_llm_calls"] += 1
         elif llm_for_call is not None and synthesis.used_fallback:
-            self._analyst_stage_stats["failed_llm_calls"] += 1
+            self._analyst_stage_stats["discarded_llm_calls"] += 1
             logger.warning("analyst_stage.llm_request.failure stage=portfolio_synthesis reason=used_fallback")
 
         logger.info(
@@ -1162,6 +1163,8 @@ class AgentOrchestrator:
         self._analyst_stage_stats["attempted_llm_calls"] += attempted_calls
         self._analyst_stage_stats["successful_llm_calls"] += successful_calls
         self._analyst_stage_stats["failed_llm_calls"] += failed_calls
+        self._analyst_stage_stats["discarded_llm_calls"] += failed_calls
+        self._analyst_stage_stats["llm_enriched_cards"] += successful_calls
         self._analyst_stage_stats["fallback_cards"] += sum(
             1 for v in verdicts.values() if v.used_fallback
         )
@@ -1485,14 +1488,21 @@ class AgentOrchestrator:
             patch["finished_at"] = datetime.now(timezone.utc).isoformat()
         if not patch:
             return
-        self._run_agent_runs_update(run_id, patch)
+        matched_rows = self._run_agent_runs_update(run_id, patch)
+        if status in ("completed", "failed"):
+            logger.info(
+                "agent_run.terminal_update status=%s job_id=%s matched_rows=%d",
+                status,
+                run_id,
+                matched_rows,
+            )
         if status in ("completed", "failed"):
             invalidate_recommendations_aggregate_cache(
                 self.user_id,
                 reason="orchestrator_run_marked_failed",
             )
 
-    def _run_agent_runs_update(self, run_id: str, patch: dict) -> None:
+    def _run_agent_runs_update(self, run_id: str, patch: dict) -> int:
         """Execute the ``agent_runs`` update with Phase 4 + 5 column fallbacks.
 
         Each Phase's new columns can independently be missing on older
@@ -1501,8 +1511,19 @@ class AgentOrchestrator:
         the core fields always land.
         """
         try:
-            self._db("agent_runs.update", lambda: self.db.table("agent_runs").update(patch).eq("id", run_id).execute())
-            return
+            result = self._db(
+                "agent_runs.update",
+                lambda: self.db.table("agent_runs")
+                .update(patch)
+                .eq("id", run_id)
+                .eq("user_id", str(self.user_id))
+                .select("id")
+                .execute(),
+            )
+            matched = len(result.data or [])
+            if matched == 0:
+                raise RuntimeError(f"agent_runs update matched zero rows for run_id={run_id}")
+            return matched
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
             schema_error = (
@@ -1511,7 +1532,7 @@ class AgentOrchestrator:
             )
             if not schema_error:
                 logger.warning("agent_runs update failed: %s", exc)
-                return
+                raise
 
         phase5_cols = {"run_mode", "run_mode_decision", "cost_metrics"}
         phase4_cols = {"portfolio_synthesis", "synthesis_used_fallback"}
@@ -1524,8 +1545,18 @@ class AgentOrchestrator:
             )
             stripped = {k: v for k, v in patch.items() if k not in phase5_cols}
             try:
-                self._db("agent_runs.update.no_phase5", lambda: self.db.table("agent_runs").update(stripped).eq("id", run_id).execute())
-                return
+                result = self._db(
+                    "agent_runs.update.no_phase5",
+                    lambda: self.db.table("agent_runs")
+                    .update(stripped)
+                    .eq("id", run_id)
+                    .eq("user_id", str(self.user_id))
+                    .select("id")
+                    .execute(),
+                )
+                if len(result.data or []) == 0:
+                    raise RuntimeError(f"agent_runs update(no_phase5) matched zero rows for run_id={run_id}")
+                return len(result.data or [])
             except Exception:  # noqa: BLE001 — fall through to Phase-4 strip
                 pass
 
@@ -1540,10 +1571,21 @@ class AgentOrchestrator:
                 if k not in (phase4_cols | phase5_cols)
             }
             try:
-                self._db("agent_runs.update.no_phase4", lambda: self.db.table("agent_runs").update(stripped).eq("id", run_id).execute())
-                return
+                result = self._db(
+                    "agent_runs.update.no_phase4",
+                    lambda: self.db.table("agent_runs")
+                    .update(stripped)
+                    .eq("id", run_id)
+                    .eq("user_id", str(self.user_id))
+                    .select("id")
+                    .execute(),
+                )
+                if len(result.data or []) == 0:
+                    raise RuntimeError(f"agent_runs update(no_phase4) matched zero rows for run_id={run_id}")
+                return len(result.data or [])
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("agent_runs update retry failed: %s", exc2)
+                raise
 
     # ── Mappers ───────────────────────────────────────────────────────────────
 

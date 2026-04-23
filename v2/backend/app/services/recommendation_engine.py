@@ -566,6 +566,8 @@ class RecommendationService:
 
     async def get_insight_cards(self) -> list[InsightCard]:
         """Get all active recommendations as frontend-ready InsightCards."""
+        started = datetime.now(timezone.utc)
+        logger.info("recommendations.aggregate.start user_id=%s", self.user_id)
         recs = (
             self.client.table("recommendations")
             .select("*")
@@ -684,6 +686,16 @@ class RecommendationService:
                 analyst_used_fallback=analyst_fields["used_fallback"],
             ))
 
+        elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+        logger.info(
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d elapsed_ms=%d",
+            self.user_id,
+            len(recs),
+            len(cards),
+            len(positions),
+            len(analyst_lookup),
+            elapsed_ms,
+        )
         return cards
 
     async def queue_agent_run(
@@ -794,6 +806,7 @@ class RecommendationService:
     async def get_job_status(self, job_id: UUID) -> AgentRunStatus:
         """Fetch the status of an agent run. Used by the UI progress tracker."""
         from fastapi import HTTPException
+        logger.info("recommendations.job_status user_id=%s job_id=%s", self.user_id, job_id)
         row = (
             self.client.table("agent_runs")
             .select("*")
@@ -808,6 +821,7 @@ class RecommendationService:
 
     async def get_latest_job(self) -> Optional[AgentRunStatus]:
         """Return the most recent agent run for this user, or None if none exists."""
+        logger.info("recommendations.latest_job user_id=%s", self.user_id)
         rows = (
             self.client.table("agent_runs")
             .select("*")
@@ -906,6 +920,7 @@ class RecommendationService:
 
     async def list_decisions(self, limit: int = 50) -> list[DecisionLogEntry]:
         """List decision log entries."""
+        logger.info("recommendations.decisions user_id=%s limit=%d", self.user_id, limit)
         result = (
             self.client.table("decision_log")
             .select("*")

@@ -84,7 +84,7 @@ export async function GET(req: Request) {
     fetchJson<LatestRun>(`${apiBase}/api/v1/recommendations/jobs/latest`, authHeader),
     fetchJson<InsightSlim[]>(`${apiBase}/api/v1/recommendations/insights/latest`, authHeader),
     fetchJson<PositionSlim[]>(`${apiBase}/api/v1/positions`, authHeader),
-    fetchJson<RecommendationSlim[]>(`${apiBase}/api/v1/recommendations`, authHeader),
+    fetchJson<RecommendationSlim[]>(`${apiBase}/api/v1/recommendations/`, authHeader),
   ]);
 
   const insightsList = Array.isArray(insights) ? insights : [];

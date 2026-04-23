@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -55,6 +56,12 @@ DRIP_YIELD: dict[str, float] = {
     "RIVN": 0.0, "BMWYY": 4.5, "BTC": 0.0, "XRP": 0.0, "KLAR": 0.0,
     "BLSH": 0.0, "STUB": 0.0,
 }
+
+# Aggregate endpoint short-lived cache + in-flight dedupe.
+_AGGREGATE_CACHE_TTL_S = 20
+_aggregate_cache: dict[str, tuple[datetime, list[InsightCard]]] = {}
+_aggregate_inflight: dict[str, asyncio.Future] = {}
+_aggregate_lock = asyncio.Lock()
 
 
 # ── Rec generation (ported from v1 generate_rec) ────────────────────────────
@@ -464,6 +471,71 @@ def _derive_quality_label(score: float) -> str:
     return "LOW"
 
 
+def _derive_sentiment_label(
+    rec: dict[str, Any], analyst_verdict: Optional[dict[str, Any]] = None
+) -> str:
+    """Return Positive/Mixed/Negative/Unavailable from available evidence."""
+    if isinstance(analyst_verdict, dict):
+        text = " ".join(
+            [*(analyst_verdict.get("key_drivers") or []), *(analyst_verdict.get("risks") or [])]
+        ).lower()
+        if any(k in text for k in ("beat", "growth", "improving", "positive", "strong")):
+            return "Positive"
+        if any(k in text for k in ("downgrade", "weak", "decline", "negative", "risk")):
+            return "Negative"
+        if text:
+            return "Mixed"
+
+    score = rec.get("sentiment_score")
+    try:
+        score_f = float(score) if score is not None else None
+    except (TypeError, ValueError):
+        score_f = None
+    if score_f is None:
+        return "Unavailable"
+    if score_f >= 0.2:
+        return "Positive"
+    if score_f <= -0.2:
+        return "Negative"
+    return "Mixed"
+
+
+def _derive_quality_label_from_evidence(
+    *,
+    confidence_score: float,
+    reason_tags: list[str],
+    analyst_fields: dict[str, Any],
+    sentiment_label: str,
+    rec: dict[str, Any],
+) -> str:
+    """Map evidence coverage to HIGH/MEDIUM/LOW more faithfully than conviction-only."""
+    evidence = 0
+    if confidence_score >= 0.7:
+        evidence += 2
+    elif confidence_score >= 0.45:
+        evidence += 1
+    if analyst_fields.get("drivers"):
+        evidence += 1
+    if rec.get("investment_thesis"):
+        evidence += 1
+    if rec.get("technical_signal"):
+        evidence += 1
+    if sentiment_label != "Unavailable":
+        evidence += 1
+    if rec.get("rationale") and "sec filing" in str(rec.get("rationale")).lower():
+        evidence += 1
+    if "fallback_used" in reason_tags:
+        evidence -= 1
+    if "low_data" in reason_tags:
+        evidence -= 1
+
+    if evidence >= 5:
+        return "HIGH"
+    if evidence >= 3:
+        return "MEDIUM"
+    return "LOW"
+
+
 def _derive_reason_tags(rec: dict) -> list[str]:
     """Extract UX reason tags from existing recommendation fields — no extra queries."""
     tags: list[str] = []
@@ -565,7 +637,45 @@ class RecommendationService:
         self._price_service = price_service
 
     async def get_insight_cards(self) -> list[InsightCard]:
-        """Get all active recommendations as frontend-ready InsightCards."""
+        """Get all active recommendations as frontend-ready InsightCards.
+
+        Includes short per-user caching + in-flight coalescing to suppress
+        duplicate aggregate calls from concurrent frontend queries.
+        """
+        key = str(self.user_id)
+        now = datetime.now(timezone.utc)
+        cached = _aggregate_cache.get(key)
+        if cached and (now - cached[0]).total_seconds() <= _AGGREGATE_CACHE_TTL_S:
+            logger.info("recommendations.aggregate.cache_hit user_id=%s", self.user_id)
+            return cached[1]
+
+        async with _aggregate_lock:
+            current = _aggregate_inflight.get(key)
+            if current is not None and not current.done():
+                logger.info("recommendations.aggregate.coalesced user_id=%s", self.user_id)
+                return await current
+            loop = asyncio.get_event_loop()
+            future: asyncio.Future = loop.create_future()
+            _aggregate_inflight[key] = future
+
+        try:
+            cards = await self._compute_insight_cards()
+            _aggregate_cache[key] = (datetime.now(timezone.utc), cards)
+            if not future.done():
+                future.set_result(cards)
+            return cards
+        except BaseException as exc:
+            if not future.done():
+                future.set_exception(exc)
+            raise
+        finally:
+            async with _aggregate_lock:
+                cur = _aggregate_inflight.get(key)
+                if cur is future:
+                    _aggregate_inflight.pop(key, None)
+
+    async def _compute_insight_cards(self) -> list[InsightCard]:
+        """Compute aggregate recommendation cards from DB state."""
         started = datetime.now(timezone.utc)
         logger.info("recommendations.aggregate.start user_id=%s", self.user_id)
         recs = (
@@ -638,9 +748,6 @@ class RecommendationService:
 
             conviction = float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None
             data_confidence_score = _derive_confidence_score(conviction)
-            data_quality_label = _derive_quality_label(data_confidence_score)
-            reason_tags = _derive_reason_tags(rec)
-
             analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
             analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
             analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
@@ -649,6 +756,15 @@ class RecommendationService:
             )
             analyst_fields = _extract_analyst_card_fields(
                 analyst_verdict, analyst_confidence=analyst_confidence,
+            )
+            reason_tags = _derive_reason_tags(rec)
+            sentiment_label = _derive_sentiment_label(rec, analyst_verdict)
+            data_quality_label = _derive_quality_label_from_evidence(
+                confidence_score=data_confidence_score,
+                reason_tags=reason_tags,
+                analyst_fields=analyst_fields,
+                sentiment_label=sentiment_label,
+                rec=rec,
             )
 
             cards.append(InsightCard(
@@ -668,6 +784,7 @@ class RecommendationService:
                 # Agent fields (may be null for legacy rule-based rows)
                 investment_thesis=rec.get("investment_thesis"),
                 sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
+                sentiment_label=sentiment_label,
                 technical_signal=rec.get("technical_signal"),
                 conviction_score=conviction,
                 suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,

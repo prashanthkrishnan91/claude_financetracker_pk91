@@ -33,7 +33,7 @@ AGENT_MODEL = PRIMARY_MODEL
 # Per-call timeout (seconds). 25s matches the reliability spec — gives Claude
 # enough headroom on large portfolios while still bounding pipeline latency.
 PRIMARY_TIMEOUT_S = 25.0
-FALLBACK_TIMEOUT_S = 12.0
+FALLBACK_TIMEOUT_S = 18.0
 
 # Exponential backoff schedule (seconds) for 429 / overloaded responses.
 # Capped at 4 attempts total (initial + 3 retries) so worst-case latency stays
@@ -106,9 +106,9 @@ class LLMClient:
         logger.warning(
             "Fallback → %s (primary failed: %s)", self.fallback_model, err or "no-json"
         )
-        fb_system = _trim_prompt(system, ratio=0.6)
-        fb_user = _trim_prompt(user, ratio=0.6)
-        fb_max_tokens = max(256, min(500, int(max_tokens * 0.6)))
+        fb_system = _trim_prompt(system, ratio=0.8)
+        fb_user = _trim_prompt(user, ratio=0.8)
+        fb_max_tokens = max(320, min(700, int(max_tokens * 0.75)))
         fb_text, fb_err = await self._call_with_backoff(
             model=self.fallback_model,
             system=fb_system,

@@ -38,6 +38,7 @@ from .run_mode import (
     projected_full_mode_cost,
 )
 from .snapshot_store import persist_snapshots
+from .sec_filings import SecFilingSignals, get_sec_filing_signals
 
 __all__ = [
     "MarketSnapshot",
@@ -68,4 +69,6 @@ __all__ = [
     "CostEntry",
     "estimate_cost_usd",
     "projected_full_mode_cost",
+    "SecFilingSignals",
+    "get_sec_filing_signals",
 ]

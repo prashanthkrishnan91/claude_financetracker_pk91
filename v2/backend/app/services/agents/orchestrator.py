@@ -39,6 +39,7 @@ from ..intelligence import (
     classify_run_mode,
     fetch_benchmark_price_action,
     format_thesis,
+    get_sec_filing_signals,
     persist_features,
     persist_snapshots,
     projected_full_mode_cost,
@@ -243,6 +244,7 @@ class AgentOrchestrator:
                 live_prices=live_prices,
                 market_data=market_bundle,
             )
+            await self._attach_sec_filing_intelligence(context)
             timings["build_context_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # Phase 1 — data stabilization. Build a MarketSnapshot per
@@ -809,6 +811,50 @@ class AgentOrchestrator:
         bundle = await self._fetch_market_bundle_for_user()
         return dict(bundle.get("live_prices") or {})
 
+    async def _attach_sec_filing_intelligence(self, context: dict[str, Any]) -> None:
+        """Attach lightweight SEC filing signals to equity entries in-place."""
+        portfolio = context.get("portfolio") or []
+        if not portfolio:
+            return
+        tasks = []
+        tickers: list[str] = []
+        for entry in portfolio:
+            if (entry.get("category") or "").lower() == "crypto":
+                entry["sec_filing"] = {"available": False, "sentiment_label": "Unavailable"}
+                continue
+            ticker = (entry.get("ticker") or "").upper()
+            if not ticker:
+                continue
+            tickers.append(ticker)
+            tasks.append(get_sec_filing_signals(ticker))
+        if not tasks:
+            return
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        by_ticker: dict[str, Any] = {}
+        for t, result in zip(tickers, results):
+            by_ticker[t] = None if isinstance(result, Exception) else result
+        for entry in portfolio:
+            t = (entry.get("ticker") or "").upper()
+            filing = by_ticker.get(t)
+            if not filing:
+                entry["sec_filing"] = {"available": False, "sentiment_label": "Unavailable"}
+                continue
+            entry["sec_filing"] = {
+                "available": filing.available,
+                "summary": filing.filing_summary,
+                "sentiment_label": filing.sentiment_label,
+                "revenue_trend": filing.revenue_trend,
+                "earnings_trend": filing.earnings_trend,
+                "operating_cash_flow_trend": filing.operating_cash_flow_trend,
+                "leverage_liquidity_risk": filing.leverage_liquidity_risk,
+                "guidance_or_risk_change": filing.guidance_or_risk_change,
+            }
+            if (
+                (entry.get("sentiment_label") or "").lower() in {"", "neutral"}
+                and filing.sentiment_label != "Unavailable"
+            ):
+                entry["sentiment_label"] = filing.sentiment_label.lower()
+
     # ── MarketSnapshot stage (Phase 1) ──────────────────────────────────────
 
     async def _build_and_persist_snapshots(
@@ -1361,21 +1407,26 @@ class AgentOrchestrator:
 
     @staticmethod
     def _rationale_line(insight: TickerInsight) -> str:
-        parts = []
-        if insight.sentiment_label:
-            parts.append(
-                f"sent {insight.sentiment_label}"
-                + (f"({insight.sentiment_score})" if insight.sentiment_score is not None else "")
+        sentiment = (insight.sentiment_label or "unavailable").lower()
+        tech = (insight.technical_signal or "NEUTRAL").upper()
+        conv = insight.conviction_score or 0.0
+        if insight.suggested_action == "BUY":
+            line = (
+                f"Attractive setup: sentiment is {sentiment}, technicals are {tech}, "
+                f"and conviction is {abs(conv):.2f}."
             )
-        if insight.technical_signal:
-            parts.append(f"tech {insight.technical_signal}")
-        if insight.fundamental_score is not None:
-            parts.append(f"fund {insight.fundamental_score:+.2f}")
-        if insight.conviction_score is not None:
-            parts.append(f"conviction {insight.conviction_score:+.2f}")
+        elif insight.suggested_action in {"SELL", "TRIM"}:
+            line = (
+                f"Risk-reduction signal: sentiment is {sentiment} with {tech} technicals, "
+                f"so reducing exposure is prudent."
+            )
+        else:
+            line = (
+                f"Lower-confidence hold: evidence is mixed ({sentiment} sentiment, {tech} technicals)."
+            )
         if insight.suggested_allocation > 0:
-            parts.append(f"alloc ${insight.suggested_allocation:.0f}")
-        return " · ".join(parts)
+            line += f" Suggested allocation: about ${insight.suggested_allocation:.0f}."
+        return line
 
     @staticmethod
     def _urgency(insight: TickerInsight) -> int:
@@ -1573,6 +1624,10 @@ def _generate_deterministic_recs(context: dict[str, Any]) -> dict[str, Any]:
         category = entry.get("category") or "Other"
         missing = list(entry.get("missing_fields") or [])
         fund_score = entry.get("fundamental_score")
+        sec_filing = entry.get("sec_filing") or {}
+        sec_sentiment = (sec_filing.get("sentiment_label") or "").lower()
+        if sec_sentiment in {"positive", "negative", "mixed"}:
+            sentiment = sec_sentiment
 
         action, conviction, confidence_label = _map_signals_to_action(
             trend=trend, sentiment=sentiment, technical=tech, cap=cap,
@@ -1581,6 +1636,7 @@ def _generate_deterministic_recs(context: dict[str, Any]) -> dict[str, Any]:
             ticker=ticker, action=action, trend=trend, sentiment=sentiment,
             missing=missing, category=category, completeness=completeness,
             fund_score=fund_score,
+            sec_filing=sec_filing,
         )
 
         cards.append({
@@ -1588,7 +1644,7 @@ def _generate_deterministic_recs(context: dict[str, Any]) -> dict[str, Any]:
             "action": action,
             "confidence": confidence_label,
             "conviction": round(conviction, 2),
-            "sentiment_label": sentiment,
+            "sentiment_label": sentiment if sentiment else "unavailable",
             "sentiment_score": entry.get("sentiment_score"),
             "technical_signal": tech,
             "fundamental_score": fund_score,
@@ -1637,9 +1693,9 @@ def _map_signals_to_action(
         score += 0.4
     elif trend == "down":
         score -= 0.4
-    if sentiment == "bullish":
+    if sentiment in {"bullish", "positive"}:
         score += 0.3
-    elif sentiment == "bearish":
+    elif sentiment in {"bearish", "negative"}:
         score -= 0.3
     if technical == "BUY":
         score += 0.2
@@ -1662,6 +1718,7 @@ def _deterministic_thesis(
     category: str,
     completeness: float,
     fund_score: Any = None,
+    sec_filing: Optional[dict[str, Any]] = None,
 ) -> str:
     """Produce a per-ticker thesis string from available signals.
 
@@ -1694,6 +1751,10 @@ def _deterministic_thesis(
     except (TypeError, ValueError):
         fs = None
 
+    filing_note = ""
+    if isinstance(sec_filing, dict) and sec_filing.get("available"):
+        filing_note = str(sec_filing.get("summary") or "")
+
     if action == "BUY" and category == "Crypto":
         s2 = (
             f"Trend signals support cautious accumulation ({gap_note}) — "
@@ -1714,6 +1775,8 @@ def _deterministic_thesis(
             f"No strong directional signal detected ({gap_note}) — "
             "maintaining HOLD as watchlist position."
         )
+    if filing_note:
+        return f"{s1} {s2} SEC filing context: {filing_note}"
     return f"{s1} {s2}"
 
 

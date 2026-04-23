@@ -27,15 +27,21 @@ from ..ai.context_builder import build_portfolio_context, build_context_from_inp
 from ..ai import io_layer
 from ..intelligence import (
     AnalystVerdict,
+    ModeDecision,
     PortfolioSynthesis,
+    RunCostTracker,
+    RunMode,
     action_to_suggested_action,
     analyze_portfolio,
+    build_degraded_verdicts,
     build_features,
     build_market_snapshots,
+    classify_run_mode,
     fetch_benchmark_price_action,
     format_thesis,
     persist_features,
     persist_snapshots,
+    projected_full_mode_cost,
     synthesize_portfolio,
 )
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
@@ -265,6 +271,24 @@ class AgentOrchestrator:
             )
             timings["features_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
+            # Phase 5 — run-mode classification. Based on snapshots
+            # because features propagate snapshot quality; snapshots
+            # are the authoritative source. Drives DEGRADED-mode
+            # cost control for the analyst + synthesis stages below.
+            self._mode_decision = classify_run_mode(
+                getattr(self, "_snapshots", {}).values()
+            )
+            self._cost_tracker = RunCostTracker(mode=self._mode_decision.mode)
+            logger.info(
+                "run_mode decision — mode=%s avg_quality=%.2f "
+                "insufficient=%d/%d reason=%s",
+                self._mode_decision.mode.value,
+                self._mode_decision.avg_quality,
+                self._mode_decision.insufficient_count,
+                self._mode_decision.total_tickers,
+                self._mode_decision.reason,
+            )
+
             # Safety guard: empty portfolio → no LLM call.
             if not context.get("portfolio"):
                 await self._update_run(
@@ -366,7 +390,29 @@ class AgentOrchestrator:
                 summary=final_summary,
                 allocation=allocation_map,
                 synthesis=getattr(self, "_synthesis", None),
+                mode_decision=getattr(self, "_mode_decision", None),
+                cost_tracker=getattr(self, "_cost_tracker", None),
             )
+            tracker = getattr(self, "_cost_tracker", None)
+            decision = getattr(self, "_mode_decision", None)
+            if tracker is not None and decision is not None:
+                projected_full = projected_full_mode_cost(
+                    tracker,
+                    ticker_count=decision.total_tickers or 1,
+                    model=self._llm.model,
+                )
+                savings_pct = 0.0
+                if projected_full > 0:
+                    savings_pct = (
+                        (projected_full - tracker.total_cost_usd)
+                        / projected_full * 100
+                    )
+                logger.info(
+                    "cost_metrics — mode=%s llm_calls=%d est_cost_usd=%.4f "
+                    "projected_full_usd=%.4f savings=%.1f%%",
+                    decision.mode.value, tracker.total_calls,
+                    tracker.total_cost_usd, projected_full, savings_pct,
+                )
             timings["total_ms"] = round((time.perf_counter() - run_start) * 1000, 1)
             run_completeness = float(
                 (context.get("data_quality") or {}).get("completeness_score") or 1.0
@@ -916,6 +962,16 @@ class AgentOrchestrator:
         snapshots = getattr(self, "_snapshots", {}) or {}
         features = getattr(self, "_features", {}) or {}
         verdicts = getattr(self, "_verdicts", {}) or {}
+        decision: Optional[ModeDecision] = getattr(self, "_mode_decision", None)
+        tracker: Optional[RunCostTracker] = getattr(self, "_cost_tracker", None)
+
+        # Phase 5 — DEGRADED mode forces the deterministic synthesis
+        # path. Zero LLM calls on the synthesis stage; the cost tracker
+        # records zero and the projected savings calculation stays
+        # accurate.
+        llm_for_call = self._llm if self._llm.api_key else None
+        if decision is not None and decision.mode == RunMode.DEGRADED:
+            llm_for_call = None
 
         synthesis = await synthesize_portfolio(
             verdicts=verdicts,
@@ -923,18 +979,29 @@ class AgentOrchestrator:
             features=features,
             positions=positions,
             macro=macro,
-            llm=self._llm if self._llm.api_key else None,
+            llm=llm_for_call,
         )
+
+        # Append DEGRADED explanation to the summary so the UI sees it.
+        if decision is not None and decision.mode == RunMode.DEGRADED and decision.explanation:
+            degraded_tag = " " + decision.explanation
+            if degraded_tag.strip() not in (synthesis.summary or ""):
+                synthesis.summary = ((synthesis.summary or "")
+                                     + degraded_tag)[:800]
+
+        if tracker is not None and not synthesis.used_fallback:
+            tracker.record(kind="synthesis", model=self._llm.model)
 
         logger.info(
             "portfolio_synthesis done — bias=%s themes=%d risks=%d "
-            "overexposure=%d rebalance=%d fallback=%s",
+            "overexposure=%d rebalance=%d fallback=%s mode=%s",
             synthesis.portfolio_bias,
             len(synthesis.key_themes),
             len(synthesis.risk_concentrations),
             len(synthesis.overexposure_flags),
             len(synthesis.rebalancing_suggestions),
             synthesis.used_fallback,
+            decision.mode.value if decision else "unknown",
         )
         return synthesis
 
@@ -946,6 +1013,10 @@ class AgentOrchestrator:
         Returns ``{ticker: AnalystVerdict}``. Every ticker is guaranteed
         to have an entry — unrecoverable failures produce an
         ``INSUFFICIENT_DATA`` verdict, never an empty map.
+
+        Phase 5: when the run-mode decision is DEGRADED, the LLM stage
+        is skipped entirely. Each ticker still gets a deterministic
+        AnalystVerdict so downstream stages see the spec-mandated shape.
         """
         snapshots = getattr(self, "_snapshots", {}) or {}
         features = getattr(self, "_features", {}) or {}
@@ -955,6 +1026,16 @@ class AgentOrchestrator:
                 len(snapshots), len(features),
             )
             return {}
+
+        decision: Optional[ModeDecision] = getattr(self, "_mode_decision", None)
+        if decision is not None and decision.mode == RunMode.DEGRADED:
+            verdicts = build_degraded_verdicts(snapshots, decision=decision)
+            logger.info(
+                "per-ticker analyst DEGRADED — tickers=%d reason=%s "
+                "(0 LLM calls made)",
+                len(verdicts), decision.reason,
+            )
+            return verdicts
 
         if not self._llm.api_key:
             logger.warning(
@@ -976,10 +1057,15 @@ class AgentOrchestrator:
 
         action_counts: dict[str, int] = {}
         fallback_count = 0
+        tracker: Optional[RunCostTracker] = getattr(self, "_cost_tracker", None)
         for ticker, v in verdicts.items():
             action_counts[v.action] = action_counts.get(v.action, 0) + 1
             if v.used_fallback:
                 fallback_count += 1
+            # Record cost only for calls that actually hit the LLM. Bypass /
+            # quality-gated fallbacks stay at zero cost.
+            if tracker is not None and not v.used_fallback:
+                tracker.record(kind="analyst", model=self._llm.model)
             logger.info(
                 "analyst ticker=%s action=%s conviction=%.2f confidence=%.2f "
                 "drivers=%d risks=%d fallback=%s",
@@ -1191,6 +1277,8 @@ class AgentOrchestrator:
         error_message: Optional[str] = None,
         allocation: Optional[dict] = None,
         synthesis: Optional[PortfolioSynthesis] = None,
+        mode_decision: Optional[ModeDecision] = None,
+        cost_tracker: Optional[RunCostTracker] = None,
     ) -> None:
         patch: dict = {}
         if status is not None:
@@ -1210,42 +1298,70 @@ class AgentOrchestrator:
         if synthesis is not None:
             patch["portfolio_synthesis"] = synthesis.to_dict()
             patch["synthesis_used_fallback"] = bool(synthesis.used_fallback)
+        # Phase 5 — run-mode classification + cost metrics per run.
+        if mode_decision is not None:
+            patch["run_mode"] = mode_decision.mode.value
+            patch["run_mode_decision"] = mode_decision.to_dict()
+        if cost_tracker is not None:
+            patch["cost_metrics"] = cost_tracker.to_dict()
         if status in ("completed", "failed"):
             patch["finished_at"] = datetime.now(timezone.utc).isoformat()
         if not patch:
             return
+        self._run_agent_runs_update(run_id, patch)
+
+    def _run_agent_runs_update(self, run_id: str, patch: dict) -> None:
+        """Execute the ``agent_runs`` update with Phase 4 + 5 column fallbacks.
+
+        Each Phase's new columns can independently be missing on older
+        deployments. On a schema-cache / missing-column error, drop the
+        Phase-5 columns first, then Phase-4, retrying at most twice so
+        the core fields always land.
+        """
         try:
             self.db.table("agent_runs").update(patch).eq("id", run_id).execute()
             return
-        except Exception as exc:
-            # Tolerate the Phase-4 columns being missing. Single WARN +
-            # retry with the new fields stripped so pre-migration-011
-            # deployments still land the core update.
+        except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
-            phase4_missing = (
-                "portfolio_synthesis" in msg
-                or "synthesis_used_fallback" in msg
-                or "schema cache" in msg
-                or "does not exist" in msg
+            schema_error = (
+                "schema cache" in msg or "does not exist" in msg
+                or "column" in msg
             )
-            if phase4_missing and ("portfolio_synthesis" in patch
-                                    or "synthesis_used_fallback" in patch):
-                logger.warning(
-                    "agent_runs missing Phase 4 columns — retrying without "
-                    "portfolio_synthesis (apply migrations/"
-                    "011_portfolio_synthesis.sql). err=%s", exc,
-                )
-                stripped = {
-                    k: v for k, v in patch.items()
-                    if k not in {"portfolio_synthesis", "synthesis_used_fallback"}
-                }
-                try:
-                    self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
-                    return
-                except Exception as exc2:  # noqa: BLE001
-                    logger.warning("agent_runs update retry failed: %s", exc2)
-                    return
-            logger.warning("agent_runs update failed: %s", exc)
+            if not schema_error:
+                logger.warning("agent_runs update failed: %s", exc)
+                return
+
+        phase5_cols = {"run_mode", "run_mode_decision", "cost_metrics"}
+        phase4_cols = {"portfolio_synthesis", "synthesis_used_fallback"}
+
+        if any(c in patch for c in phase5_cols):
+            logger.warning(
+                "agent_runs missing Phase 5 columns — retrying without "
+                "run_mode/cost_metrics (apply migrations/"
+                "012_run_mode_cost.sql).",
+            )
+            stripped = {k: v for k, v in patch.items() if k not in phase5_cols}
+            try:
+                self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
+                return
+            except Exception:  # noqa: BLE001 — fall through to Phase-4 strip
+                pass
+
+        if any(c in patch for c in phase4_cols):
+            logger.warning(
+                "agent_runs missing Phase 4 columns — retrying without "
+                "portfolio_synthesis (apply migrations/"
+                "011_portfolio_synthesis.sql).",
+            )
+            stripped = {
+                k: v for k, v in patch.items()
+                if k not in (phase4_cols | phase5_cols)
+            }
+            try:
+                self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
+                return
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning("agent_runs update retry failed: %s", exc2)
 
     # ── Mappers ───────────────────────────────────────────────────────────────
 

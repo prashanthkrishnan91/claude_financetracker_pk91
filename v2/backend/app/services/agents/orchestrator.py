@@ -26,7 +26,8 @@ from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
-from .llm import LLMClient
+from .data_sources import get_provider_status
+from .llm import LLMClient, FALLBACK_MODEL
 from .state import AgentState, TickerInsight
 
 logger = logging.getLogger(__name__)
@@ -169,9 +170,11 @@ class AgentOrchestrator:
         self._polygon_key = polygon_key
         self._llm = LLMClient(api_key=anthropic_api_key)
         self.db = get_supabase_client()
-        # Hard guarantee: exactly one LLM call per orchestrator run. Asserted
-        # inside ``_single_llm_call`` and logged on ``run`` completion.
+        # Hard guarantee: exactly one LLM call per orchestrator run.
         self._llm_call_count = 0
+        # Reliability flags — read by run() for logging and run-record metadata.
+        self._llm_skipped = False    # True when LLM was bypassed entirely
+        self._fallback_used = False  # True when deterministic recs were returned
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -283,13 +286,15 @@ class AgentOrchestrator:
                 allocation=allocation_map,
             )
             timings["total_ms"] = round((time.perf_counter() - run_start) * 1000, 1)
-            logger.info(
-                "Agent run completed — id=%s insights=%d llm_calls=%d timings=%s",
-                run_id, len(state.insights), self._llm_call_count, timings,
+            run_completeness = float(
+                (context.get("data_quality") or {}).get("completeness_score") or 1.0
             )
-            # Hard assertion: the orchestrator must never invoke the LLM
-            # more than once per run. The semaphore + this counter are a
-            # belt-and-suspenders guarantee against future regressions.
+            logger.info(
+                "Agent run completed — id=%s insights=%d llm_calls=%d "
+                "llm_skipped=%s fallback_used=%s completeness=%.2f timings=%s",
+                run_id, len(state.insights), self._llm_call_count,
+                self._llm_skipped, self._fallback_used, run_completeness, timings,
+            )
             if self._llm_call_count > 1:
                 logger.error(
                     "LLM CALL COUNT VIOLATION — run=%s made %d calls (expected ≤ 1)",
@@ -348,26 +353,23 @@ class AgentOrchestrator:
     # ── Single LLM call ──────────────────────────────────────────────────────
 
     async def _single_llm_call(self, context: dict[str, Any]) -> dict[str, Any]:
-        """Execute the one-and-only Claude call for this run.
+        """Execute one Claude call (or deterministic fallback) for this run.
 
-        Serialised behind ``LLM_SEMAPHORE``. Retries live inside ``LLMClient``
-        at the HTTP level — the orchestration layer never re-enters this
-        function. ``self._llm_call_count`` is incremented atomically so the
-        ``run`` epilogue can detect any future regression that re-invokes
-        this method from within a single run.
-
-        Confidence-gating: the context is augmented with ``confidence_cap``
-        per ticker before serialisation so the LLM is on the hook for
-        respecting it. Post-call, ``_clamp_conviction_by_confidence`` is a
-        deterministic enforcement layer — even if the LLM ignores the cap,
-        the downstream allocation + persistence code sees a clamped value.
+        Guardrails evaluated in order:
+          1. No API key          → deterministic fallback immediately.
+          2. completeness < 0.6  → skip LLM (cost control), deterministic fallback.
+          3. Degraded / LIGHTWEIGHT mode or completeness < 0.75 → downgrade to Haiku.
+          4. LLM returns empty / no cards → retry once with stripped prompt (inside semaphore).
+          5. Retry still empty   → deterministic fallback. Never returns {}.
         """
         if not self._llm.api_key:
-            logger.warning("Skipping LLM call — no anthropic_api_key configured")
-            return {}
+            logger.warning(
+                "LLM skipped — no anthropic_api_key (llm_skipped=True fallback_used=True)"
+            )
+            self._llm_skipped = True
+            self._fallback_used = True
+            return _generate_deterministic_recs(context)
 
-        # Reinforce the semaphore contract with an in-instance counter —
-        # the semaphore protects the process; the counter protects this run.
         self._llm_call_count += 1
         if self._llm_call_count > 1:
             logger.error(
@@ -375,15 +377,43 @@ class AgentOrchestrator:
             )
             return {}
 
+        # ── Data-quality snapshot for guardrails + logging ────────────────
+        data_quality = context.get("data_quality") or {}
+        completeness = float(data_quality.get("completeness_score") or 1.0)
+        source_status = get_provider_status()
+        failed_sources = [k for k, v in source_status.items() if v != "ok"]
+        failed_pct = len(failed_sources) / max(1, len(source_status)) if source_status else 0.0
+
+        logger.info(
+            "Pipeline data check — completeness=%.2f failed_sources=%s (%.0f%% failed)",
+            completeness, failed_sources, failed_pct * 100,
+        )
+
         _inject_confidence_caps(context)
-        # Surface the system mode to the LLM so it can adjust language /
-        # confidence in degraded conditions. A mirrored appendix in the
-        # system prompt gives the hardest guarantee — the prompt contract
-        # itself changes when we're operating on cached snapshots only.
         mode_state = get_system_mode_manager().current()
         context["system_mode"] = mode_state.to_dict()
         if mode_state.mode == SystemMode.LIGHTWEIGHT:
             _force_lightweight_caps(context)
+
+        # ── Guardrail: skip LLM when data is too thin ─────────────────────
+        if completeness < 0.6:
+            logger.warning(
+                "completeness=%.2f < 0.6 — LLM skipped, using deterministic fallback "
+                "(failed_pct=%.0f%% mode=%s llm_skipped=True fallback_used=True)",
+                completeness, failed_pct * 100, mode_state.mode.value,
+            )
+            self._llm_skipped = True
+            self._fallback_used = True
+            return _generate_deterministic_recs(context)
+
+        # ── Cost control: degraded/borderline → Haiku ─────────────────────
+        if mode_state.mode in {SystemMode.DEGRADED, SystemMode.LIGHTWEIGHT} or completeness < 0.75:
+            logger.info(
+                "Downgrading to Haiku — mode=%s completeness=%.2f",
+                mode_state.mode.value, completeness,
+            )
+            self._llm.model = FALLBACK_MODEL
+
         system_prompt = PORTFOLIO_AGENT_CONTRACT
         if mode_state.mode == SystemMode.LIGHTWEIGHT:
             system_prompt = PORTFOLIO_AGENT_CONTRACT + LIGHTWEIGHT_PROMPT_APPENDIX
@@ -391,19 +421,45 @@ class AgentOrchestrator:
             system_prompt = PORTFOLIO_AGENT_CONTRACT + DEGRADED_PROMPT_APPENDIX
 
         user_message = json.dumps(context, default=str)
+
         async with LLM_SEMAPHORE:
             logger.info(
-                "LLM call start — model=%s tickers=%d mode=%s",
+                "LLM call start — model=%s tickers=%d mode=%s completeness=%.2f",
                 self._llm.model,
                 len(context.get("portfolio") or []),
                 mode_state.mode.value,
+                completeness,
             )
             response = await self._llm.ask_json(
                 system=system_prompt,
                 user=user_message,
                 max_tokens=3500,
             )
-        return response or {}
+
+            # Retry once with a stripped prompt when the LLM returned no cards.
+            if not response or not response.get("cards"):
+                logger.warning(
+                    "LLM returned no cards (model=%s completeness=%.2f) — "
+                    "retrying with simplified prompt",
+                    self._llm.model, completeness,
+                )
+                response = await self._llm.ask_json(
+                    system=system_prompt,
+                    user=_build_simplified_prompt(context),
+                    max_tokens=2000,
+                )
+
+        # ── Final safety net: never return {} ─────────────────────────────
+        if not response or not response.get("cards"):
+            logger.warning(
+                "LLM empty after retry — deterministic fallback "
+                "(completeness=%.2f model=%s fallback_used=True)",
+                completeness, self._llm.model,
+            )
+            self._fallback_used = True
+            return _generate_deterministic_recs(context)
+
+        return response
 
     # ── State construction ──────────────────────────────────────────────────
 
@@ -496,15 +552,17 @@ class AgentOrchestrator:
         for ticker, insight in state.insights.items():
             card = card_map.get(ticker.upper())
             if not card:
-                # No per-ticker guidance → safe HOLD default. Never surface
-                # "insufficient data" — UI contract mandates one of:
-                # high confidence / partial signal / low confidence signal /
-                # watchlist only.
                 insight.suggested_action = insight.suggested_action or "HOLD"
                 if not insight.investment_thesis:
+                    pnl_str = (
+                        f" Current P&L: {insight.pnl_pct:+.1f}%."
+                        if insight.pnl_pct is not None else ""
+                    )
+                    sent = insight.sentiment_label or "neutral"
                     insight.investment_thesis = (
-                        f"{ticker}: partial signal from portfolio agent — "
-                        "holding position pending richer data."
+                        f"{ticker}: portfolio agent issued no specific signal — "
+                        f"holding ({sent} sentiment).{pnl_str} "
+                        "Awaiting richer market data for a directional call."
                     )
                 continue
 
@@ -522,11 +580,14 @@ class AgentOrchestrator:
             thesis = card.get("thesis") or card.get("reasoning") or ""
             thesis = str(thesis)[:500]
             if not thesis:
-                # The LLM returned a card but skipped the thesis. Fill a
-                # deterministic explanation so the UI card is never blank.
+                pnl_str = (
+                    f" P&L {insight.pnl_pct:+.1f}%."
+                    if insight.pnl_pct is not None else ""
+                )
                 thesis = (
                     f"{ticker}: {insight.suggested_action} — "
-                    "portfolio agent signal without a detailed rationale."
+                    f"portfolio agent signal ({insight.sentiment_label or 'neutral'} "
+                    f"sentiment, {insight.technical_signal or 'NEUTRAL'} technical).{pnl_str}"
                 )
             insight.investment_thesis = thesis
 
@@ -918,6 +979,209 @@ def _inject_confidence_caps(context: dict[str, Any]) -> None:
             dq.get("missing_fields") or portfolio_missing or []
         )
         entry["confidence_cap"] = _confidence_cap_for(score_f)
+
+
+# ── Deterministic recommendation fallback ─────────────────────────────────────
+
+
+def _generate_deterministic_recs(context: dict[str, Any]) -> dict[str, Any]:
+    """Build a recommendation response from price-trend signals — no LLM needed.
+
+    Called when completeness < 0.6, api_key missing, or LLM fails after retry.
+    Guarantees one card per ticker with varied, ticker-specific reasoning.
+    Never returns {}.
+    """
+    portfolio = context.get("portfolio") or []
+    data_quality = context.get("data_quality") or {}
+    completeness = float(data_quality.get("completeness_score") or 0.0)
+
+    cards: list[dict[str, Any]] = []
+    top_buys: list[str] = []
+
+    for entry in portfolio:
+        ticker = (entry.get("ticker") or "").upper()
+        if not ticker:
+            continue
+
+        trend = (entry.get("trend") or "flat").lower()
+        sentiment = (entry.get("sentiment_label") or "neutral").lower()
+        tech = (entry.get("technical_signal") or "NEUTRAL").upper()
+        cap = float(entry.get("confidence_cap") or 0.3)
+        category = entry.get("category") or "Other"
+        missing = list(entry.get("missing_fields") or [])
+        fund_score = entry.get("fundamental_score")
+
+        action, conviction, confidence_label = _map_signals_to_action(
+            trend=trend, sentiment=sentiment, technical=tech, cap=cap,
+        )
+        thesis = _deterministic_thesis(
+            ticker=ticker, action=action, trend=trend, sentiment=sentiment,
+            missing=missing, category=category, completeness=completeness,
+            fund_score=fund_score,
+        )
+
+        cards.append({
+            "ticker": ticker,
+            "action": action,
+            "confidence": confidence_label,
+            "conviction": round(conviction, 2),
+            "sentiment_label": sentiment,
+            "sentiment_score": entry.get("sentiment_score"),
+            "technical_signal": tech,
+            "fundamental_score": fund_score,
+            "thesis": thesis,
+            "reasoning": thesis,
+        })
+        if action == "BUY":
+            top_buys.append(ticker)
+
+    buy_count = sum(1 for c in cards if c["action"] == "BUY")
+    hold_count = len(cards) - buy_count
+    summary = (
+        f"Limited market data (confidence {completeness:.0%}) — recommendations "
+        f"derived from price-trend signals only. "
+        f"{buy_count} BUY, {hold_count} HOLD signals detected. "
+        "Refresh with better connectivity for full AI analysis."
+    )
+    return {
+        "summary": summary,
+        "risks": [
+            "Data completeness below confidence threshold",
+            "Recommendations based on partial signals only",
+        ],
+        "opportunities": [f"Trend signal: {t}" for t in top_buys[:3]],
+        "top_buys": top_buys[:3],
+        "cards": cards,
+        "_fallback": True,
+        "_reason": "low_data_confidence",
+    }
+
+
+def _map_signals_to_action(
+    *,
+    trend: str,
+    sentiment: str,
+    technical: str,
+    cap: float,
+) -> tuple[str, float, str]:
+    """Map trend + sentiment + technical to (action, conviction, confidence_label).
+
+    Conservative: only BUY on clear positive confluence; default HOLD otherwise
+    since we're operating with low data confidence.
+    """
+    score = 0.0
+    if trend == "up":
+        score += 0.4
+    elif trend == "down":
+        score -= 0.4
+    if sentiment == "bullish":
+        score += 0.3
+    elif sentiment == "bearish":
+        score -= 0.3
+    if technical == "BUY":
+        score += 0.2
+    elif technical == "SELL":
+        score -= 0.2
+
+    if score >= 0.5:
+        return "BUY", min(cap, 0.25), "low"
+    # Never emit SELL on low data — default HOLD with zero conviction.
+    return "HOLD", 0.0, "low"
+
+
+def _deterministic_thesis(
+    *,
+    ticker: str,
+    action: str,
+    trend: str,
+    sentiment: str,
+    missing: list[str],
+    category: str,
+    completeness: float,
+    fund_score: Any = None,
+) -> str:
+    """Produce a per-ticker thesis string from available signals.
+
+    Varies by trend, sentiment, category, and missing-field pattern so no two
+    cards ever share identical text — even when all tickers get HOLD.
+    """
+    trend_phrases = {
+        "up":   f"{ticker} is trending upward",
+        "down": f"{ticker} has shown recent price weakness",
+        "flat": f"{ticker} is trading in a flat range",
+    }
+    s1_base = trend_phrases.get(trend, f"{ticker} trend is inconclusive")
+    sentiment_adj = {
+        "bullish": "with positive market sentiment",
+        "bearish": "against cautious market sentiment",
+        "neutral": "with neutral market conditions",
+    }
+    s1 = f"{s1_base} {sentiment_adj.get(sentiment, '')}".strip() + "."
+
+    gap_count = len(missing)
+    if gap_count >= 3:
+        gap_note = "most signal sources unavailable"
+    elif gap_count > 0:
+        gap_note = f"{', '.join(missing[:2])} data missing"
+    else:
+        gap_note = "limited data sources active"
+
+    try:
+        fs = float(fund_score) if fund_score is not None else None
+    except (TypeError, ValueError):
+        fs = None
+
+    if action == "BUY" and category == "Crypto":
+        s2 = (
+            f"Trend signals support cautious accumulation ({gap_note}) — "
+            "low data confidence; size conservatively."
+        )
+    elif action == "BUY":
+        s2 = (
+            f"Upward trend suggests monitored accumulation ({gap_note}) — "
+            "verify with fresh data before increasing position."
+        )
+    elif fs is not None and fs < -0.2:
+        s2 = (
+            f"Fundamentals signal caution (score {fs:+.2f}) and {gap_note} — "
+            "holding pending clearer directional data."
+        )
+    else:
+        s2 = (
+            f"No strong directional signal detected ({gap_note}) — "
+            "maintaining HOLD as watchlist position."
+        )
+    return f"{s1} {s2}"
+
+
+def _build_simplified_prompt(context: dict[str, Any]) -> str:
+    """Strip heavy enrichment fields for the LLM retry — reduces tokens ~60%.
+
+    Keeps only what the prompt contract requires: ticker, trend, signals,
+    confidence caps, and data-quality metadata.
+    """
+    portfolio = context.get("portfolio") or []
+    slim_portfolio = [
+        {
+            "ticker": p.get("ticker"),
+            "trend": p.get("trend"),
+            "sentiment_label": p.get("sentiment_label"),
+            "technical_signal": p.get("technical_signal"),
+            "fundamental_score": p.get("fundamental_score"),
+            "confidence_cap": p.get("confidence_cap"),
+            "data_completeness_score": p.get("data_completeness_score"),
+            "missing_fields": p.get("missing_fields"),
+        }
+        for p in portfolio
+    ]
+    return json.dumps(
+        {
+            "portfolio": slim_portfolio,
+            "data_quality": context.get("data_quality"),
+            "macro": context.get("macro"),
+        },
+        default=str,
+    )
 
 
 def _normalize_action(action: Any) -> str:

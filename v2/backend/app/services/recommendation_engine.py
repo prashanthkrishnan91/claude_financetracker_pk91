@@ -437,6 +437,55 @@ Return ONLY this valid JSON structure, no other text:
     }
 
 
+# ── Data-quality UX helpers ──────────────────────────────────────────────────
+
+
+def _derive_confidence_score(conviction: Optional[float]) -> float:
+    """Map a conviction score to a data-confidence proxy (0–1).
+
+    Conviction is capped by completeness at write-time, so its magnitude is a
+    reliable proxy for how much data backed the recommendation.
+    """
+    if conviction is None:
+        return 0.3
+    abs_c = abs(conviction)
+    if abs_c >= 0.6:
+        return 0.85
+    if abs_c >= 0.3:
+        return 0.55
+    return 0.3
+
+
+def _derive_quality_label(score: float) -> str:
+    if score >= 0.7:
+        return "HIGH"
+    if score >= 0.45:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _derive_reason_tags(rec: dict) -> list[str]:
+    """Extract UX reason tags from existing recommendation fields — no extra queries."""
+    tags: list[str] = []
+    thesis = (rec.get("investment_thesis") or "").lower()
+    detail = (rec.get("detail") or "").lower()
+
+    if any(kw in thesis for kw in ("fallback", "low data confidence", "deterministic")):
+        tags.append("fallback_used")
+    if any(kw in thesis for kw in ("low confidence", "low data", "watchlist", "missing")):
+        tags.append("low_data")
+    if any(kw in detail for kw in ("unavailable", "api", "limited data")):
+        tags.append("api_failure")
+    if not tags:
+        conviction = rec.get("conviction_score")
+        try:
+            if conviction is not None and abs(float(conviction)) < 0.3:
+                tags.append("low_conviction")
+        except (TypeError, ValueError):
+            pass
+    return tags
+
+
 # ── Service class ────────────────────────────────────────────────────────────
 
 class RecommendationService:
@@ -491,6 +540,11 @@ class RecommendationService:
             if price and avg_cost > 0:
                 pnl_pct = round((price - avg_cost) / avg_cost * 100, 2)
 
+            conviction = float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None
+            data_confidence_score = _derive_confidence_score(conviction)
+            data_quality_label = _derive_quality_label(data_confidence_score)
+            reason_tags = _derive_reason_tags(rec)
+
             cards.append(InsightCard(
                 id=rec["id"],
                 ticker=ticker,
@@ -509,10 +563,14 @@ class RecommendationService:
                 investment_thesis=rec.get("investment_thesis"),
                 sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
                 technical_signal=rec.get("technical_signal"),
-                conviction_score=float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None,
+                conviction_score=conviction,
                 suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,
                 agent_run_id=rec.get("agent_run_id"),
                 what_changed=rec.get("what_changed"),
+                # Data-quality UX fields
+                data_confidence_score=data_confidence_score,
+                data_quality_label=data_quality_label,
+                reason_tags=reason_tags,
             ))
 
         return cards

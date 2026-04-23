@@ -30,10 +30,10 @@ FALLBACK_MODEL = "claude-haiku-4-5-20251001"
 # Back-compat alias used by existing imports.
 AGENT_MODEL = PRIMARY_MODEL
 
-# Per-call timeout (seconds). Sonnet calls should resolve in <8s; 12s gives
-# headroom under load without letting a single call stall the pipeline.
-PRIMARY_TIMEOUT_S = 12.0
-FALLBACK_TIMEOUT_S = 10.0
+# Per-call timeout (seconds). 25s matches the reliability spec — gives Claude
+# enough headroom on large portfolios while still bounding pipeline latency.
+PRIMARY_TIMEOUT_S = 25.0
+FALLBACK_TIMEOUT_S = 12.0
 
 # Exponential backoff schedule (seconds) for 429 / overloaded responses.
 # Capped at 4 attempts total (initial + 3 retries) so worst-case latency stays

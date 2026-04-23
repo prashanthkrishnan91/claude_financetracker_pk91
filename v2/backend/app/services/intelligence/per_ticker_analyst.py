@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_ACTIONS = {"BUY", "HOLD", "REDUCE", "INSUFFICIENT_DATA"}
 INSUFFICIENT_DATA_VERDICT_MARKER = "INSUFFICIENT_DATA"
+ANALYST_GENERATION_VERSION = "v2_strict_reasoning"
 
 
 @dataclass
@@ -61,6 +62,9 @@ class AnalystVerdict:
     sentiment: Optional[str] = None
     citations: list[str] = field(default_factory=list)
     used_fallback: bool = False
+    llm_attempted: bool = False
+    analysis_source: str = "live_llm"
+    generation_version: str = ANALYST_GENERATION_VERSION
     raw_response: Optional[dict[str, Any]] = None
     error: Optional[str] = None
 
@@ -113,6 +117,17 @@ OUTPUT — return ONLY this JSON, no preamble, no code fences:
   "sentiment": "optional short label",
   "citations": ["optional source pointer"]
 }
+"""
+
+ANALYST_STRICT_RETRY_APPENDIX = """
+RETRY MODE (STRICT):
+  - Reject boilerplate. Do NOT output template phrasing like
+    “30d return / trend regime / relative strength” without a true thesis.
+  - Explain in plain language:
+    1) what is going right,
+    2) what is concerning,
+    3) why BUY/HOLD/REDUCE follows,
+    4) what would invalidate this thesis.
 """
 
 
@@ -247,8 +262,28 @@ def insufficient_data_verdict(
         risks=[],
         confidence=0.0,
         used_fallback=True,
+        llm_attempted=False,
+        analysis_source="deterministic_fallback",
         error=error,
     )
+
+
+def _looks_generic_template(verdict: AnalystVerdict) -> bool:
+    """Heuristic guardrail for pseudo-analysis that is mostly templated."""
+    text = " ".join(
+        [verdict.summary, verdict.thesis, verdict.reasoning]
+    ).lower()
+    if not text:
+        return True
+    markers = (
+        "30d return",
+        "trend regime",
+        "relative strength",
+        "watchlist-style view",
+    )
+    marker_hits = sum(1 for m in markers if m in text)
+    has_thesis_shape = ("because" in text) or ("risk" in text) or ("invalidate" in text)
+    return marker_hits >= 2 and not has_thesis_shape
 
 
 # ── Single-ticker analyst call ─────────────────────────────────────────────
@@ -300,25 +335,51 @@ async def analyze_ticker(
             max_tokens=max_tokens,
         )
 
-    # ── Attempt 1 ──────────────────────────────────────────────────────
-    try:
-        logger.info("analyst_stage.llm_request.start ticker=%s", snapshot.ticker)
-        raw = await _call_once()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=1 err=%s",
-                       snapshot.ticker, exc)
-        raw = {}
+    retry_reason: str | None = None
+    strict_mode = False
+    for attempt in (1, 2):
+        try:
+            logger.info("analyst_stage.llm_request.start ticker=%s attempt=%d", snapshot.ticker, attempt)
+            if strict_mode:
+                raw = await llm.ask_json(
+                    system=f"{ANALYST_SYSTEM_PROMPT}\n\n{ANALYST_STRICT_RETRY_APPENDIX}",
+                    user=user_msg,
+                    max_tokens=max_tokens,
+                )
+            else:
+                raw = await _call_once()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=%d err=%s",
+                           snapshot.ticker, attempt, exc)
+            raw = {}
 
-    logger.info(
-        "analyst_trace checkpoint=raw_response ticker=%s raw=%s",
-        snapshot.ticker,
-        json.dumps(raw, default=str)[:1500],
-    )
-    verdict = validate_verdict(raw, ticker=snapshot.ticker)
-    if verdict is not None:
         logger.info(
-            "analyst_stage.llm_request.success ticker=%s verdict=%s",
+            "analyst_trace checkpoint=raw_response ticker=%s attempt=%d raw=%s",
             snapshot.ticker,
+            attempt,
+            json.dumps(raw, default=str)[:1500],
+        )
+        verdict = validate_verdict(raw, ticker=snapshot.ticker)
+        if verdict is None:
+            retry_reason = "schema_validation_failed"
+            strict_mode = True
+            continue
+        verdict.llm_attempted = True
+        verdict.analysis_source = "live_llm"
+        if _looks_generic_template(verdict):
+            retry_reason = "generic_template_rejected"
+            logger.warning(
+                "analyst_stage.quality_guard_reject ticker=%s attempt=%d reason=%s",
+                snapshot.ticker,
+                attempt,
+                retry_reason,
+            )
+            strict_mode = True
+            continue
+        logger.info(
+            "analyst_stage.llm_request.success ticker=%s attempt=%d verdict=%s",
+            snapshot.ticker,
+            attempt,
             json.dumps(verdict.to_dict(), default=str)[:1500],
         )
         logger.debug(
@@ -328,38 +389,16 @@ async def analyze_ticker(
         )
         return verdict
 
-    # ── Attempt 2 (retry) ──────────────────────────────────────────────
-    logger.info("analyst retry ticker=%s raw=%s", snapshot.ticker,
-                str(raw)[:120])
-    try:
-        logger.info("analyst_stage.llm_request.start ticker=%s attempt=2", snapshot.ticker)
-        raw = await _call_once()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=2 err=%s",
-                       snapshot.ticker, exc)
-        raw = {}
-
-    logger.info(
-        "analyst_trace checkpoint=raw_response_retry ticker=%s raw=%s",
-        snapshot.ticker,
-        json.dumps(raw, default=str)[:1500],
-    )
-    verdict = validate_verdict(raw, ticker=snapshot.ticker)
-    if verdict is not None:
-        logger.info(
-            "analyst_stage.llm_request.success ticker=%s attempt=2 verdict=%s",
-            snapshot.ticker,
-            json.dumps(verdict.to_dict(), default=str)[:1500],
-        )
-        return verdict
-
     logger.warning(
-        "analyst_stage.fallback_used ticker=%s reason=schema_validation_failed",
+        "analyst_stage.fallback_used ticker=%s reason=%s",
         snapshot.ticker,
+        retry_reason or "schema_validation_failed",
     )
-    return insufficient_data_verdict(
-        snapshot.ticker, error="schema_validation_failed",
+    fallback = insufficient_data_verdict(
+        snapshot.ticker, error=retry_reason or "schema_validation_failed",
     )
+    fallback.llm_attempted = True
+    return fallback
 
 
 # ── Portfolio-wide parallel analyst ────────────────────────────────────────

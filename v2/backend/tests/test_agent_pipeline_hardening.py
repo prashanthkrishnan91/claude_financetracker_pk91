@@ -396,6 +396,66 @@ class TestLLMClientHardening:
         assert out == {"ok": True, "source": "fallback"}
         assert client.fallback_model in calls
 
+    @pytest.mark.asyncio
+    async def test_single_call_retries_without_cache_control_on_400(self, monkeypatch):
+        from app.services.agents.llm import LLMClient
+
+        client = LLMClient(api_key="fake-key")
+
+        class _Msg:
+            def __init__(self, text):
+                self.content = [type("Part", (), {"text": text})()]
+
+        class _Messages:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    err = RuntimeError("invalid_request_error: cache_control is not allowed")
+                    err.status_code = 400
+                    raise err
+                # Fallback payload should pass plain string system
+                assert isinstance(kwargs.get("system"), str)
+                return _Msg('{"ok": true}')
+
+        class _Client:
+            def __init__(self):
+                self.messages = _Messages()
+
+        monkeypatch.setattr(client, "_ensure_client", lambda: _Client())
+
+        out = await client._single_call(client.model, "sys", "user", 200)
+        assert out == '{"ok": true}'
+
+    @pytest.mark.asyncio
+    async def test_single_call_does_not_retry_generic_400(self, monkeypatch):
+        from app.services.agents.llm import LLMClient
+
+        client = LLMClient(api_key="fake-key")
+
+        class _Messages:
+            def __init__(self):
+                self.calls = 0
+
+            def create(self, **kwargs):
+                self.calls += 1
+                err = RuntimeError("invalid_request_error: malformed JSON")
+                err.status_code = 400
+                raise err
+
+        class _Client:
+            def __init__(self):
+                self.messages = _Messages()
+
+        fake_client = _Client()
+        monkeypatch.setattr(client, "_ensure_client", lambda: fake_client)
+
+        with pytest.raises(RuntimeError):
+            await client._single_call(client.model, "sys", "user", 200)
+        assert fake_client.messages.calls == 1
+
 
 # ── Shape guarantees — ensure fallback dict matches the JSON contract ────────
 

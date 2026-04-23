@@ -184,12 +184,34 @@ class LLMClient:
         """Execute a blocking Anthropic call on the default executor."""
         def _call() -> str:
             client = self._ensure_client()
-            msg = client.messages.create(
-                model=model,
-                max_tokens=max_tokens,
-                system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user}],
-            )
+            try:
+                # Primary shape uses prompt-caching hints.
+                msg = client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=[{
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }],
+                    messages=[{"role": "user", "content": user}],
+                )
+            except Exception as exc:  # noqa: BLE001
+                # Some Anthropic SDK/API combinations reject `cache_control`
+                # or block-array system prompts with HTTP 400. Retry once
+                # with the most compatible payload shape before bubbling up.
+                if not _is_compatibility_400(exc):
+                    raise
+                logger.warning(
+                    "LLM 400 with cache_control/system-block payload; retrying "
+                    "without cache_control for compatibility"
+                )
+                msg = client.messages.create(
+                    model=model,
+                    max_tokens=max_tokens,
+                    system=system,
+                    messages=[{"role": "user", "content": user}],
+                )
             return msg.content[0].text if msg.content else ""
 
         loop = asyncio.get_event_loop()
@@ -250,6 +272,25 @@ def _status_code_from_exc(exc: Exception) -> Optional[int]:
         if isinstance(code, int):
             return code
     return None
+
+
+def _is_compatibility_400(exc: Exception) -> bool:
+    """True when a 400 likely comes from prompt-cache/system payload shape.
+
+    We only retry 400s that look like SDK/API compatibility mismatches
+    (`cache_control`, system content-block format). Other 400s should fail
+    fast so callers can surface actionable errors.
+    """
+    if _status_code_from_exc(exc) != 400:
+        return False
+    msg = str(exc).lower()
+    hints = (
+        "cache_control",
+        "prompt caching",
+        "system",
+        "content block",
+    )
+    return any(h in msg for h in hints)
 
 
 def clamp(v: Any, lo: float, hi: float, default: float = 0.0) -> float:

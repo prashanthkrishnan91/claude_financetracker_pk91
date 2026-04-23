@@ -627,6 +627,30 @@ def _extract_analyst_card_fields(
     }
 
 
+def _resolve_card_analysis_source(
+    *,
+    analyst_verdict: Optional[dict[str, Any]],
+    is_fallback: bool,
+) -> tuple[str, bool]:
+    """Return ``(analysis_source, reused_cached)`` for card serialization.
+
+    Cache reuse is only valid when a verdict explicitly marks itself as
+    ``analysis_source='cached_run'`` and is non-fallback. Fallback/template
+    cards never qualify as a reusable cache hit.
+    """
+    explicit_source = None
+    if isinstance(analyst_verdict, dict):
+        source_raw = analyst_verdict.get("analysis_source")
+        if isinstance(source_raw, str):
+            explicit_source = source_raw.strip().lower()
+
+    if explicit_source == "cached_run" and not is_fallback:
+        return "cached_run", True
+    if is_fallback:
+        return "deterministic_fallback", False
+    return "live_llm", False
+
+
 def _agent_run_row_to_status(d: dict) -> AgentRunStatus:
     """Map an ``agent_runs`` row into :class:`AgentRunStatus`.
 
@@ -862,12 +886,11 @@ class RecommendationService:
                 )
                 if is_fallback:
                     fallback_cards += 1
-                run_meta = run_lookup.get(str(rec.get("agent_run_id"))) or {}
-                run_cost = run_meta.get("cost_metrics") or {}
-                actual_calls = int(run_cost.get("actual_llm_calls") or run_cost.get("attempted_llm_calls") or 0)
-                source = "deterministic_fallback" if is_fallback else "live_llm"
-                if run_meta.get("status") == "completed" and actual_calls == 0:
-                    source = "cached_run"
+                source, reused_cached = _resolve_card_analysis_source(
+                    analyst_verdict=analyst_verdict,
+                    is_fallback=is_fallback,
+                )
+                if reused_cached:
                     reused_cached_cards += 1
 
                 card = InsightCard(

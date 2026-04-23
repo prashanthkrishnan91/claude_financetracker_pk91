@@ -1140,7 +1140,6 @@ class AgentOrchestrator:
             len(snapshots),
             decision.mode.value if decision else "unknown",
         )
-        self._analyst_stage_stats["attempted_llm_calls"] += len(snapshots)
         logger.info(
             "analyst_stage.llm_request.start tickers=%d model=%s",
             len(snapshots),
@@ -1151,12 +1150,18 @@ class AgentOrchestrator:
             features=features,
             llm=self._llm,
         )
-        self._analyst_stage_stats["successful_llm_calls"] += sum(
-            1 for v in verdicts.values() if not v.used_fallback
+        attempted_calls = sum(1 for v in verdicts.values() if getattr(v, "llm_attempted", False))
+        successful_calls = sum(
+            1 for v in verdicts.values()
+            if getattr(v, "llm_attempted", False) and not v.used_fallback
         )
-        self._analyst_stage_stats["failed_llm_calls"] += sum(
-            1 for v in verdicts.values() if v.used_fallback
+        failed_calls = sum(
+            1 for v in verdicts.values()
+            if getattr(v, "llm_attempted", False) and v.used_fallback
         )
+        self._analyst_stage_stats["attempted_llm_calls"] += attempted_calls
+        self._analyst_stage_stats["successful_llm_calls"] += successful_calls
+        self._analyst_stage_stats["failed_llm_calls"] += failed_calls
         self._analyst_stage_stats["fallback_cards"] += sum(
             1 for v in verdicts.values() if v.used_fallback
         )
@@ -1169,22 +1174,50 @@ class AgentOrchestrator:
 
         action_counts: dict[str, int] = {}
         fallback_count = 0
-        tracker: Optional[RunCostTracker] = getattr(self, "_cost_tracker", None)
+        degraded_cards = 0
+        freshly_generated_cards = 0
+        reused_nonfallback_cards = 0
+        reused_fallback_cards = 0
         for ticker, v in verdicts.items():
             action_counts[v.action] = action_counts.get(v.action, 0) + 1
             if v.used_fallback:
                 fallback_count += 1
+                degraded_cards += 1
+            else:
+                freshly_generated_cards += 1
             logger.info(
                 "analyst ticker=%s action=%s conviction=%.2f confidence=%.2f "
                 "drivers=%d risks=%d fallback=%s",
                 ticker, v.action, v.conviction, v.confidence,
                 len(v.key_drivers), len(v.risks), v.used_fallback,
             )
+            logger.info(
+                "analyst_ticker_decision ticker=%s cache_decision=%s reused_cached=%s "
+                "cached_card_was_fallback=%s forced_refresh=%s llm_attempted=%s "
+                "llm_succeeded=%s persisted_fresh_card=%s",
+                ticker,
+                "miss_no_valid_cache",
+                False,
+                False,
+                bool(v.used_fallback),
+                bool(getattr(v, "llm_attempted", False)),
+                bool(getattr(v, "llm_attempted", False) and not v.used_fallback),
+                bool(not v.used_fallback),
+            )
 
         failure_rate = fallback_count / max(1, len(verdicts))
         logger.info(
             "analyst_stage.output.normalized tickers=%d actions=%s fallback_rate=%.2f",
             len(verdicts), action_counts, failure_rate,
+        )
+        logger.info(
+            "analyst_stage.summary eligible_tickers=%d reused_nonfallback_cards=%d "
+            "reused_fallback_cards=%d freshly_generated_cards=%d degraded_cards=%d",
+            len(snapshots),
+            reused_nonfallback_cards,
+            reused_fallback_cards,
+            freshly_generated_cards,
+            degraded_cards,
         )
         return verdicts
 

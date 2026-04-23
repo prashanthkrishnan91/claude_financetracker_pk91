@@ -249,6 +249,7 @@ async def test_analyze_ticker_retries_on_invalid_and_succeeds():
     assert v.action == "HOLD"
     assert len(llm.calls) == 2
     assert v.used_fallback is False
+    assert v.llm_attempted is True
 
 
 @pytest.mark.asyncio
@@ -290,6 +291,44 @@ async def test_analyze_ticker_swallows_llm_exceptions():
     )
     assert v.action == "INSUFFICIENT_DATA"
     assert v.used_fallback is True
+    assert v.llm_attempted is True
+
+
+@pytest.mark.asyncio
+async def test_analyze_ticker_retries_when_response_is_generic_template():
+    llm = FakeLLM([
+        {
+            "action": "HOLD",
+            "conviction": 0.2,
+            "confidence": 0.3,
+            "summary": "30d return is mixed with trend regime signals.",
+            "thesis": "Trend regime and relative strength are neutral.",
+            "reasoning": "30d return and relative strength suggest a watchlist-style view.",
+            "key_drivers": ["30d return +2.0%", "trend regime uptrend"],
+            "risks": ["relative strength mean reversion"],
+        },
+        {
+            "action": "BUY",
+            "conviction": 0.61,
+            "confidence": 0.68,
+            "summary": "Demand remains firm while valuation has reset.",
+            "thesis": "What is going right is margin stability and order momentum. "
+            "What is concerning is cyclical PC demand softness.",
+            "reasoning": "BUY fits because upside catalysts outweigh near-term risks. "
+            "The thesis breaks if backlog growth stalls for two quarters.",
+            "key_drivers": ["margin stability", "order momentum"],
+            "risks": ["cyclical demand"],
+        },
+    ])
+    verdict = await analyze_ticker(
+        snapshot=_snap("INTC"),
+        feature_set=_feat("INTC"),
+        llm=llm,
+    )
+    assert verdict.used_fallback is False
+    assert verdict.action == "BUY"
+    assert verdict.llm_attempted is True
+    assert len(llm.calls) == 2
 
 
 # ── Portfolio-wide parallel analyst ────────────────────────────────────────

@@ -258,8 +258,12 @@ def build_full_mode_verdicts(
         drivers.append(f"Relative strength: {rs_label}")
 
         risks: list[str] = []
-        if snap.missing_fields:
-            risks.append(f"Missing fields: {', '.join(snap.missing_fields[:2])}")
+        missing = list(snap.missing_fields or [])
+        non_sentiment_missing = [m for m in missing if m != "sentiment"]
+        if non_sentiment_missing:
+            risks.append(f"Limited coverage in: {', '.join(non_sentiment_missing[:2])}")
+        elif "sentiment" in missing and quality < 0.45:
+            risks.append("External sentiment data is unavailable for now")
         if trend == "downtrend":
             risks.append("Trend remains weak; avoid aggressive sizing")
         elif quality < 0.60:

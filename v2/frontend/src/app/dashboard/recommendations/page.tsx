@@ -131,11 +131,6 @@ export default function RecommendationsPage() {
       const t = setTimeout(() => setActiveJobId(null), 8000);
       return () => clearTimeout(t);
     }
-    if (jobStatus?.status === "cancelled") {
-      console.log("[Intel] Polling stopped — cancelled");
-      const t = setTimeout(() => setActiveJobId(null), 4000);
-      return () => clearTimeout(t);
-    }
   }, [jobStatus?.status]);
 
   const filtered =

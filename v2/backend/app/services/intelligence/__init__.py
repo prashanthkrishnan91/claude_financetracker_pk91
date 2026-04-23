@@ -25,6 +25,17 @@ from .portfolio_synthesis import (
     deterministic_synthesis,
     synthesize_portfolio,
 )
+from .run_mode import (
+    DEGRADED_QUALITY_THRESHOLD,
+    CostEntry,
+    ModeDecision,
+    RunCostTracker,
+    RunMode,
+    build_degraded_verdicts,
+    classify_run_mode,
+    estimate_cost_usd,
+    projected_full_mode_cost,
+)
 from .snapshot_store import persist_snapshots
 
 __all__ = [
@@ -46,4 +57,13 @@ __all__ = [
     "ALLOWED_BIASES",
     "synthesize_portfolio",
     "deterministic_synthesis",
+    "RunMode",
+    "ModeDecision",
+    "DEGRADED_QUALITY_THRESHOLD",
+    "classify_run_mode",
+    "build_degraded_verdicts",
+    "RunCostTracker",
+    "CostEntry",
+    "estimate_cost_usd",
+    "projected_full_mode_cost",
 ]

@@ -841,6 +841,25 @@ class RecommendationService:
                     plain_language_explanation=reasoning.get("plain_language_explanation"),
                     fallback_flags=reasoning.get("fallback_flags"),
                 )
+                logger.info(
+                    "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",
+                    ticker,
+                    json.dumps(
+                        {
+                            "ticker": card.ticker,
+                            "action": card.action,
+                            "investment_thesis": card.investment_thesis,
+                            "summary": card.summary,
+                            "thesis": card.thesis,
+                            "plain_language_explanation": card.plain_language_explanation,
+                            "analyst_action": card.analyst_action,
+                            "analyst_drivers": card.analyst_drivers,
+                            "analyst_risks": card.analyst_risks,
+                            "data_quality_label": card.data_quality_label,
+                        },
+                        default=str,
+                    )[:1500],
+                )
                 cards.append(card)
                 if not self._trace_logged:
                     self._trace_logged = True

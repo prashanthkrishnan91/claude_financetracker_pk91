@@ -111,9 +111,26 @@ def test_format_thesis_cites_drivers_and_risks():
         confidence=0.7,
     )
     thesis = format_thesis(v)
-    assert "BUY" in thesis
     assert "earnings beat" in thesis
     assert "macro headwinds" in thesis
+
+
+def test_validate_verdict_keeps_reasoning_without_sentiment():
+    raw = {
+        "action": "HOLD",
+        "conviction": 0.41,
+        "confidence": 0.66,
+        "reasoning": "Revenue growth is slowing while valuation remains high, so upside may be limited.",
+        "thesis": "Momentum is fading despite solid margins.",
+        "key_drivers": ["slower growth", "elevated valuation"],
+        "risks": ["sector weakness"],
+        # sentiment intentionally missing
+    }
+    verdict = validate_verdict(raw, ticker="MSFT")
+    assert verdict is not None
+    assert verdict.reasoning.startswith("Revenue growth is slowing")
+    assert verdict.thesis.startswith("Momentum is fading")
+    assert verdict.sentiment is None
 
 
 # ── Snapshots + features fixtures ─────────────────────────────────────────

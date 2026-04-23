@@ -33,11 +33,26 @@ def normalize_reasoning_payload(
     rec = rec or {}
     analyst_verdict = analyst_verdict if isinstance(analyst_verdict, dict) else {}
     detail = _s(rec.get("detail"))
-    thesis = _s(rec.get("investment_thesis")) or detail
+    analyst_summary = _s(analyst_verdict.get("summary"))
+    analyst_thesis = _s(analyst_verdict.get("thesis"))
+    analyst_reasoning = _s(
+        analyst_verdict.get("reasoning") or analyst_verdict.get("reasoning_summary")
+    )
+    thesis = (
+        analyst_reasoning
+        or analyst_thesis
+        or _s(rec.get("thesis"))
+        or _s(rec.get("investment_thesis"))
+        or detail
+    )
     rationale = _s(rec.get("rationale"))
     action = _s(rec.get("action")).upper() or "HOLD"
     ticker = _s(rec.get("ticker")).upper() or "this position"
-    sentiment_label = _s(rec.get("sentiment_label")) or "Unavailable"
+    sentiment_label = (
+        _s(rec.get("sentiment_label"))
+        or _s(analyst_verdict.get("sentiment"))
+        or "Unavailable"
+    )
 
     drivers = _list_of_str(
         analyst_verdict.get("key_drivers")
@@ -57,9 +72,17 @@ def normalize_reasoning_payload(
     if not thesis and not detail:
         fallback_flags.append("reasoning_unavailable")
 
-    summary = _s(rec.get("summary")) or _human_summary(ticker=ticker, action=action, thesis=thesis, detail=detail)
+    summary = (
+        analyst_summary
+        or _s(rec.get("summary"))
+        or _human_summary(ticker=ticker, action=action, thesis=thesis, detail=detail)
+    )
     why = _s(rec.get("why_this_matters")) or _human_why(action=action, ticker=ticker, rationale=rationale, driver=drivers[0] if drivers else "")
-    explanation = _s(rec.get("plain_language_explanation")) or summary
+    explanation = (
+        analyst_reasoning
+        or _s(rec.get("plain_language_explanation"))
+        or summary
+    )
 
     return {
         "sentiment": sentiment_label,
@@ -73,7 +96,11 @@ def normalize_reasoning_payload(
         "risks": risks,
         "confidence": confidence,
         "conviction": conviction,
-        "supporting_evidence": _list_of_str(rec.get("supporting_evidence")) or drivers,
+        "supporting_evidence": (
+            _list_of_str(analyst_verdict.get("citations"))
+            or _list_of_str(rec.get("supporting_evidence"))
+            or drivers
+        ),
         "plain_language_explanation": explanation,
         "data_quality": _s(rec.get("data_quality_label")) or _s(rec.get("data_quality")) or "UNKNOWN",
         "fallback_flags": fallback_flags,

@@ -63,6 +63,14 @@ class InsightCard(BaseModel):
     agent_run_id: Optional[UUID] = None
     what_changed: Optional[str] = None
 
+    # Data-quality UX fields — drive the frontend confidence banner.
+    # data_confidence_score: 0–1 (derived from conviction / signal completeness)
+    # data_quality_label:    HIGH / MEDIUM / LOW
+    # reason_tags:           e.g. ["fallback_used", "low_data", "api_failure"]
+    data_confidence_score: Optional[float] = None
+    data_quality_label: Optional[str] = None
+    reason_tags: Optional[list[str]] = None
+
 
 class AgentRunStatus(BaseModel):
     """Status snapshot of an in-flight or completed agent run."""

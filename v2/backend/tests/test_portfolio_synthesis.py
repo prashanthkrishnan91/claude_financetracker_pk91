@@ -153,10 +153,12 @@ def test_validate_synthesis_happy_path():
     assert s.has_required_signal()
 
 
-def test_validate_synthesis_rejects_unknown_bias():
+def test_validate_synthesis_unknown_bias_defaults_to_neutral():
     raw = {"portfolio_bias": "super-bull", "key_themes": ["t1", "t2"],
            "risk_concentrations": ["r1"]}
-    assert validate_synthesis(raw) is None
+    s = validate_synthesis(raw)
+    assert s is not None
+    assert s.portfolio_bias == "neutral"
 
 
 def test_validate_synthesis_coerces_list_types():
@@ -193,6 +195,7 @@ def test_deterministic_synthesis_satisfies_phase4_minimums():
     assert len(s.key_themes) >= 2
     assert len(s.risk_concentrations) >= 1
     assert s.used_fallback is True
+    assert s.error == "llm_failed"
 
 
 def test_deterministic_synthesis_flags_sector_concentration():
@@ -253,7 +256,7 @@ class _FakeLLM:
         self.api_key = "fake"
         self.calls = 0
 
-    async def ask_json(self, *, system, user, max_tokens=1024):
+    async def ask_json(self, *, system, user, max_tokens=1024, normalizer=None):
         self.calls += 1
         if not self.responses:
             return {}
@@ -288,23 +291,20 @@ async def test_synthesize_portfolio_happy_path():
 
 
 @pytest.mark.asyncio
-async def test_synthesize_portfolio_retries_then_fallback():
-    """Both LLM attempts malformed → deterministic fallback populates."""
+async def test_synthesize_portfolio_partial_schema_is_augmented_without_fallback():
+    """Minor omissions should be repaired without marking deterministic fallback."""
     snaps, feats, verds, poss = _mixed_portfolio()
     llm = _FakeLLM([
-        {"portfolio_bias": "bogus"},  # invalid bias
-        {"portfolio_bias": "bullish", "key_themes": ["only one"],
-         "risk_concentrations": []},  # has_required_signal() False
+        {"portfolio_bias": "bogus", "themes": ["Only one theme"]},
     ])
     s = await synthesize_portfolio(
         verdicts=verds, snapshots=snaps, features=feats, positions=poss,
         llm=llm,
     )
-    # Both attempts under-specified → fallback.
-    assert s.used_fallback is True
-    # Fallback still satisfies gates.
+    assert s.used_fallback is False
     assert s.has_required_signal()
-    assert llm.calls == 2
+    assert s.error == "llm_partial_schema_normalized"
+    assert llm.calls == 1
 
 
 @pytest.mark.asyncio
@@ -326,7 +326,8 @@ async def test_synthesize_portfolio_survives_all_insufficient_data():
     # Deterministic fallback still produces a valid synthesis.
     assert s.portfolio_bias in ALLOWED_BIASES
     assert s.has_required_signal()
-    assert s.used_fallback is True
+    assert s.used_fallback is False
+    assert s.error == "llm_partial_schema_normalized"
 
 
 @pytest.mark.asyncio

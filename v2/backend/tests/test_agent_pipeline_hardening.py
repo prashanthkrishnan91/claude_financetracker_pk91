@@ -296,6 +296,29 @@ class TestLLMClientHardening:
         from app.services.agents.llm import _status_code_from_exc
         assert _status_code_from_exc(Exception("boom")) is None
 
+
+    def test_extract_json_accepts_prose_wrapped_object(self):
+        from app.services.agents.llm import _extract_json
+
+        parsed, debug = _extract_json(
+            'Here is the portfolio synthesis: {"portfolio_bias":"neutral","key_themes":[]} Thanks!'
+        )
+        assert parsed == {"portfolio_bias": "neutral", "key_themes": []}
+        assert debug["candidate"].startswith('{')
+
+    def test_extract_json_accepts_fenced_json(self):
+        from app.services.agents.llm import _extract_json
+
+        parsed, _ = _extract_json("""```json\n{\"ok\": true}\n```""")
+        assert parsed == {"ok": True}
+
+    def test_first_balanced_json_object_substring_handles_braces_in_strings(self):
+        from app.services.agents.llm import _first_balanced_json_object_substring
+
+        s = 'prefix {"summary":"brace } inside", "ok": true} suffix'
+        out = _first_balanced_json_object_substring(s)
+        assert out == '{"summary":"brace } inside", "ok": true}'
+
     @pytest.mark.asyncio
     async def test_ask_json_returns_empty_without_api_key(self):
         from app.services.agents.llm import LLMClient
@@ -395,6 +418,33 @@ class TestLLMClientHardening:
         out = await client.ask_json("sys", "user")
         assert out == {"ok": True, "source": "fallback"}
         assert client.fallback_model in calls
+
+
+    @pytest.mark.asyncio
+    async def test_single_call_collects_all_text_content_blocks(self, monkeypatch):
+        from app.services.agents.llm import LLMClient
+
+        client = LLMClient(api_key="fake-key")
+
+        class _Msg:
+            def __init__(self):
+                self.content = [
+                    type("Part", (), {"text": '{"a": 1,'})(),
+                    type("Part", (), {"text": '"b": 2}'})(),
+                ]
+
+        class _Messages:
+            def create(self, **kwargs):
+                return _Msg()
+
+        class _Client:
+            def __init__(self):
+                self.messages = _Messages()
+
+        monkeypatch.setattr(client, "_ensure_client", lambda: _Client())
+
+        out = await client._single_call(client.model, "sys", "user", 200)
+        assert out == '{"a": 1,\n"b": 2}'
 
     @pytest.mark.asyncio
     async def test_single_call_retries_without_cache_control_on_400(self, monkeypatch):

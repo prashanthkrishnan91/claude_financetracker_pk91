@@ -111,7 +111,13 @@ RULES (hard requirements):
      "trim TSLA into NVDA", "reduce Auto exposure via REDUCE verdicts".
   8. ``summary``: 2-3 sentences. Portfolio-level only.
 
-OUTPUT — return ONLY this JSON, no preamble, no code fences:
+OUTPUT CONTRACT (strict):
+  - Return exactly one JSON object.
+  - No markdown fences.
+  - No prose before or after the JSON object.
+  - Include all keys; if uncertain, use null/[] defaults.
+
+OUTPUT — return ONLY this JSON:
 {
   "portfolio_bias": "bullish" | "neutral" | "defensive",
   "key_themes": ["theme 1", "theme 2"],
@@ -245,30 +251,67 @@ def build_synthesis_inputs(
 # ── Validator ──────────────────────────────────────────────────────────────
 
 
+
+
+def _normalize_synthesis_schema(raw: Any) -> Optional[dict[str, Any]]:
+    """Normalize common alias keys + defaults for synthesis schema."""
+    if not isinstance(raw, dict):
+        return None
+
+    alias_map = {
+        "bias": "portfolio_bias",
+        "portfolio_view": "portfolio_bias",
+        "themes": "key_themes",
+        "top_themes": "key_themes",
+        "risks": "risk_concentrations",
+        "concentration_risks": "risk_concentrations",
+        "overexposures": "overexposure_flags",
+        "overweight_flags": "overexposure_flags",
+        "rebalance_suggestions": "rebalancing_suggestions",
+        "rebalance_actions": "rebalancing_suggestions",
+        "narrative": "summary",
+        "portfolio_summary": "summary",
+    }
+
+    normalized = dict(raw)
+    for alias, canonical in alias_map.items():
+        if canonical not in normalized and alias in normalized:
+            normalized[canonical] = normalized[alias]
+
+    normalized.setdefault("portfolio_bias", "neutral")
+    normalized.setdefault("key_themes", [])
+    normalized.setdefault("risk_concentrations", [])
+    normalized.setdefault("overexposure_flags", [])
+    normalized.setdefault("rebalancing_suggestions", [])
+    normalized.setdefault("summary", "")
+    return normalized
+
+
 def validate_synthesis(raw: Any) -> Optional[PortfolioSynthesis]:
     """Return a :class:`PortfolioSynthesis` when ``raw`` matches the schema.
 
     Returns ``None`` on any violation; the caller retries once and
     falls back to deterministic synthesis on the second failure.
     """
-    if not isinstance(raw, dict):
+    normalized = _normalize_synthesis_schema(raw)
+    if normalized is None:
         return None
 
-    bias = str(raw.get("portfolio_bias") or "").strip().lower()
+    bias = str(normalized.get("portfolio_bias") or "").strip().lower()
     if bias not in ALLOWED_BIASES:
-        return None
+        bias = "neutral"
 
-    key_themes = _coerce_string_list(raw.get("key_themes"), max_items=6)
+    key_themes = _coerce_string_list(normalized.get("key_themes"), max_items=6)
     risk_concentrations = _coerce_string_list(
-        raw.get("risk_concentrations"), max_items=5,
+        normalized.get("risk_concentrations"), max_items=5,
     )
     overexposure_flags = _coerce_string_list(
-        raw.get("overexposure_flags"), max_items=4,
+        normalized.get("overexposure_flags"), max_items=4,
     )
     rebalancing_suggestions = _coerce_string_list(
-        raw.get("rebalancing_suggestions"), max_items=6,
+        normalized.get("rebalancing_suggestions"), max_items=6,
     )
-    summary = str(raw.get("summary") or "").strip()[:800]
+    summary = str(normalized.get("summary") or "").strip()[:800]
 
     return PortfolioSynthesis(
         portfolio_bias=bias,
@@ -427,6 +470,37 @@ def deterministic_synthesis(
 # ── Single LLM synthesis call ──────────────────────────────────────────────
 
 
+
+
+def _augment_with_deterministic_minimums(
+    synthesis: PortfolioSynthesis,
+    payload: dict[str, Any],
+) -> PortfolioSynthesis:
+    """Fill missing cross-ticker signal from deterministic synthesis only."""
+    det = deterministic_synthesis(payload, reason="llm_partial_schema")
+    changed = False
+
+    if len(synthesis.key_themes) < 2:
+        synthesis.key_themes = (synthesis.key_themes + det.key_themes)[:6]
+        changed = True
+    if len(synthesis.risk_concentrations) < 1:
+        synthesis.risk_concentrations = (
+            synthesis.risk_concentrations + det.risk_concentrations
+        )[:5]
+        changed = True
+    if not synthesis.rebalancing_suggestions:
+        synthesis.rebalancing_suggestions = det.rebalancing_suggestions[:6]
+        changed = True
+    if not synthesis.summary:
+        synthesis.summary = det.summary
+        changed = True
+
+    synthesis.used_fallback = False
+    if changed and not synthesis.error:
+        synthesis.error = "llm_partial_schema_normalized"
+    return synthesis
+
+
 async def synthesize_portfolio(
     *,
     verdicts: dict[str, AnalystVerdict],
@@ -435,7 +509,7 @@ async def synthesize_portfolio(
     positions: list[dict[str, Any]],
     macro: Optional[dict[str, Any]] = None,
     llm=None,  # duck-typed LLMClient with ``ask_json``
-    max_tokens: int = 800,
+    max_tokens: int = 1000,
 ) -> PortfolioSynthesis:
     """Single LLM call producing the :class:`PortfolioSynthesis`.
 
@@ -462,6 +536,7 @@ async def synthesize_portfolio(
             system=SYNTHESIS_SYSTEM_PROMPT,
             user=user_msg,
             max_tokens=max_tokens,
+            normalizer=lambda obj: _normalize_synthesis_schema(obj) or obj,
         )
 
     # Attempt 1
@@ -472,8 +547,10 @@ async def synthesize_portfolio(
         raw = {}
 
     synthesis = validate_synthesis(raw)
-    if synthesis is not None and synthesis.has_required_signal():
-        return synthesis
+    if synthesis is not None:
+        synthesis = _augment_with_deterministic_minimums(synthesis, payload)
+        if synthesis.has_required_signal():
+            return synthesis
 
     logger.info(
         "synthesis retry — attempt 1 invalid or under-specified "
@@ -490,8 +567,10 @@ async def synthesize_portfolio(
         raw = {}
 
     synthesis2 = validate_synthesis(raw)
-    if synthesis2 is not None and synthesis2.has_required_signal():
-        return synthesis2
+    if synthesis2 is not None:
+        synthesis2 = _augment_with_deterministic_minimums(synthesis2, payload)
+        if synthesis2.has_required_signal():
+            return synthesis2
 
     # Fall back to deterministic synthesis. Both attempts either failed
     # validation or came back under-specified; deterministic_synthesis

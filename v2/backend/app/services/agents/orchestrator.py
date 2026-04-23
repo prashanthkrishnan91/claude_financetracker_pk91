@@ -27,6 +27,7 @@ from ..ai.context_builder import build_portfolio_context, build_context_from_inp
 from ..ai import io_layer
 from ..intelligence import (
     AnalystVerdict,
+    PortfolioSynthesis,
     action_to_suggested_action,
     analyze_portfolio,
     build_features,
@@ -35,6 +36,7 @@ from ..intelligence import (
     format_thesis,
     persist_features,
     persist_snapshots,
+    synthesize_portfolio,
 )
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from .data_sources import get_provider_status
@@ -302,27 +304,42 @@ class AgentOrchestrator:
                 run_id, current_agent="Portfolio synthesis", progress=70
             )
 
-            # Portfolio synthesis — single LLM call (Phase 4 will
-            # formalise this as a dedicated synthesis layer). For now,
-            # the existing monolithic call supplies the portfolio-level
-            # narrative. Per-ticker verdicts always take precedence.
+            # Phase 4 — dedicated portfolio synthesis. Single LLM call
+            # over the per-ticker verdicts + portfolio composition +
+            # macro snapshot. Produces strictly-validated cross-ticker
+            # insights (portfolio_bias, key_themes, risk_concentrations,
+            # overexposure_flags, rebalancing_suggestions). Deterministic
+            # fallback guarantees the acceptance-gate minimums on LLM
+            # failure.
             t0 = time.perf_counter()
-            advice = await self._single_llm_call(context)
+            synthesis = await self._run_portfolio_synthesis(
+                context=context,
+            )
+            self._synthesis = synthesis
             timings["llm_call_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
-            state.portfolio_advice = advice or {}
-            state.pm_summary = (advice or {}).get("summary", "")
+            # Project the synthesis back onto the agent state so the
+            # existing persistence / allocation paths keep working:
+            # ``portfolio_advice`` preserves the raw dict the legacy
+            # code expects, ``pm_summary`` feeds the agent_runs row.
+            advice = {
+                "summary": synthesis.summary,
+                "portfolio_bias": synthesis.portfolio_bias,
+                "key_themes": synthesis.key_themes,
+                "risk_concentrations": synthesis.risk_concentrations,
+                "overexposure_flags": synthesis.overexposure_flags,
+                "rebalancing_suggestions": synthesis.rebalancing_suggestions,
+                "_used_fallback": synthesis.used_fallback,
+                "cards": [],  # analyst verdicts own per-ticker cards now
+            }
+            state.portfolio_advice = advice
+            state.pm_summary = synthesis.summary
 
-            # Stash the per-ticker completeness so ``_apply_advice_to_insights``
-            # can enforce the confidence cap regardless of what the LLM returned.
             self._confidence_by_ticker = _extract_confidence_from_context(context)
 
-            self._apply_advice_to_insights(state, advice or {})
-
-            # Apply per-ticker analyst verdicts on top of the monolithic
-            # advice. The analyst call is closer to the structured data
-            # so it wins on action, conviction, drivers, and risks. The
-            # monolithic pass still contributes the portfolio narrative.
+            # Apply per-ticker analyst verdicts as the primary signal
+            # source. The Phase 4 synthesis owns portfolio-level
+            # narrative only — ticker fields come from the analyst.
             self._apply_verdicts_to_insights(state, self._verdicts)
 
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
@@ -348,6 +365,7 @@ class AgentOrchestrator:
                 progress=100,
                 summary=final_summary,
                 allocation=allocation_map,
+                synthesis=getattr(self, "_synthesis", None),
             )
             timings["total_ms"] = round((time.perf_counter() - run_start) * 1000, 1)
             run_completeness = float(
@@ -878,6 +896,48 @@ class AgentOrchestrator:
 
         return features
 
+    # ── Portfolio synthesis stage (Phase 4) ─────────────────────────────────
+
+    async def _run_portfolio_synthesis(
+        self,
+        *,
+        context: dict[str, Any],
+    ) -> PortfolioSynthesis:
+        """Run the Phase 4 synthesis LLM call.
+
+        Reads from the in-memory Phase 1-3 state (``self._snapshots``,
+        ``self._features``, ``self._verdicts``) plus the macro snapshot
+        from ``context``. Never raises — on LLM failure, falls back to
+        :func:`deterministic_synthesis` which guarantees the Phase 4
+        acceptance-gate minimums (≥2 themes, ≥1 risk concentration).
+        """
+        positions = context.get("portfolio") or []
+        macro = context.get("macro") or {}
+        snapshots = getattr(self, "_snapshots", {}) or {}
+        features = getattr(self, "_features", {}) or {}
+        verdicts = getattr(self, "_verdicts", {}) or {}
+
+        synthesis = await synthesize_portfolio(
+            verdicts=verdicts,
+            snapshots=snapshots,
+            features=features,
+            positions=positions,
+            macro=macro,
+            llm=self._llm if self._llm.api_key else None,
+        )
+
+        logger.info(
+            "portfolio_synthesis done — bias=%s themes=%d risks=%d "
+            "overexposure=%d rebalance=%d fallback=%s",
+            synthesis.portfolio_bias,
+            len(synthesis.key_themes),
+            len(synthesis.risk_concentrations),
+            len(synthesis.overexposure_flags),
+            len(synthesis.rebalancing_suggestions),
+            synthesis.used_fallback,
+        )
+        return synthesis
+
     # ── Per-ticker analyst stage (Phase 3) ──────────────────────────────────
 
     async def _run_per_ticker_analyst(self) -> dict[str, "AnalystVerdict"]:
@@ -1130,6 +1190,7 @@ class AgentOrchestrator:
         summary: Optional[str] = None,
         error_message: Optional[str] = None,
         allocation: Optional[dict] = None,
+        synthesis: Optional[PortfolioSynthesis] = None,
     ) -> None:
         patch: dict = {}
         if status is not None:
@@ -1144,13 +1205,46 @@ class AgentOrchestrator:
             patch["error_message"] = error_message
         if allocation is not None:
             patch["allocation"] = allocation
+        # Phase 4 — portfolio synthesis lives on agent_runs so the UI can
+        # query one row per run without joining ``recommendations``.
+        if synthesis is not None:
+            patch["portfolio_synthesis"] = synthesis.to_dict()
+            patch["synthesis_used_fallback"] = bool(synthesis.used_fallback)
         if status in ("completed", "failed"):
             patch["finished_at"] = datetime.now(timezone.utc).isoformat()
         if not patch:
             return
         try:
             self.db.table("agent_runs").update(patch).eq("id", run_id).execute()
+            return
         except Exception as exc:
+            # Tolerate the Phase-4 columns being missing. Single WARN +
+            # retry with the new fields stripped so pre-migration-011
+            # deployments still land the core update.
+            msg = str(exc).lower()
+            phase4_missing = (
+                "portfolio_synthesis" in msg
+                or "synthesis_used_fallback" in msg
+                or "schema cache" in msg
+                or "does not exist" in msg
+            )
+            if phase4_missing and ("portfolio_synthesis" in patch
+                                    or "synthesis_used_fallback" in patch):
+                logger.warning(
+                    "agent_runs missing Phase 4 columns — retrying without "
+                    "portfolio_synthesis (apply migrations/"
+                    "011_portfolio_synthesis.sql). err=%s", exc,
+                )
+                stripped = {
+                    k: v for k, v in patch.items()
+                    if k not in {"portfolio_synthesis", "synthesis_used_fallback"}
+                }
+                try:
+                    self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
+                    return
+                except Exception as exc2:  # noqa: BLE001
+                    logger.warning("agent_runs update retry failed: %s", exc2)
+                    return
             logger.warning("agent_runs update failed: %s", exc)
 
     # ── Mappers ───────────────────────────────────────────────────────────────

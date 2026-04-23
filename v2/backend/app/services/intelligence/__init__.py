@@ -19,6 +19,12 @@ from .per_ticker_analyst import (
     format_thesis,
     insufficient_data_verdict,
 )
+from .portfolio_synthesis import (
+    ALLOWED_BIASES,
+    PortfolioSynthesis,
+    deterministic_synthesis,
+    synthesize_portfolio,
+)
 from .snapshot_store import persist_snapshots
 
 __all__ = [
@@ -36,4 +42,8 @@ __all__ = [
     "action_to_suggested_action",
     "format_thesis",
     "insufficient_data_verdict",
+    "PortfolioSynthesis",
+    "ALLOWED_BIASES",
+    "synthesize_portfolio",
+    "deterministic_synthesis",
 ]

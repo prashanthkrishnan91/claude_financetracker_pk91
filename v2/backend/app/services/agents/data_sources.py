@@ -584,6 +584,7 @@ def fetch_yfinance_history_sync(ticker: str, period: str = "3mo") -> dict[str, A
         last = closes[-1]
         first = closes[0]
         pct_full = (last / first - 1) * 100 if first else 0.0
+        pct_1d = ((last / closes[-2] - 1) * 100) if len(closes) >= 2 and closes[-2] else 0.0
         pct_5d = ((last / closes[-6] - 1) * 100) if len(closes) >= 6 else 0.0
         pct_30d = ((last / closes[-22] - 1) * 100) if len(closes) >= 22 else pct_full
         # Simple trend: 20-day SMA slope
@@ -591,13 +592,18 @@ def fetch_yfinance_history_sync(ticker: str, period: str = "3mo") -> dict[str, A
         sma50 = sum(closes[-50:]) / min(len(closes), 50)
         vol_avg = sum(volumes[-20:]) / max(1, min(len(volumes), 20))
         vol_last = volumes[-1] if volumes else 0
+        # 30-day annualised volatility from log-returns of the last ~22 bars.
+        window = closes[-22:] if len(closes) >= 22 else closes
+        volatility_30d = _annualised_volatility(window)
         return {
             "last": last,
             "high_3mo": max(closes),
             "low_3mo": min(closes),
+            "pct_1d": round(pct_1d, 2),
             "pct_5d": round(pct_5d, 2),
             "pct_30d": round(pct_30d, 2),
             "pct_3mo": round(pct_full, 2),
+            "volatility_30d": round(volatility_30d, 4) if volatility_30d is not None else None,
             "sma20": round(sma20, 2),
             "sma50": round(sma50, 2),
             "vol_last": vol_last,
@@ -777,6 +783,29 @@ async def fetch_coingecko_market(
 
 
 # ── utils ────────────────────────────────────────────────────────────────────
+
+
+def _annualised_volatility(closes: list[float]) -> Optional[float]:
+    """Return the annualised stddev of daily log-returns for ``closes``.
+
+    Returns ``None`` when fewer than 3 valid bars are supplied — volatility
+    on 1-2 bars is noise, not signal. Uses 252 trading days for the
+    annualisation factor.
+    """
+    import math
+
+    if not closes or len(closes) < 3:
+        return None
+    returns: list[float] = []
+    for prev, curr in zip(closes[:-1], closes[1:]):
+        if prev and curr and prev > 0 and curr > 0:
+            returns.append(math.log(curr / prev))
+    if len(returns) < 2:
+        return None
+    mean = sum(returns) / len(returns)
+    var = sum((r - mean) ** 2 for r in returns) / (len(returns) - 1)
+    return math.sqrt(var) * math.sqrt(252)
+
 
 def _safe_float(v: Any) -> Optional[float]:
     try:

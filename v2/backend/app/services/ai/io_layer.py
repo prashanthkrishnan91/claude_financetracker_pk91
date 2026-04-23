@@ -667,7 +667,13 @@ def _unwrap_batch(result: Any, *, default: dict) -> dict:
 
 
 def _empty_bundle() -> dict[str, Any]:
-    """Canonical empty bundle — returned when no tickers are supplied."""
+    """Canonical empty bundle — returned when no tickers are supplied.
+
+    ``completeness_score`` is 1.0 here only because the ticker set is empty
+    (there is literally nothing to be incomplete about). The score for any
+    non-empty ticker set is always driven by ``_compute_completeness`` —
+    never hardcoded. This is the sole exception-by-documentation.
+    """
     try:
         mode_snapshot = get_system_mode_manager().current().to_dict()
     except Exception:  # noqa: BLE001
@@ -684,6 +690,8 @@ def _empty_bundle() -> dict[str, Any]:
         "source_status": ds.get_provider_status(),
         "system_mode": mode_snapshot,
         "missing_fields": [],
+        # Empty-input contract: 1.0 means "complete relative to 0 tickers",
+        # not "everything is fine". See module docstring + `_compute_completeness`.
         "completeness_score": 1.0,
         "timings_ms": {"total": 0.0},
     }

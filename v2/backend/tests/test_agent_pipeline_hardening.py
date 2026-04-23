@@ -309,8 +309,17 @@ class TestLLMClientHardening:
     def test_extract_json_accepts_fenced_json(self):
         from app.services.agents.llm import _extract_json
 
-        parsed, _ = _extract_json("""```json\n{\"ok\": true}\n```""")
+        parsed, debug = _extract_json("""```json\n{\"ok\": true}\n```""")
         assert parsed == {"ok": True}
+        assert debug["had_code_fence"] is True
+
+    def test_extract_json_detects_truncated_candidate(self):
+        from app.services.agents.llm import _extract_json
+
+        parsed, debug = _extract_json('{"action":"BUY","summary":"abc')
+        assert parsed is None
+        assert debug["parse_error_type"] == "truncated_json"
+        assert debug["truncated_response_detected"] is True
 
     def test_first_balanced_json_object_substring_handles_braces_in_strings(self):
         from app.services.agents.llm import _first_balanced_json_object_substring
@@ -418,6 +427,28 @@ class TestLLMClientHardening:
         out = await client.ask_json("sys", "user")
         assert out == {"ok": True, "source": "fallback"}
         assert client.fallback_model in calls
+
+    @pytest.mark.asyncio
+    async def test_ask_json_retries_once_when_primary_parse_is_truncated(self, monkeypatch):
+        from app.services.agents.llm import LLMClient
+
+        client = LLMClient(api_key="fake-key")
+        calls: list[tuple[str, int]] = []
+
+        async def _fake_single_call(model, system, user, max_tokens):
+            calls.append((model, max_tokens))
+            if len(calls) == 1:
+                return '{"action":"BUY","summary":"cut'
+            return '{"action":"BUY","summary":"ok"}'
+
+        monkeypatch.setattr(client, "_single_call", _fake_single_call)
+
+        metadata: dict = {}
+        out = await client.ask_json("sys", "user", max_tokens=320, metadata=metadata)
+        assert out == {"action": "BUY", "summary": "ok"}
+        assert len(calls) >= 2
+        assert calls[1][1] > calls[0][1]
+        assert metadata.get("truncation_retry_used") is True
 
 
     @pytest.mark.asyncio

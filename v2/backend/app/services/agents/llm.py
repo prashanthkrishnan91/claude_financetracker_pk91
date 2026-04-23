@@ -80,6 +80,7 @@ class LLMClient:
         user: str,
         max_tokens: int = 1024,
         normalizer: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
+        metadata: Optional[dict[str, Any]] = None,
     ) -> dict[str, Any]:
         """Run a single prompt, parse JSON reply, return `{}` on total failure.
 
@@ -95,6 +96,7 @@ class LLMClient:
             return {}
 
         # ── Primary attempt (with 429 backoff) ────────────────────────────
+        meta: dict[str, Any] = metadata if isinstance(metadata, dict) else {}
         logger.info("LLM call start — model=%s max_tokens=%d", self.model, max_tokens)
         text, err = await self._call_with_backoff(
             model=self.model,
@@ -106,11 +108,45 @@ class LLMClient:
         if text:
             logger.debug("raw_llm_response_preview model=%s preview=%r", self.model, text[:800])
             parsed, debug = _extract_json(text)
+            meta.update({f"primary_{k}": v for k, v in debug.items()})
             if parsed is not None:
                 logger.debug("extracted_json_preview model=%s preview=%r", self.model, (debug.get("candidate") or "")[:800])
                 logger.debug("parsed_keys model=%s keys=%s", self.model, sorted(parsed.keys()))
+                meta.update({
+                    "model_used": self.model,
+                    "parse_success": True,
+                    "retry_reason": None,
+                })
                 return normalizer(parsed) if normalizer else parsed
             _log_parse_failure(self.model, text, debug)
+            if debug.get("truncated_response_detected"):
+                larger_budget = max(max_tokens + 256, int(max_tokens * 1.6))
+                logger.warning(
+                    "LLM primary parse looks truncated; retrying once with larger max_tokens=%d",
+                    larger_budget,
+                )
+                trunc_text, trunc_err = await self._call_with_backoff(
+                    model=self.model,
+                    system=system + _JSON_ONLY_CONTRACT,
+                    user=user + _JSON_ONLY_CONTRACT,
+                    max_tokens=larger_budget,
+                    timeout_s=PRIMARY_TIMEOUT_S,
+                    max_attempts=2,
+                )
+                if trunc_text:
+                    trunc_parsed, trunc_debug = _extract_json(trunc_text)
+                    meta.update({f"retry_{k}": v for k, v in trunc_debug.items()})
+                    meta["retry_reason"] = "truncated_response_detected"
+                    if trunc_parsed is not None:
+                        meta.update({
+                            "model_used": self.model,
+                            "parse_success": True,
+                            "truncation_retry_used": True,
+                        })
+                        return normalizer(trunc_parsed) if normalizer else trunc_parsed
+                    _log_parse_failure(self.model, trunc_text, trunc_debug)
+                if trunc_err:
+                    err = trunc_err
             logger.warning("LLM primary returned unparseable JSON; falling back")
 
         # ── Fallback attempt (Haiku, trimmed prompt, single try) ──────────
@@ -131,14 +167,24 @@ class LLMClient:
         if fb_text:
             logger.debug("raw_llm_response_preview model=%s preview=%r", self.fallback_model, fb_text[:800])
             parsed, debug = _extract_json(fb_text)
+            meta.update({f"fallback_{k}": v for k, v in debug.items()})
             if parsed is not None:
                 logger.info("LLM fallback succeeded — model=%s", self.fallback_model)
                 logger.debug("extracted_json_preview model=%s preview=%r", self.fallback_model, (debug.get("candidate") or "")[:800])
                 logger.debug("parsed_keys model=%s keys=%s", self.fallback_model, sorted(parsed.keys()))
+                meta.update({
+                    "model_used": self.fallback_model,
+                    "parse_success": True,
+                })
                 return normalizer(parsed) if normalizer else parsed
             _log_parse_failure(self.fallback_model, fb_text, debug)
             logger.warning("LLM fallback returned unparseable JSON")
 
+        meta.update({
+            "model_used": self.fallback_model,
+            "parse_success": False,
+            "retry_reason": err or "no-json",
+        })
         logger.warning("LLM fallback failed: %s — returning {}", fb_err or "no-json")
         return {}
 
@@ -235,13 +281,21 @@ class LLMClient:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, str]]:
+def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, Any]]:
     """Parse a JSON object from raw model text.
 
     Accepts raw JSON, fenced JSON blocks, and JSON with short prose wrappers.
     Returns parsed object + debug metadata for targeted logging.
     """
-    debug: dict[str, str] = {"candidate": "", "error": ""}
+    debug: dict[str, Any] = {
+        "candidate": "",
+        "error": "",
+        "parse_error_type": "",
+        "raw_response_length": len(text or ""),
+        "had_code_fence": bool("```" in (text or "")),
+        "extracted_json_length": 0,
+        "truncated_response_detected": False,
+    }
     if not text:
         debug["error"] = "empty response text"
         return None, debug
@@ -252,37 +306,69 @@ def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, str]]:
         loaded = json.loads(stripped)
         if isinstance(loaded, dict):
             debug["candidate"] = stripped
+            debug["extracted_json_length"] = len(stripped)
+            debug["parse_error_type"] = "none"
             return loaded, debug
         debug["candidate"] = stripped
         debug["error"] = f"top-level JSON must be object, got {type(loaded).__name__}"
+        debug["parse_error_type"] = "top_level_not_object"
     except Exception as exc:  # noqa: BLE001
         debug["error"] = str(exc)
+        debug["parse_error_type"] = _classify_parse_error(str(exc), candidate=stripped)
+        debug["truncated_response_detected"] = _looks_truncated(
+            candidate=stripped,
+            error=str(exc),
+        )
 
     fenced = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", stripped, flags=re.IGNORECASE)
     if fenced:
         candidate = fenced.group(1).strip()
         debug["candidate"] = candidate
+        debug["extracted_json_length"] = len(candidate)
         try:
             loaded = json.loads(candidate)
             if isinstance(loaded, dict):
+                debug["parse_error_type"] = "none"
                 return loaded, debug
             debug["error"] = f"top-level fenced JSON must be object, got {type(loaded).__name__}"
+            debug["parse_error_type"] = "top_level_not_object"
         except Exception as exc:  # noqa: BLE001
             debug["error"] = str(exc)
+            debug["parse_error_type"] = _classify_parse_error(str(exc), candidate=candidate)
+            debug["truncated_response_detected"] = _looks_truncated(
+                candidate=candidate,
+                error=str(exc),
+            )
 
     candidate = _first_balanced_json_object_substring(stripped)
     if candidate:
         debug["candidate"] = candidate
+        debug["extracted_json_length"] = len(candidate)
         try:
             loaded = json.loads(candidate)
             if isinstance(loaded, dict):
+                debug["parse_error_type"] = "none"
                 return loaded, debug
             debug["error"] = f"top-level extracted JSON must be object, got {type(loaded).__name__}"
+            debug["parse_error_type"] = "top_level_not_object"
         except Exception as exc:  # noqa: BLE001
             debug["error"] = str(exc)
+            debug["parse_error_type"] = _classify_parse_error(str(exc), candidate=candidate)
+            debug["truncated_response_detected"] = _looks_truncated(
+                candidate=candidate,
+                error=str(exc),
+            )
 
     if not debug.get("error"):
         debug["error"] = "no JSON object candidate found"
+        debug["parse_error_type"] = "no_json_object_found"
+    if not candidate and "{" in stripped:
+        debug["truncated_response_detected"] = _looks_truncated(
+            candidate=stripped,
+            error=debug.get("error") or "",
+        )
+        if debug["truncated_response_detected"]:
+            debug["parse_error_type"] = "truncated_json"
     return None, debug
 
 
@@ -312,6 +398,38 @@ def _first_balanced_json_object_substring(text: str) -> Optional[str]:
                     return text[start:idx + 1]
         start = text.find("{", start + 1)
     return None
+
+
+def _classify_parse_error(error: str, *, candidate: str) -> str:
+    msg = (error or "").lower()
+    if _looks_truncated(candidate=candidate, error=error):
+        return "truncated_json"
+    if "expecting value" in msg:
+        return "expecting_value"
+    if "unterminated string" in msg:
+        return "unterminated_string"
+    if "extra data" in msg:
+        return "extra_data"
+    if "invalid control character" in msg:
+        return "invalid_control_character"
+    return "json_decode_error"
+
+
+def _looks_truncated(*, candidate: str, error: str) -> bool:
+    msg = (error or "").lower()
+    c = candidate or ""
+    if "unterminated string" in msg:
+        return True
+    if "unexpected end" in msg or "unclosed" in msg:
+        return True
+    if "expecting value" in msg and c.rstrip().endswith((",", ":", "{", "[")):
+        return True
+    opens = c.count("{")
+    closes = c.count("}")
+    if opens > closes:
+        return True
+    quote_count = c.count('"')
+    return quote_count % 2 == 1
 
 
 def _extract_text_from_message(msg: Any) -> str:

@@ -66,6 +66,7 @@ class AnalystVerdict:
     analysis_source: str = "live_llm"
     generation_version: str = ANALYST_GENERATION_VERSION
     raw_response: Optional[dict[str, Any]] = None
+    parse_diagnostics: Optional[dict[str, Any]] = None
     error: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +75,7 @@ class AnalystVerdict:
         # want it should ask explicitly. Keeps log payloads + DB blobs
         # from accidentally carrying transient upstream data.
         out.pop("raw_response", None)
+        out.pop("parse_diagnostics", None)
         return out
 
 
@@ -104,18 +106,22 @@ RULES (hard requirements):
   6. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0]. Both zero when
      you return INSUFFICIENT_DATA.
 
-OUTPUT — return ONLY this JSON, no preamble, no code fences:
+OUTPUT RULES:
+  - Return ONLY one compact JSON object.
+  - No markdown fences.
+  - No prose before/after JSON.
+  - Keep strings concise.
+
+OUTPUT — return ONLY this JSON shape:
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
   "summary": "one plain-English sentence",
-  "thesis": "2 short sentences explaining the call",
-  "reasoning": "plain-language why this action fits now",
-  "key_drivers": ["driver 1", "driver 2"],
+  "thesis": "why this call follows from the inputs",
+  "plain_language_explanation": "what is going right, what is concerning, and what invalidates this call",
+  "drivers": ["driver 1", "driver 2"],
   "risks": ["risk 1"],
-  "confidence": 0.00,
-  "sentiment": "optional short label",
-  "citations": ["optional source pointer"]
+  "sentiment": "optional short label"
 }
 """
 
@@ -194,14 +200,15 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
         raw.get("action")
         or raw.get("suggested_action")
         or raw.get("recommendation")
+        or raw.get("recommendation_action")
         or ""
     ).strip().upper()
     if action not in ALLOWED_ACTIONS:
         return None
 
     try:
-        conviction = float(raw.get("conviction", 0.0))
-        confidence = float(raw.get("confidence", 0.0))
+        conviction = float(raw.get("conviction", raw.get("confidence", 0.0)))
+        confidence = float(raw.get("confidence", raw.get("conviction", 0.0)))
     except (TypeError, ValueError):
         return None
     if conviction != conviction or confidence != confidence:  # NaN guards
@@ -211,17 +218,20 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     confidence = max(0.0, min(1.0, confidence))
 
     key_drivers = _coerce_string_list(
-        raw.get("key_drivers") or raw.get("drivers"),
+        raw.get("drivers") or raw.get("key_drivers") or raw.get("catalysts"),
         max_items=3,
     )
     risks = _coerce_string_list(
         raw.get("risks") or raw.get("main_risks"),
         max_items=2,
     )
-    summary = _coerce_short_text(raw.get("summary"), max_len=360)
-    thesis = _coerce_short_text(raw.get("thesis"), max_len=600)
+    summary = _coerce_short_text(raw.get("summary") or raw.get("short_summary"), max_len=360)
+    thesis = _coerce_short_text(raw.get("thesis") or raw.get("investment_thesis"), max_len=600)
     reasoning = _coerce_short_text(
-        raw.get("reasoning") or raw.get("reasoning_summary"),
+        raw.get("plain_language_explanation")
+        or raw.get("reasoning")
+        or raw.get("reasoning_summary")
+        or raw.get("explanation"),
         max_len=600,
     )
     sentiment = _coerce_short_text(raw.get("sentiment"), max_len=80) or None
@@ -295,7 +305,7 @@ async def analyze_ticker(
     feature_set: FeatureSet,
     llm,  # Duck-typed LLMClient with ``ask_json``
     semaphore: Optional[asyncio.Semaphore] = None,
-    max_tokens: int = 350,
+    max_tokens: int = 700,
 ) -> AnalystVerdict:
     """Run one analyst LLM call with schema validation + one retry.
 
@@ -321,37 +331,74 @@ async def analyze_ticker(
         user_msg[:1500],
     )
 
-    async def _call_once() -> Any:
+    async def _call_once(*, system_prompt: str, token_budget: int, call_meta: dict[str, Any]) -> Any:
+        async def _invoke(with_metadata: bool) -> Any:
+            kwargs = {
+                "system": system_prompt,
+                "user": user_msg,
+                "max_tokens": token_budget,
+            }
+            if with_metadata:
+                kwargs["metadata"] = call_meta
+            return await llm.ask_json(**kwargs)
+
         if semaphore is not None:
             async with semaphore:
-                return await llm.ask_json(
-                    system=ANALYST_SYSTEM_PROMPT,
-                    user=user_msg,
-                    max_tokens=max_tokens,
-                )
-        return await llm.ask_json(
-            system=ANALYST_SYSTEM_PROMPT,
-            user=user_msg,
-            max_tokens=max_tokens,
-        )
+                try:
+                    return await _invoke(with_metadata=True)
+                except TypeError:
+                    return await _invoke(with_metadata=False)
+        try:
+            return await _invoke(with_metadata=True)
+        except TypeError:
+            return await _invoke(with_metadata=False)
 
     retry_reason: str | None = None
     strict_mode = False
+    truncation_retry_used = False
+    last_meta: dict[str, Any] = {}
     for attempt in (1, 2):
+        call_meta: dict[str, Any] = {}
+        token_budget = max_tokens + (180 if strict_mode else 0)
+        system_prompt = (
+            f"{ANALYST_SYSTEM_PROMPT}\n\n{ANALYST_STRICT_RETRY_APPENDIX}"
+            if strict_mode
+            else ANALYST_SYSTEM_PROMPT
+        )
         try:
             logger.info("analyst_stage.llm_request.start ticker=%s attempt=%d", snapshot.ticker, attempt)
-            if strict_mode:
-                raw = await llm.ask_json(
-                    system=f"{ANALYST_SYSTEM_PROMPT}\n\n{ANALYST_STRICT_RETRY_APPENDIX}",
-                    user=user_msg,
-                    max_tokens=max_tokens,
-                )
-            else:
-                raw = await _call_once()
+            raw = await _call_once(
+                system_prompt=system_prompt,
+                token_budget=token_budget,
+                call_meta=call_meta,
+            )
         except Exception as exc:  # noqa: BLE001
             logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=%d err=%s",
                            snapshot.ticker, attempt, exc)
             raw = {}
+        last_meta = call_meta
+        logger.info(
+            "analyst_stage.parse_observability ticker=%s attempt=%d raw_response_length=%s "
+            "had_code_fence=%s extracted_json_length=%s parse_error_type=%s "
+            "truncated_response_detected=%s retry_reason=%s",
+            snapshot.ticker,
+            attempt,
+            call_meta.get("primary_raw_response_length")
+            or call_meta.get("fallback_raw_response_length")
+            or 0,
+            bool(call_meta.get("primary_had_code_fence") or call_meta.get("fallback_had_code_fence")),
+            call_meta.get("primary_extracted_json_length")
+            or call_meta.get("fallback_extracted_json_length")
+            or 0,
+            call_meta.get("primary_parse_error_type")
+            or call_meta.get("fallback_parse_error_type")
+            or "none",
+            bool(
+                call_meta.get("primary_truncated_response_detected")
+                or call_meta.get("fallback_truncated_response_detected")
+            ),
+            retry_reason or "",
+        )
 
         logger.info(
             "analyst_trace checkpoint=raw_response ticker=%s attempt=%d raw=%s",
@@ -361,11 +408,18 @@ async def analyze_ticker(
         )
         verdict = validate_verdict(raw, ticker=snapshot.ticker)
         if verdict is None:
-            retry_reason = "schema_validation_failed"
+            retry_reason = (
+                call_meta.get("primary_parse_error_type")
+                or call_meta.get("fallback_parse_error_type")
+                or "schema_validation_failed"
+            )
             strict_mode = True
+            if retry_reason == "truncated_json":
+                truncation_retry_used = True
             continue
         verdict.llm_attempted = True
         verdict.analysis_source = "live_llm"
+        verdict.parse_diagnostics = call_meta
         if _looks_generic_template(verdict):
             retry_reason = "generic_template_rejected"
             logger.warning(
@@ -377,9 +431,10 @@ async def analyze_ticker(
             strict_mode = True
             continue
         logger.info(
-            "analyst_stage.llm_request.success ticker=%s attempt=%d verdict=%s",
+            "analyst_stage.llm_request.success ticker=%s attempt=%d normalized_success=%s verdict=%s",
             snapshot.ticker,
             attempt,
+            True,
             json.dumps(verdict.to_dict(), default=str)[:1500],
         )
         logger.debug(
@@ -398,6 +453,13 @@ async def analyze_ticker(
         snapshot.ticker, error=retry_reason or "schema_validation_failed",
     )
     fallback.llm_attempted = True
+    fallback.parse_diagnostics = {
+        **last_meta,
+        "normalized_success": False,
+        "retry_reason": retry_reason,
+        "truncation_retry_used": truncation_retry_used,
+        "fallback_reason": retry_reason or "schema_validation_failed",
+    }
     return fallback
 
 
@@ -453,6 +515,41 @@ async def analyze_portfolio(
             continue
         _t, verdict = item  # tuple from ``_run``
         out[_t] = verdict
+    total_llm_requests = len(out)
+    parse_successes = sum(1 for v in out.values() if not v.used_fallback)
+    fenced_json_rescued = sum(
+        1 for v in out.values()
+        if isinstance(v.parse_diagnostics, dict)
+        and (
+            v.parse_diagnostics.get("primary_had_code_fence")
+            or v.parse_diagnostics.get("fallback_had_code_fence")
+        )
+        and not v.used_fallback
+    )
+    truncation_retries = sum(
+        1 for v in out.values()
+        if isinstance(v.parse_diagnostics, dict)
+        and (
+            v.parse_diagnostics.get("retry_reason") == "truncated_response_detected"
+            or v.parse_diagnostics.get("truncation_retry_used")
+        )
+    )
+    schema_normalized_successes = sum(
+        1 for v in out.values()
+        if not v.used_fallback and (v.reasoning or v.thesis or v.summary)
+    )
+    true_fallbacks = sum(1 for v in out.values() if v.used_fallback)
+    logger.info(
+        "analyst_stage.parse_summary total_llm_requests=%d parse_successes=%d "
+        "fenced_json_rescued=%d truncation_retries=%d schema_normalized_successes=%d "
+        "true_fallbacks=%d",
+        total_llm_requests,
+        parse_successes,
+        fenced_json_rescued,
+        truncation_retries,
+        schema_normalized_successes,
+        true_fallbacks,
+    )
     return out
 
 

@@ -25,7 +25,13 @@ from uuid import UUID
 from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
-from ..intelligence import build_market_snapshots, persist_snapshots
+from ..intelligence import (
+    build_features,
+    build_market_snapshots,
+    fetch_benchmark_price_action,
+    persist_features,
+    persist_snapshots,
+)
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from .data_sources import get_provider_status
 from .llm import LLMClient, FALLBACK_MODEL
@@ -239,6 +245,19 @@ class AgentOrchestrator:
                 bundle=market_bundle,
             )
             timings["snapshots_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            # Phase 2 — deterministic feature engine (no LLM). Project
+            # the MarketSnapshots into per-ticker FeatureSet rows with
+            # trend_regime / momentum_score / volatility_regime /
+            # relative_strength. Persisted to ``agent_features`` so the
+            # Phase 3 analyst + Phase 4 synthesis stages read the same
+            # structured inputs.
+            t0 = time.perf_counter()
+            self._features = await self._build_and_persist_features(
+                run_id=run_id,
+                bundle=market_bundle,
+            )
+            timings["features_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # Safety guard: empty portfolio → no LLM call.
             if not context.get("portfolio"):
@@ -759,6 +778,76 @@ class AgentOrchestrator:
             logger.warning("market_snapshots persist raised (swallowed): %s", exc)
 
         return snapshots
+
+    # ── Feature engine stage (Phase 2) ──────────────────────────────────────
+
+    async def _build_and_persist_features(
+        self,
+        *,
+        run_id: str,
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive :class:`FeatureSet` per ticker and persist best-effort.
+
+        Called immediately after :meth:`_build_and_persist_snapshots` so
+        the feature engine can project the same snapshots onto the
+        deterministic feature rows downstream stages consume. The
+        benchmark (SPY by default) is fetched through the cache-first
+        helper — a failed fetch degrades ``relative_strength`` to
+        absolute momentum without breaking the run.
+        """
+        snapshots = getattr(self, "_snapshots", {}) or {}
+        if not snapshots:
+            return {}
+
+        try:
+            benchmark = await fetch_benchmark_price_action("SPY")
+        except Exception as exc:  # noqa: BLE001 — benchmark is best-effort
+            logger.warning("benchmark fetch raised (swallowed): %s", exc)
+            benchmark = {}
+
+        features = build_features(
+            snapshots,
+            bundle=bundle,
+            benchmark=benchmark,
+            benchmark_symbol="SPY",
+        )
+
+        regime_counts: dict[str, int] = {}
+        for ticker, fs in features.items():
+            regime_counts[fs.trend_regime] = regime_counts.get(fs.trend_regime, 0) + 1
+            logger.info(
+                "feature_set ticker=%s trend=%s momentum=%.2f vol=%s rs=%s "
+                "rs_30d=%s quality=%.2f",
+                ticker,
+                fs.trend_regime,
+                fs.momentum_score,
+                fs.volatility_regime,
+                fs.relative_strength_label,
+                fs.relative_strength_30d,
+                fs.data_quality_score,
+            )
+        logger.info(
+            "feature_engine done — run=%s tickers=%d regimes=%s benchmark_return=%s",
+            run_id, len(features), regime_counts,
+            benchmark.get("pct_30d") if benchmark else None,
+        )
+
+        try:
+            inserted = await asyncio.to_thread(
+                persist_features,
+                list(features.values()),
+                run_id=run_id,
+                user_id=str(self.user_id),
+            )
+            logger.info(
+                "agent_features persisted — run=%s tickers=%d inserted=%d",
+                run_id, len(features), inserted,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail a run on persistence
+            logger.warning("agent_features persist raised (swallowed): %s", exc)
+
+        return features
 
     # ── Persistence ─────────────────────────────────────────────────────────
 

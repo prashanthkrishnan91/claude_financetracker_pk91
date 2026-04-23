@@ -6,7 +6,18 @@ Public exports:
     * ``persist_snapshots`` — best-effort Supabase insert for ``market_snapshots``.
 """
 
+from .benchmark import fetch_benchmark_price_action
+from .feature_engine import FeatureSet, build_features
+from .feature_store import persist_features
 from .market_snapshot import MarketSnapshot, build_market_snapshots
 from .snapshot_store import persist_snapshots
 
-__all__ = ["MarketSnapshot", "build_market_snapshots", "persist_snapshots"]
+__all__ = [
+    "MarketSnapshot",
+    "build_market_snapshots",
+    "persist_snapshots",
+    "FeatureSet",
+    "build_features",
+    "persist_features",
+    "fetch_benchmark_price_action",
+]

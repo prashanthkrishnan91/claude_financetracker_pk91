@@ -25,6 +25,7 @@ from uuid import UUID
 from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
+from ..intelligence import build_market_snapshots, persist_snapshots
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from .data_sources import get_provider_status
 from .llm import LLMClient, FALLBACK_MODEL
@@ -213,7 +214,8 @@ class AgentOrchestrator:
             )
 
             t0 = time.perf_counter()
-            live_prices = await self._fetch_live_prices_for_user()
+            market_bundle = await self._fetch_market_bundle_for_user()
+            live_prices = dict(market_bundle.get("live_prices") or {})
             timings["fetch_live_prices_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             await self._update_run(run_id, current_agent="Building context", progress=25)
@@ -221,8 +223,22 @@ class AgentOrchestrator:
             context = build_portfolio_context(
                 user_id=str(self.user_id),
                 live_prices=live_prices,
+                market_data=market_bundle,
             )
             timings["build_context_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            # Phase 1 — data stabilization. Build a MarketSnapshot per
+            # ticker from the resilient bundle, log the fallback chain for
+            # each one, and best-effort persist to Supabase. This is
+            # PRE-LLM so the feature engine (Phase 2) + the analyst layer
+            # (Phase 3) can both read from the same stable shape.
+            t0 = time.perf_counter()
+            self._snapshots = await self._build_and_persist_snapshots(
+                run_id=run_id,
+                context=context,
+                bundle=market_bundle,
+            )
+            timings["snapshots_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # Safety guard: empty portfolio → no LLM call.
             if not context.get("portfolio"):
@@ -621,19 +637,24 @@ class AgentOrchestrator:
                 remaining -= dollars
             insight.suggested_allocation = max(0.0, dollars)
 
-    # ── Live price bootstrap (cache-first via io_layer) ──────────────────────
+    # ── Market bundle bootstrap (cache-first via io_layer) ──────────────────
 
-    async def _fetch_live_prices_for_user(self) -> dict[str, float]:
-        """Return ``{ticker: mid_price}`` for the user's positions.
+    async def _fetch_market_bundle_for_user(self) -> dict[str, Any]:
+        """Return the full io_layer bundle (prices + news + fundamentals + price_action).
 
-        Routed through the shared market cache so repeated requests for the
-        same ticker within the TTL window collapse to a single upstream call.
-        Failures are isolated — any broken upstream returns an empty dict, the
-        context builder still produces a usable LLM prompt, and the pipeline
-        is never retried.
+        Phase 1 — the orchestrator now pulls the full bundle instead of
+        prices-only so we can project it into :class:`MarketSnapshot`
+        rows before the LLM runs. Each upstream source degrades
+        independently; a broken finnhub doesn't poison fundamentals.
+
+        The bundle is canonical — ``io_layer.fetch_market_bundle``
+        guarantees every key is present even when every upstream fails,
+        so callers can destructure without defensive ``.get``.
         """
         if not self._price_service:
-            return {}
+            return await io_layer.fetch_market_bundle(
+                [], price_service=None
+            )
         try:
             tickers = [
                 p["ticker"]
@@ -647,21 +668,97 @@ class AgentOrchestrator:
                 if p.get("ticker")
             ]
         except Exception as exc:
-            logger.warning("Failed to list tickers for price fetch: %s", exc)
-            return {}
+            logger.warning("Failed to list tickers for bundle fetch: %s", exc)
+            return await io_layer.fetch_market_bundle(
+                [], price_service=None
+            )
         if not tickers:
-            return {}
+            return await io_layer.fetch_market_bundle(
+                [], price_service=None
+            )
         try:
-            bundle = await io_layer.fetch_market_bundle(
+            return await io_layer.fetch_market_bundle(
                 tickers,
                 price_service=self._price_service,
                 finnhub_key=self._finnhub_key,
                 polygon_key=self._polygon_key,
+                include_news=True,
+                include_fundamentals=True,
+                include_price_action=True,
             )
-            return dict(bundle.get("live_prices") or {})
         except Exception as exc:  # noqa: BLE001 — absolute failure isolation
-            logger.warning("io_layer price fetch failed, degrading gracefully: %s", exc)
+            logger.warning("io_layer bundle fetch failed, degrading gracefully: %s", exc)
+            return await io_layer.fetch_market_bundle(
+                [], price_service=None
+            )
+
+    async def _fetch_live_prices_for_user(self) -> dict[str, float]:
+        """Legacy shim — some callers still want the prices-only projection."""
+        bundle = await self._fetch_market_bundle_for_user()
+        return dict(bundle.get("live_prices") or {})
+
+    # ── MarketSnapshot stage (Phase 1) ──────────────────────────────────────
+
+    async def _build_and_persist_snapshots(
+        self,
+        *,
+        run_id: str,
+        context: dict[str, Any],
+        bundle: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Derive :class:`MarketSnapshot` objects and persist them.
+
+        Best-effort — if the ``market_snapshots`` table is missing, the
+        persistence layer logs a single WARNING and the orchestrator
+        continues. Builds snapshots before the LLM stage so the feature
+        engine (Phase 2) can read the persisted rows.
+        """
+        portfolio = context.get("portfolio") or []
+        tickers = [p.get("ticker") for p in portfolio if p.get("ticker")]
+        if not tickers:
             return {}
+
+        prior_insights = {
+            entry.get("ticker"): entry for entry in (context.get("insights") or [])
+        }
+        snapshots = build_market_snapshots(
+            bundle,
+            tickers=tickers,
+            prior_insights=prior_insights,
+            positions=portfolio,
+        )
+
+        # Emit a single structured log line per ticker so operators can
+        # assert the fallback-chain acceptance gate without re-running
+        # the full pipeline. Kept to one line per ticker on purpose —
+        # verbose enough to triage 429/403 degradations, terse enough
+        # not to flood logs when everything succeeds.
+        for ticker, snap in snapshots.items():
+            logger.info(
+                "snapshot_fallbacks ticker=%s source=%s chain=%s quality=%.2f "
+                "missing=%s",
+                ticker,
+                snap.price_source,
+                "→".join(snap.fallback_chain) if snap.fallback_chain else "none",
+                snap.data_quality_score,
+                ",".join(snap.missing_fields) if snap.missing_fields else "none",
+            )
+
+        try:
+            inserted = await asyncio.to_thread(
+                persist_snapshots,
+                list(snapshots.values()),
+                run_id=run_id,
+                user_id=str(self.user_id),
+            )
+            logger.info(
+                "market_snapshots persisted — run=%s tickers=%d inserted=%d",
+                run_id, len(snapshots), inserted,
+            )
+        except Exception as exc:  # noqa: BLE001 — never fail a run on persistence
+            logger.warning("market_snapshots persist raised (swallowed): %s", exc)
+
+        return snapshots
 
     # ── Persistence ─────────────────────────────────────────────────────────
 

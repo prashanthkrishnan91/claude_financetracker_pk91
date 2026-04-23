@@ -11,6 +11,7 @@ from uuid import UUID
 
 from ..config import get_settings
 from ..database import get_supabase_client
+from .agents.llm import _is_compatibility_400
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +72,39 @@ _FALLBACK_RESPONSE = {
     "total_value": 0.0,
     "generated_at": "",
 }
+
+
+def _create_anthropic_message(client, *, model: str, max_tokens: int, system_prompt: str, user_prompt: str):
+    """Create a Claude message with a compatibility fallback for HTTP 400.
+
+    Some Anthropic SDK/API combinations reject block-style `system` payloads
+    with `cache_control` hints. We first try the cache-friendly payload, then
+    retry once with plain-string `system` when the API responds with 400.
+    """
+    try:
+        return client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=[{
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }],
+            messages=[{"role": "user", "content": user_prompt}],
+        )
+    except Exception as exc:  # noqa: BLE001
+        if not _is_compatibility_400(exc):
+            raise
+        logger.warning(
+            "Anthropic 400 with cache_control/system-block payload; retrying "
+            "without cache_control for compatibility"
+        )
+        return client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system_prompt,
+            messages=[{"role": "user", "content": user_prompt}],
+        )
 
 
 class AiService:
@@ -250,11 +284,12 @@ class AiService:
             import anthropic
 
             anthropic_client = anthropic.Anthropic(api_key=anthropic_api_key)
-            message = anthropic_client.messages.create(
+            message = _create_anthropic_message(
+                anthropic_client,
                 model="claude-sonnet-4-6",
                 max_tokens=4096,
-                system=[{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": user_prompt}],
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
             )
 
             response_text = message.content[0].text if message.content else ""

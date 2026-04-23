@@ -21,6 +21,8 @@ import random
 import re
 from typing import Any, Callable, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # Primary model for the agent pipeline — speed/quality sweet spot.
@@ -39,6 +41,10 @@ FALLBACK_TIMEOUT_S = 18.0
 # Capped at 4 attempts total (initial + 3 retries) so worst-case latency stays
 # bounded. Jitter is added to avoid thundering-herd retries.
 _BACKOFF_SCHEDULE_S = (2.0, 5.0, 10.0, 20.0)
+_JSON_ONLY_CONTRACT = (
+    "\n\nReturn exactly one JSON object. No markdown fences. "
+    "No prose before/after JSON. Include all required keys; use null/[]/\"\" defaults."
+)
 
 
 class LLMClient:
@@ -98,8 +104,11 @@ class LLMClient:
             timeout_s=PRIMARY_TIMEOUT_S,
         )
         if text:
+            logger.debug("raw_llm_response_preview model=%s preview=%r", self.model, text[:800])
             parsed, debug = _extract_json(text)
             if parsed is not None:
+                logger.debug("extracted_json_preview model=%s preview=%r", self.model, (debug.get("candidate") or "")[:800])
+                logger.debug("parsed_keys model=%s keys=%s", self.model, sorted(parsed.keys()))
                 return normalizer(parsed) if normalizer else parsed
             _log_parse_failure(self.model, text, debug)
             logger.warning("LLM primary returned unparseable JSON; falling back")
@@ -108,8 +117,8 @@ class LLMClient:
         logger.warning(
             "Fallback → %s (primary failed: %s)", self.fallback_model, err or "no-json"
         )
-        fb_system = _trim_prompt(system, ratio=0.8)
-        fb_user = _trim_prompt(user, ratio=0.8)
+        fb_system = _trim_prompt(system + _JSON_ONLY_CONTRACT, ratio=0.8)
+        fb_user = _trim_prompt(user + _JSON_ONLY_CONTRACT, ratio=0.8)
         fb_max_tokens = max(320, min(700, int(max_tokens * 0.75)))
         fb_text, fb_err = await self._call_with_backoff(
             model=self.fallback_model,
@@ -120,9 +129,12 @@ class LLMClient:
             max_attempts=2,  # single retry on the fallback only
         )
         if fb_text:
+            logger.debug("raw_llm_response_preview model=%s preview=%r", self.fallback_model, fb_text[:800])
             parsed, debug = _extract_json(fb_text)
             if parsed is not None:
                 logger.info("LLM fallback succeeded — model=%s", self.fallback_model)
+                logger.debug("extracted_json_preview model=%s preview=%r", self.fallback_model, (debug.get("candidate") or "")[:800])
+                logger.debug("parsed_keys model=%s keys=%s", self.fallback_model, sorted(parsed.keys()))
                 return normalizer(parsed) if normalizer else parsed
             _log_parse_failure(self.fallback_model, fb_text, debug)
             logger.warning("LLM fallback returned unparseable JSON")
@@ -163,7 +175,7 @@ class LLMClient:
             except Exception as exc:  # noqa: BLE001 — we classify below
                 err_str = str(exc)
                 status = _status_code_from_exc(exc)
-                retryable = status in (429, 529) or "overloaded" in err_str.lower() \
+                retryable = isinstance(exc, (httpx.ReadTimeout, httpx.ConnectError, httpx.RemoteProtocolError, httpx.WriteError)) or status in (429, 529) or "overloaded" in err_str.lower() \
                     or "rate_limit" in err_str.lower()
                 if not retryable or attempt == attempts - 1:
                     logger.warning(
@@ -319,7 +331,7 @@ def _extract_text_from_message(msg: Any) -> str:
 
 
 def _log_parse_failure(model: str, response_text: str, debug: dict[str, str]) -> None:
-    logger.debug(
+    logger.warning(
         "LLM JSON parse failure — model=%s response_preview=%r candidate_preview=%r error=%s",
         model,
         (response_text or "")[:800],

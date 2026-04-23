@@ -82,6 +82,18 @@ class InsightCard(BaseModel):
     analyst_drivers: Optional[list[str]] = None
     analyst_risks: Optional[list[str]] = None
     analyst_used_fallback: Optional[bool] = None
+    # Canonical reasoning contract projected for UI stability.
+    summary: Optional[str] = None
+    reasoning_summary: Optional[str] = None
+    thesis: Optional[str] = None
+    why_this_matters: Optional[str] = None
+    key_drivers: Optional[list[str]] = None
+    main_risks: Optional[list[str]] = None
+    confidence: Optional[float] = None
+    conviction: Optional[float] = None
+    supporting_evidence: Optional[list[str]] = None
+    plain_language_explanation: Optional[str] = None
+    fallback_flags: Optional[list[str]] = None
 
 
 class AgentRunStatus(BaseModel):

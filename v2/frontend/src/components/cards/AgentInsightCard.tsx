@@ -76,12 +76,21 @@ function cleanClause(text: string): string {
 }
 
 function synthesizeExplanation(card: InsightCardData): string {
+  if (card.plain_language_explanation?.trim()) {
+    return card.plain_language_explanation.trim().split(/\s+/).slice(0, 42).join(" ");
+  }
+  if (card.summary?.trim()) {
+    return card.summary.trim().split(/\s+/).slice(0, 42).join(" ");
+  }
+  if (card.why_this_matters?.trim()) {
+    return card.why_this_matters.trim().split(/\s+/).slice(0, 42).join(" ");
+  }
   if (looksReadableThesis(card.investment_thesis)) {
     return card.investment_thesis!.trim().split(/\s+/).slice(0, 38).join(" ");
   }
 
-  const driver = card.analyst_drivers?.[0];
-  const risk = (card.analyst_risks || []).find(
+  const driver = card.key_drivers?.[0] || card.analyst_drivers?.[0];
+  const risk = (card.main_risks || card.analyst_risks || []).find(
     (r) => !/missing fields?:\s*sentiment/i.test(r)
   );
   const changed = card.what_changed?.split("\n").filter(Boolean)[0];

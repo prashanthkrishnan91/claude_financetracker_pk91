@@ -71,9 +71,30 @@ class InsightCard(BaseModel):
     data_quality_label: Optional[str] = None
     reason_tags: Optional[list[str]] = None
 
+    # Phase 3 — per-ticker analyst projection onto the card. The analyst
+    # verdict lives on ``agent_insights`` but we surface its drivers +
+    # risks directly on the InsightCard so the frontend doesn't have to
+    # issue a second request per ticker. Null on pre-Phase-3 runs.
+    analyst_action: Optional[str] = None
+    analyst_conviction: Optional[float] = None
+    analyst_confidence: Optional[float] = None
+    analyst_drivers: Optional[list[str]] = None
+    analyst_risks: Optional[list[str]] = None
+    analyst_used_fallback: Optional[bool] = None
+
 
 class AgentRunStatus(BaseModel):
-    """Status snapshot of an in-flight or completed agent run."""
+    """Status snapshot of an in-flight or completed agent run.
+
+    Phase 4-6 extensions:
+      * ``portfolio_synthesis`` — full PortfolioSynthesis dict
+        (portfolio_bias, key_themes, risk_concentrations,
+        overexposure_flags, rebalancing_suggestions, summary,
+        used_fallback). Drives the portfolio-insights panel.
+      * ``run_mode`` / ``run_mode_decision`` — Phase 5 mode badge +
+        human-facing explanation for the DEGRADED-mode banner.
+      * ``cost_metrics`` — per-run LLM call counts + estimated cost.
+    """
     id: UUID
     status: str                 # queued | running | completed | failed
     current_agent: Optional[str] = None
@@ -86,6 +107,13 @@ class AgentRunStatus(BaseModel):
     error_message: Optional[str] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # Phase 4 — dedicated portfolio synthesis output.
+    portfolio_synthesis: Optional[dict] = None
+    synthesis_used_fallback: Optional[bool] = None
+    # Phase 5 — run mode + cost.
+    run_mode: Optional[str] = None          # FULL | DEGRADED
+    run_mode_decision: Optional[dict] = None
+    cost_metrics: Optional[dict] = None
 
 
 class AgentRunCreate(BaseModel):
@@ -102,7 +130,16 @@ class AgentRunQueued(BaseModel):
 
 
 class AgentInsight(BaseModel):
-    """Full per-ticker agent output for the drill-down view."""
+    """Full per-ticker agent output for the drill-down view.
+
+    Phase 3 additions:
+      * ``analyst_verdict`` — raw analyst output (action ∈ {BUY, HOLD,
+        REDUCE, INSUFFICIENT_DATA}, conviction, key_drivers, risks,
+        confidence, used_fallback). Used by the frontend card so every
+        ticker shows WHY the signal exists, not just the mapped action.
+      * ``analyst_confidence`` — quick access to the analyst's
+        self-reported confidence without drilling into the JSONB.
+    """
     id: UUID
     run_id: Optional[UUID] = None
     ticker: str
@@ -118,6 +155,9 @@ class AgentInsight(BaseModel):
     suggested_action: Optional[str] = None
     created_at: Optional[str] = None
     what_changed: Optional[str] = None
+    # Phase 3 per-ticker analyst verdict (raw).
+    analyst_verdict: Optional[dict] = None
+    analyst_confidence: Optional[float] = None
 
 
 class DecisionLogEntry(BaseModel):

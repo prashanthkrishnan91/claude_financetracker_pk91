@@ -13,6 +13,8 @@ import {
 } from "@/lib/hooks";
 import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
+import { PortfolioSynthesisPanel } from "@/components/cards/PortfolioSynthesisPanel";
+import { DataQualityBanner } from "@/components/cards/DataQualityBanner";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
@@ -235,6 +237,26 @@ export default function RecommendationsPage() {
             {activeJobId && jobStatus && (
               <AgentProgressTracker status={jobStatus} />
             )}
+
+            {/* Phase 6 — run-mode + data-quality banner. Surfaces
+                FULL / DEGRADED state, HIGH / MEDIUM / LOW quality band,
+                and the per-run cost ledger above the recommendations. */}
+            <DataQualityBanner
+              runMode={(jobStatus?.run_mode ?? latestRun?.run_mode) ?? null}
+              decision={
+                (jobStatus?.run_mode_decision ?? latestRun?.run_mode_decision) ?? null
+              }
+              cost={(jobStatus?.cost_metrics ?? latestRun?.cost_metrics) ?? null}
+            />
+
+            {/* Phase 6 — portfolio-synthesis panel. Cross-ticker themes,
+                risk concentrations, and rebalancing suggestions from the
+                Phase 4 synthesis LLM call. */}
+            <PortfolioSynthesisPanel
+              synthesis={
+                (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null
+              }
+            />
 
             {/* Filter cards */}
             <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">

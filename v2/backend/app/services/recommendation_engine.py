@@ -486,6 +486,74 @@ def _derive_reason_tags(rec: dict) -> list[str]:
     return tags
 
 
+def _extract_analyst_card_fields(
+    verdict: Optional[dict], *, analyst_confidence: Optional[float],
+) -> dict[str, Any]:
+    """Normalise an analyst_verdict JSONB blob into InsightCard fields.
+
+    Tolerant of missing keys / malformed blobs — returns ``None`` for
+    every field when the verdict is unusable so the card degrades to
+    the legacy (pre-Phase-3) rendering.
+    """
+    if not isinstance(verdict, dict):
+        return {
+            "action": None, "conviction": None, "confidence": analyst_confidence,
+            "drivers": None, "risks": None, "used_fallback": None,
+        }
+    action = verdict.get("action")
+    conv = verdict.get("conviction")
+    conf = verdict.get("confidence")
+    drivers = verdict.get("key_drivers")
+    risks = verdict.get("risks")
+    try:
+        conv_f = float(conv) if conv is not None else None
+    except (TypeError, ValueError):
+        conv_f = None
+    try:
+        conf_f = float(conf) if conf is not None else analyst_confidence
+    except (TypeError, ValueError):
+        conf_f = analyst_confidence
+    return {
+        "action": str(action) if isinstance(action, str) else None,
+        "conviction": conv_f,
+        "confidence": conf_f,
+        "drivers": [str(d) for d in drivers if isinstance(d, str)][:3]
+                   if isinstance(drivers, list) else None,
+        "risks": [str(r) for r in risks if isinstance(r, str)][:2]
+                 if isinstance(risks, list) else None,
+        "used_fallback": bool(verdict.get("used_fallback", False)),
+    }
+
+
+def _agent_run_row_to_status(d: dict) -> AgentRunStatus:
+    """Map an ``agent_runs`` row into :class:`AgentRunStatus`.
+
+    Handles the Phase 4-6 columns (``portfolio_synthesis``,
+    ``run_mode``, ``run_mode_decision``, ``cost_metrics``) gracefully —
+    older rows lacking the columns surface as ``None``, letting the UI
+    render a clean FULL-mode card without ever seeing missing fields.
+    """
+    return AgentRunStatus(
+        id=d["id"],
+        status=d["status"],
+        current_agent=d.get("current_agent"),
+        progress_pct=int(d.get("progress_pct") or 0),
+        tickers=d.get("tickers") or [],
+        deposit_amount=float(d.get("deposit_amount") or 0),
+        sale_proceeds=float(d.get("sale_proceeds") or 0),
+        allocation=d.get("allocation") or {},
+        summary=d.get("summary"),
+        error_message=d.get("error_message"),
+        started_at=d.get("started_at"),
+        finished_at=d.get("finished_at"),
+        portfolio_synthesis=d.get("portfolio_synthesis"),
+        synthesis_used_fallback=d.get("synthesis_used_fallback"),
+        run_mode=d.get("run_mode"),
+        run_mode_decision=d.get("run_mode_decision"),
+        cost_metrics=d.get("cost_metrics"),
+    )
+
+
 # ── Service class ────────────────────────────────────────────────────────────
 
 class RecommendationService:
@@ -517,6 +585,32 @@ class RecommendationService:
             ).data
         }
 
+        # Phase 3 / 6 — fetch the linked analyst_verdict JSONB for each
+        # recommendation so the frontend card can render drivers + risks
+        # without a second round-trip per ticker. Degrades gracefully when
+        # the column is missing (pre-migration-010 deployments).
+        analyst_lookup: dict[tuple[str, str], dict] = {}
+        run_ids_needed = {r.get("agent_run_id") for r in recs if r.get("agent_run_id")}
+        if run_ids_needed:
+            try:
+                ai_rows = (
+                    self.client.table("agent_insights")
+                    .select("run_id, ticker, analyst_verdict, analyst_confidence")
+                    .eq("user_id", str(self.user_id))
+                    .in_("run_id", [str(r) for r in run_ids_needed])
+                    .execute()
+                ).data or []
+                for row in ai_rows:
+                    run_id = row.get("run_id")
+                    ticker = row.get("ticker")
+                    if run_id and ticker:
+                        analyst_lookup[(str(run_id), ticker)] = row
+            except Exception as exc:  # noqa: BLE001 — pre-migration: skip analyst overlay
+                logger.debug(
+                    "get_insight_cards: analyst_verdict lookup failed (likely "
+                    "pre-Phase-3 schema): %s", exc,
+                )
+
         # Fetch live prices if price service available
         prices: dict[str, float] = {}
         if self._price_service and positions:
@@ -545,6 +639,16 @@ class RecommendationService:
             data_quality_label = _derive_quality_label(data_confidence_score)
             reason_tags = _derive_reason_tags(rec)
 
+            analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
+            analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
+            analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
+            analyst_confidence = (
+                float(analyst_conf_raw) if analyst_conf_raw is not None else None
+            )
+            analyst_fields = _extract_analyst_card_fields(
+                analyst_verdict, analyst_confidence=analyst_confidence,
+            )
+
             cards.append(InsightCard(
                 id=rec["id"],
                 ticker=ticker,
@@ -571,6 +675,13 @@ class RecommendationService:
                 data_confidence_score=data_confidence_score,
                 data_quality_label=data_quality_label,
                 reason_tags=reason_tags,
+                # Phase 3 — analyst verdict projection.
+                analyst_action=analyst_fields["action"],
+                analyst_conviction=analyst_fields["conviction"],
+                analyst_confidence=analyst_fields["confidence"],
+                analyst_drivers=analyst_fields["drivers"],
+                analyst_risks=analyst_fields["risks"],
+                analyst_used_fallback=analyst_fields["used_fallback"],
             ))
 
         return cards
@@ -693,21 +804,7 @@ class RecommendationService:
         )
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
-        d = row.data
-        return AgentRunStatus(
-            id=d["id"],
-            status=d["status"],
-            current_agent=d.get("current_agent"),
-            progress_pct=int(d.get("progress_pct") or 0),
-            tickers=d.get("tickers") or [],
-            deposit_amount=float(d.get("deposit_amount") or 0),
-            sale_proceeds=float(d.get("sale_proceeds") or 0),
-            allocation=d.get("allocation") or {},
-            summary=d.get("summary"),
-            error_message=d.get("error_message"),
-            started_at=d.get("started_at"),
-            finished_at=d.get("finished_at"),
-        )
+        return _agent_run_row_to_status(row.data)
 
     async def get_latest_job(self) -> Optional[AgentRunStatus]:
         """Return the most recent agent run for this user, or None if none exists."""
@@ -721,21 +818,7 @@ class RecommendationService:
         ).data
         if not rows:
             return None
-        d = rows[0]
-        return AgentRunStatus(
-            id=d["id"],
-            status=d["status"],
-            current_agent=d.get("current_agent"),
-            progress_pct=int(d.get("progress_pct") or 0),
-            tickers=d.get("tickers") or [],
-            deposit_amount=float(d.get("deposit_amount") or 0),
-            sale_proceeds=float(d.get("sale_proceeds") or 0),
-            allocation=d.get("allocation") or {},
-            summary=d.get("summary"),
-            error_message=d.get("error_message"),
-            started_at=d.get("started_at"),
-            finished_at=d.get("finished_at"),
-        )
+        return _agent_run_row_to_status(rows[0])
 
     async def get_agent_insights(self, run_id: Optional[UUID] = None) -> list[AgentInsight]:
         """Fetch the per-ticker agent insights for a run.
@@ -782,6 +865,11 @@ class RecommendationService:
                 suggested_action=r.get("suggested_action"),
                 created_at=r.get("created_at"),
                 what_changed=r.get("what_changed"),
+                analyst_verdict=r.get("analyst_verdict"),
+                analyst_confidence=(
+                    float(r["analyst_confidence"])
+                    if r.get("analyst_confidence") is not None else None
+                ),
             )
             for r in rows
         ]

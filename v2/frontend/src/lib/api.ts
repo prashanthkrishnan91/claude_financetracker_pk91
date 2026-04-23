@@ -322,6 +322,7 @@ export interface InsightCardData {
   // Multi-agent enrichment (nullable for legacy rows)
   investment_thesis?: string | null;
   sentiment_score?: number | null;
+  sentiment_label?: string | null;
   technical_signal?: string | null;
   conviction_score?: number | null;
   suggested_allocation?: number | null;

@@ -102,7 +102,8 @@ export function useRecommendations(action?: string) {
   return useQuery({
     queryKey: ["recommendations", action],
     queryFn: () => api.recommendations.list(action),
-    staleTime: 0,
+    staleTime: 20_000,
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -303,10 +304,11 @@ export function useResolveRecommendation() {
   });
 }
 
-export function useDecisionLog(limit = 50) {
+export function useDecisionLog(limit = 50, enabled = true) {
   return useQuery({
     queryKey: ["recommendations", "decisions", limit],
     queryFn: () => api.recommendations.getDecisions(limit),
+    enabled,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
   });

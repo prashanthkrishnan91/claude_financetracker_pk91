@@ -34,8 +34,18 @@ const QUALITY_STYLES: Record<string, { label: string; cls: string }> = {
   LOW:    { label: "LOW",    cls: "bg-red-500/10 text-red-400 border-red-500/30" },
 };
 
-function sentimentBadge(score?: number | null): { label: string; cls: string } {
-  if (score === undefined || score === null) return { label: "—", cls: "text-text-muted" };
+function sentimentBadge(
+  score?: number | null,
+  label?: string | null
+): { label: string; cls: string } {
+  const normalized = (label || "").toLowerCase();
+  if (normalized === "unavailable") {
+    return { label: "Unavailable", cls: "text-text-muted" };
+  }
+  if (normalized === "positive") return { label: "Positive", cls: "text-green-400" };
+  if (normalized === "negative") return { label: "Negative", cls: "text-red-400" };
+  if (normalized === "mixed") return { label: "Mixed", cls: "text-yellow-400" };
+  if (score === undefined || score === null) return { label: "Unavailable", cls: "text-text-muted" };
   if (score >= 0.3) return { label: `bullish ${score.toFixed(2)}`, cls: "text-green-400" };
   if (score <= -0.3) return { label: `bearish ${score.toFixed(2)}`, cls: "text-red-400" };
   return { label: `neutral ${score.toFixed(2)}`, cls: "text-text-secondary" };
@@ -58,7 +68,7 @@ export function AgentInsightCard({
 }) {
   const styles = ACTION_STYLES[card.action] || ACTION_STYLES.HOLD;
   const thesis = card.investment_thesis || card.detail;
-  const sent = sentimentBadge(card.sentiment_score);
+  const sent = sentimentBadge(card.sentiment_score, card.sentiment_label);
   const tech = technicalBadge(card.technical_signal);
   const conviction = card.conviction_score;
 

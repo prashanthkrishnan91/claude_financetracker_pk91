@@ -92,8 +92,11 @@ def classify_run_mode(
     avg_quality = sum(s.data_quality_score for s in snaps) / total
     insufficient = sum(1 for s in snaps if s.data_quality_score < threshold)
     non_live = sum(1 for s in snaps if s.price_source != "live")
+    sentiment_covered = sum(1 for s in snaps if (s.sentiment_label or "").lower() not in {"", "unavailable"})
+    fundamentals_covered = sum(1 for s in snaps if bool(s.fundamentals))
+    evidence_coverage = (sentiment_covered + fundamentals_covered) / max(1, (2 * total))
 
-    if avg_quality < threshold:
+    if avg_quality < threshold and evidence_coverage < 0.55:
         return ModeDecision(
             mode=RunMode.DEGRADED,
             avg_quality=avg_quality,
@@ -105,6 +108,18 @@ def classify_run_mode(
                 f"{avg_quality:.2f} below {threshold:.2f} threshold — "
                 "per-ticker LLM calls skipped, deterministic HOLD "
                 "verdicts issued."
+            ),
+        )
+    if avg_quality < threshold:
+        return ModeDecision(
+            mode=RunMode.FULL,
+            avg_quality=avg_quality,
+            insufficient_count=insufficient,
+            total_tickers=total,
+            reason="core_evidence_still_strong",
+            explanation=(
+                f"FULL mode retained: quality score {avg_quality:.2f} is below "
+                f"threshold but evidence coverage remains {evidence_coverage:.0%}."
             ),
         )
 

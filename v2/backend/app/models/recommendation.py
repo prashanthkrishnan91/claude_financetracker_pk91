@@ -57,6 +57,7 @@ class InsightCard(BaseModel):
     # Multi-agent fields (populated from the agent pipeline)
     investment_thesis: Optional[str] = None
     sentiment_score: Optional[float] = None
+    sentiment_label: Optional[str] = None
     technical_signal: Optional[str] = None
     conviction_score: Optional[float] = None
     suggested_allocation: Optional[float] = None

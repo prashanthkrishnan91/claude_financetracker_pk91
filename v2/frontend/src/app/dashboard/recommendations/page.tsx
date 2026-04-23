@@ -56,7 +56,7 @@ export default function RecommendationsPage() {
   const { data: recs, isLoading, error } = useRecommendations();
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
-  const { data: decisions } = useDecisionLog(20);
+  const { data: decisions } = useDecisionLog(20, decisionLogOpen);
   // Only one poll owner at a time:
   // - while a specific job is active, useAgentJob owns polling
   // - otherwise, useLatestAgentRun can restore any in-flight run on mount

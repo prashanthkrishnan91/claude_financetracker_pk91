@@ -109,13 +109,12 @@ export default function DepositsPage() {
 }
 
 function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
-  const [debugOpen, setDebugOpen] = useState(false);
-  const { plan, recommendations, summary, debug } = deployPlan;
+  const { plan, recommendations, summary, funding, trims, notes } = deployPlan;
 
   return (
     <div className="space-y-4">
       {/* Plan Summary */}
-      <PlanSummary plan={plan} summary={summary} aiDriven={debug.signals.ai_driven} />
+      <PlanSummary plan={plan} summary={summary} funding={funding} />
 
       {/* Link to Intel tab */}
       <Link
@@ -139,46 +138,25 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         </div>
       )}
 
-      {/* Debug Toggle */}
-      <div className="card-glass overflow-hidden">
-        <button
-          onClick={() => setDebugOpen((o) => !o)}
-          className="w-full flex items-center justify-between px-4 py-3 text-sm text-text-secondary hover:text-text-primary transition-colors"
-        >
-          <span className="text-xs font-semibold uppercase tracking-wide">
-            Show Advanced
-          </span>
-          <ChevronIcon
-            className={cn(
-              "w-4 h-4 transition-transform",
-              debugOpen ? "rotate-180" : ""
-            )}
-          />
-        </button>
-        {debugOpen && debug?.original_plan?.actions && (
-          <div className="border-t border-border p-4 space-y-3">
-            {debug.original_plan.actions.map((a, i) => (
-              <div key={i} className="p-3 rounded-xl border border-border bg-neutral-900">
-                <div className="flex justify-between">
-                  <span className="font-semibold text-text-primary">{a.symbol}</span>
-                  <span className="font-mono text-text-primary">${a.amount.toFixed(2)}</span>
-                </div>
-                <div className="text-sm text-gray-400 mt-1">
-                  Target Change: {(a.delta_weight * 100).toFixed(1)}%
-                </div>
-                <div className="w-full bg-gray-800 h-2 rounded mt-2 overflow-hidden">
-                  <div
-                    className="bg-green-500 h-2 rounded"
-                    style={{ width: `${Math.min(100, a.delta_weight * 100)}%` }}
-                  />
-                </div>
-                <div className="text-xs text-gray-500 mt-1">
-                  Date: {a.deposit_date}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+      {trims.length > 0 && (
+        <div className="card-glass p-4 space-y-2">
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+            Tax-aware trim watchlist
+          </p>
+          {trims.map((trim) => (
+            <div key={trim.ticker} className="border border-border rounded-lg px-3 py-2">
+              <p className="text-sm font-mono text-text-primary">{trim.action} {trim.ticker}</p>
+              <p className="text-xs text-text-secondary">{trim.market_note}</p>
+              <p className="text-xs text-yellow-300 mt-1">{trim.tax_note}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="card-glass p-4 space-y-1">
+        {notes.map((note, i) => (
+          <p key={i} className="text-xs text-text-muted">• {note}</p>
+        ))}
       </div>
     </div>
   );
@@ -187,11 +165,11 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
 function PlanSummary({
   plan,
   summary,
-  aiDriven,
+  funding,
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
-  aiDriven: boolean;
+  funding: DepositPlanResult["funding"];
 }) {
   return (
     <div className="card-glass p-4 space-y-3">
@@ -201,11 +179,6 @@ function PlanSummary({
             <p className="text-lg font-display text-text-primary">
               Investing {formatCurrency(plan.total_amount)}
             </p>
-            {aiDriven && (
-              <span className="text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide bg-purple-500/10 text-purple-400 border border-purple-500/20">
-                AI-Driven
-              </span>
-            )}
           </div>
           <p className="text-xs text-text-muted mt-0.5">{plan.strategy}</p>
         </div>
@@ -222,9 +195,11 @@ function PlanSummary({
       </div>
       <div className="flex gap-4 text-xs text-text-muted">
         <span>{summary.positions_count} positions</span>
-        <span>Rotating: {summary.rotating_pick}</span>
+        <span>Candidates: {summary.ranked_candidates}</span>
         <span className="capitalize">{summary.strategy_mode} mode</span>
+        <span>Cash: {formatCurrency(funding.total_cash)}</span>
       </div>
+      <p className="text-xs text-text-secondary">{plan.intel_summary}</p>
     </div>
   );
 }
@@ -233,9 +208,6 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
   const [logOpen, setLogOpen] = useState(false);
   const [ticker, setTicker] = useState(rec.symbol);
   const [amount, setAmount] = useState(rec.amount);
-  const [overrideAmount, setOverrideAmount] = useState<number | "">(
-    rec.position_size_amount ?? rec.amount
-  );
   const [saved, setSaved] = useState(false);
   const logDecision = useLogDecision();
 
@@ -322,42 +294,11 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
         </div>
       </div>
 
-      {/* Position Sizing */}
-      {rec.position_size_amount != null && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <p className="text-[10px] text-text-muted uppercase tracking-wide font-semibold">
-            Recommended Allocation
-          </p>
-          <div className="flex items-center justify-between text-xs text-text-secondary">
-            <span>
-              {formatCurrency(rec.position_size_amount)}
-              {rec.position_size_pct != null && (
-                <span className="text-text-muted ml-1">({rec.position_size_pct.toFixed(1)}% of portfolio)</span>
-              )}
-            </span>
-          </div>
-          <div className="flex gap-2 items-center mt-1">
-            <div className="relative flex-1">
-              <span className="absolute left-2 top-1/2 -translate-y-1/2 text-text-muted text-xs">$</span>
-              <input
-                type="number"
-                value={overrideAmount}
-                onChange={(e) => setOverrideAmount(e.target.value === "" ? "" : Math.max(0, Number(e.target.value)))}
-                placeholder={rec.position_size_amount.toFixed(2)}
-                className="w-full pl-5 pr-2 py-1.5 bg-surface border border-border rounded text-xs font-mono text-text-primary focus:outline-none focus:ring-1 focus:ring-accent"
-                min={0}
-                step={10}
-              />
-            </div>
-            <button
-              onClick={() => setOverrideAmount(rec.position_size_amount!)}
-              className="px-2 py-1.5 text-[10px] text-text-muted bg-surface-elevated rounded hover:text-text-primary transition-colors whitespace-nowrap"
-            >
-              Reset
-            </button>
-          </div>
-        </div>
-      )}
+      <div className="border-t border-border pt-3 space-y-1 text-xs text-text-secondary">
+        {rec.portfolio_weight != null && <p>Current portfolio weight: {rec.portfolio_weight.toFixed(1)}%</p>}
+        {rec.conviction_score != null && <p>Conviction score: {rec.conviction_score.toFixed(2)}</p>}
+        {rec.linked_intel && <p className="text-text-muted">{rec.linked_intel}</p>}
+      </div>
 
       {/* Log Decision */}
       {!logOpen ? (
@@ -596,14 +537,6 @@ function CashOverrideWidget() {
 }
 
 // Icons
-function ChevronIcon({ className }: { className?: string }) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2}>
-      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
 function ArrowRightIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>

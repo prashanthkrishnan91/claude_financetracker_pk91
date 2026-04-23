@@ -1,209 +1,209 @@
 import { NextResponse } from "next/server";
 
-const ROTATION_ORDER = [
-  "GOOGL", "META", "AAPL", "MSFT", "NFLX", "CRM",
-  "AMD", "BRK-B", "COST", "WMT", "XLE", "VGT",
-];
-
-const BREAKDOWN: Record<string, number> = {
-  NVDA: 0.28,
-  VOO: 0.22,
-  VYM: 0.17,
-  QQQ: 0.17,
-  ROTATING: 0.16,
+type LatestRun = {
+  id: string;
+  status: string;
+  summary?: string | null;
+  portfolio_synthesis?: {
+    summary?: string;
+    key_themes?: string[];
+    overexposure_flags?: string[];
+  } | null;
 };
 
-const STRATEGY_MODE = "balanced";
-
-interface InsightSlim {
+type InsightSlim = {
   ticker: string;
   conviction_score: number | null;
   suggested_action: string | null;
   investment_thesis: string | null;
-}
+  analyst_confidence?: number | null;
+};
 
-function nextBiweeklyFriday(from: Date): Date {
-  const d = new Date(from);
-  const dow = d.getDay();
-  const daysAhead = (5 - dow + 7) % 7;
-  if (daysAhead === 0) {
-    d.setDate(d.getDate() + 7 + 14);
-  } else {
-    d.setDate(d.getDate() + daysAhead + 7);
-  }
-  return d;
-}
+type PositionSlim = {
+  ticker: string;
+  shares?: number;
+  avg_cost?: number;
+  current_price?: number;
+  market_value?: number;
+};
 
-function toISODate(d: Date): string {
-  return d.toISOString().split("T")[0];
-}
+type RecommendationSlim = {
+  ticker: string;
+  action: string;
+  tax_note?: string | null;
+  detail?: string | null;
+};
 
-function normalizeToTotal(
-  actions: Array<{ symbol: string; amount: number; delta_weight: number; deposit_date: string }>,
-  total: number
-) {
-  const sum = actions.reduce((s, a) => s + a.amount, 0);
-  if (sum === 0) return actions;
-  return actions.map((a) => ({
-    ...a,
-    amount: Math.round((a.amount / sum) * total * 100) / 100,
-    delta_weight: a.amount / sum,
-  }));
-}
-
-async function fetchLatestInsights(authHeader: string): Promise<InsightSlim[]> {
-  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
-  if (!apiBase) return [];
+async function fetchJson<T>(url: string, authHeader: string): Promise<T | null> {
   try {
-    const res = await fetch(`${apiBase}/api/v1/recommendations/insights/latest`, {
+    const res = await fetch(url, {
       headers: { Authorization: authHeader, "Content-Type": "application/json" },
       cache: "no-store",
     });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return Array.isArray(data) ? data : [];
+    if (!res.ok) return null;
+    return (await res.json()) as T;
   } catch {
-    return [];
+    return null;
   }
 }
 
-function calculatePositionSize(confidenceScore: number, portfolioBalance: number): { amount: number; pct: number } {
-  const pct = confidenceScore > 0.8 ? 0.05 : confidenceScore >= 0.5 ? 0.02 : 0.01;
-  return { amount: Math.round(portfolioBalance * pct * 100) / 100, pct: pct * 100 };
+function safeNumber(v: unknown): number {
+  const n = Number(v ?? 0);
+  return Number.isFinite(n) ? n : 0;
 }
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
-  const depositAmount = Math.max(0, Number(searchParams.get("cash_to_invest") || 0));
-  const portfolioBalance = Math.max(0, Number(searchParams.get("portfolio_balance") || 0));
-
-  // Attempt to load AI insights
+  const depositAmount = Math.max(0, safeNumber(searchParams.get("cash_to_invest")));
+  const portfolioBalance = Math.max(0, safeNumber(searchParams.get("portfolio_balance")));
   const authHeader = req.headers.get("Authorization") ?? "";
-  const insights = authHeader ? await fetchLatestInsights(authHeader) : [];
-  const aiDriven = insights.length > 0;
+  const apiBase = process.env.NEXT_PUBLIC_API_URL || "";
 
-  // Build conviction map: ticker → { score, action, thesis }
-  const convictionMap: Record<string, { score: number; action: string; thesis: string }> = {};
-  for (const ins of insights) {
-    convictionMap[ins.ticker] = {
-      score: ins.conviction_score ?? 0,
-      action: ins.suggested_action ?? "HOLD",
-      thesis: ins.investment_thesis ?? "",
-    };
-  }
-
-  // Rotating pick — highest-conviction BUY from rotation list, else fall back to GOOGL
-  let rotatingPick: string;
-  if (aiDriven) {
-    const buyRotators = ROTATION_ORDER
-      .filter((t) => convictionMap[t]?.action === "BUY")
-      .sort((a, b) => (convictionMap[b]?.score ?? 0) - (convictionMap[a]?.score ?? 0));
-    rotatingPick = buyRotators[0] ?? ROTATION_ORDER[0];
-  } else {
-    rotatingPick = ROTATION_ORDER[0]; // GOOGL until executedCount is wired to DB
-  }
-
-  const pctMap: Record<string, number> = Object.fromEntries(
-    Object.entries(BREAKDOWN).map(([sym, pct]) => [
-      sym === "ROTATING" ? rotatingPick : sym,
-      pct,
-    ])
-  );
-
-  const depositDate = toISODate(nextBiweeklyFriday(new Date()));
-  const generatedAt = new Date().toISOString();
-
-  // Layer 1: Original — pure percentage breakdown
-  const originalActions = Object.entries(pctMap).map(([symbol, pct]) => ({
-    symbol,
-    amount: Math.round(depositAmount * pct * 100) / 100,
-    delta_weight: pct,
-    deposit_date: depositDate,
-  }));
-
-  // Layer 2: AI conviction-weighted or rule-based personalization
-  let adjustedActions;
-  if (aiDriven) {
-    const raw = originalActions.map((a) => {
-      const c = convictionMap[a.symbol];
-      if (!c) return a;
-      // conviction +1.0 → +50% boost, -1.0 → −50% reduction, clamped ±50%
-      const multiplier = 1 + Math.max(-0.5, Math.min(0.5, c.score * 0.5));
-      return { ...a, amount: a.amount * multiplier };
+  if (!apiBase || !authHeader) {
+    return NextResponse.json({
+      plan: {
+        total_amount: depositAmount,
+        strategy: "No data connection — hold cash",
+        generated_at: new Date().toISOString(),
+      },
+      recommendations: [],
+      summary: {
+        positions_count: 0,
+        total_deployed: 0,
+        fully_allocated: false,
+        strategy_mode: "conservative",
+        ranked_candidates: 0,
+      },
+      funding: { deposit_amount: depositAmount, sale_proceeds: 0, total_cash: depositAmount },
+      trims: [],
+      notes: ["Portfolio data unavailable. Deployment plan withheld to avoid fabricated allocations."],
     });
-    adjustedActions = normalizeToTotal(raw, depositAmount);
-  } else {
-    const GROWTH_SYMBOLS = new Set(["NVDA", "QQQ"]);
-    const INCOME_SYMBOLS = new Set(["VYM"]);
-    const rawPersonalized = originalActions.map((a) => ({
-      ...a,
-      amount: GROWTH_SYMBOLS.has(a.symbol)
-        ? a.amount * 1.08
-        : INCOME_SYMBOLS.has(a.symbol)
-        ? a.amount * 0.90
-        : a.amount,
-    }));
-    adjustedActions = normalizeToTotal(rawPersonalized, depositAmount);
   }
 
-  const strategyLabel = STRATEGY_MODE.charAt(0).toUpperCase() + STRATEGY_MODE.slice(1);
+  const [latestRun, insights, positions, recommendations] = await Promise.all([
+    fetchJson<LatestRun>(`${apiBase}/api/v1/recommendations/jobs/latest`, authHeader),
+    fetchJson<InsightSlim[]>(`${apiBase}/api/v1/recommendations/insights/latest`, authHeader),
+    fetchJson<PositionSlim[]>(`${apiBase}/api/v1/positions`, authHeader),
+    fetchJson<RecommendationSlim[]>(`${apiBase}/api/v1/recommendations`, authHeader),
+  ]);
 
-  const totalDeployed = Math.round(
-    adjustedActions.reduce((s, a) => s + a.amount, 0) * 100
-  ) / 100;
-  const fullyAllocated = Math.abs(totalDeployed - depositAmount) < 1;
+  const insightsList = Array.isArray(insights) ? insights : [];
+  const posList = Array.isArray(positions) ? positions : [];
+  const recList = Array.isArray(recommendations) ? recommendations : [];
 
-  const recommendations = adjustedActions.map((a) => {
-    const insight = convictionMap[a.symbol];
-    const confidence = insight
-      ? Math.min(99, Math.max(1, Math.round(75 + insight.score * 24)))
-      : Math.min(99, Math.round(60 + a.delta_weight * 130));
-    const rationale =
-      insight?.thesis ||
-      `Allocate ${(a.delta_weight * 100).toFixed(0)}% of deposit ($${a.amount.toFixed(2)}) into ${a.symbol} per ${strategyLabel} strategy.`;
+  const positionByTicker = new Map<string, PositionSlim>();
+  let computedBalance = 0;
+  for (const p of posList) {
+    const ticker = String(p.ticker || "").toUpperCase();
+    if (!ticker) continue;
+    positionByTicker.set(ticker, p);
+    const mv = safeNumber(p.market_value) || safeNumber(p.shares) * safeNumber(p.current_price || p.avg_cost);
+    computedBalance += mv;
+  }
+  const portfolioTotal = portfolioBalance > 0 ? portfolioBalance : computedBalance;
 
-    const confidenceNorm = confidence / 100;
-    const posSize = portfolioBalance > 0 ? calculatePositionSize(confidenceNorm, portfolioBalance) : null;
+  const candidateRows = insightsList
+    .map((ins) => {
+      const ticker = String(ins.ticker || "").toUpperCase();
+      const action = String(ins.suggested_action || "HOLD").toUpperCase();
+      const conviction = safeNumber(ins.conviction_score);
+      const confidence = Math.max(0, Math.min(1, safeNumber(ins.analyst_confidence) || 0.45));
+      const position = positionByTicker.get(ticker);
+      const marketValue = safeNumber(position?.market_value) || safeNumber(position?.shares) * safeNumber(position?.current_price || position?.avg_cost);
+      const weightPct = portfolioTotal > 0 ? (marketValue / portfolioTotal) * 100 : 0;
+      const concentrationPenalty = weightPct >= 20 ? 0.35 : weightPct >= 12 ? 0.15 : 0;
+      const qualityFloor = conviction >= 0.2 ? 1 : 0.6;
+      const score = Math.max(0, conviction) * confidence * (1 - concentrationPenalty) * qualityFloor;
+      return {
+        ticker,
+        action,
+        conviction,
+        confidence,
+        score,
+        weightPct,
+        thesis: ins.investment_thesis || "",
+      };
+    })
+    .filter((r) => r.ticker && r.action === "BUY" && r.score > 0.04)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 8);
 
+  const totalScore = candidateRows.reduce((sum, c) => sum + c.score, 0);
+  let remaining = depositAmount;
+  const recommendationsOut = candidateRows.map((c, idx) => {
+    const raw = totalScore > 0 ? (depositAmount * c.score) / totalScore : 0;
+    const capped = c.weightPct > 24 ? raw * 0.6 : raw;
+    const amount = idx === candidateRows.length - 1 ? Math.max(0, Number(remaining.toFixed(2))) : Math.max(0, Number(capped.toFixed(2)));
+    remaining = Math.max(0, remaining - amount);
     return {
-      symbol: a.symbol,
+      symbol: c.ticker,
       action: "BUY",
-      amount: a.amount,
-      target_weight: Math.round(a.delta_weight * 1000) / 10,
-      rationale,
-      confidence,
-      deposit_date: a.deposit_date,
-      position_size_amount: posSize?.amount ?? null,
-      position_size_pct: posSize?.pct ?? null,
+      amount,
+      target_weight: Number((depositAmount > 0 ? (amount / depositAmount) * 100 : 0).toFixed(1)),
+      confidence: Math.round(c.confidence * 100),
+      rationale:
+        c.thesis ||
+        `${c.ticker} ranks highly on conviction-adjusted score (${c.score.toFixed(2)}), with concentration-aware sizing.`,
+      portfolio_weight: Number(c.weightPct.toFixed(1)),
+      conviction_score: Number(c.conviction.toFixed(2)),
+      linked_intel:
+        latestRun?.portfolio_synthesis?.key_themes?.[0] ||
+        latestRun?.portfolio_synthesis?.summary ||
+        "Linked to latest Intel run.",
     };
   });
+
+  const trims = recList
+    .filter((r) => ["TRIM", "SELL"].includes(String(r.action || "").toUpperCase()))
+    .slice(0, 5)
+    .map((r) => ({
+      ticker: r.ticker,
+      action: String(r.action || "").toUpperCase(),
+      tax_note: r.tax_note || "Tax-lot precision unavailable; use conservative trimming.",
+      market_note: r.detail || "",
+    }));
+
+  const totalDeployed = recommendationsOut.reduce((sum, r) => sum + r.amount, 0);
+  const strategy = recommendationsOut.length
+    ? "Deploy by conviction × data quality, concentration-aware"
+    : "No high-conviction opportunities — preserve cash";
 
   return NextResponse.json({
     plan: {
       total_amount: depositAmount,
-      strategy: aiDriven
-        ? `${strategyLabel} — AI conviction-weighted allocation`
-        : `${strategyLabel} — Drift + signal weighted allocation`,
-      generated_at: generatedAt,
+      strategy,
+      generated_at: new Date().toISOString(),
+      intel_summary:
+        latestRun?.portfolio_synthesis?.summary ||
+        latestRun?.summary ||
+        "No recent Intel summary available.",
     },
-    recommendations,
+    recommendations: recommendationsOut,
     summary: {
-      positions_count: recommendations.length,
-      total_deployed: totalDeployed,
-      fully_allocated: fullyAllocated,
-      strategy_mode: STRATEGY_MODE,
-      rotating_pick: rotatingPick,
+      positions_count: posList.length,
+      total_deployed: Number(totalDeployed.toFixed(2)),
+      fully_allocated: Math.abs(totalDeployed - depositAmount) < 1,
+      strategy_mode: "formula",
+      ranked_candidates: recommendationsOut.length,
     },
+    funding: {
+      deposit_amount: depositAmount,
+      sale_proceeds: 0,
+      total_cash: depositAmount,
+    },
+    trims,
+    notes: [
+      "Uses latest persisted Intel artifacts only (no fabricated market data).",
+      "If tax-lot detail is missing, trim suggestions stay conservative and non-prescriptive.",
+      recommendationsOut.length === 0
+        ? "No BUY candidate cleared the confidence and concentration gates."
+        : "Overweight names were capped to reduce concentration drift.",
+    ],
     debug: {
-      original_plan: { actions: originalActions },
-      personalized_plan: { actions: adjustedActions },
-      signals: {
-        ai_driven: aiDriven,
-        insights_count: insights.length,
-        rotating_pick: rotatingPick,
-        growth_bias: aiDriven ? [] : ["NVDA", "QQQ"],
-        income_trim: aiDriven ? [] : ["VYM"],
-      },
+      latest_run_id: latestRun?.id || null,
+      latest_run_status: latestRun?.status || null,
+      insights_considered: insightsList.length,
+      recommendations_considered: recList.length,
     },
   });
 }

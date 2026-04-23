@@ -32,7 +32,7 @@ from ..intelligence import (
     RunCostTracker,
     RunMode,
     action_to_suggested_action,
-    analyze_portfolio,
+    build_full_mode_verdicts,
     build_degraded_verdicts,
     build_features,
     build_market_snapshots,
@@ -1048,11 +1048,9 @@ class AgentOrchestrator:
                 for t in snapshots.keys()
             }
 
-        verdicts = await analyze_portfolio(
+        verdicts = build_full_mode_verdicts(
             snapshots=snapshots,
             features=features,
-            llm=self._llm,
-            max_concurrency=3,
         )
 
         action_counts: dict[str, int] = {}
@@ -1062,10 +1060,6 @@ class AgentOrchestrator:
             action_counts[v.action] = action_counts.get(v.action, 0) + 1
             if v.used_fallback:
                 fallback_count += 1
-            # Record cost only for calls that actually hit the LLM. Bypass /
-            # quality-gated fallbacks stay at zero cost.
-            if tracker is not None and not v.used_fallback:
-                tracker.record(kind="analyst", model=self._llm.model)
             logger.info(
                 "analyst ticker=%s action=%s conviction=%.2f confidence=%.2f "
                 "drivers=%d risks=%d fallback=%s",
@@ -1075,7 +1069,7 @@ class AgentOrchestrator:
 
         failure_rate = fallback_count / max(1, len(verdicts))
         logger.info(
-            "per-ticker analyst done — tickers=%d actions=%s fallback_rate=%.2f",
+            "per-ticker analyst done (deterministic) — tickers=%d actions=%s fallback_rate=%.2f",
             len(verdicts), action_counts, failure_rate,
         )
         return verdicts
@@ -1240,7 +1234,7 @@ class AgentOrchestrator:
                 "sentiment_score": _round(insight.sentiment_score),
                 "technical_signal": insight.technical_signal,
                 "conviction_score": _round(insight.conviction_score),
-                "suggested_allocation": round(insight.suggested_allocation, 2),
+                "suggested_allocation": None,
                 "what_changed": what_changed_map.get(insight.ticker),
             })
 
@@ -1399,11 +1393,9 @@ class AgentOrchestrator:
     @staticmethod
     def _tax_note(insight: TickerInsight) -> str:
         if insight.suggested_action in ("SELL", "TRIM") and insight.shares > 0:
-            return (
-                "LT eligible — 15-20% cap gains"
-                if insight.lt_eligible
-                else "ST status — 37% ordinary income tax"
-            )
+            if insight.lt_eligible:
+                return "Likely long-term lot eligible; consider tax-efficient trimming first."
+            return "Likely short-term taxable sale; avoid churn unless risk is elevated."
         return ""
 
 

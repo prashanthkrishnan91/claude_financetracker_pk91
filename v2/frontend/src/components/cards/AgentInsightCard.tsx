@@ -61,7 +61,6 @@ export function AgentInsightCard({
   const sent = sentimentBadge(card.sentiment_score);
   const tech = technicalBadge(card.technical_signal);
   const conviction = card.conviction_score;
-  const alloc = card.suggested_allocation;
 
   return (
     <div
@@ -232,17 +231,6 @@ export function AgentInsightCard({
 
       {/* Footer: allocation + pnl */}
       <div className="flex flex-wrap items-center gap-2">
-        {alloc !== undefined && alloc !== null && alloc > 0 && (
-          <span
-            className={cn(
-              "text-[11px] px-2 py-0.5 rounded-full font-semibold",
-              styles.bg,
-              styles.text
-            )}
-          >
-            Deploy {formatCurrency(alloc)}
-          </span>
-        )}
         {card.pnl_pct !== null && card.pnl_pct !== undefined && (
           <span
             className={cn(

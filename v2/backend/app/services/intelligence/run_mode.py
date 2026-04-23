@@ -180,6 +180,89 @@ def build_degraded_verdicts(
     return verdicts
 
 
+def build_full_mode_verdicts(
+    snapshots: dict[str, MarketSnapshot],
+    *,
+    features: dict[str, Any],
+) -> dict[str, AnalystVerdict]:
+    """Deterministic per-ticker verdicts for FULL mode.
+
+    Keeps the pipeline stable and cheap by avoiding per-ticker LLM calls while
+    still producing structured BUY/HOLD/REDUCE output grounded in snapshot +
+    feature data only.
+    """
+    verdicts: dict[str, AnalystVerdict] = {}
+    for ticker, snap in snapshots.items():
+        fs = features.get(ticker)
+        quality = max(0.0, min(1.0, float(snap.data_quality_score or 0.0)))
+        if snap.price is None or quality < 0.25 or fs is None:
+            verdicts[ticker] = AnalystVerdict(
+                ticker=ticker,
+                action="INSUFFICIENT_DATA",
+                conviction=0.0,
+                key_drivers=[],
+                risks=["Insufficient structured inputs for a reliable call"],
+                confidence=0.0,
+                used_fallback=True,
+                error="deterministic_insufficient_data",
+            )
+            continue
+
+        momentum = float(getattr(fs, "momentum_score", 0.0) or 0.0)
+        trend = str(getattr(fs, "trend_regime", "range") or "range")
+        sentiment = float(snap.sentiment_score or 0.0)
+        rs_label = str(getattr(fs, "relative_strength_label", "neutral") or "neutral")
+
+        raw_score = 0.55 * momentum + 0.25 * sentiment
+        if trend == "uptrend":
+            raw_score += 0.15
+        elif trend == "downtrend":
+            raw_score -= 0.15
+        if rs_label == "strong":
+            raw_score += 0.10
+        elif rs_label == "weak":
+            raw_score -= 0.10
+
+        score = max(-1.0, min(1.0, raw_score))
+        conviction = round(min(abs(score), 0.85) * quality, 2)
+        confidence = round(min(0.95, max(0.20, 0.35 + quality * 0.5)), 2)
+
+        if score >= 0.30 and quality >= 0.45:
+            action = "BUY"
+        elif score <= -0.30 and quality >= 0.55:
+            action = "REDUCE"
+        else:
+            action = "HOLD"
+            conviction = min(conviction, 0.35)
+
+        drivers: list[str] = []
+        if snap.return_30d is not None:
+            sign = "+" if snap.return_30d >= 0 else ""
+            drivers.append(f"30d return {sign}{snap.return_30d:.1f}%")
+        drivers.append(f"Trend regime: {trend}")
+        drivers.append(f"Relative strength: {rs_label}")
+
+        risks: list[str] = []
+        if snap.missing_fields:
+            risks.append(f"Missing fields: {', '.join(snap.missing_fields[:2])}")
+        if trend == "downtrend":
+            risks.append("Trend remains weak; avoid aggressive sizing")
+        elif quality < 0.60:
+            risks.append("Signal confidence capped by partial data coverage")
+
+        verdicts[ticker] = AnalystVerdict(
+            ticker=ticker,
+            action=action,
+            conviction=round(conviction, 2),
+            key_drivers=drivers[:3],
+            risks=risks[:2],
+            confidence=confidence,
+            used_fallback=True,
+            error="deterministic_full_mode",
+        )
+    return verdicts
+
+
 def _degraded_drivers(snap: MarketSnapshot) -> list[str]:
     """Two deterministic drivers from snapshot fields so cards don't clone."""
     drivers: list[str] = []

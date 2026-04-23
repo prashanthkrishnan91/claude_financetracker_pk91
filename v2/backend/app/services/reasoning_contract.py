@@ -51,7 +51,6 @@ def normalize_reasoning_payload(
     sentiment_label = (
         _s(rec.get("sentiment_label"))
         or _s(analyst_verdict.get("sentiment"))
-        or "Unavailable"
     )
 
     drivers = _list_of_str(
@@ -72,15 +71,50 @@ def normalize_reasoning_payload(
     if not thesis and not detail:
         fallback_flags.append("reasoning_unavailable")
 
+    sentiment_label = _normalize_sentiment(
+        sentiment_label,
+        action=action,
+        sentiment_score=rec.get("sentiment_score"),
+        technical_signal=rec.get("technical_signal"),
+        conviction=conviction,
+    )
+
+    context = _build_reasoning_context(
+        rec=rec,
+        ticker=ticker,
+        action=action,
+        sentiment=sentiment_label,
+        conviction=conviction,
+        confidence=confidence,
+        driver=drivers[0] if drivers else "",
+        risk=risks[0] if risks else "",
+    )
+    deterministic_summary = _deterministic_summary(context)
+    deterministic_why = _deterministic_why(context)
+    deterministic_plain = _deterministic_plain_explanation(context)
+    if not drivers:
+        drivers = _deterministic_drivers(context)
+        if drivers and "deterministic_drivers" not in fallback_flags:
+            fallback_flags.append("deterministic_drivers")
+    if not risks:
+        risks = _deterministic_risks(context)
+        if risks and "deterministic_risks" not in fallback_flags:
+            fallback_flags.append("deterministic_risks")
+    if confidence is None:
+        confidence = _infer_confidence(conviction=conviction, sentiment=sentiment_label, action=action)
+        fallback_flags.append("confidence_inferred")
+
     summary = (
         analyst_summary
         or _s(rec.get("summary"))
+        or deterministic_summary
         or _human_summary(ticker=ticker, action=action, thesis=thesis, detail=detail)
     )
-    why = _s(rec.get("why_this_matters")) or _human_why(action=action, ticker=ticker, rationale=rationale, driver=drivers[0] if drivers else "")
+    why = _s(rec.get("why_this_matters")) or deterministic_why or _human_why(action=action, ticker=ticker, rationale=rationale, driver=drivers[0] if drivers else "")
     explanation = (
-        analyst_reasoning
-        or _s(rec.get("plain_language_explanation"))
+        _s(rec.get("plain_language_explanation"))
+        or analyst_reasoning
+        or deterministic_plain
         or summary
     )
 
@@ -122,6 +156,141 @@ def _human_why(*, action: str, ticker: str, rationale: str, driver: str) -> str:
     if rationale:
         return rationale[:260]
     return "Data-backed recommendation available; AI reasoning is unavailable."
+
+
+def _normalize_sentiment(
+    sentiment: str,
+    *,
+    action: str,
+    sentiment_score: Any,
+    technical_signal: Any,
+    conviction: float | None,
+) -> str:
+    s = _s(sentiment).lower()
+    if s in {"positive", "negative", "mixed"}:
+        return s.capitalize()
+    score = _f(sentiment_score)
+    if score is not None:
+        if score >= 0.2:
+            return "Positive"
+        if score <= -0.2:
+            return "Negative"
+        return "Mixed"
+    tech = _s(technical_signal).upper()
+    if tech == "BUY":
+        return "Positive"
+    if tech == "SELL":
+        return "Negative"
+    if action in {"BUY", "SELL"} and conviction is not None and abs(conviction) >= 0.45:
+        return "Positive" if action == "BUY" else "Negative"
+    return "Mixed"
+
+
+def _build_reasoning_context(
+    *,
+    rec: dict[str, Any],
+    ticker: str,
+    action: str,
+    sentiment: str,
+    conviction: float | None,
+    confidence: float | None,
+    driver: str,
+    risk: str,
+) -> dict[str, str]:
+    technical = _s(rec.get("technical_signal")).upper()
+    position = _s(rec.get("position_context"))
+    allocation = rec.get("suggested_allocation")
+    sector = _s(rec.get("sector") or rec.get("asset_type") or rec.get("category"))
+    tax = _s(rec.get("tax_note"))
+    rationale = _s(rec.get("rationale"))
+    volatility = _s(rec.get("volatility_regime"))
+    conviction_band = _conviction_band(conviction, confidence)
+    return {
+        "ticker": ticker,
+        "action": action,
+        "sentiment": sentiment,
+        "technical": technical or "HOLD",
+        "position": position,
+        "allocation": f"{float(allocation):.1f}%" if allocation is not None else "",
+        "sector": sector,
+        "tax": tax,
+        "rationale": rationale,
+        "volatility": volatility,
+        "driver": driver,
+        "risk": risk,
+        "conviction_band": conviction_band,
+    }
+
+
+def _deterministic_summary(ctx: dict[str, str]) -> str:
+    lead = f"{ctx['ticker']} is rated {ctx['action']} with {ctx['sentiment'].lower()} sentiment."
+    why = ctx["driver"] or f"Technical signal is {ctx['technical']} with {ctx['conviction_band']} conviction."
+    return f"{lead} {why[:220].rstrip('.') }."
+
+
+def _deterministic_why(ctx: dict[str, str]) -> str:
+    upside = ctx["driver"] or "Recent price behavior still supports the current thesis."
+    downside = ctx["risk"] or "The main risk is momentum fading or concentration risk if the position grows too large."
+    return f"{upside[:170].rstrip('.')} while monitoring {downside[:170].rstrip('.')}."
+
+
+def _deterministic_plain_explanation(ctx: dict[str, str]) -> str:
+    action = ctx["action"]
+    core = (
+        f"{ctx['ticker']} shows {ctx['sentiment'].lower()} evidence and a {ctx['technical'].lower()} technical setup, "
+        f"so the current stance is {action}."
+    )
+    right = ctx["driver"] or "If the trend and business backdrop continue, returns can keep compounding."
+    wrong = ctx["risk"] or "If volatility rises or fundamentals soften, this thesis weakens quickly."
+    sizing = (
+        f" Suggested allocation is {ctx['allocation']}."
+        if ctx["allocation"]
+        else " Position sizing should stay aligned with diversification limits."
+    )
+    tax = f" {ctx['tax']}" if ctx["tax"] else ""
+    return f"{core} What could go right: {right[:170].rstrip('.')}. What could go wrong: {wrong[:170].rstrip('.')}.{sizing}{tax}"
+
+
+def _deterministic_drivers(ctx: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    out.append(f"Technical signal: {ctx['technical']} with {ctx['conviction_band']} conviction.")
+    if ctx["sector"]:
+        out.append(f"Portfolio context: exposure to {ctx['sector']} remains relevant for this call.")
+    if ctx["position"]:
+        out.append(ctx["position"][:200])
+    return out[:3]
+
+
+def _deterministic_risks(ctx: dict[str, str]) -> list[str]:
+    out: list[str] = []
+    out.append("Momentum or trend reversal could invalidate this recommendation.")
+    if ctx["volatility"]:
+        out.append(f"Volatility regime risk: {ctx['volatility'][:180]}.")
+    if ctx["allocation"]:
+        out.append(f"Allocation risk: keep {ctx['ticker']} near {ctx['allocation']} to avoid concentration drift.")
+    return out[:3]
+
+
+def _conviction_band(conviction: float | None, confidence: float | None) -> str:
+    c = confidence if confidence is not None else conviction
+    if c is None:
+        return "moderate"
+    if abs(c) >= 0.7:
+        return "high"
+    if abs(c) >= 0.4:
+        return "medium"
+    return "moderate"
+
+
+def _infer_confidence(*, conviction: float | None, sentiment: str, action: str) -> float:
+    base = 0.55
+    if conviction is not None:
+        base = min(0.92, max(0.35, abs(conviction)))
+    if sentiment == "Mixed":
+        base = min(base, 0.6)
+    if action == "HOLD":
+        base = min(base, 0.58)
+    return round(base, 2)
 
 
 def _s(v: Any) -> str:

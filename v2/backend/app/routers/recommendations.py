@@ -7,6 +7,8 @@ The UI polls `/recommendations/jobs/{job_id}` to drive the progress tracker.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query
@@ -26,6 +28,7 @@ from ..services.agents.job_runner import run_agent_pipeline
 from ..services.recommendation_engine import RecommendationService
 
 router = APIRouter(prefix="/recommendations", tags=["recommendations"])
+logger = logging.getLogger(__name__)
 
 
 def _make_price_service():
@@ -47,7 +50,16 @@ async def list_active_recommendations(
 ):
     """Get all active recommendations as frontend-ready InsightCards."""
     service = RecommendationService(user_id=user.id, price_service=_make_price_service())
-    cards = await service.get_insight_cards()
+    try:
+        cards = await service.get_insight_cards()
+    except asyncio.CancelledError:
+        # Client disconnected / request superseded. Keep aggregate compute alive
+        # for other readers and avoid noisy error-level traces.
+        logger.info(
+            "recommendations.list.cancelled user_id=%s reason=client_disconnect",
+            user.id,
+        )
+        raise
 
     if action:
         cards = [c for c in cards if c.action == action.upper()]

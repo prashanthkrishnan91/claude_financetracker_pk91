@@ -64,10 +64,9 @@ export default function RecommendationsPage() {
   // Only one poll owner at a time:
   // - while a specific job is active, useAgentJob owns polling
   // - otherwise, useLatestAgentRun can restore any in-flight run on mount
-  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun(!activeJobId && !finalizingJob);
+  const { data: latestRun } = useLatestAgentRun(!activeJobId && !finalizingJob);
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
-  const hasAutoTriggered = useRef(false);
   const finalizedJobRef = useRef<string | null>(null);
 
   // Restore the progress tracker from the last run if it's still in-flight.
@@ -76,53 +75,6 @@ export default function RecommendationsPage() {
       setActiveJobId(latestRun.id);
     }
   }, [latestRun, activeJobId]);
-
-  // Auto-trigger a new run when the tab loads if there's no recent COMPLETED
-  // run. The `hasAutoTriggered` ref guards against re-renders firing duplicate
-  // POSTs, and the backend enforces a single-run lock + 2-minute cache so the
-  // worst-case duplicate call still short-circuits to the existing run.
-  useEffect(() => {
-    if (latestRunLoading) return;
-    if (hasAutoTriggered.current) return;
-    if (activeJobId) return;
-    if (refreshRecs.isPending) return;
-
-    const isStale = (isoDate: string | null | undefined) => {
-      if (!isoDate) return true;
-      return Date.now() - new Date(isoDate).getTime() > 5 * 60_000;
-    };
-
-    // Trigger when: no run exists, the last run was not completed (including
-    // `failed` — retrying is fine, backend cache dedupes), or the last
-    // completed run is older than 5 minutes.
-    const shouldTrigger =
-      !latestRun ||
-      latestRun.status !== "completed" ||
-      isStale(latestRun.finished_at);
-
-    if (shouldTrigger) {
-      const reason = !latestRun
-        ? "no run exists"
-        : latestRun.status !== "completed"
-        ? `status=${latestRun.status}`
-        : "run is older than 5 min";
-      console.log(`[Intel] Auto-triggering agent run. Reason: ${reason}`);
-      hasAutoTriggered.current = true;
-      refreshRecs.mutate(undefined, {
-        onSuccess: (data) => {
-          console.log(`[Intel] ${data.status === "reused" ? "Reusing" : "Polling"} job:`, data.job_id);
-          finalizedJobRef.current = null;
-          setFinalizingJob(false);
-          setActiveJobId(data.job_id);
-        },
-        onError: (err) => {
-          console.error("[Intel] Failed to trigger agent run:", err);
-          // Allow a manual retry via the Run Agents button.
-          hasAutoTriggered.current = false;
-        },
-      });
-    }
-  }, [latestRun, latestRunLoading, activeJobId, refreshRecs.isPending]);
 
   // Clear the tracker shortly after a run completes so it doesn't linger.
   // Keep it visible slightly longer on failure so the user can read the
@@ -245,10 +197,10 @@ export default function RecommendationsPage() {
                   },
                 })
               }
-              disabled={refreshRecs.isPending || (jobStatus?.status === "running")}
+              disabled={refreshRecs.isPending || (jobStatus?.status === "running" || jobStatus?.status === "queued")}
               className="text-xs px-3 py-1.5 rounded-md bg-accent text-background font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50"
             >
-              {refreshRecs.isPending || jobStatus?.status === "running" ? (
+              {refreshRecs.isPending || jobStatus?.status === "running" || jobStatus?.status === "queued" ? (
                 <Spinner className="h-3 w-3" />
               ) : (
                 "Run Agents"

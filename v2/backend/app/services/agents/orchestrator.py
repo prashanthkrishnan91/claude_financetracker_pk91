@@ -47,6 +47,7 @@ from ..intelligence import (
 )
 from ..recommendation_engine import invalidate_recommendations_aggregate_cache
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
+from ..http_retry import run_with_retry_sync
 from .data_sources import get_provider_status
 from .llm import LLMClient, FALLBACK_MODEL
 from .state import AgentState, TickerInsight
@@ -196,6 +197,10 @@ class AgentOrchestrator:
         # Reliability flags — read by run() for logging and run-record metadata.
         self._llm_skipped = False    # True when LLM was bypassed entirely
         self._fallback_used = False  # True when deterministic recs were returned
+        self._trace_persist_logged = False
+
+    def _db(self, op_name: str, fn):
+        return run_with_retry_sync(fn, op_name=op_name)
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -209,7 +214,7 @@ class AgentOrchestrator:
             "deposit_amount": self.deposit_amount,
             "sale_proceeds": self.sale_proceeds,
         }
-        result = self.db.table("agent_runs").insert(row).execute()
+        result = self._db("agent_runs.create", lambda: self.db.table("agent_runs").insert(row).execute())
         return result.data[0]["id"]
 
     async def run(self, run_id: str) -> AgentPipelineResult:
@@ -371,7 +376,16 @@ class AgentOrchestrator:
 
             await self._update_run(run_id, current_agent="Saving Insights", progress=95)
             t0 = time.perf_counter()
-            await self._persist(state)
+            persistence_warning: str | None = None
+            try:
+                await self._persist(state)
+            except Exception as persist_exc:  # noqa: BLE001
+                persistence_warning = str(persist_exc)[:220]
+                logger.warning(
+                    "persist degraded run_id=%s err=%s -- completing with warnings",
+                    run_id,
+                    persistence_warning,
+                )
             timings["persist_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             allocation_map = {
@@ -385,10 +399,15 @@ class AgentOrchestrator:
                     f"Pipeline processed {len(state.insights)} positions "
                     "— full narrative unavailable."
                 )
+            if persistence_warning:
+                final_summary = (
+                    f"{final_summary} (Completed with warnings: recommendation persistence "
+                    "partially failed, but usable analysis is available.)"
+                )[:900]
             await self._update_run(
                 run_id,
                 status="completed",
-                current_agent="Completed",
+                current_agent="Completed with warnings" if persistence_warning else "Completed",
                 progress=100,
                 summary=final_summary,
                 allocation=allocation_map,
@@ -1182,7 +1201,7 @@ class AgentOrchestrator:
         new columns keep persisting the core fields.
         """
         try:
-            self.db.table("agent_insights").insert(insight_rows).execute()
+            self._db("agent_insights.insert", lambda: self.db.table("agent_insights").insert(insight_rows).execute())
             return
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
@@ -1206,7 +1225,7 @@ class AgentOrchestrator:
              if k not in {"analyst_verdict", "analyst_confidence"}}
             for row in insight_rows
         ]
-        self.db.table("agent_insights").insert(stripped).execute()
+        self._db("agent_insights.insert.fallback_schema", lambda: self.db.table("agent_insights").insert(stripped).execute())
 
     def _persist_sync(self, state: AgentState) -> None:
         now = datetime.now(timezone.utc).isoformat()
@@ -1216,14 +1235,17 @@ class AgentOrchestrator:
         if tickers:
             try:
                 rows = (
-                    self.db.table("agent_insights")
-                    .select(
-                        "ticker,suggested_action,sentiment_label,technical_signal,conviction_score,sentiment_score"
+                    self._db(
+                        "agent_insights.select.prev",
+                        lambda: self.db.table("agent_insights")
+                        .select(
+                            "ticker,suggested_action,sentiment_label,technical_signal,conviction_score,sentiment_score"
+                        )
+                        .eq("user_id", state.user_id)
+                        .in_("ticker", tickers)
+                        .order("created_at", desc=True)
+                        .execute(),
                     )
-                    .eq("user_id", state.user_id)
-                    .in_("ticker", tickers)
-                    .order("created_at", desc=True)
-                    .execute()
                 ).data or []
                 for row in rows:
                     if row["ticker"] not in prev_insights:
@@ -1257,6 +1279,12 @@ class AgentOrchestrator:
 
         if insight_rows:
             self._insert_insights_with_schema_fallback(insight_rows)
+            if not self._trace_persist_logged:
+                self._trace_persist_logged = True
+                logger.info(
+                    "reasoning_contract_trace persisted_keys=%s",
+                    sorted(insight_rows[0].keys()),
+                )
 
         rec_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
@@ -1287,23 +1315,26 @@ class AgentOrchestrator:
 
         if rec_rows:
             for i in range(0, len(rec_rows), 50):
-                self.db.table("recommendations").insert(rec_rows[i:i + 50]).execute()
+                self._db(
+                    "recommendations.insert",
+                    lambda batch=rec_rows[i:i + 50]: self.db.table("recommendations").insert(batch).execute(),
+                )
 
         try:
-            self.db.table("recommendations").update({
+            self._db("recommendations.expire.active_run_mismatch", lambda: self.db.table("recommendations").update({
                 "is_active": False,
                 "resolution": "expired",
                 "resolved_at": now,
             }).eq("user_id", state.user_id).eq("is_active", True).neq(
                 "agent_run_id", state.run_id
-            ).execute()
-            self.db.table("recommendations").update({
+            ).execute())
+            self._db("recommendations.expire.null_agent_run", lambda: self.db.table("recommendations").update({
                 "is_active": False,
                 "resolution": "expired",
                 "resolved_at": now,
             }).eq("user_id", state.user_id).eq("is_active", True).filter(
                 "agent_run_id", "is", "null"
-            ).execute()
+            ).execute())
         except Exception as exc:
             logger.warning("Failed to expire old recommendations: %s", exc)
         finally:
@@ -1366,7 +1397,7 @@ class AgentOrchestrator:
         the core fields always land.
         """
         try:
-            self.db.table("agent_runs").update(patch).eq("id", run_id).execute()
+            self._db("agent_runs.update", lambda: self.db.table("agent_runs").update(patch).eq("id", run_id).execute())
             return
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
@@ -1389,7 +1420,7 @@ class AgentOrchestrator:
             )
             stripped = {k: v for k, v in patch.items() if k not in phase5_cols}
             try:
-                self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
+                self._db("agent_runs.update.no_phase5", lambda: self.db.table("agent_runs").update(stripped).eq("id", run_id).execute())
                 return
             except Exception:  # noqa: BLE001 — fall through to Phase-4 strip
                 pass
@@ -1405,7 +1436,7 @@ class AgentOrchestrator:
                 if k not in (phase4_cols | phase5_cols)
             }
             try:
-                self.db.table("agent_runs").update(stripped).eq("id", run_id).execute()
+                self._db("agent_runs.update.no_phase4", lambda: self.db.table("agent_runs").update(stripped).eq("id", run_id).execute())
                 return
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("agent_runs update retry failed: %s", exc2)

@@ -20,6 +20,8 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 from ..database import get_supabase_client
+from .http_retry import run_with_retry_sync
+from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
 from ..models.recommendation import (
     AgentInsight,
     AgentRunStatus,
@@ -645,6 +647,10 @@ class RecommendationService:
         self.user_id = user_id
         self.client = get_supabase_client()
         self._price_service = price_service
+        self._trace_logged = False
+
+    def _db(self, op_name: str, fn):
+        return run_with_retry_sync(fn, op_name=op_name)
 
     async def get_insight_cards(self) -> list[InsightCard]:
         """Get all active recommendations as frontend-ready InsightCards.
@@ -689,21 +695,27 @@ class RecommendationService:
         started = datetime.now(timezone.utc)
         logger.info("recommendations.aggregate.start user_id=%s", self.user_id)
         recs = (
-            self.client.table("recommendations")
-            .select("*")
-            .eq("user_id", str(self.user_id))
-            .eq("is_active", True)
-            .order("urgency", desc=True)
-            .execute()
+            self._db(
+                "recommendations.select_active",
+                lambda: self.client.table("recommendations")
+                .select("*")
+                .eq("user_id", str(self.user_id))
+                .eq("is_active", True)
+                .order("urgency", desc=True)
+                .execute(),
+            )
         ).data
 
         positions = {
             p["ticker"]: p
             for p in (
-                self.client.table("positions")
-                .select("*")
-                .eq("user_id", str(self.user_id))
-                .execute()
+                self._db(
+                    "positions.select",
+                    lambda: self.client.table("positions")
+                    .select("*")
+                    .eq("user_id", str(self.user_id))
+                    .execute(),
+                )
             ).data
         }
 
@@ -716,11 +728,14 @@ class RecommendationService:
         if run_ids_needed:
             try:
                 ai_rows = (
-                    self.client.table("agent_insights")
-                    .select("run_id, ticker, analyst_verdict, analyst_confidence")
-                    .eq("user_id", str(self.user_id))
-                    .in_("run_id", [str(r) for r in run_ids_needed])
-                    .execute()
+                    self._db(
+                        "agent_insights.select_for_cards",
+                        lambda: self.client.table("agent_insights")
+                        .select("run_id, ticker, analyst_verdict, analyst_confidence")
+                        .eq("user_id", str(self.user_id))
+                        .in_("run_id", [str(r) for r in run_ids_needed])
+                        .execute(),
+                    )
                 ).data or []
                 for row in ai_rows:
                     run_id = row.get("run_id")
@@ -746,81 +761,116 @@ class RecommendationService:
                 pass
 
         cards = []
+        normalized_count = degraded_count = skipped_count = 0
         for rec in recs:
-            ticker = rec["ticker"]
-            pos = positions.get(ticker, {})
-            price = prices.get(ticker)
-            shares = float(pos.get("shares", 0))
-            avg_cost = float(pos.get("avg_cost", 0))
-            pnl_pct = None
-            if price and avg_cost > 0:
-                pnl_pct = round((price - avg_cost) / avg_cost * 100, 2)
+            try:
+                ticker = rec.get("ticker") or "UNKNOWN"
+                pos = positions.get(ticker, {})
+                price = prices.get(ticker)
+                avg_cost = float(pos.get("avg_cost", 0))
+                pnl_pct = round((price - avg_cost) / avg_cost * 100, 2) if price and avg_cost > 0 else None
 
-            conviction = float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None
-            data_confidence_score = _derive_confidence_score(conviction)
-            analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
-            analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
-            analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
-            analyst_confidence = (
-                float(analyst_conf_raw) if analyst_conf_raw is not None else None
-            )
-            analyst_fields = _extract_analyst_card_fields(
-                analyst_verdict, analyst_confidence=analyst_confidence,
-            )
-            reason_tags = _derive_reason_tags(rec)
-            sentiment_label = _derive_sentiment_label(rec, analyst_verdict)
-            data_quality_label = _derive_quality_label_from_evidence(
-                confidence_score=data_confidence_score,
-                reason_tags=reason_tags,
-                analyst_fields=analyst_fields,
-                sentiment_label=sentiment_label,
-                rec=rec,
-            )
+                conviction = float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None
+                data_confidence_score = _derive_confidence_score(conviction)
+                analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
+                analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
+                analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
+                analyst_confidence = (
+                    float(analyst_conf_raw) if analyst_conf_raw is not None else None
+                )
+                analyst_fields = _extract_analyst_card_fields(
+                    analyst_verdict, analyst_confidence=analyst_confidence,
+                )
+                reason_tags = _derive_reason_tags(rec)
+                sentiment_label = _derive_sentiment_label(rec, analyst_verdict)
+                data_quality_label = _derive_quality_label_from_evidence(
+                    confidence_score=data_confidence_score,
+                    reason_tags=reason_tags,
+                    analyst_fields=analyst_fields,
+                    sentiment_label=sentiment_label,
+                    rec=rec,
+                )
+                rec["sentiment_label"] = sentiment_label
+                rec["reason_tags"] = reason_tags
+                rec["data_quality_label"] = data_quality_label
+                reasoning = normalize_reasoning_payload(rec, analyst_verdict=analyst_verdict)
+                normalized_count += 1
+                if "reasoning_unavailable" in reasoning.get("fallback_flags", []):
+                    degraded_count += 1
 
-            cards.append(InsightCard(
-                id=rec["id"],
-                ticker=ticker,
-                name=pos.get("name", ticker),
-                action=rec["action"],
-                detail=rec["detail"],
-                rationale=rec.get("rationale", ""),
-                urgency=rec["urgency"],
-                color=ACTION_COLORS.get(rec["action"], "gray"),
-                tax_note=rec.get("tax_note", ""),
-                drip_note=rec.get("drip_note", ""),
-                current_price=price,
-                pnl_pct=pnl_pct,
-                category=pos.get("category", "Unknown"),
-                # Agent fields (may be null for legacy rule-based rows)
-                investment_thesis=rec.get("investment_thesis"),
-                sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
-                sentiment_label=sentiment_label,
-                technical_signal=rec.get("technical_signal"),
-                conviction_score=conviction,
-                suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,
-                agent_run_id=rec.get("agent_run_id"),
-                what_changed=rec.get("what_changed"),
-                # Data-quality UX fields
-                data_confidence_score=data_confidence_score,
-                data_quality_label=data_quality_label,
-                reason_tags=reason_tags,
-                # Phase 3 — analyst verdict projection.
-                analyst_action=analyst_fields["action"],
-                analyst_conviction=analyst_fields["conviction"],
-                analyst_confidence=analyst_fields["confidence"],
-                analyst_drivers=analyst_fields["drivers"],
-                analyst_risks=analyst_fields["risks"],
-                analyst_used_fallback=analyst_fields["used_fallback"],
-            ))
+                card = InsightCard(
+                    id=rec["id"],
+                    ticker=ticker,
+                    name=pos.get("name", ticker),
+                    action=(rec.get("action") or "HOLD").upper(),
+                    detail=rec.get("detail") or "Data-backed recommendation available; AI reasoning is unavailable.",
+                    rationale=rec.get("rationale", ""),
+                    urgency=int(rec.get("urgency") or 0),
+                    color=ACTION_COLORS.get((rec.get("action") or "HOLD").upper(), "gray"),
+                    tax_note=rec.get("tax_note", ""),
+                    drip_note=rec.get("drip_note", ""),
+                    current_price=price,
+                    pnl_pct=pnl_pct,
+                    category=pos.get("category", "Unknown"),
+                    investment_thesis=rec.get("investment_thesis"),
+                    sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
+                    sentiment_label=sentiment_label,
+                    technical_signal=rec.get("technical_signal"),
+                    conviction_score=conviction,
+                    suggested_allocation=float(rec["suggested_allocation"]) if rec.get("suggested_allocation") is not None else None,
+                    agent_run_id=rec.get("agent_run_id"),
+                    what_changed=rec.get("what_changed"),
+                    data_confidence_score=data_confidence_score,
+                    data_quality_label=data_quality_label,
+                    reason_tags=reason_tags,
+                    analyst_action=analyst_fields["action"],
+                    analyst_conviction=analyst_fields["conviction"],
+                    analyst_confidence=analyst_fields["confidence"],
+                    analyst_drivers=analyst_fields["drivers"],
+                    analyst_risks=analyst_fields["risks"],
+                    analyst_used_fallback=analyst_fields["used_fallback"],
+                    summary=reasoning.get("summary"),
+                    reasoning_summary=reasoning.get("reasoning_summary"),
+                    thesis=reasoning.get("thesis"),
+                    why_this_matters=reasoning.get("why_this_matters"),
+                    key_drivers=reasoning.get("key_drivers"),
+                    main_risks=reasoning.get("main_risks"),
+                    confidence=reasoning.get("confidence"),
+                    conviction=reasoning.get("conviction"),
+                    supporting_evidence=reasoning.get("supporting_evidence"),
+                    plain_language_explanation=reasoning.get("plain_language_explanation"),
+                    fallback_flags=reasoning.get("fallback_flags"),
+                )
+                cards.append(card)
+                if not self._trace_logged:
+                    self._trace_logged = True
+                    logger.info(
+                        "reasoning_contract_trace loaded_keys=%s normalized_keys=%s card_keys=%s",
+                        sorted(rec.keys()),
+                        list(CANONICAL_REASONING_KEYS),
+                        sorted(card.model_dump(exclude_none=True).keys()),
+                    )
+            except Exception as exc:  # noqa: BLE001
+                skipped_count += 1
+                logger.warning(
+                    "recommendations.aggregate.row_error user_id=%s recommendation_id=%s error_type=%s",
+                    self.user_id,
+                    rec.get("id"),
+                    type(exc).__name__,
+                )
+                continue
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         logger.info(
-            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d elapsed_ms=%d",
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d",
             self.user_id,
             len(recs),
             len(cards),
             len(positions),
             len(analyst_lookup),
+            normalized_count,
+            degraded_count,
+            skipped_count,
             elapsed_ms,
         )
         return cards
@@ -937,12 +987,15 @@ class RecommendationService:
         from fastapi import HTTPException
         logger.info("recommendations.job_status user_id=%s job_id=%s", self.user_id, job_id)
         row = (
-            self.client.table("agent_runs")
-            .select("*")
-            .eq("id", str(job_id))
-            .eq("user_id", str(self.user_id))
-            .single()
-            .execute()
+            self._db(
+                "agent_runs.get_status",
+                lambda: self.client.table("agent_runs")
+                .select("*")
+                .eq("id", str(job_id))
+                .eq("user_id", str(self.user_id))
+                .single()
+                .execute(),
+            )
         )
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
@@ -955,12 +1008,15 @@ class RecommendationService:
         """Return the most recent agent run for this user, or None if none exists."""
         logger.info("recommendations.latest_job user_id=%s", self.user_id)
         rows = (
-            self.client.table("agent_runs")
-            .select("*")
-            .eq("user_id", str(self.user_id))
-            .order("started_at", desc=True)
-            .limit(1)
-            .execute()
+            self._db(
+                "agent_runs.latest",
+                lambda: self.client.table("agent_runs")
+                .select("*")
+                .eq("user_id", str(self.user_id))
+                .order("started_at", desc=True)
+                .limit(1)
+                .execute(),
+            )
         ).data
         if not rows:
             return None

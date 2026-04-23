@@ -271,6 +271,11 @@ async def analyze_ticker(
 
     verdict = validate_verdict(raw, ticker=snapshot.ticker)
     if verdict is not None:
+        logger.debug(
+            "reasoning_contract_trace normalized_keys=%s ticker=%s",
+            sorted(verdict.to_dict().keys()),
+            snapshot.ticker,
+        )
         return verdict
 
     # ── Attempt 2 (retry) ──────────────────────────────────────────────

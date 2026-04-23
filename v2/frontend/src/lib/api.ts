@@ -339,6 +339,18 @@ export interface InsightCardData {
   analyst_drivers?: string[] | null;
   analyst_risks?: string[] | null;
   analyst_used_fallback?: boolean | null;
+  // Canonical reasoning contract from backend normalization.
+  summary?: string | null;
+  reasoning_summary?: string | null;
+  thesis?: string | null;
+  why_this_matters?: string | null;
+  key_drivers?: string[] | null;
+  main_risks?: string[] | null;
+  confidence?: number | null;
+  conviction?: number | null;
+  supporting_evidence?: string[] | null;
+  plain_language_explanation?: string | null;
+  fallback_flags?: string[] | null;
 }
 
 export interface AgentRunQueued {

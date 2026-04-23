@@ -19,7 +19,7 @@ import json
 import logging
 import random
 import re
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +73,7 @@ class LLMClient:
         system: str,
         user: str,
         max_tokens: int = 1024,
+        normalizer: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
     ) -> dict[str, Any]:
         """Run a single prompt, parse JSON reply, return `{}` on total failure.
 
@@ -97,9 +98,10 @@ class LLMClient:
             timeout_s=PRIMARY_TIMEOUT_S,
         )
         if text:
-            parsed = _extract_json(text)
+            parsed, debug = _extract_json(text)
             if parsed is not None:
-                return parsed
+                return normalizer(parsed) if normalizer else parsed
+            _log_parse_failure(self.model, text, debug)
             logger.warning("LLM primary returned unparseable JSON; falling back")
 
         # ── Fallback attempt (Haiku, trimmed prompt, single try) ──────────
@@ -118,10 +120,11 @@ class LLMClient:
             max_attempts=2,  # single retry on the fallback only
         )
         if fb_text:
-            parsed = _extract_json(fb_text)
+            parsed, debug = _extract_json(fb_text)
             if parsed is not None:
                 logger.info("LLM fallback succeeded — model=%s", self.fallback_model)
-                return parsed
+                return normalizer(parsed) if normalizer else parsed
+            _log_parse_failure(self.fallback_model, fb_text, debug)
             logger.warning("LLM fallback returned unparseable JSON")
 
         logger.warning("LLM fallback failed: %s — returning {}", fb_err or "no-json")
@@ -212,7 +215,7 @@ class LLMClient:
                     system=system,
                     messages=[{"role": "user", "content": user}],
                 )
-            return msg.content[0].text if msg.content else ""
+            return _extract_text_from_message(msg)
 
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(None, _call)
@@ -220,30 +223,109 @@ class LLMClient:
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-def _extract_json(text: str) -> Optional[dict[str, Any]]:
+def _extract_json(text: str) -> tuple[Optional[dict[str, Any]], dict[str, str]]:
+    """Parse a JSON object from raw model text.
+
+    Accepts raw JSON, fenced JSON blocks, and JSON with short prose wrappers.
+    Returns parsed object + debug metadata for targeted logging.
+    """
+    debug: dict[str, str] = {"candidate": "", "error": ""}
     if not text:
-        return None
+        debug["error"] = "empty response text"
+        return None, debug
+
     stripped = text.strip()
-    # Direct parse
+
     try:
-        return json.loads(stripped)
-    except Exception:
-        pass
-    # Code fence
-    m = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", stripped)
-    if m:
+        loaded = json.loads(stripped)
+        if isinstance(loaded, dict):
+            debug["candidate"] = stripped
+            return loaded, debug
+        debug["candidate"] = stripped
+        debug["error"] = f"top-level JSON must be object, got {type(loaded).__name__}"
+    except Exception as exc:  # noqa: BLE001
+        debug["error"] = str(exc)
+
+    fenced = re.search(r"```(?:json)?\s*([\s\S]+?)\s*```", stripped, flags=re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+        debug["candidate"] = candidate
         try:
-            return json.loads(m.group(1))
-        except Exception:
-            pass
-    # First {...} block
-    m = re.search(r"\{[\s\S]+\}", stripped)
-    if m:
+            loaded = json.loads(candidate)
+            if isinstance(loaded, dict):
+                return loaded, debug
+            debug["error"] = f"top-level fenced JSON must be object, got {type(loaded).__name__}"
+        except Exception as exc:  # noqa: BLE001
+            debug["error"] = str(exc)
+
+    candidate = _first_balanced_json_object_substring(stripped)
+    if candidate:
+        debug["candidate"] = candidate
         try:
-            return json.loads(m.group(0))
-        except Exception:
-            pass
+            loaded = json.loads(candidate)
+            if isinstance(loaded, dict):
+                return loaded, debug
+            debug["error"] = f"top-level extracted JSON must be object, got {type(loaded).__name__}"
+        except Exception as exc:  # noqa: BLE001
+            debug["error"] = str(exc)
+
+    if not debug.get("error"):
+        debug["error"] = "no JSON object candidate found"
+    return None, debug
+
+
+def _first_balanced_json_object_substring(text: str) -> Optional[str]:
+    start = text.find("{")
+    while start != -1:
+        depth = 0
+        in_str = False
+        escape = False
+        for idx in range(start, len(text)):
+            ch = text[idx]
+            if in_str:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start:idx + 1]
+        start = text.find("{", start + 1)
     return None
+
+
+def _extract_text_from_message(msg: Any) -> str:
+    parts = getattr(msg, "content", None) or []
+    chunks: list[str] = []
+    for part in parts:
+        if isinstance(part, dict):
+            if part.get("type") == "text" and part.get("text"):
+                chunks.append(str(part.get("text")))
+            elif part.get("text"):
+                chunks.append(str(part.get("text")))
+            continue
+        text = getattr(part, "text", None)
+        if text:
+            chunks.append(str(text))
+    return "\n".join(c.strip() for c in chunks if c and c.strip())
+
+
+def _log_parse_failure(model: str, response_text: str, debug: dict[str, str]) -> None:
+    logger.debug(
+        "LLM JSON parse failure — model=%s response_preview=%r candidate_preview=%r error=%s",
+        model,
+        (response_text or "")[:800],
+        (debug.get("candidate") or "")[:800],
+        debug.get("error") or "unknown parse/schema error",
+    )
 
 
 def _trim_prompt(text: str, ratio: float = 0.6) -> str:

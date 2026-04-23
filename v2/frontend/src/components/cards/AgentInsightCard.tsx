@@ -76,14 +76,14 @@ function cleanClause(text: string): string {
 }
 
 function synthesizeExplanation(card: InsightCardData): string {
+  if (card.plain_language_explanation?.trim()) {
+    return card.plain_language_explanation.trim().split(/\s+/).slice(0, 52).join(" ");
+  }
   if (card.thesis?.trim()) {
     return card.thesis.trim().split(/\s+/).slice(0, 42).join(" ");
   }
   if (card.reasoning_summary?.trim()) {
     return card.reasoning_summary.trim().split(/\s+/).slice(0, 42).join(" ");
-  }
-  if (card.plain_language_explanation?.trim()) {
-    return card.plain_language_explanation.trim().split(/\s+/).slice(0, 42).join(" ");
   }
   if (card.summary?.trim()) {
     return card.summary.trim().split(/\s+/).slice(0, 42).join(" ");
@@ -111,7 +111,7 @@ function synthesizeExplanation(card: InsightCardData): string {
     || (looksReadableThesis(card.investment_thesis) ? card.investment_thesis?.trim() : "")
   );
   if (card.analyst_action === "INSUFFICIENT_DATA" && hasEvidence && !hasNarrative) {
-    return "The AI did not have enough external evidence for a high-confidence call, so this remains a watchlist-style hold for now.";
+    return "Evidence is mixed right now, so this stays a HOLD until trend and risk signals align more clearly.";
   }
 
   if (driver) {

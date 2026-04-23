@@ -139,17 +139,11 @@ export const AGENT_JOB_MAX_POLLS = 40;
 const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function useAgentJob(jobId: string | null) {
-  const qc = useQueryClient();
   return useQuery({
     queryKey: ["recommendations", "job", jobId],
     queryFn: async () => {
       if (!jobId) return null;
-      const status = await api.recommendations.getJob(jobId);
-      // When the pipeline finishes, refresh the card list so the UI catches up.
-      if (TERMINAL_AGENT_STATUSES.has(status.status)) {
-        invalidateRecommendationAggregateQueries(qc);
-      }
-      return status;
+      return api.recommendations.getJob(jobId);
     },
     enabled: !!jobId,
     // Poll on a 3s cadence until the run is terminal, capped at
@@ -177,16 +171,9 @@ export function useLatestAgentInsights() {
 }
 
 export function useLatestAgentRun(enabled = true) {
-  const qc = useQueryClient();
   return useQuery({
     queryKey: ["recommendations", "job", "latest"],
-    queryFn: async () => {
-      const job = await api.recommendations.getLatestJob();
-      if (job?.status && TERMINAL_AGENT_STATUSES.has(job.status)) {
-        invalidateRecommendationAggregateQueries(qc);
-      }
-      return job;
-    },
+    queryFn: api.recommendations.getLatestJob,
     enabled,
     staleTime: 0,
     refetchInterval: (query) => {

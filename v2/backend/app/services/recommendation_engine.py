@@ -62,18 +62,36 @@ DRIP_YIELD: dict[str, float] = {
 # Aggregate endpoint short-lived cache + in-flight dedupe.
 _AGGREGATE_CACHE_TTL_S = 20
 _aggregate_cache: dict[str, tuple[datetime, list[InsightCard]]] = {}
-_aggregate_inflight: dict[str, asyncio.Future] = {}
+_aggregate_inflight: dict[str, tuple[int, asyncio.Task[list[InsightCard]]]] = {}
+_aggregate_generation: dict[str, int] = {}
 _aggregate_lock = asyncio.Lock()
 
 
-def invalidate_recommendations_aggregate_cache(user_id: UUID | str) -> None:
-    """Drop per-user aggregate cache/in-flight state so next read is fresh."""
+def invalidate_recommendations_aggregate_cache(
+    user_id: UUID | str,
+    *,
+    reason: str = "mutation",
+) -> None:
+    """Drop per-user aggregate cache state so next read is fresh.
+
+    Important: never cancel in-flight aggregate tasks. Reads may already be
+    awaiting the shared task, and cancelling it propagates ``CancelledError``
+    across unrelated request lifecycles.
+    """
     key = str(user_id)
+    prev_generation = _aggregate_generation.get(key, 0)
+    _aggregate_generation[key] = prev_generation + 1
     _aggregate_cache.pop(key, None)
-    inflight = _aggregate_inflight.pop(key, None)
-    if inflight is not None and not inflight.done():
-        inflight.cancel()
-    logger.info("recommendations.aggregate.invalidated user_id=%s", key)
+    # Clear the pointer so new readers can start a fresh compute. Existing
+    # task continues safely for already-attached readers.
+    _aggregate_inflight.pop(key, None)
+    logger.info(
+        "recommendations.aggregate.invalidated user_id=%s reason=%s generation=%d->%d",
+        key,
+        reason,
+        prev_generation,
+        _aggregate_generation[key],
+    )
 
 
 # ── Rec generation (ported from v1 generate_rec) ────────────────────────────
@@ -659,36 +677,60 @@ class RecommendationService:
         duplicate aggregate calls from concurrent frontend queries.
         """
         key = str(self.user_id)
+        generation = _aggregate_generation.get(key, 0)
         now = datetime.now(timezone.utc)
         cached = _aggregate_cache.get(key)
         if cached and (now - cached[0]).total_seconds() <= _AGGREGATE_CACHE_TTL_S:
             logger.info("recommendations.aggregate.cache_hit user_id=%s", self.user_id)
             return cached[1]
 
+        created = False
         async with _aggregate_lock:
             current = _aggregate_inflight.get(key)
-            if current is not None and not current.done():
-                logger.info("recommendations.aggregate.coalesced user_id=%s", self.user_id)
-                return await current
-            loop = asyncio.get_event_loop()
-            future: asyncio.Future = loop.create_future()
-            _aggregate_inflight[key] = future
+            if current is not None and not current[1].done() and current[0] == generation:
+                logger.info(
+                    "recommendations.aggregate.coalesced user_id=%s generation=%d",
+                    self.user_id,
+                    generation,
+                )
+                task = current[1]
+            else:
+                if current is not None and not current[1].done() and current[0] != generation:
+                    logger.info(
+                        "recommendations.aggregate.superseded user_id=%s old_generation=%d new_generation=%d",
+                        self.user_id,
+                        current[0],
+                        generation,
+                    )
+                task = asyncio.create_task(self._compute_insight_cards())
+                _aggregate_inflight[key] = (generation, task)
+                created = True
+                logger.info(
+                    "recommendations.aggregate.attached user_id=%s generation=%d created=%s",
+                    self.user_id,
+                    generation,
+                    created,
+                )
 
+        # Shield shared compute from HTTP request cancellation.
         try:
-            cards = await self._compute_insight_cards()
-            _aggregate_cache[key] = (datetime.now(timezone.utc), cards)
-            if not future.done():
-                future.set_result(cards)
-            return cards
-        except BaseException as exc:
-            if not future.done():
-                future.set_exception(exc)
+            cards = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            logger.info(
+                "recommendations.aggregate.request_cancelled user_id=%s generation=%d",
+                self.user_id,
+                generation,
+            )
             raise
-        finally:
-            async with _aggregate_lock:
-                cur = _aggregate_inflight.get(key)
-                if cur is future:
-                    _aggregate_inflight.pop(key, None)
+
+        if created and _aggregate_generation.get(key, 0) == generation:
+            _aggregate_cache[key] = (datetime.now(timezone.utc), cards)
+
+        async with _aggregate_lock:
+            cur = _aggregate_inflight.get(key)
+            if cur is not None and cur[1] is task and task.done():
+                _aggregate_inflight.pop(key, None)
+        return cards
 
     async def _compute_insight_cards(self) -> list[InsightCard]:
         """Compute aggregate recommendation cards from DB state."""
@@ -992,7 +1034,7 @@ class RecommendationService:
                 deposit_amount = 900.0
 
         # A fresh run should never serve stale aggregate cards while queued.
-        invalidate_recommendations_aggregate_cache(self.user_id)
+        invalidate_recommendations_aggregate_cache(self.user_id, reason="refresh_requested")
         from .agents.job_runner import build_orchestrator
         orch = build_orchestrator(
             user_id=self.user_id,
@@ -1004,7 +1046,11 @@ class RecommendationService:
     async def get_job_status(self, job_id: UUID) -> AgentRunStatus:
         """Fetch the status of an agent run. Used by the UI progress tracker."""
         from fastapi import HTTPException
-        logger.info("recommendations.job_status user_id=%s job_id=%s", self.user_id, job_id)
+        logger.info(
+            "recommendations.job_status user_id=%s job_id=%s read_only=true",
+            self.user_id,
+            job_id,
+        )
         row = (
             self._db(
                 "agent_runs.get_status",
@@ -1019,8 +1065,6 @@ class RecommendationService:
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
         status = _agent_run_row_to_status(row.data)
-        if status.status in {"completed", "failed", "cancelled"}:
-            invalidate_recommendations_aggregate_cache(self.user_id)
         return status
 
     async def get_latest_job(self) -> Optional[AgentRunStatus]:
@@ -1123,7 +1167,7 @@ class RecommendationService:
                 notes=resolution.notes,
             ))
 
-        invalidate_recommendations_aggregate_cache(self.user_id)
+        invalidate_recommendations_aggregate_cache(self.user_id, reason="recommendation_resolved")
         return result.data[0]
 
     async def list_decisions(self, limit: int = 50) -> list[DecisionLogEntry]:

@@ -1354,7 +1354,10 @@ class AgentOrchestrator:
         finally:
             # Recommendations / insights changed; drop aggregate cache now so
             # the next GET /recommendations immediately reflects this run.
-            invalidate_recommendations_aggregate_cache(state.user_id)
+            invalidate_recommendations_aggregate_cache(
+                state.user_id,
+                reason="orchestrator_persisted_new_run",
+            )
 
     async def _update_run(
         self,
@@ -1400,7 +1403,10 @@ class AgentOrchestrator:
             return
         self._run_agent_runs_update(run_id, patch)
         if status in ("completed", "failed"):
-            invalidate_recommendations_aggregate_cache(self.user_id)
+            invalidate_recommendations_aggregate_cache(
+                self.user_id,
+                reason="orchestrator_run_marked_failed",
+            )
 
     def _run_agent_runs_update(self, run_id: str, patch: dict) -> None:
         """Execute the ``agent_runs`` update with Phase 4 + 5 column fallbacks.

@@ -92,6 +92,21 @@ def test_validate_verdict_insufficient_data_zeroes_conviction():
     assert v.conviction == 0.0
 
 
+def test_validate_verdict_accepts_alias_fields():
+    raw = {
+        "recommendation": "buy",
+        "drivers": ["new product cycle"],
+        "plain_language_explanation": "Demand is improving but risks remain.",
+        "risks": ["guidance miss"],
+        "confidence": 0.62,
+    }
+    v = validate_verdict(raw, ticker="MSFT")
+    assert v is not None
+    assert v.action == "BUY"
+    assert v.key_drivers == ["new product cycle"]
+    assert "Demand is improving" in v.reasoning
+
+
 def test_allowed_actions_matches_spec():
     assert ALLOWED_ACTIONS == {"BUY", "HOLD", "REDUCE", "INSUFFICIENT_DATA"}
 
@@ -329,6 +344,35 @@ async def test_analyze_ticker_retries_when_response_is_generic_template():
     assert verdict.action == "BUY"
     assert verdict.llm_attempted is True
     assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_analyze_ticker_accepts_fenced_json_via_llm_parser(monkeypatch):
+    from app.services.agents.llm import LLMClient
+
+    client = LLMClient(api_key="fake-key")
+    responses = iter([
+        "```json\n"
+        '{"action":"BUY","conviction":0.61,"drivers":["momentum"],'
+        '"risks":["valuation"],"summary":"Setup improving.",'
+        '"thesis":"Momentum is positive and breadth improved.",'
+        '"plain_language_explanation":"More things are going right than wrong.",'
+        '"sentiment":"constructive"}\n```'
+    ])
+
+    async def _fake_single_call(model, system, user, max_tokens):
+        return next(responses)
+
+    monkeypatch.setattr(client, "_single_call", _fake_single_call)
+
+    verdict = await analyze_ticker(
+        snapshot=_snap("AAPL"),
+        feature_set=_feat("AAPL"),
+        llm=client,
+    )
+    assert verdict.used_fallback is False
+    assert verdict.action == "BUY"
+    assert verdict.llm_attempted is True
 
 
 # ── Portfolio-wide parallel analyst ────────────────────────────────────────

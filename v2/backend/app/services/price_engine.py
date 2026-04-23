@@ -46,6 +46,7 @@ logger = logging.getLogger(__name__)
 
 _TIMEOUT = 8.0  # seconds per API call
 _CACHE_TTL = 300  # 5 minutes
+_COINGECKO_CACHE_TTL = 90  # 60-120s target to suppress CoinGecko 429 bursts
 _CIRCUIT_BREAKER_THRESHOLD = 3  # failures before skipping source
 _CIRCUIT_BREAKER_RESET = 300  # seconds before retrying failed source
 
@@ -162,6 +163,10 @@ class PriceService:
 
         # In-memory cache with TTL
         self._cache: dict[str, _CacheEntry] = {}
+        # CoinGecko-specific cache (short TTL + stale fallback on 429/errors).
+        # Kept separate from the general cache to enforce a tighter refresh
+        # window while still shielding upstream from repeated retry storms.
+        self._coingecko_cache: dict[str, _CacheEntry] = {}
 
         # Per-ticker async locks for in-flight request coalescing. When N
         # callers race for the same ticker within the TTL window they all
@@ -624,24 +629,43 @@ class PriceService:
     async def _fetch_coingecko(self, ticker: str) -> PriceResult:
         """Fetch crypto price from CoinGecko (free, no key).
 
-        429 is the rate-limit signal CoinGecko returns on the free tier. We
-        record the failure (which opens the circuit after 3 hits) and return
-        an error result — ``_race_sources`` then falls back to cached data
-        or a sibling source (yfinance) without failing the pipeline.
+        Uses a dedicated short-TTL cache (90s) and serves stale cached values
+        on 429/HTTP errors so repeated recommendations refreshes don't hammer
+        CoinGecko for the same BTC/XRP quote window.
         """
         coin_id = _CRYPTO_IDS.get(ticker)
         if not coin_id:
             return self._error_result(ticker, "coingecko", f"No ID for {ticker}")
 
+        fresh = self._get_coingecko_cached(ticker, require_fresh=True)
+        if fresh:
+            return fresh
+
         client = await self._get_client()
         url = f"{_COINGECKO_BASE}/simple/price"
         params = {"ids": coin_id, "vs_currencies": "usd"}
 
-        async with _PROVIDER_SEMAPHORES["coingecko"]:
-            resp = await client.get(url, params=params)
+        try:
+            async with _PROVIDER_SEMAPHORES["coingecko"]:
+                resp = await client.get(url, params=params)
+        except Exception as exc:
+            stale = self._get_coingecko_cached(ticker, require_fresh=False)
+            if stale:
+                logger.warning("%s: CoinGecko request failed (%s) — serving stale cache", ticker, exc)
+                return stale
+            return self._error_result(ticker, "coingecko", str(exc))
+
         if resp.status_code == 429:
+            stale = self._get_coingecko_cached(ticker, require_fresh=False)
+            if stale:
+                logger.warning("%s: CoinGecko 429 — serving stale cache", ticker)
+                return stale
             return self._error_result(ticker, "coingecko", "Rate limited (429)")
         if resp.status_code >= 400:
+            stale = self._get_coingecko_cached(ticker, require_fresh=False)
+            if stale:
+                logger.warning("%s: CoinGecko HTTP %s — serving stale cache", ticker, resp.status_code)
+                return stale
             return self._error_result(
                 ticker, "coingecko", f"HTTP {resp.status_code}"
             )
@@ -649,11 +673,38 @@ class PriceService:
 
         price = float(data.get(coin_id, {}).get("usd") or 0)
         if price <= 0:
+            stale = self._get_coingecko_cached(ticker, require_fresh=False)
+            if stale:
+                logger.warning("%s: CoinGecko zero price — serving stale cache", ticker)
+                return stale
             return self._error_result(ticker, "coingecko", "Zero price")
 
-        return PriceResult(
+        result = PriceResult(
             ticker=ticker, mid_price=price, bid=None, ask=None,
             last_trade=price, source="coingecko", timestamp=time.time(),
+        )
+        self._coingecko_cache[ticker] = _CacheEntry(result=result, fetched_at=time.time())
+        return result
+
+    def _get_coingecko_cached(self, ticker: str, *, require_fresh: bool) -> Optional[PriceResult]:
+        """Return CoinGecko cache hit, optionally requiring fresh TTL."""
+        cached = self._coingecko_cache.get(ticker)
+        if not cached:
+            return None
+        age = time.time() - cached.fetched_at
+        if require_fresh and age > _COINGECKO_CACHE_TTL:
+            return None
+        source = cached.result.source if require_fresh else f"cache({cached.result.source})"
+        err = None if require_fresh else "STALE — coingecko fallback"
+        return PriceResult(
+            ticker=ticker,
+            mid_price=cached.result.mid_price,
+            bid=cached.result.bid,
+            ask=cached.result.ask,
+            last_trade=cached.result.last_trade,
+            source=source,
+            timestamp=cached.result.timestamp,
+            error=err,
         )
 
     # ── Helpers ───────────────────────────────────────────────────────────────

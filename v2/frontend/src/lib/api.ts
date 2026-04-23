@@ -123,7 +123,7 @@ export const api = {
   recommendations: {
     list: (action?: string) =>
       fetchApi<InsightCardData[]>(
-        `/api/v1/recommendations${action ? `?action=${action}` : ""}`
+        `/api/v1/recommendations/${action ? `?action=${action}` : ""}`
       ),
     refresh: (body?: { deposit_amount?: number; sale_proceeds?: number }) =>
       fetchApi<AgentRunQueued>("/api/v1/recommendations/refresh", {

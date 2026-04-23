@@ -121,6 +121,7 @@ export const AGENT_JOB_POLL_MS = 3000;
 // UI's "failed" degraded view. The backend always marks runs terminal, so
 // this is a belt-and-braces timeout against network / CDN caching issues.
 export const AGENT_JOB_MAX_POLLS = 40;
+const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function useAgentJob(jobId: string | null) {
   const qc = useQueryClient();
@@ -130,7 +131,7 @@ export function useAgentJob(jobId: string | null) {
       if (!jobId) return null;
       const status = await api.recommendations.getJob(jobId);
       // When the pipeline finishes, refresh the card list so the UI catches up.
-      if (status.status === "completed" || status.status === "failed") {
+      if (TERMINAL_AGENT_STATUSES.has(status.status)) {
         qc.invalidateQueries({ queryKey: ["recommendations"] });
         qc.invalidateQueries({ queryKey: ["recommendations", "insights"] });
       }
@@ -141,12 +142,15 @@ export function useAgentJob(jobId: string | null) {
     // AGENT_JOB_MAX_POLLS attempts to prevent runaway polling.
     refetchInterval: (query) => {
       const data = query.state.data;
-      const terminal = data?.status === "completed" || data?.status === "failed";
+      // Terminal stop condition is explicit to avoid fetch storms:
+      // once completed/failed/cancelled, polling is permanently disabled.
+      const terminal = data?.status ? TERMINAL_AGENT_STATUSES.has(data.status) : false;
       if (terminal) return false;
       const attempts = query.state.dataUpdateCount ?? 0;
       if (attempts >= AGENT_JOB_MAX_POLLS) return false;
       return AGENT_JOB_POLL_MS;
     },
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -158,23 +162,25 @@ export function useLatestAgentInsights() {
   });
 }
 
-export function useLatestAgentRun() {
+export function useLatestAgentRun(enabled = true) {
   const qc = useQueryClient();
   return useQuery({
     queryKey: ["recommendations", "job", "latest"],
     queryFn: async () => {
       const job = await api.recommendations.getLatestJob();
-      if (job?.status === "completed" || job?.status === "failed") {
+      if (job?.status && TERMINAL_AGENT_STATUSES.has(job.status)) {
         qc.invalidateQueries({ queryKey: ["recommendations"] });
       }
       return job;
     },
+    enabled,
     staleTime: 0,
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data) return false;
       return data.status === "running" || data.status === "queued" ? 2000 : false;
     },
+    refetchOnWindowFocus: false,
   });
 }
 
@@ -301,6 +307,8 @@ export function useDecisionLog(limit = 50) {
   return useQuery({
     queryKey: ["recommendations", "decisions", limit],
     queryFn: () => api.recommendations.getDecisions(limit),
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
   });
 }
 

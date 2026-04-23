@@ -57,7 +57,10 @@ export default function RecommendationsPage() {
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
   const { data: decisions } = useDecisionLog(20);
-  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun();
+  // Only one poll owner at a time:
+  // - while a specific job is active, useAgentJob owns polling
+  // - otherwise, useLatestAgentRun can restore any in-flight run on mount
+  const { data: latestRun, isLoading: latestRunLoading } = useLatestAgentRun(!activeJobId);
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
   const hasAutoTriggered = useRef(false);
@@ -126,6 +129,11 @@ export default function RecommendationsPage() {
     if (jobStatus?.status === "failed") {
       console.log("[Intel] Polling stopped — failed");
       const t = setTimeout(() => setActiveJobId(null), 8000);
+      return () => clearTimeout(t);
+    }
+    if (jobStatus?.status === "cancelled") {
+      console.log("[Intel] Polling stopped — cancelled");
+      const t = setTimeout(() => setActiveJobId(null), 4000);
       return () => clearTimeout(t);
     }
   }, [jobStatus?.status]);

@@ -746,6 +746,7 @@ export interface DepositRecommendation {
   why?: string | null;
   risk?: string | null;
   do?: string | null;
+  execution_style?: string | null;
   alt_view?: string | null;
   schema_version?: string | null;
   category?: string | null;

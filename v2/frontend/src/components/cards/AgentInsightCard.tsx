@@ -73,20 +73,20 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
     <div
       onClick={onClick}
       className={cn(
-        "card-glass p-4 space-y-3 border",
+        "card-glass p-3 md:p-4 space-y-2 border",
         styles.border,
         styles.bg,
         onClick && "cursor-pointer hover:brightness-110"
       )}
     >
       {/* Header */}
-      <div className="flex items-start justify-between gap-3">
+      <div className="flex items-start justify-between gap-2">
         <div>
-          <div className="font-mono font-bold text-text-primary text-base">{card.ticker}</div>
+          <div className="font-mono font-bold text-text-primary text-sm md:text-base leading-tight">{card.ticker}</div>
           <div className="text-xs text-text-muted">{card.category}{card.sector ? ` · ${card.sector}` : ""}</div>
         </div>
-        <div className="flex flex-col items-end gap-1 text-[10px]">
-          <span className={cn("px-2 py-0.5 rounded border font-bold uppercase", styles.bg, styles.text, styles.border)}>
+        <div className="flex flex-col items-end gap-0.5 text-[10px]">
+          <span className={cn("px-2 py-0.5 rounded border font-bold uppercase leading-tight", styles.bg, styles.text, styles.border)}>
             {action}
           </span>
           <span className={cn("px-2 py-0.5 rounded font-semibold uppercase", CONVICTION_STYLES[convictionLevel])}>
@@ -102,11 +102,11 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
 
       {/* Main thesis — suppressed for human_v2 cards where memo sections own the text */}
       {mainThesis(card) && (
-        <p className="text-sm text-text-primary leading-relaxed">{mainThesis(card)}</p>
+        <p className="text-sm text-text-primary leading-snug">{mainThesis(card)}</p>
       )}
 
-      {/* Compact 4-line reasoning block */}
-      <div className="space-y-1.5 pt-1">
+      {/* Compact 2x2 reasoning grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         {whyThisMatters && (
           <MemoSection
             label="WHY"
@@ -138,7 +138,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       </div>
 
       {/* Footer chips */}
-      <div className="flex flex-wrap gap-2 pt-1">
+      <div className="flex flex-wrap md:flex-nowrap gap-1.5 pt-0.5">
         {card.pnl_pct != null && (
           <Chip
             label={`P&L ${formatPercent(card.pnl_pct)}`}
@@ -181,11 +181,11 @@ function MemoSection({
       : "text-text-muted";
 
   return (
-    <div className="rounded-md bg-surface-elevated/40 px-3 py-2">
+    <div className="rounded-md bg-surface-elevated/30 px-2.5 py-1.5">
       <p className={cn("text-[10px] uppercase tracking-wide font-semibold mb-0.5", labelCls)}>
         {label}
       </p>
-      <p className="text-xs text-text-secondary leading-relaxed">{text}</p>
+      <p className="text-xs text-text-secondary leading-[1.4]">{text}</p>
     </div>
   );
 }

@@ -53,6 +53,7 @@ class InsightCard(BaseModel):
     current_price: Optional[float] = None
     pnl_pct: Optional[float] = None
     category: str       # Core, ETF, Crypto, etc.
+    sector: Optional[str] = None
 
     # Multi-agent fields (populated from the agent pipeline)
     investment_thesis: Optional[str] = None

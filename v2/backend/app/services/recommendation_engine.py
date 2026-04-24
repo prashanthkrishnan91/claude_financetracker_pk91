@@ -658,6 +658,137 @@ def _resolve_card_analysis_source(
 
 STALE_RUN_MAX_AGE_SECONDS = 600
 
+TICKER_SECTOR_MAP: dict[str, str] = {
+    # Tech
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "NVDA": "Technology",
+    "AMD": "Technology",
+    "CRM": "Technology",
+    "SNOW": "Technology",
+    # Communication
+    "GOOGL": "Communication",
+    "META": "Communication",
+    "NFLX": "Communication",
+    "RDDT": "Communication",
+    # Consumer
+    "COST": "Consumer",
+    "WMT": "Consumer",
+    "CAVA": "Consumer",
+    # Semis
+    "QCOM": "Semis",
+    "TSM": "Semis",
+    # Financial
+    "BRK-B": "Financial",
+    # Industrial/Auto
+    "ALK": "Industrial/Auto",
+    "RIVN": "Industrial/Auto",
+    "BMWYY": "Industrial/Auto",
+    # ETF
+    "VOO": "Broad Market",
+    "VTI": "Broad Market",
+    "SPY": "Broad Market",
+    "QQQ": "Growth",
+    "SCHD": "Dividend",
+    "VYM": "Dividend",
+    "VXUS": "International",
+    "VEA": "International",
+    "VWO": "International",
+    "BND": "Bonds",
+    # Alt
+    "GLD": "Gold",
+    "BTC": "Crypto",
+    "XRP": "Crypto",
+    # Speculative
+    "KLAR": "Speculative",
+    "BLSH": "Speculative",
+    "STUB": "Speculative",
+}
+
+
+def map_ticker_to_sector(ticker: str | None) -> str:
+    if not ticker:
+        return "Unknown"
+    return TICKER_SECTOR_MAP.get(str(ticker).upper(), "Unknown")
+
+
+def _normalize_action(action: str | None) -> str:
+    raw = (action or "").strip().upper()
+    if raw == "REDUCE":
+        return "TRIM"
+    if raw in {"BUY", "HOLD", "TRIM", "SELL"}:
+        return raw
+    return "HOLD"
+
+
+def compute_portfolio_synthesis(cards: list[InsightCard]) -> dict[str, Any]:
+    """Build synthesis from runtime cards (source of truth)."""
+    total = len(cards)
+    counts = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+    sector_counts: dict[str, int] = {}
+    buy_sectors: dict[str, int] = {}
+    for c in cards:
+        action = _normalize_action(c.action)
+        counts[action] += 1
+        sector = (c.sector or c.category or map_ticker_to_sector(c.ticker) or "Unknown").strip() or "Unknown"
+        sector_counts[sector] = sector_counts.get(sector, 0) + 1
+        if action == "BUY":
+            buy_sectors[sector] = buy_sectors.get(sector, 0) + 1
+
+    enriched = sum(1 for c in cards if (c.analysis_source or "").lower() == "live_llm")
+    high_quality = sum(
+        1
+        for c in cards
+        if (c.data_quality_label or "").upper() == "HIGH"
+        and not bool(c.analyst_used_fallback)
+    )
+    fallback = sum(
+        1
+        for c in cards
+        if bool(c.analyst_used_fallback) or (c.analysis_source or "").lower() == "deterministic_fallback"
+    )
+    ratio = (enriched / total) if total else 0.0
+    if ratio >= 0.8:
+        quality = "HIGH"
+    elif ratio >= 0.5:
+        quality = "MEDIUM"
+    else:
+        quality = "LOW"
+
+    allocation = {
+        s: round((n / total) * 100.0, 1)
+        for s, n in sorted(sector_counts.items(), key=lambda item: item[1], reverse=True)
+    } if total else {}
+    top_sectors = [s for s, _ in sorted(sector_counts.items(), key=lambda item: item[1], reverse=True)[:3]]
+    concentration = "\n".join(
+        [f"- {s} (~{allocation[s]:.0f}%)" for s in top_sectors]
+    ) if top_sectors else "- No positions"
+    buy_focus = ", ".join(
+        [s for s, _ in sorted(buy_sectors.items(), key=lambda item: item[1], reverse=True)[:2]]
+    ) if buy_sectors else "No active BUY signals"
+    risk_sector = top_sectors[0] if top_sectors else "None"
+    summary = (
+        "Portfolio is primarily concentrated in:\n"
+        f"{concentration}\n"
+        f"Risk is concentrated in {risk_sector}. "
+        f"Current buys are focused on: {buy_focus}."
+    )
+
+    return {
+        "quality": quality,
+        "aggregate_quality": quality,
+        "summary": summary,
+        "top_sectors": top_sectors,
+        "sector_allocation": allocation,
+        "counts": counts,
+        "quality_breakdown": {
+            "total_cards": total,
+            "enriched": enriched,
+            "high_quality": high_quality,
+            "fallback": fallback,
+        },
+    }
+
 
 def _agent_run_row_to_status(d: dict) -> AgentRunStatus:
     """Map an ``agent_runs`` row into :class:`AgentRunStatus`.
@@ -969,6 +1100,13 @@ class RecommendationService:
                     current_price=price,
                     pnl_pct=pnl_pct,
                     category=pos.get("category", "Unknown"),
+                    sector=(
+                        pos.get("sector")
+                        or pos.get("industry")
+                        or pos.get("asset_class")
+                        or pos.get("category")
+                        or map_ticker_to_sector(ticker)
+                    ),
                     investment_thesis=rec.get("investment_thesis"),
                     sentiment_score=float(rec["sentiment_score"]) if rec.get("sentiment_score") is not None else None,
                     sentiment_label=sentiment_label,
@@ -1214,6 +1352,9 @@ class RecommendationService:
                 raw["status"] = "failed"
                 raw["summary"] = "Previous run got stuck; start a new run."
         status = _agent_run_row_to_status(raw)
+        cards = await self.get_insight_cards()
+        if cards:
+            status.portfolio_synthesis = compute_portfolio_synthesis(cards)
         return status
 
     def _mark_stale_run_failed(
@@ -1263,7 +1404,11 @@ class RecommendationService:
         ).data
         if not rows:
             return None
-        return _agent_run_row_to_status(rows[0])
+        status = _agent_run_row_to_status(rows[0])
+        cards = await self.get_insight_cards()
+        if cards:
+            status.portfolio_synthesis = compute_portfolio_synthesis(cards)
+        return status
 
     async def get_agent_insights(self, run_id: Optional[UUID] = None) -> list[AgentInsight]:
         """Fetch the per-ticker agent insights for a run.

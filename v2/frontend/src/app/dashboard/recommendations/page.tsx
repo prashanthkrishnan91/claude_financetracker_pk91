@@ -17,6 +17,7 @@ import { AgentInsightCard } from "@/components/cards/AgentInsightCard";
 import { AgentProgressTracker } from "@/components/cards/AgentProgressTracker";
 import { PortfolioSynthesisPanel } from "@/components/cards/PortfolioSynthesisPanel";
 import { DataQualityBanner } from "@/components/cards/DataQualityBanner";
+import { computePortfolioSynthesisFromCards } from "@/components/cards/portfolioSynthesisRuntime";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
@@ -118,6 +119,8 @@ export default function RecommendationsPage() {
     filter === "ALL"
       ? recs || []
       : (recs || []).filter((r) => r.action === filter);
+  const runtimeSynthesis = computePortfolioSynthesisFromCards(recs ?? []);
+  const synthesis = runtimeSynthesis ?? (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null;
 
   // Count per action
   const counts: Record<string, number> = { ALL: (recs || []).length };
@@ -235,18 +238,14 @@ export default function RecommendationsPage() {
               }
               cost={(jobStatus?.cost_metrics ?? latestRun?.cost_metrics) ?? null}
               cards={recs ?? []}
-              synthesis={
-                (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null
-              }
+              synthesis={synthesis}
             />
 
             {/* Phase 6 — portfolio-synthesis panel. Cross-ticker themes,
                 risk concentrations, and rebalancing suggestions from the
                 Phase 4 synthesis LLM call. */}
             <PortfolioSynthesisPanel
-              synthesis={
-                (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null
-              }
+              synthesis={synthesis}
             />
 
             {/* Filter cards */}

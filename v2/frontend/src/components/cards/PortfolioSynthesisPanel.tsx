@@ -25,7 +25,7 @@ export function PortfolioSynthesisPanel({
 }: {
   synthesis: PortfolioSynthesisPayload | null | undefined;
 }) {
-  if (!synthesis || !synthesis.portfolio_bias) return null;
+  if (!synthesis) return null;
 
   const bias = BIAS_STYLES[synthesis.portfolio_bias] || BIAS_STYLES.neutral;
   const unknownSectorPattern = /unknown\s*(\(\s*100%\s*of\s*book\s*\)|sector|concentration)/i;
@@ -34,6 +34,9 @@ export function PortfolioSynthesisPanel({
   const overexposure = synthesis.overexposure_flags ?? [];
   const rebalance = synthesis.rebalancing_suggestions ?? [];
   const summary = (synthesis.summary || "").trim();
+  const sectorLines = Object.entries(synthesis.sector_allocation || {})
+    .slice(0, 3)
+    .map(([sector, pct]) => `${sector} (~${Math.round(Number(pct) || 0)}%)`);
 
   return (
     <section className="card-glass rounded-xl border border-border px-4 py-4 space-y-3">
@@ -42,14 +45,16 @@ export function PortfolioSynthesisPanel({
           <span className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">
             Portfolio Synthesis
           </span>
-          <span
-            className={cn(
-              "text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase",
-              bias.cls
-            )}
-          >
-            {bias.label}
-          </span>
+          {synthesis.portfolio_bias && (
+            <span
+              className={cn(
+                "text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase",
+                bias.cls
+              )}
+            >
+              {bias.label}
+            </span>
+          )}
           {synthesis.used_fallback && (
             <span
               title="Deterministic synthesis — fresh LLM context unavailable."
@@ -65,6 +70,16 @@ export function PortfolioSynthesisPanel({
         <p className="text-sm text-text-primary leading-relaxed">
           {summary}
         </p>
+      )}
+      {sectorLines.length > 0 && (
+        <ul className="space-y-1">
+          {sectorLines.map((line, idx) => (
+            <li key={idx} className="text-xs text-text-secondary flex items-start gap-1.5">
+              <span className="text-accent mt-0.5">•</span>
+              <span>{line}</span>
+            </li>
+          ))}
+        </ul>
       )}
 
       <div className="grid sm:grid-cols-2 gap-3">

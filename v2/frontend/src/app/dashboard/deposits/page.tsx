@@ -19,6 +19,57 @@ import type {
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 
+const MAX_REASON_WORDS = 12;
+
+function cleanActionText(text?: string | null): string {
+  if (!text) return "";
+  let out = text
+    .replace(/\$[\d,.]+[kKmM]?/g, "")
+    .replace(/\b\d+(\.\d+)?\s?%/g, "")
+    .replace(/\b(position|allocation|weight|sizing|size)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+  out = out.split(/[.;]/)[0]?.trim() ?? "";
+  if (!out) return "Hold";
+  if (/accumulate|buy/i.test(out)) return "Accumulate on pullbacks";
+  if (/trim|reduce|take profit/i.test(out)) return "Trim into strength";
+  if (/hold|wait/i.test(out)) return "Hold";
+  return out;
+}
+
+function toCompactLine(text?: string | null, maxWords = MAX_REASON_WORDS): string {
+  if (!text) return "";
+  const oneIdea = text
+    .replace(/[–—]/g, " ")
+    .split(/[.;]/)[0]
+    ?.replace(/\s+/g, " ")
+    .trim();
+  if (!oneIdea) return "";
+  const words = oneIdea.split(" ");
+  if (words.length <= maxWords) return oneIdea;
+  return `${words.slice(0, maxWords).join(" ")}…`;
+}
+
+function buildCutBullet(rec: DepositRecommendation, rank: number, total: number): string {
+  const scoreText = rec.score != null ? `score ${rec.score.toFixed(2)}` : "strong composite score";
+  if (rank === 0) return toCompactLine(`${rec.symbol} led peers with ${scoreText} and top conviction.`, 12);
+  if (rank === total - 1) return toCompactLine(`${rec.symbol} edged lower-ranked names on confidence and risk-adjusted fit.`, 12);
+  return toCompactLine(`${rec.symbol} ranked above alternatives on conviction, confidence, and diversification fit.`, 12);
+}
+
+function executionGuidance(rec: DepositRecommendation): string {
+  const category = (rec.category || "").toLowerCase();
+  const confidence = rec.confidence ?? 0;
+  const conviction = (rec.conviction_level || "").toUpperCase();
+  const volatile = category === "crypto" || category === "ipo";
+
+  if (volatile && confidence < 70) return "wait for pullback";
+  if (volatile) return "accumulate gradually";
+  if (conviction === "HIGH" && confidence >= 78) return "buy now";
+  if (confidence >= 65) return "accumulate gradually";
+  return "avoid chasing";
+}
+
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
@@ -145,7 +196,11 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
           No deployment — cash preserved. See exclusions below.
         </div>
       ) : (
-        <TopAllocationTable allocations={allocs} />
+        <>
+          <WhyMadeCutSection allocations={allocs} />
+          <ExecutionPlanSection allocations={allocs} />
+          <TopAllocationTable allocations={allocs} />
+        </>
       )}
 
       {/* Why this plan */}
@@ -252,7 +307,7 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
           <div className="col-span-2 text-right">Amount</div>
           <div className="col-span-2 text-right">Current</div>
           <div className="col-span-2 text-right">After</div>
-          <div className="col-span-3">Reason</div>
+          <div className="col-span-3">Why</div>
         </div>
         {allocations.map((rec) => (
           <div
@@ -264,7 +319,7 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
             </div>
             <div className="col-span-2 sm:col-span-1">
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 font-bold uppercase">
-                {rec.action}
+                {cleanActionText(rec.do) || rec.action}
               </span>
             </div>
             <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
@@ -277,9 +332,48 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
               {(rec.after_weight ?? 0).toFixed(1)}%
             </div>
             <div className="col-span-12 sm:col-span-3 text-xs text-text-secondary leading-snug">
-              {rec.do || rec.rationale}
+              {toCompactLine(rec.why || rec.rationale, 14)}
             </div>
           </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function WhyMadeCutSection({ allocations }: { allocations: DepositRecommendation[] }) {
+  return (
+    <div className="card-glass p-4 space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+        Why these made the cut
+      </p>
+      <ul className="space-y-1">
+        {allocations.map((rec, idx) => (
+          <li key={`${rec.symbol}-cut`} className="text-xs text-text-secondary leading-snug">
+            <span className="font-mono font-semibold text-text-primary mr-1">{rec.symbol}:</span>
+            {buildCutBullet(rec, idx, allocations.length)}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ExecutionPlanSection({ allocations }: { allocations: DepositRecommendation[] }) {
+  return (
+    <div className="card-glass p-4 space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+        Execution plan
+      </p>
+      <div className="space-y-1.5">
+        {allocations.map((rec) => (
+          <p key={`${rec.symbol}-exec`} className="text-xs text-text-secondary">
+            <span className="font-mono font-semibold text-text-primary">{rec.symbol}</span>
+            {" — "}
+            <span className="uppercase tracking-wide text-accent font-semibold text-[10px]">
+              {executionGuidance(rec)}
+            </span>
+          </p>
         ))}
       </div>
     </div>
@@ -350,7 +444,7 @@ function AdvancedDetails({ allocations }: { allocations: DepositRecommendation[]
               </div>
               {rec.why && <DeployMemo label="WHY" text={rec.why} tone="positive" />}
               {rec.risk && <DeployMemo label="RISK" text={rec.risk} tone="negative" />}
-              {rec.do && <DeployMemo label="ACTION" text={rec.do} tone="neutral" />}
+              {rec.do && <DeployMemo label="ACTION" text={cleanActionText(rec.do)} tone="neutral" />}
               {rec.alt_view && rec.alt_view !== "—" && (
                 <DeployMemo label="ALT VIEW" text={rec.alt_view} tone="neutral" />
               )}
@@ -564,7 +658,9 @@ function DeployMemo({
       <p className={cn("text-[10px] uppercase tracking-wide font-semibold mb-0.5", labelCls)}>
         {label}
       </p>
-      <p className="text-xs text-text-secondary leading-relaxed">{text}</p>
+      <p className="text-xs text-text-secondary leading-relaxed">
+        {label === "ACTION" ? cleanActionText(text) : toCompactLine(text, 14)}
+      </p>
     </div>
   );
 }

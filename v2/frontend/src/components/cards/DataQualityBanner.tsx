@@ -56,6 +56,10 @@ export function derivePortfolioQualityBand({
   synthesis?: PortfolioSynthesisPayload | null | undefined;
 }): { label: "HIGH" | "MEDIUM" | "LOW"; cls: string } | null {
   const backendAggregate = (synthesis?.aggregate_quality || "").toUpperCase();
+  const synthesisQuality = (synthesis?.quality || "").toUpperCase();
+  if (synthesisQuality === "HIGH" || synthesisQuality === "MEDIUM" || synthesisQuality === "LOW") {
+    return qualityBandFromLabel(synthesisQuality);
+  }
   if (backendAggregate === "HIGH" || backendAggregate === "MEDIUM" || backendAggregate === "LOW") {
     return qualityBandFromLabel(backendAggregate);
   }

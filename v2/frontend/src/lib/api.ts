@@ -319,6 +319,7 @@ export interface InsightCardData {
   current_price?: number;
   pnl_pct?: number;
   category: string;
+  sector?: string | null;
   // Multi-agent enrichment (nullable for legacy rows)
   investment_thesis?: string | null;
   sentiment_score?: number | null;
@@ -367,6 +368,10 @@ export interface PortfolioSynthesisPayload {
   overexposure_flags: string[];
   rebalancing_suggestions: string[];
   summary: string;
+  quality?: "HIGH" | "MEDIUM" | "LOW" | string | null;
+  top_sectors?: string[] | null;
+  sector_allocation?: Record<string, number> | null;
+  counts?: Record<string, number> | null;
   aggregate_quality?: "HIGH" | "MEDIUM" | "LOW" | string | null;
   quality_breakdown?: {
     total_cards: number;

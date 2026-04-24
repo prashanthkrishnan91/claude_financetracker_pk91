@@ -5,6 +5,7 @@ import type {
   CostMetricsPayload,
   InsightCardData,
   ModeDecisionPayload,
+  PortfolioSynthesisPayload,
 } from "@/lib/api";
 
 /**
@@ -47,20 +48,22 @@ export function derivePortfolioQualityBand({
   decision,
   cost,
   cards,
+  synthesis,
 }: {
   decision: ModeDecisionPayload | null | undefined;
   cost: CostMetricsPayload | null | undefined;
   cards: InsightCardData[] | null | undefined;
+  synthesis?: PortfolioSynthesisPayload | null | undefined;
 }): { label: "HIGH" | "MEDIUM" | "LOW"; cls: string } | null {
+  const backendAggregate = (synthesis?.aggregate_quality || "").toUpperCase();
+  if (backendAggregate === "HIGH" || backendAggregate === "MEDIUM" || backendAggregate === "LOW") {
+    return qualityBandFromLabel(backendAggregate);
+  }
   const avg = decision?.avg_quality ?? null;
   const baseline = avg !== null ? qualityBandFromAvg(avg) : null;
-  const enriched = Math.max(0, Number(cost?.llm_enriched_cards ?? 0));
-  const fallback = Math.max(0, Number(cost?.fallback_cards ?? 0));
-  const hasCleanEnrichment = enriched > 0 && fallback === 0;
+
   const roster = cards ?? [];
-  const enrichedCards = roster.filter((c) => (c.analysis_source ?? "") === "live_llm");
-  const sample = enrichedCards.length > 0 ? enrichedCards : roster;
-  const dist = sample.reduce(
+  const dist = roster.reduce(
     (acc, c) => {
       const q = (c.data_quality_label || "").toUpperCase();
       if (q === "HIGH" || q === "MEDIUM" || q === "LOW") acc[q] += 1;
@@ -68,22 +71,34 @@ export function derivePortfolioQualityBand({
     },
     { HIGH: 0, MEDIUM: 0, LOW: 0 }
   );
-  const totalLabeled = dist.HIGH + dist.MEDIUM + dist.LOW;
-  const highShare = totalLabeled > 0 ? dist.HIGH / totalLabeled : 0;
-  const confidence = sample
-    .map((c) => (typeof c.analyst_confidence === "number" ? c.analyst_confidence : null))
-    .filter((v): v is number => v !== null);
-  const avgConfidence = confidence.length > 0
-    ? confidence.reduce((a, b) => a + b, 0) / confidence.length
-    : null;
+  const totalCards = Math.max(
+    Number(synthesis?.quality_breakdown?.total_cards ?? 0),
+    Number(roster.length),
+    Number(cost?.llm_enriched_cards ?? 0) + Number(cost?.fallback_cards ?? 0)
+  );
+  const enriched = Math.max(
+    0,
+    Number(synthesis?.quality_breakdown?.enriched ?? 0),
+    roster.filter((c) => (c.analysis_source ?? "") === "live_llm").length,
+    Number(cost?.llm_enriched_cards ?? 0)
+  );
+  const highQuality = Math.max(
+    0,
+    Number(synthesis?.quality_breakdown?.high_quality ?? 0),
+    dist.HIGH
+  );
+  const fallback = Math.max(
+    0,
+    Number(synthesis?.quality_breakdown?.fallback ?? 0),
+    roster.filter((c) => c.analyst_used_fallback || c.analysis_source === "deterministic_fallback").length,
+    Number(cost?.fallback_cards ?? 0)
+  );
 
-  if (
-    hasCleanEnrichment &&
-    dist.HIGH >= Math.max(1, dist.MEDIUM + dist.LOW) &&
-    highShare >= 0.55 &&
-    (avgConfidence === null || avgConfidence >= 0.45)
-  ) {
+  if (totalCards > 0 && enriched / totalCards >= 0.8 && highQuality / totalCards >= 0.8 && fallback / totalCards <= 0.2) {
     return qualityBandFromLabel("HIGH");
+  }
+  if (totalCards > 0 && enriched / totalCards >= 0.5 && highQuality / totalCards >= 0.5) {
+    return qualityBandFromLabel("MEDIUM");
   }
   return baseline;
 }
@@ -93,17 +108,19 @@ export function DataQualityBanner({
   decision,
   cost,
   cards,
+  synthesis,
 }: {
   runMode: "FULL" | "DEGRADED" | string | null | undefined;
   decision: ModeDecisionPayload | null | undefined;
   cost: CostMetricsPayload | null | undefined;
   cards: InsightCardData[] | null | undefined;
+  synthesis?: PortfolioSynthesisPayload | null | undefined;
 }) {
   // Only render when at least one field carries signal — keeps the
   // layout clean on pre-Phase-5 runs.
   if (!runMode && !decision && !cost) return null;
 
-  const band = derivePortfolioQualityBand({ decision, cost, cards });
+  const band = derivePortfolioQualityBand({ decision, cost, cards, synthesis });
   const isDegraded = runMode === "DEGRADED";
   const llmCalls = cost?.actual_llm_calls ?? cost?.attempted_llm_calls ?? cost?.total_calls ?? 0;
   const llmEnriched = cost?.llm_enriched_cards ?? 0;

@@ -234,23 +234,23 @@ def _build_reasoning_context(
 
 def _deterministic_summary(ctx: dict[str, str]) -> str:
     lead = f"{ctx['ticker']} is rated {ctx['action']} with {ctx['sentiment'].lower()} sentiment."
-    why = ctx["driver"] or f"Technical signal is {ctx['technical']} with {ctx['conviction_band']} conviction."
+    why = ctx["driver"] or "Position-level evidence supports a cautious, data-backed stance."
     return f"{lead} {why[:220].rstrip('.') }."
 
 
 def _deterministic_why(ctx: dict[str, str]) -> str:
-    upside = ctx["driver"] or "Recent price behavior still supports the current thesis."
-    downside = ctx["risk"] or "The main risk is momentum fading or concentration risk if the position grows too large."
+    upside = ctx["driver"] or "Current business and portfolio context supports staying disciplined with this position."
+    downside = ctx["risk"] or "The main risk is concentration drift or a weaker business backdrop than expected."
     return f"{upside[:170].rstrip('.')} while monitoring {downside[:170].rstrip('.')}."
 
 
 def _deterministic_plain_explanation(ctx: dict[str, str]) -> str:
     action = ctx["action"]
     core = (
-        f"{ctx['ticker']} shows {ctx['sentiment'].lower()} evidence and a {ctx['technical'].lower()} technical setup, "
+        f"{ctx['ticker']} shows {ctx['sentiment'].lower()} evidence across available signals, "
         f"so the current stance is {action}."
     )
-    right = ctx["driver"] or "If the trend and business backdrop continue, returns can keep compounding."
+    right = ctx["driver"] or "If business demand and execution remain stable, returns can keep compounding."
     wrong = ctx["risk"] or "If volatility rises or fundamentals soften, this thesis weakens quickly."
     sizing = (
         f" Suggested allocation is {ctx['allocation']}."
@@ -263,7 +263,7 @@ def _deterministic_plain_explanation(ctx: dict[str, str]) -> str:
 
 def _deterministic_drivers(ctx: dict[str, str]) -> list[str]:
     out: list[str] = []
-    out.append(f"Technical signal: {ctx['technical']} with {ctx['conviction_band']} conviction.")
+    out.append(f"Recommendation confidence is {ctx['conviction_band']} based on available evidence quality.")
     if ctx["sector"]:
         out.append(f"Portfolio context: exposure to {ctx['sector']} remains relevant for this call.")
     if ctx["position"]:
@@ -273,7 +273,7 @@ def _deterministic_drivers(ctx: dict[str, str]) -> list[str]:
 
 def _deterministic_risks(ctx: dict[str, str]) -> list[str]:
     out: list[str] = []
-    out.append("Momentum or trend reversal could invalidate this recommendation.")
+    out.append("A business-demand slowdown or concentration drift could invalidate this recommendation.")
     if ctx["volatility"]:
         out.append(f"Volatility regime risk: {ctx['volatility'][:180]}.")
     if ctx["allocation"]:

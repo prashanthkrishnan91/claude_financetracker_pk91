@@ -36,7 +36,7 @@ function normalizeAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SEL
 function classifyStrategy(card: InsightCardData): string {
   const ticker = (card.ticker || "").toUpperCase();
   if (STRATEGY_MAP[ticker]) return STRATEGY_MAP[ticker];
-  if ((card.technical_signal || "").toUpperCase() === "SELL") return "Turnaround or weak momentum";
+  if ((card.technical_signal || "").toUpperCase() === "SELL") return "Turnaround or elevated risk";
   return "Mega-cap quality growth";
 }
 
@@ -48,7 +48,7 @@ function summarizeReason(card: InsightCardData): string {
     || card.thesis
     || card.reasoning_summary
     || card.detail
-    || "Monitor execution and trend confirmation."
+    || "Monitor execution and new business evidence."
   );
 }
 
@@ -77,7 +77,7 @@ export function computePortfolioSynthesisFromCards(cards: InsightCardData[] | nu
     if (action === "TRIM" || action === "SELL") trims.push(card);
 
     if ((card.technical_signal || "").toUpperCase() === "SELL") {
-      riskCounts["Momentum breakdown risk"] = (riskCounts["Momentum breakdown risk"] || 0) + 1;
+      riskCounts["Elevated downside risk"] = (riskCounts["Elevated downside risk"] || 0) + 1;
     }
     if (["BTC", "XRP"].includes((card.ticker || "").toUpperCase())) {
       riskCounts["Crypto volatility"] = (riskCounts["Crypto volatility"] || 0) + 1;
@@ -103,7 +103,7 @@ export function computePortfolioSynthesisFromCards(cards: InsightCardData[] | nu
   const trimCandidates = trims.slice(0, 5).map((card) => ({
     ticker: card.ticker,
     why_trim: card.analyst_risks?.[0] || card.main_risks?.[0] || "Risk-adjusted upside is weaker than top BUY ideas.",
-    what_to_watch: card.what_changed?.split("\n").find(Boolean) || "Watch trend and earnings revision direction.",
+    what_to_watch: card.what_changed?.split("\n").find(Boolean) || "Watch business execution and earnings revision direction.",
     redirect_proceeds_to: topOpportunities.slice(0, 3).map((t) => t.ticker),
   }));
 
@@ -145,7 +145,7 @@ export function computePortfolioSynthesisFromCards(cards: InsightCardData[] | nu
       `Recycle proceeds from ${trimCandidates.slice(0, 3).map((o) => o.ticker).join(", ") || "trim candidates"} toward higher-conviction setups.`,
     ],
     what_changed: roster.filter((c) => c.what_changed).slice(0, 6).map((c) => ({ ticker: c.ticker, change: c.what_changed?.split("\n").find(Boolean) })),
-    watchlist: roster.filter((c) => (c.technical_signal || "").toUpperCase() === "SELL" || (c.data_quality_label || "").toUpperCase() === "LOW").slice(0, 6).map((c) => ({ ticker: c.ticker, focus: c.analyst_risks?.[0] || "Recheck trend and thesis", trigger: c.what_changed?.split("\n").find(Boolean) || "Review after earnings" })),
+    watchlist: roster.filter((c) => (c.technical_signal || "").toUpperCase() === "SELL" || (c.data_quality_label || "").toUpperCase() === "LOW").slice(0, 6).map((c) => ({ ticker: c.ticker, focus: c.analyst_risks?.[0] || "Recheck thesis and business evidence", trigger: c.what_changed?.split("\n").find(Boolean) || "Review after earnings" })),
     top_sectors: Object.keys(sectorCounts).slice(0, 3),
     sector_allocation: Object.fromEntries(Object.entries(sectorCounts).map(([k, v]) => [k, Number(((v / total) * 100).toFixed(1))])),
     quality_breakdown: { total_cards: total, enriched, high_quality: highQuality, fallback },

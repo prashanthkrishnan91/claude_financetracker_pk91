@@ -231,7 +231,7 @@ def test_deterministic_synthesis_avoids_unknown_sector_summary():
     lower_summary = s.summary.lower()
     assert "top sector: unknown" not in lower_summary
     assert "unknown (100% of book)" not in lower_summary
-    assert "sector data is unavailable" in lower_summary
+    assert "top exposures:" in lower_summary
 
 
 def test_deterministic_synthesis_uses_plain_english_summary_copy():
@@ -241,11 +241,11 @@ def test_deterministic_synthesis_uses_plain_english_summary_copy():
     )
     s = deterministic_synthesis(payload)
     lower_summary = s.summary.lower()
-    assert "buy candidates" in lower_summary
-    assert "holds" in lower_summary
-    assert "trims" in lower_summary
-    assert "biggest opportunity:" in lower_summary
-    assert "main risk:" in lower_summary
+    assert "action mix:" in lower_summary
+    assert "buy /" in lower_summary
+    assert "hold /" in lower_summary
+    assert "reduce" in lower_summary
+    assert "top exposures:" in lower_summary
 
 
 def test_deterministic_synthesis_bias_bullish_when_buy_dominates():
@@ -283,6 +283,49 @@ def test_deterministic_synthesis_bias_defensive_when_reduces_dominate():
     )
     s = deterministic_synthesis(payload)
     assert s.portfolio_bias == "defensive"
+
+
+def test_build_synthesis_inputs_maps_known_tickers_and_sets_high_aggregate_quality():
+    known = [
+        "AAPL", "MSFT", "NVDA", "AMD", "CRM", "SNOW",
+        "GOOGL", "META", "NFLX", "RDDT", "COST", "WMT",
+        "QCOM", "TSM", "BRK-B", "ALK", "RIVN", "BMWYY",
+        "VOO", "VTI", "SPY", "QQQ", "SCHD", "VYM",
+        "BND", "VXUS", "VEA", "VWO", "GLD", "BTC",
+        "XRP", "KLAR", "BLSH", "STUB",
+    ]
+    snapshots = {
+        t: _snap(t, sector="", category="", data_quality_score=0.9)
+        for t in known
+    }
+    features = {t: _feat(t, sector="", category="") for t in known}
+    verdicts = {
+        t: _verdict(
+            t,
+            action="BUY" if i < 10 else ("REDUCE" if i < 13 else "HOLD"),
+            conviction=0.75,
+            confidence=0.9,
+        )
+        for i, t in enumerate(known)
+    }
+    positions = [{"ticker": t, "shares": 1, "avg_cost": 100, "category": ""} for t in known]
+
+    payload = build_synthesis_inputs(
+        verdicts=verdicts,
+        snapshots=snapshots,
+        features=features,
+        positions=positions,
+    )
+    synthesis = deterministic_synthesis(payload)
+    sec = payload["portfolio_composition"]["sector_exposure"]
+    assert payload["data_quality"]["aggregate_quality"] == "HIGH"
+    assert payload["data_quality"]["total_cards"] == 34
+    assert "Unknown" not in sec or sec.get("Unknown", 0.0) < 100.0
+    assert "Technology" in sec
+    assert "Crypto" in sec
+    text = " ".join(synthesis.overexposure_flags + synthesis.rebalancing_suggestions + [synthesis.summary]).lower()
+    assert "unknown-heavy book" not in text
+    assert "trim unknown" not in text
 
 
 # ── Failure-mode LLM drivers ───────────────────────────────────────────────

@@ -235,6 +235,9 @@ export default function RecommendationsPage() {
               }
               cost={(jobStatus?.cost_metrics ?? latestRun?.cost_metrics) ?? null}
               cards={recs ?? []}
+              synthesis={
+                (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null
+              }
             />
 
             {/* Phase 6 — portfolio-synthesis panel. Cross-ticker themes,

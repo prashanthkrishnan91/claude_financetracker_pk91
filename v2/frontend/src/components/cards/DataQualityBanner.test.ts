@@ -26,6 +26,7 @@ describe("derivePortfolioQualityBand", () => {
         { id: "2", ticker: "B", name: "B", action: "HOLD", detail: "", rationale: "", urgency: 1, color: "", tax_note: "", drip_note: "", category: "Tech", data_quality_label: "HIGH", analysis_source: "live_llm", analyst_confidence: 0.7 },
         { id: "3", ticker: "C", name: "C", action: "TRIM", detail: "", rationale: "", urgency: 1, color: "", tax_note: "", drip_note: "", category: "Tech", data_quality_label: "MEDIUM", analysis_source: "live_llm", analyst_confidence: 0.55 },
       ],
+      synthesis: null,
     });
 
     expect(band?.label).toBe("HIGH");
@@ -52,8 +53,29 @@ describe("derivePortfolioQualityBand", () => {
         entries: [],
       },
       cards: [],
+      synthesis: null,
     });
 
     expect(band?.label).toBe("MEDIUM");
+  });
+
+  it("uses backend aggregate quality when synthesis provides it", () => {
+    const band = derivePortfolioQualityBand({
+      decision: null,
+      cost: null,
+      cards: [],
+      synthesis: {
+        portfolio_bias: "neutral",
+        key_themes: [],
+        risk_concentrations: [],
+        overexposure_flags: [],
+        rebalancing_suggestions: [],
+        summary: "",
+        aggregate_quality: "HIGH",
+        quality_breakdown: { total_cards: 34, enriched: 34, high_quality: 33, fallback: 0 },
+      },
+    });
+
+    expect(band?.label).toBe("HIGH");
   });
 });

@@ -33,10 +33,7 @@ export function PortfolioSynthesisPanel({
   const risks = (synthesis.risk_concentrations ?? []).filter((item) => !unknownSectorPattern.test(item));
   const overexposure = synthesis.overexposure_flags ?? [];
   const rebalance = synthesis.rebalancing_suggestions ?? [];
-  const summary = (synthesis.summary || "").replace(
-    /top sector:\s*unknown\s*\(\s*100%\s*of\s*book\s*\)\.?\s*/gi,
-    "Sector data unavailable. "
-  ).trim();
+  const summary = (synthesis.summary || "").trim();
 
   return (
     <section className="card-glass rounded-xl border border-border px-4 py-4 space-y-3">

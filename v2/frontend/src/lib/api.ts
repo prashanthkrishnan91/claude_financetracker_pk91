@@ -367,6 +367,13 @@ export interface PortfolioSynthesisPayload {
   overexposure_flags: string[];
   rebalancing_suggestions: string[];
   summary: string;
+  aggregate_quality?: "HIGH" | "MEDIUM" | "LOW" | string | null;
+  quality_breakdown?: {
+    total_cards: number;
+    enriched: number;
+    high_quality: number;
+    fallback: number;
+  } | null;
   used_fallback?: boolean;
   error?: string | null;
 }

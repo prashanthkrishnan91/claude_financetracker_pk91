@@ -3,6 +3,7 @@
 import { cn } from "@/lib/utils";
 import type {
   CostMetricsPayload,
+  InsightCardData,
   ModeDecisionPayload,
 } from "@/lib/api";
 
@@ -33,21 +34,76 @@ function qualityBandFromAvg(avg: number): {
   return { label: "LOW", cls: "bg-red-500/10 text-red-400 border-red-500/30" };
 }
 
+function qualityBandFromLabel(label: "HIGH" | "MEDIUM" | "LOW"): {
+  label: "HIGH" | "MEDIUM" | "LOW";
+  cls: string;
+} {
+  if (label === "HIGH") return qualityBandFromAvg(0.8);
+  if (label === "MEDIUM") return qualityBandFromAvg(0.6);
+  return qualityBandFromAvg(0.2);
+}
+
+export function derivePortfolioQualityBand({
+  decision,
+  cost,
+  cards,
+}: {
+  decision: ModeDecisionPayload | null | undefined;
+  cost: CostMetricsPayload | null | undefined;
+  cards: InsightCardData[] | null | undefined;
+}): { label: "HIGH" | "MEDIUM" | "LOW"; cls: string } | null {
+  const avg = decision?.avg_quality ?? null;
+  const baseline = avg !== null ? qualityBandFromAvg(avg) : null;
+  const enriched = Math.max(0, Number(cost?.llm_enriched_cards ?? 0));
+  const fallback = Math.max(0, Number(cost?.fallback_cards ?? 0));
+  const hasCleanEnrichment = enriched > 0 && fallback === 0;
+  const roster = cards ?? [];
+  const enrichedCards = roster.filter((c) => (c.analysis_source ?? "") === "live_llm");
+  const sample = enrichedCards.length > 0 ? enrichedCards : roster;
+  const dist = sample.reduce(
+    (acc, c) => {
+      const q = (c.data_quality_label || "").toUpperCase();
+      if (q === "HIGH" || q === "MEDIUM" || q === "LOW") acc[q] += 1;
+      return acc;
+    },
+    { HIGH: 0, MEDIUM: 0, LOW: 0 }
+  );
+  const totalLabeled = dist.HIGH + dist.MEDIUM + dist.LOW;
+  const highShare = totalLabeled > 0 ? dist.HIGH / totalLabeled : 0;
+  const confidence = sample
+    .map((c) => (typeof c.analyst_confidence === "number" ? c.analyst_confidence : null))
+    .filter((v): v is number => v !== null);
+  const avgConfidence = confidence.length > 0
+    ? confidence.reduce((a, b) => a + b, 0) / confidence.length
+    : null;
+
+  if (
+    hasCleanEnrichment &&
+    dist.HIGH >= Math.max(1, dist.MEDIUM + dist.LOW) &&
+    highShare >= 0.55 &&
+    (avgConfidence === null || avgConfidence >= 0.45)
+  ) {
+    return qualityBandFromLabel("HIGH");
+  }
+  return baseline;
+}
+
 export function DataQualityBanner({
   runMode,
   decision,
   cost,
+  cards,
 }: {
   runMode: "FULL" | "DEGRADED" | string | null | undefined;
   decision: ModeDecisionPayload | null | undefined;
   cost: CostMetricsPayload | null | undefined;
+  cards: InsightCardData[] | null | undefined;
 }) {
   // Only render when at least one field carries signal — keeps the
   // layout clean on pre-Phase-5 runs.
   if (!runMode && !decision && !cost) return null;
 
-  const avg = decision?.avg_quality ?? null;
-  const band = avg !== null ? qualityBandFromAvg(avg) : null;
+  const band = derivePortfolioQualityBand({ decision, cost, cards });
   const isDegraded = runMode === "DEGRADED";
   const llmCalls = cost?.actual_llm_calls ?? cost?.attempted_llm_calls ?? cost?.total_calls ?? 0;
   const llmEnriched = cost?.llm_enriched_cards ?? 0;

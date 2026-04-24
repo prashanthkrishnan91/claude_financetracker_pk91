@@ -46,6 +46,7 @@ from ..intelligence import (
     synthesize_portfolio,
 )
 from ..recommendation_engine import invalidate_recommendations_aggregate_cache
+from ..agent_run_status import assert_db_status
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from ..http_retry import run_with_retry_sync
 from .data_sources import get_provider_status
@@ -206,6 +207,7 @@ class AgentOrchestrator:
             "discarded_llm_calls": 0,
             "fallback_cards": 0,
             "reused_cached_cards": 0,
+            "skipped_llm_reason": None,
         }
 
     def _db(self, op_name: str, fn):
@@ -216,7 +218,7 @@ class AgentOrchestrator:
     async def create_run(self, tickers: Optional[list[str]] = None) -> str:
         row = {
             "user_id": str(self.user_id),
-            "status": "queued",
+            "status": assert_db_status("queued"),
             "current_agent": "Queued",
             "progress_pct": 0,
             "tickers": tickers or [],
@@ -1048,6 +1050,9 @@ class AgentOrchestrator:
         if decision is not None and decision.mode == RunMode.DEGRADED:
             llm_for_call = None
         if llm_for_call is None:
+            self._analyst_stage_stats["skipped_llm_reason"] = (
+                "degraded_mode" if decision is not None and decision.mode == RunMode.DEGRADED else "missing_api_key"
+            )
             logger.info("analyst_stage.fallback_used reason=synthesis_llm_unavailable")
         else:
             self._analyst_stage_stats["attempted_llm_calls"] += 1
@@ -1071,8 +1076,11 @@ class AgentOrchestrator:
 
         if tracker is not None and not synthesis.used_fallback:
             tracker.record(kind="synthesis", model=self._llm.model)
+            self._analyst_stage_stats["successful_llm_calls"] += 1
+            self._analyst_stage_stats["llm_enriched_cards"] += 1
         elif llm_for_call is not None and synthesis.used_fallback:
             self._analyst_stage_stats["discarded_llm_calls"] += 1
+            self._analyst_stage_stats["failed_llm_calls"] += 1
             logger.warning("analyst_stage.llm_request.failure stage=portfolio_synthesis reason=used_fallback")
 
         logger.info(
@@ -1116,6 +1124,7 @@ class AgentOrchestrator:
 
         decision: Optional[ModeDecision] = getattr(self, "_mode_decision", None)
         if decision is not None and decision.mode == RunMode.DEGRADED:
+            self._analyst_stage_stats["skipped_llm_reason"] = "degraded_mode"
             verdicts = build_degraded_verdicts(snapshots, decision=decision)
             self._analyst_stage_stats["fallback_cards"] += len(verdicts)
             logger.info(
@@ -1125,6 +1134,7 @@ class AgentOrchestrator:
             return verdicts
 
         if not self._llm.api_key:
+            self._analyst_stage_stats["skipped_llm_reason"] = "missing_api_key"
             self._analyst_stage_stats["fallback_cards"] += len(snapshots)
             logger.warning(
                 "analyst_stage.fallback_used reason=no_anthropic_api_key tickers=%d",
@@ -1459,7 +1469,7 @@ class AgentOrchestrator:
     ) -> None:
         patch: dict = {}
         if status is not None:
-            patch["status"] = status
+            patch["status"] = assert_db_status(status)
         if current_agent is not None:
             patch["current_agent"] = current_agent
         if progress is not None:
@@ -1480,6 +1490,7 @@ class AgentOrchestrator:
             patch["run_mode"] = mode_decision.mode.value
             patch["run_mode_decision"] = mode_decision.to_dict()
         if cost_tracker is not None:
+            self._enforce_llm_metric_invariants()
             payload = cost_tracker.to_dict()
             payload.update(self._analyst_stage_stats)
             payload["actual_llm_calls"] = self._analyst_stage_stats.get("attempted_llm_calls", 0)
@@ -1488,6 +1499,14 @@ class AgentOrchestrator:
             patch["finished_at"] = datetime.now(timezone.utc).isoformat()
         if not patch:
             return
+        if "status" in patch:
+            logger.info(
+                "agent_runs.status_patch job_id=%s old_status=%s new_status=%s reason=%s",
+                run_id,
+                "unknown",
+                patch["status"],
+                current_agent or "orchestrator_update",
+            )
         matched_rows = self._run_agent_runs_update(run_id, patch)
         if status in ("completed", "failed"):
             logger.info(
@@ -1586,6 +1605,29 @@ class AgentOrchestrator:
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("agent_runs update retry failed: %s", exc2)
                 raise
+
+    def _enforce_llm_metric_invariants(self) -> None:
+        attempted = int(self._analyst_stage_stats.get("attempted_llm_calls", 0) or 0)
+        successful = int(self._analyst_stage_stats.get("successful_llm_calls", 0) or 0)
+        failed = int(self._analyst_stage_stats.get("failed_llm_calls", 0) or 0)
+        fallback_cards = int(self._analyst_stage_stats.get("fallback_cards", 0) or 0)
+        skipped_reason = self._analyst_stage_stats.get("skipped_llm_reason")
+        if attempted > 0 and successful == 0 and failed == 0:
+            logger.warning(
+                "llm_metrics_invariant_fix attempted=%d successful=%d failed=%d skipped_reason=%s",
+                attempted,
+                successful,
+                failed,
+                skipped_reason,
+            )
+            self._analyst_stage_stats["failed_llm_calls"] = attempted
+            failed = attempted
+        if fallback_cards > 0 and failed == 0 and not skipped_reason:
+            logger.warning(
+                "llm_metrics_invariant_fix fallback_cards=%d with no failed_llm_calls/skipped_reason",
+                fallback_cards,
+            )
+            self._analyst_stage_stats["skipped_llm_reason"] = "fallback_without_recorded_failure"
 
     # ── Mappers ───────────────────────────────────────────────────────────────
 

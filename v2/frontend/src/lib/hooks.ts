@@ -134,7 +134,7 @@ export function useRefreshRecommendations() {
 export const AGENT_JOB_POLL_MS = 3000;
 // Max poll duration is 10 minutes.
 export const AGENT_JOB_MAX_POLLS = Math.ceil((10 * 60 * 1000) / AGENT_JOB_POLL_MS);
-const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled", "stale_failed", "no_data"]);
+const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 export function useAgentJob(jobId: string | null) {
   return useQuery({
@@ -177,7 +177,7 @@ export function useLatestAgentRun(enabled = true) {
     refetchInterval: (query) => {
       const data = query.state.data;
       if (!data) return false;
-      return data.status === "running" || data.status === "queued" ? 2000 : false;
+      return data.status === "running" || data.status === "queued" || data.status === "in_progress" ? 2000 : false;
     },
     refetchOnWindowFocus: false,
   });

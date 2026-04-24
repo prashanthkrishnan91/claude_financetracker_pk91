@@ -71,7 +71,7 @@ export default function RecommendationsPage() {
 
   // Restore the progress tracker from the last run if it's still in-flight.
   useEffect(() => {
-    if (!activeJobId && latestRun && (latestRun.status === "running" || latestRun.status === "queued")) {
+    if (!activeJobId && latestRun && (latestRun.status === "running" || latestRun.status === "queued" || latestRun.status === "in_progress")) {
       setActiveJobId(latestRun.id);
     }
   }, [latestRun, activeJobId]);
@@ -81,7 +81,7 @@ export default function RecommendationsPage() {
   // degraded summary before it disappears.
   useEffect(() => {
     if (!activeJobId || !jobStatus) return;
-    if (!["completed", "failed", "cancelled", "stale_failed", "no_data"].includes(jobStatus.status)) return;
+    if (!["completed", "failed", "cancelled"].includes(jobStatus.status)) return;
     if (finalizedJobRef.current === activeJobId) return;
     finalizedJobRef.current = activeJobId;
     setFinalizingJob(true);
@@ -98,8 +98,8 @@ export default function RecommendationsPage() {
           queryClient.refetchQueries({ queryKey: ["recommendations", "insights"], type: "active" }),
         ]);
       }
-      if (jobStatus.status === "stale_failed") {
-        setToast("Previous run got stuck; start a new run");
+      if (jobStatus.status === "failed") {
+        setToast(jobStatus.error_message || "LLM failed: run ended in fallback mode");
       }
       setTimeout(() => {
         setActiveJobId(null);
@@ -202,10 +202,10 @@ export default function RecommendationsPage() {
                   },
                 })
               }
-              disabled={refreshRecs.isPending || (jobStatus?.status === "running" || jobStatus?.status === "queued")}
+              disabled={refreshRecs.isPending || (jobStatus?.status === "running" || jobStatus?.status === "queued" || jobStatus?.status === "in_progress")}
               className="text-xs px-3 py-1.5 rounded-md bg-accent text-background font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50"
             >
-              {refreshRecs.isPending || jobStatus?.status === "running" || jobStatus?.status === "queued" ? (
+              {refreshRecs.isPending || jobStatus?.status === "running" || jobStatus?.status === "queued" || jobStatus?.status === "in_progress" ? (
                 <Spinner className="h-3 w-3" />
               ) : (
                 "Run Agents"
@@ -280,21 +280,18 @@ export default function RecommendationsPage() {
             ) : error ? (
               <EmptyState title="Failed to load recommendations" description="Check your connection and try again." />
             ) : filtered.length === 0 ? (
-              jobStatus?.status === "running" || jobStatus?.status === "queued" ? (
+              jobStatus?.status === "running" || jobStatus?.status === "queued" || jobStatus?.status === "in_progress" ? (
                 <EmptyState
                   title="AI agents analyzing..."
                   description="Signals will appear here once the pipeline completes."
-                />
-              ) : jobStatus?.status === "stale_failed" ? (
-                <EmptyState
-                  title="Previous run got stuck"
-                  description="Previous run got stuck; start a new run."
                 />
               ) : jobStatus?.status === "failed" || latestRun?.status === "failed" ? (
                 <EmptyState
                   title="Analysis temporarily unavailable"
                   description={
+                    jobStatus?.error_message ||
                     jobStatus?.summary ||
+                    latestRun?.error_message ||
                     latestRun?.summary ||
                     "The agent pipeline hit an error. Tap Run Agents to retry."
                   }

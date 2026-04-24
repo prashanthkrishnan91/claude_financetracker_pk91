@@ -20,26 +20,6 @@ import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 
 const MAX_REASON_WORDS = 12;
-const ACTION_LABELS: Record<string, string> = {
-  INITIATE_OR_ADD: "Initiate or Add",
-  ADD_ON_PULLBACKS: "Add on Pullbacks",
-  ACCUMULATE: "Accumulate",
-  ACCUMULATE_GRADUALLY: "Accumulate Gradually",
-  INITIATE_HALF: "Initiate Half",
-  INITIATE_HALF_NOW: "Initiate Half Now",
-  BUY: "Buy",
-  BUY_NOW: "Buy Now",
-  TRIM: "Trim",
-  HOLD: "Hold",
-};
-
-function formatActionLabel(rawAction: string | null | undefined): string {
-  if (!rawAction) return "—";
-
-  const cleaned = rawAction.replace(/\s+\d+$/, "").trim();
-  const normalized = cleaned.toUpperCase().replace(/\s+/g, "_");
-  return ACTION_LABELS[normalized] ?? cleaned;
-}
 
 function cleanActionText(text?: string | null): string {
   if (!text) return "";
@@ -88,6 +68,44 @@ function executionGuidance(rec: DepositRecommendation): string {
   if (conviction === "HIGH" && confidence >= 78) return "buy now";
   if (confidence >= 65) return "accumulate gradually";
   return "avoid chasing";
+}
+
+function normalizeSignal(value: number | null | undefined): number {
+  if (value == null || Number.isNaN(value)) return 0;
+  return value > 1 ? value / 100 : value;
+}
+
+function getEntryStrategy(rec: DepositRecommendation): { label: string; detail?: string; tone: string } {
+  const momentum = normalizeSignal(rec.features?.momentum);
+  const volatility = normalizeSignal(rec.features?.volatility);
+  const confidence = normalizeSignal(rec.confidence);
+
+  if (momentum > 0.7 && confidence > 0.7) {
+    return {
+      label: "Buy now",
+      detail: "Momentum setup",
+      tone: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
+    };
+  }
+  if (volatility > 0.7) {
+    return {
+      label: "Accumulate on dips",
+      detail: "High volatility",
+      tone: "bg-amber-500/15 text-amber-300 border-amber-500/30",
+    };
+  }
+  if (confidence > 0.6) {
+    return {
+      label: "Scale in",
+      detail: "Build gradually",
+      tone: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",
+    };
+  }
+  return {
+    label: "Starter position",
+    detail: "Start small",
+    tone: "bg-slate-500/15 text-slate-300 border-slate-500/30",
+  };
 }
 
 export default function DepositsPage() {
@@ -323,39 +341,51 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
           <div className="col-span-2">Ticker</div>
-          <div className="col-span-1">Action</div>
+          <div className="col-span-3">Entry Strategy</div>
           <div className="col-span-2 text-right">Amount</div>
-          <div className="col-span-2 text-right">Current</div>
-          <div className="col-span-2 text-right">After</div>
+          <div className="col-span-1 text-right">Current</div>
+          <div className="col-span-1 text-right">After</div>
           <div className="col-span-3">Why</div>
         </div>
-        {allocations.map((rec) => (
-          <div
-            key={rec.symbol}
-            className="grid grid-cols-12 gap-2 px-4 py-3 items-center text-sm"
-          >
-            <div className="col-span-4 sm:col-span-2 font-mono font-bold text-text-primary">
-              {rec.symbol}
+        {allocations.map((rec) => {
+          const entry = getEntryStrategy(rec);
+          return (
+            <div
+              key={rec.symbol}
+              className="grid grid-cols-12 gap-2 px-4 py-3 items-center text-sm"
+            >
+              <div className="col-span-4 sm:col-span-2 font-mono font-bold text-text-primary">
+                {rec.symbol}
+              </div>
+              <div className="col-span-8 sm:col-span-3">
+                <span
+                  title={entry.detail}
+                  className={cn(
+                    "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold",
+                    entry.tone
+                  )}
+                >
+                  {entry.label}
+                </span>
+                {entry.detail && (
+                  <p className="text-[10px] text-text-muted mt-0.5">{entry.detail}</p>
+                )}
+              </div>
+              <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                {formatCurrency(rec.amount)}
+              </div>
+              <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
+                {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
+              </div>
+              <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
+                {(rec.after_weight ?? 0).toFixed(1)}%
+              </div>
+              <div className="col-span-12 sm:col-span-3 text-xs text-text-secondary leading-snug">
+                {toCompactLine(rec.why || rec.rationale, 14)}
+              </div>
             </div>
-            <div className="col-span-2 sm:col-span-1">
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 font-bold">
-                {formatActionLabel(rec.action)}
-              </span>
-            </div>
-            <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
-              {formatCurrency(rec.amount)}
-            </div>
-            <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-text-muted">
-              {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
-            </div>
-            <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-accent">
-              {(rec.after_weight ?? 0).toFixed(1)}%
-            </div>
-            <div className="col-span-12 sm:col-span-3 text-xs text-text-secondary leading-snug">
-              {toCompactLine(rec.why || rec.rationale, 14)}
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

@@ -13,6 +13,11 @@ from fastapi import APIRouter, Depends, Query
 
 from ..database import get_supabase_client
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..services.adaptive_deployment import (
+    AdaptiveDecision,
+    StagedAllocation,
+    adapt_allocation_plan,
+)
 from ..services.allocation_engine import (
     AllocationPlan,
     Holding,
@@ -24,6 +29,7 @@ from ..services.allocation_engine import (
     build_allocation_plan,
 )
 from ..services.recommendation_engine import RecommendationService
+from ..services.regime_engine import RegimeOutput, detect_market_regime
 
 router = APIRouter(prefix="/allocation", tags=["allocation"])
 logger = logging.getLogger(__name__)
@@ -156,10 +162,24 @@ def _card_to_insight(card: Any) -> InsightIn:
     )
 
 
-def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engine") -> dict:
+def _plan_to_dict(
+    plan: AllocationPlan,
+    *,
+    strategy_mode: str = "allocation_engine",
+    regime: RegimeOutput | None = None,
+    adaptive: AdaptiveDecision | None = None,
+) -> dict:
     """Serialize the engine output into the JSON shape the Deploy UI expects."""
-    allocations = [
-        {
+    staged_by_ticker: dict[str, StagedAllocation] = {}
+    if adaptive is not None:
+        staged_by_ticker = {
+            s.ticker.upper(): s for s in adaptive.staged_allocations
+        }
+
+    allocations: list[dict[str, Any]] = []
+    for a in plan.allocations:
+        staged = staged_by_ticker.get(a.ticker.upper())
+        allocations.append({
             "ticker": a.ticker,
             "symbol": a.ticker,                 # alias for existing Deploy UI
             "action": a.action,
@@ -178,9 +198,12 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
             "execution_style": a.do,
             "alt_view": a.alt_view,
             "category": a.category,
-        }
-        for a in plan.allocations
-    ]
+            # Adaptive staging — falls back to (full, 0) if adapter not run.
+            "immediate_amount": staged.immediate_amount if staged else a.amount,
+            "reserve_amount": staged.reserve_amount if staged else 0.0,
+            "staging_instruction": staged.staging_instruction if staged else None,
+            "execution_timing": staged.execution_timing if staged else None,
+        })
     exclusions = [{"ticker": e.ticker, "reason": e.reason} for e in plan.exclusions]
     trims = [
         {
@@ -191,17 +214,28 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
         }
         for t in plan.trims
     ]
-    return {
-        "plan": {
-            "cash_to_invest": plan.cash_to_invest,
-            "total_deployed": plan.total_deployed,
-            "fully_allocated": plan.fully_allocated,
-            "strategy": plan.strategy,
-        },
+    plan_block: dict[str, Any] = {
+        "cash_to_invest": plan.cash_to_invest,
+        "total_deployed": plan.total_deployed,
+        "fully_allocated": plan.fully_allocated,
+        "strategy": plan.strategy,
+    }
+    if adaptive is not None:
+        plan_block["recommended_deploy_amount"] = adaptive.recommended_deploy_amount
+        plan_block["cash_reserve"] = adaptive.cash_reserve_amount
+        plan_block["deploy_percentage"] = adaptive.deploy_percentage
+        plan_block["deployment_mode"] = adaptive.deployment_mode
+
+    explanation = plan.portfolio_explanation
+    if adaptive is not None and adaptive.adaptive_reasons:
+        explanation = " ".join(adaptive.adaptive_reasons)
+
+    out: dict[str, Any] = {
+        "plan": plan_block,
         "allocations": allocations,
         "exclusions": exclusions,
         "trims": trims,
-        "explanation": plan.portfolio_explanation,
+        "explanation": explanation,
         "warning": plan.warning,
         "summary": {
             "cash_to_invest": plan.cash_to_invest,
@@ -212,6 +246,23 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
             "fully_allocated": plan.fully_allocated,
         },
     }
+    if regime is not None:
+        out["regime"] = {
+            "regime_label": regime.regime_label,
+            "regime_score": regime.regime_score,
+            "regime_reasons": regime.regime_reasons,
+            "data_quality": regime.data_quality,
+        }
+    if adaptive is not None:
+        out["adaptive"] = {
+            "deploy_percentage": adaptive.deploy_percentage,
+            "deployment_mode": adaptive.deployment_mode,
+            "recommended_deploy_amount": adaptive.recommended_deploy_amount,
+            "cash_reserve_amount": adaptive.cash_reserve_amount,
+            "adaptive_reasons": adaptive.adaptive_reasons,
+            "adjustments_applied": adaptive.adjustments_applied,
+        }
+    return out
 
 
 @router.get("/plan")
@@ -276,6 +327,33 @@ async def get_allocation_plan(
         insights=insights,
         target_weights=targets,
     )
+
+    # Adaptive layer — regime detection + deploy %/reserve staging.
+    regime: RegimeOutput | None = None
+    adaptive: AdaptiveDecision | None = None
+    try:
+        regime = await detect_market_regime()
+    except Exception as exc:  # noqa: BLE001 — never fail Deploy on regime
+        logger.warning("allocation: regime detection failed — %s", exc)
+        regime = None
+    try:
+        adaptive = adapt_allocation_plan(
+            cash_to_deploy=cash_to_invest,
+            allocations=plan.allocations,
+            regime=regime,  # type: ignore[arg-type]
+            holdings=holdings,
+            portfolio_total=portfolio_total,
+        )
+    except Exception as exc:  # noqa: BLE001 — adaptive layer is optional
+        logger.warning("allocation: adaptive decision failed — %s", exc)
+        adaptive = None
+    if regime is not None and adaptive is not None:
+        logger.info(
+            "allocation: adaptive regime=%s score=%.0f deploy_pct=%.1f mode=%s",
+            regime.regime_label, regime.regime_score,
+            adaptive.deploy_percentage, adaptive.deployment_mode,
+        )
+
     cards_by_ticker = {str(getattr(c, "ticker", "")).upper(): c for c in cards}
     for exclusion in plan.exclusions[:5]:
         card = cards_by_ticker.get(exclusion.ticker.upper())
@@ -294,4 +372,4 @@ async def get_allocation_plan(
             getattr(card, "data_quality_label", None) if card else None,
             getattr(card, "analysis_source", None) if card else None,
         )
-    return _plan_to_dict(plan)
+    return _plan_to_dict(plan, regime=regime, adaptive=adaptive)

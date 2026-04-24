@@ -205,9 +205,9 @@ export const api = {
   },
 
   deposits: {
-    getPlan: (cashToInvest = 0, portfolioBalance = 0) =>
+    getPlan: (cashToInvest = 0, _portfolioBalance = 0) =>
       fetchLocal<DepositPlanResult>(
-        `/api/deposit-plan?cash_to_invest=${cashToInvest}&portfolio_balance=${portfolioBalance}`
+        `/api/deposit-plan?cash_to_invest=${cashToInvest}`
       ),
   },
 
@@ -733,10 +733,14 @@ export interface DepositRecommendation {
   action: string;
   amount: number;
   target_weight: number;
+  current_weight?: number;
+  after_weight?: number;
   rationale: string;
   confidence: number;
   portfolio_weight?: number;
   conviction_score?: number;
+  conviction_level?: string;
+  score?: number;
   linked_intel?: string;
   // compact_v1 reasoning fields — aligned with Intel tab
   why?: string | null;
@@ -744,6 +748,20 @@ export interface DepositRecommendation {
   do?: string | null;
   alt_view?: string | null;
   schema_version?: string | null;
+  category?: string | null;
+}
+
+export interface AllocationExclusion {
+  ticker: string;
+  reason: string;
+}
+
+export interface AllocationTrim {
+  ticker: string;
+  action: string;
+  current_weight?: number;
+  tax_note: string;
+  market_note: string;
 }
 
 export interface DepositPlanResult {
@@ -754,29 +772,24 @@ export interface DepositPlanResult {
     intel_summary?: string;
   };
   recommendations: DepositRecommendation[];
+  allocations?: DepositRecommendation[];
+  exclusions?: AllocationExclusion[];
   summary: {
     positions_count: number;
     total_deployed: number;
     fully_allocated: boolean;
     strategy_mode: string;
     ranked_candidates: number;
+    candidates_considered?: number;
   };
   funding: {
     deposit_amount: number;
     sale_proceeds: number;
     total_cash: number;
   };
-  trims: Array<{
-    ticker: string;
-    action: string;
-    tax_note: string;
-    market_note: string;
-  }>;
+  trims: AllocationTrim[];
   notes: string[];
-  debug: {
-    latest_run_id: string | null;
-    latest_run_status: string | null;
-    insights_considered: number;
-    recommendations_considered: number;
-  };
+  warning?: string | null;
+  explanation?: string;
+  debug?: Record<string, unknown>;
 }

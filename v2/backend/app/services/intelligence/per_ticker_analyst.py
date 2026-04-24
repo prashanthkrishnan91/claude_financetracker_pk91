@@ -357,13 +357,20 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     ]).lower()
     if not text:
         return True
-    # Any single hard-banned phrase triggers rejection
+    # Any single hard-banned phrase triggers rejection.
+    # Use explicit indicator tokens (sma20/sma50/rsi/macd) rather than
+    # partial phrases like "above sma" which can false-positive on
+    # legitimate text such as "above small-cap peers".
     hard_banned = (
         "trending higher",
         "above moving averages",
         "momentum is positive",
-        "above sma",
-        "below sma",
+        "sma20",
+        "sma50",
+        "sma 20",
+        "sma 50",
+        "rsi",
+        "macd",
         "trending upward",
         "trending downward",
         "bullish technicals",

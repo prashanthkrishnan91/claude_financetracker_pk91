@@ -1012,13 +1012,90 @@ with tab_ops:
           dep_num, portfolio, prices, targets,
           amount=dep_amount, cash_balance=cash,
       )
-  
+
+      def _bucket_category(ticker: str) -> str:
+          raw_cat = str(portfolio.get(ticker, {}).get("category", "Stocks")).lower()
+          speculative_names = {"RDDT", "SNOW", "BLSH", "KLAR", "STUB", "BTC", "XRP"}
+          if "etf" in raw_cat:
+              return "etf"
+          if "crypto" in raw_cat or ticker in speculative_names:
+              return "speculative"
+          return "core"
+
+      def _extract_volatility(ticker: str) -> float | None:
+          pv = prices.get(ticker)
+          if isinstance(pv, dict):
+              for key in ("volatility", "vol", "sigma", "atr_pct"):
+                  val = pv.get(key)
+                  if isinstance(val, (int, float)):
+                      return float(val)
+          return None
+
+      def _build_enriched_recs(recs: list[dict]) -> list[dict]:
+          ranked = sorted(recs, key=lambda x: x.get("amount", 0), reverse=True)
+          rank_map = {r["ticker"]: i + 1 for i, r in enumerate(ranked)}
+          total_value_now = sum(de._safe_price(t, p, prices) * p["shares"] for t, p in portfolio.items())
+          total_after = total_value_now + total_investable
+
+          enriched = []
+          for r in recs:
+              tkr = r["ticker"]
+              amount = float(r.get("amount", 0) or 0)
+              px = de._safe_price(tkr, portfolio.get(tkr, {}), prices)
+              current_value = px * float(portfolio.get(tkr, {}).get("shares", 0) or 0)
+              current_w = (current_value / total_value_now * 100) if total_value_now > 0 else 0.0
+              after_w = ((current_value + amount) / total_after * 100) if total_after > 0 else 0.0
+              rank = rank_map.get(tkr, len(recs))
+              cat = _bucket_category(tkr)
+              vol = _extract_volatility(tkr)
+              high_vol = (vol is not None and vol >= 0.04) or cat == "speculative"
+
+              if current_w > 10:
+                  execution = "Hold/add on pullback only."
+              elif rank == 1:
+                  execution = "Primary allocation: first tranche now."
+              elif cat == "core" and rank <= 3:
+                  execution = "Partial buy now; reassess next window."
+              elif rank >= max(4, len(recs) - 1):
+                  execution = "Smaller size; stage entry."
+              elif high_vol:
+                  execution = "Scale in across entries; no full-size upfront."
+              else:
+                  execution = "Build position in two steps."
+
+              if rank <= 2 and amount >= total_investable * 0.2:
+                  conviction = "High conviction"
+              elif cat == "core":
+                  conviction = "Core builder"
+              elif cat == "etf":
+                  conviction = "Diversifier"
+              elif high_vol and rank <= 3:
+                  conviction = "Momentum-driven"
+              else:
+                  conviction = "Opportunistic"
+
+              rr = dict(r)
+              rr.update({
+                  "rank": rank,
+                  "category_bucket": cat,
+                  "volatility": vol,
+                  "current_weight": round(current_w, 2),
+                  "after_weight": round(after_w, 2),
+                  "execution_plan": execution,
+                  "conviction_label": conviction,
+              })
+              enriched.append(rr)
+          return enriched
+
       # Use final recs (post-override) if already applied, else base
       active_recs = (
           st.session_state.dep_recs_final
           if st.session_state.overrides_applied and st.session_state.dep_recs_final
           else base_recs
       )
+
+      base_recs = _build_enriched_recs(base_recs)
+      active_recs = _build_enriched_recs(active_recs)
   
       # ── Override input form ───────────────────────────────────────────────────
       st.markdown("#### AI Recommendations + Manual Overrides")
@@ -1038,6 +1115,7 @@ with tab_ops:
           fc     = r.get("from_cash", 0)
           est_sh = r.get("est_shares", 0)
           why    = r.get("why", "")
+          conv   = r.get("conviction_label", "Core builder")
           ovd    = st.session_state.dep_overrides.get(ticker, 0.0)
   
           with st.container():
@@ -1045,7 +1123,8 @@ with tab_ops:
               with col_t:
                   st.markdown(
                       f"<div style='padding-top:28px'>"
-                      f"<b style='font-size:15px'>{ticker}</b>"
+                      f"<b style='font-size:15px'>{ticker}</b> "
+                      f"<span style='font-size:10px;font-weight:700;color:#93c5fd;background:#0b1220;border:1px solid #1f2937;border-radius:999px;padding:2px 8px'>{conv}</span>"
                       f"<br/><span style='font-size:11px;color:#64748b'>"
                       f"${price:,.2f} · {why}</span></div>",
                       unsafe_allow_html=True,
@@ -1115,14 +1194,29 @@ with tab_ops:
       st.markdown(
           f"#### {'🔒 Locked Plan (with overrides)' if st.session_state.overrides_applied else '📊 AI Plan Preview'}"
       )
-  
+
       display_recs = active_recs
+      top_names = [r["ticker"] for r in sorted(display_recs, key=lambda x: x.get("amount", 0), reverse=True)[:2]]
+      pullback_names = [r["ticker"] for r in display_recs if r.get("current_weight", 0) > 10]
+      stage_names = [r["ticker"] for r in display_recs if "stage" in r.get("execution_plan", "").lower() or "scale" in r.get("execution_plan", "").lower()]
+      action_bullets = []
+      if top_names:
+          action_bullets.append(f"Start deploying capital into {', '.join(top_names)} as primary builds.")
+      if pullback_names:
+          action_bullets.append(f"Avoid adding {', '.join(pullback_names)} aggressively at current levels; wait for pullbacks.")
+      if stage_names:
+          action_bullets.append(f"Stage entries for {', '.join(stage_names)} to manage concentration and timing risk.")
+      st.markdown("#### What to Do Now")
+      for b in action_bullets[:3]:
+          st.markdown(f"- {b}")
+
       rows_disp = []
       for r in display_recs:
           ovd_flag = r.get("overridden", False)
           delta    = r.get("override_delta", 0.0)
           rows_disp.append({
               "Ticker":        r["ticker"],
+              "Conviction":    r.get("conviction_label", "Core builder"),
               "Amount ($)":    r["amount"],
               "AI Amount ($)": r.get("amount", 0) if not ovd_flag else
                                round(r["amount"] - delta, 2),
@@ -1131,6 +1225,7 @@ with tab_ops:
               "Est. Shares":   r["est_shares"],
               "Price":         r.get("price", 0),
               "From Cash":     r.get("from_cash", 0),
+              "Execution":     r.get("execution_plan", ""),
               "Why":           r["why"],
           })
   

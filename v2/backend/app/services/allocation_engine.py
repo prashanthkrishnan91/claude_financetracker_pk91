@@ -594,10 +594,10 @@ def build_allocation_plan(
 
     # Portfolio-level explanation
     if allocations:
-        top_names = ", ".join(a.ticker for a in allocations[:3])
+        deployed_names = ", ".join(a.ticker for a in allocations)
         strategy = (
             f"Deploying ${cash:,.0f} across top {len(allocations)} "
-            f"high-conviction ideas ({top_names})"
+            f"high-conviction ideas ({deployed_names})"
         )
         explanation = (
             f"This plan concentrates capital in the {len(allocations)} highest-"
@@ -606,7 +606,7 @@ def build_allocation_plan(
             f"diversification while penalizing concentration and volatility. "
             f"Per-category caps (single stock {MAX_SINGLE_STOCK_WEIGHT:.0f}%, "
             f"ETF {MAX_ETF_WEIGHT:.0f}%, speculative {MAX_SPECULATIVE_WEIGHT:.0f}%) "
-            f"and a {MAX_SAME_THEME_WEIGHT:.0f}% same-theme ceiling are enforced."
+            f"and {MAX_SAME_THEME_WEIGHT:.0f}% same-theme exposure is monitored and flagged."
         )
     else:
         strategy = "No deployment — preserve cash"

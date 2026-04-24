@@ -750,6 +750,10 @@ export interface DepositRecommendation {
   alt_view?: string | null;
   schema_version?: string | null;
   category?: string | null;
+  features?: {
+    momentum?: number | null;
+    volatility?: number | null;
+  } | null;
 }
 
 export interface AllocationExclusion {

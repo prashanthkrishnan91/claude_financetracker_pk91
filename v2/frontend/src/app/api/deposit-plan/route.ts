@@ -17,6 +17,13 @@ type InsightSlim = {
   suggested_action: string | null;
   investment_thesis: string | null;
   analyst_confidence?: number | null;
+  analyst_verdict?: {
+    primary_driver?: string | null;
+    risk_flag?: string | null;
+    action_reason?: string | null;
+    differentiation?: string | null;
+    generation_version?: string | null;
+  } | null;
 };
 
 type PositionSlim = {
@@ -114,6 +121,7 @@ export async function GET(req: Request) {
       const concentrationPenalty = weightPct >= 20 ? 0.35 : weightPct >= 12 ? 0.15 : 0;
       const qualityFloor = conviction >= 0.2 ? 1 : 0.6;
       const score = Math.max(0, conviction) * confidence * (1 - concentrationPenalty) * qualityFloor;
+      const verdict = ins.analyst_verdict;
       return {
         ticker,
         action,
@@ -122,6 +130,11 @@ export async function GET(req: Request) {
         score,
         weightPct,
         thesis: ins.investment_thesis || "",
+        why: verdict?.primary_driver || null,
+        risk: verdict?.risk_flag || null,
+        do: verdict?.action_reason || null,
+        alt_view: verdict?.differentiation || null,
+        schema_version: verdict?.generation_version || null,
       };
     })
     .filter((r) => r.ticker && r.action === "BUY" && r.score > 0.04)
@@ -150,6 +163,11 @@ export async function GET(req: Request) {
         latestRun?.portfolio_synthesis?.key_themes?.[0] ||
         latestRun?.portfolio_synthesis?.summary ||
         "Linked to latest Intel run.",
+      why: c.why,
+      risk: c.risk,
+      do: c.do,
+      alt_view: c.alt_view,
+      schema_version: c.schema_version,
     };
   });
 

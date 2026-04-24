@@ -2,7 +2,31 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
+
+# Mirror of per_ticker_analyst._BANNED_INDICATOR_PATTERNS but kept local
+# to avoid a circular import. Used to scrub stale DB fallback text.
+_FORBIDDEN_PATTERNS = (
+    re.compile(r"\bmoving averages?\b", re.IGNORECASE),
+    re.compile(r"\bsma\d*\b", re.IGNORECASE),  # matches SMA, SMA20, SMA50 etc.
+    re.compile(r"\bmomentum\b", re.IGNORECASE),
+    re.compile(r"\btrend(?:ing)?\b", re.IGNORECASE),
+    re.compile(r"\brsi\b", re.IGNORECASE),
+    re.compile(r"\bprice above\b", re.IGNORECASE),
+    re.compile(r"\boutperforming (?:the )?broad market\b", re.IGNORECASE),
+    re.compile(r"\bmacd\b", re.IGNORECASE),
+    re.compile(r"\bbollinger\b", re.IGNORECASE),
+    re.compile(r"\bsupport level\b", re.IGNORECASE),
+    re.compile(r"\bresistance level\b", re.IGNORECASE),
+)
+
+
+def _contains_forbidden_language(text: str) -> bool:
+    """Return True when ``text`` contains any banned indicator phrase."""
+    if not text:
+        return False
+    return any(p.search(text) for p in _FORBIDDEN_PATTERNS)
 
 
 CANONICAL_REASONING_KEYS = (
@@ -26,6 +50,9 @@ CANONICAL_REASONING_KEYS = (
     "primary_driver",
     "risk_flag",
     "action_reason",
+    # human_v2 fields
+    "differentiation",
+    "reasoning_schema_version",
 )
 
 
@@ -43,12 +70,21 @@ def normalize_reasoning_payload(
     analyst_reasoning = _s(
         analyst_verdict.get("reasoning") or analyst_verdict.get("reasoning_summary")
     )
+
+    # Scrub stale DB fields before using them as fallbacks — old runs may have
+    # written forbidden indicator language (SMA/momentum/trending) before the
+    # validator was active. Clearing them forces the deterministic templates
+    # so forbidden words never reach the UI via the rec fallback chain.
+    def _safe_rec(key: str) -> str:
+        val = _s(rec.get(key))
+        return "" if _contains_forbidden_language(val) else val
+
     thesis = (
         analyst_reasoning
         or analyst_thesis
-        or _s(rec.get("thesis"))
-        or _s(rec.get("investment_thesis"))
-        or detail
+        or _safe_rec("thesis")
+        or _safe_rec("investment_thesis")
+        or (detail if not _contains_forbidden_language(detail) else "")
     )
     rationale = _s(rec.get("rationale"))
     action = _s(rec.get("action")).upper() or "HOLD"
@@ -148,6 +184,9 @@ def normalize_reasoning_payload(
         "primary_driver": _s(analyst_verdict.get("primary_driver")) or None,
         "risk_flag": _s(analyst_verdict.get("risk_flag")) or None,
         "action_reason": _s(analyst_verdict.get("action_reason")) or None,
+        "differentiation": _s(analyst_verdict.get("differentiation")) or None,
+        # Schema version for downstream gating (human_v2 = new validated schema)
+        "reasoning_schema_version": _s(analyst_verdict.get("generation_version")) or None,
     }
 
 

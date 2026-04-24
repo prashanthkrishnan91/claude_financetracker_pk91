@@ -358,6 +358,10 @@ export interface InsightCardData {
   primary_driver?: string | null;
   risk_flag?: string | null;
   action_reason?: string | null;
+  // human_v2 schema fields
+  differentiation?: string | null;
+  reasoning_schema_version?: string | null;
+  reasoning_source?: "fresh_llm" | "fallback" | "cache" | "stale_db" | "no_analyst_data" | string | null;
 }
 
 export interface AgentRunQueued {

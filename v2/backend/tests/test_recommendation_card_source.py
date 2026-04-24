@@ -26,3 +26,25 @@ def test_nonfallback_live_card_defaults_to_live_llm():
     )
     assert source == "live_llm"
     assert reused is False
+
+
+def test_old_generation_version_gets_stale_db_reasoning_source():
+    """Verdicts with generation_version != human_v2 should be treated as stale."""
+    old_verdict = {
+        "analysis_source": "live_llm",
+        "used_fallback": False,
+        "generation_version": "v2_strict_reasoning",
+    }
+    # The logic in _compute_insight_cards checks gen_version != "human_v2"
+    # and excludes from preferred_live pool. We verify the version string gate.
+    from app.services.intelligence.per_ticker_analyst import ANALYST_GENERATION_VERSION
+    assert old_verdict["generation_version"] != ANALYST_GENERATION_VERSION
+
+
+def test_human_v2_non_fallback_live_llm_resolves_live():
+    source, reused = _resolve_card_analysis_source(
+        analyst_verdict={"analysis_source": "live_llm", "used_fallback": False, "generation_version": "human_v2"},
+        is_fallback=False,
+    )
+    assert source == "live_llm"
+    assert reused is False

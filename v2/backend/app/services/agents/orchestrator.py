@@ -1275,14 +1275,11 @@ class AgentOrchestrator:
             else:
                 insight.conviction_score = 0.0
 
-            # Compose the thesis: analyst drivers/risks first, then the
-            # monolithic narrative (if any) for portfolio-level colour.
-            existing = (insight.investment_thesis or "").strip()
-            analyst_line = format_thesis(verdict)
-            if existing and existing != analyst_line:
-                insight.investment_thesis = (analyst_line + " " + existing)[:500]
-            else:
-                insight.investment_thesis = analyst_line
+            # Use the analyst verdict as the sole thesis source.
+            # Never append the prior portfolio-agent thesis — it may contain
+            # indicator language (SMA/momentum/trending) that was produced
+            # before the banned-language validator was active.
+            insight.investment_thesis = format_thesis(verdict)
 
         # Re-run the cash allocator with the updated conviction scores
         # so BUY verdicts get deposit share and REDUCE verdicts don't.
@@ -1376,11 +1373,23 @@ class AgentOrchestrator:
             # time by the fallback path below.
             verdict = verdicts.get(insight.ticker)
             if verdict is not None:
+                from ..intelligence.per_ticker_analyst import _contains_banned_indicator_language, insufficient_data_verdict
+                if _contains_banned_indicator_language(verdict):
+                    # Safety net: if forbidden language still reached persist,
+                    # replace with a deterministic fallback rather than writing
+                    # bad text to the DB.
+                    logger.error(
+                        "analyst_trace FORBIDDEN_LANGUAGE_AT_PERSIST ticker=%s — replacing with fallback",
+                        insight.ticker,
+                    )
+                    verdict = insufficient_data_verdict(insight.ticker, error="forbidden_language_at_persist")
                 row["analyst_verdict"] = verdict.to_dict()
                 row["analyst_confidence"] = round(verdict.confidence, 2)
                 logger.info(
-                    "analyst_trace checkpoint=pre_db_write ticker=%s row=%s",
+                    "analyst_trace checkpoint=pre_db_write ticker=%s reasoning_source=%s reasoning_schema_version=%s row=%s",
                     insight.ticker,
+                    verdict.analysis_source,
+                    verdict.generation_version,
                     json.dumps(
                         {
                             "ticker": row.get("ticker"),

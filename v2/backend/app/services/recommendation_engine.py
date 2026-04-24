@@ -1287,7 +1287,19 @@ class RecommendationService:
                         verdict = row.get("analyst_verdict") or {}
                         source = str((verdict or {}).get("analysis_source") or "").lower()
                         used_fallback = bool((verdict or {}).get("used_fallback", False))
+                        gen_version = str((verdict or {}).get("generation_version") or "").lower()
+                        # Only accept human_v2 verdicts as fresh candidates.
+                        # Older rows (generation_version != "human_v2") may contain
+                        # forbidden indicator language written before the validator
+                        # was active — serving them as "live_llm" is the root cause
+                        # of stale forbidden text appearing after manual runs.
                         if source != "live_llm" or used_fallback:
+                            continue
+                        if gen_version != "human_v2":
+                            logger.debug(
+                                "get_insight_cards: skipping stale-schema row ticker=%s gen_version=%s",
+                                ticker, gen_version,
+                            )
                             continue
                         prev = latest_live_llm_by_ticker.get(ticker)
                         if prev is None:
@@ -1343,12 +1355,38 @@ class RecommendationService:
                 data_confidence_score = _derive_confidence_score(conviction)
                 analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
                 preferred_live_row = latest_live_llm_by_ticker.get(ticker)
+                _used_preferred = False
                 if preferred_live_row and (
                     analyst_row is None
                     or bool((analyst_row.get("analyst_verdict") or {}).get("used_fallback", False))
                 ):
                     analyst_row = preferred_live_row
+                    _used_preferred = True
                 analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
+                # Determine reasoning_source for observability + frontend badge.
+                _av_gen = str((analyst_verdict or {}).get("generation_version") or "").lower()
+                _av_src = str((analyst_verdict or {}).get("analysis_source") or "").lower()
+                _av_fallback = bool((analyst_verdict or {}).get("used_fallback", False))
+                if analyst_verdict is None:
+                    _reasoning_source = "no_analyst_data"
+                elif _av_fallback:
+                    _reasoning_source = "fallback"
+                elif _used_preferred and _av_gen == "human_v2":
+                    _reasoning_source = "fresh_llm"
+                elif not _used_preferred and _av_gen == "human_v2" and _av_src == "live_llm":
+                    _reasoning_source = "fresh_llm"
+                elif _av_gen == "human_v2" and _av_src == "cached_run":
+                    _reasoning_source = "cache"
+                elif _av_gen != "human_v2" and analyst_verdict is not None:
+                    _reasoning_source = "stale_db"
+                else:
+                    _reasoning_source = _av_src or "unknown"
+                _reasoning_schema_version = _av_gen if _av_gen else None
+                logger.info(
+                    "analyst_trace checkpoint=card_assembly ticker=%s reasoning_source=%s "
+                    "reasoning_schema_version=%s used_preferred=%s av_gen=%s",
+                    ticker, _reasoning_source, _reasoning_schema_version, _used_preferred, _av_gen,
+                )
                 analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
                 analyst_confidence = (
                     float(analyst_conf_raw) if analyst_conf_raw is not None else None
@@ -1438,6 +1476,9 @@ class RecommendationService:
                     primary_driver=reasoning.get("primary_driver"),
                     risk_flag=reasoning.get("risk_flag"),
                     action_reason=reasoning.get("action_reason"),
+                    reasoning_source=_reasoning_source,
+                    reasoning_schema_version=_reasoning_schema_version,
+                    differentiation=reasoning.get("differentiation"),
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",
@@ -1446,10 +1487,15 @@ class RecommendationService:
                         {
                             "ticker": card.ticker,
                             "action": card.action,
+                            "reasoning_source": card.reasoning_source,
+                            "reasoning_schema_version": card.reasoning_schema_version,
                             "investment_thesis": card.investment_thesis,
                             "summary": card.summary,
                             "thesis": card.thesis,
                             "plain_language_explanation": card.plain_language_explanation,
+                            "primary_driver": card.primary_driver,
+                            "risk_flag": card.risk_flag,
+                            "action_reason": card.action_reason,
                             "analyst_action": card.analyst_action,
                             "analyst_drivers": card.analyst_drivers,
                             "analyst_risks": card.analyst_risks,

@@ -298,3 +298,72 @@ def test_terminal_statuses_match_frontend_contract():
     from app.services.agent_run_status import TERMINAL_RUN_STATUSES
 
     assert TERMINAL_RUN_STATUSES == {"completed", "failed", "cancelled"}
+
+def test_run_agent_runs_update_uses_separate_verify_select(monkeypatch):
+    from app.services.agents.orchestrator import AgentOrchestrator
+
+    class _UpdateBuilder:
+        def __init__(self, client):
+            self._client = client
+
+        def eq(self, key, value):
+            self._client.update_filters.append((key, value))
+            return self
+
+        def execute(self):
+            self._client.updated = True
+            return SimpleNamespace(data=[])
+
+    class _SelectBuilder:
+        def __init__(self, client):
+            self._client = client
+
+        def eq(self, key, value):
+            self._client.select_filters.append((key, value))
+            return self
+
+        def limit(self, value):
+            self._client.select_limit = value
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[{"id": self._client.run_id, "status": "running"}])
+
+    class _AgentRunsTable:
+        def __init__(self, client):
+            self._client = client
+
+        def update(self, payload):
+            self._client.update_payload = payload
+            return _UpdateBuilder(self._client)
+
+        def select(self, columns):
+            self._client.select_columns = columns
+            return _SelectBuilder(self._client)
+
+    class _Client:
+        def __init__(self):
+            self.run_id = str(uuid4())
+            self.update_payload = None
+            self.update_filters = []
+            self.select_columns = None
+            self.select_filters = []
+            self.select_limit = None
+            self.updated = False
+
+        def table(self, _name: str):
+            return _AgentRunsTable(self)
+
+    client = _Client()
+    monkeypatch.setattr(
+        "app.services.agents.orchestrator.get_supabase_client",
+        lambda: client,
+    )
+
+    orch = AgentOrchestrator(user_id=uuid4(), anthropic_api_key="")
+    matched = orch._run_agent_runs_update(client.run_id, {"status": "running"})
+
+    assert matched == 1
+    assert client.updated is True
+    assert client.select_columns == "id,status"
+    assert client.select_limit == 1

@@ -131,6 +131,8 @@ function deriveExecutionPlan(rec: DepositRecommendation): string {
     || category.includes("value");
   const isEtf = category === "etf" || ticker === "VOO" || ticker === "SPY" || ticker === "QQQ";
 
+  if (currentWeight >= 15) return "Avoid chasing; only add on major pullback";
+  if (currentWeight >= 10) return "Hold/add only on pullback";
   if (isEtf) return "Buy now or dollar-cost average";
   if (isDefensive) return "Buy now; use as stabilizer";
   if (isSpeculative || volatility >= 0.7) return "Stage entry in 2–3 buys";
@@ -184,12 +186,18 @@ function buildDeploymentRisks(allocations: EnrichedAllocation[], noteText: strin
   const topTheme = Object.entries(bucketWeights).sort((a, b) => b[1] - a[1])[0];
   const topThemePct = topTheme ? topTheme[1] / totalWeight : 0;
   const sameThemeCapPct = noteText.includes("40% same-theme") ? 0.4 : 0.5;
+  const topThemeTicker = withWeight
+    .filter((rec) => getThemeBucket(rec) === (topTheme?.[0] ?? ""))
+    .sort((a, b) => b.weight - a.weight)[0]?.symbol;
 
   const risks: string[] = [];
   if (topTheme && topThemePct > sameThemeCapPct) {
-    risks.push(`${topTheme[0]} concentration is ${(topThemePct * 100).toFixed(0)}% of deployed weight, above the ${(sameThemeCapPct * 100).toFixed(0)}% same-theme ceiling.`);
+    const mitigation = topThemeTicker
+      ? ` Stage entries and avoid adding ${topThemeTicker} unless it pulls back.`
+      : " Stage entries and add only on pullbacks.";
+    risks.push(`${topTheme[0]} concentration is ${(topThemePct * 100).toFixed(0)}% of deployed weight, above the ${(sameThemeCapPct * 100).toFixed(0)}% same-theme threshold.${mitigation}`);
   } else if (topTheme && topThemePct > 0.3) {
-    risks.push(`${topTheme[0]} is ${(topThemePct * 100).toFixed(0)}% of deployed weight; monitor theme concentration drift.`);
+    risks.push(`${topTheme[0]} is ${(topThemePct * 100).toFixed(0)}% of deployed weight; monitor concentration and stage entries on pullbacks.`);
   }
   if (topTwoPct > 60) {
     risks.push(`Top 2 positions combine for ${topTwoPct.toFixed(0)}% of post-deploy exposure.`);

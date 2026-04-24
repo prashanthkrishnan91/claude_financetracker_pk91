@@ -21,6 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+import uuid
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
@@ -94,59 +96,21 @@ class AnalystVerdict:
 # ── System prompt ──────────────────────────────────────────────────────────
 
 
-ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst writing investment memos for a retail client. Every memo must feel like a unique, specific investment thesis — not a template.
+ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst. Write differentiated, behavior-based reasoning for ONE ticker only.
 
-INPUTS — you receive a JSON object with:
-  - "ticker": string.
-  - "snapshot": price / returns / volatility / sector / sentiment / fundamentals / news headlines.
-  - "features": trend direction, momentum, volatility, relative strength versus benchmark.
+STRICT RULES (auto-rejected if violated):
+1) Never use indicator or chart vocabulary. Forbidden words include:
+   moving average, SMA, RSI, momentum, trend, MACD, technical setup.
+2) Explain behavior, not indicators:
+   - who is buying/selling and why,
+   - what business demand or structural advantage is driving interest,
+   - what concrete real-world risk could break the thesis.
+3) Reasoning must be ticker-specific. Avoid generic phrases like "strong fundamentals" or "positive outlook."
+4) primary_driver, risk_flag, and action_reason must each make different points.
+5) If snapshot.data_quality_score < 0.4 then action must be INSUFFICIENT_DATA and conviction=0.0.
+6) Use only provided data; do not invent facts.
 
-HARD RULES — violations cause automatic rejection and retry:
-  1. NEVER use price-based or indicator language. Translate signals into behaviour:
-       BANNED: "trending higher", "above moving averages", "momentum is positive",
-               "SMA20", "SMA50", "RSI", "MACD", "trend_regime", "relative_strength",
-               "price is up", "price weakness", "above support", "below resistance",
-               "bullish technicals", "bearish technicals", "technical setup"
-       REQUIRED instead — describe what market participants are DOING:
-               GOOD: "buyers have consistently stepped in on any weakness"
-               GOOD: "this name has held its ground while peers sold off"
-               GOOD: "sellers have dominated every attempted recovery"
-  2. primary_driver MUST name a specific demand driver or structural advantage:
-       GOOD: "Accelerating enterprise AI budget cycles are driving spend on {ticker}'s platform"
-       GOOD: "No credible competitor exists in this market at scale, giving pricing power"
-       BAD: "Strong fundamentals support a positive outlook"
-       BAD: "The company has good growth prospects"
-  3. For BUY: explicitly answer "why put NEW money here vs other options?" Must include:
-       - a named demand driver (AI, cloud, consumer demand, regulatory tailwind, etc.) OR
-       - a named structural advantage (monopoly position, switching costs, brand moat, IP)
-  4. risk_flag MUST be a real-world risk — no technical or price language:
-       BANNED: "breaks below a moving average", "RSI overbought", "momentum fades",
-               "technical breakdown", "bearish signal"
-       REQUIRED: "a slowdown in enterprise IT spending", "a narrative shift if earnings disappoint",
-                 "macro rate pressure compressing growth multiples", "consumer pullback in discretionary"
-  5. Each of primary_driver, risk_flag, action_reason MUST make a completely different point.
-     No sentence may appear in two fields. No paraphrasing of the same idea across fields.
-  6. Max 2 sentences per field. No padding, no filler phrases.
-  7. When snapshot.data_quality_score < 0.4 → action = INSUFFICIENT_DATA, conviction = 0.0.
-  8. action ∈ "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA".
-  9. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0].
-  10. conviction_level ∈ "HIGH" | "MEDIUM" | "LOW":
-      HIGH → conviction ≥ 0.65, MEDIUM → 0.35–0.64, LOW → < 0.35.
-  11. You interpret the provided data only. NEVER invent headlines, estimate P/E, or
-      infer numbers not present in the inputs.
-
-FIELD DEFINITIONS:
-  primary_driver  — the ONE specific demand driver or structural moat that makes
-                    this ticker actionable NOW. Name the industry catalyst explicitly.
-                    Ticker-specific, not a market platitude. Max 2 sentences.
-  risk_flag       — the one real-world event or macro shift that would invalidate
-                    the thesis. Concrete and specific, not generic. No technical signals.
-                    Max 2 sentences.
-  action_reason   — why BUY/HOLD/REDUCE follows from the evidence, and what makes
-                    this ticker stand out versus alternatives at this moment. Must differ
-                    entirely from primary_driver. Max 2 sentences.
-
-OUTPUT — return ONLY this JSON (no fences, no prose before/after):
+OUTPUT — return ONLY valid JSON:
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
@@ -166,24 +130,14 @@ OUTPUT — return ONLY this JSON (no fences, no prose before/after):
 
 ANALYST_STRICT_RETRY_APPENDIX = """
 RETRY MODE (STRICT) — your previous response was rejected. Common failure reasons:
-  - Used banned price/indicator language: "trending higher", "above moving averages",
-    "momentum is positive", SMA, RSI, "relative strength", "technical setup", "bearish technicals"
-  - primary_driver was generic: "strong fundamentals", "positive outlook", "good setup",
-    "favorable conditions" — these are not specific demand drivers
-  - risk_flag referenced technical signals instead of real-world business risks
-  - action_reason repeated or paraphrased primary_driver content
-  - Multiple fields said essentially the same thing in different words
+  - Forbidden language detected (moving average / SMA / RSI / momentum / trend)
+  - Generic template reasoning reused across tickers
+  - Duplicate ideas across primary_driver, risk_flag, and action_reason
 
-REQUIRED corrections:
-  primary_driver: name the SPECIFIC industry catalyst, demand driver, or structural moat
-                  that makes THIS ticker actionable — not a truism, not market commentary
-  risk_flag: name a CONCRETE real-world risk: demand slowdown in a named market, narrative
-             shift if a specific event occurs, macro rate pressure on a specific multiple,
-             competitor threat — NEVER mention moving averages or any technical indicator
-  action_reason: explain specifically why BUY/HOLD/REDUCE vs doing nothing or buying
-                 a different ticker in the same sector — must be a fresh point
-
-Write like an analyst who will be asked "so what makes THIS one different?"
+REWRITE NOW:
+  - Use concrete business behavior and catalyst language only.
+  - Make the thesis unmistakably specific to this ticker.
+  - Keep each field short, distinct, and actionable.
 """
 
 
@@ -362,25 +316,23 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     # partial phrases like "above sma" which can false-positive on
     # legitimate text such as "above small-cap peers".
     hard_banned = (
-        "trending higher",
-        "above moving averages",
-        "momentum is positive",
-        "sma20",
-        "sma50",
-        "sma 20",
-        "sma 50",
-        "rsi",
-        "macd",
-        "trending upward",
-        "trending downward",
-        "bullish technicals",
-        "bearish technicals",
-        "technical setup",
-        "breaks below a moving average",
-        "above the moving average",
+        re.compile(r"\btrending higher\b"),
+        re.compile(r"\babove moving averages\b"),
+        re.compile(r"\bmomentum is positive\b"),
+        re.compile(r"\bsma ?20\b"),
+        re.compile(r"\bsma ?50\b"),
+        re.compile(r"\brsi\b"),
+        re.compile(r"\bmacd\b"),
+        re.compile(r"\btrending upward\b"),
+        re.compile(r"\btrending downward\b"),
+        re.compile(r"\bbullish technicals\b"),
+        re.compile(r"\bbearish technicals\b"),
+        re.compile(r"\btechnical setup\b"),
+        re.compile(r"\bbreaks below a moving average\b"),
+        re.compile(r"\babove the moving average\b"),
     )
-    for phrase in hard_banned:
-        if phrase in text:
+    for pattern in hard_banned:
+        if pattern.search(text):
             return True
     # Two or more soft-banned phrases → reject when no real thesis shape
     soft_banned = (
@@ -400,6 +352,68 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     return marker_hits >= 2 and not has_thesis_shape
 
 
+_BANNED_INDICATOR_PATTERNS = (
+    re.compile(r"\bmoving averages?\b", re.IGNORECASE),
+    re.compile(r"\bsma\b", re.IGNORECASE),
+    re.compile(r"\bmomentum\b", re.IGNORECASE),
+    re.compile(r"\btrend(?:ing)?\b", re.IGNORECASE),
+    re.compile(r"\brsi\b", re.IGNORECASE),
+)
+
+
+def _contains_banned_indicator_language(verdict: AnalystVerdict) -> bool:
+    text = " ".join(
+        [
+            verdict.summary,
+            verdict.thesis,
+            verdict.reasoning,
+            verdict.primary_driver,
+            verdict.risk_flag,
+            verdict.action_reason,
+            *verdict.key_drivers,
+            *verdict.risks,
+        ]
+    ).lower()
+    if not text:
+        return False
+    return any(pattern.search(text) for pattern in _BANNED_INDICATOR_PATTERNS)
+
+
+def _extract_normalized_sentences(verdict: AnalystVerdict) -> set[str]:
+    source = " ".join(
+        [
+            verdict.summary,
+            verdict.thesis,
+            verdict.reasoning,
+            verdict.primary_driver,
+            verdict.risk_flag,
+            verdict.action_reason,
+        ]
+    ).lower()
+    chunks = re.split(r"[.!?;\n]+", source)
+    out: set[str] = set()
+    for raw in chunks:
+        cleaned = re.sub(r"\s+", " ", raw).strip(" -,:")
+        if len(cleaned) >= 35:
+            out.add(cleaned)
+    return out
+
+
+def _find_cross_ticker_similarity_offenders(
+    verdicts: dict[str, AnalystVerdict],
+) -> set[str]:
+    offenders: set[str] = set()
+    tickers = [t for t, v in verdicts.items() if not v.used_fallback]
+    sentence_map = {ticker: _extract_normalized_sentences(verdicts[ticker]) for ticker in tickers}
+    for idx, ticker_a in enumerate(tickers):
+        for ticker_b in tickers[idx + 1 :]:
+            shared = sentence_map[ticker_a] & sentence_map[ticker_b]
+            if shared:
+                offenders.add(ticker_a)
+                offenders.add(ticker_b)
+    return offenders
+
+
 # ── Single-ticker analyst call ─────────────────────────────────────────────
 
 
@@ -410,6 +424,7 @@ async def analyze_ticker(
     llm,  # Duck-typed LLMClient with ``ask_json``
     semaphore: Optional[asyncio.Semaphore] = None,
     max_tokens: int = 700,
+    strict_mode_only: bool = False,
 ) -> AnalystVerdict:
     """Run one analyst LLM call with schema validation + one retry.
 
@@ -445,6 +460,7 @@ async def analyze_ticker(
         )
 
     payload = build_analyst_inputs(snapshot=snapshot, feature_set=feature_set)
+    payload["_reasoning_nonce"] = str(uuid.uuid4())
     user_msg = json.dumps(payload, default=str)
     logger.info(
         "analyst_stage.prompt_built ticker=%s payload=%s",
@@ -478,8 +494,11 @@ async def analyze_ticker(
     strict_mode = False
     truncation_retry_used = False
     last_meta: dict[str, Any] = {}
-    for attempt in (1, 2):
+    attempts = (1,) if strict_mode_only else (1, 2)
+    for attempt in attempts:
         call_meta: dict[str, Any] = {}
+        if strict_mode_only:
+            strict_mode = True
         token_budget = max_tokens + (180 if strict_mode else 0)
         system_prompt = (
             f"{ANALYST_SYSTEM_PROMPT}\n\n{ANALYST_STRICT_RETRY_APPENDIX}"
@@ -550,6 +569,16 @@ async def analyze_ticker(
         verdict.llm_attempted = True
         verdict.analysis_source = "live_llm"
         verdict.parse_diagnostics = call_meta
+        if _contains_banned_indicator_language(verdict):
+            retry_reason = "banned_indicator_language"
+            logger.warning(
+                "analyst_stage.quality_guard_reject ticker=%s attempt=%d reason=%s",
+                snapshot.ticker,
+                attempt,
+                retry_reason,
+            )
+            strict_mode = True
+            continue
         if _looks_generic_template(verdict):
             retry_reason = "generic_template_rejected"
             logger.warning(
@@ -645,6 +674,35 @@ async def analyze_portfolio(
             continue
         _t, verdict = item  # tuple from ``_run``
         out[_t] = verdict
+        logger.info("LLM reasoning regenerated for ticker %s", _t)
+
+    similarity_offenders = _find_cross_ticker_similarity_offenders(out)
+    if similarity_offenders:
+        logger.warning(
+            "analyst_stage.cross_ticker_similarity_reject tickers=%s",
+            sorted(similarity_offenders),
+        )
+        for ticker in sorted(similarity_offenders):
+            snap = snapshots.get(ticker)
+            fs = features.get(ticker)
+            if snap is None or fs is None:
+                out[ticker] = insufficient_data_verdict(ticker, error="missing_inputs_for_similarity_retry")
+                continue
+            out[ticker] = await analyze_ticker(
+                snapshot=snap,
+                feature_set=fs,
+                llm=llm,
+                semaphore=semaphore,
+                strict_mode_only=True,
+            )
+            logger.info("LLM reasoning regenerated for ticker %s", ticker)
+
+        post_retry_offenders = _find_cross_ticker_similarity_offenders(out)
+        for ticker in post_retry_offenders:
+            out[ticker] = insufficient_data_verdict(
+                ticker,
+                error="cross_ticker_similarity_rejected",
+            )
     total_llm_requests = len(out)
     parse_successes = sum(1 for v in out.values() if not v.used_fallback)
     fenced_json_rescued = sum(

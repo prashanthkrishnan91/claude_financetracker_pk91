@@ -229,7 +229,7 @@ async def test_analyze_ticker_happy_path():
         {
             "action": "BUY",
             "conviction": 0.6,
-            "key_drivers": ["earnings", "momentum"],
+            "key_drivers": ["earnings", "enterprise demand"],
             "risks": ["rates"],
             "confidence": 0.7,
         }
@@ -385,11 +385,11 @@ async def test_analyze_ticker_retries_when_response_is_generic_template():
             "conviction": 0.61,
             "confidence": 0.68,
             "summary": "Demand remains firm while valuation has reset.",
-            "thesis": "What is going right is margin stability and order momentum. "
+            "thesis": "What is going right is margin stability and order growth. "
             "What is concerning is cyclical PC demand softness.",
             "reasoning": "BUY fits because upside catalysts outweigh near-term risks. "
             "The thesis breaks if backlog growth stalls for two quarters.",
-            "key_drivers": ["margin stability", "order momentum"],
+            "key_drivers": ["margin stability", "order growth"],
             "risks": ["cyclical demand"],
         },
     ])
@@ -411,9 +411,9 @@ async def test_analyze_ticker_accepts_fenced_json_via_llm_parser(monkeypatch):
     client = LLMClient(api_key="fake-key")
     responses = iter([
         "```json\n"
-        '{"action":"BUY","conviction":0.61,"drivers":["momentum"],'
+        '{"action":"BUY","conviction":0.61,"drivers":["demand acceleration"],'
         '"risks":["valuation"],"summary":"Setup improving.",'
-        '"thesis":"Momentum is positive and breadth improved.",'
+        '"thesis":"Demand remains firm and execution is stable.",'
         '"plain_language_explanation":"More things are going right than wrong.",'
         '"sentiment":"constructive"}\n```'
     ])
@@ -511,6 +511,50 @@ async def test_analyze_portfolio_failure_rate_under_threshold():
     # consecutive ``bad`` responses at the head of the FakeLLM queue.
     assert fallback_rate < 0.10, fallback_rate
     assert len(verdicts) == 11
+
+
+@pytest.mark.asyncio
+async def test_analyze_ticker_rejects_banned_indicator_language():
+    llm = FakeLLM([
+        {
+            "action": "BUY",
+            "conviction": 0.5,
+            "confidence": 0.5,
+            "summary": "Demand is improving.",
+            "thesis": "Momentum is improving in this name.",
+            "plain_language_explanation": "Buyers are active.",
+        },
+        {
+            "action": "BUY",
+            "conviction": 0.64,
+            "confidence": 0.66,
+            "summary": "Commercial demand remains resilient.",
+            "thesis": "Customers are renewing and upsell conversion is improving.",
+            "plain_language_explanation": "Business demand is firm while execution risk remains manageable.",
+        },
+    ])
+    verdict = await analyze_ticker(snapshot=_snap("AAPL"), feature_set=_feat("AAPL"), llm=llm)
+    assert verdict.used_fallback is False
+    assert verdict.action == "BUY"
+    assert len(llm.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_analyze_portfolio_retries_cross_ticker_similarity_and_falls_back_if_persistent():
+    duplicate = {
+        "action": "BUY",
+        "conviction": 0.7,
+        "confidence": 0.7,
+        "summary": "Enterprise demand is resilient and contract renewals are stable.",
+        "thesis": "Enterprise demand is resilient and contract renewals are stable.",
+        "plain_language_explanation": "Enterprise demand is resilient and contract renewals are stable.",
+    }
+    llm = FakeLLM([duplicate, duplicate, duplicate, duplicate])
+    snapshots = {"AAPL": _snap("AAPL"), "MSFT": _snap("MSFT")}
+    features = {"AAPL": _feat("AAPL"), "MSFT": _feat("MSFT")}
+    verdicts = await analyze_portfolio(snapshots=snapshots, features=features, llm=llm, max_concurrency=2)
+    assert verdicts["AAPL"].used_fallback is True
+    assert verdicts["MSFT"].used_fallback is True
 
 
 # ── Input construction ─────────────────────────────────────────────────────

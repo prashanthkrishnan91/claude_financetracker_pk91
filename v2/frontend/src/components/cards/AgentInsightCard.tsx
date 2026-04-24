@@ -32,7 +32,7 @@ function mainThesis(card: InsightCardData): string {
     || card.summary
     || card.investment_thesis
     || card.detail
-    || `${card.ticker} remains on watch pending stronger confirmation.`
+    || ""
   );
 }
 
@@ -43,7 +43,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
 
   const whyThisMatters = card.primary_driver || (card.analyst_drivers || card.key_drivers || [])[0] || null;
   const whatCouldGoWrong = card.risk_flag || (card.analyst_risks || card.main_risks || [])[0] || null;
-  const whatToDo = card.action_reason || _defaultActionReason(action, card.ticker);
+  const whatToDo = card.action_reason || null;
 
   return (
     <div
@@ -95,11 +95,13 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
             tone="negative"
           />
         )}
-        <MemoSection
-          label="What to do now"
-          text={whatToDo}
-          tone="neutral"
-        />
+        {whatToDo && (
+          <MemoSection
+            label="What to do now"
+            text={whatToDo}
+            tone="neutral"
+          />
+        )}
       </div>
 
       {/* Footer chips */}
@@ -167,12 +169,4 @@ function _resolveConvictionLevel(card: InsightCardData): "HIGH" | "MEDIUM" | "LO
   if (score >= 0.65) return "HIGH";
   if (score >= 0.35) return "MEDIUM";
   return "LOW";
-}
-
-function _defaultActionReason(action: string, ticker: string): string {
-  if (action === "BUY") return `Adding to ${ticker} now keeps you sized in proportion to conviction — consider buying in stages rather than all at once.`;
-  if (action === "HOLD") return `No new information justifies changing the position. Reassess after the next earnings report or a meaningful price move.`;
-  if (action === "TRIM") return `Reducing exposure gradually limits downside while keeping you in the position if the thesis recovers.`;
-  if (action === "SELL") return `Exit if the original investment thesis is broken or the tax impact of holding is acceptable.`;
-  return `Monitor ${ticker} and reassess when new data arrives.`;
 }

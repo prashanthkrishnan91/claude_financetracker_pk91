@@ -145,3 +145,119 @@ rows + the io_layer bundle.
 
 ## Phases 3–6
 Not started until Phase 2 gates green + user approval.
+
+---
+
+# Adaptive Allocation Engine — Plan (awaiting approval)
+
+Branch: `claude/complete-deploy-ui-QIX4k`
+
+Goal: Upgrade Deploy from a static "spend all cash" allocator into a market-aware
+Adaptive Allocation Engine that decides **how much** to deploy now vs. hold back
+based on regime, concentration, volatility, and current portfolio risk.
+
+DO NOT touch: compact_v1 reasoning, ticker scoring model, existing Deploy UX
+sections (Why Made the Cut / Deployment Risks / What To Do Now / Top Allocation).
+
+## Plumbing audit (verified)
+
+- Allocation engine: `v2/backend/app/services/allocation_engine.py` — pure
+  scoring/constraint module producing `AllocationPlan`. No regime awareness.
+  Always tries to fully allocate `cash_to_invest`.
+- API: `v2/backend/app/routers/allocation.py` GET `/allocation/plan` calls
+  `build_allocation_plan(...)` and serializes via `_plan_to_dict()`.
+- Next.js proxy: `v2/frontend/src/app/api/deposit-plan/route.ts` reshapes engine
+  output into `DepositPlanResult`.
+- Deploy UI: `v2/frontend/src/app/dashboard/deposits/page.tsx` (already has Why
+  Made the Cut, Deployment Risks, What To Do Now, Top Allocation, Why This Plan).
+- SPY data: `services/intelligence/benchmark.fetch_benchmark_price_action()`
+  returns `{last, sma20, sma50, pct_5d, pct_30d, volatility_30d, high_3mo, ...}`
+  with cache + coalescer + stale-fallback. **Reuse** — no new fetcher.
+- Tests: `v2/backend/tests/test_allocation_engine.py` exists; we extend it.
+
+## Task 1 — Market regime detection (NEW)
+
+**File**: `v2/backend/app/services/regime_engine.py` (~150 LoC)
+
+Pure heuristic scorer over the existing SPY benchmark dict. Async wrapper calls
+`fetch_benchmark_price_action()`; pure variant tested with synthetic bundles.
+
+Output `RegimeOutput`: `regime_label` (bull|neutral|risk_off), `regime_score`
+0..100, `regime_reasons[]`, `data_quality` (high|medium|low), plus the raw
+signals used (`spy_pct_5d`, `pct_30d`, `vs_sma50`, `drawdown`, `vol_30d`).
+
+Heuristics: trend (last vs sma20/sma50), recent return (pct_5d, pct_30d),
+volatility (volatility_30d), drawdown (last / high_3mo). Score thresholds:
+≥65 bull, ≤35 risk_off, else neutral.
+
+Failure isolation: empty bundle → neutral / data_quality=low. Never raises.
+
+## Task 2 — Adaptive deployment percentage (NEW)
+
+**File**: `v2/backend/app/services/adaptive_deployment.py` (~200 LoC)
+
+Pure module. `adapt_allocation_plan(...)` consumes the engine's allocation list,
+the regime, holdings, and emits an `AdaptiveDecision` plus per-row
+`StagedAllocation`s.
+
+Base deploy %: bull 90, neutral 70, risk_off 50. Modifiers:
+- top theme >40% of plan weight: −15
+- top theme 30–40%: −5
+- top-2 dominance >60%: −10
+- ticker post-deploy weight ≥80% of category cap AND share ≥25%: defer (immediate=0,
+  reserve=full), reduce plan-level deploy by 5
+
+Guardrails: ≥25% floor unless `wait`; risk_off cap 60%; bull cap 100%.
+
+Per-row staging: bull=full immediate; neutral split 70/30; risk_off split 50/50;
+deferred ticker = 0/full. Sum invariant `immediate + reserve == original`.
+
+## Task 3 — Row-level staging (router glue)
+
+In `allocation.py`:
+1. After `build_allocation_plan(...)`, call `regime = await detect_market_regime()`
+   and `decision = adapt_allocation_plan(...)`.
+2. Extend `_plan_to_dict()` to include per-row `immediate_amount`,
+   `reserve_amount`, `staging_instruction`, `execution_timing`, top-level
+   `regime` and `adaptive` blocks. Keep existing `amount` unchanged so the
+   current UI doesn't break.
+
+## Task 4 — UI changes (additive)
+
+`api.ts` + `deposit-plan/route.ts` extend types and pass through new fields.
+
+`deposits/page.tsx`:
+- `RecommendedDeploymentCard`: headline "Deploy $X now", subline "Hold $Y reserve",
+  badges for regime + deployment_mode.
+- Top allocation table: thin sub-row "Now $X · Reserve $Y · {staging_instruction}"
+  shown only when `reserve_amount > 0`.
+- `What to Do Now`: prepend "Deploy $X now and hold $Y for pullbacks." Mention
+  deferred tickers.
+- `Why this plan`: append regime + reserve sentence + concentration adjustment
+  if applied (max 3 sentences, all from `adaptive.adaptive_reasons`).
+
+Fallback: when backend returns no `adaptive`/`regime`, UI renders exactly as today.
+
+## Task 5 — Explainability
+
+Covered by `adaptive.adaptive_reasons` in Task 2. Three deterministic templates,
+joined into ≤3 sentences.
+
+## Task 6 — Testing
+
+NEW: `tests/test_regime_engine.py`, `tests/test_adaptive_deployment.py`.
+Cases match success criteria (bull/neutral/risk_off, missing data, high
+current weight, same-theme concentration). Re-run `test_allocation_engine.py`
+for regression.
+
+Frontend: `npm run typecheck` (or `npm run build`) if feasible.
+
+## Files touched
+
+NEW: `regime_engine.py`, `adaptive_deployment.py`, two new test files.
+EDIT: `routers/allocation.py`, `lib/api.ts`, `api/deposit-plan/route.ts`,
+`dashboard/deposits/page.tsx`.
+NOT TOUCHED: `allocation_engine.py`, compact_v1, ticker scoring, existing UI sections.
+
+**Status: awaiting user approval before executing.**
+

@@ -24,7 +24,19 @@ function normalizeAction(action?: string | null): string {
   return "HOLD";
 }
 
+function isHumanV2(card: InsightCardData): boolean {
+  return card.reasoning_schema_version === "human_v2";
+}
+
 function mainThesis(card: InsightCardData): string {
+  // When human_v2 schema is present, the memo sections (primary_driver /
+  // risk_flag / action_reason) own all the visible reasoning — do NOT also
+  // render a legacy text block above them. This prevents old indicator
+  // language (SMA / momentum / trending) from appearing through the
+  // summary/thesis fallback chain.
+  if (isHumanV2(card) && (card.primary_driver || card.risk_flag || card.action_reason)) {
+    return "";
+  }
   return (
     card.plain_language_explanation
     || card.thesis
@@ -36,10 +48,21 @@ function mainThesis(card: InsightCardData): string {
   );
 }
 
+function reasoningSourceLabel(source?: string | null): string | null {
+  if (!source) return null;
+  if (source === "fresh_llm") return "Live analysis";
+  if (source === "cache") return "Cached";
+  if (source === "stale_db") return "Historical";
+  if (source === "fallback") return "Fallback";
+  if (source === "no_analyst_data") return "No analyst data";
+  return null;
+}
+
 export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onClick?: () => void }) {
   const action = normalizeAction(card.analyst_action || card.action);
   const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
   const convictionLevel = _resolveConvictionLevel(card);
+  const humanV2 = isHumanV2(card);
 
   const whyThisMatters = card.primary_driver || (card.analyst_drivers || card.key_drivers || [])[0] || null;
   const whatCouldGoWrong = card.risk_flag || (card.analyst_risks || card.main_risks || [])[0] || null;
@@ -76,8 +99,10 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         </div>
       </div>
 
-      {/* Main thesis */}
-      <p className="text-sm text-text-primary leading-relaxed">{mainThesis(card)}</p>
+      {/* Main thesis — suppressed for human_v2 cards where memo sections own the text */}
+      {mainThesis(card) && (
+        <p className="text-sm text-text-primary leading-relaxed">{mainThesis(card)}</p>
+      )}
 
       {/* Hedge-fund memo sections */}
       <div className="space-y-2 pt-1">
@@ -102,6 +127,13 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
             tone="neutral"
           />
         )}
+        {humanV2 && card.differentiation && (
+          <MemoSection
+            label="Why this vs alternatives"
+            text={card.differentiation}
+            tone="neutral"
+          />
+        )}
       </div>
 
       {/* Footer chips */}
@@ -115,10 +147,17 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         {card.data_quality_label && (
           <Chip label={`Data: ${card.data_quality_label}`} tone="neutral" />
         )}
-        <Chip
-          label={card.analysis_source === "live_llm" ? "Live analysis" : "Cached"}
-          tone={card.analysis_source === "live_llm" ? "good" : "neutral"}
-        />
+        {(() => {
+          const srcLabel = reasoningSourceLabel(card.reasoning_source) ?? (card.analysis_source === "live_llm" ? "Live analysis" : "Cached");
+          const isFresh = card.reasoning_source === "fresh_llm" || (!card.reasoning_source && card.analysis_source === "live_llm");
+          const isStale = card.reasoning_source === "stale_db";
+          return (
+            <Chip
+              label={srcLabel}
+              tone={isFresh ? "good" : isStale ? "bad" : "neutral"}
+            />
+          );
+        })()}
       </div>
     </div>
   );

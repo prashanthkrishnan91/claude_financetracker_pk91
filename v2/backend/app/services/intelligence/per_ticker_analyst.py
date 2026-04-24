@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_ACTIONS = {"BUY", "HOLD", "REDUCE", "INSUFFICIENT_DATA"}
 INSUFFICIENT_DATA_VERDICT_MARKER = "INSUFFICIENT_DATA"
-ANALYST_GENERATION_VERSION = "v2_strict_reasoning"
+ANALYST_GENERATION_VERSION = "human_v2"
 
 
 CONVICTION_LEVELS = {"HIGH", "MEDIUM", "LOW"}
@@ -75,6 +75,11 @@ class AnalystVerdict:
     primary_driver: str = ""
     risk_flag: str = ""
     action_reason: str = ""
+    # human_v2 canonical fields (aliases clarify intent for consumers)
+    why_this_matters: str = ""      # alias for primary_driver
+    what_could_go_wrong: str = ""   # alias for risk_flag
+    what_to_do_now: str = ""        # alias for action_reason
+    differentiation: str = ""       # why THIS ticker vs similar alternatives
     used_fallback: bool = False
     llm_attempted: bool = False
     analysis_source: str = "live_llm"
@@ -110,7 +115,7 @@ STRICT RULES (auto-rejected if violated):
 5) If snapshot.data_quality_score < 0.4 then action must be INSUFFICIENT_DATA and conviction=0.0.
 6) Use only provided data; do not invent facts.
 
-OUTPUT — return ONLY valid JSON:
+OUTPUT — return ONLY valid JSON (reasoning_schema_version is always "human_v2"):
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
@@ -118,13 +123,15 @@ OUTPUT — return ONLY valid JSON:
   "primary_driver": "specific demand driver or structural advantage — ticker-specific, named catalyst",
   "risk_flag": "real-world risk that would break the thesis — no technical indicators",
   "action_reason": "why this action and why this ticker vs alternatives — distinct from primary_driver",
+  "differentiation": "what makes this ticker different from similar holdings — concrete, not generic",
   "summary": "one plain-English sentence",
   "thesis": "2-sentence expanded rationale",
   "plain_language_explanation": "what is going right and what is concerning",
   "drivers": ["specific named driver 1", "specific named driver 2"],
   "risks": ["real-world risk 1"],
   "confidence": 0.00,
-  "sentiment": "optional short label"
+  "sentiment": "optional short label",
+  "reasoning_schema_version": "human_v2"
 }
 """
 
@@ -243,6 +250,7 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     primary_driver = _coerce_short_text(raw.get("primary_driver"), max_len=400)
     risk_flag = _coerce_short_text(raw.get("risk_flag"), max_len=400)
     action_reason = _coerce_short_text(raw.get("action_reason"), max_len=400)
+    differentiation = _coerce_short_text(raw.get("differentiation"), max_len=400)
     raw_level = str(raw.get("conviction_level") or "").strip().upper()
     conviction_level = raw_level if raw_level in CONVICTION_LEVELS else _conviction_level_from_score(conviction)
 
@@ -273,6 +281,11 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
         primary_driver=primary_driver,
         risk_flag=risk_flag,
         action_reason=action_reason,
+        differentiation=differentiation,
+        # canonical aliases
+        why_this_matters=primary_driver,
+        what_could_go_wrong=risk_flag,
+        what_to_do_now=action_reason,
         raw_response=raw,
     )
 
@@ -308,6 +321,7 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     text = " ".join([
         verdict.summary, verdict.thesis, verdict.reasoning,
         verdict.primary_driver, verdict.risk_flag, verdict.action_reason,
+        verdict.differentiation,
     ]).lower()
     if not text:
         return True
@@ -354,10 +368,16 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
 
 _BANNED_INDICATOR_PATTERNS = (
     re.compile(r"\bmoving averages?\b", re.IGNORECASE),
-    re.compile(r"\bsma\b", re.IGNORECASE),
+    re.compile(r"\bsma\d*\b", re.IGNORECASE),  # matches SMA, SMA20, SMA50 etc.
     re.compile(r"\bmomentum\b", re.IGNORECASE),
     re.compile(r"\btrend(?:ing)?\b", re.IGNORECASE),
     re.compile(r"\brsi\b", re.IGNORECASE),
+    re.compile(r"\bprice above\b", re.IGNORECASE),
+    re.compile(r"\boutperforming (?:the )?broad market\b", re.IGNORECASE),
+    re.compile(r"\bmacd\b", re.IGNORECASE),
+    re.compile(r"\bbollinger\b", re.IGNORECASE),
+    re.compile(r"\bsupport level\b", re.IGNORECASE),
+    re.compile(r"\bresistance level\b", re.IGNORECASE),
 )
 
 
@@ -370,6 +390,7 @@ def _contains_banned_indicator_language(verdict: AnalystVerdict) -> bool:
             verdict.primary_driver,
             verdict.risk_flag,
             verdict.action_reason,
+            verdict.differentiation,
             *verdict.key_drivers,
             *verdict.risks,
         ]

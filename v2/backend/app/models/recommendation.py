@@ -101,6 +101,10 @@ class InsightCard(BaseModel):
     primary_driver: Optional[str] = None
     risk_flag: Optional[str] = None
     action_reason: Optional[str] = None
+    # human_v2 schema fields
+    differentiation: Optional[str] = None        # why THIS ticker vs alternatives
+    reasoning_schema_version: Optional[str] = None  # e.g. "human_v2"
+    reasoning_source: Optional[str] = None          # fresh_llm | fallback | cache | stale_db
 
 
 class AgentRunStatus(BaseModel):

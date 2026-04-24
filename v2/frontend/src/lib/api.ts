@@ -381,6 +381,21 @@ export interface PortfolioSynthesisPayload {
   } | null;
   used_fallback?: boolean;
   error?: string | null;
+  bias?: "Bullish" | "Neutral" | "Defensive" | string | null;
+  headline?: string | null;
+  executive_summary?: string | null;
+  action_counts?: Record<string, number> | null;
+  exposures?: {
+    strategy_buckets?: Array<{ name: string; percentage: number; top_tickers?: string[]; why_it_matters?: string }>;
+    sector_buckets?: Array<{ name: string; percentage: number; top_tickers?: string[]; why_it_matters?: string }>;
+    risk_buckets?: Array<{ name: string; percentage: number; top_tickers?: string[]; why_it_matters?: string }>;
+  } | null;
+  top_opportunities?: Array<{ ticker: string; reason: string; confidence?: number; risk_note?: string; suggested_use?: string }>;
+  top_risks?: Array<{ label?: string; tickers?: string[]; note?: string }>;
+  trim_candidates?: Array<{ ticker: string; why_trim?: string; what_to_watch?: string; redirect_proceeds_to?: string[] }>;
+  deploy_suggestions?: string[];
+  what_changed?: Array<{ ticker?: string; change?: string }>;
+  watchlist?: Array<{ ticker?: string; focus?: string; trigger?: string }>;
 }
 
 export interface ModeDecisionPayload {

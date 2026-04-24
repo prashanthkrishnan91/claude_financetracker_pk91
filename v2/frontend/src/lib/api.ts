@@ -754,6 +754,8 @@ export interface DepositRecommendation {
     momentum?: number | null;
     volatility?: number | null;
   } | null;
+  why_selected?: string;
+  execution_plan?: string;
 }
 
 export interface AllocationExclusion {
@@ -796,5 +798,6 @@ export interface DepositPlanResult {
   notes: string[];
   warning?: string | null;
   explanation?: string;
+  deployment_risks?: string[];
   debug?: Record<string, unknown>;
 }

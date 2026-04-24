@@ -265,13 +265,24 @@ function RecommendationCard({ rec }: { rec: DepositRecommendation }) {
         </div>
       </div>
 
-      {/* Rationale */}
-      <ul className="space-y-0.5">
-        <li className="flex gap-2 text-xs text-text-secondary leading-relaxed">
-          <span className="text-accent shrink-0 mt-0.5">•</span>
-          <span>{rec.rationale}</span>
-        </li>
-      </ul>
+      {/* Compact reasoning block — matches Intel tab format */}
+      {rec.why || rec.risk || rec.do ? (
+        <div className="space-y-1.5">
+          {rec.why && <DeployMemo label="WHY" text={rec.why} tone="positive" />}
+          {rec.risk && <DeployMemo label="RISK" text={rec.risk} tone="negative" />}
+          {rec.do && <DeployMemo label="ACTION" text={rec.do} tone="neutral" />}
+          {rec.alt_view && rec.alt_view !== "—" && (
+            <DeployMemo label="ALT VIEW" text={rec.alt_view} tone="neutral" />
+          )}
+        </div>
+      ) : (
+        <ul className="space-y-0.5">
+          <li className="flex gap-2 text-xs text-text-secondary leading-relaxed">
+            <span className="text-accent shrink-0 mt-0.5">•</span>
+            <span>{rec.rationale}</span>
+          </li>
+        </ul>
+      )}
 
       {/* Confidence bar */}
       <div className="space-y-1">
@@ -532,6 +543,31 @@ function CashOverrideWidget() {
           </button>
         </div>
       )}
+    </div>
+  );
+}
+
+function DeployMemo({
+  label,
+  text,
+  tone,
+}: {
+  label: string;
+  text: string;
+  tone: "positive" | "negative" | "neutral";
+}) {
+  const labelCls =
+    tone === "positive"
+      ? "text-green-400"
+      : tone === "negative"
+      ? "text-red-400"
+      : "text-text-muted";
+  return (
+    <div className="rounded-md bg-surface-elevated/40 px-3 py-1.5">
+      <p className={cn("text-[10px] uppercase tracking-wide font-semibold mb-0.5", labelCls)}>
+        {label}
+      </p>
+      <p className="text-xs text-text-secondary leading-relaxed">{text}</p>
     </div>
   );
 }

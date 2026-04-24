@@ -738,6 +738,12 @@ export interface DepositRecommendation {
   portfolio_weight?: number;
   conviction_score?: number;
   linked_intel?: string;
+  // compact_v1 reasoning fields — aligned with Intel tab
+  why?: string | null;
+  risk?: string | null;
+  do?: string | null;
+  alt_view?: string | null;
+  schema_version?: string | null;
 }
 
 export interface DepositPlanResult {

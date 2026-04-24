@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 
 ALLOWED_ACTIONS = {"BUY", "HOLD", "REDUCE", "INSUFFICIENT_DATA"}
 INSUFFICIENT_DATA_VERDICT_MARKER = "INSUFFICIENT_DATA"
-ANALYST_GENERATION_VERSION = "human_v2"
+ANALYST_GENERATION_VERSION = "compact_v1"
 
 
 CONVICTION_LEVELS = {"HIGH", "MEDIUM", "LOW"}
@@ -101,50 +101,42 @@ class AnalystVerdict:
 # ── System prompt ──────────────────────────────────────────────────────────
 
 
-ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst. Write differentiated, behavior-based reasoning for ONE ticker only.
+ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst. Write HIGH-SIGNAL, LOW-TOKEN reasoning for ONE ticker.
 
-STRICT RULES (auto-rejected if violated):
-1) Never use indicator or chart vocabulary. Forbidden words include:
-   moving average, SMA, RSI, momentum, trend, MACD, technical setup.
-2) Explain behavior, not indicators:
-   - who is buying/selling and why,
-   - what business demand or structural advantage is driving interest,
-   - what concrete real-world risk could break the thesis.
-3) Reasoning must be ticker-specific. Avoid generic phrases like "strong fundamentals" or "positive outlook."
-4) primary_driver, risk_flag, and action_reason must each make different points.
-5) If snapshot.data_quality_score < 0.4 then action must be INSUFFICIENT_DATA and conviction=0.0.
-6) Use only provided data; do not invent facts.
+HARD RULES — auto-rejected if violated:
+1. FORBIDDEN words: SMA, RSI, MACD, moving average, momentum, trend, trending, price above, outperforming broad market.
+2. Use behavior-based language: who is buying/selling and why, what structural edge exists, what named catalyst drives the view.
+3. Each field must make a DIFFERENT point — no repeated ideas.
+4. Each field ≤ 18 words. No paragraphs.
+5. reasoning_schema_version must be "compact_v1".
+6. If data_quality_score < 0.4: action=INSUFFICIENT_DATA, conviction=0.0, use fallback phrases below.
 
-OUTPUT — return ONLY valid JSON (reasoning_schema_version is always "human_v2"):
+INSUFFICIENT DATA fallback phrases (use verbatim when data is thin):
+  why: "No clear edge vs alternatives."
+  risk: "Limited data reduces conviction."
+  do: "Hold — no allocation until signal improves."
+  alt_view: "—"
+
+Return ONLY valid JSON:
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
   "conviction_level": "HIGH" | "MEDIUM" | "LOW",
-  "primary_driver": "specific demand driver or structural advantage — ticker-specific, named catalyst",
-  "risk_flag": "real-world risk that would break the thesis — no technical indicators",
-  "action_reason": "why this action and why this ticker vs alternatives — distinct from primary_driver",
-  "differentiation": "what makes this ticker different from similar holdings — concrete, not generic",
-  "summary": "one plain-English sentence",
-  "thesis": "2-sentence expanded rationale",
-  "plain_language_explanation": "what is going right and what is concerning",
-  "drivers": ["specific named driver 1", "specific named driver 2"],
-  "risks": ["real-world risk 1"],
+  "why": "core demand driver or structural edge — named catalyst, ≤18 words",
+  "risk": "real-world risk that breaks thesis — business/macro/regulatory, ≤18 words",
+  "do": "what to do now — sizing or hold logic, distinct from why, ≤18 words",
+  "alt_view": "why this vs similar alternatives — concrete differentiation, ≤18 words",
   "confidence": 0.00,
-  "sentiment": "optional short label",
-  "reasoning_schema_version": "human_v2"
+  "reasoning_schema_version": "compact_v1"
 }
 """
 
 ANALYST_STRICT_RETRY_APPENDIX = """
-RETRY MODE (STRICT) — your previous response was rejected. Common failure reasons:
-  - Forbidden language detected (moving average / SMA / RSI / momentum / trend)
-  - Generic template reasoning reused across tickers
-  - Duplicate ideas across primary_driver, risk_flag, and action_reason
-
-REWRITE NOW:
-  - Use concrete business behavior and catalyst language only.
-  - Make the thesis unmistakably specific to this ticker.
-  - Keep each field short, distinct, and actionable.
+RETRY MODE — previous response rejected. Fix ALL of:
+  - No forbidden words (SMA / RSI / MACD / moving average / momentum / trend / trending)
+  - Each field ≤ 18 words, no paragraphs
+  - why / risk / do / alt_view must each make a different point
+  - reasoning_schema_version must be "compact_v1"
 """
 
 
@@ -234,23 +226,32 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
         raw.get("risks") or raw.get("main_risks"),
         max_items=2,
     )
-    summary = _coerce_short_text(raw.get("summary") or raw.get("short_summary"), max_len=360)
-    thesis = _coerce_short_text(raw.get("thesis") or raw.get("investment_thesis"), max_len=600)
+    summary = _coerce_short_text(raw.get("summary") or raw.get("short_summary"), max_len=200)
+    thesis = _coerce_short_text(raw.get("thesis") or raw.get("investment_thesis"), max_len=300)
     reasoning = _coerce_short_text(
         raw.get("plain_language_explanation")
         or raw.get("reasoning")
         or raw.get("reasoning_summary")
         or raw.get("explanation"),
-        max_len=600,
+        max_len=300,
     )
-    sentiment = _coerce_short_text(raw.get("sentiment"), max_len=80) or None
+    sentiment = _coerce_short_text(raw.get("sentiment"), max_len=60) or None
     citations = _coerce_string_list(raw.get("citations"), max_items=4)
 
-    # Hedge-fund memo fields
-    primary_driver = _coerce_short_text(raw.get("primary_driver"), max_len=400)
-    risk_flag = _coerce_short_text(raw.get("risk_flag"), max_len=400)
-    action_reason = _coerce_short_text(raw.get("action_reason"), max_len=400)
-    differentiation = _coerce_short_text(raw.get("differentiation"), max_len=400)
+    # compact_v1 fields (why/risk/do/alt_view) map to the canonical memo fields.
+    # Also accept legacy human_v2 field names for backward compatibility.
+    primary_driver = _coerce_short_text(
+        raw.get("why") or raw.get("primary_driver"), max_len=200
+    )
+    risk_flag = _coerce_short_text(
+        raw.get("risk") or raw.get("risk_flag"), max_len=200
+    )
+    action_reason = _coerce_short_text(
+        raw.get("do") or raw.get("action_reason"), max_len=200
+    )
+    differentiation = _coerce_short_text(
+        raw.get("alt_view") or raw.get("differentiation"), max_len=200
+    )
     raw_level = str(raw.get("conviction_level") or "").strip().upper()
     conviction_level = raw_level if raw_level in CONVICTION_LEVELS else _conviction_level_from_score(conviction)
 
@@ -306,12 +307,17 @@ def insufficient_data_verdict(
         risks=[],
         confidence=0.0,
         conviction_level="LOW",
-        primary_driver="Not enough market data to form a view on this position.",
-        risk_flag="Any call made without sufficient data carries elevated uncertainty.",
-        action_reason="Holding until more information is available is the prudent choice here.",
+        primary_driver="No clear edge vs alternatives.",
+        risk_flag="Limited data reduces conviction.",
+        action_reason="Hold — no allocation until signal improves.",
+        differentiation="—",
+        why_this_matters="No clear edge vs alternatives.",
+        what_could_go_wrong="Limited data reduces conviction.",
+        what_to_do_now="Hold — no allocation until signal improves.",
         used_fallback=True,
         llm_attempted=False,
         analysis_source="deterministic_fallback",
+        generation_version=ANALYST_GENERATION_VERSION,
         error=error,
     )
 
@@ -444,7 +450,7 @@ async def analyze_ticker(
     feature_set: FeatureSet,
     llm,  # Duck-typed LLMClient with ``ask_json``
     semaphore: Optional[asyncio.Semaphore] = None,
-    max_tokens: int = 700,
+    max_tokens: int = 250,
     strict_mode_only: bool = False,
 ) -> AnalystVerdict:
     """Run one analyst LLM call with schema validation + one retry.
@@ -783,49 +789,32 @@ def action_to_suggested_action(action: str) -> str:
 
 
 def format_thesis(verdict: AnalystVerdict) -> str:
-    """Render a plain-English thesis (max ~2 short sentences).
+    """Render a compact 4-line thesis block from the memo fields.
 
-    Prefers the new hedge-fund memo fields when populated; falls back to
-    the legacy reasoning / thesis / summary chain for older verdicts.
+    Compact format: WHY / RISK / ACTION / ALT VIEW — one line each.
+    Falls back to a minimal single-line when memo fields are missing.
     """
-    # Prefer the new memo fields for a richer, more human summary
-    if verdict.primary_driver and verdict.action_reason:
-        parts = [verdict.primary_driver.rstrip(".")]
-        if verdict.action_reason.rstrip(".") != verdict.primary_driver.rstrip("."):
-            parts.append(verdict.action_reason)
-        return " ".join(parts)[:500]
+    if verdict.primary_driver:
+        parts: list[str] = [f"WHY: {verdict.primary_driver.rstrip('.')}"]
+        if verdict.risk_flag:
+            parts.append(f"RISK: {verdict.risk_flag.rstrip('.')}")
+        if verdict.action_reason:
+            parts.append(f"ACTION: {verdict.action_reason.rstrip('.')}")
+        if verdict.differentiation and verdict.differentiation != "—":
+            parts.append(f"ALT VIEW: {verdict.differentiation.rstrip('.')}")
+        return " | ".join(parts)[:400]
 
-    preferred = (
-        verdict.reasoning.strip()
-        or verdict.thesis.strip()
-        or verdict.summary.strip()
-    )
+    preferred = verdict.reasoning.strip() or verdict.thesis.strip() or verdict.summary.strip()
     if preferred:
-        return preferred[:500]
+        return preferred[:300]
 
-    lead_by_action = {
-        "BUY": "The setup still looks constructive",
-        "REDUCE": "Risk now looks elevated versus reward",
-        "HOLD": "The setup looks balanced for now",
-        "INSUFFICIENT_DATA": "Evidence is limited right now",
+    fallback_by_action = {
+        "BUY": "Conviction-backed buy.",
+        "REDUCE": "Risk elevated vs reward.",
+        "HOLD": "Mixed signal — hold.",
+        "INSUFFICIENT_DATA": "No clear edge — hold.",
     }
-    lead = lead_by_action.get(verdict.action, "The setup is mixed right now")
-
-    sentence_1 = lead
-    if verdict.key_drivers:
-        sentence_1 += f" because {verdict.key_drivers[0].rstrip('.')}."
-    else:
-        sentence_1 += "."
-
-    sentence_2 = ""
-    if verdict.risks:
-        sentence_2 = f"Main watch item: {verdict.risks[0].rstrip('.')}."
-    elif verdict.action == "INSUFFICIENT_DATA" or verdict.used_fallback:
-        sentence_2 = (
-            "This is a watchlist-style view until more external evidence is available."
-        )
-
-    return f"{sentence_1} {sentence_2}".strip()[:500]
+    return fallback_by_action.get(verdict.action, "Hold.")
 
 
 # ── Small helpers ──────────────────────────────────────────────────────────

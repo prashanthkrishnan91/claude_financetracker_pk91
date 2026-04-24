@@ -24,17 +24,18 @@ function normalizeAction(action?: string | null): string {
   return "HOLD";
 }
 
-function isHumanV2(card: InsightCardData): boolean {
-  return card.reasoning_schema_version === "human_v2";
+const STRUCTURED_SCHEMAS = new Set(["human_v2", "compact_v1"]);
+
+function isStructuredSchema(card: InsightCardData): boolean {
+  return STRUCTURED_SCHEMAS.has(card.reasoning_schema_version ?? "");
 }
 
 function mainThesis(card: InsightCardData): string {
-  // When human_v2 schema is present, the memo sections (primary_driver /
-  // risk_flag / action_reason) own all the visible reasoning — do NOT also
-  // render a legacy text block above them. This prevents old indicator
-  // language (SMA / momentum / trending) from appearing through the
-  // summary/thesis fallback chain.
-  if (isHumanV2(card) && (card.primary_driver || card.risk_flag || card.action_reason)) {
+  // For structured schemas (human_v2 / compact_v1), the memo sections
+  // (primary_driver / risk_flag / action_reason) own all visible reasoning.
+  // Suppress the legacy text block to prevent old indicator language from
+  // appearing through the summary/thesis fallback chain.
+  if (isStructuredSchema(card) && (card.primary_driver || card.risk_flag || card.action_reason)) {
     return "";
   }
   return (
@@ -62,7 +63,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
   const action = normalizeAction(card.analyst_action || card.action);
   const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
   const convictionLevel = _resolveConvictionLevel(card);
-  const humanV2 = isHumanV2(card);
+  const structuredSchema = isStructuredSchema(card);
 
   const whyThisMatters = card.primary_driver || (card.analyst_drivers || card.key_drivers || [])[0] || null;
   const whatCouldGoWrong = card.risk_flag || (card.analyst_risks || card.main_risks || [])[0] || null;
@@ -104,32 +105,32 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         <p className="text-sm text-text-primary leading-relaxed">{mainThesis(card)}</p>
       )}
 
-      {/* Hedge-fund memo sections */}
-      <div className="space-y-2 pt-1">
+      {/* Compact 4-line reasoning block */}
+      <div className="space-y-1.5 pt-1">
         {whyThisMatters && (
           <MemoSection
-            label="Why this matters"
+            label="WHY"
             text={whyThisMatters}
             tone="positive"
           />
         )}
         {whatCouldGoWrong && (
           <MemoSection
-            label="What could go wrong"
+            label="RISK"
             text={whatCouldGoWrong}
             tone="negative"
           />
         )}
         {whatToDo && (
           <MemoSection
-            label="What to do now"
+            label="ACTION"
             text={whatToDo}
             tone="neutral"
           />
         )}
-        {humanV2 && card.differentiation && (
+        {structuredSchema && card.differentiation && card.differentiation !== "—" && (
           <MemoSection
-            label="Why this vs alternatives"
+            label="ALT VIEW"
             text={card.differentiation}
             tone="neutral"
           />

@@ -1288,14 +1288,13 @@ class RecommendationService:
                         source = str((verdict or {}).get("analysis_source") or "").lower()
                         used_fallback = bool((verdict or {}).get("used_fallback", False))
                         gen_version = str((verdict or {}).get("generation_version") or "").lower()
-                        # Only accept human_v2 verdicts as fresh candidates.
-                        # Older rows (generation_version != "human_v2") may contain
-                        # forbidden indicator language written before the validator
-                        # was active — serving them as "live_llm" is the root cause
-                        # of stale forbidden text appearing after manual runs.
+                        # Only accept human_v2 / compact_v1 verdicts as fresh candidates.
+                        # Older rows may contain forbidden indicator language — serving
+                        # them as "live_llm" is the root cause of stale text in the UI.
+                        _VALID_GEN_VERSIONS = {"human_v2", "compact_v1"}
                         if source != "live_llm" or used_fallback:
                             continue
-                        if gen_version != "human_v2":
+                        if gen_version not in _VALID_GEN_VERSIONS:
                             logger.debug(
                                 "get_insight_cards: skipping stale-schema row ticker=%s gen_version=%s",
                                 ticker, gen_version,
@@ -1367,17 +1366,18 @@ class RecommendationService:
                 _av_gen = str((analyst_verdict or {}).get("generation_version") or "").lower()
                 _av_src = str((analyst_verdict or {}).get("analysis_source") or "").lower()
                 _av_fallback = bool((analyst_verdict or {}).get("used_fallback", False))
+                _FRESH_GEN_VERSIONS = {"human_v2", "compact_v1"}
                 if analyst_verdict is None:
                     _reasoning_source = "no_analyst_data"
                 elif _av_fallback:
                     _reasoning_source = "fallback"
-                elif _used_preferred and _av_gen == "human_v2":
+                elif _used_preferred and _av_gen in _FRESH_GEN_VERSIONS:
                     _reasoning_source = "fresh_llm"
-                elif not _used_preferred and _av_gen == "human_v2" and _av_src == "live_llm":
+                elif not _used_preferred and _av_gen in _FRESH_GEN_VERSIONS and _av_src == "live_llm":
                     _reasoning_source = "fresh_llm"
-                elif _av_gen == "human_v2" and _av_src == "cached_run":
+                elif _av_gen in _FRESH_GEN_VERSIONS and _av_src == "cached_run":
                     _reasoning_source = "cache"
-                elif _av_gen != "human_v2" and analyst_verdict is not None:
+                elif _av_gen not in _FRESH_GEN_VERSIONS and analyst_verdict is not None:
                     _reasoning_source = "stale_db"
                 else:
                     _reasoning_source = _av_src or "unknown"

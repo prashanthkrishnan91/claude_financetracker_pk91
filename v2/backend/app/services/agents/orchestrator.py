@@ -1529,20 +1529,42 @@ class AgentOrchestrator:
         Phase-5 columns first, then Phase-4, retrying at most twice so
         the core fields always land.
         """
-        try:
-            result = self._db(
-                "agent_runs.update",
+
+        def _update_and_verify(op_name: str, payload: dict) -> int:
+            self._db(
+                op_name,
                 lambda: self.db.table("agent_runs")
-                .update(patch)
+                .update(payload)
                 .eq("id", run_id)
                 .eq("user_id", str(self.user_id))
-                .select("id")
                 .execute(),
             )
-            matched = len(result.data or [])
+            try:
+                verify = self._db(
+                    f"{op_name}.verify",
+                    lambda: self.db.table("agent_runs")
+                    .select("id,status")
+                    .eq("id", run_id)
+                    .eq("user_id", str(self.user_id))
+                    .limit(1)
+                    .execute(),
+                )
+            except Exception as verify_exc:  # noqa: BLE001
+                logger.warning(
+                    "agent_runs update verification failed after successful update "
+                    "for run_id=%s: %s",
+                    run_id,
+                    verify_exc,
+                )
+                return 1
+
+            matched = len(verify.data or [])
             if matched == 0:
                 raise RuntimeError(f"agent_runs update matched zero rows for run_id={run_id}")
             return matched
+
+        try:
+            return _update_and_verify("agent_runs.update", patch)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc).lower()
             schema_error = (
@@ -1564,18 +1586,7 @@ class AgentOrchestrator:
             )
             stripped = {k: v for k, v in patch.items() if k not in phase5_cols}
             try:
-                result = self._db(
-                    "agent_runs.update.no_phase5",
-                    lambda: self.db.table("agent_runs")
-                    .update(stripped)
-                    .eq("id", run_id)
-                    .eq("user_id", str(self.user_id))
-                    .select("id")
-                    .execute(),
-                )
-                if len(result.data or []) == 0:
-                    raise RuntimeError(f"agent_runs update(no_phase5) matched zero rows for run_id={run_id}")
-                return len(result.data or [])
+                return _update_and_verify("agent_runs.update.no_phase5", stripped)
             except Exception:  # noqa: BLE001 — fall through to Phase-4 strip
                 pass
 
@@ -1590,21 +1601,12 @@ class AgentOrchestrator:
                 if k not in (phase4_cols | phase5_cols)
             }
             try:
-                result = self._db(
-                    "agent_runs.update.no_phase4",
-                    lambda: self.db.table("agent_runs")
-                    .update(stripped)
-                    .eq("id", run_id)
-                    .eq("user_id", str(self.user_id))
-                    .select("id")
-                    .execute(),
-                )
-                if len(result.data or []) == 0:
-                    raise RuntimeError(f"agent_runs update(no_phase4) matched zero rows for run_id={run_id}")
-                return len(result.data or [])
+                return _update_and_verify("agent_runs.update.no_phase4", stripped)
             except Exception as exc2:  # noqa: BLE001
                 logger.warning("agent_runs update retry failed: %s", exc2)
                 raise
+
+        raise RuntimeError("agent_runs update failed after schema fallback attempts")
 
     def _enforce_llm_metric_invariants(self) -> None:
         attempted = int(self._analyst_stage_stats.get("attempted_llm_calls", 0) or 0)

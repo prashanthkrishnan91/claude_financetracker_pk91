@@ -39,7 +39,7 @@ function mainThesis(card: InsightCardData): string {
 export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onClick?: () => void }) {
   const action = normalizeAction(card.analyst_action || card.action);
   const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
-  const convictionLevel = (card.conviction_level || "LOW").toUpperCase() as "HIGH" | "MEDIUM" | "LOW";
+  const convictionLevel = _resolveConvictionLevel(card);
 
   const whyThisMatters = card.primary_driver || (card.analyst_drivers || card.key_drivers || [])[0] || null;
   const whatCouldGoWrong = card.risk_flag || (card.analyst_risks || card.main_risks || [])[0] || null;
@@ -156,6 +156,17 @@ function Chip({ label, tone }: { label: string; tone: "good" | "bad" | "neutral"
       ? "bg-red-500/10 text-red-400"
       : "bg-surface-elevated text-text-secondary";
   return <span className={cn("text-[10px] px-2 py-0.5 rounded-full", cls)}>{label}</span>;
+}
+
+function _resolveConvictionLevel(card: InsightCardData): "HIGH" | "MEDIUM" | "LOW" {
+  const raw = (card.conviction_level || "").toUpperCase();
+  if (raw === "HIGH" || raw === "MEDIUM" || raw === "LOW") return raw;
+  // Derive from numeric score for legacy rows that pre-date this field
+  const score = card.analyst_conviction ?? card.conviction ?? card.conviction_score ?? null;
+  if (score === null) return "LOW";
+  if (score >= 0.65) return "HIGH";
+  if (score >= 0.35) return "MEDIUM";
+  return "LOW";
 }
 
 function _defaultActionReason(action: string, ticker: string): string {

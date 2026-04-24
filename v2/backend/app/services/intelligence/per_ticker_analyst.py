@@ -270,6 +270,7 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
 
     if action == INSUFFICIENT_DATA_VERDICT_MARKER:
         conviction = 0.0
+        conviction_level = "LOW"  # always LOW when there's no data
 
     # Reject if the memo fields repeat content across each other.
     if _has_field_repetition(primary_driver, risk_flag, action_reason):

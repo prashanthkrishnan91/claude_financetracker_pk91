@@ -11,10 +11,12 @@ import {
   useDecisionOutcomes,
 } from "@/lib/hooks";
 import type {
+  AdaptiveBlock,
   AllocationExclusion,
   DepositPlanResult,
   DepositRecommendation,
   DecisionLogEntry,
+  RegimeBlock,
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
@@ -342,7 +344,7 @@ export default function DepositsPage() {
 }
 
 function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
-  const { plan, recommendations, summary, trims, notes, warning, explanation, exclusions } = deployPlan;
+  const { plan, recommendations, summary, trims, notes, warning, explanation, exclusions, regime, adaptive } = deployPlan;
   const allocs = recommendations ?? [];
   const rankedAllocs = [...allocs].sort((a, b) => getScoreValue(b) - getScoreValue(a));
   const enrichedAllocs: EnrichedAllocation[] = rankedAllocs.map((rec) => ({
@@ -380,6 +382,8 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         plan={plan}
         summary={summary}
         allocationCount={allocs.length}
+        regime={regime ?? null}
+        adaptive={adaptive ?? null}
       />
 
       {warning && (
@@ -407,13 +411,23 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         <>
           <WhyMadeCutSection allocations={enrichedAllocs} />
           <DeploymentRisksSection risks={deployment_risks} />
-          <WhatToDoNowSection allocations={enrichedAllocs} risks={deployment_risks} />
+          <WhatToDoNowSection
+            allocations={enrichedAllocs}
+            risks={deployment_risks}
+            adaptive={adaptive ?? null}
+          />
           <TopAllocationTable allocations={enrichedAllocs} />
         </>
       )}
 
       {/* Why this plan */}
-      <WhyThisPlanCard explanation={explanation ?? plan.intel_summary ?? notes.join(" ")} />
+      <WhyThisPlanCard
+        explanation={
+          adaptive?.adaptive_reasons?.length
+            ? adaptive.adaptive_reasons.join(" ")
+            : (explanation ?? plan.intel_summary ?? notes.join(" "))
+        }
+      />
 
       {/* Skipped / excluded */}
       {exclusions && exclusions.length > 0 && (
@@ -450,11 +464,21 @@ function RecommendedDeploymentCard({
   plan,
   summary,
   allocationCount,
+  regime,
+  adaptive,
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
   allocationCount: number;
+  regime: RegimeBlock | null;
+  adaptive: AdaptiveBlock | null;
 }) {
+  const hasAdaptive = !!adaptive;
+  const immediate = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
+  const reserve = adaptive?.cash_reserve_amount ?? plan.cash_reserve ?? 0;
+  const regimeBadge = regime ? regimeBadgeMeta(regime.regime_label) : null;
+  const modeBadge = adaptive ? modeBadgeMeta(adaptive.deployment_mode) : null;
+
   return (
     <div className="card-glass p-4 space-y-3 border border-accent/20">
       <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -463,20 +487,50 @@ function RecommendedDeploymentCard({
             Recommended Deployment
           </p>
           <p className="text-2xl font-display text-text-primary mt-1">
-            Deploy {formatCurrency(plan.total_amount)}
+            Deploy {formatCurrency(immediate)} now
           </p>
+          {hasAdaptive && reserve > 0 && (
+            <p className="text-xs text-text-secondary mt-0.5">
+              Hold {formatCurrency(reserve)} cash reserve
+            </p>
+          )}
           <p className="text-xs text-text-muted mt-0.5">{plan.strategy}</p>
         </div>
-        <span
-          className={cn(
-            "text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wide",
-            summary.fully_allocated
-              ? "bg-green-500/10 text-green-400 border border-green-500/20"
-              : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
+        <div className="flex items-center gap-1.5 flex-wrap justify-end">
+          {regimeBadge && (
+            <span
+              className={cn(
+                "text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide border",
+                regimeBadge.cls
+              )}
+              title={regime?.regime_reasons?.[0] ?? ""}
+            >
+              {regimeBadge.label}
+            </span>
           )}
-        >
-          {summary.fully_allocated ? "Fully Allocated" : "Partial"}
-        </span>
+          {modeBadge && (
+            <span
+              className={cn(
+                "text-[10px] px-2 py-0.5 rounded-full font-semibold uppercase tracking-wide border",
+                modeBadge.cls
+              )}
+            >
+              {modeBadge.label}
+            </span>
+          )}
+          {!hasAdaptive && (
+            <span
+              className={cn(
+                "text-xs px-2.5 py-1 rounded-full font-semibold uppercase tracking-wide",
+                summary.fully_allocated
+                  ? "bg-green-500/10 text-green-400 border border-green-500/20"
+                  : "bg-yellow-500/10 text-yellow-400 border border-yellow-500/20"
+              )}
+            >
+              {summary.fully_allocated ? "Fully Allocated" : "Partial"}
+            </span>
+          )}
+        </div>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">
         <div className="bg-surface-elevated rounded-md p-2">
@@ -484,20 +538,46 @@ function RecommendedDeploymentCard({
           <p className="font-mono text-text-primary">{allocationCount}</p>
         </div>
         <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">Deployed</p>
+          <p className="text-text-muted">{hasAdaptive ? "Deploy now" : "Deployed"}</p>
           <p className="font-mono text-text-primary">
-            {formatCurrency(summary.total_deployed)}
+            {formatCurrency(hasAdaptive ? immediate : summary.total_deployed)}
           </p>
         </div>
         <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">Considered</p>
+          <p className="text-text-muted">{hasAdaptive ? "Reserve" : "Considered"}</p>
           <p className="font-mono text-text-primary">
-            {summary.candidates_considered ?? summary.ranked_candidates}
+            {hasAdaptive
+              ? formatCurrency(reserve)
+              : summary.candidates_considered ?? summary.ranked_candidates}
           </p>
         </div>
       </div>
     </div>
   );
+}
+
+function regimeBadgeMeta(label: RegimeBlock["regime_label"]): { label: string; cls: string } {
+  if (label === "bull") {
+    return { label: "Bull", cls: "bg-green-500/10 text-green-400 border-green-500/30" };
+  }
+  if (label === "risk_off") {
+    return { label: "Risk-off", cls: "bg-red-500/10 text-red-400 border-red-500/30" };
+  }
+  return { label: "Neutral", cls: "bg-blue-500/10 text-blue-300 border-blue-500/30" };
+}
+
+function modeBadgeMeta(mode: AdaptiveBlock["deployment_mode"]): { label: string; cls: string } {
+  switch (mode) {
+    case "full":
+      return { label: "Full", cls: "bg-green-500/10 text-green-400 border-green-500/30" };
+    case "defensive":
+      return { label: "Defensive", cls: "bg-yellow-500/10 text-yellow-300 border-yellow-500/30" };
+    case "wait":
+      return { label: "Wait", cls: "bg-red-500/10 text-red-400 border-red-500/30" };
+    case "partial":
+    default:
+      return { label: "Partial", cls: "bg-accent/10 text-accent border-accent/30" };
+  }
 }
 
 function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[] }) {
@@ -527,34 +607,42 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
               : role === "Watch"
                 ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
                 : "bg-surface-elevated text-text-muted border border-border";
+          const reserve = rec.reserve_amount ?? 0;
+          const immediate = rec.immediate_amount ?? rec.amount;
+          const showStaging = (rec.staging_instruction != null && rec.staging_instruction !== "") || reserve > 0;
           return (
-            <div
-              key={rec.symbol}
-              className="grid grid-cols-12 gap-2 px-4 py-3 items-center text-sm"
-            >
-              <div className="col-span-4 sm:col-span-2 flex items-center gap-1.5">
-                <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
-                <span
-                  className={cn(
-                    "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
-                    roleClass
-                  )}
-                >
-                  {role}
-                </span>
+            <div key={rec.symbol} className="px-4 py-3 text-sm">
+              <div className="grid grid-cols-12 gap-2 items-center">
+                <div className="col-span-4 sm:col-span-2 flex items-center gap-1.5">
+                  <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
+                  <span
+                    className={cn(
+                      "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
+                      roleClass
+                    )}
+                  >
+                    {role}
+                  </span>
+                </div>
+                <div className="col-span-8 sm:col-span-6 text-xs text-text-secondary">
+                  {rec.execution_plan}
+                </div>
+                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                  {formatCurrency(rec.amount)}
+                </div>
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
+                  {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
+                </div>
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
+                  {(rec.after_weight ?? 0).toFixed(1)}%
+                </div>
               </div>
-              <div className="col-span-8 sm:col-span-6 text-xs text-text-secondary">
-                {rec.execution_plan}
-              </div>
-              <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
-                {formatCurrency(rec.amount)}
-              </div>
-              <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
-                {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
-              </div>
-              <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
-                {(rec.after_weight ?? 0).toFixed(1)}%
-              </div>
+              {showStaging && (
+                <p className="text-[11px] text-text-muted mt-1 leading-snug">
+                  Now {formatCurrency(immediate)} · Reserve {formatCurrency(reserve)}
+                  {rec.staging_instruction ? ` · ${rec.staging_instruction}` : ""}
+                </p>
+              )}
             </div>
           );
         })}
@@ -566,12 +654,41 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
 function WhatToDoNowSection({
   allocations,
   risks,
+  adaptive,
 }: {
   allocations: EnrichedAllocation[];
   risks: string[];
+  adaptive: AdaptiveBlock | null;
 }) {
   const bullets = buildWhatToDoNowBullets(allocations, risks);
-  if (bullets.length === 0) return null;
+  const deployBullets: string[] = [];
+
+  if (adaptive) {
+    const reserve = adaptive.cash_reserve_amount ?? 0;
+    const immediate = adaptive.recommended_deploy_amount ?? 0;
+    if (immediate > 0 && reserve > 0) {
+      deployBullets.push(
+        `Deploy ${formatCurrency(immediate)} now and hold ${formatCurrency(reserve)} for pullbacks.`
+      );
+    } else if (immediate > 0) {
+      deployBullets.push(`Deploy ${formatCurrency(immediate)} now in full.`);
+    } else {
+      deployBullets.push(
+        `Hold cash; conditions don't support deploying right now.`
+      );
+    }
+    const deferred = allocations
+      .filter((rec) => (rec.execution_timing ?? "") === "wait_for_pullback")
+      .map((rec) => rec.symbol);
+    if (deferred.length > 0) {
+      deployBullets.push(
+        `Avoid adding ${deferred.join(", ")} unless it pulls back.`
+      );
+    }
+  }
+
+  const merged = [...deployBullets, ...bullets].slice(0, 3);
+  if (merged.length === 0) return null;
 
   return (
     <div className="card-glass p-4 space-y-2 border border-accent/20">
@@ -579,7 +696,7 @@ function WhatToDoNowSection({
         What to Do Now
       </p>
       <ul className="space-y-1.5">
-        {bullets.map((bullet) => (
+        {merged.map((bullet) => (
           <li key={bullet} className="text-xs text-text-secondary leading-snug">
             • {bullet}
           </li>

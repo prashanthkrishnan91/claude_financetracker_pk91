@@ -29,6 +29,26 @@ type AllocationItem = {
   do?: string | null;
   alt_view?: string | null;
   category?: string;
+  immediate_amount?: number | null;
+  reserve_amount?: number | null;
+  staging_instruction?: string | null;
+  execution_timing?: string | null;
+};
+
+type RegimeBlock = {
+  regime_label: "bull" | "neutral" | "risk_off";
+  regime_score: number;
+  regime_reasons: string[];
+  data_quality: "high" | "medium" | "low";
+};
+
+type AdaptiveBlock = {
+  deploy_percentage: number;
+  deployment_mode: "full" | "partial" | "defensive" | "wait";
+  recommended_deploy_amount: number;
+  cash_reserve_amount: number;
+  adaptive_reasons: string[];
+  adjustments_applied: string[];
 };
 
 type TrimItem = {
@@ -44,6 +64,10 @@ type AllocationPlanPayload = {
     total_deployed: number;
     fully_allocated: boolean;
     strategy: string;
+    recommended_deploy_amount?: number;
+    cash_reserve?: number;
+    deploy_percentage?: number;
+    deployment_mode?: "full" | "partial" | "defensive" | "wait";
   };
   allocations: AllocationItem[];
   exclusions: Array<{ ticker: string; reason: string }>;
@@ -58,6 +82,8 @@ type AllocationPlanPayload = {
     strategy_mode: string;
     fully_allocated: boolean;
   };
+  regime?: RegimeBlock | null;
+  adaptive?: AdaptiveBlock | null;
 };
 
 function safeNumber(v: unknown): number {
@@ -147,6 +173,10 @@ export async function GET(req: Request) {
     execution_style: a.execution_style ?? null,
     alt_view: a.alt_view ?? null,
     category: a.category ?? null,
+    immediate_amount: a.immediate_amount ?? null,
+    reserve_amount: a.reserve_amount ?? null,
+    staging_instruction: a.staging_instruction ?? null,
+    execution_timing: a.execution_timing ?? null,
   }));
 
   return NextResponse.json({
@@ -155,7 +185,13 @@ export async function GET(req: Request) {
       strategy: payload.plan.strategy,
       generated_at: new Date().toISOString(),
       intel_summary: payload.explanation,
+      recommended_deploy_amount: payload.plan.recommended_deploy_amount,
+      cash_reserve: payload.plan.cash_reserve,
+      deploy_percentage: payload.plan.deploy_percentage,
+      deployment_mode: payload.plan.deployment_mode,
     },
+    regime: payload.regime ?? null,
+    adaptive: payload.adaptive ?? null,
     recommendations,
     allocations: payload.allocations,
     exclusions: payload.exclusions,

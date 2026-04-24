@@ -756,6 +756,30 @@ export interface DepositRecommendation {
   } | null;
   why_selected?: string;
   execution_plan?: string;
+  // Adaptive deployment (added when backend regime+adaptive layer runs)
+  immediate_amount?: number | null;
+  reserve_amount?: number | null;
+  staging_instruction?: string | null;
+  execution_timing?: string | null;
+}
+
+export type RegimeLabel = "bull" | "neutral" | "risk_off";
+export type DeploymentMode = "full" | "partial" | "defensive" | "wait";
+
+export interface RegimeBlock {
+  regime_label: RegimeLabel;
+  regime_score: number;
+  regime_reasons: string[];
+  data_quality: "high" | "medium" | "low";
+}
+
+export interface AdaptiveBlock {
+  deploy_percentage: number;
+  deployment_mode: DeploymentMode;
+  recommended_deploy_amount: number;
+  cash_reserve_amount: number;
+  adaptive_reasons: string[];
+  adjustments_applied: string[];
 }
 
 export interface AllocationExclusion {
@@ -777,6 +801,10 @@ export interface DepositPlanResult {
     strategy: string;
     generated_at: string;
     intel_summary?: string;
+    recommended_deploy_amount?: number;
+    cash_reserve?: number;
+    deploy_percentage?: number;
+    deployment_mode?: DeploymentMode;
   };
   recommendations: DepositRecommendation[];
   allocations?: DepositRecommendation[];
@@ -799,5 +827,7 @@ export interface DepositPlanResult {
   warning?: string | null;
   explanation?: string;
   deployment_risks?: string[];
+  regime?: RegimeBlock | null;
+  adaptive?: AdaptiveBlock | null;
   debug?: Record<string, unknown>;
 }

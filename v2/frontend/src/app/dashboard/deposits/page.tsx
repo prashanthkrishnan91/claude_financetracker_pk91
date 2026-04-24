@@ -211,6 +211,47 @@ function buildDeploymentRisks(allocations: EnrichedAllocation[], noteText: strin
   return risks.slice(0, 3);
 }
 
+function buildWhatToDoNowBullets(allocations: EnrichedAllocation[], risks: string[]): string[] {
+  if (allocations.length === 0) return [];
+  const sorted = [...allocations].sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0));
+  const primaryCount = sorted.length === 1 ? 1 : 2;
+  const primary = sorted.slice(0, primaryCount);
+  const secondary = sorted.slice(primaryCount, Math.min(primaryCount + 2, sorted.length));
+  const riskyByConcentration = sorted.filter((rec) => (rec.current_weight ?? rec.portfolio_weight ?? 0) >= 10);
+  const riskyByVolatility = sorted.filter((rec) => normalizeSignal(rec.features?.volatility) >= 0.7);
+  const riskTickers = Array.from(
+    new Set([
+      ...riskyByConcentration.map((rec) => rec.symbol),
+      ...riskyByVolatility.map((rec) => rec.symbol),
+    ])
+  ).filter(Boolean);
+
+  const bullets: string[] = [];
+  bullets.push(
+    `Deploy into ${primary.map((rec) => rec.symbol).join(", ")} as primary positions; ${primary
+      .map((rec) => `${rec.symbol}: ${rec.execution_plan.toLowerCase()}`)
+      .join("; ")}.`
+  );
+  if (secondary.length > 0) {
+    bullets.push(
+      `Treat ${secondary.map((rec) => rec.symbol).join(", ")} as supporting positions; scale gradually (${secondary
+        .map((rec) => `${rec.symbol}: ${rec.execution_plan.toLowerCase()}`)
+        .join("; ")}).`
+    );
+  }
+  if (riskTickers.length > 0) {
+    bullets.push(
+      `Stage entries due to concentration/volatility risk in ${riskTickers.join(", ")}; avoid adding ${riskTickers[0]} unless pullback.`
+    );
+  } else if (risks.length > 0) {
+    bullets.push(
+      `Stage entries due to concentration risk; avoid adding ${sorted[0]?.symbol} unless pullback.`
+    );
+  }
+
+  return bullets.slice(0, 3);
+}
+
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
@@ -368,6 +409,7 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         <>
           <WhyMadeCutSection allocations={enrichedAllocs} />
           <DeploymentRisksSection risks={deployment_risks} />
+          <WhatToDoNowSection allocations={enrichedAllocs} risks={deployment_risks} />
           <TopAllocationTable allocations={enrichedAllocs} />
         </>
       )}
@@ -502,6 +544,32 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
           );
         })}
       </div>
+    </div>
+  );
+}
+
+function WhatToDoNowSection({
+  allocations,
+  risks,
+}: {
+  allocations: EnrichedAllocation[];
+  risks: string[];
+}) {
+  const bullets = buildWhatToDoNowBullets(allocations, risks);
+  if (bullets.length === 0) return null;
+
+  return (
+    <div className="card-glass p-4 space-y-2 border border-accent/20">
+      <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+        What to Do Now
+      </p>
+      <ul className="space-y-1.5">
+        {bullets.map((bullet) => (
+          <li key={bullet} className="text-xs text-text-secondary leading-snug">
+            • {bullet}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

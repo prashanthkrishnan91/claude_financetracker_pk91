@@ -227,29 +227,27 @@ function buildWhatToDoNowBullets(allocations: EnrichedAllocation[], risks: strin
   ).filter(Boolean);
 
   const bullets: string[] = [];
-  bullets.push(
-    `Deploy into ${primary.map((rec) => rec.symbol).join(", ")} as primary positions; ${primary
-      .map((rec) => `${rec.symbol}: ${rec.execution_plan.toLowerCase()}`)
-      .join("; ")}.`
-  );
+  bullets.push(`Deploy into ${primary.map((rec) => rec.symbol).join(" and ")} as primary positions.`);
   if (secondary.length > 0) {
-    bullets.push(
-      `Treat ${secondary.map((rec) => rec.symbol).join(", ")} as supporting positions; scale gradually (${secondary
-        .map((rec) => `${rec.symbol}: ${rec.execution_plan.toLowerCase()}`)
-        .join("; ")}).`
-    );
+    bullets.push(`Scale into ${secondary.map((rec) => rec.symbol).join(" and ")} as supporting allocations.`);
   }
   if (riskTickers.length > 0) {
-    bullets.push(
-      `Stage entries due to concentration/volatility risk in ${riskTickers.join(", ")}; avoid adding ${riskTickers[0]} unless pullback.`
-    );
+    bullets.push(`Avoid adding ${riskTickers[0]} at current levels; wait for pullback.`);
   } else if (risks.length > 0) {
-    bullets.push(
-      `Stage entries due to concentration risk; avoid adding ${sorted[0]?.symbol} unless pullback.`
-    );
+    bullets.push(`Avoid adding ${sorted[0]?.symbol} at current levels; wait for pullback.`);
   }
 
   return bullets.slice(0, 3);
+}
+
+function deriveRoleLabel(rec: EnrichedAllocation, rank: number, total: number): "Primary" | "Supporting" | "Watch" {
+  const momentum = normalizeSignal(rec.features?.momentum);
+  const volatility = normalizeSignal(rec.features?.volatility);
+  const currentWeight = rec.current_weight ?? rec.portfolio_weight ?? 0;
+  const highRiskProfile = currentWeight >= 10 || volatility >= 0.7 || momentum >= 0.88;
+  if (highRiskProfile) return "Watch";
+  if (rank < Math.min(2, total)) return "Primary";
+  return "Supporting";
 }
 
 export default function DepositsPage() {
@@ -503,6 +501,8 @@ function RecommendedDeploymentCard({
 }
 
 function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[] }) {
+  const ranked = [...allocations].sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0));
+
   return (
     <div className="card-glass overflow-hidden border border-border/80">
       <div className="px-4 py-3 border-b border-border">
@@ -519,14 +519,29 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
           <div className="col-span-1 text-right">Current</div>
           <div className="col-span-1 text-right">After</div>
         </div>
-        {allocations.map((rec) => {
+        {ranked.map((rec, index) => {
+          const role = deriveRoleLabel(rec, index, ranked.length);
+          const roleClass =
+            role === "Primary"
+              ? "bg-accent/10 text-accent border border-accent/30"
+              : role === "Watch"
+                ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
+                : "bg-surface-elevated text-text-muted border border-border";
           return (
             <div
               key={rec.symbol}
               className="grid grid-cols-12 gap-2 px-4 py-3 items-center text-sm"
             >
-              <div className="col-span-4 sm:col-span-2 font-mono font-bold text-text-primary">
-                {rec.symbol}
+              <div className="col-span-4 sm:col-span-2 flex items-center gap-1.5">
+                <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
+                <span
+                  className={cn(
+                    "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
+                    roleClass
+                  )}
+                >
+                  {role}
+                </span>
               </div>
               <div className="col-span-8 sm:col-span-6 text-xs text-text-secondary">
                 {rec.execution_plan}

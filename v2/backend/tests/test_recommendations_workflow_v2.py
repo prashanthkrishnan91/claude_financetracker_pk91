@@ -294,6 +294,101 @@ def test_fallback_cards_require_failed_calls_or_skipped_reason():
     assert orch._analyst_stage_stats["skipped_llm_reason"] is not None
 
 
+@pytest.mark.asyncio
+async def test_portfolio_synthesis_success_counts_even_without_cost_tracker(monkeypatch):
+    from app.services.agents.orchestrator import AgentOrchestrator
+    from app.services.intelligence.portfolio_synthesis import PortfolioSynthesis
+    from app.services.intelligence.run_mode import RunMode
+
+    orch = AgentOrchestrator(user_id=uuid4(), anthropic_api_key="fake-key")
+    orch._snapshots = {"AAPL": object()}
+    orch._features = {"AAPL": object()}
+    orch._verdicts = {"AAPL": object()}
+    orch._mode_decision = SimpleNamespace(mode=RunMode.FULL, reason="ok")
+    orch._cost_tracker = None
+
+    async def _fake_synthesize(**_kwargs):
+        return PortfolioSynthesis(
+            portfolio_bias="balanced",
+            key_themes=["theme1", "theme2"],
+            risk_concentrations=["risk1"],
+            overexposure_flags=[],
+            rebalancing_suggestions=[],
+            summary="Live synthesis",
+            used_fallback=False,
+        )
+
+    monkeypatch.setattr(
+        "app.services.agents.orchestrator.synthesize_portfolio",
+        _fake_synthesize,
+    )
+
+    await orch._run_portfolio_synthesis(context={"portfolio": [{"ticker": "AAPL"}], "macro": {}})
+
+    assert orch._analyst_stage_stats["attempted_llm_calls"] == 1
+    assert orch._analyst_stage_stats["successful_llm_calls"] == 1
+    assert orch._analyst_stage_stats["failed_llm_calls"] == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_agent_run_latest_query_avoids_heartbeat_column(monkeypatch):
+    from app.services.recommendation_engine import RecommendationService
+
+    captured = {"select": ""}
+
+    class _AgentRunsTable:
+        def select(self, cols):
+            captured["select"] = cols
+            return self
+
+        def eq(self, *_args, **_kwargs):
+            return self
+
+        def order(self, *_args, **_kwargs):
+            return self
+
+        def limit(self, *_args, **_kwargs):
+            return self
+
+        def execute(self):
+            return SimpleNamespace(data=[])
+
+    class _UsersTable:
+        def select(self, *_args, **_kwargs):
+            return self
+        def eq(self, *_args, **_kwargs):
+            return self
+        @property
+        def single(self):
+            return self
+        def execute(self):
+            return SimpleNamespace(data={"deposit_amount": 900.0})
+
+    class _Client:
+        def table(self, name: str):
+            if name == "agent_runs":
+                return _AgentRunsTable()
+            return _UsersTable()
+
+    monkeypatch.setattr(
+        "app.services.recommendation_engine.get_supabase_client",
+        lambda: _Client(),
+    )
+
+    class _Orch:
+        async def create_run(self):
+            return "job-1"
+
+    monkeypatch.setattr(
+        "app.services.agents.job_runner.build_orchestrator",
+        lambda **_kwargs: _Orch(),
+    )
+
+    svc = RecommendationService(user_id=uuid4())
+    await svc.queue_agent_run(deposit_amount=500.0)
+    assert "heartbeat_at" not in captured["select"]
+
+
 def test_terminal_statuses_match_frontend_contract():
     from app.services.agent_run_status import TERMINAL_RUN_STATUSES
 

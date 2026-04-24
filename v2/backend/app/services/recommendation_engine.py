@@ -798,8 +798,10 @@ class RecommendationService:
         # without a second round-trip per ticker. Degrades gracefully when
         # the column is missing (pre-migration-010 deployments).
         analyst_lookup: dict[tuple[str, str], dict] = {}
+        latest_live_llm_by_ticker: dict[str, dict] = {}
         run_lookup: dict[str, dict] = {}
         run_ids_needed = {r.get("agent_run_id") for r in recs if r.get("agent_run_id")}
+        tickers_needed = {str(r.get("ticker")) for r in recs if r.get("ticker")}
         if run_ids_needed:
             try:
                 ai_rows = (
@@ -822,6 +824,52 @@ class RecommendationService:
                     "get_insight_cards: analyst_verdict lookup failed (likely "
                     "pre-Phase-3 schema): %s", exc,
                 )
+            try:
+                completed_runs = (
+                    self._db(
+                        "agent_runs.select_completed_for_card_preference",
+                        lambda: self.client.table("agent_runs")
+                        .select("id, finished_at")
+                        .eq("user_id", str(self.user_id))
+                        .eq("status", "completed")
+                        .order("finished_at", desc=True)
+                        .limit(25)
+                        .execute(),
+                    )
+                ).data or []
+                completed_ids = [str(r["id"]) for r in completed_runs if r.get("id")]
+                if completed_ids and tickers_needed:
+                    candidate_rows = (
+                        self._db(
+                            "agent_insights.select_latest_completed_for_cards",
+                            lambda: self.client.table("agent_insights")
+                            .select("run_id, ticker, analyst_verdict, analyst_confidence, created_at")
+                            .eq("user_id", str(self.user_id))
+                            .in_("run_id", completed_ids)
+                            .in_("ticker", list(tickers_needed))
+                            .execute(),
+                        )
+                    ).data or []
+                    run_rank = {rid: idx for idx, rid in enumerate(completed_ids)}
+                    for row in candidate_rows:
+                        ticker = row.get("ticker")
+                        if not ticker:
+                            continue
+                        verdict = row.get("analyst_verdict") or {}
+                        source = str((verdict or {}).get("analysis_source") or "").lower()
+                        used_fallback = bool((verdict or {}).get("used_fallback", False))
+                        if source != "live_llm" or used_fallback:
+                            continue
+                        prev = latest_live_llm_by_ticker.get(ticker)
+                        if prev is None:
+                            latest_live_llm_by_ticker[ticker] = row
+                            continue
+                        prev_rank = run_rank.get(str(prev.get("run_id")), 10_000)
+                        row_rank = run_rank.get(str(row.get("run_id")), 10_000)
+                        if row_rank < prev_rank:
+                            latest_live_llm_by_ticker[ticker] = row
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_insight_cards: latest completed analyst lookup failed: %s", exc)
             try:
                 run_rows = (
                     self._db(
@@ -865,6 +913,12 @@ class RecommendationService:
                 conviction = float(rec["conviction_score"]) if rec.get("conviction_score") is not None else None
                 data_confidence_score = _derive_confidence_score(conviction)
                 analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
+                preferred_live_row = latest_live_llm_by_ticker.get(ticker)
+                if preferred_live_row and (
+                    analyst_row is None
+                    or bool((analyst_row.get("analyst_verdict") or {}).get("used_fallback", False))
+                ):
+                    analyst_row = preferred_live_row
                 analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
                 analyst_conf_raw = (analyst_row or {}).get("analyst_confidence")
                 analyst_confidence = (
@@ -1038,7 +1092,7 @@ class RecommendationService:
         try:
             recent = (
                 self.client.table("agent_runs")
-                .select("id, status, started_at, finished_at, updated_at, created_at, heartbeat_at")
+                .select("id, status, started_at, finished_at, updated_at, created_at")
                 .eq("user_id", str(self.user_id))
                 .order("started_at", desc=True)
                 .limit(1)

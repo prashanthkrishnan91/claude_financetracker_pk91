@@ -72,6 +72,7 @@ function getScoreValue(rec: DepositRecommendation): number {
 }
 
 function deriveWhySelected(rec: DepositRecommendation, sorted: DepositRecommendation[]): string {
+  const ticker = (rec.symbol || "").toUpperCase();
   const scoreRank = sorted.findIndex((candidate) => candidate.symbol === rec.symbol);
   const topScore = getScoreValue(sorted[0] ?? rec);
   const ownScore = getScoreValue(rec);
@@ -79,37 +80,80 @@ function deriveWhySelected(rec: DepositRecommendation, sorted: DepositRecommenda
   const momentum = normalizeSignal(rec.features?.momentum);
   const volatility = normalizeSignal(rec.features?.volatility);
   const category = (rec.category || "").toLowerCase();
+  const conviction = rec.conviction_level || (rec.conviction_score != null && rec.conviction_score > 0.75 ? "high" : "");
+  const rationaleText = `${rec.why || ""} ${rec.rationale || ""}`.toLowerCase();
 
+  const tickerSpecific: Record<string, string> = {
+    TSM: "AI semiconductor supply-chain exposure with less direct mega-cap concentration than NVDA-heavy alternatives.",
+    NVDA: "Strongest AI momentum in the set, but sized with awareness of chase and concentration risk.",
+    MSFT: "Cloud + AI compounder with high enterprise quality that balances growth with resilience.",
+    META: "Cheaper mega-cap AI/ad platform exposure with strong cash generation versus higher-multiple peers.",
+    GOOGL: "AI-search and cloud upside with better valuation support than many comparable mega-cap names.",
+    "BRK-B": "Defensive, cash-rich compounder that diversifies away from pure technology cyclicality.",
+  };
+
+  if (tickerSpecific[ticker]) return tickerSpecific[ticker];
+
+  if (category === "etf") {
+    return "Broad diversification sleeve that reduces single-name risk and smooths deployment concentration.";
+  }
   if (scoreRank === 0) {
-    return "highest blended score and conviction among current BUY candidates.";
+    return "Highest blended score and conviction among current BUY candidates after risk adjustments.";
   }
   if (momentum > 0.65 && scoreGap <= 0.1) {
-    return "stronger trend signal than similarly scored alternatives.";
+    return "Stronger trend signal than similarly scored alternatives while retaining acceptable risk balance.";
   }
   if (volatility > 0 && volatility < 0.4) {
-    return "lower volatility profile than peers with similar conviction.";
+    return "Lower volatility profile than peers with comparable conviction and score quality.";
   }
-  if (category === "etf") {
-    return "improves diversification versus single-name BUY options.";
+  if (conviction.toLowerCase() === "high") {
+    return "High-conviction setup with score support that edged other candidates for this deploy window.";
   }
-  return buildCutBullet(rec, Math.max(scoreRank, 0), sorted.length).replace(`${rec.symbol} `, "");
+  if (category.includes("tech") || rationaleText.includes("technology")) {
+    return "Technology exposure selected for favorable score/conviction mix without over-concentrating any single name.";
+  }
+  return `${rec.category || "Core"} exposure made the cut on relative score, confidence, and portfolio fit.`;
 }
 
 function deriveExecutionPlan(rec: DepositRecommendation): string {
+  const ticker = (rec.symbol || "").toUpperCase();
   const momentum = normalizeSignal(rec.features?.momentum);
   const volatility = normalizeSignal(rec.features?.volatility);
   const score = getScoreValue(rec);
+  const currentWeight = rec.current_weight ?? rec.portfolio_weight ?? 0;
+  const afterWeight = rec.after_weight ?? rec.target_weight ?? 0;
+  const weightJump = Math.max(0, afterWeight - currentWeight);
+  const conviction = (rec.conviction_level || "").toLowerCase();
   const category = (rec.category || "").toLowerCase();
   const isSpeculative = category === "speculative" || category === "crypto" || category === "ipo";
+  const isDefensive = ["BRK-B", "BRK.B", "XLP", "XLV", "VTV"].includes(ticker)
+    || category.includes("defensive")
+    || category.includes("value");
+  const isEtf = category === "etf" || ticker === "VOO" || ticker === "SPY" || ticker === "QQQ";
 
-  if (momentum > 0.9) return "Wait for pullback";
-  if (volatility >= 0.7) return "Accumulate gradually";
-  if (isSpeculative) return "Stage entry, avoid full allocation";
-  if (momentum >= 0.65 && score >= 0.65) return "Buy now or small pullbacks";
-  return "Accumulate gradually";
+  if (isEtf) return "Buy now or dollar-cost average";
+  if (isDefensive) return "Buy now; use as stabilizer";
+  if (isSpeculative || volatility >= 0.7) return "Stage entry in 2–3 buys";
+  if (momentum >= 0.88 && weightJump >= 1.5) return "Wait for pullback; avoid chasing";
+  if ((conviction === "high" || score >= 0.72) && momentum >= 0.45 && momentum <= 0.85) {
+    return "Buy first tranche now";
+  }
+  if (momentum >= 0.65) return "Add on small pullbacks";
+  return "Start with partial buy, then reassess";
 }
 
-function buildDeploymentRisks(allocations: EnrichedAllocation[]): string[] {
+function getThemeBucket(rec: DepositRecommendation): string | null {
+  const ticker = (rec.symbol || "").toUpperCase();
+  const meta = `${rec.category || ""} ${rec.rationale || ""} ${rec.why || ""}`.toLowerCase();
+  if (["NVDA", "TSM", "AVGO", "AMD", "ASML"].includes(ticker)) return "Semis/AI infra";
+  if (["MSFT", "GOOGL", "AMZN"].includes(ticker)) return "Cloud/platform AI";
+  if (["META", "RDDT", "SNAP"].includes(ticker)) return "Ads/social AI";
+  if (/\betf\b/.test(meta)) return "ETF diversification";
+  if (/\b(technology|tech|software|semiconductor|internet)\b/.test(meta)) return "technology exposure";
+  return null;
+}
+
+function buildDeploymentRisks(allocations: EnrichedAllocation[], noteText: string): string[] {
   if (allocations.length === 0) return [];
   const withWeight = allocations.map((rec) => ({
     ...rec,
@@ -128,16 +172,24 @@ function buildDeploymentRisks(allocations: EnrichedAllocation[]): string[] {
       return category === "speculative" || category === "crypto" || category === "ipo";
     })
     .reduce((sum, rec) => sum + rec.weight, 0);
-  const aiThemePct = withWeight
-    .filter((rec) => `${rec.category || ""} ${rec.rationale || ""} ${rec.why || ""}`.match(/\b(ai|theme)\b/i))
-    .reduce((sum, rec) => sum + rec.weight, 0);
   const highVolPct = withWeight
     .filter((rec) => normalizeSignal(rec.features?.volatility) >= 0.7)
     .reduce((sum, rec) => sum + rec.weight, 0);
+  const bucketWeights = withWeight.reduce<Record<string, number>>((acc, rec) => {
+    const bucket = getThemeBucket(rec);
+    if (!bucket) return acc;
+    acc[bucket] = (acc[bucket] || 0) + rec.weight;
+    return acc;
+  }, {});
+  const topTheme = Object.entries(bucketWeights).sort((a, b) => b[1] - a[1])[0];
+  const topThemePct = topTheme ? topTheme[1] / totalWeight : 0;
+  const sameThemeCapPct = noteText.includes("40% same-theme") ? 0.4 : 0.5;
 
   const risks: string[] = [];
-  if (aiThemePct / totalWeight > 0.5) {
-    risks.push(`AI/theme concentration is ${(aiThemePct / totalWeight * 100).toFixed(0)}% of deployed weight.`);
+  if (topTheme && topThemePct > sameThemeCapPct) {
+    risks.push(`${topTheme[0]} concentration is ${(topThemePct * 100).toFixed(0)}% of deployed weight, above the ${(sameThemeCapPct * 100).toFixed(0)}% same-theme ceiling.`);
+  } else if (topTheme && topThemePct > 0.3) {
+    risks.push(`${topTheme[0]} is ${(topThemePct * 100).toFixed(0)}% of deployed weight; monitor theme concentration drift.`);
   }
   if (topTwoPct > 60) {
     risks.push(`Top 2 positions combine for ${topTwoPct.toFixed(0)}% of post-deploy exposure.`);
@@ -251,7 +303,28 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
     why_selected: deriveWhySelected(rec, rankedAllocs),
     execution_plan: deriveExecutionPlan(rec),
   }));
-  const deployment_risks = buildDeploymentRisks(enrichedAllocs);
+  const uniqueExecutionPlans = new Set(enrichedAllocs.map((rec) => rec.execution_plan));
+  if (enrichedAllocs.length > 1 && uniqueExecutionPlans.size === 1) {
+    enrichedAllocs.sort((a, b) => normalizeSignal(b.features?.volatility) - normalizeSignal(a.features?.volatility));
+    enrichedAllocs[0] = { ...enrichedAllocs[0], execution_plan: "Stage entry in 2–3 buys" };
+    enrichedAllocs[enrichedAllocs.length - 1] = {
+      ...enrichedAllocs[enrichedAllocs.length - 1],
+      execution_plan: "Buy first tranche now",
+    };
+  }
+  const whySeen = new Set<string>();
+  for (let i = 0; i < enrichedAllocs.length; i += 1) {
+    const reason = enrichedAllocs[i].why_selected;
+    if (!reason) continue;
+    if (whySeen.has(reason)) {
+      enrichedAllocs[i] = {
+        ...enrichedAllocs[i],
+        why_selected: `${reason} Relative score edge vs peers: ${getScoreValue(enrichedAllocs[i]).toFixed(2)}.`,
+      };
+    }
+    whySeen.add(enrichedAllocs[i].why_selected);
+  }
+  const deployment_risks = buildDeploymentRisks(enrichedAllocs, `${notes.join(" ")} ${warning || ""}`);
 
   return (
     <div className="space-y-4">
@@ -391,11 +464,10 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
           <div className="col-span-2">Ticker</div>
-          <div className="col-span-3">How to Buy</div>
+          <div className="col-span-6">How to Buy</div>
           <div className="col-span-2 text-right">Amount</div>
           <div className="col-span-1 text-right">Current</div>
           <div className="col-span-1 text-right">After</div>
-          <div className="col-span-3">Why</div>
         </div>
         {allocations.map((rec) => {
           return (
@@ -406,7 +478,7 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
               <div className="col-span-4 sm:col-span-2 font-mono font-bold text-text-primary">
                 {rec.symbol}
               </div>
-              <div className="col-span-8 sm:col-span-3 text-xs text-text-secondary">
+              <div className="col-span-8 sm:col-span-6 text-xs text-text-secondary">
                 {rec.execution_plan}
               </div>
               <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
@@ -417,9 +489,6 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
               </div>
               <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
                 {(rec.after_weight ?? 0).toFixed(1)}%
-              </div>
-              <div className="col-span-12 sm:col-span-3 text-xs text-text-secondary leading-snug">
-                {toCompactLine(rec.why_selected || rec.why || rec.rationale, 14)}
               </div>
             </div>
           );

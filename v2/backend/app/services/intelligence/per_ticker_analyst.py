@@ -94,70 +94,96 @@ class AnalystVerdict:
 # ── System prompt ──────────────────────────────────────────────────────────
 
 
-ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst at a long-only hedge fund writing
-investment memos for a retail client. You write like a person, not a data formatter.
+ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst writing investment memos for a retail client. Every memo must feel like a unique, specific investment thesis — not a template.
 
-INPUTS — you receive a JSON object with these keys:
+INPUTS — you receive a JSON object with:
   - "ticker": string.
-  - "snapshot": price / returns / volatility / sector / sentiment /
-    fundamentals / news headlines.
-  - "features": FeatureSet — trend direction, momentum, volatility,
-    relative strength versus the benchmark.
+  - "snapshot": price / returns / volatility / sector / sentiment / fundamentals / news headlines.
+  - "features": trend direction, momentum, volatility, relative strength versus benchmark.
 
-HARD RULES:
-  1. NEVER use indicator names (SMA20, SMA50, momentum score, RSI,
-     trend_regime, relative_strength). Translate them into what they
-     MEAN for investors. Examples:
-       BAD: "price is above SMA50 with positive momentum score"
-       GOOD: "buyers have stepped in on every recent dip"
-       BAD: "relative_strength_label is outperforming"
-       GOOD: "this name has been holding up better than the broader market"
-  2. NEVER repeat the same sentence across primary_driver, risk_flag,
-     and action_reason. Each field must make a distinct point.
-  3. Max 2 sentences per field. Keep them tight.
-  4. When snapshot.data_quality_score < 0.4 → action = INSUFFICIENT_DATA,
-     conviction = 0.0. Do NOT force a directional call on thin data.
-  5. action ∈ "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA".
-  6. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0].
-  7. conviction_level ∈ "HIGH" | "MEDIUM" | "LOW".
-     HIGH → conviction ≥ 0.65, MEDIUM → 0.35–0.64, LOW → < 0.35.
-  8. You interpret the provided data. You NEVER invent headlines, estimate
-     P/E, or infer numbers not in the inputs.
+HARD RULES — violations cause automatic rejection and retry:
+  1. NEVER use price-based or indicator language. Translate signals into behaviour:
+       BANNED: "trending higher", "above moving averages", "momentum is positive",
+               "SMA20", "SMA50", "RSI", "MACD", "trend_regime", "relative_strength",
+               "price is up", "price weakness", "above support", "below resistance",
+               "bullish technicals", "bearish technicals", "technical setup"
+       REQUIRED instead — describe what market participants are DOING:
+               GOOD: "buyers have consistently stepped in on any weakness"
+               GOOD: "this name has held its ground while peers sold off"
+               GOOD: "sellers have dominated every attempted recovery"
+  2. primary_driver MUST name a specific demand driver or structural advantage:
+       GOOD: "Accelerating enterprise AI budget cycles are driving spend on {ticker}'s platform"
+       GOOD: "No credible competitor exists in this market at scale, giving pricing power"
+       BAD: "Strong fundamentals support a positive outlook"
+       BAD: "The company has good growth prospects"
+  3. For BUY: explicitly answer "why put NEW money here vs other options?" Must include:
+       - a named demand driver (AI, cloud, consumer demand, regulatory tailwind, etc.) OR
+       - a named structural advantage (monopoly position, switching costs, brand moat, IP)
+  4. risk_flag MUST be a real-world risk — no technical or price language:
+       BANNED: "breaks below a moving average", "RSI overbought", "momentum fades",
+               "technical breakdown", "bearish signal"
+       REQUIRED: "a slowdown in enterprise IT spending", "a narrative shift if earnings disappoint",
+                 "macro rate pressure compressing growth multiples", "consumer pullback in discretionary"
+  5. Each of primary_driver, risk_flag, action_reason MUST make a completely different point.
+     No sentence may appear in two fields. No paraphrasing of the same idea across fields.
+  6. Max 2 sentences per field. No padding, no filler phrases.
+  7. When snapshot.data_quality_score < 0.4 → action = INSUFFICIENT_DATA, conviction = 0.0.
+  8. action ∈ "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA".
+  9. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0].
+  10. conviction_level ∈ "HIGH" | "MEDIUM" | "LOW":
+      HIGH → conviction ≥ 0.65, MEDIUM → 0.35–0.64, LOW → < 0.35.
+  11. You interpret the provided data only. NEVER invent headlines, estimate P/E, or
+      infer numbers not present in the inputs.
 
 FIELD DEFINITIONS:
-  primary_driver  — the single most important reason the trade makes sense
-                    right now, in plain English. No jargon.
-  risk_flag       — the single biggest thing that could break the thesis.
-                    Must be specific (not "market risk"). Max 2 sentences.
-  action_reason   — plain English: why BUY/HOLD/REDUCE follows from the
-                    evidence. Must differ from primary_driver and risk_flag.
+  primary_driver  — the ONE specific demand driver or structural moat that makes
+                    this ticker actionable NOW. Name the industry catalyst explicitly.
+                    Ticker-specific, not a market platitude. Max 2 sentences.
+  risk_flag       — the one real-world event or macro shift that would invalidate
+                    the thesis. Concrete and specific, not generic. No technical signals.
+                    Max 2 sentences.
+  action_reason   — why BUY/HOLD/REDUCE follows from the evidence, and what makes
+                    this ticker stand out versus alternatives at this moment. Must differ
+                    entirely from primary_driver. Max 2 sentences.
 
 OUTPUT — return ONLY this JSON (no fences, no prose before/after):
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
   "conviction_level": "HIGH" | "MEDIUM" | "LOW",
-  "primary_driver": "single most important reason — plain English",
-  "risk_flag": "biggest risk that could break the thesis",
-  "action_reason": "why this action follows — plain English, no jargon",
+  "primary_driver": "specific demand driver or structural advantage — ticker-specific, named catalyst",
+  "risk_flag": "real-world risk that would break the thesis — no technical indicators",
+  "action_reason": "why this action and why this ticker vs alternatives — distinct from primary_driver",
   "summary": "one plain-English sentence",
   "thesis": "2-sentence expanded rationale",
   "plain_language_explanation": "what is going right and what is concerning",
-  "drivers": ["plain-English driver 1", "plain-English driver 2"],
-  "risks": ["plain-English risk 1"],
+  "drivers": ["specific named driver 1", "specific named driver 2"],
+  "risks": ["real-world risk 1"],
   "confidence": 0.00,
   "sentiment": "optional short label"
 }
 """
 
 ANALYST_STRICT_RETRY_APPENDIX = """
-RETRY MODE (STRICT):
-  - Reject boilerplate. Write like an analyst explaining to a smart client.
-  - FORBIDDEN indicator language: SMA, EMA, RSI, momentum score, trend_regime,
-    relative_strength, MACD. Replace with what they mean in plain English.
-  - Each of primary_driver, risk_flag, action_reason MUST say something different.
-  - Explain: 1) what is going right, 2) what is concerning,
-    3) why BUY/HOLD/REDUCE, 4) what would break this thesis.
+RETRY MODE (STRICT) — your previous response was rejected. Common failure reasons:
+  - Used banned price/indicator language: "trending higher", "above moving averages",
+    "momentum is positive", SMA, RSI, "relative strength", "technical setup", "bearish technicals"
+  - primary_driver was generic: "strong fundamentals", "positive outlook", "good setup",
+    "favorable conditions" — these are not specific demand drivers
+  - risk_flag referenced technical signals instead of real-world business risks
+  - action_reason repeated or paraphrased primary_driver content
+  - Multiple fields said essentially the same thing in different words
+
+REQUIRED corrections:
+  primary_driver: name the SPECIFIC industry catalyst, demand driver, or structural moat
+                  that makes THIS ticker actionable — not a truism, not market commentary
+  risk_flag: name a CONCRETE real-world risk: demand slowdown in a named market, narrative
+             shift if a specific event occurs, macro rate pressure on a specific multiple,
+             competitor threat — NEVER mention moving averages or any technical indicator
+  action_reason: explain specifically why BUY/HOLD/REDUCE vs doing nothing or buying
+                 a different ticker in the same sector — must be a fresh point
+
+Write like an analyst who will be asked "so what makes THIS one different?"
 """
 
 
@@ -196,14 +222,12 @@ def build_analyst_inputs(
             "missing_fields": snapshot.missing_fields,
         },
         "features": {
-            "trend_regime": feature_set.trend_regime,
+            "trend_direction": feature_set.trend_regime,
             "momentum_score": feature_set.momentum_score,
             "volatility_regime": feature_set.volatility_regime,
-            "relative_strength_30d": feature_set.relative_strength_30d,
-            "relative_strength_label": feature_set.relative_strength_label,
+            "vs_benchmark_30d": feature_set.relative_strength_30d,
+            "vs_benchmark_label": feature_set.relative_strength_label,
             "benchmark_symbol": feature_set.benchmark_symbol,
-            "sma20": feature_set.sma20,
-            "sma50": feature_set.sma50,
         },
     }
 
@@ -327,18 +351,51 @@ def insufficient_data_verdict(
 
 def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     """Heuristic guardrail for pseudo-analysis that is mostly templated."""
-    text = " ".join(
-        [verdict.summary, verdict.thesis, verdict.reasoning]
-    ).lower()
+    text = " ".join([
+        verdict.summary, verdict.thesis, verdict.reasoning,
+        verdict.primary_driver, verdict.risk_flag, verdict.action_reason,
+    ]).lower()
     if not text:
         return True
-    markers = (
+    # Any single hard-banned phrase triggers rejection.
+    # Use explicit indicator tokens (sma20/sma50/rsi/macd) rather than
+    # partial phrases like "above sma" which can false-positive on
+    # legitimate text such as "above small-cap peers".
+    hard_banned = (
+        "trending higher",
+        "above moving averages",
+        "momentum is positive",
+        "sma20",
+        "sma50",
+        "sma 20",
+        "sma 50",
+        "rsi",
+        "macd",
+        "trending upward",
+        "trending downward",
+        "bullish technicals",
+        "bearish technicals",
+        "technical setup",
+        "breaks below a moving average",
+        "above the moving average",
+    )
+    for phrase in hard_banned:
+        if phrase in text:
+            return True
+    # Two or more soft-banned phrases → reject when no real thesis shape
+    soft_banned = (
         "30d return",
         "trend regime",
         "relative strength",
         "watchlist-style view",
+        "strong fundamentals support",
+        "positive outlook",
+        "constructive setup",
+        "price weakness",
+        "favorable conditions",
+        "good setup",
     )
-    marker_hits = sum(1 for m in markers if m in text)
+    marker_hits = sum(1 for m in soft_banned if m in text)
     has_thesis_shape = ("because" in text) or ("risk" in text) or ("invalidate" in text)
     return marker_hits >= 2 and not has_thesis_shape
 

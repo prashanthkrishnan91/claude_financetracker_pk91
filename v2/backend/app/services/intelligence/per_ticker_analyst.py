@@ -104,12 +104,13 @@ class AnalystVerdict:
 ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst. Write HIGH-SIGNAL, LOW-TOKEN reasoning for ONE ticker.
 
 HARD RULES — auto-rejected if violated:
-1. FORBIDDEN words: SMA, RSI, MACD, moving average, momentum, trend, trending, price above, outperforming broad market.
-2. Use behavior-based language: who is buying/selling and why, what structural edge exists, what named catalyst drives the view.
-3. Each field must make a DIFFERENT point — no repeated ideas.
-4. Each field ≤ 18 words. No paragraphs.
-5. reasoning_schema_version must be "compact_v1".
-6. If data_quality_score < 0.4: action=INSUFFICIENT_DATA, conviction=0.0, use fallback phrases below.
+1. HARD-BANNED (always rejected): SMA, RSI, MACD, moving average, Bollinger, support level, resistance level, price above, uptrend, downtrend.
+2. SOFT words allowed ONLY in business context: "revenue trend" OK, "price trend" NOT OK; "demand momentum" OK, "momentum is positive" NOT OK.
+3. Use behavior-based language: who is buying/selling and why, what structural edge exists, what named catalyst drives the view.
+4. Each field must make a DIFFERENT point — no repeated ideas. No semicolons.
+5. Each field ≤ 14 words. One idea per field.
+6. reasoning_schema_version must be "compact_v1".
+7. If data_quality_score < 0.4: action=INSUFFICIENT_DATA, conviction=0.0, use fallback phrases below.
 
 INSUFFICIENT DATA fallback phrases (use verbatim when data is thin):
   why: "No clear edge vs alternatives."
@@ -122,10 +123,10 @@ Return ONLY valid JSON:
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
   "conviction_level": "HIGH" | "MEDIUM" | "LOW",
-  "why": "core demand driver or structural edge — named catalyst, ≤18 words",
-  "risk": "real-world risk that breaks thesis — business/macro/regulatory, ≤18 words",
-  "do": "what to do now — sizing or hold logic, distinct from why, ≤18 words",
-  "alt_view": "why this vs similar alternatives — concrete differentiation, ≤18 words",
+  "why": "core demand driver or structural edge — named catalyst, ≤14 words",
+  "risk": "real-world risk that breaks thesis — business/macro/regulatory, ≤14 words",
+  "do": "decision only — Accumulate / Hold / Trim / Buy — no sizing or % numbers, ≤14 words",
+  "alt_view": "why this over [named peer or ETF] — e.g. 'vs MSFT: …', ≤14 words",
   "confidence": 0.00,
   "reasoning_schema_version": "compact_v1"
 }
@@ -133,10 +134,13 @@ Return ONLY valid JSON:
 
 ANALYST_STRICT_RETRY_APPENDIX = """
 RETRY MODE — previous response rejected. Fix ALL of:
-  - No forbidden words (SMA / RSI / MACD / moving average / momentum / trend / trending)
-  - Each field ≤ 18 words, no paragraphs
+  - Remove hard-banned: SMA / RSI / MACD / moving average / Bollinger / support level / price above / uptrend / downtrend
+  - Each field ≤ 14 words, no semicolons, one idea per field
+  - do = decision only (Accumulate / Hold / Trim / Buy), no sizing or % allocations
+  - alt_view must name a specific peer or ETF comparison
   - why / risk / do / alt_view must each make a different point
   - reasoning_schema_version must be "compact_v1"
+Return ONLY valid JSON with keys: action, conviction, conviction_level, why, risk, do, alt_view, confidence, reasoning_schema_version
 """
 
 
@@ -331,30 +335,29 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
     ]).lower()
     if not text:
         return True
-    # Any single hard-banned phrase triggers rejection.
-    # Use explicit indicator tokens (sma20/sma50/rsi/macd) rather than
-    # partial phrases like "above sma" which can false-positive on
-    # legitimate text such as "above small-cap peers".
+    # Hard-banned phrases always trigger rejection.
     hard_banned = (
-        re.compile(r"\btrending higher\b"),
-        re.compile(r"\babove moving averages\b"),
-        re.compile(r"\bmomentum is positive\b"),
+        re.compile(r"\babove moving averages?\b"),
+        re.compile(r"\bmomentum is (?:positive|negative|strong|weak)\b"),
         re.compile(r"\bsma ?20\b"),
         re.compile(r"\bsma ?50\b"),
         re.compile(r"\brsi\b"),
         re.compile(r"\bmacd\b"),
-        re.compile(r"\btrending upward\b"),
-        re.compile(r"\btrending downward\b"),
+        re.compile(r"\buptrend\b"),
+        re.compile(r"\bdowntrend\b"),
         re.compile(r"\bbullish technicals\b"),
         re.compile(r"\bbearish technicals\b"),
         re.compile(r"\btechnical setup\b"),
-        re.compile(r"\bbreaks below a moving average\b"),
+        re.compile(r"\bbreaks below (?:a )?moving average\b"),
         re.compile(r"\babove the moving average\b"),
+        re.compile(r"\bprice momentum\b"),
+        re.compile(r"\bsupport level\b"),
+        re.compile(r"\bresistance level\b"),
     )
     for pattern in hard_banned:
         if pattern.search(text):
             return True
-    # Two or more soft-banned phrases → reject when no real thesis shape
+    # Two or more template-like data field echoes → reject when no real thesis
     soft_banned = (
         "30d return",
         "trend regime",
@@ -373,17 +376,22 @@ def _looks_generic_template(verdict: AnalystVerdict) -> bool:
 
 
 _BANNED_INDICATOR_PATTERNS = (
+    # Hard-banned indicator names
     re.compile(r"\bmoving averages?\b", re.IGNORECASE),
-    re.compile(r"\bsma\d*\b", re.IGNORECASE),  # matches SMA, SMA20, SMA50 etc.
-    re.compile(r"\bmomentum\b", re.IGNORECASE),
-    re.compile(r"\btrend(?:ing)?\b", re.IGNORECASE),
+    re.compile(r"\bsma\d*\b", re.IGNORECASE),
     re.compile(r"\brsi\b", re.IGNORECASE),
-    re.compile(r"\bprice above\b", re.IGNORECASE),
-    re.compile(r"\boutperforming (?:the )?broad market\b", re.IGNORECASE),
     re.compile(r"\bmacd\b", re.IGNORECASE),
     re.compile(r"\bbollinger\b", re.IGNORECASE),
     re.compile(r"\bsupport level\b", re.IGNORECASE),
     re.compile(r"\bresistance level\b", re.IGNORECASE),
+    re.compile(r"\bprice above\b", re.IGNORECASE),
+    re.compile(r"\boutperforming (?:the )?broad market\b", re.IGNORECASE),
+    # Technical-context-specific trend/momentum (not business language)
+    re.compile(r"\buptrend\b", re.IGNORECASE),
+    re.compile(r"\bdowntrend\b", re.IGNORECASE),
+    re.compile(r"\bprice momentum\b", re.IGNORECASE),
+    re.compile(r"\bmomentum is (?:positive|negative|strong|weak)\b", re.IGNORECASE),
+    re.compile(r"\btechnical(?:ly)? (?:in a )?trend\b", re.IGNORECASE),
 )
 
 
@@ -791,7 +799,7 @@ def action_to_suggested_action(action: str) -> str:
 def format_thesis(verdict: AnalystVerdict) -> str:
     """Render a compact 4-line thesis block from the memo fields.
 
-    Compact format: WHY / RISK / ACTION / ALT VIEW — one line each.
+    Compact format: one labeled line each for WHY / RISK / ACTION / ALT VIEW.
     Falls back to a minimal single-line when memo fields are missing.
     """
     if verdict.primary_driver:
@@ -800,9 +808,9 @@ def format_thesis(verdict: AnalystVerdict) -> str:
             parts.append(f"RISK: {verdict.risk_flag.rstrip('.')}")
         if verdict.action_reason:
             parts.append(f"ACTION: {verdict.action_reason.rstrip('.')}")
-        if verdict.differentiation and verdict.differentiation != "—":
-            parts.append(f"ALT VIEW: {verdict.differentiation.rstrip('.')}")
-        return " | ".join(parts)[:400]
+        alt = verdict.differentiation or "—"
+        parts.append(f"ALT VIEW: {alt.rstrip('.')}")
+        return "\n".join(parts)[:400]
 
     preferred = verdict.reasoning.strip() or verdict.thesis.strip() or verdict.summary.strip()
     if preferred:

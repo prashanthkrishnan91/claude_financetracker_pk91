@@ -203,6 +203,7 @@ class AgentOrchestrator:
             "attempted_llm_calls": 0,
             "successful_llm_calls": 0,
             "failed_llm_calls": 0,
+            "skipped_llm_calls": 0,
             "llm_enriched_cards": 0,
             "discarded_llm_calls": 0,
             "fallback_cards": 0,
@@ -524,9 +525,8 @@ class AgentOrchestrator:
           5. Retry still empty   → deterministic fallback. Never returns {}.
         """
         if not self._llm.api_key:
-            logger.warning(
-                "LLM skipped — no anthropic_api_key (llm_skipped=True fallback_used=True)"
-            )
+            logger.warning("llm_skipped_reason stage=single_call reason=missing_api_key")
+            logger.info("fallback_trigger_reason stage=single_call reason=missing_api_key")
             self._llm_skipped = True
             self._fallback_used = True
             return _generate_deterministic_recs(context)
@@ -558,11 +558,9 @@ class AgentOrchestrator:
 
         # ── Guardrail: skip LLM when data is too thin ─────────────────────
         if completeness < 0.6:
-            logger.warning(
-                "completeness=%.2f < 0.6 — LLM skipped, using deterministic fallback "
-                "(failed_pct=%.0f%% mode=%s llm_skipped=True fallback_used=True)",
-                completeness, failed_pct * 100, mode_state.mode.value,
-            )
+            logger.warning("llm_skipped_reason stage=single_call reason=low_completeness completeness=%.2f failed_pct=%.0f%% mode=%s",
+                           completeness, failed_pct * 100, mode_state.mode.value)
+            logger.info("fallback_trigger_reason stage=single_call reason=low_completeness")
             self._llm_skipped = True
             self._fallback_used = True
             return _generate_deterministic_recs(context)
@@ -585,7 +583,7 @@ class AgentOrchestrator:
 
         async with LLM_SEMAPHORE:
             logger.info(
-                "LLM call start — model=%s tickers=%d mode=%s completeness=%.2f",
+                "llm_call_started stage=single_call model=%s tickers=%d mode=%s completeness=%.2f",
                 self._llm.model,
                 len(context.get("portfolio") or []),
                 mode_state.mode.value,
@@ -600,7 +598,8 @@ class AgentOrchestrator:
             # Retry once with a stripped prompt when the LLM returned no cards.
             if not response or not response.get("cards"):
                 logger.warning(
-                    "LLM returned no cards (model=%s completeness=%.2f) — "
+                    "llm_response_empty stage=single_call model=%s completeness=%.2f "
+                    "— "
                     "retrying with simplified prompt",
                     self._llm.model, completeness,
                 )
@@ -613,12 +612,13 @@ class AgentOrchestrator:
         # ── Final safety net: never return {} ─────────────────────────────
         if not response or not response.get("cards"):
             logger.warning(
-                "LLM empty after retry — deterministic fallback "
-                "(completeness=%.2f model=%s fallback_used=True)",
+                "llm_call_failed stage=single_call reason=empty_after_retry completeness=%.2f model=%s",
                 completeness, self._llm.model,
             )
+            logger.info("fallback_trigger_reason stage=single_call reason=empty_after_retry")
             self._fallback_used = True
             return _generate_deterministic_recs(context)
+        logger.info("llm_call_completed stage=single_call model=%s", self._llm.model)
 
         return response
 
@@ -1053,10 +1053,12 @@ class AgentOrchestrator:
             self._analyst_stage_stats["skipped_llm_reason"] = (
                 "degraded_mode" if decision is not None and decision.mode == RunMode.DEGRADED else "missing_api_key"
             )
-            logger.info("analyst_stage.fallback_used reason=synthesis_llm_unavailable")
+            self._analyst_stage_stats["skipped_llm_calls"] += 1
+            logger.info("llm_skipped_reason stage=portfolio_synthesis reason=%s", self._analyst_stage_stats["skipped_llm_reason"])
+            logger.info("fallback_trigger_reason stage=portfolio_synthesis reason=synthesis_llm_unavailable")
         else:
             self._analyst_stage_stats["attempted_llm_calls"] += 1
-            logger.info("analyst_stage.llm_request.start stage=portfolio_synthesis model=%s", self._llm.model)
+            logger.info("llm_call_started stage=portfolio_synthesis model=%s", self._llm.model)
 
         synthesis = await synthesize_portfolio(
             verdicts=verdicts,
@@ -1074,14 +1076,17 @@ class AgentOrchestrator:
                 synthesis.summary = ((synthesis.summary or "")
                                      + degraded_tag)[:800]
 
-        if tracker is not None and not synthesis.used_fallback:
-            tracker.record(kind="synthesis", model=self._llm.model)
+        if not synthesis.used_fallback:
+            if tracker is not None:
+                tracker.record(kind="synthesis", model=self._llm.model)
             self._analyst_stage_stats["successful_llm_calls"] += 1
             self._analyst_stage_stats["llm_enriched_cards"] += 1
+            logger.info("llm_call_completed stage=portfolio_synthesis model=%s", self._llm.model)
         elif llm_for_call is not None and synthesis.used_fallback:
             self._analyst_stage_stats["discarded_llm_calls"] += 1
             self._analyst_stage_stats["failed_llm_calls"] += 1
-            logger.warning("analyst_stage.llm_request.failure stage=portfolio_synthesis reason=used_fallback")
+            logger.warning("llm_call_failed stage=portfolio_synthesis reason=used_fallback")
+            logger.warning("fallback_trigger_reason stage=portfolio_synthesis reason=used_fallback")
 
         logger.info(
             "portfolio_synthesis done — bias=%s themes=%d risks=%d "
@@ -1125,21 +1130,25 @@ class AgentOrchestrator:
         decision: Optional[ModeDecision] = getattr(self, "_mode_decision", None)
         if decision is not None and decision.mode == RunMode.DEGRADED:
             self._analyst_stage_stats["skipped_llm_reason"] = "degraded_mode"
+            self._analyst_stage_stats["skipped_llm_calls"] += len(snapshots)
             verdicts = build_degraded_verdicts(snapshots, decision=decision)
             self._analyst_stage_stats["fallback_cards"] += len(verdicts)
             logger.info(
-                "analyst_stage.fallback_used reason=degraded_mode tickers=%d mode_reason=%s",
+                "llm_skipped_reason stage=per_ticker reason=degraded_mode tickers=%d mode_reason=%s",
                 len(verdicts), decision.reason,
             )
+            logger.info("fallback_trigger_reason stage=per_ticker reason=degraded_mode tickers=%d", len(verdicts))
             return verdicts
 
         if not self._llm.api_key:
             self._analyst_stage_stats["skipped_llm_reason"] = "missing_api_key"
+            self._analyst_stage_stats["skipped_llm_calls"] += len(snapshots)
             self._analyst_stage_stats["fallback_cards"] += len(snapshots)
             logger.warning(
-                "analyst_stage.fallback_used reason=no_anthropic_api_key tickers=%d",
+                "llm_skipped_reason stage=per_ticker reason=no_anthropic_api_key tickers=%d",
                 len(snapshots),
             )
+            logger.info("fallback_trigger_reason stage=per_ticker reason=no_anthropic_api_key tickers=%d", len(snapshots))
             from ..intelligence import insufficient_data_verdict
             return {
                 t: insufficient_data_verdict(t, error="no_api_key")
@@ -1612,18 +1621,23 @@ class AgentOrchestrator:
         attempted = int(self._analyst_stage_stats.get("attempted_llm_calls", 0) or 0)
         successful = int(self._analyst_stage_stats.get("successful_llm_calls", 0) or 0)
         failed = int(self._analyst_stage_stats.get("failed_llm_calls", 0) or 0)
+        skipped = int(self._analyst_stage_stats.get("skipped_llm_calls", 0) or 0)
         fallback_cards = int(self._analyst_stage_stats.get("fallback_cards", 0) or 0)
         skipped_reason = self._analyst_stage_stats.get("skipped_llm_reason")
-        if attempted > 0 and successful == 0 and failed == 0:
+        if attempted > 0 and (successful + failed) != attempted:
             logger.warning(
-                "llm_metrics_invariant_fix attempted=%d successful=%d failed=%d skipped_reason=%s",
+                "llm_metrics_invariant_fix attempted=%d successful=%d failed=%d skipped=%d skipped_reason=%s",
                 attempted,
                 successful,
                 failed,
+                skipped,
                 skipped_reason,
             )
-            self._analyst_stage_stats["failed_llm_calls"] = attempted
-            failed = attempted
+            # Repair by assigning the residual to failed calls so attempted
+            # partitions cleanly into success/failed for actual attempts.
+            repaired_failed = max(0, attempted - successful)
+            self._analyst_stage_stats["failed_llm_calls"] = repaired_failed
+            failed = repaired_failed
         if fallback_cards > 0 and failed == 0 and not skipped_reason:
             logger.warning(
                 "llm_metrics_invariant_fix fallback_cards=%d with no failed_llm_calls/skipped_reason",

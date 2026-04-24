@@ -387,6 +387,7 @@ export interface CostMetricsPayload {
   attempted_llm_calls?: number;
   successful_llm_calls?: number;
   failed_llm_calls?: number;
+  skipped_llm_calls?: number;
   llm_enriched_cards?: number;
   discarded_llm_calls?: number;
   fallback_cards?: number;

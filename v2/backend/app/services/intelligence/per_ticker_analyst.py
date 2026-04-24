@@ -312,12 +312,29 @@ async def analyze_ticker(
     Never raises. Returns an ``INSUFFICIENT_DATA`` verdict when both
     attempts yield unparseable or invalid JSON.
     """
-    # Data-quality gate: bypass the LLM entirely for the thinnest tickers.
-    # Saves tokens and guarantees the verdict shape the spec mandates.
-    if snapshot.data_quality_score < 0.25:
+    # Data-quality gate: bypass the LLM only when evidence is both very thin
+    # and structurally sparse. We avoid over-skipping when upstream price/news
+    # providers are partially degraded but there is still enough context for a
+    # useful thesis.
+    has_price = snapshot.price is not None and float(snapshot.price or 0) > 0
+    has_return_signal = any(
+        v is not None for v in (snapshot.return_1d, snapshot.return_5d, snapshot.return_30d)
+    )
+    has_news = bool((snapshot.recent_headlines or [])[:1]) or int(snapshot.news_count or 0) > 0
+    has_fundamentals = isinstance(snapshot.fundamentals, dict) and bool(snapshot.fundamentals)
+    evidence_signals = sum(1 for flag in (has_price, has_return_signal, has_news, has_fundamentals) if flag)
+    quality_skip = snapshot.data_quality_score < 0.25 and evidence_signals < 2
+    if quality_skip:
         logger.info(
-            "analyst_stage.fallback_used ticker=%s reason=data_quality_below_threshold quality=%.2f",
-            snapshot.ticker, snapshot.data_quality_score,
+            "llm_skipped_reason stage=per_ticker ticker=%s reason=data_quality_below_threshold "
+            "quality=%.2f evidence_signals=%d",
+            snapshot.ticker,
+            snapshot.data_quality_score,
+            evidence_signals,
+        )
+        logger.info(
+            "fallback_trigger_reason stage=per_ticker ticker=%s reason=data_quality_below_threshold",
+            snapshot.ticker,
         )
         return insufficient_data_verdict(
             snapshot.ticker, error="data_quality_below_threshold",
@@ -366,15 +383,19 @@ async def analyze_ticker(
             else ANALYST_SYSTEM_PROMPT
         )
         try:
-            logger.info("analyst_stage.llm_request.start ticker=%s attempt=%d", snapshot.ticker, attempt)
+            logger.info("llm_call_started stage=per_ticker ticker=%s attempt=%d", snapshot.ticker, attempt)
             raw = await _call_once(
                 system_prompt=system_prompt,
                 token_budget=token_budget,
                 call_meta=call_meta,
             )
         except Exception as exc:  # noqa: BLE001
-            logger.warning("analyst_stage.llm_request.failure ticker=%s attempt=%d err=%s",
-                           snapshot.ticker, attempt, exc)
+            logger.warning(
+                "llm_call_failed stage=per_ticker ticker=%s attempt=%d err=%s",
+                snapshot.ticker,
+                attempt,
+                exc,
+            )
             raw = {}
         last_meta = call_meta
         logger.info(
@@ -408,6 +429,11 @@ async def analyze_ticker(
         )
         verdict = validate_verdict(raw, ticker=snapshot.ticker)
         if verdict is None:
+            logger.warning(
+                "llm_response_empty stage=per_ticker ticker=%s attempt=%d reason=schema_validation_failed",
+                snapshot.ticker,
+                attempt,
+            )
             retry_reason = (
                 call_meta.get("primary_parse_error_type")
                 or call_meta.get("fallback_parse_error_type")
@@ -431,7 +457,7 @@ async def analyze_ticker(
             strict_mode = True
             continue
         logger.info(
-            "analyst_stage.llm_request.success ticker=%s attempt=%d normalized_success=%s verdict=%s",
+            "llm_call_completed stage=per_ticker ticker=%s attempt=%d normalized_success=%s verdict=%s",
             snapshot.ticker,
             attempt,
             True,
@@ -445,7 +471,7 @@ async def analyze_ticker(
         return verdict
 
     logger.warning(
-        "analyst_stage.fallback_used ticker=%s reason=%s",
+        "fallback_trigger_reason stage=per_ticker ticker=%s reason=%s",
         snapshot.ticker,
         retry_reason or "schema_validation_failed",
     )

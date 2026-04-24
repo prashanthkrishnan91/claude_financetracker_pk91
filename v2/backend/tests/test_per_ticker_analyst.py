@@ -245,6 +245,54 @@ async def test_analyze_ticker_happy_path():
 
 
 @pytest.mark.asyncio
+async def test_analyze_ticker_skips_llm_when_quality_too_low_and_sparse():
+    llm = FakeLLM([
+        {"action": "BUY", "conviction": 0.7, "confidence": 0.7}
+    ])
+    v = await analyze_ticker(
+        snapshot=_snap(
+            "AAPL",
+            data_quality_score=0.1,
+            price=None,
+            return_1d=None,
+            return_5d=None,
+            return_30d=None,
+            news_count=0,
+            recent_headlines=[],
+            fundamentals={},
+        ),
+        feature_set=_feat("AAPL"),
+        llm=llm,
+    )
+    assert v.used_fallback is True
+    assert v.llm_attempted is False
+    assert len(llm.calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_analyze_ticker_allows_llm_when_low_quality_but_has_evidence():
+    llm = FakeLLM([
+        {"action": "HOLD", "conviction": 0.2, "confidence": 0.5}
+    ])
+    v = await analyze_ticker(
+        snapshot=_snap(
+            "MSFT",
+            data_quality_score=0.2,
+            price=100.0,
+            return_5d=1.2,
+            news_count=0,
+            recent_headlines=[],
+            fundamentals={},
+        ),
+        feature_set=_feat("MSFT"),
+        llm=llm,
+    )
+    assert v.used_fallback is False
+    assert v.llm_attempted is True
+    assert len(llm.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_analyze_ticker_retries_on_invalid_and_succeeds():
     llm = FakeLLM([
         {"action": "WHATEVER"},  # invalid
@@ -287,7 +335,17 @@ async def test_analyze_ticker_falls_back_on_two_failures():
 async def test_analyze_ticker_bypasses_llm_when_quality_low():
     """Thin-data guard skips the LLM entirely."""
     llm = FakeLLM([])  # would be empty anyway — asserts no call
-    snap = _snap("NVDA", data_quality_score=0.1)
+    snap = _snap(
+        "NVDA",
+        data_quality_score=0.1,
+        price=None,
+        return_1d=None,
+        return_5d=None,
+        return_30d=None,
+        news_count=0,
+        recent_headlines=[],
+        fundamentals={},
+    )
     v = await analyze_ticker(
         snapshot=snap, feature_set=_feat("NVDA"), llm=llm,
     )

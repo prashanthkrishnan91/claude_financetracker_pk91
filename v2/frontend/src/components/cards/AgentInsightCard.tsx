@@ -73,7 +73,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
     <div
       onClick={onClick}
       className={cn(
-        "card-glass p-3 md:p-4 space-y-2 border",
+        "card-glass p-2.5 md:p-3 space-y-1.5 border",
         styles.border,
         styles.bg,
         onClick && "cursor-pointer hover:brightness-110"
@@ -106,7 +106,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       )}
 
       {/* Compact 2x2 reasoning grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
         {whyThisMatters && (
           <MemoSection
             label="WHY"
@@ -138,7 +138,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       </div>
 
       {/* Footer chips */}
-      <div className="flex flex-wrap md:flex-nowrap gap-1.5 pt-0.5">
+      <div className="flex flex-wrap md:flex-nowrap gap-1 pt-0.5">
         {card.pnl_pct != null && (
           <Chip
             label={`P&L ${formatPercent(card.pnl_pct)}`}
@@ -181,7 +181,7 @@ function MemoSection({
       : "text-text-muted";
 
   return (
-    <div className="rounded-md bg-surface-elevated/30 px-2.5 py-1.5">
+    <div className="rounded-md bg-surface-elevated/30 px-2 py-1">
       <p className={cn("text-[10px] uppercase tracking-wide font-semibold mb-0.5", labelCls)}>
         {label}
       </p>

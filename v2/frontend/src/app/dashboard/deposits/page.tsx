@@ -57,55 +57,98 @@ function buildCutBullet(rec: DepositRecommendation, rank: number, total: number)
   return toCompactLine(`${rec.symbol} ranked above alternatives on conviction, confidence, and diversification fit.`, 12);
 }
 
-function executionGuidance(rec: DepositRecommendation): string {
-  const category = (rec.category || "").toLowerCase();
-  const confidence = rec.confidence ?? 0;
-  const conviction = (rec.conviction_level || "").toUpperCase();
-  const volatile = category === "crypto" || category === "ipo";
-
-  if (volatile && confidence < 70) return "wait for pullback";
-  if (volatile) return "accumulate gradually";
-  if (conviction === "HIGH" && confidence >= 78) return "buy now";
-  if (confidence >= 65) return "accumulate gradually";
-  return "avoid chasing";
-}
-
 function normalizeSignal(value: number | null | undefined): number {
   if (value == null || Number.isNaN(value)) return 0;
   return value > 1 ? value / 100 : value;
 }
 
-function getEntryStrategy(rec: DepositRecommendation): { label: string; detail?: string; tone: string } {
+type EnrichedAllocation = DepositRecommendation & {
+  why_selected: string;
+  execution_plan: string;
+};
+
+function getScoreValue(rec: DepositRecommendation): number {
+  return rec.score ?? rec.conviction_score ?? normalizeSignal(rec.confidence);
+}
+
+function deriveWhySelected(rec: DepositRecommendation, sorted: DepositRecommendation[]): string {
+  const scoreRank = sorted.findIndex((candidate) => candidate.symbol === rec.symbol);
+  const topScore = getScoreValue(sorted[0] ?? rec);
+  const ownScore = getScoreValue(rec);
+  const scoreGap = topScore - ownScore;
   const momentum = normalizeSignal(rec.features?.momentum);
   const volatility = normalizeSignal(rec.features?.volatility);
-  const confidence = normalizeSignal(rec.confidence);
+  const category = (rec.category || "").toLowerCase();
 
-  if (momentum > 0.7 && confidence > 0.7) {
-    return {
-      label: "Buy now",
-      detail: "Momentum setup",
-      tone: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
-    };
+  if (scoreRank === 0) {
+    return "highest blended score and conviction among current BUY candidates.";
   }
-  if (volatility > 0.7) {
-    return {
-      label: "Accumulate on dips",
-      detail: "High volatility",
-      tone: "bg-amber-500/15 text-amber-300 border-amber-500/30",
-    };
+  if (momentum > 0.65 && scoreGap <= 0.1) {
+    return "stronger trend signal than similarly scored alternatives.";
   }
-  if (confidence > 0.6) {
-    return {
-      label: "Scale in",
-      detail: "Build gradually",
-      tone: "bg-cyan-500/15 text-cyan-300 border-cyan-500/30",
-    };
+  if (volatility > 0 && volatility < 0.4) {
+    return "lower volatility profile than peers with similar conviction.";
   }
-  return {
-    label: "Starter position",
-    detail: "Start small",
-    tone: "bg-slate-500/15 text-slate-300 border-slate-500/30",
-  };
+  if (category === "etf") {
+    return "improves diversification versus single-name BUY options.";
+  }
+  return buildCutBullet(rec, Math.max(scoreRank, 0), sorted.length).replace(`${rec.symbol} `, "");
+}
+
+function deriveExecutionPlan(rec: DepositRecommendation): string {
+  const momentum = normalizeSignal(rec.features?.momentum);
+  const volatility = normalizeSignal(rec.features?.volatility);
+  const score = getScoreValue(rec);
+  const category = (rec.category || "").toLowerCase();
+  const isSpeculative = category === "speculative" || category === "crypto" || category === "ipo";
+
+  if (momentum > 0.9) return "Wait for pullback";
+  if (volatility >= 0.7) return "Accumulate gradually";
+  if (isSpeculative) return "Stage entry, avoid full allocation";
+  if (momentum >= 0.65 && score >= 0.65) return "Buy now or small pullbacks";
+  return "Accumulate gradually";
+}
+
+function buildDeploymentRisks(allocations: EnrichedAllocation[]): string[] {
+  if (allocations.length === 0) return [];
+  const withWeight = allocations.map((rec) => ({
+    ...rec,
+    weight: rec.after_weight ?? rec.target_weight ?? 0,
+  }));
+  const totalWeight = withWeight.reduce((sum, rec) => sum + rec.weight, 0) || 1;
+  const topTwoPct =
+    withWeight
+      .map((rec) => rec.weight)
+      .sort((a, b) => b - a)
+      .slice(0, 2)
+      .reduce((sum, value) => sum + value, 0);
+  const speculativePct = withWeight
+    .filter((rec) => {
+      const category = (rec.category || "").toLowerCase();
+      return category === "speculative" || category === "crypto" || category === "ipo";
+    })
+    .reduce((sum, rec) => sum + rec.weight, 0);
+  const aiThemePct = withWeight
+    .filter((rec) => `${rec.category || ""} ${rec.rationale || ""} ${rec.why || ""}`.match(/\b(ai|theme)\b/i))
+    .reduce((sum, rec) => sum + rec.weight, 0);
+  const highVolPct = withWeight
+    .filter((rec) => normalizeSignal(rec.features?.volatility) >= 0.7)
+    .reduce((sum, rec) => sum + rec.weight, 0);
+
+  const risks: string[] = [];
+  if (aiThemePct / totalWeight > 0.5) {
+    risks.push(`AI/theme concentration is ${(aiThemePct / totalWeight * 100).toFixed(0)}% of deployed weight.`);
+  }
+  if (topTwoPct > 60) {
+    risks.push(`Top 2 positions combine for ${topTwoPct.toFixed(0)}% of post-deploy exposure.`);
+  }
+  if (speculativePct / totalWeight > 0.3) {
+    risks.push(`Speculative exposure is ${(speculativePct / totalWeight * 100).toFixed(0)}%, above the 30% guardrail.`);
+  }
+  if (risks.length < 3 && highVolPct / totalWeight > 0.4) {
+    risks.push(`High-volatility names account for ${(highVolPct / totalWeight * 100).toFixed(0)}% of this deployment.`);
+  }
+  return risks.slice(0, 3);
 }
 
 export default function DepositsPage() {
@@ -202,6 +245,13 @@ export default function DepositsPage() {
 function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
   const { plan, recommendations, summary, trims, notes, warning, explanation, exclusions } = deployPlan;
   const allocs = recommendations ?? [];
+  const rankedAllocs = [...allocs].sort((a, b) => getScoreValue(b) - getScoreValue(a));
+  const enrichedAllocs: EnrichedAllocation[] = rankedAllocs.map((rec) => ({
+    ...rec,
+    why_selected: deriveWhySelected(rec, rankedAllocs),
+    execution_plan: deriveExecutionPlan(rec),
+  }));
+  const deployment_risks = buildDeploymentRisks(enrichedAllocs);
 
   return (
     <div className="space-y-4">
@@ -235,9 +285,9 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         </div>
       ) : (
         <>
-          <WhyMadeCutSection allocations={allocs} />
-          <ExecutionPlanSection allocations={allocs} />
-          <TopAllocationTable allocations={allocs} />
+          <WhyMadeCutSection allocations={enrichedAllocs} />
+          <DeploymentRisksSection risks={deployment_risks} />
+          <TopAllocationTable allocations={enrichedAllocs} />
         </>
       )}
 
@@ -329,9 +379,9 @@ function RecommendedDeploymentCard({
   );
 }
 
-function TopAllocationTable({ allocations }: { allocations: DepositRecommendation[] }) {
+function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[] }) {
   return (
-    <div className="card-glass overflow-hidden">
+    <div className="card-glass overflow-hidden border border-border/80">
       <div className="px-4 py-3 border-b border-border">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
           Top allocation
@@ -341,14 +391,13 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
           <div className="col-span-2">Ticker</div>
-          <div className="col-span-3">Entry Strategy</div>
+          <div className="col-span-3">How to Buy</div>
           <div className="col-span-2 text-right">Amount</div>
           <div className="col-span-1 text-right">Current</div>
           <div className="col-span-1 text-right">After</div>
           <div className="col-span-3">Why</div>
         </div>
         {allocations.map((rec) => {
-          const entry = getEntryStrategy(rec);
           return (
             <div
               key={rec.symbol}
@@ -357,19 +406,8 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
               <div className="col-span-4 sm:col-span-2 font-mono font-bold text-text-primary">
                 {rec.symbol}
               </div>
-              <div className="col-span-8 sm:col-span-3">
-                <span
-                  title={entry.detail}
-                  className={cn(
-                    "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-bold",
-                    entry.tone
-                  )}
-                >
-                  {entry.label}
-                </span>
-                {entry.detail && (
-                  <p className="text-[10px] text-text-muted mt-0.5">{entry.detail}</p>
-                )}
+              <div className="col-span-8 sm:col-span-3 text-xs text-text-secondary">
+                {rec.execution_plan}
               </div>
               <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
                 {formatCurrency(rec.amount)}
@@ -381,7 +419,7 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
                 {(rec.after_weight ?? 0).toFixed(1)}%
               </div>
               <div className="col-span-12 sm:col-span-3 text-xs text-text-secondary leading-snug">
-                {toCompactLine(rec.why || rec.rationale, 14)}
+                {toCompactLine(rec.why_selected || rec.why || rec.rationale, 14)}
               </div>
             </div>
           );
@@ -391,17 +429,20 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
   );
 }
 
-function WhyMadeCutSection({ allocations }: { allocations: DepositRecommendation[] }) {
+function WhyMadeCutSection({ allocations }: { allocations: EnrichedAllocation[] }) {
+  const visible = allocations.filter((rec) => !!rec.why_selected);
+  if (visible.length === 0) return null;
+
   return (
-    <div className="card-glass p-4 space-y-2">
+    <div className="card-glass p-4 space-y-2 border border-border/80">
       <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
         Why these made the cut
       </p>
       <ul className="space-y-1">
-        {allocations.map((rec, idx) => (
+        {visible.map((rec, idx) => (
           <li key={`${rec.symbol}-cut`} className="text-xs text-text-secondary leading-snug">
             <span className="font-mono font-semibold text-text-primary mr-1">{rec.symbol}:</span>
-            {buildCutBullet(rec, idx, allocations.length)}
+            {toCompactLine(rec.why_selected, 14) || buildCutBullet(rec, idx, visible.length)}
           </li>
         ))}
       </ul>
@@ -409,23 +450,32 @@ function WhyMadeCutSection({ allocations }: { allocations: DepositRecommendation
   );
 }
 
-function ExecutionPlanSection({ allocations }: { allocations: DepositRecommendation[] }) {
-  return (
-    <div className="card-glass p-4 space-y-2">
-      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-        Execution plan
-      </p>
-      <div className="space-y-1.5">
-        {allocations.map((rec) => (
-          <p key={`${rec.symbol}-exec`} className="text-xs text-text-secondary">
-            <span className="font-mono font-semibold text-text-primary">{rec.symbol}</span>
-            {" — "}
-            <span className="uppercase tracking-wide text-accent font-semibold text-[10px]">
-              {executionGuidance(rec)}
-            </span>
-          </p>
-        ))}
+function DeploymentRisksSection({ risks }: { risks: string[] }) {
+  if (risks.length === 0) {
+    return (
+      <div className="card-glass p-4 border border-border/80">
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          Deployment risks
+        </p>
+        <p className="text-xs text-text-secondary mt-2">
+          No immediate deployment concentration flags.
+        </p>
       </div>
+    );
+  }
+
+  return (
+    <div className="card-glass p-4 space-y-2 border border-border/80">
+      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+        Deployment risks
+      </p>
+      <ul className="space-y-1.5">
+        {risks.map((risk) => (
+          <li key={risk} className="text-xs text-yellow-300 leading-snug">
+            • {risk}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

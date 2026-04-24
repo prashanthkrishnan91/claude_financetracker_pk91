@@ -17,6 +17,10 @@ from ..services.allocation_engine import (
     AllocationPlan,
     Holding,
     InsightIn,
+    _current_weight,
+    _eligibility_reason,
+    _get_category,
+    _portfolio_total,
     build_allocation_plan,
 )
 from ..services.recommendation_engine import RecommendationService
@@ -24,26 +28,28 @@ from ..services.recommendation_engine import RecommendationService
 router = APIRouter(prefix="/allocation", tags=["allocation"])
 logger = logging.getLogger(__name__)
 
-_ACTION_ALIASES = {
-    "INITIATE": "INITIATE_OR_ADD",
-    "ADD": "INITIATE_OR_ADD",
-    "BUY": "INITIATE_OR_ADD",
-    "ADD_ON_PULLBACK": "ADD_ON_PULLBACKS",
-}
-
-
-def _normalize_action_enum(raw_action: Any) -> str:
-    """Return a strict uppercase underscore action enum for Deploy payloads."""
-    raw = str(raw_action or "HOLD").strip().upper()
+def _format_action_label(raw_action: Any) -> str:
+    raw = str(raw_action or "").strip()
     if not raw:
-        return "HOLD"
-    # Safety hardening: drop score pollution e.g. "INITIATE OR ADD 4".
-    token = raw.split(" ")[0]
-    token = token.replace("-", "_")
-    token = "".join(ch for ch in token if ch.isalpha() or ch == "_")
-    if not token:
-        return "HOLD"
-    return _ACTION_ALIASES.get(token, token)
+        return "—"
+
+    cleaned = raw
+    while cleaned and cleaned[-1].isdigit():
+        cleaned = cleaned[:-1].rstrip()
+    normalized = cleaned.upper().replace(" ", "_")
+    labels = {
+        "INITIATE_OR_ADD": "Initiate or Add",
+        "ADD_ON_PULLBACKS": "Add on Pullbacks",
+        "ACCUMULATE": "Accumulate",
+        "ACCUMULATE_GRADUALLY": "Accumulate Gradually",
+        "INITIATE_HALF": "Initiate Half",
+        "INITIATE_HALF_NOW": "Initiate Half Now",
+        "BUY": "Buy",
+        "BUY_NOW": "Buy Now",
+        "TRIM": "Trim",
+        "HOLD": "Hold",
+    }
+    return labels.get(normalized, cleaned)
 
 
 def _make_price_service():
@@ -103,11 +109,11 @@ def _card_to_insight(card: Any) -> InsightIn:
     (analyst_action, analyst_conviction, analyst_confidence,
      analysis_source, reasoning_schema_version, …).
     """
-    action = _normalize_action_enum(
+    action = str(
         getattr(card, "analyst_action", None)
         or getattr(card, "action", None)
         or "HOLD"
-    )
+    ).strip().upper()
 
     conviction_level = (getattr(card, "conviction_level", None) or "").upper() or None
     conviction_score = (
@@ -156,7 +162,7 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
         {
             "ticker": a.ticker,
             "symbol": a.ticker,                 # alias for existing Deploy UI
-            "action": _normalize_action_enum(a.action),
+            "action": a.action,
             "amount": a.amount,
             "current_weight": a.current_weight,
             "after_weight": a.after_weight,
@@ -243,10 +249,49 @@ async def get_allocation_plan(
     except Exception:
         targets = {}
 
+    holdings_by_ticker = {h.ticker.upper(): h for h in holdings if h.ticker}
+    portfolio_total = _portfolio_total(holdings)
+    eligible_before_allocation = 0
+    for ins in insights:
+        tkr = (ins.ticker or "").upper()
+        holding = holdings_by_ticker.get(tkr)
+        category = _get_category(tkr, ins, holding)
+        current_weight = _current_weight(
+            holding.market_value if holding else 0.0,
+            portfolio_total,
+        )
+        target_weight = targets.get(tkr, 0.0)
+        if _eligibility_reason(
+            ins,
+            current_weight=current_weight,
+            target_weight=target_weight,
+            category=category,
+        ) is None:
+            eligible_before_allocation += 1
+    logger.info("allocation: eligible candidates before allocation=%d", eligible_before_allocation)
+
     plan = build_allocation_plan(
         cash_to_invest=cash_to_invest,
         holdings=holdings,
         insights=insights,
         target_weights=targets,
     )
+    cards_by_ticker = {str(getattr(c, "ticker", "")).upper(): c for c in cards}
+    for exclusion in plan.exclusions[:5]:
+        card = cards_by_ticker.get(exclusion.ticker.upper())
+        raw_action = (
+            getattr(card, "analyst_action", None)
+            or getattr(card, "action", None)
+            or None
+        ) if card else None
+        logger.info(
+            "allocation: rejected ticker=%s reason=%s raw_action=%s display_action=%s confidence=%s data_quality=%s analysis_freshness=%s",
+            exclusion.ticker,
+            exclusion.reason,
+            raw_action,
+            _format_action_label(raw_action),
+            getattr(card, "analyst_confidence", None) if card else None,
+            getattr(card, "data_quality_label", None) if card else None,
+            getattr(card, "analysis_source", None) if card else None,
+        )
     return _plan_to_dict(plan)

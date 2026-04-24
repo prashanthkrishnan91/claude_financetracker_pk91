@@ -24,22 +24,21 @@ const ACTION_LABELS: Record<string, string> = {
   INITIATE_OR_ADD: "Initiate or Add",
   ADD_ON_PULLBACKS: "Add on Pullbacks",
   ACCUMULATE: "Accumulate",
+  ACCUMULATE_GRADUALLY: "Accumulate Gradually",
   INITIATE_HALF: "Initiate Half",
+  INITIATE_HALF_NOW: "Initiate Half Now",
+  BUY: "Buy",
+  BUY_NOW: "Buy Now",
   TRIM: "Trim",
   HOLD: "Hold",
 };
 
-function normalizeDeployAction(action?: string | null): string {
-  const raw = (action ?? "").toUpperCase().trim();
-  if (!raw) return "HOLD";
-  const safeToken = raw.split(" ")[0] ?? raw;
-  const underscored = safeToken.replace(/-/g, "_").replace(/[^A-Z_]/g, "");
-  return underscored || "HOLD";
-}
+function formatActionLabel(rawAction: string | null | undefined): string {
+  if (!rawAction) return "—";
 
-function actionLabel(action?: string | null): string {
-  const normalized = normalizeDeployAction(action);
-  return ACTION_LABELS[normalized] ?? normalized;
+  const cleaned = rawAction.replace(/\s+\d+$/, "").trim();
+  const normalized = cleaned.toUpperCase().replace(/\s+/g, "_");
+  return ACTION_LABELS[normalized] ?? cleaned;
 }
 
 function cleanActionText(text?: string | null): string {
@@ -340,7 +339,7 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
             </div>
             <div className="col-span-2 sm:col-span-1">
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 font-bold">
-                {actionLabel(rec.action)}
+                {formatActionLabel(rec.action)}
               </span>
             </div>
             <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">

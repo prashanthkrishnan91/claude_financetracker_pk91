@@ -20,6 +20,27 @@ import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 
 const MAX_REASON_WORDS = 12;
+const ACTION_LABELS: Record<string, string> = {
+  INITIATE_OR_ADD: "Initiate or Add",
+  ADD_ON_PULLBACKS: "Add on Pullbacks",
+  ACCUMULATE: "Accumulate",
+  INITIATE_HALF: "Initiate Half",
+  TRIM: "Trim",
+  HOLD: "Hold",
+};
+
+function normalizeDeployAction(action?: string | null): string {
+  const raw = (action ?? "").toUpperCase().trim();
+  if (!raw) return "HOLD";
+  const safeToken = raw.split(" ")[0] ?? raw;
+  const underscored = safeToken.replace(/-/g, "_").replace(/[^A-Z_]/g, "");
+  return underscored || "HOLD";
+}
+
+function actionLabel(action?: string | null): string {
+  const normalized = normalizeDeployAction(action);
+  return ACTION_LABELS[normalized] ?? normalized;
+}
 
 function cleanActionText(text?: string | null): string {
   if (!text) return "";
@@ -318,8 +339,8 @@ function TopAllocationTable({ allocations }: { allocations: DepositRecommendatio
               {rec.symbol}
             </div>
             <div className="col-span-2 sm:col-span-1">
-              <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 font-bold uppercase">
-                {cleanActionText(rec.do) || rec.action}
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-green-500/10 text-green-400 font-bold">
+                {actionLabel(rec.action)}
               </span>
             </div>
             <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
@@ -439,7 +460,7 @@ function AdvancedDetails({ allocations }: { allocations: DepositRecommendation[]
               <div className="flex items-center justify-between text-sm">
                 <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-elevated text-text-muted uppercase">
-                  {rec.conviction_level ?? "—"} · conf {rec.confidence.toFixed(0)}%
+                  {rec.conviction_level ?? "—"}
                 </span>
               </div>
               {rec.why && <DeployMemo label="WHY" text={rec.why} tone="positive" />}

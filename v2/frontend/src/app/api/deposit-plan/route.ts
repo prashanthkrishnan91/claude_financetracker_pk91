@@ -14,6 +14,7 @@ type AllocationItem = {
   ticker: string;
   symbol?: string;
   action: string;
+  execution_style?: string | null;
   amount: number;
   current_weight: number;
   after_weight: number;
@@ -143,6 +144,7 @@ export async function GET(req: Request) {
     why: a.why ?? null,
     risk: a.risk ?? null,
     do: a.do ?? null,
+    execution_style: a.execution_style ?? null,
     alt_view: a.alt_view ?? null,
     category: a.category ?? null,
   }));

@@ -24,6 +24,27 @@ from ..services.recommendation_engine import RecommendationService
 router = APIRouter(prefix="/allocation", tags=["allocation"])
 logger = logging.getLogger(__name__)
 
+_ACTION_ALIASES = {
+    "INITIATE": "INITIATE_OR_ADD",
+    "ADD": "INITIATE_OR_ADD",
+    "BUY": "INITIATE_OR_ADD",
+    "ADD_ON_PULLBACK": "ADD_ON_PULLBACKS",
+}
+
+
+def _normalize_action_enum(raw_action: Any) -> str:
+    """Return a strict uppercase underscore action enum for Deploy payloads."""
+    raw = str(raw_action or "HOLD").strip().upper()
+    if not raw:
+        return "HOLD"
+    # Safety hardening: drop score pollution e.g. "INITIATE OR ADD 4".
+    token = raw.split(" ")[0]
+    token = token.replace("-", "_")
+    token = "".join(ch for ch in token if ch.isalpha() or ch == "_")
+    if not token:
+        return "HOLD"
+    return _ACTION_ALIASES.get(token, token)
+
 
 def _make_price_service():
     from ..config import get_settings
@@ -82,11 +103,11 @@ def _card_to_insight(card: Any) -> InsightIn:
     (analyst_action, analyst_conviction, analyst_confidence,
      analysis_source, reasoning_schema_version, …).
     """
-    action = (
+    action = _normalize_action_enum(
         getattr(card, "analyst_action", None)
         or getattr(card, "action", None)
         or "HOLD"
-    ).upper()
+    )
 
     conviction_level = (getattr(card, "conviction_level", None) or "").upper() or None
     conviction_score = (
@@ -135,7 +156,7 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
         {
             "ticker": a.ticker,
             "symbol": a.ticker,                 # alias for existing Deploy UI
-            "action": a.action,
+            "action": _normalize_action_enum(a.action),
             "amount": a.amount,
             "current_weight": a.current_weight,
             "after_weight": a.after_weight,
@@ -148,6 +169,7 @@ def _plan_to_dict(plan: AllocationPlan, *, strategy_mode: str = "allocation_engi
             "why": a.why,
             "risk": a.risk,
             "do": a.do,
+            "execution_style": a.do,
             "alt_view": a.alt_view,
             "category": a.category,
         }

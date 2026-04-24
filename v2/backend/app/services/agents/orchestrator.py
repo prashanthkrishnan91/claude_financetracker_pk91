@@ -1968,15 +1968,15 @@ def _deterministic_thesis(
     cards ever share identical text — even when all tickers get HOLD.
     """
     trend_phrases = {
-        "up":   f"{ticker} is trending upward",
-        "down": f"{ticker} has shown recent price weakness",
-        "flat": f"{ticker} is trading in a flat range",
+        "up":   f"Buyers have been consistent in {ticker}",
+        "down": f"Sellers have been in control of {ticker}",
+        "flat": f"{ticker} is showing no strong directional conviction from either side",
     }
-    s1_base = trend_phrases.get(trend, f"{ticker} trend is inconclusive")
+    s1_base = trend_phrases.get(trend, f"{ticker} direction is unclear from available data")
     sentiment_adj = {
-        "bullish": "with positive market sentiment",
-        "bearish": "against cautious market sentiment",
-        "neutral": "with neutral market conditions",
+        "bullish": "and broader sentiment is supportive",
+        "bearish": "while broader sentiment remains cautious",
+        "neutral": "with mixed broader sentiment",
     }
     s1 = f"{s1_base} {sentiment_adj.get(sentiment, '')}".strip() + "."
 
@@ -1999,12 +1999,12 @@ def _deterministic_thesis(
 
     if action == "BUY" and category == "Crypto":
         s2 = (
-            f"Trend signals support cautious accumulation ({gap_note}) — "
+            f"Demand signals support cautious accumulation ({gap_note}) — "
             "low data confidence; size conservatively."
         )
     elif action == "BUY":
         s2 = (
-            f"Upward trend suggests monitored accumulation ({gap_note}) — "
+            f"Consistent buyer interest supports monitored accumulation ({gap_note}) — "
             "verify with fresh data before increasing position."
         )
     elif fs is not None and fs < -0.2:

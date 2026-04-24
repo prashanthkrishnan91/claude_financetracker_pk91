@@ -353,6 +353,11 @@ export interface InsightCardData {
   plain_language_explanation?: string | null;
   fallback_flags?: string[] | null;
   analysis_source?: "live_llm" | "cached_run" | "deterministic_fallback" | null;
+  // Hedge-fund memo fields (Phase 7)
+  conviction_level?: "HIGH" | "MEDIUM" | "LOW" | null;
+  primary_driver?: string | null;
+  risk_flag?: string | null;
+  action_reason?: string | null;
 }
 
 export interface AgentRunQueued {

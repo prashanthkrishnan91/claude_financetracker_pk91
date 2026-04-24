@@ -38,6 +38,9 @@ INSUFFICIENT_DATA_VERDICT_MARKER = "INSUFFICIENT_DATA"
 ANALYST_GENERATION_VERSION = "v2_strict_reasoning"
 
 
+CONVICTION_LEVELS = {"HIGH", "MEDIUM", "LOW"}
+
+
 @dataclass
 class AnalystVerdict:
     """Strictly-validated per-ticker analyst output.
@@ -46,6 +49,10 @@ class AnalystVerdict:
     * ``conviction`` ∈ [0.0, 1.0]. Zero when ``action == INSUFFICIENT_DATA``.
     * ``key_drivers`` — max 3 short bullets; ``risks`` — max 2.
     * ``confidence`` ∈ [0.0, 1.0] — self-reported analyst confidence.
+    * ``conviction_level`` — HIGH | MEDIUM | LOW categorical label.
+    * ``primary_driver`` — single most important plain-English reason.
+    * ``risk_flag`` — biggest single risk that could break the thesis.
+    * ``action_reason`` — plain-English explanation of why BUY/HOLD/TRIM.
     * ``used_fallback`` — True when the LLM response was unrecoverable and
       we synthesised an ``INSUFFICIENT_DATA`` verdict instead of raising.
     """
@@ -61,6 +68,11 @@ class AnalystVerdict:
     reasoning: str = ""
     sentiment: Optional[str] = None
     citations: list[str] = field(default_factory=list)
+    # Hedge-fund style memo fields
+    conviction_level: str = "LOW"
+    primary_driver: str = ""
+    risk_flag: str = ""
+    action_reason: str = ""
     used_fallback: bool = False
     llm_attempted: bool = False
     analysis_source: str = "live_llm"
@@ -82,58 +94,70 @@ class AnalystVerdict:
 # ── System prompt ──────────────────────────────────────────────────────────
 
 
-ANALYST_SYSTEM_PROMPT = """You are a disciplined per-ticker equity analyst.
+ANALYST_SYSTEM_PROMPT = """You are a senior portfolio analyst at a long-only hedge fund writing
+investment memos for a retail client. You write like a person, not a data formatter.
 
 INPUTS — you receive a JSON object with these keys:
   - "ticker": string.
-  - "snapshot": MarketSnapshot with price / returns / volatility /
-    sector / sentiment / fundamentals / news.
-  - "features": FeatureSet with trend_regime / momentum_score /
-    volatility_regime / relative_strength_label.
+  - "snapshot": price / returns / volatility / sector / sentiment /
+    fundamentals / news headlines.
+  - "features": FeatureSet — trend direction, momentum, volatility,
+    relative strength versus the benchmark.
 
-RULES (hard requirements):
-  1. You interpret the structured inputs. You NEVER recompute indicators,
-     invent headlines, estimate P/E, or infer missing numbers.
-  2. When a field is missing you say so in the reasoning — you do NOT
-     guess.
-  3. When snapshot.data_quality_score < 0.4 default the action to
-     INSUFFICIENT_DATA and conviction to 0.0. Do not force a directional
-     call on thin data.
-  4. key_drivers list: MAX 3 short phrases grounded in the inputs.
-     risks list: MAX 2 short phrases.
-  5. action MUST be one of: "BUY", "HOLD", "REDUCE", "INSUFFICIENT_DATA".
-     REDUCE means trim the existing position.
-  6. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0]. Both zero when
-     you return INSUFFICIENT_DATA.
+HARD RULES:
+  1. NEVER use indicator names (SMA20, SMA50, momentum score, RSI,
+     trend_regime, relative_strength). Translate them into what they
+     MEAN for investors. Examples:
+       BAD: "price is above SMA50 with positive momentum score"
+       GOOD: "buyers have stepped in on every recent dip"
+       BAD: "relative_strength_label is outperforming"
+       GOOD: "this name has been holding up better than the broader market"
+  2. NEVER repeat the same sentence across primary_driver, risk_flag,
+     and action_reason. Each field must make a distinct point.
+  3. Max 2 sentences per field. Keep them tight.
+  4. When snapshot.data_quality_score < 0.4 → action = INSUFFICIENT_DATA,
+     conviction = 0.0. Do NOT force a directional call on thin data.
+  5. action ∈ "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA".
+  6. conviction ∈ [0.0, 1.0], confidence ∈ [0.0, 1.0].
+  7. conviction_level ∈ "HIGH" | "MEDIUM" | "LOW".
+     HIGH → conviction ≥ 0.65, MEDIUM → 0.35–0.64, LOW → < 0.35.
+  8. You interpret the provided data. You NEVER invent headlines, estimate
+     P/E, or infer numbers not in the inputs.
 
-OUTPUT RULES:
-  - Return ONLY one compact JSON object.
-  - No markdown fences.
-  - No prose before/after JSON.
-  - Keep strings concise.
+FIELD DEFINITIONS:
+  primary_driver  — the single most important reason the trade makes sense
+                    right now, in plain English. No jargon.
+  risk_flag       — the single biggest thing that could break the thesis.
+                    Must be specific (not "market risk"). Max 2 sentences.
+  action_reason   — plain English: why BUY/HOLD/REDUCE follows from the
+                    evidence. Must differ from primary_driver and risk_flag.
 
-OUTPUT — return ONLY this JSON shape:
+OUTPUT — return ONLY this JSON (no fences, no prose before/after):
 {
   "action": "BUY" | "HOLD" | "REDUCE" | "INSUFFICIENT_DATA",
   "conviction": 0.00,
+  "conviction_level": "HIGH" | "MEDIUM" | "LOW",
+  "primary_driver": "single most important reason — plain English",
+  "risk_flag": "biggest risk that could break the thesis",
+  "action_reason": "why this action follows — plain English, no jargon",
   "summary": "one plain-English sentence",
-  "thesis": "why this call follows from the inputs",
-  "plain_language_explanation": "what is going right, what is concerning, and what invalidates this call",
-  "drivers": ["driver 1", "driver 2"],
-  "risks": ["risk 1"],
+  "thesis": "2-sentence expanded rationale",
+  "plain_language_explanation": "what is going right and what is concerning",
+  "drivers": ["plain-English driver 1", "plain-English driver 2"],
+  "risks": ["plain-English risk 1"],
+  "confidence": 0.00,
   "sentiment": "optional short label"
 }
 """
 
 ANALYST_STRICT_RETRY_APPENDIX = """
 RETRY MODE (STRICT):
-  - Reject boilerplate. Do NOT output template phrasing like
-    “30d return / trend regime / relative strength” without a true thesis.
-  - Explain in plain language:
-    1) what is going right,
-    2) what is concerning,
-    3) why BUY/HOLD/REDUCE follows,
-    4) what would invalidate this thesis.
+  - Reject boilerplate. Write like an analyst explaining to a smart client.
+  - FORBIDDEN indicator language: SMA, EMA, RSI, momentum score, trend_regime,
+    relative_strength, MACD. Replace with what they mean in plain English.
+  - Each of primary_driver, risk_flag, action_reason MUST say something different.
+  - Explain: 1) what is going right, 2) what is concerning,
+    3) why BUY/HOLD/REDUCE, 4) what would break this thesis.
 """
 
 
@@ -190,8 +214,8 @@ def build_analyst_inputs(
 def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     """Return an :class:`AnalystVerdict` when ``raw`` matches the schema.
 
-    Returns ``None`` when the response is malformed — the caller then
-    retries once and falls back to ``INSUFFICIENT_DATA`` on second failure.
+    Returns ``None`` when the response is malformed or fails the repetition
+    check — the caller then retries once, then falls back to INSUFFICIENT_DATA.
     """
     if not isinstance(raw, dict):
         return None
@@ -237,8 +261,23 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
     sentiment = _coerce_short_text(raw.get("sentiment"), max_len=80) or None
     citations = _coerce_string_list(raw.get("citations"), max_items=4)
 
+    # Hedge-fund memo fields
+    primary_driver = _coerce_short_text(raw.get("primary_driver"), max_len=400)
+    risk_flag = _coerce_short_text(raw.get("risk_flag"), max_len=400)
+    action_reason = _coerce_short_text(raw.get("action_reason"), max_len=400)
+    raw_level = str(raw.get("conviction_level") or "").strip().upper()
+    conviction_level = raw_level if raw_level in CONVICTION_LEVELS else _conviction_level_from_score(conviction)
+
     if action == INSUFFICIENT_DATA_VERDICT_MARKER:
         conviction = 0.0
+        conviction_level = "LOW"  # always LOW when there's no data
+
+    # Reject if the memo fields repeat content across each other.
+    if _has_field_repetition(primary_driver, risk_flag, action_reason):
+        logger.warning(
+            "analyst_verdict rejected — field repetition detected ticker=%s", ticker
+        )
+        return None
 
     return AnalystVerdict(
         ticker=ticker,
@@ -252,6 +291,10 @@ def validate_verdict(raw: Any, *, ticker: str) -> Optional[AnalystVerdict]:
         reasoning=reasoning,
         sentiment=sentiment,
         citations=citations,
+        conviction_level=conviction_level,
+        primary_driver=primary_driver,
+        risk_flag=risk_flag,
+        action_reason=action_reason,
         raw_response=raw,
     )
 
@@ -271,6 +314,10 @@ def insufficient_data_verdict(
         key_drivers=[],
         risks=[],
         confidence=0.0,
+        conviction_level="LOW",
+        primary_driver="Not enough market data to form a view on this position.",
+        risk_flag="Any call made without sufficient data carries elevated uncertainty.",
+        action_reason="Holding until more information is available is the prudent choice here.",
         used_fallback=True,
         llm_attempted=False,
         analysis_source="deterministic_fallback",
@@ -600,7 +647,18 @@ def action_to_suggested_action(action: str) -> str:
 
 
 def format_thesis(verdict: AnalystVerdict) -> str:
-    """Render a plain-English thesis (max ~2 short sentences)."""
+    """Render a plain-English thesis (max ~2 short sentences).
+
+    Prefers the new hedge-fund memo fields when populated; falls back to
+    the legacy reasoning / thesis / summary chain for older verdicts.
+    """
+    # Prefer the new memo fields for a richer, more human summary
+    if verdict.primary_driver and verdict.action_reason:
+        parts = [verdict.primary_driver.rstrip(".")]
+        if verdict.action_reason.rstrip(".") != verdict.primary_driver.rstrip("."):
+            parts.append(verdict.action_reason)
+        return " ".join(parts)[:500]
+
     preferred = (
         verdict.reasoning.strip()
         or verdict.thesis.strip()
@@ -635,6 +693,44 @@ def format_thesis(verdict: AnalystVerdict) -> str:
 
 
 # ── Small helpers ──────────────────────────────────────────────────────────
+
+
+def _conviction_level_from_score(conviction: float) -> str:
+    """Derive conviction_level categorical label from numeric conviction."""
+    if conviction >= 0.65:
+        return "HIGH"
+    if conviction >= 0.35:
+        return "MEDIUM"
+    return "LOW"
+
+
+def _has_field_repetition(primary_driver: str, risk_flag: str, action_reason: str) -> bool:
+    """Return True when the same substantive sentence appears in 2+ memo fields.
+
+    Splits each field into sentences, normalises whitespace, and checks for
+    exact-sentence duplicates across the three fields. Returns False (no
+    rejection) when any field is empty — the retry prompt handles missing
+    fields separately.
+    """
+    if not (primary_driver and risk_flag and action_reason):
+        return False
+
+    def _sentences(text: str) -> set[str]:
+        return {
+            s.strip().lower().rstrip(".")
+            for s in text.replace("!", ".").replace("?", ".").split(".")
+            if len(s.strip()) > 20  # ignore very short fragments
+        }
+
+    pd_sents = _sentences(primary_driver)
+    rf_sents = _sentences(risk_flag)
+    ar_sents = _sentences(action_reason)
+
+    return bool(
+        pd_sents & rf_sents
+        or pd_sents & ar_sents
+        or rf_sents & ar_sents
+    )
 
 
 def _coerce_string_list(v: Any, *, max_items: int) -> list[str]:

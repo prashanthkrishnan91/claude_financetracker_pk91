@@ -363,14 +363,26 @@ def deterministic_synthesis(
         top_sector, top_sector_pct = max(
             sector_exposure.items(), key=lambda kv: kv[1] or 0.0
         )
+    known_sector = bool(top_sector and str(top_sector).strip().lower() not in {"unknown", "n/a", "none"})
+    category_weights: dict[str, float] = composition.get("category_weights") or {}
+    top_category, top_category_pct = ("", 0.0)
+    if category_weights:
+        top_category, top_category_pct = max(
+            category_weights.items(), key=lambda kv: kv[1] or 0.0
+        )
     risk_concentrations: list[str] = []
-    if top_sector and top_sector_pct >= 30:
+    if known_sector and top_sector_pct >= 30:
         risk_concentrations.append(
             f"{top_sector} sector concentration at {top_sector_pct:.0f}% of book"
         )
+    elif top_category and top_category_pct >= 35:
+        risk_concentrations.append(
+            f"{top_category} category concentration at {top_category_pct:.0f}% of book"
+        )
     # Correlated-risk fallback: if top 2 positions share a sector, flag it.
     if len(top_positions) >= 2 and top_positions[0].get("sector") and \
-       top_positions[0].get("sector") == top_positions[1].get("sector"):
+       top_positions[0].get("sector") == top_positions[1].get("sector") and \
+       str(top_positions[0].get("sector")).strip().lower() not in {"unknown", "n/a", "none"}:
         risk_concentrations.append(
             f"Top-2 positions both in {top_positions[0]['sector']} — "
             "correlated single-sector exposure"
@@ -405,9 +417,13 @@ def deterministic_synthesis(
         key_themes.append(
             f"Risk-off rotation out of {reduce} positions flagged for REDUCE"
         )
-    if top_sector_pct >= 20:
+    if known_sector and top_sector_pct >= 20:
         key_themes.append(
             f"{top_sector}-heavy book ({top_sector_pct:.0f}% of value)"
+        )
+    elif top_category and top_category_pct >= 20:
+        key_themes.append(
+            f"{top_category}-tilted allocation ({top_category_pct:.0f}% of value)"
         )
     insufficient = len(payload.get("data_quality", {}).get("insufficient_data_tickers") or [])
     if insufficient >= 2:
@@ -427,6 +443,9 @@ def deterministic_synthesis(
     # Overexposure flags.
     overexposure_flags: list[str] = []
     for sector, pct in sector_exposure.items():
+        sector_norm = str(sector or "").strip().lower()
+        if sector_norm in {"unknown", "n/a", "none"}:
+            continue
         if pct > 35:
             overexposure_flags.append(
                 f"{sector} exposure at {pct:.0f}% exceeds 35% ceiling"
@@ -448,11 +467,36 @@ def deterministic_synthesis(
             "Hold current allocation; no high-conviction cross-ticker rotation."
         )
 
+    bias_text = {
+        "bullish": "mildly bullish" if reduce > 0 else "bullish",
+        "defensive": "cautiously defensive",
+        "neutral": "balanced",
+    }.get(bias, bias)
+    biggest_opportunity = (
+        "momentum leaders with strong trend confirmation"
+        if buy >= max(2, reduce)
+        else "selective rebalancing into higher-conviction names"
+    )
+    insufficient = len(payload.get("data_quality", {}).get("insufficient_data_tickers") or [])
+    missing_sector_data = not known_sector
+    if missing_sector_data and top_category:
+        main_risk = (
+            f"sector data is unavailable, so concentration is approximated via "
+            f"{top_category} category exposure"
+        )
+    elif insufficient > 0:
+        main_risk = (
+            f"{insufficient} ticker{'s' if insufficient != 1 else ''} still have limited "
+            "evidence coverage"
+        )
+    else:
+        main_risk = "a few positions still have partial fundamental coverage"
+
     summary = (
-        f"Portfolio bias: {bias}. {buy} BUY / "
-        f"{action_summary.get('HOLD', 0)} HOLD / {reduce} REDUCE. "
-        f"Top sector: {top_sector or 'Unknown'} "
-        f"({top_sector_pct:.0f}% of book)."
+        f"Portfolio bias: {bias_text}. "
+        f"{buy} buy candidates, {action_summary.get('HOLD', 0)} holds, and {reduce} trims. "
+        f"Biggest opportunity: {biggest_opportunity}. "
+        f"Main risk: {main_risk}."
     )
 
     return PortfolioSynthesis(

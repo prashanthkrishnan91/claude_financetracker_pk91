@@ -210,6 +210,44 @@ def test_deterministic_synthesis_flags_sector_concentration():
     assert "tech" in combined or "technology" in combined
 
 
+def test_deterministic_synthesis_avoids_unknown_sector_summary():
+    snapshots = {
+        "AAA": _snap("AAA", sector="", category="Momentum"),
+        "BBB": _snap("BBB", sector="", category="Momentum"),
+    }
+    features = {"AAA": _feat("AAA"), "BBB": _feat("BBB")}
+    verdicts = {
+        "AAA": _verdict("AAA", action="BUY", conviction=0.6, confidence=0.7),
+        "BBB": _verdict("BBB", action="HOLD", conviction=0.1, confidence=0.5),
+    }
+    positions = [
+        {"ticker": "AAA", "shares": 10, "avg_cost": 100, "category": "Momentum"},
+        {"ticker": "BBB", "shares": 8, "avg_cost": 100, "category": "Momentum"},
+    ]
+    payload = build_synthesis_inputs(
+        verdicts=verdicts, snapshots=snapshots, features=features, positions=positions,
+    )
+    s = deterministic_synthesis(payload)
+    lower_summary = s.summary.lower()
+    assert "top sector: unknown" not in lower_summary
+    assert "unknown (100% of book)" not in lower_summary
+    assert "sector data is unavailable" in lower_summary
+
+
+def test_deterministic_synthesis_uses_plain_english_summary_copy():
+    snaps, feats, verds, poss = _mixed_portfolio()
+    payload = build_synthesis_inputs(
+        verdicts=verds, snapshots=snaps, features=feats, positions=poss,
+    )
+    s = deterministic_synthesis(payload)
+    lower_summary = s.summary.lower()
+    assert "buy candidates" in lower_summary
+    assert "holds" in lower_summary
+    assert "trims" in lower_summary
+    assert "biggest opportunity:" in lower_summary
+    assert "main risk:" in lower_summary
+
+
 def test_deterministic_synthesis_bias_bullish_when_buy_dominates():
     # Three BUYs, one HOLD — bullish bias.
     snaps = {f"T{i}": _snap(f"T{i}") for i in range(4)}

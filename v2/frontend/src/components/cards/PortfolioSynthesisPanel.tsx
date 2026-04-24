@@ -28,10 +28,15 @@ export function PortfolioSynthesisPanel({
   if (!synthesis || !synthesis.portfolio_bias) return null;
 
   const bias = BIAS_STYLES[synthesis.portfolio_bias] || BIAS_STYLES.neutral;
-  const themes = synthesis.key_themes ?? [];
-  const risks = synthesis.risk_concentrations ?? [];
+  const unknownSectorPattern = /unknown\s*(\(\s*100%\s*of\s*book\s*\)|sector|concentration)/i;
+  const themes = (synthesis.key_themes ?? []).filter((item) => !unknownSectorPattern.test(item));
+  const risks = (synthesis.risk_concentrations ?? []).filter((item) => !unknownSectorPattern.test(item));
   const overexposure = synthesis.overexposure_flags ?? [];
   const rebalance = synthesis.rebalancing_suggestions ?? [];
+  const summary = (synthesis.summary || "").replace(
+    /top sector:\s*unknown\s*\(\s*100%\s*of\s*book\s*\)\.?\s*/gi,
+    "Sector data unavailable. "
+  ).trim();
 
   return (
     <section className="card-glass rounded-xl border border-border px-4 py-4 space-y-3">
@@ -59,9 +64,9 @@ export function PortfolioSynthesisPanel({
         </div>
       </header>
 
-      {synthesis.summary && (
+      {summary && (
         <p className="text-sm text-text-primary leading-relaxed">
-          {synthesis.summary}
+          {summary}
         </p>
       )}
 

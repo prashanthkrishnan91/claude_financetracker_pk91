@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
+from .agent_run_status import (
+    ACTIVE_RUN_STATUSES,
+    assert_db_status,
+    normalize_run_status,
+)
 from ..models.recommendation import (
     AgentInsight,
     AgentRunStatus,
@@ -651,8 +656,6 @@ def _resolve_card_analysis_source(
     return "live_llm", False
 
 
-ACTIVE_RUN_STATUSES = {"queued", "running", "in_progress"}
-TERMINAL_RUN_STATUSES = {"completed", "failed", "cancelled", "stale_failed", "no_data"}
 STALE_RUN_MAX_AGE_SECONDS = 600
 
 
@@ -666,7 +669,7 @@ def _agent_run_row_to_status(d: dict) -> AgentRunStatus:
     """
     return AgentRunStatus(
         id=d["id"],
-        status=d["status"],
+        status=normalize_run_status(d.get("status")),
         current_agent=d.get("current_agent"),
         progress_pct=int(d.get("progress_pct") or 0),
         tickers=d.get("tickers") or [],
@@ -1047,10 +1050,11 @@ class RecommendationService:
         if recent:
             last = recent[0]
             status = last.get("status")
-            if status in ACTIVE_RUN_STATUSES:
+            normalized_status = normalize_run_status(status)
+            if normalized_status in ACTIVE_RUN_STATUSES:
                 if _is_stale_active_run(last):
                     try:
-                        self._mark_stale_run_failed(last["id"])
+                        self._mark_stale_run_failed(last["id"], old_status=status, reason="stale_timeout")
                         logger.info(
                             "recommendations.queue.stale_active_marked_failed user_id=%s job_id=%s status=%s",
                             self.user_id,
@@ -1070,7 +1074,7 @@ class RecommendationService:
                     return last["id"], False
 
             # 3) Light cache: completed within the last 2 minutes.
-            elif status == "completed" and allow_completed_reuse:
+            elif normalized_status == "completed" and allow_completed_reuse:
                 finished = last.get("finished_at") or last.get("started_at")
                 if finished and _within_last(finished, seconds=120):
                     logger.info(
@@ -1078,7 +1082,7 @@ class RecommendationService:
                         last["id"], finished,
                     )
                     return last["id"], False
-            elif status == "completed":
+            elif normalized_status == "completed":
                 logger.info(
                     "Fresh run requested — not reusing completed run %s (allow_completed_reuse=%s)",
                     last["id"],
@@ -1137,16 +1141,18 @@ class RecommendationService:
         if not row.data:
             raise HTTPException(status_code=404, detail="Agent run not found")
         raw = row.data
-        if raw.get("status") in ACTIVE_RUN_STATUSES and _is_stale_active_run(raw):
+        raw_status = normalize_run_status(raw.get("status"))
+        raw["status"] = raw_status
+        if raw_status in ACTIVE_RUN_STATUSES and _is_stale_active_run(raw):
             try:
-                self._mark_stale_run_failed(str(job_id))
-                raw["status"] = "stale_failed"
-                raw["current_agent"] = "Stale run auto-failed"
+                self._mark_stale_run_failed(str(job_id), old_status=raw_status, reason="stale_timeout")
+                raw["status"] = "failed"
+                raw["current_agent"] = "failed"
                 raw["progress_pct"] = 100
                 raw["summary"] = "Previous run got stuck; start a new run."
                 raw["error_message"] = (
                     raw.get("error_message")
-                    or "Job exceeded stale timeout (>10m without activity)."
+                    or "LLM failed: stale_timeout (>10m without activity)."
                 )
                 raw["finished_at"] = datetime.now(timezone.utc).isoformat()
             except Exception as exc:
@@ -1156,15 +1162,29 @@ class RecommendationService:
         status = _agent_run_row_to_status(raw)
         return status
 
-    def _mark_stale_run_failed(self, run_id: str) -> None:
+    def _mark_stale_run_failed(
+        self,
+        run_id: str,
+        *,
+        old_status: Optional[str] = None,
+        reason: str = "stale_timeout",
+    ) -> None:
+        new_status = assert_db_status("failed")
+        logger.warning(
+            "agent_runs.status_patch job_id=%s old_status=%s new_status=%s reason=%s",
+            run_id,
+            old_status or "unknown",
+            new_status,
+            reason,
+        )
         self._db(
-            "agent_runs.mark_stale_failed",
+            "agent_runs.mark_failed",
             lambda: self.client.table("agent_runs")
             .update({
-                "status": "stale_failed",
-                "current_agent": "Stale run auto-failed",
+                "status": new_status,
+                "current_agent": "failed",
                 "progress_pct": 100,
-                "error_message": "Job timeout — no status update for over 10 minutes.",
+                "error_message": f"LLM failed: {reason}",
                 "summary": "Previous run got stuck; start a new run.",
                 "finished_at": datetime.now(timezone.utc).isoformat(),
             })

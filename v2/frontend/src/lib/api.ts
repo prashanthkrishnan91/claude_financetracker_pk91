@@ -405,7 +405,7 @@ export interface CostMetricsPayload {
 
 export interface AgentRunStatus {
   id: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "stale_failed" | "no_data";
+  status: "queued" | "running" | "in_progress" | "completed" | "failed" | "cancelled";
   current_agent: string | null;
   progress_pct: number;
   tickers: string[];

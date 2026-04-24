@@ -224,6 +224,12 @@ export function AgentInsightCard({
         <p className="text-sm text-text-primary leading-relaxed">{thesis}</p>
       )}
 
+      {card.analysis_source === "deterministic_fallback" && (
+        <p className="text-xs text-amber-300">
+          LLM failed: {(card.fallback_flags && card.fallback_flags[0]) || "deterministic_fallback"}
+        </p>
+      )}
+
       {/* Phase 6 — analyst drivers & risks. Rendered WHEN the analyst
           returned a structured verdict so the card stops rehashing the
           same thesis prose for every ticker. */}

@@ -11,6 +11,7 @@ from uuid import UUID
 
 from ...config import get_settings
 from ...database import get_supabase_client
+from ..agent_run_status import assert_db_status
 from ..crypto_service import decrypt_value
 from .orchestrator import AgentOrchestrator
 
@@ -123,8 +124,16 @@ async def _force_fail_run(run_id: str, error: str, *, user_id: UUID | None = Non
     from datetime import datetime, timezone
     try:
         db = get_supabase_client()
+        new_status = assert_db_status("failed")
+        logger.warning(
+            "agent_runs.status_patch job_id=%s old_status=%s new_status=%s reason=%s",
+            run_id,
+            "unknown",
+            new_status,
+            "job_runner_exception_fallback",
+        )
         query = db.table("agent_runs").update({
-            "status": "failed",
+            "status": new_status,
             "current_agent": "Failed",
             "progress_pct": 100,
             "error_message": error[:500],

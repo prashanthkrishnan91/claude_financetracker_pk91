@@ -1434,6 +1434,10 @@ class RecommendationService:
                     plain_language_explanation=reasoning.get("plain_language_explanation"),
                     fallback_flags=reasoning.get("fallback_flags"),
                     analysis_source=source,
+                    conviction_level=reasoning.get("conviction_level"),
+                    primary_driver=reasoning.get("primary_driver"),
+                    risk_flag=reasoning.get("risk_flag"),
+                    action_reason=reasoning.get("action_reason"),
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",

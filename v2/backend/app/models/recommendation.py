@@ -96,6 +96,11 @@ class InsightCard(BaseModel):
     plain_language_explanation: Optional[str] = None
     fallback_flags: Optional[list[str]] = None
     analysis_source: Optional[str] = None  # live_llm | cached_run | deterministic_fallback
+    # Hedge-fund memo fields (Phase 7)
+    conviction_level: Optional[str] = None   # HIGH | MEDIUM | LOW
+    primary_driver: Optional[str] = None
+    risk_flag: Optional[str] = None
+    action_reason: Optional[str] = None
 
 
 class AgentRunStatus(BaseModel):

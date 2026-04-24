@@ -21,6 +21,11 @@ CANONICAL_REASONING_KEYS = (
     "plain_language_explanation",
     "data_quality",
     "fallback_flags",
+    # Hedge-fund memo fields (Phase 7)
+    "conviction_level",
+    "primary_driver",
+    "risk_flag",
+    "action_reason",
 )
 
 
@@ -138,6 +143,11 @@ def normalize_reasoning_payload(
         "plain_language_explanation": explanation,
         "data_quality": _s(rec.get("data_quality_label")) or _s(rec.get("data_quality")) or "UNKNOWN",
         "fallback_flags": fallback_flags,
+        # Hedge-fund memo fields — pass through from analyst verdict when available
+        "conviction_level": _s(analyst_verdict.get("conviction_level")) or None,
+        "primary_driver": _s(analyst_verdict.get("primary_driver")) or None,
+        "risk_flag": _s(analyst_verdict.get("risk_flag")) or None,
+        "action_reason": _s(analyst_verdict.get("action_reason")) or None,
     }
 
 

@@ -552,3 +552,78 @@ class TestGenerateRecEdgeCases:
                            bear=250, bull=500, lt_ready=True, lt_date="2024-01-01",
                            price=500)
         assert "DCA" in rec.action_label
+
+
+class TestPortfolioIntelSynthesis:
+    def _card(self, ticker: str, action: str, category: str = "Core", sector: str | None = None, technical: str | None = None):
+        from uuid import uuid4
+        from app.models.recommendation import InsightCard
+
+        return InsightCard(
+            id=uuid4(),
+            ticker=ticker,
+            name=ticker,
+            action=action,
+            detail=f"{ticker} detail",
+            rationale="",
+            urgency=2,
+            color="blue",
+            tax_note="LT eligible" if action in {"TRIM", "SELL"} else "",
+            drip_note="",
+            category=category,
+            sector=sector,
+            technical_signal=technical,
+            analyst_drivers=[f"{ticker} driver"],
+            analyst_risks=[f"{ticker} risk"],
+            analyst_confidence=0.72 if action == "BUY" else 0.55,
+            analysis_source="live_llm",
+            data_quality_label="HIGH",
+        )
+
+    def test_portfolio_intel_uses_strategy_and_sector_buckets(self):
+        from app.services.recommendation_engine import compute_portfolio_synthesis
+
+        cards = [
+            self._card("VOO", "HOLD", category="ETF", sector="ETFs / Broad Market"),
+            self._card("MSFT", "BUY", sector="Technology"),
+            self._card("NVDA", "BUY", sector="Technology"),
+            self._card("BTC", "TRIM", category="Crypto", sector="Crypto"),
+        ]
+        synthesis = compute_portfolio_synthesis(cards)
+
+        assert synthesis["exposures"]["strategy_buckets"]
+        names = {b["name"] for b in synthesis["exposures"]["strategy_buckets"]}
+        assert "Core index ETFs" in names
+        assert "Semiconductors / AI infrastructure" in names or "Mega-cap quality growth" in names
+        assert "Core ~" not in synthesis["summary"]
+        assert "ETF ~" not in synthesis["summary"]
+
+    def test_portfolio_intel_opportunities_and_trims_present(self):
+        from app.services.recommendation_engine import compute_portfolio_synthesis
+
+        cards = [
+            self._card("MSFT", "BUY", sector="Technology"),
+            self._card("AAPL", "BUY", sector="Technology"),
+            self._card("RIVN", "TRIM", category="Speculative", sector="Industrials / Autos", technical="SELL"),
+            self._card("BTC", "SELL", category="Crypto", sector="Crypto", technical="SELL"),
+        ]
+        synthesis = compute_portfolio_synthesis(cards)
+
+        assert synthesis["top_opportunities"]
+        assert {row["ticker"] for row in synthesis["top_opportunities"]} & {"MSFT", "AAPL"}
+        assert synthesis["trim_candidates"]
+        assert {row["ticker"] for row in synthesis["trim_candidates"]} & {"RIVN", "BTC"}
+
+    def test_portfolio_intel_summary_mentions_tickers_and_not_unknown_100(self):
+        from app.services.recommendation_engine import compute_portfolio_synthesis
+
+        cards = [
+            self._card("MSFT", "BUY", sector="Technology"),
+            self._card("NVDA", "BUY", sector="Technology"),
+            self._card("RIVN", "TRIM", sector="Industrials / Autos", technical="SELL"),
+        ]
+        synthesis = compute_portfolio_synthesis(cards)
+        summary = (synthesis.get("summary") or "").lower()
+
+        assert any(t in summary for t in ["msft", "nvda", "rivn"])
+        assert "unknown 100%" not in summary

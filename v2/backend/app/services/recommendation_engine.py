@@ -667,43 +667,81 @@ TICKER_SECTOR_MAP: dict[str, str] = {
     "CRM": "Technology",
     "SNOW": "Technology",
     # Communication
-    "GOOGL": "Communication",
-    "META": "Communication",
-    "NFLX": "Communication",
-    "RDDT": "Communication",
+    "GOOGL": "Communication Services",
+    "META": "Communication Services",
+    "NFLX": "Communication Services",
+    "RDDT": "Communication Services",
     # Consumer
     "COST": "Consumer",
     "WMT": "Consumer",
     "CAVA": "Consumer",
     # Semis
-    "QCOM": "Semis",
-    "TSM": "Semis",
+    "QCOM": "Technology",
+    "TSM": "Technology",
     # Financial
-    "BRK-B": "Financial",
+    "BRK-B": "Financials",
     # Industrial/Auto
-    "ALK": "Industrial/Auto",
-    "RIVN": "Industrial/Auto",
-    "BMWYY": "Industrial/Auto",
+    "ALK": "Industrials / Autos",
+    "RIVN": "Industrials / Autos",
+    "BMWYY": "Industrials / Autos",
     # ETF
-    "VOO": "Broad Market",
-    "VTI": "Broad Market",
-    "SPY": "Broad Market",
-    "QQQ": "Growth",
-    "SCHD": "Dividend",
-    "VYM": "Dividend",
-    "VXUS": "International",
-    "VEA": "International",
-    "VWO": "International",
-    "BND": "Bonds",
+    "VOO": "ETFs / Broad Market",
+    "VTI": "ETFs / Broad Market",
+    "SPY": "ETFs / Broad Market",
+    "QQQ": "ETFs / Broad Market",
+    "SCHD": "ETFs / Broad Market",
+    "VYM": "ETFs / Broad Market",
+    "VXUS": "ETFs / Broad Market",
+    "VEA": "ETFs / Broad Market",
+    "VWO": "ETFs / Broad Market",
+    "BND": "Gold / Bonds / Defensive",
     # Alt
-    "GLD": "Gold",
+    "GLD": "Gold / Bonds / Defensive",
     "BTC": "Crypto",
     "XRP": "Crypto",
     # Speculative
-    "KLAR": "Speculative",
-    "BLSH": "Speculative",
-    "STUB": "Speculative",
+    "KLAR": "Consumer",
+    "BLSH": "Consumer",
+    "STUB": "Consumer",
 }
+
+STRATEGY_MAP: dict[str, str] = {
+    "VOO": "Core index ETFs",
+    "VTI": "Core index ETFs",
+    "SPY": "Core index ETFs",
+    "QQQ": "Core index ETFs",
+    "AAPL": "Mega-cap quality growth",
+    "MSFT": "Mega-cap quality growth",
+    "GOOGL": "Mega-cap quality growth",
+    "META": "Mega-cap quality growth",
+    "AMZN": "Mega-cap quality growth",
+    "NVDA": "Semiconductors / AI infrastructure",
+    "AMD": "Semiconductors / AI infrastructure",
+    "TSM": "Semiconductors / AI infrastructure",
+    "QCOM": "Semiconductors / AI infrastructure",
+    "SCHD": "Dividend income",
+    "VYM": "Dividend income",
+    "VXUS": "International diversification",
+    "VEA": "International diversification",
+    "VWO": "International diversification",
+    "BTC": "Crypto / alternatives",
+    "XRP": "Crypto / alternatives",
+    "GLD": "Crypto / alternatives",
+    "KLAR": "Speculative / IPO / high volatility",
+    "BLSH": "Speculative / IPO / high volatility",
+    "STUB": "Speculative / IPO / high volatility",
+    "RIVN": "Speculative / IPO / high volatility",
+}
+
+RISK_BUCKETS = [
+    "Concentration risk",
+    "Momentum breakdown risk",
+    "Speculative risk",
+    "Crypto volatility",
+    "Single-stock risk",
+    "Tax-sensitive trims",
+    "Missing fundamental data",
+]
 
 
 def map_ticker_to_sector(ticker: str | None) -> str:
@@ -721,72 +759,332 @@ def _normalize_action(action: str | None) -> str:
     return "HOLD"
 
 
-def compute_portfolio_synthesis(cards: list[InsightCard]) -> dict[str, Any]:
-    """Build synthesis from runtime cards (source of truth)."""
+def _bucket_pct(count: int, total: int) -> float:
+    return round((count / total) * 100.0, 1) if total else 0.0
+
+
+def _first_text(values: list[str]) -> str:
+    for value in values:
+        if value and value.strip():
+            return value.strip()
+    return ""
+
+
+def _classify_strategy(card: InsightCard) -> str:
+    ticker = (card.ticker or "").upper()
+    if ticker in STRATEGY_MAP:
+        return STRATEGY_MAP[ticker]
+
+    category = (card.category or "").lower()
+    sector = (card.sector or map_ticker_to_sector(ticker) or "").lower()
+    if "etf" in category or sector == "etfs / broad market":
+        return "Core index ETFs"
+    if ticker in {"AAPL", "MSFT", "GOOGL", "META", "AMZN"} or "technology" in sector:
+        return "Mega-cap quality growth"
+    if ticker in {"NVDA", "AMD", "TSM", "QCOM"} or "semi" in sector:
+        return "Semiconductors / AI infrastructure"
+    if ticker in {"SCHD", "VYM"} or "dividend" in category:
+        return "Dividend income"
+    if ticker in {"VXUS", "VEA", "VWO"} or "international" in category:
+        return "International diversification"
+    if ticker in {"BTC", "XRP"} or "crypto" in category:
+        return "Crypto / alternatives"
+    if ticker in {"RIVN", "KLAR", "BLSH", "STUB"} or "ipo" in category or "spec" in category:
+        return "Speculative / IPO / high volatility"
+
+    momentum = (card.technical_signal or "").upper()
+    if momentum in {"SELL", "WEAK", "BEARISH"}:
+        return "Turnaround or weak momentum"
+    return "Mega-cap quality growth"
+
+
+def _classify_sector(card: InsightCard) -> str:
+    raw = (card.sector or map_ticker_to_sector(card.ticker) or card.category or "Unknown").strip().lower()
+    if "technology" in raw or "semi" in raw:
+        return "Technology"
+    if "communication" in raw:
+        return "Communication Services"
+    if "consumer" in raw:
+        return "Consumer"
+    if "financial" in raw:
+        return "Financials"
+    if "industrial" in raw or "auto" in raw:
+        return "Industrials / Autos"
+    if "etf" in raw or "broad market" in raw or (card.category or "").lower() == "etf":
+        return "ETFs / Broad Market"
+    if "crypto" in raw:
+        return "Crypto"
+    if "bond" in raw or "gold" in raw or "defensive" in raw:
+        return "Gold / Bonds / Defensive"
+    return "Technology"
+
+
+def _card_risk_labels(card: InsightCard, weight_pct: float) -> set[str]:
+    labels: set[str] = set()
+    ticker = (card.ticker or "").upper()
+    action = _normalize_action(card.action)
+    tech = (card.technical_signal or "").upper()
+    quality = (card.data_quality_label or "").upper()
+    risks = [r.lower() for r in (card.analyst_risks or card.main_risks or [])]
+
+    if weight_pct >= 12:
+        labels.add("Single-stock risk")
+    if action in {"TRIM", "SELL"} and (card.tax_note or ""):
+        labels.add("Tax-sensitive trims")
+    if ticker in {"BTC", "XRP"} or "crypto" in (card.category or "").lower():
+        labels.add("Crypto volatility")
+    if ticker in {"RIVN", "KLAR", "BLSH", "STUB"} or "speculative" in (card.category or "").lower():
+        labels.add("Speculative risk")
+    if tech in {"SELL", "WEAK", "BEARISH"} or any("momentum" in r or "breakdown" in r for r in risks):
+        labels.add("Momentum breakdown risk")
+    if quality == "LOW" or bool(card.analyst_used_fallback) or any("missing" in r for r in risks):
+        labels.add("Missing fundamental data")
+    return labels
+
+
+def build_portfolio_intel(cards: list[InsightCard], holdings: Optional[list[dict[str, Any]]] = None, run_metrics: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     total = len(cards)
     counts = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
-    sector_counts: dict[str, int] = {}
-    buy_sectors: dict[str, int] = {}
+    if total == 0:
+        return {
+            "quality": "LOW",
+            "bias": "Neutral",
+            "headline": "No active signals available.",
+            "executive_summary": "Run agents to generate portfolio intelligence.",
+            "action_counts": counts,
+            "exposures": {"strategy_buckets": [], "sector_buckets": [], "risk_buckets": []},
+            "top_opportunities": [],
+            "top_risks": [],
+            "trim_candidates": [],
+            "deploy_suggestions": [],
+            "what_changed": [],
+            "watchlist": [],
+        }
+
+    per_card: list[dict[str, Any]] = []
     for c in cards:
         action = _normalize_action(c.action)
         counts[action] += 1
-        sector = (c.sector or c.category or map_ticker_to_sector(c.ticker) or "Unknown").strip() or "Unknown"
-        sector_counts[sector] = sector_counts.get(sector, 0) + 1
-        if action == "BUY":
-            buy_sectors[sector] = buy_sectors.get(sector, 0) + 1
+    for c in cards:
+        weight_pct = _bucket_pct(1, total)
+        per_card.append({
+            "card": c,
+            "ticker": c.ticker,
+            "action": _normalize_action(c.action),
+            "strategy": _classify_strategy(c),
+            "sector": _classify_sector(c),
+            "weight_pct": weight_pct,
+            "confidence": float(c.analyst_confidence or c.confidence or 0.0),
+            "conviction": float(c.analyst_conviction or c.conviction or c.conviction_score or 0.0),
+            "thesis": _first_text([
+                c.plain_language_explanation or "",
+                c.thesis or "",
+                c.reasoning_summary or "",
+                c.summary or "",
+                c.detail or "",
+            ]),
+            "risk_note": _first_text((c.analyst_risks or c.main_risks or ["Monitor position sizing and trend confirmation."])),
+            "drivers": (c.analyst_drivers or c.key_drivers or [])[:3],
+            "what_changed": [line for line in (c.what_changed or "").split("\\n") if line.strip()][:2],
+            "risk_labels": _card_risk_labels(c, weight_pct),
+        })
+
+    def _bucketize(rows: list[dict[str, Any]], key: str, min_display_pct: float = 0.1) -> list[dict[str, Any]]:
+        bucket_counts: dict[str, int] = {}
+        bucket_tickers: dict[str, list[str]] = {}
+        for row in rows:
+            name = row[key]
+            bucket_counts[name] = bucket_counts.get(name, 0) + 1
+            bucket_tickers.setdefault(name, []).append(row["ticker"])
+        out = []
+        for name, n in sorted(bucket_counts.items(), key=lambda item: item[1], reverse=True):
+            pct = _bucket_pct(n, total)
+            if pct < min_display_pct:
+                continue
+            out.append({
+                "name": name,
+                "percentage": pct,
+                "top_tickers": bucket_tickers[name][:3],
+                "why_it_matters": f"{name} represents about {pct:.0f}% of current signals, which affects diversification and risk budgeting.",
+            })
+        return out
+
+    strategy_buckets = _bucketize(per_card, "strategy")
+    sector_buckets = _bucketize(per_card, "sector")
+
+    risk_counts: dict[str, int] = {label: 0 for label in RISK_BUCKETS}
+    risk_tickers: dict[str, list[str]] = {label: [] for label in RISK_BUCKETS}
+    largest_sector = sector_buckets[0]["name"] if sector_buckets else ""
+    largest_sector_pct = sector_buckets[0]["percentage"] if sector_buckets else 0.0
+    if largest_sector_pct >= 35:
+        risk_counts["Concentration risk"] += 1
+        risk_tickers["Concentration risk"] = [r["ticker"] for r in per_card if r["sector"] == largest_sector][:3]
+    for row in per_card:
+        for label in row["risk_labels"]:
+            risk_counts[label] = risk_counts.get(label, 0) + 1
+            if row["ticker"] not in risk_tickers.setdefault(label, []):
+                risk_tickers[label].append(row["ticker"])
+
+    risk_buckets = []
+    for label, n in sorted(risk_counts.items(), key=lambda item: item[1], reverse=True):
+        if n <= 0:
+            continue
+        pct = _bucket_pct(n, total)
+        risk_buckets.append({
+            "name": label,
+            "percentage": pct,
+            "top_tickers": risk_tickers.get(label, [])[:3],
+            "why_it_matters": f"{label} appears in {n} names and can affect drawdown control and deployment timing.",
+        })
 
     enriched = sum(1 for c in cards if (c.analysis_source or "").lower() == "live_llm")
-    high_quality = sum(
-        1
-        for c in cards
-        if (c.data_quality_label or "").upper() == "HIGH"
-        and not bool(c.analyst_used_fallback)
-    )
-    fallback = sum(
-        1
-        for c in cards
-        if bool(c.analyst_used_fallback) or (c.analysis_source or "").lower() == "deterministic_fallback"
-    )
+    high_quality = sum(1 for c in cards if (c.data_quality_label or "").upper() == "HIGH" and not bool(c.analyst_used_fallback))
+    fallback = sum(1 for c in cards if bool(c.analyst_used_fallback) or (c.analysis_source or "").lower() == "deterministic_fallback")
     ratio = (enriched / total) if total else 0.0
-    if ratio >= 0.8:
-        quality = "HIGH"
-    elif ratio >= 0.5:
-        quality = "MEDIUM"
-    else:
-        quality = "LOW"
+    quality = "HIGH" if ratio >= 0.8 else ("MEDIUM" if ratio >= 0.5 else "LOW")
 
-    allocation = {
-        s: round((n / total) * 100.0, 1)
-        for s, n in sorted(sector_counts.items(), key=lambda item: item[1], reverse=True)
-    } if total else {}
-    top_sectors = [s for s, _ in sorted(sector_counts.items(), key=lambda item: item[1], reverse=True)[:3]]
-    concentration = "\n".join(
-        [f"- {s} (~{allocation[s]:.0f}%)" for s in top_sectors]
-    ) if top_sectors else "- No positions"
-    buy_focus = ", ".join(
-        [s for s, _ in sorted(buy_sectors.items(), key=lambda item: item[1], reverse=True)[:2]]
-    ) if buy_sectors else "No active BUY signals"
-    risk_sector = top_sectors[0] if top_sectors else "None"
-    summary = (
-        "Portfolio is primarily concentrated in:\n"
-        f"{concentration}\n"
-        f"Risk is concentrated in {risk_sector}. "
-        f"Current buys are focused on: {buy_focus}."
+    bias = "Neutral"
+    if counts["BUY"] >= max(1, counts["TRIM"] + counts["SELL"] + 1):
+        bias = "Bullish"
+    elif counts["TRIM"] + counts["SELL"] > counts["BUY"]:
+        bias = "Defensive"
+
+    buy_rows = sorted([r for r in per_card if r["action"] == "BUY"], key=lambda r: (r["confidence"], r["conviction"]), reverse=True)
+    trim_rows = sorted([r for r in per_card if r["action"] in {"TRIM", "SELL"}], key=lambda r: (r["confidence"], r["conviction"]), reverse=True)
+
+    def _suggested_use(row: dict[str, Any]) -> str:
+        if row["confidence"] >= 0.7:
+            return "add"
+        if row["confidence"] >= 0.5:
+            return "buy on weakness"
+        return "watch"
+
+    top_opportunities = [{
+        "ticker": r["ticker"],
+        "reason": _first_text(r["drivers"] or [r["thesis"]]),
+        "confidence": round(r["confidence"], 2),
+        "risk_note": r["risk_note"],
+        "suggested_use": _suggested_use(r),
+    } for r in buy_rows[:5]]
+
+    trim_candidates = [{
+        "ticker": r["ticker"],
+        "why_trim": r["risk_note"] or "Trim to control concentration and redeploy to stronger buys.",
+        "what_to_watch": _first_text(r["what_changed"] or ["Watch momentum and earnings revisions."]),
+        "redirect_proceeds_to": [o["ticker"] for o in top_opportunities[:3]],
+    } for r in trim_rows[:5]]
+
+    top_risks = [{
+        "label": b["name"],
+        "tickers": b["top_tickers"],
+        "note": b["why_it_matters"],
+    } for b in risk_buckets[:5]]
+
+    deploy_suggestions = []
+    if top_opportunities:
+        deploy_suggestions.append(f"Prioritize staged adds in {', '.join([o['ticker'] for o in top_opportunities[:3]])} instead of adding to the largest existing bucket.")
+    if trim_candidates:
+        deploy_suggestions.append(f"Use trim proceeds from {', '.join([t['ticker'] for t in trim_candidates[:3]])} to fund highest-conviction BUY ideas.")
+
+    what_changed = []
+    for row in per_card:
+        for line in row["what_changed"]:
+            what_changed.append({"ticker": row["ticker"], "change": line})
+    if not what_changed:
+        for row in per_card:
+            if row["action"] in {"TRIM", "SELL"} and len(what_changed) < 5:
+                what_changed.append({"ticker": row["ticker"], "change": "Action downgraded to risk-control posture; monitor momentum and thesis drift."})
+
+    watchlist = []
+    for row in per_card:
+        if "Momentum breakdown risk" in row["risk_labels"] or "Missing fundamental data" in row["risk_labels"] or row["action"] in {"TRIM", "SELL"}:
+            watchlist.append({
+                "ticker": row["ticker"],
+                "focus": row["risk_note"],
+                "trigger": _first_text(row["what_changed"] or ["Review after earnings or a major price move."]),
+            })
+    watchlist = watchlist[:6]
+
+    top_strategy = strategy_buckets[0] if strategy_buckets else {"name": "mixed allocation", "percentage": 0, "top_tickers": []}
+    top_sector = sector_buckets[0] if sector_buckets else {"name": "mixed sectors", "percentage": 0, "top_tickers": []}
+    buy_names = ", ".join([r["ticker"] for r in buy_rows[:3]]) or "selective names"
+    risk_names = ", ".join([r["ticker"] for r in trim_rows[:3]]) or "higher-volatility names"
+    headline = (
+        f"Your portfolio is {bias.lower()} with concentration in {top_strategy['name']} and {top_sector['name']} "
+        f"(~{top_strategy['percentage']:.0f}% / ~{top_sector['percentage']:.0f}% of signals). "
+        f"Best opportunities right now are {buy_names}, while key risks cluster in {risk_names}. "
+        f"Use {len(trim_candidates)} trims to fund {len(top_opportunities)} highest-conviction buys instead of adding to concentrated buckets."
+    )
+    executive_summary = (
+        f"Actionable mix is {counts['BUY']} BUY, {counts['HOLD']} HOLD, {counts['TRIM']} TRIM, {counts['SELL']} SELL. "
+        f"This means focus new money on diversified high-conviction buys and treat trims as funding sources, "
+        f"especially where momentum or data quality has weakened."
     )
 
     return {
         "quality": quality,
-        "aggregate_quality": quality,
-        "summary": summary,
-        "top_sectors": top_sectors,
-        "sector_allocation": allocation,
-        "counts": counts,
+        "bias": bias,
+        "headline": headline,
+        "executive_summary": executive_summary,
+        "action_counts": counts,
+        "exposures": {
+            "strategy_buckets": strategy_buckets,
+            "sector_buckets": sector_buckets,
+            "risk_buckets": risk_buckets,
+        },
+        "top_opportunities": top_opportunities,
+        "top_risks": top_risks,
+        "trim_candidates": trim_candidates,
+        "deploy_suggestions": deploy_suggestions,
+        "what_changed": what_changed[:8],
+        "watchlist": watchlist,
         "quality_breakdown": {
             "total_cards": total,
             "enriched": enriched,
             "high_quality": high_quality,
             "fallback": fallback,
         },
+    }
+
+
+def compute_portfolio_synthesis(cards: list[InsightCard]) -> dict[str, Any]:
+    """Build deterministic portfolio intelligence for the Intel dashboard."""
+    intel = build_portfolio_intel(cards)
+    action_counts = intel.get("action_counts", {})
+    strategy_buckets = intel.get("exposures", {}).get("strategy_buckets", [])
+    sector_buckets = intel.get("exposures", {}).get("sector_buckets", [])
+    risk_buckets = intel.get("exposures", {}).get("risk_buckets", [])
+
+    return {
+        # legacy fields kept for compatibility
+        "quality": intel.get("quality"),
+        "aggregate_quality": intel.get("quality"),
+        "summary": intel.get("headline") or intel.get("executive_summary") or "",
+        "counts": action_counts,
+        "top_sectors": [b.get("name") for b in sector_buckets[:3]],
+        "sector_allocation": {b.get("name"): b.get("percentage") for b in sector_buckets},
+        "quality_breakdown": intel.get("quality_breakdown"),
+        # richer optional payload
+        "portfolio_bias": (intel.get("bias") or "Neutral").lower(),
+        "bias": intel.get("bias"),
+        "headline": intel.get("headline"),
+        "executive_summary": intel.get("executive_summary"),
+        "action_counts": action_counts,
+        "exposures": {
+            "strategy_buckets": strategy_buckets,
+            "sector_buckets": sector_buckets,
+            "risk_buckets": risk_buckets,
+        },
+        "key_themes": [f"{b.get('name')} exposure ~{round(float(b.get('percentage') or 0))}%" for b in strategy_buckets[:3]],
+        "risk_concentrations": [f"{b.get('name')}: {', '.join(b.get('top_tickers') or [])}" for b in risk_buckets[:3]],
+        "overexposure_flags": [f"{b.get('name')} at ~{round(float(b.get('percentage') or 0))}%" for b in strategy_buckets if float(b.get("percentage") or 0) >= 35][:3],
+        "rebalancing_suggestions": intel.get("deploy_suggestions", [])[:5],
+        "top_opportunities": intel.get("top_opportunities", []),
+        "top_risks": intel.get("top_risks", []),
+        "trim_candidates": intel.get("trim_candidates", []),
+        "deploy_suggestions": intel.get("deploy_suggestions", []),
+        "what_changed": intel.get("what_changed", []),
+        "watchlist": intel.get("watchlist", []),
     }
 
 

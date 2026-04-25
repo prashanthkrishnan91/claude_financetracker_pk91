@@ -421,3 +421,11 @@ export function useUpdateDecisionMemoryLog() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }
+
+export function useEvaluateDecisionMemoryLog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.decisionLogs.evaluateDecisionLog(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
+  });
+}

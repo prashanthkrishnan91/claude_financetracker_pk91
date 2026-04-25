@@ -35,7 +35,19 @@ async def get_decision_log(
     user: AuthenticatedUser = Depends(get_current_user),
 ):
     svc = DecisionLogService()
-    row = svc.get(user_id=str(user.id), decision_log_id=decision_log_id)
+    row = svc.get(user_id=str(user.id), decision_log_id=decision_log_id, evaluate_if_missing=True)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Decision log not found")
+    return row
+
+
+@router.post("/{decision_log_id}/evaluate", response_model=DecisionLogResponse)
+async def evaluate_decision_log(
+    decision_log_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    svc = DecisionLogService()
+    row = svc.evaluateDecisionPerformance(user_id=str(user.id), decision_log_id=decision_log_id)
     if not row:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Decision log not found")
     return row

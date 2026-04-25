@@ -2,7 +2,6 @@ import type {
   ActualDecisionItem,
   AdaptiveBlock,
   DecisionLogPatch,
-  DecisionLogStatus,
   DecisionMemoryLog,
   DepositPlanResult,
   DepositRecommendation,
@@ -79,8 +78,8 @@ export function buildRecommendationSnapshot(plan: DepositPlanResult): Record<str
 }
 
 export const decisionLogApi = {
-  createDecisionLog: (snapshot: Record<string, unknown>, status: DecisionLogStatus = "draft") =>
-    api.decisionLogs.createDecisionLog(snapshot, status),
+  createDecisionLog: (snapshot: Record<string, unknown>) =>
+    api.decisionLogs.createDecisionLog(snapshot),
   listDecisionLogs: () => api.decisionLogs.listDecisionLogs(),
   getDecisionLog: (id: string) => api.decisionLogs.getDecisionLog(id),
   updateDecisionLog: (id: string, patch: DecisionLogPatch) => api.decisionLogs.updateDecisionLog(id, patch),

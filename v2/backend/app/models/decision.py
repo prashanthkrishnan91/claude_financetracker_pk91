@@ -48,22 +48,19 @@ class ManualDecisionLogCreate(BaseModel):
 
 
 class DecisionLogStatus(str):
-    DRAFT = "draft"
-    EXECUTED = "executed"
-    PARTIALLY_EXECUTED = "partially_executed"
-    SKIPPED = "skipped"
+    FULLY_EXECUTED = "FULLY_EXECUTED"
+    PARTIALLY_EXECUTED = "PARTIALLY_EXECUTED"
+    SKIPPED = "SKIPPED"
 
 
 class DecisionLogCreateRequest(BaseModel):
     source: str = "deploy"
-    status: str = Field(default="draft", pattern="^(draft|executed|partially_executed|skipped)$")
     recommendation_snapshot: dict[str, Any]
     actual_decisions: list[dict[str, Any]] = Field(default_factory=list)
     notes: Optional[str] = None
 
 
 class DecisionLogUpdateRequest(BaseModel):
-    status: Optional[str] = Field(default=None, pattern="^(draft|executed|partially_executed|skipped)$")
     actual_decisions: Optional[list[dict[str, Any]]] = None
     notes: Optional[str] = None
 
@@ -75,6 +72,13 @@ class DecisionLogResponse(BaseModel):
     status: str
     recommendation_snapshot: dict[str, Any]
     actual_decisions: list[dict[str, Any]]
+    decision_delta: Optional[dict[str, Any]] = None
+    risk_behavior: Optional[str] = None
+    style_shift: Optional[str] = None
+    execution_gap_percent: Optional[float] = None
+    realized_pnl: Optional[float] = None
+    unrealized_pnl: Optional[float] = None
+    review_date: Optional[datetime] = None
     notes: Optional[str] = None
     created_at: datetime
     updated_at: datetime

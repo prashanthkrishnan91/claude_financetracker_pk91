@@ -560,6 +560,46 @@ function RecommendedDeploymentCard({
           </p>
         </div>
       </div>
+      <InvestingStyleAdjustment adaptive={adaptive} />
+    </div>
+  );
+}
+
+function InvestingStyleAdjustment({ adaptive }: { adaptive: AdaptiveBlock | null }) {
+  if (!adaptive) return null;
+
+  const profile = adaptive.behavior_profile ?? {};
+  const messages = new Set<string>();
+  for (const msg of adaptive.style_messages ?? []) {
+    if (msg) messages.add(msg);
+  }
+
+  if (profile.prefers_etf) {
+    messages.add("You tend to prefer ETFs over single stocks.");
+  }
+  if (profile.prefers_income) {
+    messages.add("You often rotate toward income-focused picks.");
+  }
+  const avgDeployRatio = Number(profile.avg_deploy_ratio ?? 0);
+  if (Number.isFinite(avgDeployRatio) && avgDeployRatio > 0 && avgDeployRatio < 0.999) {
+    messages.add(`You typically deploy ~${Math.round(avgDeployRatio * 100)}% of suggested capital.`);
+  }
+
+  const bullets = Array.from(messages).slice(0, 2);
+  if (bullets.length === 0) return null;
+
+  return (
+    <div className="rounded-md border border-border/80 bg-surface-elevated/30 p-2.5">
+      <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted mb-1">
+        Adjusted for your investing style
+      </p>
+      <ul className="space-y-1">
+        {bullets.map((line) => (
+          <li key={line} className="text-[11px] text-text-secondary leading-snug">
+            • {line}
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

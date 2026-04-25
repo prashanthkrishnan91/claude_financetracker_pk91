@@ -48,6 +48,7 @@ class ManualDecisionLogCreate(BaseModel):
 
 
 class DecisionLogStatus(str):
+    DRAFT = "DRAFT"
     FULLY_EXECUTED = "FULLY_EXECUTED"
     PARTIALLY_EXECUTED = "PARTIALLY_EXECUTED"
     SKIPPED = "SKIPPED"

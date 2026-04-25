@@ -275,40 +275,26 @@ export default function DepositsPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
-        {/* KPI row */}
-        {summary && (
-          <div className="grid grid-cols-3 gap-3">
-            <div className="card-glass p-3 text-center">
-              <p className="text-xs text-text-muted">Portfolio</p>
-              <p className="font-mono text-sm text-text-primary">
-                {formatCurrency(summary.total_equity)}
+      <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+                Step 1 — How much are you investing?
+              </p>
+              <p className="text-xs text-text-muted mt-1">
+                Set deployment capital, then review the plan below.
               </p>
             </div>
-            <div className="card-glass p-3 text-center">
-              <p className="text-xs text-text-muted">Cash</p>
-              <p className="font-mono text-sm text-text-primary">
-                {formatCurrency(summary.cash_balance)}
+            {summary && (
+              <p className="text-xs text-text-secondary">
+                Available cash:{" "}
+                <span className="font-mono text-text-primary font-semibold">
+                  {formatCurrency(summary.cash_balance)}
+                </span>
               </p>
-            </div>
-            <div className="card-glass p-3 text-center">
-              <p className="text-xs text-text-muted">Positions</p>
-              <p className="font-mono text-sm text-text-primary">
-                {summary.positions_count}
-              </p>
-            </div>
+            )}
           </div>
-        )}
-
-        {outcomes && outcomes.some((o) => o.return_pct != null) && (
-          <OutcomePLSection outcomes={outcomes} />
-        )}
-
-        <CashOverrideWidget />
-
-        {/* Deploy amount input */}
-        <div className="card-glass p-4 space-y-3">
-          <p className="text-sm text-text-secondary font-medium">Cash to deploy</p>
           <div className="flex gap-3 items-center">
             <div className="relative flex-1">
               <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted">$</span>
@@ -338,20 +324,39 @@ export default function DepositsPage() {
               </button>
             ))}
           </div>
-        </div>
+        </section>
 
-        {/* Deployment Plan */}
         {isPlanLoading ? (
           <InlineLoader text="Building deployment plan..." />
         ) : deployPlan ? (
-          <DeploymentPlan deployPlan={deployPlan} />
+          <DeploymentPlan deployPlan={deployPlan} amount={amount} />
         ) : null}
+
+        {outcomes && outcomes.some((o) => o.return_pct != null) && (
+          <details className="card-glass p-4 border border-border/70">
+            <summary className="text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer">
+              Decision P&amp;L history
+            </summary>
+            <div className="mt-3">
+              <OutcomePLSection outcomes={outcomes} />
+            </div>
+          </details>
+        )}
+
+        <details className="card-glass p-4 border border-border/70">
+          <summary className="text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer">
+            Cash source & override
+          </summary>
+          <div className="mt-3">
+            <CashOverrideWidget />
+          </div>
+        </details>
       </main>
     </>
   );
 }
 
-function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
+function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult; amount: number }) {
   const { plan, recommendations, summary, trims, notes, warning, explanation, exclusions, regime, adaptive } = deployPlan;
   const allocs = recommendations ?? [];
   const rankedAllocs = [...allocs].sort((a, b) => getScoreValue(b) - getScoreValue(a));
@@ -385,30 +390,47 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
 
   return (
     <div className="space-y-4">
-      {/* Recommended Deployment summary card */}
-      <RecommendedDeploymentCard
-        plan={plan}
-        summary={summary}
-        allocationCount={allocs.length}
-        regime={regime ?? null}
-        adaptive={adaptive ?? null}
-      />
-      {allocs.length === 0 ? (
-        <div className="card-glass px-4 py-6 text-center text-sm text-text-muted">
-          No deployment — cash preserved. See exclusions below.
-        </div>
-      ) : (
-        <>
-          <WhatToDoNowSection
-            allocations={enrichedAllocs}
-            risks={deployment_risks}
-            adaptive={adaptive ?? null}
-          />
-          <WhyMadeCutSection allocations={enrichedAllocs} />
-          <DeploymentRisksSection risks={deployment_risks} />
-          <DecisionLogMemoryPanel deployPlan={deployPlan} recommendations={enrichedAllocs} />
-        </>
-      )}
+      <section className="card-glass p-4 space-y-4 border border-border/80">
+        <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+          Step 2 — Where should this go?
+        </p>
+        <RecommendedDeploymentCard
+          plan={plan}
+          summary={summary}
+          allocationCount={allocs.length}
+          regime={regime ?? null}
+          adaptive={adaptive ?? null}
+          explanation={
+            adaptive?.adaptive_reasons?.length
+              ? adaptive.adaptive_reasons.join(" ")
+              : (explanation ?? plan.intel_summary ?? notes.join(" "))
+          }
+        />
+        {allocs.length === 0 ? (
+          <div className="px-4 py-4 text-center text-sm text-text-muted border border-border/70 rounded-lg">
+            No deployment right now — keep cash reserved until conditions improve.
+          </div>
+        ) : (
+          <>
+            <WhatToDoNowSection
+              allocations={enrichedAllocs}
+              risks={deployment_risks}
+              adaptive={adaptive ?? null}
+            />
+            <WhyMadeCutSection allocations={enrichedAllocs} />
+            <DeploymentRisksSection risks={deployment_risks} />
+          </>
+        )}
+      </section>
+
+      <section id="step-3">
+        <DecisionLogMemoryPanel
+          deployPlan={deployPlan}
+          recommendations={enrichedAllocs}
+          amount={amount}
+          adaptive={adaptive ?? null}
+        />
+      </section>
 
       {warning && (
         <div className="card-glass border border-yellow-500/30 bg-yellow-500/5 p-3 flex items-start gap-2">
@@ -425,15 +447,6 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         View full AI analysis
         <ArrowRightIcon className="w-3.5 h-3.5" />
       </Link>
-
-      {/* Why this plan */}
-      <WhyThisPlanCard
-        explanation={
-          adaptive?.adaptive_reasons?.length
-            ? adaptive.adaptive_reasons.join(" ")
-            : (explanation ?? plan.intel_summary ?? notes.join(" "))
-        }
-      />
 
       {/* Skipped / excluded */}
       {exclusions && exclusions.length > 0 && (
@@ -461,7 +474,7 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
       )}
 
       {/* Advanced details (collapsed by default) */}
-      {allocs.length > 0 && <AdvancedDetails allocations={allocs} />}
+      {allocs.length > 0 && <AdvancedDetails allocations={allocs} adaptive={adaptive ?? null} />}
     </div>
   );
 }
@@ -472,12 +485,14 @@ function RecommendedDeploymentCard({
   allocationCount,
   regime,
   adaptive,
+  explanation,
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
   allocationCount: number;
   regime: RegimeBlock | null;
   adaptive: AdaptiveBlock | null;
+  explanation?: string;
 }) {
   const hasAdaptive = !!adaptive;
   const immediate = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
@@ -497,10 +512,10 @@ function RecommendedDeploymentCard({
           </p>
           {hasAdaptive && reserve > 0 && (
             <p className="text-xs text-text-secondary mt-0.5">
-              Hold {formatCurrency(reserve)} cash reserve
+              Hold {formatCurrency(reserve)} for pullbacks
             </p>
           )}
-          <p className="text-xs text-text-muted mt-0.5">{plan.strategy}</p>
+          <p className="text-xs text-text-muted mt-0.5">{toCompactLine(explanation || plan.strategy, 18)}</p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           {regimeBadge && (
@@ -558,7 +573,6 @@ function RecommendedDeploymentCard({
           </p>
         </div>
       </div>
-      <InvestingStyleAdjustment adaptive={adaptive} />
     </div>
   );
 }
@@ -741,7 +755,7 @@ function WhatToDoNowSection({
   if (merged.length === 0) return null;
 
   return (
-    <div className="card-glass p-4 space-y-2 border border-accent/20">
+    <div className="p-3 space-y-2 border border-accent/20 rounded-lg bg-accent/5">
       <p className="text-xs font-semibold uppercase tracking-wide text-accent">
         What to Do Now
       </p>
@@ -761,28 +775,29 @@ function WhyMadeCutSection({ allocations }: { allocations: EnrichedAllocation[] 
   if (visible.length === 0) return null;
 
   return (
-    <div className="card-glass p-4 space-y-2 border border-border/80">
-      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-        Why these made the cut
-      </p>
-      <ul className="space-y-1">
+    <details className="border border-border/80 rounded-lg p-3">
+      <summary className="text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer">
+        Why these picks
+      </summary>
+      <ul className="space-y-1 mt-2">
         {visible.map((rec, idx) => (
           <li key={`${rec.symbol}-cut`} className="text-xs text-text-secondary leading-snug">
             <span className="font-mono font-semibold text-text-primary mr-1">{rec.symbol}:</span>
-            {toCompactLine(rec.why_selected, 14) || buildCutBullet(rec, idx, visible.length)}
+            {toCompactLine(rec.why_selected, 10) || buildCutBullet(rec, idx, visible.length)}
           </li>
         ))}
       </ul>
-    </div>
+    </details>
   );
 }
 
 function DeploymentRisksSection({ risks }: { risks: string[] }) {
+  const strongestRisks = risks.slice(0, 2);
   if (risks.length === 0) {
     return (
-      <div className="card-glass p-4 border border-border/80">
+      <div className="p-3 border border-yellow-500/30 bg-yellow-500/5 rounded-lg">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          Deployment risks
+          Risks
         </p>
         <p className="text-xs text-text-secondary mt-2">
           No immediate deployment concentration flags.
@@ -792,12 +807,12 @@ function DeploymentRisksSection({ risks }: { risks: string[] }) {
   }
 
   return (
-    <div className="card-glass p-4 space-y-2 border border-border/80">
-      <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-        Deployment risks
+    <div className="p-3 space-y-2 border border-yellow-500/30 bg-yellow-500/5 rounded-lg">
+      <p className="text-xs font-semibold uppercase tracking-wide text-yellow-200">
+        ⚠ Risks to watch
       </p>
       <ul className="space-y-1.5">
-        {risks.map((risk) => (
+        {strongestRisks.map((risk) => (
           <li key={risk} className="text-xs text-yellow-300 leading-snug">
             • {risk}
           </li>
@@ -846,7 +861,7 @@ function SkippedSection({ exclusions }: { exclusions: AllocationExclusion[] }) {
   );
 }
 
-function AdvancedDetails({ allocations }: { allocations: DepositRecommendation[] }) {
+function AdvancedDetails({ allocations, adaptive }: { allocations: DepositRecommendation[]; adaptive: AdaptiveBlock | null }) {
   const [open, setOpen] = useState(false);
   return (
     <div className="card-glass overflow-hidden">
@@ -861,6 +876,7 @@ function AdvancedDetails({ allocations }: { allocations: DepositRecommendation[]
       </button>
       {open && (
         <div className="border-t border-border p-4 space-y-3">
+          <InvestingStyleAdjustment adaptive={adaptive} />
           {allocations.map((rec) => (
             <div key={rec.symbol} className="border border-border rounded-lg p-3 space-y-2">
               <div className="flex items-center justify-between text-sm">
@@ -1097,9 +1113,13 @@ function DeployMemo({
 function DecisionLogMemoryPanel({
   deployPlan,
   recommendations,
+  amount,
+  adaptive,
 }: {
   deployPlan: DepositPlanResult;
   recommendations: EnrichedAllocation[];
+  amount: number;
+  adaptive: AdaptiveBlock | null;
 }) {
   const snapshot = useMemo(() => buildRecommendationSnapshot(deployPlan), [deployPlan]);
   const createLog = useCreateDecisionMemoryLog();
@@ -1112,6 +1132,7 @@ function DecisionLogMemoryPanel({
   const [notes, setNotes] = useState<string>("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
+  const [executeMessage, setExecuteMessage] = useState("");
   const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
     buildInitialActualDecisions(recommendations)
   );
@@ -1202,12 +1223,13 @@ function DecisionLogMemoryPanel({
       : performanceStatus === "ready" || performanceStatus === "partial_data"
       ? "Ready to evaluate"
       : "Not enough history";
+  const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
 
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
       <div className="flex items-center justify-between gap-2">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          {activeLog ? "Step 3 — Record what you actually did" : "Step 3 — Record your decision"}
+          Step 3 — Execute &amp; record
         </p>
         <span
           className={cn(
@@ -1234,9 +1256,24 @@ function DecisionLogMemoryPanel({
       ) : null}
       <div className="flex flex-wrap gap-2">
         <button
+          onClick={() => {
+            setDetailsOpen(true);
+            setExecuteMessage(`Execution focus set for ${formatCurrency(deployNow)}. Confirm orders in your broker, then save your decision log.`);
+          }}
+          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
+        >
+          Execute Plan
+        </button>
+        <button
+          onClick={() => document.getElementById("step-1")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
+        >
+          Modify Plan
+        </button>
+        <button
           onClick={activeLog ? onSaveActual : onSaveLog}
           disabled={activeLog ? updateLog.isPending : createLog.isPending}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background disabled:opacity-60"
+          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary disabled:opacity-60"
         >
           {activeLog
             ? updateLog.isPending
@@ -1256,6 +1293,7 @@ function DecisionLogMemoryPanel({
           </button>
         ) : null}
       </div>
+      {executeMessage && <p className="text-xs text-text-secondary">{executeMessage}</p>}
       {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
 
       {detailsOpen && savedLog && (

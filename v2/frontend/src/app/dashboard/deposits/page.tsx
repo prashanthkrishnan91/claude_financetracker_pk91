@@ -393,8 +393,23 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         regime={regime ?? null}
         adaptive={adaptive ?? null}
       />
-
-      <DecisionLogMemoryPanel deployPlan={deployPlan} recommendations={enrichedAllocs} />
+      {allocs.length === 0 ? (
+        <div className="card-glass px-4 py-6 text-center text-sm text-text-muted">
+          No deployment — cash preserved. See exclusions below.
+        </div>
+      ) : (
+        <>
+          <WhatToDoNowSection
+            allocations={enrichedAllocs}
+            risks={deployment_risks}
+            adaptive={adaptive ?? null}
+          />
+          <WhyMadeCutSection allocations={enrichedAllocs} />
+          <DeploymentRisksSection risks={deployment_risks} />
+          <DecisionLogMemoryPanel deployPlan={deployPlan} recommendations={enrichedAllocs} />
+          <TopAllocationTable allocations={enrichedAllocs} />
+        </>
+      )}
 
       {warning && (
         <div className="card-glass border border-yellow-500/30 bg-yellow-500/5 p-3 flex items-start gap-2">
@@ -411,24 +426,6 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         View full AI analysis
         <ArrowRightIcon className="w-3.5 h-3.5" />
       </Link>
-
-      {/* Top allocation table */}
-      {allocs.length === 0 ? (
-        <div className="card-glass px-4 py-6 text-center text-sm text-text-muted">
-          No deployment — cash preserved. See exclusions below.
-        </div>
-      ) : (
-        <>
-          <WhyMadeCutSection allocations={enrichedAllocs} />
-          <DeploymentRisksSection risks={deployment_risks} />
-          <WhatToDoNowSection
-            allocations={enrichedAllocs}
-            risks={deployment_risks}
-            adaptive={adaptive ?? null}
-          />
-          <TopAllocationTable allocations={enrichedAllocs} />
-        </>
-      )}
 
       {/* Why this plan */}
       <WhyThisPlanCard
@@ -1115,6 +1112,7 @@ function DecisionLogMemoryPanel({
   const [saveMessage, setSaveMessage] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
     buildInitialActualDecisions(recommendations)
   );
@@ -1145,11 +1143,6 @@ function DecisionLogMemoryPanel({
     : "No replacements";
   const performance = activeLog?.performance_snapshot?.portfolio;
   const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
-  const baselineCapturedAt = activeLog?.performance_snapshot?.baseline_captured_at;
-  const baselineCapturedAtDate = baselineCapturedAt ? new Date(baselineCapturedAt) : null;
-  const baselineCapturedAtLabel = baselineCapturedAtDate && !Number.isNaN(baselineCapturedAtDate.getTime())
-    ? baselineCapturedAtDate.toLocaleString()
-    : null;
   const perfDelta = performance?.delta ?? 0;
   const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
   const showPortfolioPerformance = performanceStatus === "ready" || performanceStatus === "partial_data";
@@ -1198,22 +1191,69 @@ function DecisionLogMemoryPanel({
   const insightsConfidenceLabel =
     insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
   const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
+  const replacementSummary = delta?.replaced_tickers?.length
+    ? delta.replaced_tickers
+        .slice(0, 2)
+        .map((item) => `${item.from || "—"} → ${item.to || "—"}`)
+        .join(" • ")
+    : "No replacements";
+  const performanceStatusLabel =
+    performanceStatus === "baseline_captured"
+      ? "Baseline captured"
+      : performanceStatus === "ready" || performanceStatus === "partial_data"
+      ? "Ready to evaluate"
+      : "Not enough history";
 
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision log memory</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision memory</p>
+        <span
+          className={cn(
+            "text-[11px] px-2 py-1 rounded-full border",
+            activeLog ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10" : "text-text-muted border-border bg-surface-elevated/40"
+          )}
+        >
+          {activeLog ? "Saved" : "Not saved"}
+        </span>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 text-xs">
+        <p className="text-text-secondary">
+          Deployed: <span className="text-text-primary font-semibold">{activeLog && delta ? formatCurrency(delta.total_actual) : "—"}</span>
+          {activeLog && delta ? <span className="text-text-muted"> ({deployedPct}%)</span> : null}
+        </p>
+        <p className="text-text-secondary">
+          Replacements: <span className="text-text-primary">{replacementSummary}</span>
+        </p>
+        <p className="text-text-secondary sm:col-span-2">
+          Performance status: <span className="text-text-primary">{performanceStatusLabel}</span>
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-2">
         <button
-          onClick={onSaveLog}
-          disabled={createLog.isPending}
+          onClick={activeLog ? onSaveActual : onSaveLog}
+          disabled={activeLog ? updateLog.isPending : createLog.isPending}
           className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background disabled:opacity-60"
         >
-          {createLog.isPending ? "Saving..." : "Save Decision Log"}
+          {activeLog
+            ? updateLog.isPending
+              ? "Saving..."
+              : "Update Actuals"
+            : createLog.isPending
+            ? "Saving..."
+            : "Save Decision Log"}
+        </button>
+        <button
+          onClick={() => setDetailsOpen((prev) => !prev)}
+          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary inline-flex items-center gap-1"
+        >
+          {detailsOpen ? "Hide decision details" : "View decision details"}
+          <ChevronIcon className={cn("w-3.5 h-3.5 transition-transform", detailsOpen ? "rotate-180" : "")} />
         </button>
       </div>
       {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
 
-      {savedLog && (
+      {detailsOpen && savedLog && (
         <div className="space-y-2 border-t border-border pt-3">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual Decision</p>
           <div className="space-y-2">
@@ -1286,7 +1326,7 @@ function DecisionLogMemoryPanel({
         </div>
       )}
 
-      {activeLog && delta && (
+      {detailsOpen && activeLog && delta && (
         <div className="border-t border-border pt-3 space-y-1.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
           <p className="text-xs text-text-secondary">
@@ -1299,7 +1339,7 @@ function DecisionLogMemoryPanel({
           <p className="text-xs text-text-secondary">Net effect: {behaviorLabel}</p>
         </div>
       )}
-      {activeLog && (
+      {detailsOpen && activeLog && (
         <div className="border-t border-border pt-3 space-y-1.5">
           <div className="flex items-center justify-between gap-2">
             <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Performance vs AI</p>
@@ -1314,19 +1354,9 @@ function DecisionLogMemoryPanel({
           {performance ? (
             <>
               {performanceStatus === "baseline_captured" ? (
-                <div className="space-y-1">
-                  <p className="text-xs text-amber-300">
-                    Performance baseline captured. Return comparison will become meaningful after prices move.
-                  </p>
-                  <p className="text-xs text-amber-300">
-                    Re-evaluate after market movement (next trading day or later)
-                  </p>
-                  {baselineCapturedAtLabel ? (
-                    <p className="text-xs text-text-muted">
-                      Baseline captured at: {baselineCapturedAtLabel}
-                    </p>
-                  ) : null}
-                </div>
+                <p className="text-xs text-amber-300">
+                  Performance baseline captured. Re-evaluate next trading day or later.
+                </p>
               ) : (
                 <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
               )}
@@ -1371,49 +1401,48 @@ function DecisionLogMemoryPanel({
           )}
         </div>
       )}
-      <div className="border-t border-border pt-3 space-y-1.5">
-        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Insights</p>
-        {!insights || insights.eligible_logs < 3 ? (
-          <div className="space-y-1">
-            <p className="text-xs text-text-secondary">Not enough evaluated decisions yet.</p>
-            <p className="text-xs text-text-muted">Log more decisions and re-evaluate after prices move.</p>
-          </div>
-        ) : (
-          <div className="space-y-1">
-            {(insights.confidence === "low" || insights.confidence === "medium") ? (
-              <p className="text-[11px] text-amber-300">
-                {insightsConfidenceLabel}: not enough history for a strong conclusion.
-              </p>
-            ) : null}
-            <p className="text-xs text-text-secondary">
-              You beat the model in {winCount} of {insights.eligible_logs} evaluated decisions.
-            </p>
-            <p className={cn("text-xs", (insights.summary.avg_delta ?? 0) >= 0 ? "text-emerald-300" : "text-red-300")}>
-              Average delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}%
-            </p>
-            {insights.behavior_insights.etf_replacements.count > 0 && insights.behavior_insights.etf_replacements.avg_delta !== null ? (
+      {detailsOpen && (
+        <div className="border-t border-border pt-3 space-y-1.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Insights</p>
+          {!insights || insights.eligible_logs < 3 ? (
+            <p className="text-xs text-text-secondary">Decision insights will appear after 3+ evaluated logs.</p>
+          ) : (
+            <div className="space-y-1">
+              {(insights.confidence === "low" || insights.confidence === "medium") ? (
+                <p className="text-[11px] text-amber-300">
+                  {insightsConfidenceLabel}: not enough history for a strong conclusion.
+                </p>
+              ) : null}
               <p className="text-xs text-text-secondary">
-                ETF replacements: {(insights.behavior_insights.etf_replacements.avg_delta ?? 0) >= 0 ? "+" : ""}
-                {(insights.behavior_insights.etf_replacements.avg_delta ?? 0).toFixed(2)}% avg delta
+                You beat the model in {winCount} of {insights.eligible_logs} evaluated decisions.
               </p>
-            ) : null}
-            {insights.behavior_insights.under_deployment.count > 0 && insights.behavior_insights.under_deployment.avg_delta !== null ? (
-              <p className="text-xs text-text-secondary">
-                Under-deployment ({insights.behavior_insights.under_deployment.count} logs): {(insights.behavior_insights.under_deployment.avg_delta ?? 0) >= 0 ? "helped" : "hurt"} by{" "}
-                {Math.abs(insights.behavior_insights.under_deployment.avg_delta ?? 0).toFixed(2)}% avg delta.
+              <p className={cn("text-xs", (insights.summary.avg_delta ?? 0) >= 0 ? "text-emerald-300" : "text-red-300")}>
+                Average delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}%
               </p>
-            ) : null}
-            {insights.summary.worst_override ? (
-              <p className="text-xs text-text-secondary">
-                Worst override: {insights.summary.worst_override.ticker}, {insights.summary.worst_override.delta_pct >= 0 ? "+" : ""}
-                {insights.summary.worst_override.delta_pct.toFixed(2)}%
-              </p>
-            ) : null}
-          </div>
-        )}
-      </div>
+              {insights.behavior_insights.etf_replacements.count > 0 && insights.behavior_insights.etf_replacements.avg_delta !== null ? (
+                <p className="text-xs text-text-secondary">
+                  ETF replacements: {(insights.behavior_insights.etf_replacements.avg_delta ?? 0) >= 0 ? "+" : ""}
+                  {(insights.behavior_insights.etf_replacements.avg_delta ?? 0).toFixed(2)}% avg delta
+                </p>
+              ) : null}
+              {insights.behavior_insights.under_deployment.count > 0 && insights.behavior_insights.under_deployment.avg_delta !== null ? (
+                <p className="text-xs text-text-secondary">
+                  Under-deployment ({insights.behavior_insights.under_deployment.count} logs): {(insights.behavior_insights.under_deployment.avg_delta ?? 0) >= 0 ? "helped" : "hurt"} by{" "}
+                  {Math.abs(insights.behavior_insights.under_deployment.avg_delta ?? 0).toFixed(2)}% avg delta.
+                </p>
+              ) : null}
+              {insights.summary.worst_override ? (
+                <p className="text-xs text-text-secondary">
+                  Worst override: {insights.summary.worst_override.ticker}, {insights.summary.worst_override.delta_pct >= 0 ? "+" : ""}
+                  {insights.summary.worst_override.delta_pct.toFixed(2)}%
+                </p>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
 
-      {logsToShow.length > 0 && (
+      {detailsOpen && logsToShow.length > 0 && (
         <div className="border-t border-border pt-2">
           <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex justify-between text-xs text-text-muted">
             <span>Recent Decision Logs</span>

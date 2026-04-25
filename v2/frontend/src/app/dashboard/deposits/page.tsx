@@ -1143,6 +1143,11 @@ function DecisionLogMemoryPanel({
     : "No replacements";
   const performance = activeLog?.performance_snapshot?.portfolio;
   const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
+  const baselineCapturedAt = activeLog?.performance_snapshot?.baseline_captured_at;
+  const baselineCapturedAtDate = baselineCapturedAt ? new Date(baselineCapturedAt) : null;
+  const baselineCapturedAtLabel = baselineCapturedAtDate && !Number.isNaN(baselineCapturedAtDate.getTime())
+    ? baselineCapturedAtDate.toLocaleString()
+    : null;
   const perfDelta = performance?.delta ?? 0;
   const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
   const showPortfolioPerformance = performanceStatus === "ready" || performanceStatus === "partial_data";
@@ -1304,9 +1309,19 @@ function DecisionLogMemoryPanel({
           {performance ? (
             <>
               {performanceStatus === "baseline_captured" ? (
-                <p className="text-xs text-amber-300">
-                  Performance baseline captured. Return comparison will become meaningful after prices move.
-                </p>
+                <div className="space-y-1">
+                  <p className="text-xs text-amber-300">
+                    Performance baseline captured. Return comparison will become meaningful after prices move.
+                  </p>
+                  <p className="text-xs text-amber-300">
+                    Re-evaluate after market movement (next trading day or later)
+                  </p>
+                  {baselineCapturedAtLabel ? (
+                    <p className="text-xs text-text-muted">
+                      Baseline captured at: {baselineCapturedAtLabel}
+                    </p>
+                  ) : null}
+                </div>
               ) : (
                 <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
               )}

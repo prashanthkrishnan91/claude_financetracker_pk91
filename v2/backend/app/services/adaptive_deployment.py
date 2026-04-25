@@ -56,6 +56,8 @@ class AdaptiveDecision:
     cash_reserve_amount: float
     adaptive_reasons: list[str]
     adjustments_applied: list[str]
+    style_messages: list[str] = field(default_factory=list)
+    behavior_profile: dict[str, object] = field(default_factory=dict)
     staged_allocations: list[StagedAllocation] = field(default_factory=list)
 
 
@@ -173,6 +175,8 @@ def _stage_row(
     deploy_pct: float,
     regime_label: str,
     deferred: bool,
+    prefers_etf: bool = False,
+    prefers_income: bool = False,
 ) -> StagedAllocation:
     """Split a row into immediate vs. reserve and pick a staging instruction.
 
@@ -210,6 +214,16 @@ def _stage_row(
     share = max(0.0, min(1.0, deploy_pct / 100.0))
     if is_etf and regime_label != "risk_off":
         share = max(share, 0.85)
+    if prefers_etf:
+        if is_etf:
+            share = min(1.0, share + 0.08)
+        else:
+            share = max(0.25, share - 0.05)
+    if prefers_income:
+        income_ticker_hints = {"SCHD", "VYM", "DGRO", "HDV", "JEPI", "DIVO", "BND", "SCHY"}
+        is_income_like = is_etf and a.ticker.upper() in income_ticker_hints
+        if is_income_like:
+            share = min(1.0, share + 0.05)
     if is_speculative:
         share = min(share, 0.50)
 
@@ -262,6 +276,7 @@ def adapt_allocation_plan(
     holdings: Optional[list[Holding]] = None,
     portfolio_total: float = 0.0,
     deployment_risks: Optional[list[str]] = None,
+    user_behavior: Optional[dict[str, object]] = None,
 ) -> AdaptiveDecision:
     """Compute deploy %, mode, per-row staging, and human reasons.
 
@@ -276,6 +291,11 @@ def adapt_allocation_plan(
     base = _BASE_DEPLOY.get(label, 70.0)
     deploy_pct = base
     adjustments: list[str] = []
+    style_messages: list[str] = []
+    behavior = user_behavior or {}
+    avg_deploy_ratio = float(behavior.get("avg_deploy_ratio") or 1.0)
+    prefers_etf = bool(behavior.get("prefers_etf"))
+    prefers_income = bool(behavior.get("prefers_income"))
 
     # Concentration adjustments use only the *selected* allocations (post-engine).
     top_theme, top_theme_share, top_theme_count = _theme_concentration(
@@ -312,6 +332,20 @@ def adapt_allocation_plan(
         deploy_pct -= 5.0
         adjustments.append("-5pts: low market-data quality")
 
+    # User behavior adaptive layer — soft-only nudges from prior decision logs.
+    if avg_deploy_ratio < 0.85:
+        deploy_pct -= 10.0
+        adjustments.append(
+            f"-10pts: prior execution ratio {avg_deploy_ratio*100:.0f}% (<85%)"
+        )
+        style_messages.append(
+            f"You typically deploy about {avg_deploy_ratio*100:.0f}% of recommended capital."
+        )
+    if prefers_etf:
+        style_messages.append("You tend to prefer ETFs over single stocks.")
+    if prefers_income:
+        style_messages.append("You often rotate toward income-focused ETFs.")
+
     # Caps + floors
     if label == "risk_off":
         deploy_pct = min(deploy_pct, _RISK_OFF_CAP)
@@ -337,7 +371,12 @@ def adapt_allocation_plan(
     for a in allocations:
         deferred = a.ticker.upper() in deferred_set
         staged.append(_stage_row(
-            a, deploy_pct=deploy_pct, regime_label=label, deferred=deferred,
+            a,
+            deploy_pct=deploy_pct,
+            regime_label=label,
+            deferred=deferred,
+            prefers_etf=prefers_etf,
+            prefers_income=prefers_income,
         ))
 
     # Plan-level totals are the sums of per-row immediates / reserves.
@@ -386,5 +425,7 @@ def adapt_allocation_plan(
         cash_reserve_amount=round(reserve, 2),
         adaptive_reasons=reasons[:3],
         adjustments_applied=adjustments,
+        style_messages=style_messages[:3],
+        behavior_profile=behavior,
         staged_allocations=staged,
     )

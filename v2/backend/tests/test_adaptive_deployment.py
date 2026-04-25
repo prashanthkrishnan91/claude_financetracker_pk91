@@ -223,3 +223,45 @@ class TestExplainability:
         )
         joined = " ".join(out.adaptive_reasons)
         assert "NVDA" in joined or "deferred" in joined.lower()
+
+
+class TestBehaviorAdaptiveLayer:
+    def test_under_deployer_reduces_deploy_percentage(self):
+        allocs = [
+            _alloc("MSFT", amount=300),
+            _alloc("TSM", amount=300),
+            _alloc("VOO", amount=300, category="ETF"),
+        ]
+        baseline = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+        )
+        behavior_adjusted = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+            user_behavior={"avg_deploy_ratio": 0.78, "under_deployer": True},
+        )
+        assert behavior_adjusted.deploy_percentage < baseline.deploy_percentage
+        assert any("execution ratio" in item.lower() for item in behavior_adjusted.adjustments_applied)
+
+    def test_prefers_etf_biases_staging_toward_etf(self):
+        allocs = [
+            _alloc("MSFT", amount=300, category="Core"),
+            _alloc("VOO", amount=300, category="ETF"),
+        ]
+        base = adapt_allocation_plan(
+            cash_to_deploy=600,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+        )
+        etf_biased = adapt_allocation_plan(
+            cash_to_deploy=600,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+            user_behavior={"prefers_etf": True},
+        )
+        base_etf = next(s for s in base.staged_allocations if s.ticker == "VOO")
+        tilted_etf = next(s for s in etf_biased.staged_allocations if s.ticker == "VOO")
+        assert tilted_etf.immediate_amount >= base_etf.immediate_amount

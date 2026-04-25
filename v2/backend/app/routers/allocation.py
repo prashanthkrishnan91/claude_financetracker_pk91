@@ -28,6 +28,7 @@ from ..services.allocation_engine import (
     _portfolio_total,
     build_allocation_plan,
 )
+from ..services.decision_log_service import DecisionLogService
 from ..services.recommendation_engine import RecommendationService
 from ..services.regime_engine import RegimeOutput, detect_market_regime
 
@@ -261,6 +262,8 @@ def _plan_to_dict(
             "cash_reserve_amount": adaptive.cash_reserve_amount,
             "adaptive_reasons": adaptive.adaptive_reasons,
             "adjustments_applied": adaptive.adjustments_applied,
+            "style_messages": adaptive.style_messages,
+            "behavior_profile": adaptive.behavior_profile,
         }
     return out
 
@@ -331,11 +334,17 @@ async def get_allocation_plan(
     # Adaptive layer — regime detection + deploy %/reserve staging.
     regime: RegimeOutput | None = None
     adaptive: AdaptiveDecision | None = None
+    behavior_profile: dict[str, Any] = {}
     try:
         regime = await detect_market_regime()
     except Exception as exc:  # noqa: BLE001 — never fail Deploy on regime
         logger.warning("allocation: regime detection failed — %s", exc)
         regime = None
+    try:
+        behavior_profile = DecisionLogService().getUserBehaviorProfile(str(user.id), limit=10)
+    except Exception as exc:  # noqa: BLE001 — deploy should work without decision history
+        logger.warning("allocation: behavior profile fetch failed — %s", exc)
+        behavior_profile = {}
     try:
         adaptive = adapt_allocation_plan(
             cash_to_deploy=cash_to_invest,
@@ -343,6 +352,7 @@ async def get_allocation_plan(
             regime=regime,  # type: ignore[arg-type]
             holdings=holdings,
             portfolio_total=portfolio_total,
+            user_behavior=behavior_profile,
         )
     except Exception as exc:  # noqa: BLE001 — adaptive layer is optional
         logger.warning("allocation: adaptive decision failed — %s", exc)

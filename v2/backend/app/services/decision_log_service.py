@@ -11,6 +11,28 @@ from .decision_delta import analyzeDecisionDelta
 logger = logging.getLogger(__name__)
 
 
+INCOME_ETF_HINTS = {"SCHD", "VYM", "DGRO", "HDV", "JEPI", "DIVO", "BND", "SCHY"}
+ETF_HINTS = {
+    "VOO", "VTI", "IVV", "SPY", "QQQ", "VYM", "SCHD", "DGRO", "BND", "VXUS", "VEA",
+    "SCHY", "HDV", "JEPI", "DIVO",
+}
+
+
+def _to_float(value: Any) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return 0.0
+    return 0.0
+
+
+def _is_etf_like(ticker: str) -> bool:
+    return ticker.upper() in ETF_HINTS
+
+
 class DecisionLogService:
     def __init__(self) -> None:
         self.client = get_supabase_client()
@@ -103,3 +125,87 @@ class DecisionLogService:
             .execute()
         )
         return bool(result.data)
+
+    def getUserBehaviorProfile(self, user_id: str, limit: int = 10) -> dict[str, Any]:
+        """Aggregate recent decision log behavior for soft adaptive deploy nudges."""
+        rows = self.list(user_id=user_id, limit=limit)
+        if not rows:
+            return {
+                "avg_deploy_ratio": 1.0,
+                "skip_rate": 0.0,
+                "replace_rate": 0.0,
+                "prefers_etf": False,
+                "prefers_income": False,
+                "growth_to_income_count": 0,
+                "single_to_etf_count": 0,
+                "avg_execution_gap_percent": 0.0,
+                "sample_size": 0,
+                "under_deployer": False,
+            }
+
+        deploy_ratios: list[float] = []
+        execution_gaps: list[float] = []
+        skip_count = 0
+        replace_count = 0
+        decision_count = 0
+        replacement_events = 0
+        etf_replacements = 0
+        income_replacements = 0
+        growth_to_income_count = 0
+        single_to_etf_count = 0
+
+        for row in rows:
+            delta = row.get("decision_delta") if isinstance(row.get("decision_delta"), dict) else {}
+            rec_total = _to_float(delta.get("total_recommended"))
+            actual_total = _to_float(delta.get("total_actual"))
+            if rec_total > 0:
+                deploy_ratios.append(max(0.0, actual_total / rec_total))
+            execution_gaps.append(_to_float(row.get("execution_gap_percent")))
+
+            actuals = row.get("actual_decisions")
+            decisions = actuals if isinstance(actuals, list) else []
+            for decision in decisions:
+                if not isinstance(decision, dict):
+                    continue
+                decision_count += 1
+                action = str(decision.get("actual_action") or "").strip().upper()
+                replacement_ticker = str(decision.get("replacement_ticker") or "").strip().upper()
+                reason_blob = str(decision.get("reason") or "").lower()
+                if action == "SKIPPED":
+                    skip_count += 1
+                if action == "REPLACED" or replacement_ticker:
+                    replace_count += 1
+                    replacement_events += 1
+                    if replacement_ticker and _is_etf_like(replacement_ticker):
+                        etf_replacements += 1
+                    if replacement_ticker in INCOME_ETF_HINTS or any(
+                        phrase in reason_blob for phrase in ("income", "dividend", "yield")
+                    ):
+                        income_replacements += 1
+
+            category_shift = delta.get("category_shift") if isinstance(delta.get("category_shift"), dict) else {}
+            if bool(category_shift.get("growth_to_income")) or str(row.get("style_shift") or "") == "growth_to_income":
+                growth_to_income_count += 1
+            if bool(category_shift.get("single_to_etf")):
+                single_to_etf_count += 1
+
+        total_decisions = max(1, decision_count)
+        avg_deploy_ratio = sum(deploy_ratios) / len(deploy_ratios) if deploy_ratios else 1.0
+        skip_rate = skip_count / total_decisions
+        replace_rate = replace_count / total_decisions
+        prefers_etf = replacement_events > 0 and (etf_replacements / replacement_events) > 0.50
+        prefers_income = income_replacements >= 2 or growth_to_income_count >= 2
+        avg_execution_gap = sum(execution_gaps) / len(execution_gaps) if execution_gaps else 0.0
+
+        return {
+            "avg_deploy_ratio": round(avg_deploy_ratio, 4),
+            "skip_rate": round(skip_rate, 4),
+            "replace_rate": round(replace_rate, 4),
+            "prefers_etf": prefers_etf,
+            "prefers_income": prefers_income,
+            "growth_to_income_count": growth_to_income_count,
+            "single_to_etf_count": single_to_etf_count,
+            "avg_execution_gap_percent": round(avg_execution_gap, 2),
+            "sample_size": len(rows),
+            "under_deployer": avg_deploy_ratio < 0.85,
+        }

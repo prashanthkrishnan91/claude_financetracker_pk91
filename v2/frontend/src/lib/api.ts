@@ -830,6 +830,19 @@ export interface AdaptiveBlock {
   cash_reserve_amount: number;
   adaptive_reasons: string[];
   adjustments_applied: string[];
+  style_messages?: string[];
+  behavior_profile?: {
+    avg_deploy_ratio?: number;
+    skip_rate?: number;
+    replace_rate?: number;
+    prefers_etf?: boolean;
+    prefers_income?: boolean;
+    growth_to_income_count?: number;
+    single_to_etf_count?: number;
+    avg_execution_gap_percent?: number;
+    sample_size?: number;
+    under_deployer?: boolean;
+  };
 }
 
 export interface AllocationExclusion {

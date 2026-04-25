@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from statistics import median
 from typing import Any
 
 from ..database import get_supabase_client
@@ -31,6 +32,26 @@ def _to_float(value: Any) -> float:
 
 def _is_etf_like(ticker: str) -> bool:
     return ticker.upper() in ETF_HINTS
+
+
+def _weighted_median(values: list[float], weights: list[float]) -> float:
+    """Return weighted median for aligned ``values``/``weights`` arrays."""
+    if not values or len(values) != len(weights):
+        return 1.0
+    pairs = sorted(
+        [(float(v), max(0.0, float(w))) for v, w in zip(values, weights)],
+        key=lambda item: item[0],
+    )
+    total_weight = sum(w for _, w in pairs)
+    if total_weight <= 0:
+        return median(values)
+    threshold = total_weight / 2.0
+    running = 0.0
+    for value, weight in pairs:
+        running += weight
+        if running >= threshold:
+            return value
+    return pairs[-1][0]
 
 
 class DecisionLogService:
@@ -132,6 +153,7 @@ class DecisionLogService:
         if not rows:
             return {
                 "avg_deploy_ratio": 1.0,
+                "stable_deploy_ratio": 1.0,
                 "skip_rate": 0.0,
                 "replace_rate": 0.0,
                 "prefers_etf": False,
@@ -140,10 +162,13 @@ class DecisionLogService:
                 "single_to_etf_count": 0,
                 "avg_execution_gap_percent": 0.0,
                 "sample_size": 0,
+                "personalization_confidence": "Low",
+                "adjustment_strength": 0.0,
                 "under_deployer": False,
             }
 
         deploy_ratios: list[float] = []
+        deploy_ratio_weights: list[float] = []
         execution_gaps: list[float] = []
         skip_count = 0
         replace_count = 0
@@ -154,12 +179,15 @@ class DecisionLogService:
         growth_to_income_count = 0
         single_to_etf_count = 0
 
-        for row in rows:
+        total_rows = len(rows)
+        for idx, row in enumerate(rows):
             delta = row.get("decision_delta") if isinstance(row.get("decision_delta"), dict) else {}
             rec_total = _to_float(delta.get("total_recommended"))
             actual_total = _to_float(delta.get("total_actual"))
             if rec_total > 0:
                 deploy_ratios.append(max(0.0, actual_total / rec_total))
+                # Rows are ordered newest->oldest. Weight recent logs higher.
+                deploy_ratio_weights.append(float(total_rows - idx))
             execution_gaps.append(_to_float(row.get("execution_gap_percent")))
 
             actuals = row.get("actual_decisions")
@@ -191,14 +219,27 @@ class DecisionLogService:
 
         total_decisions = max(1, decision_count)
         avg_deploy_ratio = sum(deploy_ratios) / len(deploy_ratios) if deploy_ratios else 1.0
+        stable_deploy_ratio = _weighted_median(deploy_ratios, deploy_ratio_weights) if deploy_ratios else 1.0
         skip_rate = skip_count / total_decisions
         replace_rate = replace_count / total_decisions
         prefers_etf = replacement_events > 0 and (etf_replacements / replacement_events) > 0.50
         prefers_income = income_replacements >= 2 or growth_to_income_count >= 2
         avg_execution_gap = sum(execution_gaps) / len(execution_gaps) if execution_gaps else 0.0
+        sample_size = len(rows)
+
+        if sample_size < 3:
+            confidence_label = "Low"
+            adjustment_strength = 0.0
+        elif sample_size <= 5:
+            confidence_label = "Medium"
+            adjustment_strength = 0.5
+        else:
+            confidence_label = "High"
+            adjustment_strength = 1.0
 
         return {
             "avg_deploy_ratio": round(avg_deploy_ratio, 4),
+            "stable_deploy_ratio": round(stable_deploy_ratio, 4),
             "skip_rate": round(skip_rate, 4),
             "replace_rate": round(replace_rate, 4),
             "prefers_etf": prefers_etf,
@@ -206,6 +247,8 @@ class DecisionLogService:
             "growth_to_income_count": growth_to_income_count,
             "single_to_etf_count": single_to_etf_count,
             "avg_execution_gap_percent": round(avg_execution_gap, 2),
-            "sample_size": len(rows),
-            "under_deployer": avg_deploy_ratio < 0.85,
+            "sample_size": sample_size,
+            "personalization_confidence": confidence_label,
+            "adjustment_strength": adjustment_strength,
+            "under_deployer": stable_deploy_ratio < 0.85,
         }

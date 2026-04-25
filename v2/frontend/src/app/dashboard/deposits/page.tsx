@@ -569,8 +569,17 @@ function InvestingStyleAdjustment({ adaptive }: { adaptive: AdaptiveBlock | null
   if (!adaptive) return null;
 
   const profile = adaptive.behavior_profile ?? {};
+  const confidence = profile.personalization_confidence ?? "Low";
+  const ratioPct = Math.round((profile.stable_deploy_ratio ?? profile.avg_deploy_ratio ?? 1) * 100);
+  const strength = profile.adjustment_strength ?? 0;
+  const hasEnoughHistory = (profile.sample_size ?? 0) >= 3;
+  const deployLine = !hasEnoughHistory
+    ? "Deployment unchanged: Not enough history yet to personalize deployment."
+    : strength < 1
+      ? `Deployment adjusted gently: recent execution baseline is ${ratioPct}% with medium confidence.`
+      : `Deployment adjusted: recent execution baseline is ${ratioPct}% with high confidence.`;
   const bulletLines = [
-    "Deployment adjusted: suggested deploy amount reduced based on your historical 81% execution rate.",
+    deployLine,
     "Ticker list unchanged: model conviction picks are preserved.",
     "ETF preference detected: show ETF alternatives as optional substitutes, not automatic replacements.",
   ];
@@ -579,6 +588,9 @@ function InvestingStyleAdjustment({ adaptive }: { adaptive: AdaptiveBlock | null
     <div className="rounded-md border border-border/80 bg-surface-elevated/30 p-2.5">
       <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted mb-1">
         Adjusted for your investing style
+      </p>
+      <p className="text-[11px] text-text-secondary leading-snug mb-1">
+        Personalization confidence: <span className="font-semibold">{confidence}</span>
       </p>
       <ul className="space-y-1">
         {bulletLines.map((line) => (

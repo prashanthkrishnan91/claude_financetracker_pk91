@@ -241,7 +241,14 @@ class TestBehaviorAdaptiveLayer:
             cash_to_deploy=900,
             allocations=allocs,
             regime=_regime("neutral", 55),
-            user_behavior={"avg_deploy_ratio": 0.78, "under_deployer": True},
+            user_behavior={
+                "avg_deploy_ratio": 0.78,
+                "stable_deploy_ratio": 0.78,
+                "sample_size": 10,
+                "personalization_confidence": "High",
+                "adjustment_strength": 1.0,
+                "under_deployer": True,
+            },
         )
         assert behavior_adjusted.deploy_percentage < baseline.deploy_percentage
         assert any("execution ratio" in item.lower() for item in behavior_adjusted.adjustments_applied)
@@ -265,3 +272,53 @@ class TestBehaviorAdaptiveLayer:
         base_etf = next(s for s in base.staged_allocations if s.ticker == "VOO")
         tilted_etf = next(s for s in etf_biased.staged_allocations if s.ticker == "VOO")
         assert tilted_etf.immediate_amount >= base_etf.immediate_amount
+
+    def test_low_history_disables_personalized_deploy_adjustment(self):
+        allocs = [
+            _alloc("MSFT", amount=300),
+            _alloc("TSM", amount=300),
+            _alloc("VOO", amount=300, category="ETF"),
+        ]
+        baseline = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+        )
+        low_history = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+            user_behavior={
+                "stable_deploy_ratio": 0.6,
+                "sample_size": 2,
+                "personalization_confidence": "Low",
+                "adjustment_strength": 0.0,
+            },
+        )
+        assert low_history.deploy_percentage == baseline.deploy_percentage
+        assert any("not enough history yet to personalize deployment" in m.lower() for m in low_history.style_messages)
+
+    def test_medium_confidence_uses_half_strength_penalty(self):
+        allocs = [
+            _alloc("MSFT", amount=300),
+            _alloc("TSM", amount=300),
+            _alloc("VOO", amount=300, category="ETF"),
+        ]
+        baseline = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+        )
+        medium = adapt_allocation_plan(
+            cash_to_deploy=900,
+            allocations=allocs,
+            regime=_regime("neutral", 55),
+            user_behavior={
+                "stable_deploy_ratio": 0.6,
+                "sample_size": 4,
+                "personalization_confidence": "Medium",
+                "adjustment_strength": 0.5,
+            },
+        )
+        assert medium.deploy_percentage < baseline.deploy_percentage
+        assert any("-5pts" in item.lower() for item in medium.adjustments_applied)

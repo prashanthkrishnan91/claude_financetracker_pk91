@@ -294,6 +294,26 @@ def adapt_allocation_plan(
     style_messages: list[str] = []
     behavior = user_behavior or {}
     avg_deploy_ratio = float(behavior.get("avg_deploy_ratio") or 1.0)
+    stable_deploy_ratio = float(
+        behavior.get("stable_deploy_ratio")
+        or avg_deploy_ratio
+        or 1.0
+    )
+    stable_deploy_ratio = max(0.6, min(1.0, stable_deploy_ratio))
+    adjusted_ratio = (0.5 * stable_deploy_ratio) + (0.5 * 0.9)
+    sample_size = int(behavior.get("sample_size") or 0)
+    confidence = str(behavior.get("personalization_confidence") or "").strip().title()
+    if confidence not in {"Low", "Medium", "High"}:
+        if sample_size < 3:
+            confidence = "Low"
+        elif sample_size <= 5:
+            confidence = "Medium"
+        else:
+            confidence = "High"
+    adjustment_strength = behavior.get("adjustment_strength")
+    if adjustment_strength is None:
+        adjustment_strength = 0.0 if sample_size < 3 else (0.5 if sample_size <= 5 else 1.0)
+    strength = max(0.0, min(1.0, float(adjustment_strength)))
     prefers_etf = bool(behavior.get("prefers_etf"))
     prefers_income = bool(behavior.get("prefers_income"))
 
@@ -333,14 +353,18 @@ def adapt_allocation_plan(
         adjustments.append("-5pts: low market-data quality")
 
     # User behavior adaptive layer — soft-only nudges from prior decision logs.
-    if avg_deploy_ratio < 0.85:
-        deploy_pct -= 10.0
+    if sample_size < 3:
+        style_messages.append("Not enough history yet to personalize deployment")
+    if adjusted_ratio < 0.85 and strength > 0:
+        penalty = 10.0 * strength
+        deploy_pct -= penalty
         adjustments.append(
-            f"-10pts: prior execution ratio {avg_deploy_ratio*100:.0f}% (<85%)"
+            f"-{penalty:.0f}pts: prior execution ratio {adjusted_ratio*100:.0f}% (<85%)"
         )
         style_messages.append(
-            f"You typically deploy about {avg_deploy_ratio*100:.0f}% of recommended capital."
+            f"You typically deploy about {adjusted_ratio*100:.0f}% of recommended capital."
         )
+    style_messages.append(f"Personalization confidence: {confidence}.")
     if prefers_etf:
         style_messages.append("You tend to prefer ETFs over single stocks.")
     if prefers_income:

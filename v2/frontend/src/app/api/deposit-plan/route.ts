@@ -52,6 +52,7 @@ type AdaptiveBlock = {
   style_messages?: string[];
   behavior_profile?: {
     avg_deploy_ratio?: number;
+    stable_deploy_ratio?: number;
     skip_rate?: number;
     replace_rate?: number;
     prefers_etf?: boolean;
@@ -60,6 +61,8 @@ type AdaptiveBlock = {
     single_to_etf_count?: number;
     avg_execution_gap_percent?: number;
     sample_size?: number;
+    personalization_confidence?: "Low" | "Medium" | "High";
+    adjustment_strength?: number;
     under_deployer?: boolean;
   };
 };

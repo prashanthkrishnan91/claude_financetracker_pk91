@@ -1145,6 +1145,7 @@ function DecisionLogMemoryPanel({
   const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
   const perfDelta = performance?.delta ?? 0;
   const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
+  const showPortfolioPerformance = performanceStatus === "ready" || performanceStatus === "partial_data";
   const perfSummary = performanceStatus === "ready"
     ? performance?.summary_text
       ? performance.summary_text
@@ -1153,7 +1154,7 @@ function DecisionLogMemoryPanel({
       : perfDelta > 0.05
       ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
       : `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
-    : performance?.summary_text ?? "Performance baseline captured. Return comparison will become meaningful after prices move.";
+    : performance?.summary_text ?? "Performance comparison is still collecting data.";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -1302,32 +1303,42 @@ function DecisionLogMemoryPanel({
           </div>
           {performance ? (
             <>
-              <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
               {performanceStatus === "baseline_captured" ? (
                 <p className="text-xs text-amber-300">
                   Performance baseline captured. Return comparison will become meaningful after prices move.
                 </p>
-              ) : null}
+              ) : (
+                <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
+              )}
               {hasQualityIssues ? (
                 <p className="text-xs text-amber-300">
                   Data quality note: some tickers are excluded because entry or current prices are missing.
                 </p>
               ) : null}
-              <p className="text-xs text-text-secondary">
-                Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
-              </p>
-              {performanceStatus === "ready" ? (
+              {showPortfolioPerformance ? (
+                <p className="text-xs text-text-secondary">
+                  Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
+                </p>
+              ) : null}
+              {showPortfolioPerformance ? (
                 <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
               ) : null}
               {activeLog.performance_snapshot?.per_ticker?.length ? (
                 <div className="space-y-1 pt-1">
                   {activeLog.performance_snapshot.per_ticker.map((row) => (
                     <p key={row.ticker} className={cn("text-[11px]", performanceStatus === "baseline_captured" ? "text-text-muted/70" : "text-text-muted")}>
-                      {row.status === "missing_price"
-                        ? `${row.ticker}: missing_price (${row.reason ?? "Missing entry price/current price"})`
-                        : performanceStatus === "baseline_captured"
-                        ? `${row.ticker}: baseline captured`
-                        : `${row.ticker}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`}
+                      {(() => {
+                        const tickerLabel = row.recommended_ticker && row.actual_ticker && row.recommended_ticker !== row.actual_ticker
+                          ? `${row.recommended_ticker} → ${row.actual_ticker}`
+                          : row.actual_ticker ?? row.recommended_ticker ?? row.ticker;
+                        if (row.status === "missing_price") {
+                          return `${tickerLabel}: missing_price (${row.reason ?? "Missing entry price/current price"})`;
+                        }
+                        if (performanceStatus === "baseline_captured") {
+                          return `${tickerLabel}: baseline captured`;
+                        }
+                        return `${tickerLabel}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`;
+                      })()}
                     </p>
                   ))}
                 </div>

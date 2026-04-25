@@ -407,7 +407,6 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
           <WhyMadeCutSection allocations={enrichedAllocs} />
           <DeploymentRisksSection risks={deployment_risks} />
           <DecisionLogMemoryPanel deployPlan={deployPlan} recommendations={enrichedAllocs} />
-          <TopAllocationTable allocations={enrichedAllocs} />
         </>
       )}
 
@@ -1207,7 +1206,9 @@ function DecisionLogMemoryPanel({
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
       <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision memory</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          {activeLog ? "Step 3 — Record what you actually did" : "Step 3 — Record your decision"}
+        </p>
         <span
           className={cn(
             "text-[11px] px-2 py-1 rounded-full border",
@@ -1217,18 +1218,20 @@ function DecisionLogMemoryPanel({
           {activeLog ? "Saved" : "Not saved"}
         </span>
       </div>
-      <div className="grid gap-2 sm:grid-cols-2 text-xs">
-        <p className="text-text-secondary">
-          Deployed: <span className="text-text-primary font-semibold">{activeLog && delta ? formatCurrency(delta.total_actual) : "—"}</span>
-          {activeLog && delta ? <span className="text-text-muted"> ({deployedPct}%)</span> : null}
-        </p>
-        <p className="text-text-secondary">
-          Replacements: <span className="text-text-primary">{replacementSummary}</span>
-        </p>
-        <p className="text-text-secondary sm:col-span-2">
-          Performance status: <span className="text-text-primary">{performanceStatusLabel}</span>
-        </p>
-      </div>
+      {activeLog ? (
+        <div className="grid gap-2 sm:grid-cols-2 text-xs">
+          <p className="text-text-secondary">
+            Deployed: <span className="text-text-primary font-semibold">{delta ? formatCurrency(delta.total_actual) : "—"}</span>
+            {delta ? <span className="text-text-muted"> ({deployedPct}%)</span> : null}
+          </p>
+          <p className="text-text-secondary">
+            Replacements: <span className="text-text-primary">{replacementSummary}</span>
+          </p>
+          <p className="text-text-secondary sm:col-span-2">
+            Performance status: <span className="text-text-primary">{performanceStatusLabel}</span>
+          </p>
+        </div>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <button
           onClick={activeLog ? onSaveActual : onSaveLog}
@@ -1243,13 +1246,15 @@ function DecisionLogMemoryPanel({
             ? "Saving..."
             : "Save Decision Log"}
         </button>
-        <button
-          onClick={() => setDetailsOpen((prev) => !prev)}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary inline-flex items-center gap-1"
-        >
-          {detailsOpen ? "Hide decision details" : "View decision details"}
-          <ChevronIcon className={cn("w-3.5 h-3.5 transition-transform", detailsOpen ? "rotate-180" : "")} />
-        </button>
+        {activeLog ? (
+          <button
+            onClick={() => setDetailsOpen((prev) => !prev)}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary inline-flex items-center gap-1"
+          >
+            {detailsOpen ? "Hide details" : "View details"}
+            <ChevronIcon className={cn("w-3.5 h-3.5 transition-transform", detailsOpen ? "rotate-180" : "")} />
+          </button>
+        ) : null}
       </div>
       {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
 
@@ -1316,13 +1321,6 @@ function DecisionLogMemoryPanel({
             className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
             rows={2}
           />
-          <button
-            onClick={onSaveActual}
-            disabled={updateLog.isPending}
-            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
-          >
-            {updateLog.isPending ? "Saving..." : "Update Actual Decisions"}
-          </button>
         </div>
       )}
 

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from statistics import median
 from typing import Any
 
@@ -73,6 +73,38 @@ def _to_iso_utc(ts: float | None = None) -> str:
     if ts is None:
         return datetime.now(timezone.utc).isoformat()
     return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+
+
+def _parse_iso_utc(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _derive_baseline_captured_at(snapshot: dict[str, Any]) -> str:
+    meta = snapshot.get("_meta") if isinstance(snapshot.get("_meta"), dict) else {}
+    explicit = str(meta.get("baseline_captured_at") or "").strip() if isinstance(meta, dict) else ""
+    if explicit:
+        return explicit
+    candidates: list[datetime] = []
+    for key, value in snapshot.items():
+        if str(key).startswith("_") or not isinstance(value, dict):
+            continue
+        parsed = _parse_iso_utc(value.get("timestamp"))
+        if parsed is not None:
+            candidates.append(parsed)
+    if candidates:
+        return min(candidates).isoformat()
+    return _to_iso_utc()
 
 
 def _run_async(coro):
@@ -175,6 +207,7 @@ class DecisionLogService:
             price_snapshot.setdefault("_meta", {})
             if isinstance(price_snapshot["_meta"], dict):
                 price_snapshot["_meta"].setdefault("backfilled", False)
+                price_snapshot["_meta"].setdefault("baseline_captured_at", _to_iso_utc())
         payload = {
             **data,
             "user_id": user_id,
@@ -294,6 +327,7 @@ class DecisionLogService:
             snapshot_meta["backfilled_at"] = _to_iso_utc()
         else:
             snapshot_meta.setdefault("backfilled", bool(snapshot_meta.get("backfilled")))
+        snapshot_meta.setdefault("baseline_captured_at", _derive_baseline_captured_at(merged_price_snapshot))
         merged_price_snapshot["_meta"] = snapshot_meta
 
         current_prices = _run_async(self._fetch_price_map_async(unique_tickers_needed))
@@ -383,21 +417,70 @@ class DecisionLogService:
         total_recommended = rec_weighted_sum / rec_weight_total if rec_weight_total > 0 else 0.0
         total_actual = actual_weighted_sum / actual_weight_total if actual_weight_total > 0 else 0.0
         total_delta = total_actual - total_recommended
-        all_returns_zero = _is_near_zero(total_recommended) and _is_near_zero(total_actual) and _is_near_zero(total_delta)
-        too_early = bool(snapshot_meta.get("backfilled")) and all_returns_zero
 
         comparable_rows = [item for item in per_ticker if item.get("status") == "ok" and isinstance(item.get("delta_pct"), (int, float))]
         best = max(comparable_rows, key=lambda item: item["delta_pct"], default=None)
         worst = min(comparable_rows, key=lambda item: item["delta_pct"], default=None)
+
+        evaluated_at = _to_iso_utc()
+        evaluated_dt = _parse_iso_utc(evaluated_at) or datetime.now(timezone.utc)
+        baseline_captured_at = str(snapshot_meta.get("baseline_captured_at") or "").strip() or evaluated_at
+        baseline_dt = _parse_iso_utc(baseline_captured_at) or evaluated_dt
+        less_than_one_trading_day = (evaluated_dt - baseline_dt) < timedelta(days=1)
+        tiny_moves = (
+            bool(comparable_rows)
+            and all(
+                abs(float(item.get("recommended_return_pct") or 0.0)) < 0.01
+                and abs(float(item.get("actual_return_pct") or 0.0)) < 0.01
+                and abs(float(item.get("delta_pct") or 0.0)) < 0.01
+                for item in comparable_rows
+            )
+        )
+        equal_entry_and_current = (
+            bool(comparable_rows)
+            and all(
+                _is_near_zero(float(item.get("recommended_return_pct") or 0.0), tolerance=0.0001)
+                and _is_near_zero(float(item.get("actual_return_pct") or 0.0), tolerance=0.0001)
+                for item in comparable_rows
+            )
+        )
+        baseline_guard = bool(snapshot_meta.get("backfilled")) or less_than_one_trading_day or tiny_moves or equal_entry_and_current
+        has_missing_rows = any(item.get("status") == "missing_price" for item in per_ticker)
+
+        if not comparable_rows:
+            evaluation_status = "missing_price"
+        elif baseline_guard:
+            evaluation_status = "baseline_captured"
+        elif has_missing_rows:
+            evaluation_status = "partial_data"
+        else:
+            evaluation_status = "ready"
+
         matched_model = (
-            skipped_count == 0
+            evaluation_status == "ready"
+            and skipped_count == 0
             and replaced_count == 0
             and not amount_mismatch_found
-            and _is_near_zero(total_delta)
-            and not too_early
+            and abs(total_delta) < 0.05
         )
+        if evaluation_status == "ready":
+            if abs(total_delta) < 0.05:
+                summary_text = "You matched the model"
+            elif total_delta > 0.05:
+                summary_text = f"You outperformed the model by {round(total_delta, 2):.2f}%"
+            else:
+                summary_text = f"You underperformed the model by {abs(round(total_delta, 2)):.2f}%"
+        elif evaluation_status == "baseline_captured":
+            summary_text = "Performance baseline captured. Return comparison will become meaningful after prices move."
+        elif evaluation_status == "partial_data":
+            summary_text = "Partial data: some tickers are missing required price points."
+        else:
+            summary_text = "Missing price data: return comparison is not available yet."
+
         performance_snapshot = {
-            "evaluated_at": _to_iso_utc(),
+            "status": evaluation_status,
+            "evaluated_at": evaluated_at,
+            "baseline_captured_at": baseline_captured_at,
             "portfolio": {
                 "recommended_return": round(total_recommended, 4),
                 "actual_return": round(total_actual, 4),
@@ -408,17 +491,9 @@ class DecisionLogService:
                 "best_decision": best,
                 "worst_decision": worst,
                 "matched_model": matched_model,
-                "too_early_to_judge": too_early,
+                "too_early_to_judge": evaluation_status == "baseline_captured",
                 "backfilled_baseline": bool(snapshot_meta.get("backfilled")),
-                "summary_text": (
-                    "Too early to judge performance"
-                    if too_early
-                    else "You matched the model"
-                    if matched_model
-                    else f"You outperformed the model by {round(total_delta, 2):.2f}%"
-                    if total_delta > 0
-                    else f"You underperformed the model by {abs(round(total_delta, 2)):.2f}%"
-                ),
+                "summary_text": summary_text,
             },
             "per_ticker": per_ticker,
             "data_quality": data_quality,

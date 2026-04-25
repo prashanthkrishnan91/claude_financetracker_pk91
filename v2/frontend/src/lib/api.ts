@@ -696,7 +696,9 @@ export interface DecisionMemoryLog {
   price_snapshot?: Record<string, { price?: number; timestamp?: string } | unknown> | null;
   actual_decisions: ActualDecisionItem[];
   performance_snapshot?: {
+    status?: "baseline_captured" | "ready" | "partial_data" | "missing_price";
     evaluated_at: string;
+    baseline_captured_at?: string;
     portfolio: {
       recommended_return: number;
       actual_return: number;

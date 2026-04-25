@@ -1142,15 +1142,18 @@ function DecisionLogMemoryPanel({
       : "No replacements"
     : "No replacements";
   const performance = activeLog?.performance_snapshot?.portfolio;
+  const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
   const perfDelta = performance?.delta ?? 0;
   const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
-  const perfSummary = performance?.summary_text
-    ? performance.summary_text
-    : perfDelta > 0
-    ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
-    : perfDelta < 0
-    ? `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
-    : "You matched the model";
+  const perfSummary = performanceStatus === "ready"
+    ? performance?.summary_text
+      ? performance.summary_text
+      : Math.abs(perfDelta) < 0.05
+      ? "You matched the model"
+      : perfDelta > 0.05
+      ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
+      : `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
+    : performance?.summary_text ?? "Performance baseline captured. Return comparison will become meaningful after prices move.";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -1299,8 +1302,8 @@ function DecisionLogMemoryPanel({
           </div>
           {performance ? (
             <>
-              <p className={cn("text-xs", perfDelta >= 0 ? "text-emerald-300" : "text-red-300")}>{perfSummary}</p>
-              {performance.too_early_to_judge ? (
+              <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
+              {performanceStatus === "baseline_captured" ? (
                 <p className="text-xs text-amber-300">
                   Performance baseline captured. Return comparison will become meaningful after prices move.
                 </p>
@@ -1313,13 +1316,17 @@ function DecisionLogMemoryPanel({
               <p className="text-xs text-text-secondary">
                 Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
               </p>
-              <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
+              {performanceStatus === "ready" ? (
+                <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
+              ) : null}
               {activeLog.performance_snapshot?.per_ticker?.length ? (
                 <div className="space-y-1 pt-1">
                   {activeLog.performance_snapshot.per_ticker.map((row) => (
-                    <p key={row.ticker} className="text-[11px] text-text-muted">
+                    <p key={row.ticker} className={cn("text-[11px]", performanceStatus === "baseline_captured" ? "text-text-muted/70" : "text-text-muted")}>
                       {row.status === "missing_price"
                         ? `${row.ticker}: missing_price (${row.reason ?? "Missing entry price/current price"})`
+                        : performanceStatus === "baseline_captured"
+                        ? `${row.ticker}: baseline captured`
                         : `${row.ticker}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`}
                     </p>
                   ))}

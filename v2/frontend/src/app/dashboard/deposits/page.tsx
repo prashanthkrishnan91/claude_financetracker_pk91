@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import { cn, formatCurrency } from "@/lib/utils";
 import {
@@ -9,17 +9,23 @@ import {
   useSetCash,
   useDepositPlan,
   useDecisionOutcomes,
+  useCreateDecisionMemoryLog,
+  useDecisionMemoryLogs,
+  useUpdateDecisionMemoryLog,
 } from "@/lib/hooks";
 import type {
   AdaptiveBlock,
   AllocationExclusion,
   DepositPlanResult,
   DepositRecommendation,
+  ActualDecisionItem,
   DecisionLogEntry,
+  DecisionMemoryLog,
   RegimeBlock,
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
+import { buildInitialActualDecisions, buildRecommendationSnapshot } from "@/lib/decision-log";
 
 const MAX_REASON_WORDS = 12;
 
@@ -385,6 +391,8 @@ function DeploymentPlan({ deployPlan }: { deployPlan: DepositPlanResult }) {
         regime={regime ?? null}
         adaptive={adaptive ?? null}
       />
+
+      <DecisionLogMemoryPanel deployPlan={deployPlan} recommendations={enrichedAllocs} />
 
       {warning && (
         <div className="card-glass border border-yellow-500/30 bg-yellow-500/5 p-3 flex items-start gap-2">
@@ -1043,6 +1051,165 @@ function DeployMemo({
 }
 
 // Icons
+
+function DecisionLogMemoryPanel({
+  deployPlan,
+  recommendations,
+}: {
+  deployPlan: DepositPlanResult;
+  recommendations: EnrichedAllocation[];
+}) {
+  const snapshot = useMemo(() => buildRecommendationSnapshot(deployPlan), [deployPlan]);
+  const createLog = useCreateDecisionMemoryLog();
+  const updateLog = useUpdateDecisionMemoryLog();
+  const { data: recentLogs } = useDecisionMemoryLogs(6, true);
+  const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
+  const [saveMessage, setSaveMessage] = useState<string>("");
+  const [notes, setNotes] = useState<string>("");
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
+    buildInitialActualDecisions(recommendations)
+  );
+
+  function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
+    setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  }
+
+  async function onSaveLog() {
+    if (createLog.isPending) return;
+    const created = await createLog.mutateAsync({ snapshot, status: "draft" });
+    setSavedLog(created);
+    setNotes(created.notes ?? "");
+    setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
+    setSaveMessage("Decision log saved");
+  }
+
+  async function onSaveActual() {
+    if (!savedLog || updateLog.isPending) return;
+    const patch = {
+      actual_decisions: actualDecisions.map((row) => ({ ...row, executed_at: row.executed_at ?? new Date().toISOString() })),
+      notes,
+      status: "partially_executed" as const,
+    };
+    const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
+    setSavedLog(updated);
+    setSaveMessage("Actual decisions updated");
+  }
+
+  const logsToShow = recentLogs ?? [];
+
+  return (
+    <div className="card-glass p-4 space-y-3 border border-border/80">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision log memory</p>
+        <button
+          onClick={onSaveLog}
+          disabled={createLog.isPending}
+          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background disabled:opacity-60"
+        >
+          {createLog.isPending ? "Saving..." : "Save Decision Log"}
+        </button>
+      </div>
+      {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
+
+      {savedLog && (
+        <div className="space-y-2 border-t border-border pt-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual Decision</p>
+          <div className="space-y-2">
+            {actualDecisions.map((row, idx) => (
+              <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
+                <div className="col-span-2 font-mono text-text-primary">{row.ticker || "—"}</div>
+                <select
+                  value={String(row.actual_action || "BOUGHT")}
+                  onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
+                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
+                >
+                  <option value="BOUGHT">Bought</option>
+                  <option value="SKIPPED">Skipped</option>
+                  <option value="REPLACED">Replaced</option>
+                  <option value="WATCH">Watch</option>
+                </select>
+                <input
+                  type="number"
+                  value={row.actual_amount ?? 0}
+                  onChange={(e) => updateDecision(idx, { actual_amount: Number(e.target.value) || 0 })}
+                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                />
+                <input
+                  placeholder="Replacement"
+                  value={row.replacement_ticker ?? ""}
+                  onChange={(e) => updateDecision(idx, { replacement_ticker: e.target.value.toUpperCase() || undefined })}
+                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                />
+                <input
+                  placeholder="Reason"
+                  value={row.reason ?? ""}
+                  onChange={(e) => updateDecision(idx, { reason: e.target.value || undefined })}
+                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
+                />
+              </div>
+            ))}
+          </div>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            placeholder="Notes (optional)"
+            className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
+            rows={2}
+          />
+          <button
+            onClick={onSaveActual}
+            disabled={updateLog.isPending}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
+          >
+            {updateLog.isPending ? "Saving..." : "Save updates"}
+          </button>
+        </div>
+      )}
+
+      {logsToShow.length > 0 && (
+        <div className="border-t border-border pt-2">
+          <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex justify-between text-xs text-text-muted">
+            <span>Recent Decision Logs</span>
+            <span>{historyOpen ? "−" : "+"}</span>
+          </button>
+          {historyOpen && (
+            <div className="mt-2 space-y-1">
+              {logsToShow.map((log) => {
+                const recs = Array.isArray((log.recommendation_snapshot as any)?.normalized_tickers)
+                  ? ((log.recommendation_snapshot as any).normalized_tickers as Array<Record<string, unknown>>)
+                  : [];
+                const recTotal = recs.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
+                const actualTotal = (log.actual_decisions || []).reduce((sum, row) => sum + (Number(row.actual_amount) || 0), 0);
+                return (
+                  <button
+                    key={log.id}
+                    onClick={() => {
+                      setSavedLog(log);
+                      setActualDecisions(log.actual_decisions?.length ? log.actual_decisions : buildInitialActualDecisions(recommendations));
+                      setNotes(log.notes ?? "");
+                      setSaveMessage("");
+                    }}
+                    className="w-full text-left rounded border border-border px-2 py-1.5 text-xs hover:bg-surface-elevated"
+                  >
+                    <div className="flex justify-between text-text-primary">
+                      <span>{new Date(log.created_at).toLocaleDateString()}</span>
+                      <span className="uppercase">{log.status}</span>
+                    </div>
+                    <div className="text-text-muted mt-0.5">
+                      {recs.length} tickers · Rec {formatCurrency(recTotal)} · Actual {formatCurrency(actualTotal)}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ArrowRightIcon({ className }: { className?: string }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>

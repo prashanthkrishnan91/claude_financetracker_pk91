@@ -19,7 +19,7 @@ async def get_decision_logs(
 ):
     """List deploy-plan decision log entries, newest first."""
     svc = DecisionLogService()
-    return svc.list(limit).data
+    return svc.list(user_id=str(user.id), limit=limit)
 
 
 @router.post("/logs", status_code=201)
@@ -29,8 +29,14 @@ async def create_decision_log(
 ):
     """Manually log a deploy decision (with optional ticker/amount edits)."""
     svc = DecisionLogService()
-    result = svc.log({**body.model_dump(), "user_id": str(user.id)})
-    return result.data[0] if result.data else {}
+    payload = {
+        "source": body.source or "manual",
+        "status": "executed",
+        "recommendation_snapshot": body.model_dump(),
+        "actual_decisions": [body.model_dump()],
+        "notes": body.reasoning,
+    }
+    return svc.create(user_id=str(user.id), data=payload)
 
 
 @router.get("/{decision_id}", response_model=DecisionResponse)

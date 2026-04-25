@@ -323,8 +323,9 @@ export function useDecisionOutcomes() {
 export function useLogDecision() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: api.decisionLogs.create,
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["decisionLogs"] }),
+    mutationFn: ({ snapshot, status }: { snapshot: Record<string, unknown>; status?: "draft" | "executed" | "partially_executed" | "skipped" }) =>
+      api.decisionLogs.createDecisionLog(snapshot, status),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }
 
@@ -390,5 +391,33 @@ export function useStrategyPerformance() {
     queryKey: ["analytics", "strategy-performance"],
     queryFn: api.analytics.getStrategyPerformance,
     staleTime: 5 * 60_000,
+  });
+}
+
+
+export function useDecisionMemoryLogs(limit = 10, enabled = true) {
+  return useQuery({
+    queryKey: ["decision-logs", limit],
+    queryFn: () => api.decisionLogs.listDecisionLogs(limit),
+    enabled,
+    staleTime: 30_000,
+  });
+}
+
+export function useCreateDecisionMemoryLog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ snapshot, status }: { snapshot: Record<string, unknown>; status?: "draft" | "executed" | "partially_executed" | "skipped" }) =>
+      api.decisionLogs.createDecisionLog(snapshot, status),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
+  });
+}
+
+export function useUpdateDecisionMemoryLog() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: { status?: "draft" | "executed" | "partially_executed" | "skipped"; actual_decisions?: Array<Record<string, unknown>>; notes?: string } }) =>
+      api.decisionLogs.updateDecisionLog(id, patch),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }

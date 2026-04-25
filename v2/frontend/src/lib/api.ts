@@ -212,23 +212,22 @@ export const api = {
   },
 
   decisionLogs: {
-    list: (limit = 50) =>
-      fetchApi<Record<string, unknown>[]>(`/api/v1/decision/logs?limit=${limit}`),
-    create: (entry: {
-      ticker: string;
-      action: string;
-      amount: number;
-      confidence?: number;
-      reasoning?: string;
-      source?: string;
-      metadata?: Record<string, unknown>;
-      strategy_tag?: string;
-      confidence_score?: number;
-    }) =>
-      fetchApi<Record<string, unknown>>("/api/v1/decision/logs", {
+    createDecisionLog: (snapshot: Record<string, unknown>, status: DecisionLogStatus = "draft") =>
+      fetchApi<DecisionMemoryLog>("/api/v1/decision-logs", {
         method: "POST",
-        body: JSON.stringify(entry),
+        body: JSON.stringify({ recommendation_snapshot: snapshot, status, source: "deploy" }),
       }),
+    listDecisionLogs: (limit = 25) =>
+      fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),
+    getDecisionLog: (id: string) =>
+      fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`),
+    updateDecisionLog: (id: string, patch: DecisionLogPatch) =>
+      fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      }),
+    deleteDecisionLog: (id: string) =>
+      fetchApi<void>(`/api/v1/decision-logs/${id}`, { method: "DELETE" }),
   },
 
   analytics: {
@@ -652,6 +651,38 @@ export interface CashBalance {
   cash_balance: number;
   source: "plaid" | "manual" | "none";
   manual_override: number | null;
+}
+
+export type DecisionLogStatus = "draft" | "executed" | "partially_executed" | "skipped";
+
+export interface ActualDecisionItem {
+  ticker?: string;
+  recommended_action?: string;
+  actual_action?: string;
+  recommended_amount?: number;
+  actual_amount?: number;
+  replacement_ticker?: string;
+  replacement_amount?: number;
+  reason?: string;
+  executed_at?: string;
+}
+
+export interface DecisionLogPatch {
+  status?: DecisionLogStatus;
+  actual_decisions?: ActualDecisionItem[];
+  notes?: string;
+}
+
+export interface DecisionMemoryLog {
+  id: string;
+  user_id: string;
+  source: string;
+  status: DecisionLogStatus;
+  recommendation_snapshot: Record<string, unknown>;
+  actual_decisions: ActualDecisionItem[];
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface DecisionLogEntry {

@@ -1143,12 +1143,14 @@ function DecisionLogMemoryPanel({
     : "No replacements";
   const performance = activeLog?.performance_snapshot?.portfolio;
   const perfDelta = performance?.delta ?? 0;
-  const perfSummary =
-    perfDelta > 0
-      ? `You outperformed the model by +${perfDelta.toFixed(2)}%`
-      : perfDelta < 0
-      ? `Model outperformed your decisions by ${perfDelta.toFixed(2)}%`
-      : "You matched the model";
+  const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
+  const perfSummary = performance?.summary_text
+    ? performance.summary_text
+    : perfDelta > 0
+    ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
+    : perfDelta < 0
+    ? `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
+    : "You matched the model";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -1298,15 +1300,27 @@ function DecisionLogMemoryPanel({
           {performance ? (
             <>
               <p className={cn("text-xs", perfDelta >= 0 ? "text-emerald-300" : "text-red-300")}>{perfSummary}</p>
+              {performance.too_early_to_judge ? (
+                <p className="text-xs text-amber-300">
+                  Performance baseline captured. Return comparison will become meaningful after prices move.
+                </p>
+              ) : null}
+              {hasQualityIssues ? (
+                <p className="text-xs text-amber-300">
+                  Data quality note: some tickers are excluded because entry or current prices are missing.
+                </p>
+              ) : null}
               <p className="text-xs text-text-secondary">
                 Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
               </p>
               <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
               {activeLog.performance_snapshot?.per_ticker?.length ? (
                 <div className="space-y-1 pt-1">
-                  {activeLog.performance_snapshot.per_ticker.slice(0, 4).map((row) => (
+                  {activeLog.performance_snapshot.per_ticker.map((row) => (
                     <p key={row.ticker} className="text-[11px] text-text-muted">
-                      {row.ticker}: AI {row.recommended_return_pct.toFixed(2)}% • You {row.actual_return_pct.toFixed(2)}% • Δ {row.delta_pct.toFixed(2)}%
+                      {row.status === "missing_price"
+                        ? `${row.ticker}: missing_price (${row.reason ?? "Missing entry price/current price"})`
+                        : `${row.ticker}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`}
                     </p>
                   ))}
                 </div>

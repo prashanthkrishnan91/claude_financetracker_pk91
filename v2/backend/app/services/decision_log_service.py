@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from statistics import median
@@ -62,6 +63,10 @@ def _pct_return(entry_price: float, current_price: float) -> float:
     if entry_price <= 0:
         return 0.0
     return ((current_price - entry_price) / entry_price) * 100.0
+
+
+def _is_near_zero(value: float, tolerance: float = 0.05) -> bool:
+    return abs(value) <= tolerance
 
 
 def _to_iso_utc(ts: float | None = None) -> str:
@@ -146,6 +151,17 @@ class DecisionLogService:
                 tickers.append(replacement)
         return tickers
 
+    def _price_snapshot_has_tickers(self, snapshot: dict[str, Any]) -> bool:
+        for key, value in snapshot.items():
+            if key.startswith("_"):
+                continue
+            if isinstance(value, dict):
+                return True
+        return False
+
+    def _is_missing_price(self, price_value: float) -> bool:
+        return (not math.isfinite(price_value)) or price_value <= 0.0
+
     def create(self, user_id: str, data: dict[str, Any]) -> dict[str, Any]:
         recommendation_snapshot = data.get("recommendation_snapshot")
         actual_decisions = data.get("actual_decisions")
@@ -155,6 +171,10 @@ class DecisionLogService:
         )
         tickers_for_snapshot = self._extract_recommendation_tickers(recommendation_snapshot) + self._extract_replacement_tickers(actual_decisions)
         price_snapshot = _run_async(self._fetch_price_map_async(tickers_for_snapshot))
+        if isinstance(price_snapshot, dict):
+            price_snapshot.setdefault("_meta", {})
+            if isinstance(price_snapshot["_meta"], dict):
+                price_snapshot["_meta"].setdefault("backfilled", False)
         payload = {
             **data,
             "user_id": user_id,
@@ -258,17 +278,35 @@ class DecisionLogService:
 
         existing_snapshot = row.get("price_snapshot") if isinstance(row.get("price_snapshot"), dict) else {}
         tickers_needed = self._extract_recommendation_tickers(recommendation_snapshot) + self._extract_replacement_tickers(actual_list)
-        missing_tickers = [t for t in sorted(set(tickers_needed)) if t and t not in existing_snapshot]
-        fetched_snapshot = _run_async(self._fetch_price_map_async(missing_tickers)) if missing_tickers else {}
-        merged_price_snapshot = {**existing_snapshot, **fetched_snapshot}
+        unique_tickers_needed = [t for t in sorted(set(tickers_needed)) if t]
 
-        current_prices = _run_async(self._fetch_price_map_async(tickers_needed))
+        existing_has_prices = self._price_snapshot_has_tickers(existing_snapshot)
+        snapshot_backfilled = not existing_has_prices
+        fetched_backfill = _run_async(self._fetch_price_map_async(unique_tickers_needed)) if snapshot_backfilled else {}
+        missing_tickers = [t for t in unique_tickers_needed if t not in existing_snapshot]
+        fetched_missing = _run_async(self._fetch_price_map_async(missing_tickers)) if (not snapshot_backfilled and missing_tickers) else {}
+        merged_price_snapshot = {**existing_snapshot, **fetched_backfill, **fetched_missing}
+        snapshot_meta = merged_price_snapshot.get("_meta") if isinstance(merged_price_snapshot.get("_meta"), dict) else {}
+        if not isinstance(snapshot_meta, dict):
+            snapshot_meta = {}
+        if snapshot_backfilled:
+            snapshot_meta["backfilled"] = True
+            snapshot_meta["backfilled_at"] = _to_iso_utc()
+        else:
+            snapshot_meta.setdefault("backfilled", bool(snapshot_meta.get("backfilled")))
+        merged_price_snapshot["_meta"] = snapshot_meta
+
+        current_prices = _run_async(self._fetch_price_map_async(unique_tickers_needed))
 
         per_ticker: list[dict[str, Any]] = []
+        data_quality: list[dict[str, Any]] = []
         rec_weighted_sum = 0.0
         rec_weight_total = 0.0
         actual_weighted_sum = 0.0
         actual_weight_total = 0.0
+        skipped_count = 0
+        replaced_count = 0
+        amount_mismatch_found = False
 
         for rec in rec_rows:
             if not isinstance(rec, dict):
@@ -281,10 +319,13 @@ class DecisionLogService:
             rec_now = current_prices.get(ticker) if isinstance(current_prices.get(ticker), dict) else {}
             rec_entry_price = _to_float(rec_entry.get("price"))
             rec_current_price = _to_float(rec_now.get("price"))
-            recommended_return_pct = _pct_return(rec_entry_price, rec_current_price)
 
             actual_decision = actual_by_ticker.get(ticker) or {}
             action = str(actual_decision.get("actual_action") or "BOUGHT").strip().upper()
+            if action == "SKIPPED":
+                skipped_count += 1
+            if action == "REPLACED":
+                replaced_count += 1
             actual_ticker = ticker
             if action == "REPLACED":
                 replacement = str(actual_decision.get("replacement_ticker") or "").strip().upper()
@@ -292,35 +333,69 @@ class DecisionLogService:
                     actual_ticker = replacement
             actual_amount = _to_float(actual_decision.get("actual_amount"))
             exposure_amount = 0.0 if action == "SKIPPED" else (actual_amount if actual_amount > 0 else recommended_amount)
+            if action != "SKIPPED" and recommended_amount > 0 and exposure_amount > 0 and abs(exposure_amount - recommended_amount) > 0.01:
+                amount_mismatch_found = True
             actual_entry = merged_price_snapshot.get(actual_ticker) if isinstance(merged_price_snapshot.get(actual_ticker), dict) else {}
             actual_now = current_prices.get(actual_ticker) if isinstance(current_prices.get(actual_ticker), dict) else {}
             actual_entry_price = _to_float(actual_entry.get("price"))
             actual_current_price = _to_float(actual_now.get("price"))
-            actual_return_pct = 0.0 if exposure_amount <= 0 else _pct_return(actual_entry_price, actual_current_price)
-            delta_pct = actual_return_pct - recommended_return_pct
+
+            row_status = "ok"
+            row_reason = None
+            if self._is_missing_price(rec_entry_price) or self._is_missing_price(rec_current_price):
+                row_status = "missing_price"
+                row_reason = "Missing entry price/current price"
+                data_quality.append({"status": row_status, "reason": row_reason, "ticker": ticker, "leg": "recommended"})
+            if exposure_amount > 0 and (self._is_missing_price(actual_entry_price) or self._is_missing_price(actual_current_price)):
+                row_status = "missing_price"
+                row_reason = "Missing entry price/current price"
+                data_quality.append({"status": row_status, "reason": row_reason, "ticker": actual_ticker, "leg": "actual", "for_ticker": ticker})
+
+            recommended_return_pct: float | None = None
+            actual_return_pct: float | None = None
+            delta_pct: float | None = None
+            if row_status == "ok":
+                recommended_return_pct = _pct_return(rec_entry_price, rec_current_price)
+                actual_return_pct = 0.0 if exposure_amount <= 0 else _pct_return(actual_entry_price, actual_current_price)
+                delta_pct = actual_return_pct - recommended_return_pct
 
             per_ticker.append(
                 {
-                    "ticker": ticker,
-                    "recommended_return_pct": round(recommended_return_pct, 4),
-                    "actual_return_pct": round(actual_return_pct, 4),
-                    "delta_pct": round(delta_pct, 4),
+                    "ticker": f"{ticker} → {actual_ticker}" if action == "REPLACED" and actual_ticker != ticker else ticker,
+                    "recommended_ticker": ticker,
+                    "actual_ticker": actual_ticker,
+                    "actual_action": action,
+                    "status": row_status,
+                    "reason": row_reason,
+                    "recommended_return_pct": round(recommended_return_pct, 4) if recommended_return_pct is not None else None,
+                    "actual_return_pct": round(actual_return_pct, 4) if actual_return_pct is not None else None,
+                    "delta_pct": round(delta_pct, 4) if delta_pct is not None else None,
                 }
             )
 
-            if recommended_amount > 0:
+            if row_status == "ok" and recommended_amount > 0 and recommended_return_pct is not None:
                 rec_weighted_sum += recommended_return_pct * recommended_amount
                 rec_weight_total += recommended_amount
-            if exposure_amount > 0:
+            if row_status == "ok" and exposure_amount > 0 and actual_return_pct is not None:
                 actual_weighted_sum += actual_return_pct * exposure_amount
                 actual_weight_total += exposure_amount
 
         total_recommended = rec_weighted_sum / rec_weight_total if rec_weight_total > 0 else 0.0
         total_actual = actual_weighted_sum / actual_weight_total if actual_weight_total > 0 else 0.0
         total_delta = total_actual - total_recommended
+        all_returns_zero = _is_near_zero(total_recommended) and _is_near_zero(total_actual) and _is_near_zero(total_delta)
+        too_early = bool(snapshot_meta.get("backfilled")) and all_returns_zero
 
-        best = max(per_ticker, key=lambda item: item["delta_pct"], default=None)
-        worst = min(per_ticker, key=lambda item: item["delta_pct"], default=None)
+        comparable_rows = [item for item in per_ticker if item.get("status") == "ok" and isinstance(item.get("delta_pct"), (int, float))]
+        best = max(comparable_rows, key=lambda item: item["delta_pct"], default=None)
+        worst = min(comparable_rows, key=lambda item: item["delta_pct"], default=None)
+        matched_model = (
+            skipped_count == 0
+            and replaced_count == 0
+            and not amount_mismatch_found
+            and _is_near_zero(total_delta)
+            and not too_early
+        )
         performance_snapshot = {
             "evaluated_at": _to_iso_utc(),
             "portfolio": {
@@ -332,8 +407,21 @@ class DecisionLogService:
                 "total_delta": round(total_delta, 4),
                 "best_decision": best,
                 "worst_decision": worst,
+                "matched_model": matched_model,
+                "too_early_to_judge": too_early,
+                "backfilled_baseline": bool(snapshot_meta.get("backfilled")),
+                "summary_text": (
+                    "Too early to judge performance"
+                    if too_early
+                    else "You matched the model"
+                    if matched_model
+                    else f"You outperformed the model by {round(total_delta, 2):.2f}%"
+                    if total_delta > 0
+                    else f"You underperformed the model by {abs(round(total_delta, 2)):.2f}%"
+                ),
             },
             "per_ticker": per_ticker,
+            "data_quality": data_quality,
         }
 
         updated = (
@@ -342,6 +430,7 @@ class DecisionLogService:
                 {
                     "price_snapshot": merged_price_snapshot,
                     "performance_snapshot": performance_snapshot,
+                    "evaluated_at": performance_snapshot["evaluated_at"],
                 }
             )
             .eq("id", decision_log_id)

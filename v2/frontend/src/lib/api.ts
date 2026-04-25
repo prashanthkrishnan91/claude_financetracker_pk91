@@ -693,7 +693,7 @@ export interface DecisionMemoryLog {
   source: string;
   status: DecisionLogStatus;
   recommendation_snapshot: Record<string, unknown>;
-  price_snapshot?: Record<string, { price?: number; timestamp?: string }> | null;
+  price_snapshot?: Record<string, { price?: number; timestamp?: string } | unknown> | null;
   actual_decisions: ActualDecisionItem[];
   performance_snapshot?: {
     evaluated_at: string;
@@ -701,6 +701,10 @@ export interface DecisionMemoryLog {
       recommended_return: number;
       actual_return: number;
       delta: number;
+      matched_model?: boolean;
+      too_early_to_judge?: boolean;
+      backfilled_baseline?: boolean;
+      summary_text?: string;
       total_recommended_return?: number;
       total_actual_return?: number;
       total_delta?: number;
@@ -709,9 +713,21 @@ export interface DecisionMemoryLog {
     };
     per_ticker: Array<{
       ticker: string;
-      recommended_return_pct: number;
-      actual_return_pct: number;
-      delta_pct: number;
+      recommended_ticker?: string;
+      actual_ticker?: string;
+      actual_action?: string;
+      status?: string;
+      reason?: string | null;
+      recommended_return_pct: number | null;
+      actual_return_pct: number | null;
+      delta_pct: number | null;
+    }>;
+    data_quality?: Array<{
+      status: string;
+      reason: string;
+      ticker: string;
+      leg?: string;
+      for_ticker?: string;
     }>;
   } | null;
   decision_delta?: DecisionDelta | null;

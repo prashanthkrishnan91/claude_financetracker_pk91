@@ -212,10 +212,10 @@ export const api = {
   },
 
   decisionLogs: {
-    createDecisionLog: (snapshot: Record<string, unknown>, status: DecisionLogStatus = "draft") =>
+    createDecisionLog: (snapshot: Record<string, unknown>) =>
       fetchApi<DecisionMemoryLog>("/api/v1/decision-logs", {
         method: "POST",
-        body: JSON.stringify({ recommendation_snapshot: snapshot, status, source: "deploy" }),
+        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy" }),
       }),
     listDecisionLogs: (limit = 25) =>
       fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),
@@ -653,7 +653,7 @@ export interface CashBalance {
   manual_override: number | null;
 }
 
-export type DecisionLogStatus = "draft" | "executed" | "partially_executed" | "skipped";
+export type DecisionLogStatus = "FULLY_EXECUTED" | "PARTIALLY_EXECUTED" | "SKIPPED";
 
 export interface ActualDecisionItem {
   ticker?: string;
@@ -668,9 +668,21 @@ export interface ActualDecisionItem {
 }
 
 export interface DecisionLogPatch {
-  status?: DecisionLogStatus;
   actual_decisions?: ActualDecisionItem[];
   notes?: string;
+}
+
+export interface DecisionDelta {
+  total_recommended: number;
+  total_actual: number;
+  deploy_delta: number;
+  skipped_tickers: string[];
+  replaced_tickers: Array<{ from: string | null; to: string | null; reason: string | null }>;
+  category_shift: {
+    growth_to_income: boolean;
+    single_to_etf: boolean;
+    concentration_change: number;
+  };
 }
 
 export interface DecisionMemoryLog {
@@ -680,6 +692,13 @@ export interface DecisionMemoryLog {
   status: DecisionLogStatus;
   recommendation_snapshot: Record<string, unknown>;
   actual_decisions: ActualDecisionItem[];
+  decision_delta?: DecisionDelta | null;
+  risk_behavior?: "more_conservative" | "more_aggressive" | "aligned" | null;
+  style_shift?: "growth_to_income" | "income_to_growth" | null;
+  execution_gap_percent?: number | null;
+  realized_pnl?: number | null;
+  unrealized_pnl?: number | null;
+  review_date?: string | null;
   notes: string | null;
   created_at: string;
   updated_at: string;

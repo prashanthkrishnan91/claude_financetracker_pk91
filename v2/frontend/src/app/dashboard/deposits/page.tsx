@@ -1071,13 +1071,22 @@ function DecisionLogMemoryPanel({
     buildInitialActualDecisions(recommendations)
   );
 
+  const activeLog = savedLog;
+  const delta = activeLog?.decision_delta;
+  const behaviorLabel =
+    activeLog?.risk_behavior === "more_conservative"
+      ? "More conservative than model"
+      : activeLog?.risk_behavior === "more_aggressive"
+      ? "More aggressive than model"
+      : "Aligned with model";
+
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   }
 
   async function onSaveLog() {
     if (createLog.isPending) return;
-    const created = await createLog.mutateAsync({ snapshot, status: "draft" });
+    const created = await createLog.mutateAsync({ snapshot });
     setSavedLog(created);
     setNotes(created.notes ?? "");
     setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
@@ -1089,7 +1098,6 @@ function DecisionLogMemoryPanel({
     const patch = {
       actual_decisions: actualDecisions.map((row) => ({ ...row, executed_at: row.executed_at ?? new Date().toISOString() })),
       notes,
-      status: "partially_executed" as const,
     };
     const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
     setSavedLog(updated);
@@ -1118,7 +1126,25 @@ function DecisionLogMemoryPanel({
           <div className="space-y-2">
             {actualDecisions.map((row, idx) => (
               <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
-                <div className="col-span-2 font-mono text-text-primary">{row.ticker || "—"}</div>
+                <div className="col-span-2 flex items-center gap-1.5">
+                  <span className="font-mono text-text-primary">{row.ticker || "—"}</span>
+                  <span
+                    className={cn(
+                      "px-1.5 py-0.5 rounded text-[10px] font-semibold",
+                      String(row.actual_action || "BOUGHT") === "SKIPPED"
+                        ? "bg-red-500/15 text-red-300"
+                        : String(row.actual_action || "BOUGHT") === "REPLACED"
+                        ? "bg-amber-500/15 text-amber-300"
+                        : "bg-emerald-500/15 text-emerald-300"
+                    )}
+                  >
+                    {String(row.actual_action || "BOUGHT") === "SKIPPED"
+                      ? "Skipped"
+                      : String(row.actual_action || "BOUGHT") === "REPLACED"
+                      ? "Replaced"
+                      : "Matched"}
+                  </span>
+                </div>
                 <select
                   value={String(row.actual_action || "BOUGHT")}
                   onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
@@ -1162,8 +1188,29 @@ function DecisionLogMemoryPanel({
             disabled={updateLog.isPending}
             className="px-3 py-1.5 rounded-md text-xs font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
           >
-            {updateLog.isPending ? "Saving..." : "Save updates"}
+            {updateLog.isPending ? "Saving..." : "Update Actual Decisions"}
           </button>
+        </div>
+      )}
+
+      {activeLog && delta && (
+        <div className="border-t border-border pt-3 space-y-1.5">
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
+          <p className="text-xs text-text-secondary">
+            You deployed {formatCurrency(delta.total_actual)} vs {formatCurrency(delta.total_recommended)} recommended ({delta.deploy_delta >= 0 ? "+" : ""}
+            {formatCurrency(delta.deploy_delta)}).
+          </p>
+          <p className="text-xs text-text-secondary">
+            Skipped: {delta.skipped_tickers.length ? delta.skipped_tickers.join(", ") : "None"}
+          </p>
+          {delta.replaced_tickers.length > 0 && (
+            <p className="text-xs text-text-secondary">
+              {delta.replaced_tickers
+                .map((item) => `${item.from || "—"} → ${item.to || "—"}${item.reason ? ` (${item.reason})` : ""}`)
+                .join(" • ")}
+            </p>
+          )}
+          <p className="text-xs text-text-secondary">Overall behavior: {behaviorLabel}</p>
         </div>
       )}
 
@@ -1194,10 +1241,26 @@ function DecisionLogMemoryPanel({
                   >
                     <div className="flex justify-between text-text-primary">
                       <span>{new Date(log.created_at).toLocaleDateString()}</span>
-                      <span className="uppercase">{log.status}</span>
+                      <span className="uppercase">{log.status.replaceAll("_", " ")}</span>
                     </div>
                     <div className="text-text-muted mt-0.5">
-                      {recs.length} tickers · Rec {formatCurrency(recTotal)} · Actual {formatCurrency(actualTotal)}
+                      {(() => {
+                        const delta = log.decision_delta;
+                        const deployedPct = delta?.total_recommended
+                          ? Math.round((delta.total_actual / delta.total_recommended) * 100)
+                          : recTotal > 0
+                          ? Math.round((actualTotal / recTotal) * 100)
+                          : 0;
+                        const skippedCount = delta?.skipped_tickers?.length ?? 0;
+                        const replacedCount = delta?.replaced_tickers?.length ?? 0;
+                        const behavior =
+                          log.risk_behavior === "more_conservative"
+                            ? "Conservative"
+                            : log.risk_behavior === "more_aggressive"
+                            ? "Aggressive"
+                            : "Aligned";
+                        return `${deployedPct}% deployed • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
+                      })()}
                     </div>
                   </button>
                 );

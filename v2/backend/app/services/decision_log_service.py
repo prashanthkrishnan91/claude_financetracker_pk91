@@ -35,8 +35,27 @@ def _to_float(value: Any) -> float:
     return 0.0
 
 
+def _to_optional_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)):
+        numeric = float(value)
+        return numeric if math.isfinite(numeric) else None
+    if isinstance(value, str):
+        try:
+            numeric = float(value)
+        except ValueError:
+            return None
+        return numeric if math.isfinite(numeric) else None
+    return None
+
+
 def _is_etf_like(ticker: str) -> bool:
     return ticker.upper() in ETF_HINTS
+
+
+def _avg(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def _weighted_median(values: list[float], weights: list[float]) -> float:
@@ -525,6 +544,182 @@ class DecisionLogService:
             .execute()
         )
         return bool(result.data)
+
+    def getDecisionPerformanceInsights(self, user_id: str, limit: int = 20) -> dict[str, Any]:
+        rows = self.list(user_id=user_id, limit=limit)
+        total_logs = len(rows)
+        eligible_rows: list[dict[str, Any]] = []
+        all_messages: list[str] = []
+
+        for row in rows:
+            perf = row.get("performance_snapshot") if isinstance(row.get("performance_snapshot"), dict) else {}
+            if str(perf.get("status") or "").strip().lower() != "ready":
+                continue
+            portfolio = perf.get("portfolio") if isinstance(perf.get("portfolio"), dict) else {}
+            delta = _to_optional_float(portfolio.get("delta"))
+            actual_return = _to_optional_float(portfolio.get("actual_return"))
+            model_return = _to_optional_float(portfolio.get("recommended_return"))
+            if delta is None or actual_return is None or model_return is None:
+                continue
+            eligible_rows.append(row)
+
+        eligible_logs = len(eligible_rows)
+        if eligible_logs <= 2:
+            confidence = "low"
+        elif eligible_logs <= 7:
+            confidence = "medium"
+        else:
+            confidence = "high"
+
+        portfolio_actual_returns: list[float] = []
+        portfolio_model_returns: list[float] = []
+        portfolio_deltas: list[float] = []
+        wins = 0
+
+        replacement_deltas: list[float] = []
+        replacement_wins = 0
+        replacement_count = 0
+        etf_replacement_deltas: list[float] = []
+        etf_replacement_wins = 0
+        etf_replacement_count = 0
+        skipped_count = 0
+        under_deployment_deltas: list[float] = []
+        under_deployment_count = 0
+
+        best_override: dict[str, Any] | None = None
+        worst_override: dict[str, Any] | None = None
+
+        for row in eligible_rows:
+            perf = row.get("performance_snapshot") if isinstance(row.get("performance_snapshot"), dict) else {}
+            portfolio = perf.get("portfolio") if isinstance(perf.get("portfolio"), dict) else {}
+            delta = float(_to_optional_float(portfolio.get("delta")) or 0.0)
+            actual_return = float(_to_optional_float(portfolio.get("actual_return")) or 0.0)
+            model_return = float(_to_optional_float(portfolio.get("recommended_return")) or 0.0)
+
+            portfolio_actual_returns.append(actual_return)
+            portfolio_model_returns.append(model_return)
+            portfolio_deltas.append(delta)
+            if delta > 0.05:
+                wins += 1
+
+            row_actual_decisions = row.get("actual_decisions") if isinstance(row.get("actual_decisions"), list) else []
+            skipped_count += sum(
+                1
+                for decision in row_actual_decisions
+                if isinstance(decision, dict) and str(decision.get("actual_action") or "").strip().upper() == "SKIPPED"
+            )
+
+            deploy_ratio: float | None = None
+            row_decision_delta = row.get("decision_delta") if isinstance(row.get("decision_delta"), dict) else {}
+            rec_total = _to_optional_float(row_decision_delta.get("total_recommended"))
+            actual_total = _to_optional_float(row_decision_delta.get("total_actual"))
+            if rec_total is not None and rec_total > 0 and actual_total is not None:
+                deploy_ratio = actual_total / rec_total
+            if deploy_ratio is not None and deploy_ratio < 0.85:
+                under_deployment_count += 1
+                under_deployment_deltas.append(delta)
+
+            per_ticker = perf.get("per_ticker") if isinstance(perf.get("per_ticker"), list) else []
+            for per_row in per_ticker:
+                if not isinstance(per_row, dict):
+                    continue
+                if str(per_row.get("status") or "ok").strip().lower() != "ok":
+                    continue
+                action = str(per_row.get("actual_action") or "").strip().upper()
+                label = str(per_row.get("ticker") or "")
+                is_replacement = action == "REPLACED" or "→" in label
+                if not is_replacement:
+                    continue
+                row_delta = _to_optional_float(per_row.get("delta_pct"))
+                if row_delta is None:
+                    continue
+                replacement_count += 1
+                replacement_deltas.append(row_delta)
+                if row_delta > 0.05:
+                    replacement_wins += 1
+
+                recommended_ticker = str(per_row.get("recommended_ticker") or "").strip().upper()
+                actual_ticker = str(per_row.get("actual_ticker") or "").strip().upper()
+                if _is_etf_like(actual_ticker) and actual_ticker and actual_ticker != recommended_ticker:
+                    etf_replacement_count += 1
+                    etf_replacement_deltas.append(row_delta)
+                    if row_delta > 0.05:
+                        etf_replacement_wins += 1
+
+                candidate = {
+                    "ticker": label or f"{recommended_ticker} → {actual_ticker}",
+                    "delta_pct": round(row_delta, 4),
+                    "actual_action": action or None,
+                }
+                if best_override is None or candidate["delta_pct"] > best_override["delta_pct"]:
+                    best_override = candidate
+                if worst_override is None or candidate["delta_pct"] < worst_override["delta_pct"]:
+                    worst_override = candidate
+
+        avg_actual_return = _avg(portfolio_actual_returns) or 0.0
+        avg_model_return = _avg(portfolio_model_returns) or 0.0
+        avg_delta = _avg(portfolio_deltas) or 0.0
+        win_rate_vs_model = (wins / eligible_logs) if eligible_logs > 0 else 0.0
+
+        replacements_avg_delta = _avg(replacement_deltas)
+        replacements_win_rate = (replacement_wins / replacement_count) if replacement_count > 0 else None
+        etf_replacements_avg_delta = _avg(etf_replacement_deltas)
+        etf_replacements_win_rate = (etf_replacement_wins / etf_replacement_count) if etf_replacement_count > 0 else None
+        under_deployment_avg_delta = _avg(under_deployment_deltas)
+
+        if eligible_logs < 3:
+            all_messages.append("Not enough evaluated decisions yet. Keep logging decisions and re-evaluate after prices move.")
+        else:
+            direction = "outperformed" if avg_delta >= 0 else "underperformed"
+            all_messages.append(
+                f"Across {eligible_logs} evaluated decisions, your actual decisions have {direction} the model by {abs(avg_delta):.2f}% on average."
+            )
+            if replacement_count > 0 and replacements_avg_delta is not None:
+                rep_direction = "outperformed" if replacements_avg_delta >= 0 else "underperformed"
+                all_messages.append(
+                    f"Your replacements have {rep_direction} the model by {abs(replacements_avg_delta):.2f}% on average."
+                )
+            if skipped_count > 0:
+                all_messages.append(
+                    "Your skipped recommendations are being tracked; opportunity-cost deltas are not available yet."
+                )
+
+        return {
+            "eligible_logs": eligible_logs,
+            "total_logs": total_logs,
+            "confidence": confidence,
+            "summary": {
+                "avg_actual_return": round(avg_actual_return, 4),
+                "avg_model_return": round(avg_model_return, 4),
+                "avg_delta": round(avg_delta, 4),
+                "win_rate_vs_model": round(win_rate_vs_model, 4),
+                "best_override": best_override,
+                "worst_override": worst_override,
+            },
+            "behavior_insights": {
+                "replacements": {
+                    "count": replacement_count,
+                    "avg_delta": round(replacements_avg_delta, 4) if replacements_avg_delta is not None else None,
+                    "win_rate": round(replacements_win_rate, 4) if replacements_win_rate is not None else None,
+                },
+                "skipped": {
+                    "count": skipped_count,
+                    "avg_delta": None,
+                    "win_rate": None,
+                },
+                "under_deployment": {
+                    "count": under_deployment_count,
+                    "avg_delta": round(under_deployment_avg_delta, 4) if under_deployment_avg_delta is not None else None,
+                    "win_rate": None,
+                },
+                "etf_replacements": {
+                    "count": etf_replacement_count,
+                    "avg_delta": round(etf_replacements_avg_delta, 4) if etf_replacements_avg_delta is not None else None,
+                    "win_rate": round(etf_replacements_win_rate, 4) if etf_replacements_win_rate is not None else None,
+                },
+            },
+            "messages": all_messages,
+        }
 
     def getUserBehaviorProfile(self, user_id: str, limit: int = 10) -> dict[str, Any]:
         """Aggregate recent decision log behavior for soft adaptive deploy nudges."""

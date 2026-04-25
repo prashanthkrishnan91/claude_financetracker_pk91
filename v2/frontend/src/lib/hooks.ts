@@ -429,3 +429,13 @@ export function useEvaluateDecisionMemoryLog() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }
+
+export function useDecisionPerformanceInsights(enabled = true) {
+  return useQuery({
+    queryKey: ["decision-logs", "insights"],
+    queryFn: api.decisionLogs.getDecisionInsights,
+    enabled,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
+  });
+}

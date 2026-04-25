@@ -5,7 +5,12 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
-from ..models.decision import DecisionLogCreateRequest, DecisionLogResponse, DecisionLogUpdateRequest
+from ..models.decision import (
+    DecisionLogCreateRequest,
+    DecisionLogResponse,
+    DecisionLogUpdateRequest,
+    DecisionPerformanceInsightsResponse,
+)
 from ..services.decision_log_service import DecisionLogService
 
 router = APIRouter(prefix="/decision-logs", tags=["decision-logs"])
@@ -27,6 +32,14 @@ async def list_decision_logs(
 ):
     svc = DecisionLogService()
     return svc.list(user_id=str(user.id), limit=limit)
+
+
+@router.get("/insights", response_model=DecisionPerformanceInsightsResponse)
+async def get_decision_log_insights(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    svc = DecisionLogService()
+    return svc.getDecisionPerformanceInsights(user_id=str(user.id))
 
 
 @router.get("/{decision_log_id}", response_model=DecisionLogResponse)

@@ -653,7 +653,7 @@ export interface CashBalance {
   manual_override: number | null;
 }
 
-export type DecisionLogStatus = "FULLY_EXECUTED" | "PARTIALLY_EXECUTED" | "SKIPPED";
+export type DecisionLogStatus = "DRAFT" | "FULLY_EXECUTED" | "PARTIALLY_EXECUTED" | "SKIPPED";
 
 export interface ActualDecisionItem {
   ticker?: string;

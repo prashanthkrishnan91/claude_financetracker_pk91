@@ -45,3 +45,38 @@ class ManualDecisionLogCreate(BaseModel):
     metadata: Optional[dict] = None
     strategy_tag: Optional[str] = None
     confidence_score: Optional[float] = None
+
+
+class DecisionLogStatus(str):
+    DRAFT = "draft"
+    EXECUTED = "executed"
+    PARTIALLY_EXECUTED = "partially_executed"
+    SKIPPED = "skipped"
+
+
+class DecisionLogCreateRequest(BaseModel):
+    source: str = "deploy"
+    status: str = Field(default="draft", pattern="^(draft|executed|partially_executed|skipped)$")
+    recommendation_snapshot: dict[str, Any]
+    actual_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+
+class DecisionLogUpdateRequest(BaseModel):
+    status: Optional[str] = Field(default=None, pattern="^(draft|executed|partially_executed|skipped)$")
+    actual_decisions: Optional[list[dict[str, Any]]] = None
+    notes: Optional[str] = None
+
+
+class DecisionLogResponse(BaseModel):
+    id: UUID
+    user_id: UUID
+    source: str
+    status: str
+    recommendation_snapshot: dict[str, Any]
+    actual_decisions: list[dict[str, Any]]
+    notes: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = {"from_attributes": True}

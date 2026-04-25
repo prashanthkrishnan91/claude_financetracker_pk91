@@ -1119,6 +1119,22 @@ function DecisionLogMemoryPanel({
       : activeLog?.risk_behavior === "more_aggressive"
       ? "More aggressive than model"
       : "Aligned with model";
+  const deployedPct = delta?.total_recommended ? Math.round((delta.total_actual / delta.total_recommended) * 100) : 0;
+  const capitalBehavior = delta
+    ? delta.deploy_delta < -0.5
+      ? "Under-deployed"
+      : delta.deploy_delta > 0.5
+      ? "Over-deployed"
+      : "Fully deployed"
+    : "Fully deployed";
+  const styleShiftSummary = delta
+    ? delta.replaced_tickers.length
+      ? `${delta.replaced_tickers
+          .slice(0, 2)
+          .map((item) => `${item.from || "—"} → ${item.to || "—"}${item.reason ? ` (${item.reason})` : " (style shift)"}`)
+          .join(" • ")}${delta.replaced_tickers.length > 2 ? ` • +${delta.replaced_tickers.length - 2} more` : ""}`
+      : "No replacements"
+    : "No replacements";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -1237,20 +1253,13 @@ function DecisionLogMemoryPanel({
         <div className="border-t border-border pt-3 space-y-1.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
           <p className="text-xs text-text-secondary">
-            You deployed {formatCurrency(delta.total_actual)} vs {formatCurrency(delta.total_recommended)} recommended ({delta.deploy_delta >= 0 ? "+" : ""}
-            {formatCurrency(delta.deploy_delta)}).
+            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} recommended ({deployedPct}%).
           </p>
           <p className="text-xs text-text-secondary">
-            Skipped: {delta.skipped_tickers.length ? delta.skipped_tickers.join(", ") : "None"}
+            Capital behavior: {capitalBehavior}
           </p>
-          {delta.replaced_tickers.length > 0 && (
-            <p className="text-xs text-text-secondary">
-              {delta.replaced_tickers
-                .map((item) => `${item.from || "—"} → ${item.to || "—"}${item.reason ? ` (${item.reason})` : ""}`)
-                .join(" • ")}
-            </p>
-          )}
-          <p className="text-xs text-text-secondary">Overall behavior: {behaviorLabel}</p>
+          <p className="text-xs text-text-secondary">Style shift: {styleShiftSummary}</p>
+          <p className="text-xs text-text-secondary">Net effect: {behaviorLabel}</p>
         </div>
       )}
 

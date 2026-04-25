@@ -13,6 +13,7 @@ import {
   useDecisionMemoryLogs,
   useEvaluateDecisionMemoryLog,
   useUpdateDecisionMemoryLog,
+  useDecisionPerformanceInsights,
 } from "@/lib/hooks";
 import type {
   AdaptiveBlock,
@@ -1109,6 +1110,7 @@ function DecisionLogMemoryPanel({
   const updateLog = useUpdateDecisionMemoryLog();
   const { data: recentLogs } = useDecisionMemoryLogs(6, true);
   const evaluateLog = useEvaluateDecisionMemoryLog();
+  const { data: insights } = useDecisionPerformanceInsights(true);
   const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
   const [saveMessage, setSaveMessage] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
@@ -1193,6 +1195,9 @@ function DecisionLogMemoryPanel({
   }
 
   const logsToShow = recentLogs ?? [];
+  const insightsConfidenceLabel =
+    insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
+  const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
 
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
@@ -1366,6 +1371,47 @@ function DecisionLogMemoryPanel({
           )}
         </div>
       )}
+      <div className="border-t border-border pt-3 space-y-1.5">
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Insights</p>
+        {!insights || insights.eligible_logs < 3 ? (
+          <div className="space-y-1">
+            <p className="text-xs text-text-secondary">Not enough evaluated decisions yet.</p>
+            <p className="text-xs text-text-muted">Log more decisions and re-evaluate after prices move.</p>
+          </div>
+        ) : (
+          <div className="space-y-1">
+            {(insights.confidence === "low" || insights.confidence === "medium") ? (
+              <p className="text-[11px] text-amber-300">
+                {insightsConfidenceLabel}: not enough history for a strong conclusion.
+              </p>
+            ) : null}
+            <p className="text-xs text-text-secondary">
+              You beat the model in {winCount} of {insights.eligible_logs} evaluated decisions.
+            </p>
+            <p className={cn("text-xs", (insights.summary.avg_delta ?? 0) >= 0 ? "text-emerald-300" : "text-red-300")}>
+              Average delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}%
+            </p>
+            {insights.behavior_insights.etf_replacements.count > 0 && insights.behavior_insights.etf_replacements.avg_delta !== null ? (
+              <p className="text-xs text-text-secondary">
+                ETF replacements: {(insights.behavior_insights.etf_replacements.avg_delta ?? 0) >= 0 ? "+" : ""}
+                {(insights.behavior_insights.etf_replacements.avg_delta ?? 0).toFixed(2)}% avg delta
+              </p>
+            ) : null}
+            {insights.behavior_insights.under_deployment.count > 0 && insights.behavior_insights.under_deployment.avg_delta !== null ? (
+              <p className="text-xs text-text-secondary">
+                Under-deployment ({insights.behavior_insights.under_deployment.count} logs): {(insights.behavior_insights.under_deployment.avg_delta ?? 0) >= 0 ? "helped" : "hurt"} by{" "}
+                {Math.abs(insights.behavior_insights.under_deployment.avg_delta ?? 0).toFixed(2)}% avg delta.
+              </p>
+            ) : null}
+            {insights.summary.worst_override ? (
+              <p className="text-xs text-text-secondary">
+                Worst override: {insights.summary.worst_override.ticker}, {insights.summary.worst_override.delta_pct >= 0 ? "+" : ""}
+                {insights.summary.worst_override.delta_pct.toFixed(2)}%
+              </p>
+            ) : null}
+          </div>
+        )}
+      </div>
 
       {logsToShow.length > 0 && (
         <div className="border-t border-border pt-2">

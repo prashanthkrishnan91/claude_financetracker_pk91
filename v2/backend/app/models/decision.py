@@ -87,3 +87,40 @@ class DecisionLogResponse(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class DecisionInsightExtreme(BaseModel):
+    ticker: str
+    delta_pct: float
+    actual_action: Optional[str] = None
+
+
+class DecisionInsightBucket(BaseModel):
+    count: int
+    avg_delta: Optional[float] = None
+    win_rate: Optional[float] = None
+
+
+class DecisionBehaviorInsights(BaseModel):
+    replacements: DecisionInsightBucket
+    skipped: DecisionInsightBucket
+    under_deployment: DecisionInsightBucket
+    etf_replacements: DecisionInsightBucket
+
+
+class DecisionPerformanceSummary(BaseModel):
+    avg_actual_return: float
+    avg_model_return: float
+    avg_delta: float
+    win_rate_vs_model: float
+    best_override: Optional[DecisionInsightExtreme] = None
+    worst_override: Optional[DecisionInsightExtreme] = None
+
+
+class DecisionPerformanceInsightsResponse(BaseModel):
+    eligible_logs: int
+    total_logs: int
+    confidence: str
+    summary: DecisionPerformanceSummary
+    behavior_insights: DecisionBehaviorInsights
+    messages: list[str]

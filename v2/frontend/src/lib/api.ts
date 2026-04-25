@@ -223,6 +223,8 @@ export const api = {
       fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`),
     evaluateDecisionLog: (id: string) =>
       fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}/evaluate`, { method: "POST" }),
+    getDecisionInsights: () =>
+      fetchApi<DecisionPerformanceInsights>("/api/v1/decision-logs/insights"),
     updateDecisionLog: (id: string, patch: DecisionLogPatch) =>
       fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`, {
         method: "PATCH",
@@ -742,6 +744,33 @@ export interface DecisionMemoryLog {
   notes: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface DecisionInsightBucket {
+  count: number;
+  avg_delta: number | null;
+  win_rate: number | null;
+}
+
+export interface DecisionPerformanceInsights {
+  eligible_logs: number;
+  total_logs: number;
+  confidence: "low" | "medium" | "high";
+  summary: {
+    avg_actual_return: number;
+    avg_model_return: number;
+    avg_delta: number;
+    win_rate_vs_model: number;
+    best_override?: { ticker: string; delta_pct: number; actual_action?: string | null } | null;
+    worst_override?: { ticker: string; delta_pct: number; actual_action?: string | null } | null;
+  };
+  behavior_insights: {
+    replacements: DecisionInsightBucket;
+    skipped: DecisionInsightBucket;
+    under_deployment: DecisionInsightBucket;
+    etf_replacements: DecisionInsightBucket;
+  };
+  messages: string[];
 }
 
 export interface DecisionLogEntry {

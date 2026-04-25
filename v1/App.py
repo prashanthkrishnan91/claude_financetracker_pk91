@@ -158,6 +158,8 @@ def _init():
         "overrides_applied": False,
         # Active Recommendations filter — empty set = show all categories
         "rec_filter":      set(),
+        # Deploy behavior
+        "cash_policy":     {"mode": "fully_invested"},
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -989,6 +991,18 @@ with tab_ops:
           "New deposit amount ($)", value=900.0, min_value=0.0, step=50.0, format="%.2f",
           help="Change this if your biweekly deposit differs from $900",
       )
+      cash_policy_modes = ["fully_invested", "balanced", "defensive"]
+      current_cash_mode = str(st.session_state.cash_policy.get("mode", "fully_invested"))
+      if current_cash_mode not in cash_policy_modes:
+          current_cash_mode = "fully_invested"
+      selected_cash_mode = st.selectbox(
+          "Cash policy",
+          cash_policy_modes,
+          index=cash_policy_modes.index(current_cash_mode),
+          format_func=lambda m: m.replace("_", " ").title(),
+          help="Fully Invested always allocates 100% of capital, handling risk through staged deployment.",
+      )
+      st.session_state.cash_policy = {"mode": selected_cash_mode}
       total_investable = dep_amount + cash
   
       ki1, ki2, ki3 = st.columns(3)
@@ -1096,6 +1110,32 @@ with tab_ops:
 
       base_recs = _build_enriched_recs(base_recs)
       active_recs = _build_enriched_recs(active_recs)
+
+      def _risk_bucket_and_stage_ratio(recs: list[dict]) -> tuple[str, float]:
+          if not recs:
+              return ("low", 0.10)
+          high_vol_names = [r for r in recs if (r.get("volatility") or 0) >= 0.04 or r.get("category_bucket") == "speculative"]
+          high_weight_names = [r for r in recs if r.get("current_weight", 0) >= 10]
+          risk_score = len(high_vol_names) * 1.0 + len(high_weight_names) * 0.6
+          if risk_score >= 3:
+              return ("high", 0.50)
+          if risk_score >= 1.5:
+              return ("medium", 0.30)
+          return ("low", 0.10)
+
+      risk_bucket, stage_ratio = _risk_bucket_and_stage_ratio(active_recs)
+      if selected_cash_mode == "balanced":
+          stage_ratio = max(stage_ratio, 0.20)
+      elif selected_cash_mode == "defensive":
+          stage_ratio = max(stage_ratio, 0.35)
+
+      total_deploy = total_investable
+      deploy_now = round(total_deploy * (1 - stage_ratio), 2)
+      deploy_later = round(total_deploy - deploy_now, 2)
+      st.caption(
+          f"Risk signals: **{risk_bucket.title()}** → Deploy **${deploy_now:,.2f} now** · "
+          f"Stage **${deploy_later:,.2f} for pullbacks** (100% capital allocated)."
+      )
   
       # ── Override input form ───────────────────────────────────────────────────
       st.markdown("#### AI Recommendations + Manual Overrides")
@@ -1206,6 +1246,8 @@ with tab_ops:
           action_bullets.append(f"Avoid adding {', '.join(pullback_names)} aggressively at current levels; wait for pullbacks.")
       if stage_names:
           action_bullets.append(f"Stage entries for {', '.join(stage_names)} to manage concentration and timing risk.")
+      action_bullets.append(f"Deploy ${deploy_now:,.2f} now using target allocations.")
+      action_bullets.append(f"Stage ${deploy_later:,.2f} for pullbacks; keep this staged capital ready for dips.")
       st.markdown("#### What to Do Now")
       for b in action_bullets[:3]:
           st.markdown(f"- {b}")
@@ -1254,10 +1296,10 @@ with tab_ops:
   
       # Totals row
       tc1, tc2, tc3, tc4 = st.columns(4)
-      tc1.metric("Total Deployed",    f"${totals_row_amount:,.2f}")
+      tc1.metric("Total Allocated",   f"${totals_row_amount:,.2f}")
       tc2.metric("From New Deposit",  f"${totals_row_amount - totals_row_from_cash:,.2f}")
       tc3.metric("From Cash Balance", f"${totals_row_from_cash:,.2f}")
-      tc4.metric("Remaining Cash",    f"${max(0, cash - totals_row_from_cash):,.2f}")
+      tc4.metric("Stage for Pullbacks", f"${deploy_later:,.2f}")
   
       with col_mark:
           if st.button("📌 Mark Deposit Done", width='stretch'):

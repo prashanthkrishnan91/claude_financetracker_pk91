@@ -11,6 +11,7 @@ import {
   useDecisionOutcomes,
   useCreateDecisionMemoryLog,
   useDecisionMemoryLogs,
+  useEvaluateDecisionMemoryLog,
   useUpdateDecisionMemoryLog,
 } from "@/lib/hooks";
 import type {
@@ -1107,6 +1108,7 @@ function DecisionLogMemoryPanel({
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
   const { data: recentLogs } = useDecisionMemoryLogs(6, true);
+  const evaluateLog = useEvaluateDecisionMemoryLog();
   const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
   const [saveMessage, setSaveMessage] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
@@ -1139,6 +1141,14 @@ function DecisionLogMemoryPanel({
           .join(" • ")}${delta.replaced_tickers.length > 2 ? ` • +${delta.replaced_tickers.length - 2} more` : ""}`
       : "No replacements"
     : "No replacements";
+  const performance = activeLog?.performance_snapshot?.portfolio;
+  const perfDelta = performance?.delta ?? 0;
+  const perfSummary =
+    perfDelta > 0
+      ? `You outperformed the model by +${perfDelta.toFixed(2)}%`
+      : perfDelta < 0
+      ? `Model outperformed your decisions by ${perfDelta.toFixed(2)}%`
+      : "You matched the model";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
@@ -1162,6 +1172,13 @@ function DecisionLogMemoryPanel({
     const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
     setSavedLog(updated);
     setSaveMessage("Actual decisions updated");
+  }
+
+  async function onEvaluatePerformance() {
+    if (!savedLog || evaluateLog.isPending) return;
+    const evaluated = await evaluateLog.mutateAsync(savedLog.id);
+    setSavedLog(evaluated);
+    setSaveMessage("Performance refreshed");
   }
 
   const logsToShow = recentLogs ?? [];
@@ -1264,6 +1281,42 @@ function DecisionLogMemoryPanel({
           </p>
           <p className="text-xs text-text-secondary">Style shift: {styleShiftSummary}</p>
           <p className="text-xs text-text-secondary">Net effect: {behaviorLabel}</p>
+        </div>
+      )}
+      {activeLog && (
+        <div className="border-t border-border pt-3 space-y-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Performance vs AI</p>
+            <button
+              onClick={onEvaluatePerformance}
+              disabled={evaluateLog.isPending}
+              className="px-2 py-1 rounded text-[11px] font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
+            >
+              {evaluateLog.isPending ? "Evaluating..." : "Evaluate"}
+            </button>
+          </div>
+          {performance ? (
+            <>
+              <p className={cn("text-xs", perfDelta >= 0 ? "text-emerald-300" : "text-red-300")}>{perfSummary}</p>
+              <p className="text-xs text-text-secondary">
+                Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
+              </p>
+              <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
+              {activeLog.performance_snapshot?.per_ticker?.length ? (
+                <div className="space-y-1 pt-1">
+                  {activeLog.performance_snapshot.per_ticker.slice(0, 4).map((row) => (
+                    <p key={row.ticker} className="text-[11px] text-text-muted">
+                      {row.ticker}: AI {row.recommended_return_pct.toFixed(2)}% • You {row.actual_return_pct.toFixed(2)}% • Δ {row.delta_pct.toFixed(2)}%
+                    </p>
+                  ))}
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-xs text-text-secondary">
+              Evaluate this log to compare your executed decisions against the model recommendations.
+            </p>
+          )}
         </div>
       )}
 

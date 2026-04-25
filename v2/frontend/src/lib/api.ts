@@ -221,6 +221,8 @@ export const api = {
       fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),
     getDecisionLog: (id: string) =>
       fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`),
+    evaluateDecisionLog: (id: string) =>
+      fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}/evaluate`, { method: "POST" }),
     updateDecisionLog: (id: string, patch: DecisionLogPatch) =>
       fetchApi<DecisionMemoryLog>(`/api/v1/decision-logs/${id}`, {
         method: "PATCH",
@@ -691,7 +693,27 @@ export interface DecisionMemoryLog {
   source: string;
   status: DecisionLogStatus;
   recommendation_snapshot: Record<string, unknown>;
+  price_snapshot?: Record<string, { price?: number; timestamp?: string }> | null;
   actual_decisions: ActualDecisionItem[];
+  performance_snapshot?: {
+    evaluated_at: string;
+    portfolio: {
+      recommended_return: number;
+      actual_return: number;
+      delta: number;
+      total_recommended_return?: number;
+      total_actual_return?: number;
+      total_delta?: number;
+      best_decision?: { ticker: string; delta_pct: number } | null;
+      worst_decision?: { ticker: string; delta_pct: number } | null;
+    };
+    per_ticker: Array<{
+      ticker: string;
+      recommended_return_pct: number;
+      actual_return_pct: number;
+      delta_pct: number;
+    }>;
+  } | null;
   decision_delta?: DecisionDelta | null;
   risk_behavior?: "more_conservative" | "more_aggressive" | "aligned" | null;
   style_shift?: "growth_to_income" | "income_to_growth" | null;

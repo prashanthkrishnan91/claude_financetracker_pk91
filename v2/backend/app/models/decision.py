@@ -72,7 +72,9 @@ class DecisionLogResponse(BaseModel):
     source: str
     status: str
     recommendation_snapshot: dict[str, Any]
+    price_snapshot: Optional[dict[str, Any]] = None
     actual_decisions: list[dict[str, Any]]
+    performance_snapshot: Optional[dict[str, Any]] = None
     decision_delta: Optional[dict[str, Any]] = None
     risk_behavior: Optional[str] = None
     style_shift: Optional[str] = None

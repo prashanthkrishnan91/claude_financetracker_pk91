@@ -387,6 +387,7 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
     whySeen.add(enrichedAllocs[i].why_selected);
   }
   const deployment_risks = buildDeploymentRisks(enrichedAllocs, `${notes.join(" ")} ${warning || ""}`);
+  const deployNowAmount = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
 
   return (
     <div className="space-y-4">
@@ -406,6 +407,12 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
               : (explanation ?? plan.intel_summary ?? notes.join(" "))
           }
         />
+        {allocs.length > 0 && (
+          <AllocationBreakdownTable
+            allocations={enrichedAllocs}
+            deployNowAmount={deployNowAmount}
+          />
+        )}
         {allocs.length === 0 ? (
           <div className="px-4 py-4 text-center text-sm text-text-muted border border-border/70 rounded-lg">
             No deployment right now — keep cash reserved until conditions improve.
@@ -644,22 +651,36 @@ function modeBadgeMeta(mode: AdaptiveBlock["deployment_mode"]): { label: string;
   }
 }
 
-function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[] }) {
-  const ranked = [...allocations].sort((a, b) => (b.amount ?? 0) - (a.amount ?? 0));
+function AllocationBreakdownTable({
+  allocations,
+  deployNowAmount,
+}: {
+  allocations: EnrichedAllocation[];
+  deployNowAmount: number;
+}) {
+  const ranked = [...allocations].sort(
+    (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
+  );
+  const allocatedNowTotal = ranked.reduce((sum, rec) => sum + Math.max(0, rec.immediate_amount ?? rec.amount ?? 0), 0);
+  const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
 
   return (
     <div className="card-glass overflow-hidden border border-border/80">
       <div className="px-4 py-3 border-b border-border">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          Top allocation
+          Allocation Breakdown
+        </p>
+        <p className="text-[11px] text-text-secondary mt-1">
+          Deploy {formatCurrency(denominator)} now across {ranked.length} ticker{ranked.length === 1 ? "" : "s"}.
         </p>
       </div>
       <div className="divide-y divide-border">
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
           <div className="col-span-2">Ticker</div>
-          <div className="col-span-6">How to Buy</div>
+          <div className="col-span-5">Why selected</div>
           <div className="col-span-2 text-right">Amount</div>
+          <div className="col-span-1 text-right">%</div>
           <div className="col-span-1 text-right">Current</div>
           <div className="col-span-1 text-right">After</div>
         </div>
@@ -671,9 +692,10 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
               : role === "Watch"
                 ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
                 : "bg-surface-elevated text-text-muted border border-border";
-          const reserve = rec.reserve_amount ?? 0;
-          const immediate = rec.immediate_amount ?? rec.amount;
+          const immediate = Math.max(0, rec.immediate_amount ?? rec.amount ?? 0);
+          const reserve = Math.max(0, rec.reserve_amount ?? 0);
           const showStaging = (rec.staging_instruction != null && rec.staging_instruction !== "") || reserve > 0;
+          const pct = denominator > 0 ? (immediate / denominator) * 100 : 0;
           return (
             <div key={rec.symbol} className="px-4 py-3 text-sm">
               <div className="grid grid-cols-12 gap-2 items-center">
@@ -688,11 +710,14 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
                     {role}
                   </span>
                 </div>
-                <div className="col-span-8 sm:col-span-6 text-xs text-text-secondary">
-                  {rec.execution_plan}
+                <div className="col-span-8 sm:col-span-5 text-xs text-text-secondary">
+                  {toCompactLine(rec.why_selected || rec.rationale || rec.execution_plan, 14)}
                 </div>
-                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
-                  {formatCurrency(rec.amount)}
+                <div className="col-span-4 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                  {formatCurrency(immediate)}
+                </div>
+                <div className="col-span-2 sm:col-span-1 text-right font-mono text-xs text-accent">
+                  {pct.toFixed(1)}%
                 </div>
                 <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
                   {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
@@ -710,6 +735,10 @@ function TopAllocationTable({ allocations }: { allocations: EnrichedAllocation[]
             </div>
           );
         })}
+        <div className="px-4 py-2 bg-surface-elevated/20 flex items-center justify-between text-xs">
+          <span className="text-text-muted uppercase tracking-wide font-semibold">Total deploying now</span>
+          <span className="font-mono font-semibold text-text-primary">{formatCurrency(allocatedNowTotal)}</span>
+        </div>
       </div>
     </div>
   );

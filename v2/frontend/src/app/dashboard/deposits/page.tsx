@@ -172,6 +172,65 @@ function deriveRoleLabel(rec: EnrichedAllocation, rank: number, total: number): 
   return "Supporting";
 }
 
+function deriveAllocationWhy(
+  rec: EnrichedAllocation,
+  role: "Primary" | "Supporting" | "Watch"
+): string {
+  const currentWeight = rec.current_weight ?? rec.portfolio_weight ?? 0;
+  const afterWeight = rec.after_weight ?? 0;
+  const delta = afterWeight - currentWeight;
+  const category = (rec.category || "").toLowerCase();
+  const isEtf = category === "etf" || ["VOO", "SPY", "QQQ", "VTI", "SCHD"].includes((rec.symbol || "").toUpperCase());
+
+  if (role === "Watch") {
+    if (currentWeight > 5) return "Already large; capped to limit concentration risk";
+    if (currentWeight > 0) return "Starter only; elevated risk profile limits sizing";
+    return "Small starter only due to elevated sizing risk";
+  }
+  if (role === "Primary") {
+    if (isEtf) return "Broad index core, prioritized for stability";
+    if (currentWeight < 1) return "New core position, building initial allocation";
+    if (delta > 2) return "Core position under target, building allocation";
+    return "Core position, adding to reinforce target weight";
+  }
+  if (isEtf) return "Broad sleeve reducing single-name concentration";
+  if (delta > 1.5) return "Adds growth exposure without overconcentrating";
+  if (currentWeight > 5) return "Secondary position near target, topping up";
+  return "Supports diversification without over-concentrating";
+}
+
+function computeAdjustedAmounts(
+  sorted: EnrichedAllocation[],
+  deployNowAmount: number
+): Map<string, number> {
+  const watchCap = Math.max(deployNowAmount * 0.075, 0);
+  const roles = sorted.map((rec, idx) => deriveRoleLabel(rec, idx, sorted.length));
+  const amounts = sorted.map(rec => Math.max(0, rec.immediate_amount ?? rec.amount ?? 0));
+  let pool = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (roles[i] === "Watch" && amounts[i] > watchCap) {
+      pool += amounts[i] - watchCap;
+      amounts[i] = watchCap;
+    }
+  }
+
+  if (pool > 0) {
+    const psIndices: number[] = [];
+    roles.forEach((r, i) => { if (r !== "Watch") psIndices.push(i); });
+    const psTotal = psIndices.reduce((sum, i) => sum + amounts[i], 0);
+    if (psTotal > 0) {
+      for (const i of psIndices) {
+        amounts[i] += (amounts[i] / psTotal) * pool;
+      }
+    }
+  }
+
+  const result = new Map<string, number>();
+  sorted.forEach((rec, i) => result.set(rec.symbol ?? "", amounts[i]));
+  return result;
+}
+
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
@@ -291,6 +350,12 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
     whySeen.add(enrichedAllocs[i].why_selected);
   }
   const deployNowAmount = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
+  const sortedByAmount = [...enrichedAllocs].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0));
+  const primaryTickers = sortedByAmount
+    .filter((rec, idx) => deriveRoleLabel(rec, idx, sortedByAmount.length) === "Primary")
+    .slice(0, 2)
+    .map(rec => rec.symbol ?? "")
+    .filter(Boolean);
 
   return (
     <div className="space-y-4">
@@ -309,6 +374,7 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
               ? adaptive.adaptive_reasons.join(" ")
               : (explanation ?? plan.intel_summary ?? notes.join(" "))
           }
+          primaryTickers={primaryTickers}
         />
         {allocs.length > 0 && (
           <AllocationBreakdownTable
@@ -322,7 +388,6 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
           </div>
         ) : (
           <>
-            <WhatToDoNowSection allocations={enrichedAllocs} adaptive={adaptive ?? null} />
             <WhyMadeCutSection allocations={enrichedAllocs} />
             <DeploymentRisksSection allocations={enrichedAllocs} adaptive={adaptive ?? null} />
           </>
@@ -401,6 +466,7 @@ function RecommendedDeploymentCard({
   regime,
   adaptive,
   explanation,
+  primaryTickers = [],
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
@@ -408,12 +474,17 @@ function RecommendedDeploymentCard({
   regime: RegimeBlock | null;
   adaptive: AdaptiveBlock | null;
   explanation?: string;
+  primaryTickers?: string[];
 }) {
   const hasAdaptive = !!adaptive;
   const immediate = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
   const reserve = adaptive?.cash_reserve_amount ?? plan.cash_reserve ?? 0;
   const regimeBadge = regime ? regimeBadgeMeta(regime.regime_label) : null;
   const modeBadge = adaptive ? modeBadgeMeta(adaptive.deployment_mode) : null;
+  const subtitleParts: string[] = [`Across ${allocationCount} ticker${allocationCount === 1 ? "" : "s"}`];
+  if (reserve > 0) subtitleParts.push(`Hold ${formatCurrency(reserve)} for pullbacks`);
+  if (primaryTickers.length > 0) subtitleParts.push(`Prioritize ${primaryTickers.join(" & ")}`);
+  const subtitle = subtitleParts.join(" • ");
 
   return (
     <div className="card-glass p-4 space-y-3 border border-accent/20">
@@ -425,12 +496,7 @@ function RecommendedDeploymentCard({
           <p className="text-2xl font-display text-text-primary mt-1">
             Deploy {formatCurrency(immediate)} now
           </p>
-          {hasAdaptive && reserve > 0 && (
-            <p className="text-xs text-text-secondary mt-0.5">
-              Hold {formatCurrency(reserve)} for pullbacks
-            </p>
-          )}
-          <p className="text-xs text-text-muted mt-0.5">{toCompactLine(explanation || plan.strategy, 18)}</p>
+          <p className="text-xs text-text-secondary mt-0.5">{subtitle}</p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           {regimeBadge && (
@@ -569,7 +635,12 @@ function AllocationBreakdownTable({
   const ranked = [...allocations].sort(
     (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
   );
-  const allocatedNowTotal = ranked.reduce((sum, rec) => sum + Math.max(0, rec.immediate_amount ?? rec.amount ?? 0), 0);
+  const roleMap = new Map(ranked.map((rec, idx) => [rec.symbol ?? "", deriveRoleLabel(rec, idx, ranked.length)]));
+  const adjustedAmounts = computeAdjustedAmounts(ranked, deployNowAmount);
+  const displayRanked = [...ranked].sort(
+    (a, b) => (adjustedAmounts.get(b.symbol ?? "") ?? 0) - (adjustedAmounts.get(a.symbol ?? "") ?? 0)
+  );
+  const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (adjustedAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
 
   return (
@@ -579,7 +650,7 @@ function AllocationBreakdownTable({
           Allocation Breakdown
         </p>
         <p className="text-[11px] text-text-secondary mt-1">
-          Deploy {formatCurrency(denominator)} now across {ranked.length} ticker{ranked.length === 1 ? "" : "s"}.
+          Deploy {formatCurrency(denominator)} now across {displayRanked.length} ticker{displayRanked.length === 1 ? "" : "s"}.
         </p>
       </div>
       <div className="divide-y divide-border">
@@ -587,33 +658,31 @@ function AllocationBreakdownTable({
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
           <div className="col-span-2">Ticker</div>
           <div className="col-span-2">Role</div>
+          <div className="col-span-4">Why</div>
           <div className="col-span-2 text-right">Invest now</div>
-          <div className="col-span-2 text-right">Reserve</div>
-          <div className="col-span-2 text-right">Current %</div>
-          <div className="col-span-2 text-right">After %</div>
+          <div className="col-span-1 text-right">Now %</div>
+          <div className="col-span-1 text-right">After %</div>
         </div>
-        {ranked.map((rec, index) => {
-          const role = deriveRoleLabel(rec, index, ranked.length);
+        {displayRanked.map((rec) => {
+          const role = roleMap.get(rec.symbol ?? "") ?? "Supporting";
           const roleClass =
             role === "Primary"
               ? "bg-accent/10 text-accent border border-accent/30"
               : role === "Watch"
                 ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
                 : "bg-surface-elevated text-text-muted border border-border";
-          const immediate = Math.max(0, rec.immediate_amount ?? rec.amount ?? 0);
-          const reserve = Math.max(0, rec.reserve_amount ?? 0);
-          const showStaging = (rec.staging_instruction != null && rec.staging_instruction !== "") || reserve > 0;
-          const pct = denominator > 0 ? (immediate / denominator) * 100 : 0;
+          const immediate = adjustedAmounts.get(rec.symbol ?? "") ?? 0;
+          const why = deriveAllocationWhy(rec, role);
           return (
             <div key={rec.symbol} className="px-4 py-3 text-sm">
-              <div className="grid grid-cols-12 gap-2 items-center">
+              <div className="grid grid-cols-12 gap-2 items-start">
                 <div className="col-span-6 sm:col-span-2">
                   <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
                   <p className="text-[11px] text-text-muted leading-snug mt-1">
-                    {toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now; reserve rest for pullback.", 10)}
+                    {toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now.", 10)}
                   </p>
                 </div>
-                <div className="col-span-6 sm:col-span-2">
+                <div className="col-span-6 sm:col-span-2 flex items-start pt-0.5">
                   <span
                     className={cn(
                       "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
@@ -623,20 +692,19 @@ function AllocationBreakdownTable({
                     {role}
                   </span>
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                <div className="hidden sm:block sm:col-span-4 text-[11px] text-text-muted leading-snug pt-0.5">
+                  {why}
+                </div>
+                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
                   {formatCurrency(immediate)}
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-text-secondary">
-                  {formatCurrency(reserve)}
-                </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-text-muted">
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
                   {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-accent">
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
                   {(rec.after_weight ?? 0).toFixed(1)}%
                 </div>
               </div>
-              {showStaging && <p className="text-[11px] text-text-muted mt-1 leading-snug">Now {pct.toFixed(1)}% of immediate deploy budget.</p>}
             </div>
           );
         })}
@@ -645,61 +713,6 @@ function AllocationBreakdownTable({
           <span className="font-mono font-semibold text-text-primary">{formatCurrency(allocatedNowTotal)}</span>
         </div>
       </div>
-    </div>
-  );
-}
-
-function WhatToDoNowSection({
-  allocations,
-  adaptive,
-}: {
-  allocations: EnrichedAllocation[];
-  adaptive: AdaptiveBlock | null;
-}) {
-  const deployBullets: string[] = [];
-  const ranked = [...allocations].sort(
-    (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
-  );
-  const immediateTickers = ranked.filter((rec) => (rec.immediate_amount ?? rec.amount ?? 0) > 0).map((rec) => rec.symbol);
-  const primary = immediateTickers.slice(0, Math.min(2, immediateTickers.length));
-
-  if (adaptive) {
-    const reserve = adaptive.cash_reserve_amount ?? 0;
-    const immediate = adaptive.recommended_deploy_amount ?? 0;
-    if (immediate > 0 && reserve > 0) {
-      deployBullets.push(
-        `Deploy ${formatCurrency(immediate)} now and hold ${formatCurrency(reserve)} for pullbacks.`
-      );
-    } else if (immediate > 0) {
-      deployBullets.push(`Deploy ${formatCurrency(immediate)} now in full.`);
-    } else {
-      deployBullets.push(
-        `Hold cash; conditions don't support deploying right now.`
-      );
-    }
-  }
-  if (immediateTickers.length > 0) {
-    deployBullets.unshift(`Deploy across ${immediateTickers.length} ticker${immediateTickers.length === 1 ? "" : "s"}.`);
-  }
-  if (primary.length > 0) {
-    deployBullets.push(`Prioritize ${primary.join(" and ")} as primary allocations.`);
-  }
-
-  const merged = deployBullets.slice(0, 3);
-  if (merged.length === 0 && allocations.length === 0) return null;
-
-  return (
-    <div className="p-3 space-y-2 border border-accent/20 rounded-lg bg-accent/5">
-      <p className="text-xs font-semibold uppercase tracking-wide text-accent">
-        What to Do Now
-      </p>
-      <ul className="space-y-1.5">
-        {merged.map((bullet) => (
-          <li key={bullet} className="text-xs text-text-secondary leading-snug">
-            • {bullet}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }

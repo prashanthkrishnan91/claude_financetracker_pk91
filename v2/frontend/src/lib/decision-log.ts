@@ -77,6 +77,34 @@ export function buildRecommendationSnapshot(plan: DepositPlanResult): Record<str
   };
 }
 
+export function buildRecommendationSnapshotWithContext(
+  plan: DepositPlanResult,
+  context: {
+    entered_capital_amount: number;
+    deploy_now_amount: number;
+    reserve_amount: number;
+    ticker_context: Array<{ ticker: string; amount: number; role: string; why_reason: string | null }>;
+  },
+): Record<string, unknown> {
+  const base = buildRecommendationSnapshot(plan);
+  return {
+    ...base,
+    decision_context: {
+      entered_capital_amount: context.entered_capital_amount,
+      deploy_now_amount: context.deploy_now_amount,
+      reserve_amount: context.reserve_amount,
+      ticker_allocations: context.ticker_context,
+      role_and_why_summary: context.ticker_context.map((item) => ({
+        ticker: item.ticker,
+        role: item.role,
+        why_reason: item.why_reason,
+        amount: item.amount,
+      })),
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
 export const decisionLogApi = {
   createDecisionLog: (snapshot: Record<string, unknown>) =>
     api.decisionLogs.createDecisionLog(snapshot),

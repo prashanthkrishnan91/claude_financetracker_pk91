@@ -183,20 +183,20 @@ function deriveAllocationWhy(
   const isEtf = category === "etf" || ["VOO", "SPY", "QQQ", "VTI", "SCHD"].includes((rec.symbol || "").toUpperCase());
 
   if (role === "Watch") {
-    if (currentWeight > 5) return "Already large; capped to limit concentration risk";
-    if (currentWeight > 0) return "Starter only; elevated risk profile limits sizing";
-    return "Small starter only due to elevated sizing risk";
+    if (currentWeight > 5) return "Large already, capped add";
+    if (currentWeight > 0) return "Existing risk, keep add small";
+    return "Starter size only, risk kept tight";
   }
   if (role === "Primary") {
-    if (isEtf) return "Broad index core, prioritized for stability";
-    if (currentWeight < 1) return "New core position, building initial allocation";
-    if (delta > 2) return "Core position under target, building allocation";
-    return "Core position, adding to reinforce target weight";
+    if (isEtf) return "Core ballast, steady move toward target";
+    if (currentWeight < 1) return "New core position, starting allocation";
+    if (delta > 2) return "Core position, moving toward target";
+    return "Core position, moderate add toward target";
   }
-  if (isEtf) return "Broad sleeve reducing single-name concentration";
-  if (delta > 1.5) return "Adds growth exposure without overconcentrating";
-  if (currentWeight > 5) return "Secondary position near target, topping up";
-  return "Supports diversification without over-concentrating";
+  if (isEtf) return "Quality exposure, moderate add";
+  if (delta > 1.5) return "Growth exposure, sized below core";
+  if (currentWeight > 5) return "Near target, top up lightly";
+  return "Diversifier add, sized below core";
 }
 
 function computeAdjustedAmounts(
@@ -642,37 +642,15 @@ function AllocationBreakdownTable({
   );
   const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (adjustedAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
-  const impactPreview = displayRanked
-    .filter((rec) => (adjustedAmounts.get(rec.symbol ?? "") ?? 0) > 0)
-    .map((rec) => ({
-      ticker: rec.symbol ?? "—",
-      before: rec.current_weight ?? rec.portfolio_weight ?? 0,
-      after: rec.after_weight ?? 0,
-    }));
-
   return (
     <div className="card-glass overflow-hidden border border-border/80">
-      <div className="px-4 py-3 border-b border-border">
+      <div className="px-4 py-2 border-b border-border">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
           Allocation Breakdown
         </p>
         <p className="text-[11px] text-text-secondary mt-1">
           Deploy {formatCurrency(denominator)} now across {displayRanked.length} ticker{displayRanked.length === 1 ? "" : "s"}.
         </p>
-        <div className="mt-2 border border-border/80 rounded-md bg-surface-elevated/20 p-2">
-          <p className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">After this trade</p>
-          <div className="mt-1 grid gap-1 sm:grid-cols-2">
-            {impactPreview.map((row) => (
-              <div key={`${row.ticker}-impact`} className="flex items-center justify-between text-[11px]">
-                <span className="font-mono text-text-primary">{row.ticker}</span>
-                <span className="font-mono text-text-secondary">
-                  {row.before.toFixed(1)}% <span className="text-text-muted">→</span>{" "}
-                  <span className="text-accent">{row.after.toFixed(1)}%</span>
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
       </div>
       <div className="divide-y divide-border">
         {/* Header */}
@@ -695,7 +673,7 @@ function AllocationBreakdownTable({
           const immediate = adjustedAmounts.get(rec.symbol ?? "") ?? 0;
           const why = deriveAllocationWhy(rec, role);
           return (
-            <div key={rec.symbol} className="px-4 py-3 text-sm">
+            <div key={rec.symbol} className="px-4 py-2.5 text-sm">
               <div className="grid grid-cols-12 gap-2 items-start">
                 <div className="col-span-6 sm:col-span-2">
                   <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>

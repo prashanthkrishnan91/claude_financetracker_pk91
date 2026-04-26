@@ -27,7 +27,7 @@ import type {
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
-import { buildInitialActualDecisions, buildRecommendationSnapshot } from "@/lib/decision-log";
+import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext } from "@/lib/decision-log";
 
 const MAX_REASON_WORDS = 12;
 
@@ -642,6 +642,13 @@ function AllocationBreakdownTable({
   );
   const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (adjustedAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
+  const impactPreview = displayRanked
+    .filter((rec) => (adjustedAmounts.get(rec.symbol ?? "") ?? 0) > 0)
+    .map((rec) => ({
+      ticker: rec.symbol ?? "—",
+      before: rec.current_weight ?? rec.portfolio_weight ?? 0,
+      after: rec.after_weight ?? 0,
+    }));
 
   return (
     <div className="card-glass overflow-hidden border border-border/80">
@@ -652,6 +659,20 @@ function AllocationBreakdownTable({
         <p className="text-[11px] text-text-secondary mt-1">
           Deploy {formatCurrency(denominator)} now across {displayRanked.length} ticker{displayRanked.length === 1 ? "" : "s"}.
         </p>
+        <div className="mt-2 border border-border/80 rounded-md bg-surface-elevated/20 p-2">
+          <p className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">After this trade</p>
+          <div className="mt-1 grid gap-1 sm:grid-cols-2">
+            {impactPreview.map((row) => (
+              <div key={`${row.ticker}-impact`} className="flex items-center justify-between text-[11px]">
+                <span className="font-mono text-text-primary">{row.ticker}</span>
+                <span className="font-mono text-text-secondary">
+                  {row.before.toFixed(1)}% <span className="text-text-muted">→</span>{" "}
+                  <span className="text-accent">{row.after.toFixed(1)}%</span>
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
       <div className="divide-y divide-border">
         {/* Header */}
@@ -1089,7 +1110,7 @@ function DecisionLogMemoryPanel({
   amount: number;
   adaptive: AdaptiveBlock | null;
 }) {
-  const snapshot = useMemo(() => buildRecommendationSnapshot(deployPlan), [deployPlan]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
   const { data: recentLogs } = useDecisionMemoryLogs(6, true);
@@ -1192,6 +1213,33 @@ function DecisionLogMemoryPanel({
       ? "Ready to evaluate"
       : "Not enough history";
   const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
+  const reserveAmount = Math.max(0, amount - deployNow);
+  const rankedForLog = useMemo(
+    () => [...recommendations].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)),
+    [recommendations],
+  );
+  const adjustedAmountsForLog = useMemo(() => computeAdjustedAmounts(rankedForLog, deployNow), [rankedForLog, deployNow]);
+  const tickerContext = useMemo(
+    () =>
+      rankedForLog.map((rec, idx) => ({
+        ticker: rec.symbol ?? "",
+        amount: adjustedAmountsForLog.get(rec.symbol ?? "") ?? 0,
+        role: deriveRoleLabel(rec, idx, rankedForLog.length),
+        why_reason: rec.why_selected ?? rec.why ?? rec.rationale ?? null,
+      })),
+    [adjustedAmountsForLog, rankedForLog],
+  );
+  const snapshot = useMemo(
+    () =>
+      buildRecommendationSnapshotWithContext(deployPlan, {
+        entered_capital_amount: amount,
+        deploy_now_amount: deployNow,
+        reserve_amount: reserveAmount,
+        ticker_context: tickerContext,
+      }),
+    [amount, deployNow, deployPlan, reserveAmount, tickerContext],
+  );
+  const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
 
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
@@ -1225,12 +1273,11 @@ function DecisionLogMemoryPanel({
       <div className="flex flex-wrap gap-2">
         <button
           onClick={() => {
-            setDetailsOpen(true);
-            setExecuteMessage(`Execution focus set for ${formatCurrency(deployNow)}. Confirm orders in your broker, then save your decision log.`);
+            setConfirmOpen(true);
           }}
           className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
         >
-          Execute Plan
+          Invest {formatCurrency(deployNow)} Now
         </button>
         <button
           onClick={() => document.getElementById("step-1")?.scrollIntoView({ behavior: "smooth", block: "start" })}
@@ -1263,6 +1310,47 @@ function DecisionLogMemoryPanel({
       </div>
       {executeMessage && <p className="text-xs text-text-secondary">{executeMessage}</p>}
       {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
+      {confirmOpen && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-lg border border-border bg-surface p-4 space-y-3">
+            <p className="text-sm font-semibold text-text-primary">Confirm execution</p>
+            <div className="text-xs space-y-1">
+              <p className="text-text-secondary">
+                Total invested now: <span className="font-mono text-text-primary">{formatCurrency(deployNow)}</span>
+              </p>
+              <p className="text-text-secondary">
+                Reserve remaining: <span className="font-mono text-text-primary">{formatCurrency(reserveAmount)}</span>
+              </p>
+            </div>
+            <div className="max-h-48 overflow-y-auto border border-border rounded-md divide-y divide-border">
+              {executeRows.map((row) => (
+                <div key={`${row.ticker}-confirm`} className="px-3 py-2 flex items-center justify-between text-xs">
+                  <span className="font-mono text-text-primary">{row.ticker}</span>
+                  <span className="font-mono text-text-secondary">{formatCurrency(row.amount)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmOpen(false)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  setConfirmOpen(false);
+                  setDetailsOpen(true);
+                  setExecuteMessage(`Execution focus set for ${formatCurrency(deployNow)}. Confirm orders in your broker, then save your decision log.`);
+                }}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {detailsOpen && savedLog && (
         <div className="space-y-2 border-t border-border pt-3">

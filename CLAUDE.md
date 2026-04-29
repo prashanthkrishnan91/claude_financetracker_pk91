@@ -25,7 +25,7 @@ Do not ignore these files. If the user gives a prompt that conflicts with them, 
 - Hosting: Vercel frontend, Railway backend
 - Primary app path: `v2/`
 
-Important: do not assume Travel Concierge stack details apply here. This app is Next 14/React 18/Tailwind 3, while Travel Concierge is newer.
+Important: do not assume Travel Concierge stack details apply here.
 
 ## Work rules
 
@@ -36,8 +36,22 @@ Important: do not assume Travel Concierge stack details apply here. This app is 
 - Do not add unrelated refactors.
 - Never expose secrets or `.env` contents.
 - Always state whether Supabase SQL is required.
-- Update `docs/ai/HANDOFF.md` after meaningful code changes.
 - Update `README.md` only when user-visible behavior, setup, migration, or architecture changes.
+
+## Mandatory handoff automation
+
+For every implementation, bug fix, refactor, UI change, migration, or architecture change, update `docs/ai/HANDOFF.md` in the same PR/commit. This is required, not optional.
+
+`docs/ai/HANDOFF.md` must include:
+
+- Last change
+- Files touched
+- Behavior change
+- Known issues
+- Next likely task
+- Debug notes
+
+Do not end a coding task with "Handoff update needed: Yes" unless you already updated the file. Use "Handoff updated: Yes" or explain why no update was required.
 
 ## Response format
 
@@ -48,16 +62,14 @@ Use this order:
 3. Tests/checks run or required
 4. Risks / rollback notes
 5. Supabase SQL required: Yes/No
-6. Handoff update needed: Yes/No
+6. Handoff updated: Yes/No with reason
 
 ## Product invariants
 
-- Intel tab should provide concise ticker reasoning with meaningful data-quality indicators.
-- Deploy tab should keep a clear top-to-bottom allocation flow for the user's recurring deposits.
-- Allocation math must not be changed casually during UI cleanup.
-- Decision logging should capture recommendation context without requiring LLM usage.
-- Avoid verbose repetitive card text; prefer compact, inspectable explanations.
-- Do not introduce DB migrations unless necessary; if needed, name exact Supabase SQL files.
+- Intel tab must remain concise and signal-rich.
+- Deploy tab must preserve clear allocation flow and accurate math.
+- Decision logs must capture context without requiring LLM.
+- Avoid repetitive UI text and unnecessary duplication.
 
 ## Chat strategy
 

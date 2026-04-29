@@ -680,6 +680,9 @@ function AllocationBreakdownTable({
                   <p className="text-[11px] text-text-muted leading-snug mt-1">
                     {toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now.", 10)}
                   </p>
+                  <p className="sm:hidden text-[11px] text-text-muted leading-snug mt-1">
+                    {why}
+                  </p>
                 </div>
                 <div className="col-span-6 sm:col-span-2 flex items-start pt-0.5">
                   <span

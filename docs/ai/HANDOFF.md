@@ -1,25 +1,31 @@
 # AI Handoff — Investing App
 
 ## Last change
-Cleaned Deploy tab by removing redundant preview and tightening WHY copy (PR #126).
+Deploy tab regression QA + mobile execution visibility fix after PR #126.
 
 ## Files touched
 - v2/frontend/src/app/dashboard/deposits/page.tsx
-- allocation table components
-- deriveAllocationWhy logic
+
+## QA scope completed
+- Verified Deploy tab 3-step flow remains intact:
+  - Step 1: deposit amount
+  - Step 2: per-ticker allocation
+  - Step 3: execution + decision log
+- Verified allocation table still shows ticker, role, short WHY, invest-now amount, now %, after %.
+- Verified no duplicate "after this trade" preview block remains outside table.
+- Verified WATCH role allocations are capped via `computeAdjustedAmounts` and appear smaller when cap applies.
+- Verified "Total deploying now" equals sum of per-ticker invest-now amounts.
+- Verified decision-log snapshot still includes entered amount, deploy amount, reserve amount, ticker allocations, roles, reasons, timestamp context.
+- Verified no Supabase SQL migration needed for this QA/fix pass.
 
 ## Behavior change
-- Removed "After this trade" preview block to reduce clutter
-- Allocation table is now the single source of truth for before/after percentages
-- WHY column now uses short, scannable phrases instead of repetitive text
-- Slight UI compression (reduced padding) for better vertical density
+- Mobile/tablet view now shows each ticker's short WHY inline in the allocation row (`sm:hidden`) so critical execution context is visible without desktop columns.
 
 ## Known issues
-- Build/test environment still requires proper Supabase env setup
-- Some WHY phrases may still feel slightly repetitive across tickers
+- Build/test environment still requires proper Supabase env setup for full runtime validation.
 
 ## Next likely task
-Enhance WHY logic to be more context-aware and personalized without introducing verbosity or LLM dependency.
+- Optional: add Playwright snapshot coverage for Deploy mobile layout to guard against future hidden-column regressions.
 
 ## Debug notes
 - Allocation math unchanged; only presentation layer modified

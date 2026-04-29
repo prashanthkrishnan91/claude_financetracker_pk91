@@ -2,79 +2,69 @@
 
 ## Operating mode
 
-This repo is developed through Claude/Codex in browser or mobile app. Do not assume CLI-only hooks, background agents, swarms, or local terminal orchestration are available unless the user explicitly says they are using CLI.
+Browser/mobile Claude + Codex workflow. No CLI-only hooks, swarms, background agents, or local terminal assumptions unless user explicitly says CLI is available.
 
-Primary objective: preserve Claude Pro usage by using repo memory files and compact state packs instead of rediscovering the app.
+Primary objective: every Claude/Codex token must move the fix forward. No filler, no broad repo exploration, no speculative rewrites.
 
 ## Required memory files
 
-Before planning or coding, use these files as the current source of truth:
+Before planning or coding, use the smallest needed subset of:
 
-1. `docs/ai/CLAUDE_WORKFLOW_KIT.md`
-2. `docs/ai/HANDOFF.md`
-3. `docs/ai/PROMPT_LIBRARY.md`
-4. `README.md` only when setup/user-facing behavior is relevant
+1. `docs/ai/HANDOFF.md`
+2. `docs/ai/PROMPT_LIBRARY.md`
+3. `docs/ai/CLAUDE_WORKFLOW_KIT.md`
+4. `README.md`
 
-Do not ignore these files. If the user gives a prompt that conflicts with them, point out the conflict briefly and follow the newest explicit user instruction.
+Do not restate these files. Use them.
 
 ## Project stack
 
-- Frontend: Next.js 14, React 18, TypeScript, Tailwind 3
+- Frontend: Next.js 14, React 18, Tailwind 3
 - Backend: FastAPI
 - Database/Auth: Supabase
-- Hosting: Vercel frontend, Railway backend
+- Hosting: Vercel + Railway
 - Primary app path: `v2/`
 
-Important: do not assume Travel Concierge stack details apply here.
+## Zero-waste work rules
 
-## Work rules
-
+- Every sentence must move diagnosis, implementation, verification, or merge forward.
 - Do only the requested task.
+- Read only required files.
+- Do not scan the repo unless necessary.
 - Prefer smallest safe patch.
-- Read only hot files relevant to the task.
-- Do not scan the whole repo unless necessary.
-- Do not add unrelated refactors.
-- Never expose secrets or `.env` contents.
-- Always state whether Supabase SQL is required.
-- Update `README.md` only when user-visible behavior, setup, migration, or architecture changes.
+- Do not refactor unrelated code.
+- Do not repeat known architecture.
+- Never expose secrets.
+- Always state Supabase SQL requirement.
 
 ## Mandatory handoff automation
 
-For every implementation, bug fix, refactor, UI change, migration, or architecture change, update `docs/ai/HANDOFF.md` in the same PR/commit. This is required, not optional.
+For every implementation, bug fix, refactor, UI change, migration, architecture change, or workflow change, edit `docs/ai/HANDOFF.md` in the same PR.
 
-`docs/ai/HANDOFF.md` must include:
+The task is incomplete if HANDOFF should change and was not updated.
 
-- Last change
-- Files touched
-- Behavior change
-- Known issues
-- Next likely task
-- Debug notes
+Never ask the user to update HANDOFF manually. Update it.
 
-Do not end a coding task with "Handoff update needed: Yes" unless you already updated the file. Use "Handoff updated: Yes" or explain why no update was required.
+## Required final response
 
-## Response format
-
-Use this order:
-
-1. Root cause or plan
-2. Files changed / files to change
-3. Tests/checks run or required
-4. Risks / rollback notes
-5. Supabase SQL required: Yes/No
-6. Handoff updated: Yes/No with reason
+```md
+Root cause/plan:
+Files changed:
+Tests:
+Risks:
+Supabase SQL: Yes/No
+HANDOFF.md edited: Yes/No + reason
+README.md edited: Yes/No + reason
+```
 
 ## Product invariants
 
-- Intel tab must remain concise and signal-rich.
-- Deploy tab must preserve clear allocation flow and accurate math.
-- Decision logs must capture context without requiring LLM.
-- Avoid repetitive UI text and unnecessary duplication.
+- Intel must stay concise and signal-rich.
+- Deploy must preserve allocation math and clarity.
+- Decision logs must remain deterministic (no LLM dependency).
 
 ## Chat strategy
 
-- New feature/fix: new Claude/Codex chat.
-- PR review: use Codex or ChatGPT unless implementation reasoning is needed.
-- Opus: planning only, produce compact spec, then stop.
-- Sonnet: focused implementation.
-- Codex: bug fixes, audits, smaller implementation.
+- Codex: bug fixes, audits
+- Sonnet: implementation
+- Opus: planning only

@@ -1,82 +1,68 @@
-# Claude Code — RuFlo V3
+# Claude Instructions — Investing App
 
-## Stack
-Vercel (serverless) · Supabase (DB) · Python/JS frontend
+## Operating mode
 
-## MOST IMPORTANT: Be as token efficient as possible when reading files, running commands and in conversations. Your focus is to build and deploy code, save tokens everywhere else.
+This repo is developed through Claude/Codex in browser or mobile app. Do not assume CLI-only hooks, background agents, swarms, or local terminal orchestration are available unless the user explicitly says they are using CLI.
 
-## Code Graph
-Auto-loaded — never re-read raw source for structural questions; graph is rebuilt automatically after code edits.
-@graphify-out/GRAPH_REPORT.md
-@graphify-out/wiki/index.md
+Primary objective: preserve Claude Pro usage by using repo memory files and compact state packs instead of rediscovering the app.
 
-## Core Rules
-- Do only what was asked — nothing more, nothing less
-- Read only files needed for the task; never index `node_modules/`, `.next/`, `venv/`, `*.csv`, `*.pdf`
-- Output only diffs/snippets — never full files unless asked
-- Prefer editing existing files; never create files unless strictly required
-- Never save to root — use `/src`, `/tests`, `/docs`, `/config`, `/scripts`, `/examples`
-- Always read a file before editing it
-- Always run tests after code changes; verify build before committing
-- Never hardcode API keys, credentials, or commit `.env` files
-- Always validate user input and sanitize file paths at system boundaries
-- Run `npx @claude-flow/cli@latest security scan` after security-related changes
-- Max 2 fix attempts before asking the user what to try next
-- After each feature/bug fix, prompt: "Run /compact before next task."
-- No conversational filler. Plan → Code → Verify.
+## Required memory files
 
-## Workflow
-- Tasks >2 steps: write plan to `tasks/todo.md`, await approval, then execute
-- One objective at a time — log unrelated bugs to `tasks/todo.md`, do NOT fix mid-task
-- Never mark done without running tests or diffing behavior — show proof
-- After any user correction, log the pattern in `tasks/lessons.md`; review at session start
+Before planning or coding, use these files as the current source of truth:
 
-## Skill Loading (load only when task matches — no preloading)
+1. `docs/ai/CLAUDE_WORKFLOW_KIT.md`
+2. `docs/ai/HANDOFF.md`
+3. `docs/ai/PROMPT_LIBRARY.md`
+4. `README.md` only when setup/user-facing behavior is relevant
 
-| Task Type | Skill |
-|---|---|
-| UI / layout / components | `/mnt/skills/user/frontend-design/SKILL.md` |
-| New feature (design phase) | `/mnt/skills/user/brainstorming/SKILL.md` |
-| Writing implementation spec | `/mnt/skills/user/writing-plans/SKILL.md` |
-| Executing a written plan | `/mnt/skills/user/executing-plans/SKILL.md` |
-| 2+ independent parallel tasks | `/mnt/skills/user/dispatching-parallel-agents/SKILL.md` |
-| Bug investigation | `/mnt/skills/user/systematic-debugging/SKILL.md` |
-| New feature (implementation) | `/mnt/skills/user/test-driven-development/SKILL.md` |
-| About to claim task complete | `/mnt/skills/user/verification-before-completion/SKILL.md` |
-| Word / PDF / Excel output | `/mnt/skills/public/{docx\|pdf\|xlsx}/SKILL.md` |
+Do not ignore these files. If the user gives a prompt that conflicts with them, point out the conflict briefly and follow the newest explicit user instruction.
 
-## Architecture
-- Domain-Driven Design with bounded contexts
-- Typed interfaces for all public APIs
-- TDD London School (mock-first) for new code
-- Event sourcing for state changes
-- Input validation at system boundaries
+## Project stack
 
-**Config**: topology `hierarchical-mesh` · maxAgents `15` · memory `hybrid` · HNSW `on` · Neural `on`
+- Frontend: Next.js 14, React 18, TypeScript, Tailwind 3
+- Backend: FastAPI
+- Database/Auth: Supabase
+- Hosting: Vercel frontend, Railway backend
+- Primary app path: `v2/`
 
-## Build & Test
-```bash
-npm run build  # build
-npm test       # test
-npm run lint   # lint
-```
+Important: do not assume Travel Concierge stack details apply here. This app is Next 14/React 18/Tailwind 3, while Travel Concierge is newer.
 
-## Concurrency — 1 message = all related operations
-- Batch ALL file reads/writes/edits in one message
-- Batch ALL Bash commands in one message
-- Spawn ALL agents in one message via Agent tool
+## Work rules
 
-## Swarm
-- Init swarm with CLI tools for complex tasks; Agent tool does the actual work — call BOTH in ONE message
-- Use hierarchical topology; maxAgents 6–8; specialized strategy; `raft` consensus
-- Shared memory namespace for all agents; run checkpoints via `post-task` hooks
-- Set `run_in_background: true` for all Agent calls
-- After spawning, STOP — do not poll or check status; review ALL results before proceeding
+- Do only the requested task.
+- Prefer smallest safe patch.
+- Read only hot files relevant to the task.
+- Do not scan the whole repo unless necessary.
+- Do not add unrelated refactors.
+- Never expose secrets or `.env` contents.
+- Always state whether Supabase SQL is required.
+- Update `docs/ai/HANDOFF.md` after meaningful code changes.
+- Update `README.md` only when user-visible behavior, setup, migration, or architecture changes.
 
-## 3-Tier Model Routing (ADR-026)
+## Response format
 
-| Tier | Handler | Use Cases |
-|---|---|---|
-| 1 | Agent Booster WASM (<1ms, $0) | Simple transforms — use Edit tool directly, skip LLM |
-| 2 | Haiku (~500ms) | Low complexity (<30%) |
-| 3 | Sonnet/Opus (2–5s) | Complex reasoning, architecture, security (>30%) |
+Use this order:
+
+1. Root cause or plan
+2. Files changed / files to change
+3. Tests/checks run or required
+4. Risks / rollback notes
+5. Supabase SQL required: Yes/No
+6. Handoff update needed: Yes/No
+
+## Product invariants
+
+- Intel tab should provide concise ticker reasoning with meaningful data-quality indicators.
+- Deploy tab should keep a clear top-to-bottom allocation flow for the user's recurring deposits.
+- Allocation math must not be changed casually during UI cleanup.
+- Decision logging should capture recommendation context without requiring LLM usage.
+- Avoid verbose repetitive card text; prefer compact, inspectable explanations.
+- Do not introduce DB migrations unless necessary; if needed, name exact Supabase SQL files.
+
+## Chat strategy
+
+- New feature/fix: new Claude/Codex chat.
+- PR review: use Codex or ChatGPT unless implementation reasoning is needed.
+- Opus: planning only, produce compact spec, then stop.
+- Sonnet: focused implementation.
+- Codex: bug fixes, audits, smaller implementation.

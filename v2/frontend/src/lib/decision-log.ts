@@ -138,7 +138,7 @@ export function dedupeDecisionLogsForDisplay(logs: DecisionMemoryLog[]): Decisio
       map.set(key, log);
     }
   }
-  return [...map.values()].sort((a, b) => logSortTime(b) - logSortTime(a));
+  return Array.from(map.values()).sort((a, b) => logSortTime(b) - logSortTime(a));
 }
 
 export const decisionLogApi = {

@@ -243,9 +243,53 @@ class DecisionLogService:
             "style_shift": analysis["style_shift"],
             "execution_gap_percent": analysis["execution_gap_percent"],
         }
+        recommendation_key = self._extract_recommendation_key(recommendation_snapshot)
+        if recommendation_key:
+            existing = self._find_by_recommendation_key(user_id=user_id, recommendation_key=recommendation_key)
+            if existing:
+                logger.info("decision_log.create idempotent_update user_id=%s id=%s key=%s", user_id, existing.get("id"), recommendation_key)
+                updated = self.update(user_id=user_id, decision_log_id=str(existing.get("id")), patch=payload)
+                return updated or existing
         logger.info("decision_log.create user_id=%s status=%s", user_id, payload.get("status"))
         result = self.client.table("decision_logs").insert(payload).execute()
         return result.data[0] if result.data else {}
+
+    def _extract_recommendation_key(self, recommendation_snapshot: Any) -> str | None:
+        if not isinstance(recommendation_snapshot, dict):
+            return None
+        context = recommendation_snapshot.get("decision_context")
+        if not isinstance(context, dict):
+            return None
+        key = context.get("recommendation_key") or context.get("session_key")
+        if not isinstance(key, str):
+            return None
+        normalized = key.strip()
+        return normalized or None
+
+    def _find_by_recommendation_key(self, user_id: str, recommendation_key: str) -> dict[str, Any] | None:
+        result = (
+            self.client.table("decision_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .contains("recommendation_snapshot", {"decision_context": {"recommendation_key": recommendation_key}})
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if rows:
+            return rows[0]
+        fallback = (
+            self.client.table("decision_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .contains("recommendation_snapshot", {"decision_context": {"session_key": recommendation_key}})
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        fallback_rows = fallback.data or []
+        return fallback_rows[0] if fallback_rows else None
 
     def list(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         logger.info("decision_log.list user_id=%s limit=%s", user_id, limit)

@@ -225,3 +225,13 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Added frontend unit test coverage for deterministic session key generation.
 - No Supabase SQL required; this is implemented in frontend flow/state guardrails.
 - Known limitation: already-created duplicate rows remain in DB history and are not auto-deleted.
+
+### Step 3 durable recommendation-key idempotency + deploy percentage semantics (April 30, 2026)
+- Root cause: duplicate logs still appeared when create endpoint was called again after refresh/tab lifecycle before frontend state rehydration, and backend always inserted new rows without checking recommendation identity.
+- Added stable `decision_context.recommendation_key` (kept `session_key` for backward compatibility) derived from entered capital, deploy-now, reserve, and sorted ticker allocations.
+- Backend `DecisionLogService.create` now enforces idempotent create/update behavior by checking for an existing row with the same recommendation key in `recommendation_snapshot.decision_context` and updating that row instead of inserting a duplicate.
+- Kept allocation/recommendation engine unchanged; this only affects decision-log identity and persistence behavior.
+- Updated Step 3 and Recent Decision Logs copy to separate plan execution % from total deposit deployed % (e.g., "$715 of $715 plan (100%) · 79% of $900 deposit").
+- Added/updated frontend unit tests for deterministic key generation and changed-key behavior when deposit context changes.
+- No Supabase SQL required.
+- Known limitation remains: historical duplicate rows already stored are not auto-deduplicated.

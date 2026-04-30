@@ -41,3 +41,27 @@ Frontend UI foundation pass: elite intelligence design system (PR: "Investing UI
 - All new CSS classes are additive; no existing classes removed or renamed
 - `card-glass` and `card-elevated` kept intact for backward compat
 - `pnl-positive` / `pnl-negative` kept; `data-positive` / `data-negative` added as semantic aliases
+
+## Last change
+Decision Log Performance v1: windowed evaluation statuses + minimal Deploy memory surfacing.
+
+## Files touched
+- `v2/backend/app/services/decision_log_service.py` — Added window-level performance rollups (`7d`/`30d`/`90d`) with status model (`pending`, `ready`, `insufficient_data`, `unavailable`) and included them under `performance_snapshot.windows`.
+- `v2/backend/tests/test_decision_performance.py` — Added tests for window status transitions and unavailable data handling while preserving existing baseline/missing-price checks.
+- `v2/frontend/src/lib/api.ts` — Extended `DecisionMemoryLog.performance_snapshot` typing to include new status variants and `windows` structure.
+- `v2/frontend/src/app/dashboard/deposits/page.tsx` — Minimal Step 3 UI update to display compact 7d/30d/90d results/status without redesigning Deploy.
+- `v2/progress_log.md` — Added concise project progress note.
+
+## QA scope completed
+- `pytest -q v2/backend/tests/test_decision_performance.py` passed (6 tests).
+- No recommendation/allocation algorithm changes.
+- No Intel tab logic changes.
+- No Supabase schema migration required for this patch (JSON snapshot extension only).
+
+## Behavior change
+- Decision logs now expose time-window evaluation state explicitly so frontend can show pending/unavailable instead of ambiguous or misleading 0% outputs.
+- Deploy execution cockpit remains intact; update is additive and compact.
+
+## Known limitations
+- Window returns are based on available baseline-vs-current prices; no separate historical candles are fetched per window.
+- If price points are missing, window status reports `unavailable` and does not fabricate return percentages.

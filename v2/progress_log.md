@@ -203,3 +203,9 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 ## v2.0.0 — Phase 1: Database & Architecture Setup (April 8, 2026)
 
 > Archived to `v2/progress_log_archive.md`.
+
+### Decision Log Performance v1 (April 30, 2026)
+- Added windowed decision performance evaluation outputs (`7d`, `30d`, `90d`) with honest statuses (`pending`, `ready`, `insufficient_data`, `unavailable`) instead of defaulting to misleading zeros.
+- Kept existing Deploy logging flow and allocation/recommendation logic intact; extended stored `performance_snapshot` payload only.
+- Added backend tests for window readiness/pending behavior and unavailable-data handling.
+- Added minimal Deploy Step 3 UI lines to show 7d/30d/90d status/returns when available.

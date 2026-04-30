@@ -28,7 +28,7 @@ import type {
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
-import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext } from "@/lib/decision-log";
+import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, getDecisionLogSessionKey } from "@/lib/decision-log";
 
 const MAX_REASON_WORDS = 12;
 
@@ -1098,11 +1098,6 @@ function DecisionLogMemoryPanel({
   amount: number;
   adaptive: AdaptiveBlock | null;
 }) {
-  function getSessionKey(log: DecisionMemoryLog | null | undefined): string | null {
-    const key = (log?.recommendation_snapshot as { decision_context?: { session_key?: unknown } } | undefined)?.decision_context?.session_key;
-    return typeof key === "string" && key.trim() ? key : null;
-  }
-
   const [confirmOpen, setConfirmOpen] = useState(false);
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
@@ -1213,7 +1208,7 @@ function DecisionLogMemoryPanel({
     setSaveMessage("Performance refreshed");
   }
 
-  const logsToShow = recentLogs ?? [];
+  const logsToShow = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []), [recentLogs]);
   const insightsConfidenceLabel =
     insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
   const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
@@ -1267,7 +1262,7 @@ function DecisionLogMemoryPanel({
   );
   const matchingRecentLog = useMemo(() => {
     if (!recentLogs?.length || !currentSessionKey) return null;
-    return recentLogs.find((log) => getSessionKey(log) === currentSessionKey) ?? null;
+    return dedupeDecisionLogsForDisplay(recentLogs).find((log) => getDecisionLogSessionKey(log) === currentSessionKey) ?? null;
   }, [currentSessionKey, recentLogs]);
 
   useEffect(() => {
@@ -1300,7 +1295,7 @@ function DecisionLogMemoryPanel({
         <div className="grid gap-2 sm:grid-cols-2 text-xs">
           <p className="text-text-secondary">
             Deployed: <span className="text-text-primary font-semibold">{delta ? formatCurrency(delta.total_actual) : "—"}</span>
-            {delta ? <span className="text-text-muted"> ({deployedPct}% of plan · {depositDeployedPct}% of deposit)</span> : null}
+            {delta ? <span className="text-text-muted"> ({deployedPct}% of deploy-now plan · {depositDeployedPct}% of total deposit)</span> : null}
           </p>
           <p className="text-text-secondary">
             Replacements: <span className="text-text-primary">{replacementSummary}</span>
@@ -1490,7 +1485,7 @@ function DecisionLogMemoryPanel({
         <div className="border-t border-border pt-3 space-y-1.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
           <p className="text-xs text-text-secondary">
-            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} plan ({deployedPct}%) and {depositDeployedPct}% of {formatCurrency(amount)} deposit.
+            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} deploy-now plan ({deployedPct}%) and {depositDeployedPct}% of {formatCurrency(amount)} total deposit.
           </p>
           <p className="text-xs text-text-secondary">
             Capital behavior: {capitalBehavior}
@@ -1670,7 +1665,7 @@ function DecisionLogMemoryPanel({
                             : log.risk_behavior === "more_aggressive"
                             ? "Aggressive"
                             : "Aligned";
-                        return `${formatCurrency(deployedAmount)} of ${formatCurrency(delta?.total_recommended ?? recTotal)} plan (${planExecutionPct}%) · ${depositDeployedPct}% of ${formatCurrency(depositAmount)} deposit • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
+                        return `${formatCurrency(deployedAmount)} of ${formatCurrency(delta?.total_recommended ?? recTotal)} deploy-now plan (${planExecutionPct}%) · ${depositDeployedPct}% of ${formatCurrency(depositAmount)} total deposit • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
                       })()}
                     </div>
                   </button>

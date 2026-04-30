@@ -117,6 +117,30 @@ export function buildRecommendationSnapshotWithContext(
   };
 }
 
+function logSortTime(log: DecisionMemoryLog): number {
+  const updated = Date.parse(log.updated_at || "");
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(log.created_at || "");
+  return Number.isFinite(created) ? created : 0;
+}
+
+export function getDecisionLogSessionKey(log: DecisionMemoryLog | null | undefined): string | null {
+  const key = (log?.recommendation_snapshot as { decision_context?: { session_key?: unknown } } | undefined)?.decision_context?.session_key;
+  return typeof key === "string" && key.trim() ? key : null;
+}
+
+export function dedupeDecisionLogsForDisplay(logs: DecisionMemoryLog[]): DecisionMemoryLog[] {
+  const map = new Map<string, DecisionMemoryLog>();
+  for (const log of logs) {
+    const key = getDecisionLogSessionKey(log) ?? `id:${log.id}`;
+    const current = map.get(key);
+    if (!current || logSortTime(log) > logSortTime(current)) {
+      map.set(key, log);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => logSortTime(b) - logSortTime(a));
+}
+
 export const decisionLogApi = {
   createDecisionLog: (snapshot: Record<string, unknown>) =>
     api.decisionLogs.createDecisionLog(snapshot),

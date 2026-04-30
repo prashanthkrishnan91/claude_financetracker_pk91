@@ -1,51 +1,32 @@
 # Claude Instructions — Investing App
 
-## Operating mode
+Use this repo through a browser/mobile Claude + Codex workflow unless the user explicitly says CLI is available.
 
-Browser/mobile Claude + Codex workflow. No CLI-only hooks, swarms, background agents, or local terminal assumptions unless user explicitly says CLI is available.
+Before work, read only the smallest needed subset of:
 
-Primary objective: every Claude/Codex token must move the fix forward. No filler, no broad repo exploration, no speculative rewrites.
+1. `docs/ai/HANDOFF.md` — current state
+2. `docs/ai/PROMPT_LIBRARY.md` — workflow, budget, prompt, UI, and review rules
+3. `docs/ai/UI_BASELINE.md` — UI baseline and known visual costs when doing UI work
+4. `docs/ai/CLAUDE_WORKFLOW_KIT.md` — stable project constraints only when needed
+5. `README.md` — public/setup context only when needed
 
-## Required memory files
+Core rules:
 
-Before planning or coding, use the smallest needed subset of:
+- No broad discovery. Read primary target files first; fallback reads only if blocked.
+- Smallest safe patch. No unrelated refactors.
+- Update `docs/ai/HANDOFF.md` in the same PR for any implementation, bug fix, UI change, architecture change, migration, or workflow change.
+- State Supabase SQL requirement in every PR summary.
+- Stop after opening any Medium-High/High usage PR. Do not propose the next implementation prompt.
 
-1. `docs/ai/HANDOFF.md`
-2. `docs/ai/PROMPT_LIBRARY.md`
-3. `docs/ai/CLAUDE_WORKFLOW_KIT.md`
-4. `README.md`
+Project invariants:
 
-Do not restate these files. Use them.
+- Primary app path: `v2/`.
+- Intel must stay concise and signal-rich.
+- Deploy must preserve allocation math and clarity.
+- Decision logs must remain deterministic with no LLM dependency.
+- No backend/API/business-logic changes during UI-only work.
 
-## Project stack
-
-- Frontend: Next.js 14, React 18, Tailwind 3
-- Backend: FastAPI
-- Database/Auth: Supabase
-- Hosting: Vercel + Railway
-- Primary app path: `v2/`
-
-## Zero-waste work rules
-
-- Every sentence must move diagnosis, implementation, verification, or merge forward.
-- Do only the requested task.
-- Read only required files.
-- Do not scan the repo unless necessary.
-- Prefer smallest safe patch.
-- Do not refactor unrelated code.
-- Do not repeat known architecture.
-- Never expose secrets.
-- Always state Supabase SQL requirement.
-
-## Mandatory handoff automation
-
-For every implementation, bug fix, refactor, UI change, migration, architecture change, or workflow change, edit `docs/ai/HANDOFF.md` in the same PR.
-
-The task is incomplete if HANDOFF should change and was not updated.
-
-Never ask the user to update HANDOFF manually. Update it.
-
-## Required final response
+Final response format:
 
 ```md
 Root cause/plan:
@@ -56,15 +37,3 @@ Supabase SQL: Yes/No
 HANDOFF.md edited: Yes/No + reason
 README.md edited: Yes/No + reason
 ```
-
-## Product invariants
-
-- Intel must stay concise and signal-rich.
-- Deploy must preserve allocation math and clarity.
-- Decision logs must remain deterministic (no LLM dependency).
-
-## Chat strategy
-
-- Codex: bug fixes, audits
-- Sonnet: implementation
-- Opus: planning only

@@ -212,10 +212,10 @@ export const api = {
   },
 
   decisionLogs: {
-    createDecisionLog: (snapshot: Record<string, unknown>) =>
+    createDecisionLog: (snapshot: Record<string, unknown>, actualDecisions?: ActualDecisionItem[]) =>
       fetchApi<DecisionMemoryLog>("/api/v1/decision-logs", {
         method: "POST",
-        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy" }),
+        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy", actual_decisions: actualDecisions ?? [] }),
       }),
     listDecisionLogs: (limit = 25) =>
       fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),

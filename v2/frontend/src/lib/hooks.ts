@@ -2,6 +2,7 @@
 
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
+import type { ActualDecisionItem } from "./api";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
@@ -407,8 +408,8 @@ export function useDecisionMemoryLogs(limit = 10, enabled = true) {
 export function useCreateDecisionMemoryLog() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ snapshot }: { snapshot: Record<string, unknown> }) =>
-      api.decisionLogs.createDecisionLog(snapshot),
+    mutationFn: ({ snapshot, actualDecisions }: { snapshot: Record<string, unknown>; actualDecisions?: ActualDecisionItem[] }) =>
+      api.decisionLogs.createDecisionLog(snapshot, actualDecisions),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }

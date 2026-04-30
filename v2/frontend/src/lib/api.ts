@@ -698,7 +698,7 @@ export interface DecisionMemoryLog {
   price_snapshot?: Record<string, { price?: number; timestamp?: string } | unknown> | null;
   actual_decisions: ActualDecisionItem[];
   performance_snapshot?: {
-    status?: "baseline_captured" | "ready" | "partial_data" | "missing_price";
+    status?: "baseline_captured" | "ready" | "partial_data" | "missing_price" | "pending" | "insufficient_data" | "unavailable";
     evaluated_at: string;
     baseline_captured_at?: string;
     portfolio: {
@@ -714,6 +714,15 @@ export interface DecisionMemoryLog {
       total_delta?: number;
       best_decision?: { ticker: string; delta_pct: number } | null;
       worst_decision?: { ticker: string; delta_pct: number } | null;
+    };
+    windows?: {
+      [key in "7d" | "30d" | "90d"]?: {
+        status: "pending" | "ready" | "insufficient_data" | "unavailable";
+        recommended_return_pct: number | null;
+        actual_return_pct: number | null;
+        delta_pct: number | null;
+        as_of: string;
+      };
     };
     per_ticker: Array<{
       ticker: string;

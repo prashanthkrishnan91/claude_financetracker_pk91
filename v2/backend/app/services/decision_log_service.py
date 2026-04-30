@@ -84,6 +84,12 @@ def _pct_return(entry_price: float, current_price: float) -> float:
     return ((current_price - entry_price) / entry_price) * 100.0
 
 
+def _window_status(days_elapsed: float, window_days: int, has_any_data: bool) -> str:
+    if days_elapsed < window_days:
+        return "pending"
+    return "ready" if has_any_data else "unavailable"
+
+
 def _is_near_zero(value: float, tolerance: float = 0.05) -> bool:
     return abs(value) <= tolerance
 
@@ -465,6 +471,8 @@ class DecisionLogService:
         )
         baseline_guard = bool(snapshot_meta.get("backfilled")) or less_than_one_trading_day or tiny_moves or equal_entry_and_current
         has_missing_rows = any(item.get("status") == "missing_price" for item in per_ticker)
+        has_any_rows = bool(per_ticker)
+        has_any_comparable = bool(comparable_rows)
 
         if not comparable_rows:
             evaluation_status = "missing_price"
@@ -474,6 +482,21 @@ class DecisionLogService:
             evaluation_status = "partial_data"
         else:
             evaluation_status = "ready"
+
+        days_elapsed = max(0.0, (evaluated_dt - baseline_dt).total_seconds() / 86400.0)
+        windows: dict[str, Any] = {}
+        for window_days in (7, 30, 90):
+            key = f"{window_days}d"
+            window_eval_status = _window_status(days_elapsed, window_days, has_any_comparable)
+            if not has_any_rows:
+                window_eval_status = "insufficient_data"
+            windows[key] = {
+                "status": window_eval_status,
+                "recommended_return_pct": round(total_recommended, 4) if window_eval_status == "ready" else None,
+                "actual_return_pct": round(total_actual, 4) if window_eval_status == "ready" else None,
+                "delta_pct": round(total_delta, 4) if window_eval_status == "ready" else None,
+                "as_of": evaluated_at,
+            }
 
         matched_model = (
             evaluation_status == "ready"
@@ -514,6 +537,7 @@ class DecisionLogService:
                 "backfilled_baseline": bool(snapshot_meta.get("backfilled")),
                 "summary_text": summary_text,
             },
+            "windows": windows,
             "per_ticker": per_ticker,
             "data_quality": data_quality,
         }

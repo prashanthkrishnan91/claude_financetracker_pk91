@@ -1198,6 +1198,8 @@ function DecisionLogMemoryPanel({
       ? "Baseline captured"
       : performanceStatus === "ready" || performanceStatus === "partial_data"
       ? "Ready to evaluate"
+      : performanceStatus === "missing_price"
+      ? "Unavailable (price data)"
       : "Not enough history";
   const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
   const reserveAmount = Math.max(0, amount - deployNow);
@@ -1451,6 +1453,26 @@ function DecisionLogMemoryPanel({
               ) : null}
               {showPortfolioPerformance ? (
                 <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
+              ) : null}
+              {activeLog.performance_snapshot?.windows ? (
+                <div className="space-y-1">
+                  {(["7d", "30d", "90d"] as const).map((windowKey) => {
+                    const window = activeLog.performance_snapshot?.windows?.[windowKey];
+                    if (!window) return null;
+                    if (window.status !== "ready") {
+                      return (
+                        <p key={windowKey} className="text-[11px] text-text-muted">
+                          {windowKey}: {window.status.replace("_", " ")}
+                        </p>
+                      );
+                    }
+                    return (
+                      <p key={windowKey} className="text-[11px] text-text-muted">
+                        {windowKey}: AI {(window.recommended_return_pct ?? 0).toFixed(2)}% • You {(window.actual_return_pct ?? 0).toFixed(2)}% • Δ {(window.delta_pct ?? 0).toFixed(2)}%
+                      </p>
+                    );
+                  })}
+                </div>
               ) : null}
               {activeLog.performance_snapshot?.per_ticker?.length ? (
                 <div className="space-y-1 pt-1">

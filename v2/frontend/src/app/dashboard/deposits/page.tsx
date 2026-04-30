@@ -1098,6 +1098,11 @@ function DecisionLogMemoryPanel({
   amount: number;
   adaptive: AdaptiveBlock | null;
 }) {
+  function getSessionKey(log: DecisionMemoryLog | null | undefined): string | null {
+    const key = (log?.recommendation_snapshot as { decision_context?: { session_key?: unknown } } | undefined)?.decision_context?.session_key;
+    return typeof key === "string" && key.trim() ? key : null;
+  }
+
   const [confirmOpen, setConfirmOpen] = useState(false);
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
@@ -1162,10 +1167,20 @@ function DecisionLogMemoryPanel({
     if (createLog.isPending) return;
     try {
       setErrorMessage("");
-      const created = await createLog.mutateAsync({ snapshot, actualDecisions });
-      setSavedLog(created);
-      setNotes(created.notes ?? "");
-      setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
+      if (savedLog || matchingRecentLog) {
+        const updated = await updateLog.mutateAsync({
+          id: (savedLog ?? matchingRecentLog)!.id,
+          patch: { actual_decisions: actualDecisions, notes },
+        });
+        setSavedLog(updated);
+        setNotes(updated.notes ?? "");
+        setActualDecisions(updated.actual_decisions?.length ? updated.actual_decisions : buildInitialActualDecisions(recommendations));
+      } else {
+        const created = await createLog.mutateAsync({ snapshot, actualDecisions });
+        setSavedLog(created);
+        setNotes(created.notes ?? "");
+        setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
+      }
       setSaveMessage("Decision log saved");
     } catch (error) {
       setSaveMessage("");
@@ -1243,14 +1258,27 @@ function DecisionLogMemoryPanel({
     [amount, deployNow, deployPlan, reserveAmount, tickerContext],
   );
   const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
+  const currentSessionKey = useMemo(
+    () =>
+      ((snapshot as { decision_context?: { session_key?: unknown } }).decision_context?.session_key as string | undefined) ??
+      null,
+    [snapshot],
+  );
+  const matchingRecentLog = useMemo(() => {
+    if (!recentLogs?.length || !currentSessionKey) return null;
+    return recentLogs.find((log) => getSessionKey(log) === currentSessionKey) ?? null;
+  }, [currentSessionKey, recentLogs]);
 
   useEffect(() => {
-    if (savedLog || !recentLogs?.length) return;
-    const latest = recentLogs[0];
-    setSavedLog(latest);
-    setNotes(latest.notes ?? "");
-    setActualDecisions(latest.actual_decisions?.length ? latest.actual_decisions : buildInitialActualDecisions(recommendations));
-  }, [recentLogs, recommendations, savedLog]);
+    if (savedLog || !matchingRecentLog) return;
+    setSavedLog(matchingRecentLog);
+    setNotes(matchingRecentLog.notes ?? "");
+    setActualDecisions(
+      matchingRecentLog.actual_decisions?.length
+        ? matchingRecentLog.actual_decisions
+        : buildInitialActualDecisions(recommendations),
+    );
+  }, [matchingRecentLog, recommendations, savedLog]);
 
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
@@ -1367,8 +1395,9 @@ function DecisionLogMemoryPanel({
                   }));
                   setActualDecisions(executedDecisions);
                   try {
-                    if (savedLog) {
-                      const updated = await updateLog.mutateAsync({ id: savedLog.id, patch: { actual_decisions: executedDecisions, notes } });
+                    const targetLog = savedLog ?? matchingRecentLog;
+                    if (targetLog) {
+                      const updated = await updateLog.mutateAsync({ id: targetLog.id, patch: { actual_decisions: executedDecisions, notes } });
                       setSavedLog(updated);
                     } else {
                       const created = await createLog.mutateAsync({ snapshot, actualDecisions: executedDecisions });

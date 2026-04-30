@@ -417,7 +417,7 @@ export function useCreateDecisionMemoryLog() {
 export function useUpdateDecisionMemoryLog() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { actual_decisions?: Array<Record<string, unknown>>; notes?: string } }) =>
+    mutationFn: ({ id, patch }: { id: string; patch: { actual_decisions?: ActualDecisionItem[]; notes?: string } }) =>
       api.decisionLogs.updateDecisionLog(id, patch),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });

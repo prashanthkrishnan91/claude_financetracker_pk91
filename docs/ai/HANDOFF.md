@@ -1,6 +1,45 @@
 # AI Handoff — Investing App
 
 ## Last change
+Deploy Step 3 + Decision History refactor: correct deploy-now amount semantics, execution status, copy, and UI split (PR: "refactor(deploy-step3): correct amount semantics + split Decision History card").
+
+## Files touched
+- `v2/frontend/src/app/dashboard/deposits/page.tsx` — Replaced `DecisionLogMemoryPanel` with two-card layout: Card A (Step 3 Execute & Record) and Card B (Decision History). Fixed `buildInitialActualDecisions` call site to pass `adjustedAmountsForLog` so "Use AI Plan" prefills actual rows from deploy-now amount not full deposit. Fixed execution copy to use deploy-now denominator. Added `executionStatusLabel`/`executionStatusCls`/`buildExecutionCopy` helpers. Added `DecisionHistoryEntry` component with expandable per-ticker actuals and performance windows.
+- `v2/frontend/src/lib/decision-log.ts` — Fixed `buildInitialActualDecisions` signature to accept optional `adjustedAmounts: Map<string, number>`. Added `deriveExecutionStatus` (uses deploy-now denominator). Exported `ExecutionStatus` type.
+- `v2/frontend/src/lib/decision-log.test.ts` — Added 7 new tests: adjusted-amount sums to deploy-now; fallback to rec.amount; skipped/fully_executed/partially_executed/modified status derivation; denominator correctness ($725 actual vs $900 deposit = fully_executed).
+- `v2/progress_log.md` — Concise entry added.
+
+## QA scope completed
+- No node_modules in CI environment; `npm test` cannot run. Tests are authored and will run in deployment environment.
+- No backend files touched.
+- No API contracts changed.
+- No recommendation/allocation algorithm changed.
+- No Supabase SQL required.
+- No LLM calls added or changed.
+
+## Behavior change
+- "Use AI Plan" now prefills rows summing to deploy-now amount (e.g. $725), not full deposit ($900).
+- Execution status badge derives from actual vs deploy-now (not deposit).
+- Execution copy: "Executed $X of $Y planned now. Reserved $Z from your $D deposit."
+- Decision History is a separate card (Card B) below Step 3. Each entry shows date, status badge, deposit/invested/reserve, ticker actuals. Expand for performance vs AI (7d/30d/90d) and deviation detail.
+- Performance/insights moved from Step 3 editor to Decision History expand section.
+
+## Known issues
+- `npm install` not run in CI; full build verification requires deployment environment.
+- `tsc --noEmit` would show only pre-existing errors (missing node_modules types).
+
+## Next likely task
+- Playwright snapshot baseline update for the new two-card Step 3 layout.
+- Optional: further polish of Decision History (e.g. filter by status, sort controls).
+
+## Debug notes
+- `deriveExecutionStatus` tolerance is $0.51 to handle floating-point allocation math.
+- `buildInitialActualDecisions` is backward-compatible: without `adjustedAmounts` it uses `rec.amount` (old behavior) — safe for any callers that don't pass adjusted amounts.
+- Rehydration `useEffect` guards on `savedLog` being null before applying `matchingRecentLog`, preventing overwrite of in-session edits.
+
+---
+
+## Previous change
 Frontend UI foundation pass: elite intelligence design system (PR: "Investing UI Foundation: elite intelligence design system pass").
 
 ## Files touched

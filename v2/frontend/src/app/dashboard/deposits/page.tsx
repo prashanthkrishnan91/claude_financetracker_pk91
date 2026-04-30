@@ -28,7 +28,8 @@ import type {
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
-import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, getDecisionLogSessionKey } from "@/lib/decision-log";
+import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
+import type { ExecutionStatus } from "@/lib/decision-log";
 
 const MAX_REASON_WORDS = 12;
 
@@ -1085,7 +1086,40 @@ function DeployMemo({
   );
 }
 
-// Icons
+// ─── Step 3 + Decision History ────────────────────────────────────────────────
+
+function executionStatusLabel(status: ExecutionStatus): string {
+  switch (status) {
+    case "fully_executed": return "Fully executed";
+    case "partially_executed": return "Partially executed";
+    case "modified": return "Modified";
+    case "skipped": return "Skipped";
+  }
+}
+
+function executionStatusCls(status: ExecutionStatus): string {
+  switch (status) {
+    case "fully_executed": return "bg-emerald-500/10 text-emerald-300 border-emerald-500/30";
+    case "partially_executed": return "bg-yellow-500/10 text-yellow-300 border-yellow-500/30";
+    case "modified": return "bg-blue-500/10 text-blue-300 border-blue-500/30";
+    case "skipped": return "bg-surface-elevated text-text-muted border-border";
+  }
+}
+
+function buildExecutionCopy(
+  actualDeployed: number,
+  aiDeployNow: number,
+  totalDeposit: number,
+  status: ExecutionStatus,
+): string {
+  const reserve = totalDeposit - actualDeployed;
+  if (status === "skipped") {
+    return `Skipped this deploy-now plan. ${formatCurrency(totalDeposit)} remains uninvested/reserved.`;
+  }
+  const pct = aiDeployNow > 0 ? Math.round((actualDeployed / aiDeployNow) * 100) : 0;
+  const pctText = pct < 100 ? ` (${pct}% of deploy-now plan)` : "";
+  return `Executed ${formatCurrency(actualDeployed)} of ${formatCurrency(aiDeployNow)} planned now${pctText}. Reserved ${formatCurrency(reserve)} from your ${formatCurrency(totalDeposit)} deposit.`;
+}
 
 function DecisionLogMemoryPanel({
   deployPlan,
@@ -1099,6 +1133,7 @@ function DecisionLogMemoryPanel({
   adaptive: AdaptiveBlock | null;
 }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
   const { data: recentLogs } = useDecisionMemoryLogs(6, true);
@@ -1107,132 +1142,20 @@ function DecisionLogMemoryPanel({
   const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
   const [saveMessage, setSaveMessage] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [executeMessage, setExecuteMessage] = useState("");
-  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
-    buildInitialActualDecisions(recommendations)
-  );
+  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const activeLog = savedLog;
-  const delta = activeLog?.decision_delta;
-  const behaviorLabel =
-    activeLog?.risk_behavior === "more_conservative"
-      ? "More conservative than model"
-      : activeLog?.risk_behavior === "more_aggressive"
-      ? "More aggressive than model"
-      : "Aligned with model";
-  const deployedPct = delta?.total_recommended ? Math.round((delta.total_actual / delta.total_recommended) * 100) : 0;
-  const depositDeployedPct = amount > 0 && delta?.total_actual ? Math.round((delta.total_actual / amount) * 100) : 0;
-  const capitalBehavior = delta
-    ? delta.deploy_delta < -0.5
-      ? "Under-deployed"
-      : delta.deploy_delta > 0.5
-      ? "Over-deployed"
-      : "Fully deployed"
-    : "Fully deployed";
-  const styleShiftSummary = delta
-    ? delta.replaced_tickers.length
-      ? `${delta.replaced_tickers
-          .slice(0, 2)
-          .map((item) => `${item.from || "—"} → ${item.to || "—"}${item.reason ? ` (${item.reason})` : " (style shift)"}`)
-          .join(" • ")}${delta.replaced_tickers.length > 2 ? ` • +${delta.replaced_tickers.length - 2} more` : ""}`
-      : "No replacements"
-    : "No replacements";
-  const performance = activeLog?.performance_snapshot?.portfolio;
-  const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
-  const perfDelta = performance?.delta ?? 0;
-  const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
-  const showPortfolioPerformance = performanceStatus === "ready" || performanceStatus === "partial_data";
-  const perfSummary = performanceStatus === "ready"
-    ? performance?.summary_text
-      ? performance.summary_text
-      : Math.abs(perfDelta) < 0.05
-      ? "You matched the model"
-      : perfDelta > 0.05
-      ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
-      : `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
-    : performance?.summary_text ?? "Performance comparison is still collecting data.";
-
-  function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
-    setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
-  }
-
-  async function onSaveLog() {
-    if (createLog.isPending) return;
-    try {
-      setErrorMessage("");
-      if (savedLog || matchingRecentLog) {
-        const updated = await updateLog.mutateAsync({
-          id: (savedLog ?? matchingRecentLog)!.id,
-          patch: { actual_decisions: actualDecisions, notes },
-        });
-        setSavedLog(updated);
-        setNotes(updated.notes ?? "");
-        setActualDecisions(updated.actual_decisions?.length ? updated.actual_decisions : buildInitialActualDecisions(recommendations));
-      } else {
-        const created = await createLog.mutateAsync({ snapshot, actualDecisions });
-        setSavedLog(created);
-        setNotes(created.notes ?? "");
-        setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
-      }
-      setSaveMessage("Decision log saved");
-    } catch (error) {
-      setSaveMessage("");
-      setErrorMessage(error instanceof Error ? error.message : "Failed to save decision log.");
-    }
-  }
-
-  async function onSaveActual() {
-    if (!savedLog || updateLog.isPending) return;
-    const patch = {
-      actual_decisions: actualDecisions.map((row) => ({ ...row, executed_at: row.executed_at ?? new Date().toISOString() })),
-      notes,
-    };
-    try {
-      setErrorMessage("");
-      const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
-      setSavedLog(updated);
-      setSaveMessage("Actual decisions updated");
-    } catch (error) {
-      setSaveMessage("");
-      setErrorMessage(error instanceof Error ? error.message : "Failed to update actual decisions.");
-    }
-  }
-
-  async function onEvaluatePerformance() {
-    if (!savedLog || evaluateLog.isPending) return;
-    const evaluated = await evaluateLog.mutateAsync(savedLog.id);
-    setSavedLog(evaluated);
-    setSaveMessage("Performance refreshed");
-  }
-
-  const logsToShow = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []), [recentLogs]);
-  const insightsConfidenceLabel =
-    insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
-  const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
-  const replacementSummary = delta?.replaced_tickers?.length
-    ? delta.replaced_tickers
-        .slice(0, 2)
-        .map((item) => `${item.from || "—"} → ${item.to || "—"}`)
-        .join(" • ")
-    : "No replacements";
-  const performanceStatusLabel =
-    performanceStatus === "baseline_captured"
-      ? "Baseline captured"
-      : performanceStatus === "ready" || performanceStatus === "partial_data"
-      ? "Ready to evaluate"
-      : performanceStatus === "missing_price"
-      ? "Unavailable (price data)"
-      : "Not enough history";
   const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
   const reserveAmount = Math.max(0, amount - deployNow);
+
   const rankedForLog = useMemo(
     () => [...recommendations].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)),
     [recommendations],
   );
-  const adjustedAmountsForLog = useMemo(() => computeAdjustedAmounts(rankedForLog, deployNow), [rankedForLog, deployNow]);
+  const adjustedAmountsForLog = useMemo(
+    () => computeAdjustedAmounts(rankedForLog, deployNow),
+    [rankedForLog, deployNow],
+  );
   const tickerContext = useMemo(
     () =>
       rankedForLog.map((rec, idx) => ({
@@ -1253,18 +1176,25 @@ function DecisionLogMemoryPanel({
       }),
     [amount, deployNow, deployPlan, reserveAmount, tickerContext],
   );
-  const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
   const currentSessionKey = useMemo(
     () =>
-      ((snapshot as { decision_context?: { session_key?: unknown } }).decision_context?.session_key as string | undefined) ??
-      null,
+      ((snapshot as { decision_context?: { session_key?: unknown } }).decision_context?.session_key as string | undefined) ?? null,
     [snapshot],
   );
+  const logsToShow = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []), [recentLogs]);
   const matchingRecentLog = useMemo(() => {
     if (!recentLogs?.length || !currentSessionKey) return null;
-    return dedupeDecisionLogsForDisplay(recentLogs).find((log) => getDecisionLogSessionKey(log) === currentSessionKey) ?? null;
-  }, [currentSessionKey, recentLogs]);
+    return logsToShow.find((log) => getDecisionLogSessionKey(log) === currentSessionKey) ?? null;
+  }, [currentSessionKey, logsToShow, recentLogs]);
 
+  // Initialize actualDecisions from adjusted amounts (deploy-now, not full deposit)
+  useEffect(() => {
+    if (actualDecisions.length > 0) return;
+    if (rankedForLog.length === 0) return;
+    setActualDecisions(buildInitialActualDecisions(recommendations, adjustedAmountsForLog));
+  }, [actualDecisions.length, adjustedAmountsForLog, rankedForLog.length, recommendations]);
+
+  // Rehydrate from backend on load
   useEffect(() => {
     if (savedLog || !matchingRecentLog) return;
     setSavedLog(matchingRecentLog);
@@ -1272,102 +1202,246 @@ function DecisionLogMemoryPanel({
     setActualDecisions(
       matchingRecentLog.actual_decisions?.length
         ? matchingRecentLog.actual_decisions
-        : buildInitialActualDecisions(recommendations),
+        : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
     );
-  }, [matchingRecentLog, recommendations, savedLog]);
+  }, [adjustedAmountsForLog, matchingRecentLog, recommendations, savedLog]);
+
+  const activeLog = savedLog;
+
+  function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
+    setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  }
+
+  async function onSaveLog(overrideDecisions?: ActualDecisionItem[]) {
+    const decisionData = overrideDecisions ?? actualDecisions;
+    if (createLog.isPending || updateLog.isPending) return;
+    try {
+      setErrorMessage("");
+      const targetLog = savedLog ?? matchingRecentLog;
+      if (targetLog) {
+        const updated = await updateLog.mutateAsync({ id: targetLog.id, patch: { actual_decisions: decisionData, notes } });
+        setSavedLog(updated);
+        setNotes(updated.notes ?? "");
+        if (!overrideDecisions) {
+          setActualDecisions(
+            updated.actual_decisions?.length
+              ? updated.actual_decisions
+              : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+          );
+        }
+      } else {
+        const created = await createLog.mutateAsync({ snapshot, actualDecisions: decisionData });
+        setSavedLog(created);
+        setNotes(created.notes ?? "");
+        if (!overrideDecisions) {
+          setActualDecisions(
+            created.actual_decisions?.length
+              ? created.actual_decisions
+              : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+          );
+        }
+      }
+      setSaveMessage("Decision log saved");
+    } catch (error) {
+      setSaveMessage("");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save decision log.");
+    }
+  }
+
+  async function onSkipPlan() {
+    const skipped = actualDecisions.map((row) => ({
+      ...row,
+      actual_action: "SKIPPED",
+      actual_amount: 0,
+      executed_at: new Date().toISOString(),
+    }));
+    setActualDecisions(skipped);
+    await onSaveLog(skipped);
+  }
+
+  async function onEvaluatePerformance(logId: string) {
+    const evaluated = await evaluateLog.mutateAsync(logId);
+    if (savedLog?.id === logId) setSavedLog(evaluated);
+    setSaveMessage("Performance refreshed");
+  }
+
+  // Execution status derived from the saved log's actual decisions vs deploy-now amount
+  const savedActuals = activeLog?.actual_decisions ?? [];
+  const savedActualTotal = savedActuals.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+  const savedStatus: ExecutionStatus | null = activeLog ? deriveExecutionStatus(savedActuals, deployNow) : null;
+
+  // Pending (unsaved) total for display in the editor
+  const pendingTotal = actualDecisions.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+
+  const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
+
+  const insightsConfidenceLabel =
+    insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
+  const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
 
   return (
-    <div className="card-glass p-4 space-y-3 border border-border/80">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          Step 3 — Execute &amp; record
-        </p>
-        <span
-          className={cn(
-            "text-[11px] px-2 py-1 rounded-full border",
-            activeLog ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10" : "text-text-muted border-border bg-surface-elevated/40"
+    <div className="space-y-4">
+
+      {/* ── Card A: Step 3 — Execute & Record ─────────────────────────────── */}
+      <div className="card-glass p-4 space-y-4 border border-border/80">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+            Step 3 — Execute &amp; Record
+          </p>
+          {activeLog ? (
+            <span className={cn("text-[11px] px-2 py-0.5 rounded-full border font-semibold", executionStatusCls(savedStatus!))}>
+              {executionStatusLabel(savedStatus!)}
+            </span>
+          ) : (
+            <span className="text-[11px] px-2 py-0.5 rounded-full border text-text-muted border-border bg-surface-elevated/40">
+              Not saved
+            </span>
           )}
-        >
-          {activeLog ? "Saved" : "Not saved"}
-        </span>
-      </div>
-      {activeLog ? (
-        <div className="grid gap-2 sm:grid-cols-2 text-xs">
-          <p className="text-text-secondary">
-            Deployed: <span className="text-text-primary font-semibold">{delta ? formatCurrency(delta.total_actual) : "—"}</span>
-            {delta ? <span className="text-text-muted"> ({deployedPct}% of deploy-now plan · {depositDeployedPct}% of total deposit)</span> : null}
-          </p>
-          <p className="text-text-secondary">
-            Replacements: <span className="text-text-primary">{replacementSummary}</span>
-          </p>
-          <p className="text-text-secondary sm:col-span-2">
-            Performance status: <span className="text-text-primary">{performanceStatusLabel}</span>
-          </p>
         </div>
-      ) : null}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => {
-            setConfirmOpen(true);
-          }}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
-        >
-          Invest {formatCurrency(deployNow)} Now
-        </button>
-        <button
-          onClick={() => {
-            setDetailsOpen(true);
-            if (!savedLog) {
-              setSaveMessage("Set actual execution amounts, then save your decision log.");
-            }
-          }}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
-        >
-          Modify Plan
-        </button>
-        <button
-          onClick={activeLog ? onSaveActual : onSaveLog}
-          disabled={activeLog ? updateLog.isPending : createLog.isPending}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary disabled:opacity-60"
-        >
-          {activeLog
-            ? updateLog.isPending
-              ? "Saving..."
-              : "Update Actuals"
-            : createLog.isPending
-            ? "Saving..."
-            : "Save Decision Log"}
-        </button>
-        {activeLog ? (
+
+        {/* AI plan summary */}
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="bg-surface-elevated/60 border border-border/70 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Deposit</p>
+            <p className="font-mono text-text-primary font-semibold">{formatCurrency(amount)}</p>
+          </div>
+          <div className="bg-surface-elevated/60 border border-emerald-500/25 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Invest now</p>
+            <p className="font-mono text-emerald-300 font-semibold">{formatCurrency(deployNow)}</p>
+          </div>
+          <div className="bg-surface-elevated/60 border border-blue-500/20 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Reserve</p>
+            <p className="font-mono text-blue-300 font-semibold">{formatCurrency(reserveAmount)}</p>
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex flex-wrap gap-2">
           <button
-            onClick={() => setDetailsOpen((prev) => !prev)}
-            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary inline-flex items-center gap-1"
+            onClick={() => {
+              setActualDecisions(buildInitialActualDecisions(recommendations, adjustedAmountsForLog));
+              setConfirmOpen(true);
+            }}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background hover:bg-accent-hover transition-colors"
           >
-            {detailsOpen ? "Hide details" : "View details"}
-            <ChevronIcon className={cn("w-3.5 h-3.5 transition-transform", detailsOpen ? "rotate-180" : "")} />
+            Use AI Plan
           </button>
-        ) : null}
+          <button
+            onClick={() => setEditorOpen(true)}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary hover:bg-surface-elevated transition-colors"
+          >
+            Modify Plan
+          </button>
+          <button
+            onClick={onSkipPlan}
+            disabled={createLog.isPending || updateLog.isPending}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-muted hover:text-text-primary transition-colors disabled:opacity-50"
+          >
+            Skip Plan
+          </button>
+        </div>
+
+        {/* Execution copy — shown after save */}
+        {activeLog && savedStatus && (
+          <p className="text-xs text-text-secondary leading-snug">
+            {buildExecutionCopy(savedActualTotal, deployNow, amount, savedStatus)}
+          </p>
+        )}
+
+        {/* Editor */}
+        {editorOpen && (
+          <div className="space-y-3 border-t border-border pt-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual execution</p>
+              <p className="text-[11px] text-text-muted">
+                Total: <span className="font-mono text-text-primary">{formatCurrency(pendingTotal)}</span>
+                {" "}of <span className="font-mono text-emerald-300">{formatCurrency(deployNow)}</span> planned
+              </p>
+            </div>
+            <div className="space-y-2">
+              {actualDecisions.map((row, idx) => (
+                <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
+                  <div className="col-span-2 font-mono text-text-primary">{row.ticker || "—"}</div>
+                  <select
+                    value={String(row.actual_action || "BOUGHT")}
+                    onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
+                    className="col-span-3 bg-surface border border-border rounded px-2 py-1"
+                  >
+                    <option value="BOUGHT">Bought</option>
+                    <option value="SKIPPED">Skipped</option>
+                    <option value="REPLACED">Replaced</option>
+                    <option value="WATCH">Watch</option>
+                  </select>
+                  <input
+                    type="number"
+                    value={row.actual_amount ?? 0}
+                    onChange={(e) => updateDecision(idx, { actual_amount: Number(e.target.value) || 0 })}
+                    className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                  />
+                  <input
+                    placeholder="Alt ticker"
+                    value={row.replacement_ticker ?? ""}
+                    onChange={(e) => updateDecision(idx, { replacement_ticker: e.target.value.toUpperCase() || undefined })}
+                    className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                  />
+                  <input
+                    placeholder="Reason"
+                    value={row.reason ?? ""}
+                    onChange={(e) => updateDecision(idx, { reason: e.target.value || undefined })}
+                    className="col-span-3 bg-surface border border-border rounded px-2 py-1"
+                  />
+                </div>
+              ))}
+            </div>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Notes (optional)"
+              className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
+              rows={2}
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => onSaveLog()}
+                disabled={createLog.isPending || updateLog.isPending}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background disabled:opacity-60"
+              >
+                {createLog.isPending || updateLog.isPending ? "Saving…" : activeLog ? "Update log" : "Save decision log"}
+              </button>
+              <button
+                onClick={() => setEditorOpen(false)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-muted"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        )}
+
+        {saveMessage && <p className="text-xs text-emerald-400">{saveMessage}</p>}
+        {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
       </div>
-      {executeMessage && <p className="text-xs text-text-secondary">{executeMessage}</p>}
-      {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
-      {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
-      {confirmOpen && (
-        createPortal(<div className="fixed inset-0 z-[2000] bg-black/60 flex items-center justify-center p-4 pointer-events-auto">
+
+      {/* ── Confirm modal (Use AI Plan) ─────────────────────────────────────── */}
+      {confirmOpen && createPortal(
+        <div className="fixed inset-0 z-[2000] bg-black/60 flex items-center justify-center p-4 pointer-events-auto">
           <div className="w-full max-w-md rounded-lg border border-border bg-surface p-4 space-y-3">
-            <p className="text-sm font-semibold text-text-primary">Confirm execution</p>
+            <p className="text-sm font-semibold text-text-primary">Confirm — Use AI plan</p>
             <div className="text-xs space-y-1">
               <p className="text-text-secondary">
-                Total invested now: <span className="font-mono text-text-primary">{formatCurrency(deployNow)}</span>
+                Invest now: <span className="font-mono text-emerald-300 font-semibold">{formatCurrency(deployNow)}</span>
               </p>
               <p className="text-text-secondary">
-                Reserve remaining: <span className="font-mono text-text-primary">{formatCurrency(reserveAmount)}</span>
+                Reserve: <span className="font-mono text-blue-300 font-semibold">{formatCurrency(reserveAmount)}</span>
+                {" "}from your <span className="font-mono">{formatCurrency(amount)}</span> deposit
               </p>
             </div>
             <div className="max-h-48 overflow-y-auto border border-border rounded-md divide-y divide-border">
               {executeRows.map((row) => (
-                <div key={`${row.ticker}-confirm`} className="px-3 py-2 flex items-center justify-between text-xs">
+                <div key={row.ticker} className="px-3 py-2 flex items-center justify-between text-xs">
                   <span className="font-mono text-text-primary">{row.ticker}</span>
-                  <span className="font-mono text-text-secondary">{formatCurrency(row.amount)}</span>
+                  <span className="font-mono text-emerald-300">{formatCurrency(row.amount)}</span>
                 </div>
               ))}
             </div>
@@ -1381,7 +1455,7 @@ function DecisionLogMemoryPanel({
               <button
                 onClick={async () => {
                   setConfirmOpen(false);
-                  setDetailsOpen(true);
+                  setEditorOpen(false);
                   setErrorMessage("");
                   const executedDecisions = actualDecisions.map((row) => ({
                     ...row,
@@ -1390,21 +1464,7 @@ function DecisionLogMemoryPanel({
                     executed_at: row.executed_at ?? new Date().toISOString(),
                   }));
                   setActualDecisions(executedDecisions);
-                  try {
-                    const targetLog = savedLog ?? matchingRecentLog;
-                    if (targetLog) {
-                      const updated = await updateLog.mutateAsync({ id: targetLog.id, patch: { actual_decisions: executedDecisions, notes } });
-                      setSavedLog(updated);
-                    } else {
-                      const created = await createLog.mutateAsync({ snapshot, actualDecisions: executedDecisions });
-                      setSavedLog(created);
-                    }
-                    setSaveMessage("Decision log saved");
-                    setExecuteMessage(`Execution saved for ${formatCurrency(deployNow)}.`);
-                  } catch (error) {
-                    setSaveMessage("");
-                    setErrorMessage(error instanceof Error ? error.message : "Failed to save execution.");
-                  }
+                  await onSaveLog(executedDecisions);
                 }}
                 className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
               >
@@ -1412,266 +1472,246 @@ function DecisionLogMemoryPanel({
               </button>
             </div>
           </div>
-        </div>, document.body)
+        </div>,
+        document.body,
       )}
 
-      {detailsOpen && savedLog && (
-        <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual Decision</p>
-          <div className="space-y-2">
-            {actualDecisions.map((row, idx) => (
-              <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
-                <div className="col-span-2 flex items-center gap-1.5">
-                  <span className="font-mono text-text-primary">{row.ticker || "—"}</span>
-                  <span
-                    className={cn(
-                      "px-1.5 py-0.5 rounded text-[10px] font-semibold",
-                      String(row.actual_action || "BOUGHT") === "SKIPPED"
-                        ? "bg-red-500/15 text-red-300"
-                        : String(row.actual_action || "BOUGHT") === "REPLACED"
-                        ? "bg-amber-500/15 text-amber-300"
-                        : "bg-emerald-500/15 text-emerald-300"
-                    )}
-                  >
-                    {String(row.actual_action || "BOUGHT") === "SKIPPED"
-                      ? "Skipped"
-                      : String(row.actual_action || "BOUGHT") === "REPLACED"
-                      ? "Replaced"
-                      : "Matched"}
-                  </span>
-                </div>
-                <select
-                  value={String(row.actual_action || "BOUGHT")}
-                  onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
-                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
-                >
-                  <option value="BOUGHT">Bought</option>
-                  <option value="SKIPPED">Skipped</option>
-                  <option value="REPLACED">Replaced</option>
-                  <option value="WATCH">Watch</option>
-                </select>
-                <input
-                  type="number"
-                  value={row.actual_amount ?? 0}
-                  onChange={(e) => updateDecision(idx, { actual_amount: Number(e.target.value) || 0 })}
-                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
-                />
-                <input
-                  placeholder="Replacement"
-                  value={row.replacement_ticker ?? ""}
-                  onChange={(e) => updateDecision(idx, { replacement_ticker: e.target.value.toUpperCase() || undefined })}
-                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
-                />
-                <input
-                  placeholder="Reason"
-                  value={row.reason ?? ""}
-                  onChange={(e) => updateDecision(idx, { reason: e.target.value || undefined })}
-                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
-                />
-              </div>
-            ))}
-          </div>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Notes (optional)"
-            className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
-            rows={2}
-          />
-        </div>
-      )}
+      {/* ── Card B: Decision History ──────────────────────────────────────── */}
+      {logsToShow.length > 0 && (
+        <div className="card-glass p-4 space-y-3 border border-border/80">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+            Decision History
+          </p>
 
-      {detailsOpen && activeLog && delta && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
-          <p className="text-xs text-text-secondary">
-            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} deploy-now plan ({deployedPct}%) and {depositDeployedPct}% of {formatCurrency(amount)} total deposit.
-          </p>
-          <p className="text-xs text-text-secondary">
-            Capital behavior: {capitalBehavior}
-          </p>
-          <p className="text-xs text-text-secondary">Style shift: {styleShiftSummary}</p>
-          <p className="text-xs text-text-secondary">Net effect: {behaviorLabel}</p>
-        </div>
-      )}
-      {detailsOpen && activeLog && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Performance vs AI</p>
-            <button
-              onClick={onEvaluatePerformance}
-              disabled={evaluateLog.isPending}
-              className="px-2 py-1 rounded text-[11px] font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
-            >
-              {evaluateLog.isPending ? "Evaluating..." : "Evaluate"}
-            </button>
-          </div>
-          {performance ? (
-            <>
-              {performanceStatus === "baseline_captured" ? (
-                <p className="text-xs text-amber-300">
-                  Performance baseline captured. Re-evaluate next trading day or later.
-                </p>
-              ) : (
-                <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
-              )}
-              {hasQualityIssues ? (
-                <p className="text-xs text-amber-300">
-                  Data quality note: some tickers are excluded because entry or current prices are missing.
-                </p>
-              ) : null}
-              {showPortfolioPerformance ? (
-                <p className="text-xs text-text-secondary">
-                  Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
-                </p>
-              ) : null}
-              {showPortfolioPerformance ? (
-                <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
-              ) : null}
-              {activeLog.performance_snapshot?.windows ? (
-                <div className="space-y-1">
-                  {(["7d", "30d", "90d"] as const).map((windowKey) => {
-                    const window = activeLog.performance_snapshot?.windows?.[windowKey];
-                    if (!window) return null;
-                    if (window.status !== "ready") {
-                      return (
-                        <p key={windowKey} className="text-[11px] text-text-muted">
-                          {windowKey}: {window.status.replace("_", " ")}
-                        </p>
-                      );
-                    }
-                    return (
-                      <p key={windowKey} className="text-[11px] text-text-muted">
-                        {windowKey}: AI {(window.recommended_return_pct ?? 0).toFixed(2)}% • You {(window.actual_return_pct ?? 0).toFixed(2)}% • Δ {(window.delta_pct ?? 0).toFixed(2)}%
-                      </p>
-                    );
-                  })}
-                </div>
-              ) : null}
-              {activeLog.performance_snapshot?.per_ticker?.length ? (
-                <div className="space-y-1 pt-1">
-                  {activeLog.performance_snapshot.per_ticker.map((row) => (
-                    <p key={row.ticker} className={cn("text-[11px]", performanceStatus === "baseline_captured" ? "text-text-muted/70" : "text-text-muted")}>
-                      {(() => {
-                        const tickerLabel = row.recommended_ticker && row.actual_ticker && row.recommended_ticker !== row.actual_ticker
-                          ? `${row.recommended_ticker} → ${row.actual_ticker}`
-                          : row.actual_ticker ?? row.recommended_ticker ?? row.ticker;
-                        if (row.status === "missing_price") {
-                          return `${tickerLabel}: missing_price (${row.reason ?? "Missing entry price/current price"})`;
-                        }
-                        if (performanceStatus === "baseline_captured") {
-                          return `${tickerLabel}: baseline captured`;
-                        }
-                        return `${tickerLabel}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`;
-                      })()}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <p className="text-xs text-text-secondary">
-              Evaluate this log to compare your executed decisions against the model recommendations.
-            </p>
-          )}
-        </div>
-      )}
-      {detailsOpen && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Insights</p>
-          {!insights || insights.eligible_logs < 3 ? (
-            <p className="text-xs text-text-secondary">Decision insights will appear after 3+ evaluated logs.</p>
-          ) : (
-            <div className="space-y-1">
-              {(insights.confidence === "low" || insights.confidence === "medium") ? (
-                <p className="text-[11px] text-amber-300">
-                  {insightsConfidenceLabel}: not enough history for a strong conclusion.
-                </p>
-              ) : null}
-              <p className="text-xs text-text-secondary">
-                You beat the model in {winCount} of {insights.eligible_logs} evaluated decisions.
+          {/* Global insights summary */}
+          {insights && insights.eligible_logs >= 3 && (
+            <div className="rounded-md border border-border/70 bg-surface-elevated/30 p-2.5 space-y-1">
+              <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">
+                {insightsConfidenceLabel} · {insights.eligible_logs} evaluated
               </p>
               <p className={cn("text-xs", (insights.summary.avg_delta ?? 0) >= 0 ? "text-emerald-300" : "text-red-300")}>
-                Average delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}%
+                Avg delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}% · beat model {winCount}/{insights.eligible_logs}
               </p>
-              {insights.behavior_insights.etf_replacements.count > 0 && insights.behavior_insights.etf_replacements.avg_delta !== null ? (
-                <p className="text-xs text-text-secondary">
-                  ETF replacements: {(insights.behavior_insights.etf_replacements.avg_delta ?? 0) >= 0 ? "+" : ""}
-                  {(insights.behavior_insights.etf_replacements.avg_delta ?? 0).toFixed(2)}% avg delta
-                </p>
-              ) : null}
-              {insights.behavior_insights.under_deployment.count > 0 && insights.behavior_insights.under_deployment.avg_delta !== null ? (
-                <p className="text-xs text-text-secondary">
-                  Under-deployment ({insights.behavior_insights.under_deployment.count} logs): {(insights.behavior_insights.under_deployment.avg_delta ?? 0) >= 0 ? "helped" : "hurt"} by{" "}
-                  {Math.abs(insights.behavior_insights.under_deployment.avg_delta ?? 0).toFixed(2)}% avg delta.
-                </p>
-              ) : null}
-              {insights.summary.worst_override ? (
-                <p className="text-xs text-text-secondary">
-                  Worst override: {insights.summary.worst_override.ticker}, {insights.summary.worst_override.delta_pct >= 0 ? "+" : ""}
-                  {insights.summary.worst_override.delta_pct.toFixed(2)}%
-                </p>
-              ) : null}
             </div>
           )}
+
+          {/* Log entries */}
+          <div className="space-y-2">
+            {logsToShow.map((log) => (
+              <DecisionHistoryEntry
+                key={log.id}
+                log={log}
+                deployNow={deployNow}
+                isActive={activeLog?.id === log.id}
+                onEvaluate={() => onEvaluatePerformance(log.id)}
+                isEvaluating={evaluateLog.isPending}
+                onSelect={() => {
+                  setSavedLog(log);
+                  setActualDecisions(
+                    log.actual_decisions?.length
+                      ? log.actual_decisions
+                      : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+                  );
+                  setNotes(log.notes ?? "");
+                  setSaveMessage("");
+                }}
+              />
+            ))}
+          </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {detailsOpen && logsToShow.length > 0 && (
-        <div className="border-t border-border pt-2">
-          <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex justify-between text-xs text-text-muted">
-            <span>Recent Decision Logs</span>
-            <span>{historyOpen ? "−" : "+"}</span>
-          </button>
-          {historyOpen && (
-            <div className="mt-2 space-y-1">
-              {logsToShow.map((log) => {
-                const recs = Array.isArray((log.recommendation_snapshot as any)?.normalized_tickers)
-                  ? ((log.recommendation_snapshot as any).normalized_tickers as Array<Record<string, unknown>>)
-                  : [];
-                const recTotal = recs.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-                const actualTotal = (log.actual_decisions || []).reduce((sum, row) => sum + (Number(row.actual_amount) || 0), 0);
-                return (
-                  <button
-                    key={log.id}
-                    onClick={() => {
-                      setSavedLog(log);
-                      setActualDecisions(log.actual_decisions?.length ? log.actual_decisions : buildInitialActualDecisions(recommendations));
-                      setNotes(log.notes ?? "");
-                      setSaveMessage("");
-                    }}
-                    className="w-full text-left rounded border border-border px-2 py-1.5 text-xs hover:bg-surface-elevated"
-                  >
-                    <div className="flex justify-between text-text-primary">
-                      <span>{new Date(log.created_at).toLocaleDateString()}</span>
-                      <span className="uppercase">{log.status.replaceAll("_", " ")}</span>
-                    </div>
-                    <div className="text-text-muted mt-0.5">
-                      {(() => {
-                        const delta = log.decision_delta;
-                        const planExecutionPct = delta?.total_recommended
-                          ? Math.round((delta.total_actual / delta.total_recommended) * 100)
-                          : recTotal > 0
-                          ? Math.round((actualTotal / recTotal) * 100)
-                          : 0;
-                        const depositAmount = Number(((log.recommendation_snapshot as any)?.decision_context?.entered_capital_amount) || 0);
-                        const deployedAmount = delta?.total_actual ?? actualTotal;
-                        const depositDeployedPct = depositAmount > 0 ? Math.round((deployedAmount / depositAmount) * 100) : 0;
-                        const skippedCount = delta?.skipped_tickers?.length ?? 0;
-                        const replacedCount = delta?.replaced_tickers?.length ?? 0;
-                        const behavior =
-                          log.risk_behavior === "more_conservative"
-                            ? "Conservative"
-                            : log.risk_behavior === "more_aggressive"
-                            ? "Aggressive"
-                            : "Aligned";
-                        return `${formatCurrency(deployedAmount)} of ${formatCurrency(delta?.total_recommended ?? recTotal)} deploy-now plan (${planExecutionPct}%) · ${depositDeployedPct}% of ${formatCurrency(depositAmount)} total deposit • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
-                      })()}
-                    </div>
-                  </button>
-                );
-              })}
+function DecisionHistoryEntry({
+  log,
+  deployNow,
+  isActive,
+  onEvaluate,
+  isEvaluating,
+  onSelect,
+}: {
+  log: DecisionMemoryLog;
+  deployNow: number;
+  isActive: boolean;
+  onEvaluate: () => void;
+  isEvaluating: boolean;
+  onSelect: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const snap = log.recommendation_snapshot as Record<string, unknown>;
+  const ctx = (snap?.decision_context as Record<string, unknown> | undefined) ?? {};
+  const totalDeposit = Number(ctx.entered_capital_amount) || 0;
+  const aiDeployNow = Number(ctx.deploy_now_amount) || deployNow;
+  const aiReserve = Number(ctx.reserve_amount) || 0;
+  const actuals = log.actual_decisions ?? [];
+  const actualTotal = actuals.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+  const actualReserve = totalDeposit > 0 ? totalDeposit - actualTotal : aiReserve;
+  const status = deriveExecutionStatus(actuals, aiDeployNow);
+
+  const tickerActuals = actuals
+    .filter((r) => r.ticker && (r.actual_amount ?? 0) > 0)
+    .map((r) => `${r.ticker} ${formatCurrency(r.actual_amount ?? 0)}`)
+    .join(" · ");
+
+  const perf = log.performance_snapshot;
+  const perfStatus = perf?.status ?? null;
+  const portfolio = perf?.portfolio;
+  const perfDelta = portfolio?.delta ?? 0;
+  const showPerf = perfStatus === "ready" || perfStatus === "partial_data";
+
+  return (
+    <div className={cn("border rounded-lg overflow-hidden", isActive ? "border-accent/40" : "border-border/80")}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left px-3 py-2.5 hover:bg-surface-elevated/20 transition-colors"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-text-muted">
+            {new Date(log.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+          </span>
+          <div className="flex items-center gap-1.5">
+            {isActive && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30 font-semibold">
+                Active
+              </span>
+            )}
+            <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full border font-semibold", executionStatusCls(status))}>
+              {executionStatusLabel(status)}
+            </span>
+            <ChevronIcon className={cn("w-3.5 h-3.5 text-text-muted transition-transform", open && "rotate-180")} />
+          </div>
+        </div>
+        <div className="flex gap-3 mt-1 text-[11px] text-text-muted flex-wrap">
+          {totalDeposit > 0 && <span>Deposit {formatCurrency(totalDeposit)}</span>}
+          <span>Invested <span className="text-text-primary font-semibold">{formatCurrency(actualTotal)}</span></span>
+          <span>Reserved <span className="text-text-primary">{formatCurrency(actualReserve)}</span></span>
+        </div>
+        {tickerActuals && (
+          <p className="text-[11px] text-text-secondary mt-1 truncate">{tickerActuals}</p>
+        )}
+      </button>
+
+      {open && (
+        <div className="border-t border-border px-3 pb-3 pt-2.5 space-y-2">
+          {/* Ticker detail */}
+          {actuals.filter((r) => r.ticker).length > 0 && (
+            <div className="divide-y divide-border border border-border rounded-md overflow-hidden">
+              {actuals.filter((r) => r.ticker).map((r, i) => (
+                <div key={`${r.ticker}-${i}`} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                  <span className="font-mono text-text-primary">{r.ticker}</span>
+                  <div className="flex items-center gap-2 text-text-muted">
+                    <span className={cn(
+                      "text-[10px] px-1 rounded font-semibold",
+                      r.actual_action === "SKIPPED" ? "text-red-300" :
+                      r.actual_action === "REPLACED" ? "text-amber-300" : "text-emerald-300"
+                    )}>{r.actual_action ?? "BOUGHT"}</span>
+                    {(r.actual_amount ?? 0) > 0 && (
+                      <span className="font-mono">{formatCurrency(r.actual_amount ?? 0)}</span>
+                    )}
+                    {r.replacement_ticker && (
+                      <span className="text-amber-300">→ {r.replacement_ticker}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
+          )}
+
+          {/* Plan comparison */}
+          {aiDeployNow > 0 && (
+            <p className="text-[11px] text-text-muted">
+              AI planned: {formatCurrency(aiDeployNow)} now · {formatCurrency(aiReserve)} reserve
+            </p>
+          )}
+
+          {/* Performance */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">Performance vs AI</p>
+              <button
+                onClick={onEvaluate}
+                disabled={isEvaluating}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
+              >
+                {isEvaluating ? "…" : "Evaluate"}
+              </button>
+            </div>
+            {!perf ? (
+              <p className="text-[11px] text-text-muted">Not yet evaluated.</p>
+            ) : perfStatus === "baseline_captured" ? (
+              <p className="text-[11px] text-amber-300">Baseline captured — re-evaluate next trading day.</p>
+            ) : perfStatus === "pending" || perfStatus === "insufficient_data" ? (
+              <p className="text-[11px] text-text-muted">
+                {perfStatus === "pending" ? "Pending data." : "Insufficient data yet."}
+              </p>
+            ) : (
+              <>
+                {showPerf && portfolio && (
+                  <p className={cn("text-xs font-semibold", perfDelta >= 0 ? "text-emerald-300" : "text-red-300")}>
+                    {portfolio.summary_text
+                      ? portfolio.summary_text
+                      : `Delta vs model: ${perfDelta >= 0 ? "+" : ""}${perfDelta.toFixed(2)}%`}
+                  </p>
+                )}
+                {showPerf && portfolio && (
+                  <p className="text-[11px] text-text-muted">
+                    AI {(portfolio.recommended_return ?? 0).toFixed(2)}% · You {(portfolio.actual_return ?? 0).toFixed(2)}%
+                  </p>
+                )}
+                {perf.windows && (
+                  <div className="space-y-0.5">
+                    {(["7d", "30d", "90d"] as const).map((w) => {
+                      const win = perf.windows?.[w];
+                      if (!win) return null;
+                      if (win.status !== "ready") {
+                        return <p key={w} className="text-[11px] text-text-muted">{w}: {win.status.replace("_", " ")}</p>;
+                      }
+                      return (
+                        <p key={w} className="text-[11px] text-text-muted">
+                          {w}: AI {(win.recommended_return_pct ?? 0).toFixed(2)}% · You {(win.actual_return_pct ?? 0).toFixed(2)}% · Δ {(win.delta_pct ?? 0).toFixed(2)}%
+                        </p>
+                      );
+                    })}
+                  </div>
+                )}
+                {perf.per_ticker?.length ? (
+                  <div className="space-y-0.5">
+                    {perf.per_ticker.map((row) => {
+                      const label = row.recommended_ticker && row.actual_ticker && row.recommended_ticker !== row.actual_ticker
+                        ? `${row.recommended_ticker}→${row.actual_ticker}`
+                        : row.actual_ticker ?? row.recommended_ticker ?? row.ticker;
+                      if (row.status === "missing_price") {
+                        return <p key={row.ticker} className="text-[11px] text-text-muted">{label}: missing price</p>;
+                      }
+                      return (
+                        <p key={row.ticker} className="text-[11px] text-text-muted">
+                          {label}: AI {(row.recommended_return_pct ?? 0).toFixed(2)}% · You {(row.actual_return_pct ?? 0).toFixed(2)}% · Δ {(row.delta_pct ?? 0).toFixed(2)}%
+                        </p>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {perf.data_quality?.length ? (
+                  <p className="text-[11px] text-amber-300">Some tickers excluded due to missing price data.</p>
+                ) : null}
+              </>
+            )}
+          </div>
+
+          {/* Load into editor */}
+          {!isActive && (
+            <button
+              onClick={onSelect}
+              className="text-[11px] text-accent hover:text-accent-hover transition-colors font-semibold"
+            >
+              Load into editor
+            </button>
+          )}
+          {log.notes && (
+            <p className="text-[11px] text-text-muted italic">{log.notes}</p>
           )}
         </div>
       )}

@@ -1,4 +1,4 @@
-import { buildRecommendationSnapshotWithContext } from './decision-log';
+import { buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay } from './decision-log';
 
 describe('decision log session key', () => {
   const plan: any = {
@@ -54,5 +54,36 @@ describe('decision log session key', () => {
     });
 
     expect((a as any).decision_context.recommendation_key).not.toEqual((b as any).decision_context.recommendation_key);
+  });
+});
+
+
+describe('decision log dedupe for display', () => {
+  it('keeps only the latest log per session key', () => {
+    const logs: any[] = [
+      {
+        id: '1',
+        recommendation_snapshot: { decision_context: { session_key: 'same' } },
+        created_at: '2026-04-20T10:00:00.000Z',
+        updated_at: '2026-04-20T10:00:00.000Z',
+      },
+      {
+        id: '2',
+        recommendation_snapshot: { decision_context: { session_key: 'same' } },
+        created_at: '2026-04-21T10:00:00.000Z',
+        updated_at: '2026-04-22T10:00:00.000Z',
+      },
+      {
+        id: '3',
+        recommendation_snapshot: { decision_context: { session_key: 'other' } },
+        created_at: '2026-04-23T10:00:00.000Z',
+        updated_at: '2026-04-23T10:00:00.000Z',
+      },
+    ];
+
+    const deduped = dedupeDecisionLogsForDisplay(logs as any);
+    expect(deduped).toHaveLength(2);
+    expect(deduped[0].id).toBe('3');
+    expect(deduped[1].id).toBe('2');
   });
 });

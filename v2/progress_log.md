@@ -5,6 +5,16 @@
 
 ## Recent Changes
 
+### fix(deploy-step3): stabilize decision-log idempotency, rehydration, and wording
+- **Commit**: `TBD`
+- **Date**: April 30, 2026
+
+Focused QA pass for Deploy Step 3 persistence and Decision Log performance display:
+- Added display-only dedupe helper keyed by `decision_context.session_key` (keeps latest `updated_at`) so Recent Decision Logs prefer current active record without deleting history.
+- Updated Deploy Step 3 rehydration/matching to use deduped logs and shared session-key helper, reducing duplicate/noisy log selection after refresh/tab switches.
+- Clarified deployment percentages everywhere in Step 3 and Recent Decision Logs (`of deploy-now plan` vs `of total deposit`) to avoid misleading “100% deployed” wording.
+- No recommendation/allocation logic changes; no LLM behavior changes; no SQL migration required.
+
 ### fix(code-graph): resolve relative and short-name imports correctly
 - **Commit**: `9f5bab1`
 - **Date**: April 13, 2026

@@ -209,3 +209,10 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Kept existing Deploy logging flow and allocation/recommendation logic intact; extended stored `performance_snapshot` payload only.
 - Added backend tests for window readiness/pending behavior and unavailable-data handling.
 - Added minimal Deploy Step 3 UI lines to show 7d/30d/90d status/returns when available.
+
+### Step 3 Execute & Record durability fixes (April 30, 2026)
+- Fixed Step 3 confirm flow to persist execution immediately (create/update decision log with actual decisions) instead of only setting local UI text.
+- Added guarded success/error messaging so UI only shows save success after backend mutation resolves.
+- Rehydrated latest saved decision log on load from decision log history query to survive refresh.
+- Updated Modify Plan action to open actual execution editor directly.
+- Moved confirm execution modal rendering to a portal with higher z-index to resolve layering/clickability issues.

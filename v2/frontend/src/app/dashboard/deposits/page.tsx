@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { cn, formatCurrency } from "@/lib/utils";
 import {
   usePortfolioSummary,
@@ -1112,6 +1113,7 @@ function DecisionLogMemoryPanel({
   const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
     buildInitialActualDecisions(recommendations)
   );
+  const [errorMessage, setErrorMessage] = useState("");
 
   const activeLog = savedLog;
   const delta = activeLog?.decision_delta;
@@ -1158,11 +1160,17 @@ function DecisionLogMemoryPanel({
 
   async function onSaveLog() {
     if (createLog.isPending) return;
-    const created = await createLog.mutateAsync({ snapshot });
-    setSavedLog(created);
-    setNotes(created.notes ?? "");
-    setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
-    setSaveMessage("Decision log saved");
+    try {
+      setErrorMessage("");
+      const created = await createLog.mutateAsync({ snapshot, actualDecisions });
+      setSavedLog(created);
+      setNotes(created.notes ?? "");
+      setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
+      setSaveMessage("Decision log saved");
+    } catch (error) {
+      setSaveMessage("");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save decision log.");
+    }
   }
 
   async function onSaveActual() {
@@ -1171,9 +1179,15 @@ function DecisionLogMemoryPanel({
       actual_decisions: actualDecisions.map((row) => ({ ...row, executed_at: row.executed_at ?? new Date().toISOString() })),
       notes,
     };
-    const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
-    setSavedLog(updated);
-    setSaveMessage("Actual decisions updated");
+    try {
+      setErrorMessage("");
+      const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
+      setSavedLog(updated);
+      setSaveMessage("Actual decisions updated");
+    } catch (error) {
+      setSaveMessage("");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to update actual decisions.");
+    }
   }
 
   async function onEvaluatePerformance() {
@@ -1230,6 +1244,14 @@ function DecisionLogMemoryPanel({
   );
   const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
 
+  useEffect(() => {
+    if (savedLog || !recentLogs?.length) return;
+    const latest = recentLogs[0];
+    setSavedLog(latest);
+    setNotes(latest.notes ?? "");
+    setActualDecisions(latest.actual_decisions?.length ? latest.actual_decisions : buildInitialActualDecisions(recommendations));
+  }, [recentLogs, recommendations, savedLog]);
+
   return (
     <div className="card-glass p-4 space-y-3 border border-border/80">
       <div className="flex items-center justify-between gap-2">
@@ -1269,7 +1291,12 @@ function DecisionLogMemoryPanel({
           Invest {formatCurrency(deployNow)} Now
         </button>
         <button
-          onClick={() => document.getElementById("step-1")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+          onClick={() => {
+            setDetailsOpen(true);
+            if (!savedLog) {
+              setSaveMessage("Set actual execution amounts, then save your decision log.");
+            }
+          }}
           className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
         >
           Modify Plan
@@ -1299,8 +1326,9 @@ function DecisionLogMemoryPanel({
       </div>
       {executeMessage && <p className="text-xs text-text-secondary">{executeMessage}</p>}
       {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
+      {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
       {confirmOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+        createPortal(<div className="fixed inset-0 z-[2000] bg-black/60 flex items-center justify-center p-4 pointer-events-auto">
           <div className="w-full max-w-md rounded-lg border border-border bg-surface p-4 space-y-3">
             <p className="text-sm font-semibold text-text-primary">Confirm execution</p>
             <div className="text-xs space-y-1">
@@ -1327,10 +1355,31 @@ function DecisionLogMemoryPanel({
                 Cancel
               </button>
               <button
-                onClick={() => {
+                onClick={async () => {
                   setConfirmOpen(false);
                   setDetailsOpen(true);
-                  setExecuteMessage(`Execution focus set for ${formatCurrency(deployNow)}. Confirm orders in your broker, then save your decision log.`);
+                  setErrorMessage("");
+                  const executedDecisions = actualDecisions.map((row) => ({
+                    ...row,
+                    actual_action: row.actual_action ?? "BOUGHT",
+                    actual_amount: row.actual_amount ?? row.recommended_amount ?? 0,
+                    executed_at: row.executed_at ?? new Date().toISOString(),
+                  }));
+                  setActualDecisions(executedDecisions);
+                  try {
+                    if (savedLog) {
+                      const updated = await updateLog.mutateAsync({ id: savedLog.id, patch: { actual_decisions: executedDecisions, notes } });
+                      setSavedLog(updated);
+                    } else {
+                      const created = await createLog.mutateAsync({ snapshot, actualDecisions: executedDecisions });
+                      setSavedLog(created);
+                    }
+                    setSaveMessage("Decision log saved");
+                    setExecuteMessage(`Execution saved for ${formatCurrency(deployNow)}.`);
+                  } catch (error) {
+                    setSaveMessage("");
+                    setErrorMessage(error instanceof Error ? error.message : "Failed to save execution.");
+                  }
                 }}
                 className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
               >
@@ -1338,7 +1387,7 @@ function DecisionLogMemoryPanel({
               </button>
             </div>
           </div>
-        </div>
+        </div>, document.body)
       )}
 
       {detailsOpen && savedLog && (

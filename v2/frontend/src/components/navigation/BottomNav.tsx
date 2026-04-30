@@ -17,7 +17,7 @@ export function BottomNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="fixed bottom-0 left-0 right-0 z-50 bg-background/90 backdrop-blur-xl border-t border-border lg:hidden">
+    <nav className="fixed bottom-0 left-0 right-0 z-50 bg-background/95 backdrop-blur-xl border-t border-border lg:hidden">
       <div className="flex justify-around items-center h-16 max-w-lg mx-auto">
         {NAV_ITEMS.map((item) => {
           const active =
@@ -28,14 +28,22 @@ export function BottomNav() {
               key={item.href}
               href={item.href}
               className={cn(
-                "flex flex-col items-center gap-1 px-2 py-2 rounded-lg transition-colors",
+                "relative flex flex-col items-center gap-0.5 px-2 py-2 rounded-lg transition-colors",
                 active
                   ? "text-accent"
                   : "text-text-muted hover:text-text-secondary"
               )}
             >
+              {active && (
+                <span className="absolute top-0 left-1/2 -translate-x-1/2 w-5 h-px bg-accent rounded-full" />
+              )}
               <item.icon className="w-5 h-5" />
-              <span className="text-[10px] font-medium">{item.label}</span>
+              <span className={cn(
+                "text-[9px] font-semibold tracking-[0.06em] uppercase",
+                active ? "text-accent" : "text-text-muted"
+              )}>
+                {item.label}
+              </span>
             </Link>
           );
         })}
@@ -44,35 +52,44 @@ export function BottomNav() {
   );
 }
 
-// Desktop sidebar nav (shown on lg+)
 export function SideNav() {
   const pathname = usePathname();
 
   return (
-    <nav className="hidden lg:flex flex-col w-56 border-r border-border bg-surface/50 p-4 gap-1 min-h-screen sticky top-0 h-screen overflow-y-auto">
-      <Link href="/dashboard" className="text-lg font-display text-text-primary mb-6">
-        Portfolio Intelligence
+    <nav className="hidden lg:flex flex-col w-56 border-r border-border bg-surface p-4 gap-1 min-h-screen sticky top-0 h-screen overflow-y-auto">
+      <Link href="/dashboard" className="block mb-7 group">
+        <span className="block text-[10px] font-mono uppercase tracking-[0.14em] text-accent opacity-50 group-hover:opacity-70 transition-opacity">
+          Intelligence
+        </span>
+        <span className="block text-base font-semibold text-text-primary tracking-tight leading-none mt-0.5">
+          Portfolio
+        </span>
       </Link>
-      {NAV_ITEMS.map((item) => {
-        const active =
-          pathname === item.href ||
-          (item.href !== "/dashboard" && pathname.startsWith(item.href));
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={cn(
-              "flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors",
-              active
-                ? "bg-accent/10 text-accent font-semibold"
-                : "text-text-secondary hover:text-text-primary hover:bg-surface-elevated"
-            )}
-          >
-            <item.icon className="w-4 h-4" />
-            {item.label}
-          </Link>
-        );
-      })}
+      <div className="space-y-0.5">
+        {NAV_ITEMS.map((item) => {
+          const active =
+            pathname === item.href ||
+            (item.href !== "/dashboard" && pathname.startsWith(item.href));
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                "flex items-center gap-3 py-2 rounded-md text-sm transition-colors",
+                active
+                  ? "bg-accent/8 text-accent font-semibold pl-[10px] pr-3 border-l-2 border-accent"
+                  : "text-text-secondary hover:text-text-primary hover:bg-surface-elevated px-3 border-l-2 border-transparent"
+              )}
+            >
+              <item.icon className="w-4 h-4 shrink-0" />
+              <span className="text-sm">{item.label}</span>
+            </Link>
+          );
+        })}
+      </div>
+      <div className="mt-auto pt-4 border-t border-border/50">
+        <p className="text-[10px] font-mono text-text-muted opacity-40 tracking-widest">v2.0</p>
+      </div>
     </nav>
   );
 }

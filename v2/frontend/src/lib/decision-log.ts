@@ -150,14 +150,40 @@ export const decisionLogApi = {
   deleteDecisionLog: (id: string) => api.decisionLogs.deleteDecisionLog(id),
 };
 
-export function buildInitialActualDecisions(recommendations: DepositRecommendation[]): ActualDecisionItem[] {
-  return recommendations.map((rec) => ({
-    ticker: rec.symbol,
-    recommended_action: rec.action,
-    actual_action: "BOUGHT",
-    recommended_amount: rec.amount,
-    actual_amount: rec.amount,
-  }));
+export function buildInitialActualDecisions(
+  recommendations: DepositRecommendation[],
+  adjustedAmounts?: Map<string, number>,
+): ActualDecisionItem[] {
+  return recommendations.map((rec) => {
+    const amount = adjustedAmounts?.get(rec.symbol ?? "") ?? rec.amount;
+    return {
+      ticker: rec.symbol,
+      recommended_action: rec.action,
+      actual_action: "BOUGHT",
+      recommended_amount: amount,
+      actual_amount: amount,
+    };
+  });
+}
+
+export type ExecutionStatus = "fully_executed" | "partially_executed" | "skipped" | "modified";
+
+export function deriveExecutionStatus(
+  actualDecisions: ActualDecisionItem[],
+  aiDeployNowAmount: number,
+): ExecutionStatus {
+  const totalActual = actualDecisions.reduce((sum, row) => sum + (Number(row.actual_amount) || 0), 0);
+  if (totalActual <= 0) return "skipped";
+  const tolerance = 0.51;
+  const hasReplacements = actualDecisions.some(
+    (r) => r.actual_action === "REPLACED" || (r.replacement_ticker && r.replacement_ticker.trim()),
+  );
+  const hasSkips = actualDecisions.some((r) => r.actual_action === "SKIPPED");
+  if (Math.abs(totalActual - aiDeployNowAmount) > tolerance) {
+    return totalActual < aiDeployNowAmount - tolerance ? "partially_executed" : "modified";
+  }
+  if (hasReplacements || hasSkips) return "modified";
+  return "fully_executed";
 }
 
 export type { DecisionMemoryLog };

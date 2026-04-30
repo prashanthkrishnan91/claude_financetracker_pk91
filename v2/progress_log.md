@@ -5,6 +5,20 @@
 
 ## Recent Changes
 
+### refactor(deploy-step3): correct amount semantics + split Decision History card
+- **Commit**: `TBD`
+- **Date**: April 30, 2026
+
+Focused Step 3 + Decision History refactor — no allocation logic or LLM changes:
+
+- **Bug fixed**: `buildInitialActualDecisions` now uses deploy-now adjusted amounts per ticker (from `computeAdjustedAmounts`) instead of raw `rec.amount`. Clicking "Use AI Plan" now prefills actual rows totalling the AI deploy-now amount (e.g. $725), not the full deposit ($900).
+- **Status semantics fixed**: New `deriveExecutionStatus` helper uses `ai_deploy_now_amount` as denominator. `fully_executed` when actual ≈ deploy-now; `partially_executed` when under; `skipped` when zero; `modified` when tickers replaced/skipped.
+- **Copy fixed**: Execution copy now reads e.g. "Executed $725 of $725 planned now. Reserved $175 from your $900 deposit." — no more misleading "$900 of $900 (100%)".
+- **UI split**: Step 3 is now **Card A** (AI plan summary, Use AI Plan / Modify / Skip buttons, execution editor, single save button). **Card B** ("Decision History") is a separate card showing past logs with date, status badge, deposit/invested/reserve, ticker actuals, and expandable performance details (7d/30d/90d windows).
+- **Idempotency**: save/update path unchanged; rehydration from backend on load unchanged.
+- **Tests added**: `decision-log.test.ts` — adjusted-amount sum equals deploy-now not deposit; `deriveExecutionStatus` with deploy-now denominator; $725 actual vs $900 deposit = `fully_executed` not `partially_executed`.
+- No Supabase SQL required. No backend changes. No recommendation/allocation changes.
+
 ### fix(deploy-step3): stabilize decision-log idempotency, rehydration, and wording
 - **Commit**: `TBD`
 - **Date**: April 30, 2026

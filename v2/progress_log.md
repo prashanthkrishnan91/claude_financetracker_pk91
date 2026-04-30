@@ -216,3 +216,12 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Rehydrated latest saved decision log on load from decision log history query to survive refresh.
 - Updated Modify Plan action to open actual execution editor directly.
 - Moved confirm execution modal rendering to a portal with higher z-index to resolve layering/clickability issues.
+
+### Step 3 idempotency guardrails for Decision Logs (April 30, 2026)
+- Root cause found: repeated Step 3 confirm/save calls could hit create path again when `savedLog` was unset for the current render lifecycle, and frontend rehydration picked latest log without verifying it belonged to the active recommendation session.
+- Added deterministic `decision_context.session_key` to recommendation snapshots so a Step 2 recommendation maps to one Step 3 log candidate.
+- Updated Step 3 handlers to prefer update over create when a matching recent log exists for the same session key.
+- Rehydration now binds `savedLog` to the matching session log instead of blindly taking `recentLogs[0]`.
+- Added frontend unit test coverage for deterministic session key generation.
+- No Supabase SQL required; this is implemented in frontend flow/state guardrails.
+- Known limitation: already-created duplicate rows remain in DB history and are not auto-deleted.

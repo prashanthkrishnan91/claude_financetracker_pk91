@@ -247,10 +247,10 @@ export default function DepositsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
-        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80">
+        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80 bg-gradient-to-b from-surface-elevated/25 to-transparent">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
                 Step 1 — How much are you investing?
               </p>
               <p className="text-xs text-text-muted mt-1">
@@ -273,7 +273,7 @@ export default function DepositsPage() {
                 type="number"
                 value={amount}
                 onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
-                className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border rounded-lg text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border/80 rounded-lg text-text-primary font-mono text-base focus:outline-none focus:ring-1 focus:ring-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 min={0}
                 step={50}
               />
@@ -285,10 +285,10 @@ export default function DepositsPage() {
                 key={preset}
                 onClick={() => setAmount(preset)}
                 className={cn(
-                  "px-3 py-1 text-xs rounded-md transition-colors",
+                  "px-3 py-1 text-xs rounded-md transition-colors border",
                   amount === preset
-                    ? "bg-accent text-background font-semibold"
-                    : "text-text-muted bg-surface-elevated hover:text-text-primary"
+                    ? "bg-accent text-background font-semibold border-accent"
+                    : "text-text-muted bg-surface-elevated border-border/70 hover:text-text-primary"
                 )}
               >
                 ${preset}
@@ -359,8 +359,8 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
 
   return (
     <div className="space-y-4">
-      <section className="card-glass p-4 space-y-4 border border-border/80">
-        <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+      <section className="card-glass p-4 space-y-4 border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
           Step 2 — Where should this go?
         </p>
         <RecommendedDeploymentCard
@@ -487,16 +487,16 @@ function RecommendedDeploymentCard({
   const subtitle = subtitleParts.join(" • ");
 
   return (
-    <div className="card-glass p-4 space-y-3 border border-accent/20">
+    <div className="card-glass p-4 space-y-4 border border-accent/25 bg-gradient-to-br from-accent/10 via-surface/80 to-blue-500/5">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <p className="text-[10px] uppercase tracking-wide font-semibold text-accent">
+          <p className="text-[10px] uppercase tracking-[0.14em] font-semibold text-accent">
             Recommended Deployment
           </p>
-          <p className="text-2xl font-display text-text-primary mt-1">
+          <p className="text-2xl sm:text-[1.8rem] font-display text-text-primary mt-1 leading-none">
             Deploy {formatCurrency(immediate)} now
           </p>
-          <p className="text-xs text-text-secondary mt-0.5">{subtitle}</p>
+          <p className="text-xs text-text-secondary mt-1">{subtitle}</p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           {regimeBadge && (
@@ -535,19 +535,19 @@ function RecommendedDeploymentCard({
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">Tickers</p>
-          <p className="font-mono text-text-primary">{allocationCount}</p>
+        <div className="bg-surface-elevated/70 border border-border/70 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">Tickers</p>
+          <p className="font-mono text-text-primary text-lg leading-tight">{allocationCount}</p>
         </div>
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">{hasAdaptive ? "Deploy now" : "Deployed"}</p>
-          <p className="font-mono text-text-primary">
+        <div className="bg-surface-elevated/70 border border-emerald-500/25 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">{hasAdaptive ? "Deploy now" : "Deployed"}</p>
+          <p className="font-mono text-emerald-300 text-lg leading-tight font-semibold">
             {formatCurrency(hasAdaptive ? immediate : summary.total_deployed)}
           </p>
         </div>
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">{hasAdaptive ? "Reserve" : "Considered"}</p>
-          <p className="font-mono text-text-primary">
+        <div className="bg-surface-elevated/70 border border-blue-500/25 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">{hasAdaptive ? "Reserve" : "Considered"}</p>
+          <p className="font-mono text-blue-300 text-lg leading-tight font-semibold">
             {hasAdaptive
               ? formatCurrency(reserve)
               : summary.candidates_considered ?? summary.ranked_candidates}
@@ -643,14 +643,20 @@ function AllocationBreakdownTable({
   const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (adjustedAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
   return (
-    <div className="card-glass overflow-hidden border border-border/80">
-      <div className="px-4 py-2 border-b border-border">
+    <div className="card-glass overflow-hidden border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
+      <div className="px-4 py-2.5 border-b border-border flex items-end justify-between gap-3">
+        <div>
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
           Allocation Breakdown
         </p>
         <p className="text-[11px] text-text-secondary mt-1">
           Deploy {formatCurrency(denominator)} now across {displayRanked.length} ticker{displayRanked.length === 1 ? "" : "s"}.
         </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] uppercase tracking-wide text-text-muted">Deploy now total</p>
+          <p className="font-mono text-sm sm:text-base text-text-primary font-semibold">{formatCurrency(allocatedNowTotal)}</p>
+        </div>
       </div>
       <div className="divide-y divide-border">
         {/* Header */}
@@ -666,14 +672,14 @@ function AllocationBreakdownTable({
           const role = roleMap.get(rec.symbol ?? "") ?? "Supporting";
           const roleClass =
             role === "Primary"
-              ? "bg-accent/10 text-accent border border-accent/30"
+              ? "bg-emerald-500/10 text-emerald-300 border border-emerald-400/30"
               : role === "Watch"
-                ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
-                : "bg-surface-elevated text-text-muted border border-border";
+                ? "bg-amber-500/10 text-amber-300 border border-amber-400/30"
+                : "bg-blue-500/10 text-blue-300 border border-blue-400/25";
           const immediate = adjustedAmounts.get(rec.symbol ?? "") ?? 0;
           const why = deriveAllocationWhy(rec, role);
           return (
-            <div key={rec.symbol} className="px-4 py-2.5 text-sm">
+            <div key={rec.symbol} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
               <div className="grid grid-cols-12 gap-2 items-start">
                 <div className="col-span-6 sm:col-span-2">
                   <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
@@ -697,22 +703,22 @@ function AllocationBreakdownTable({
                 <div className="hidden sm:block sm:col-span-4 text-[11px] text-text-muted leading-snug pt-0.5">
                   {why}
                 </div>
-                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-emerald-300">
                   {formatCurrency(immediate)}
                 </div>
                 <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
                   {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
                 </div>
-                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-accent">
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-blue-300 font-semibold">
                   {(rec.after_weight ?? 0).toFixed(1)}%
                 </div>
               </div>
             </div>
           );
         })}
-        <div className="px-4 py-2 bg-surface-elevated/20 flex items-center justify-between text-xs">
+        <div className="px-4 py-2 bg-surface-elevated/30 flex items-center justify-between text-xs border-t border-border/70">
           <span className="text-text-muted uppercase tracking-wide font-semibold">Total deploying now</span>
-          <span className="font-mono font-semibold text-text-primary">{formatCurrency(allocatedNowTotal)}</span>
+          <span className="font-mono font-semibold text-emerald-300">{formatCurrency(allocatedNowTotal)}</span>
         </div>
       </div>
     </div>

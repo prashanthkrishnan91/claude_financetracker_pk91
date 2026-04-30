@@ -29,6 +29,30 @@ describe('decision log session key', () => {
       ],
     });
 
+    expect((a as any).decision_context.recommendation_key).toEqual((b as any).decision_context.recommendation_key);
     expect((a as any).decision_context.session_key).toEqual((b as any).decision_context.session_key);
+  });
+
+  it('changes recommendation key when deposit amount changes', () => {
+    const a = buildRecommendationSnapshotWithContext(plan, {
+      entered_capital_amount: 200,
+      deploy_now_amount: 150,
+      reserve_amount: 50,
+      ticker_context: [
+        { ticker: 'AAPL', amount: 100, role: 'core', why_reason: null },
+        { ticker: 'MSFT', amount: 50, role: 'growth', why_reason: null },
+      ],
+    });
+    const b = buildRecommendationSnapshotWithContext(plan, {
+      entered_capital_amount: 900,
+      deploy_now_amount: 715,
+      reserve_amount: 185,
+      ticker_context: [
+        { ticker: 'AAPL', amount: 100, role: 'core', why_reason: null },
+        { ticker: 'MSFT', amount: 50, role: 'growth', why_reason: null },
+      ],
+    });
+
+    expect((a as any).decision_context.recommendation_key).not.toEqual((b as any).decision_context.recommendation_key);
   });
 });

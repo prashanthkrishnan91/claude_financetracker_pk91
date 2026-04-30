@@ -1129,6 +1129,7 @@ function DecisionLogMemoryPanel({
       ? "More aggressive than model"
       : "Aligned with model";
   const deployedPct = delta?.total_recommended ? Math.round((delta.total_actual / delta.total_recommended) * 100) : 0;
+  const depositDeployedPct = amount > 0 && delta?.total_actual ? Math.round((delta.total_actual / amount) * 100) : 0;
   const capitalBehavior = delta
     ? delta.deploy_delta < -0.5
       ? "Under-deployed"
@@ -1299,7 +1300,7 @@ function DecisionLogMemoryPanel({
         <div className="grid gap-2 sm:grid-cols-2 text-xs">
           <p className="text-text-secondary">
             Deployed: <span className="text-text-primary font-semibold">{delta ? formatCurrency(delta.total_actual) : "—"}</span>
-            {delta ? <span className="text-text-muted"> ({deployedPct}%)</span> : null}
+            {delta ? <span className="text-text-muted"> ({deployedPct}% of plan · {depositDeployedPct}% of deposit)</span> : null}
           </p>
           <p className="text-text-secondary">
             Replacements: <span className="text-text-primary">{replacementSummary}</span>
@@ -1489,7 +1490,7 @@ function DecisionLogMemoryPanel({
         <div className="border-t border-border pt-3 space-y-1.5">
           <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
           <p className="text-xs text-text-secondary">
-            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} recommended ({deployedPct}%).
+            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} plan ({deployedPct}%) and {depositDeployedPct}% of {formatCurrency(amount)} deposit.
           </p>
           <p className="text-xs text-text-secondary">
             Capital behavior: {capitalBehavior}
@@ -1653,11 +1654,14 @@ function DecisionLogMemoryPanel({
                     <div className="text-text-muted mt-0.5">
                       {(() => {
                         const delta = log.decision_delta;
-                        const deployedPct = delta?.total_recommended
+                        const planExecutionPct = delta?.total_recommended
                           ? Math.round((delta.total_actual / delta.total_recommended) * 100)
                           : recTotal > 0
                           ? Math.round((actualTotal / recTotal) * 100)
                           : 0;
+                        const depositAmount = Number(((log.recommendation_snapshot as any)?.decision_context?.entered_capital_amount) || 0);
+                        const deployedAmount = delta?.total_actual ?? actualTotal;
+                        const depositDeployedPct = depositAmount > 0 ? Math.round((deployedAmount / depositAmount) * 100) : 0;
                         const skippedCount = delta?.skipped_tickers?.length ?? 0;
                         const replacedCount = delta?.replaced_tickers?.length ?? 0;
                         const behavior =
@@ -1666,7 +1670,7 @@ function DecisionLogMemoryPanel({
                             : log.risk_behavior === "more_aggressive"
                             ? "Aggressive"
                             : "Aligned";
-                        return `${deployedPct}% deployed • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
+                        return `${formatCurrency(deployedAmount)} of ${formatCurrency(delta?.total_recommended ?? recTotal)} plan (${planExecutionPct}%) · ${depositDeployedPct}% of ${formatCurrency(depositAmount)} deposit • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
                       })()}
                     </div>
                   </button>

@@ -91,7 +91,7 @@ export function buildRecommendationSnapshotWithContext(
     .map((item) => `${item.ticker}:${Math.round(item.amount * 100) / 100}`)
     .sort()
     .join("|");
-  const sessionKey = [
+  const recommendationKey = [
     `entered:${Math.round(context.entered_capital_amount * 100) / 100}`,
     `deploy:${Math.round(context.deploy_now_amount * 100) / 100}`,
     `reserve:${Math.round(context.reserve_amount * 100) / 100}`,
@@ -110,7 +110,8 @@ export function buildRecommendationSnapshotWithContext(
         why_reason: item.why_reason,
         amount: item.amount,
       })),
-      session_key: sessionKey,
+      recommendation_key: recommendationKey,
+      session_key: recommendationKey,
       timestamp: new Date().toISOString(),
     },
   };

@@ -5,6 +5,23 @@
 
 ## Recent Changes
 
+### feat(deploy-v2-pr1): deterministic deployment-mode classifier, output schema, and backend tests
+- **Commit**: `TBD`
+- **Date**: May 1, 2026
+
+Deploy Logic v2 PR 1 — backend-only, no UI changes, no Supabase SQL:
+
+- **New module**: `v2/backend/app/services/deployment_engine.py` — deterministic deployment mode classifier replacing the always-some-reserve heuristic.
+- **Four deployment modes**: `full_deploy`, `staged_deploy`, `defensive_reserve`, `skip_or_wait` replacing the old `full/partial/defensive/wait` labels.
+- **Cash drag penalty**: Bonus added to deployment score when idle reserve has no valid trigger — promotes full deployment by default.
+- **Hard reserve trigger rule**: If `reserve_amount > MIN_RESERVE_FOR_TRIGGER ($25)` and no specific non-generic trigger can be generated, engine forces `reserve = 0` and `mode = full_deploy`.
+- **Four trigger types**: `technical_pullback` (near-cap tickers), `watch_tier_breakout` (low conviction), `event_driven` (risk-off regime), `concentration_reduction` (theme staging). Each must include specific target tickers and conditions — generic reserve text is blocked.
+- **WATCH ticker cap**: Low-conviction tickers capped at 25% of plan allocation.
+- **Output schema extended**: `DeploymentDecision` with all required fields; `ReserveTrigger`, `PerTickerDeployment` dataclasses.
+- **TypeScript types added**: `DeploymentModeV2`, `DeploymentDecisionV2`, `ReserveTriggerV2`, `PerTickerDeploymentV2`, `TickerRole` in `api.ts` — backward compatible, old `DeploymentMode` unchanged.
+- **Tests**: 32 focused backend tests covering all mode paths, hard trigger rule, cash drag, WATCH cap, denominators, no-generic-reserve, data quality confidence, edge cases.
+- No allocation logic changes. No LLM calls. No Supabase SQL. Existing `adaptive_deployment.py` and its tests untouched.
+
 ### refactor(deploy-step3): correct amount semantics + split Decision History card
 - **Commit**: `TBD`
 - **Date**: April 30, 2026

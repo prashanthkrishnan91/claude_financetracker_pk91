@@ -109,6 +109,10 @@ class InsightCard(BaseModel):
     # Populated when the orchestrator has run and a ScoreCard is available.
     # Frontend must not render this field until a dedicated UI pass is done.
     thesis_v2: Optional[dict] = None
+    # Intel v2 PR-8 — plain-English translation of thesis_v2. Additive and
+    # optional: present only when thesis_v2 is available. Safe for future
+    # frontend use; contains no raw metric keys.
+    thesis_plain_english: Optional[dict] = None
 
 
 class AgentRunStatus(BaseModel):

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
+from .intelligence.thesis_plain_english import build_thesis_plain_english
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -1315,7 +1316,7 @@ class RecommendationService:
                     self._db(
                         "agent_runs.select_for_cards",
                         lambda: self.client.table("agent_runs")
-                        .select("id, status, cost_metrics")
+                        .select("id, status, cost_metrics, allocation")
                         .eq("user_id", str(self.user_id))
                         .in_("id", [str(r) for r in run_ids_needed])
                         .execute(),
@@ -1422,6 +1423,29 @@ class RecommendationService:
                 if reused_cached:
                     reused_cached_cards += 1
 
+                # Intel v2 PR-8: extract per-ticker thesis scorecard from
+                # agent_runs.allocation["_thesis_v2"] and generate the
+                # plain-English translation. Fails safely — both fields
+                # remain None if data is unavailable or malformed.
+                thesis_v2_dict: Optional[dict] = None
+                thesis_plain_english_dict: Optional[dict] = None
+                _run_id_str = str(rec.get("agent_run_id") or "")
+                if _run_id_str:
+                    _run_row = run_lookup.get(_run_id_str)
+                    if _run_row:
+                        _allocation = _run_row.get("allocation") or {}
+                        _thesis_map = _allocation.get("_thesis_v2") or {}
+                        _scorecard = _thesis_map.get(ticker)
+                        if isinstance(_scorecard, dict) and _scorecard:
+                            thesis_v2_dict = _scorecard
+                            try:
+                                thesis_plain_english_dict = build_thesis_plain_english(_scorecard)
+                            except Exception as _tpe_exc:  # noqa: BLE001
+                                logger.debug(
+                                    "thesis_plain_english generation skipped ticker=%s err=%s",
+                                    ticker, _tpe_exc,
+                                )
+
                 card = InsightCard(
                     id=rec["id"],
                     ticker=ticker,
@@ -1479,6 +1503,8 @@ class RecommendationService:
                     reasoning_source=_reasoning_source,
                     reasoning_schema_version=_reasoning_schema_version,
                     differentiation=reasoning.get("differentiation"),
+                    thesis_v2=thesis_v2_dict,
+                    thesis_plain_english=thesis_plain_english_dict,
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",

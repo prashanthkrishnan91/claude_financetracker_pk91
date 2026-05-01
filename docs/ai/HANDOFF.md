@@ -1,4 +1,35 @@
 ## Last change
+Intel v2 PR-8: wire plain-English thesis translator into backend recommendation/intel responses (PR: "feat(intel-v2-pr8): expose plain-English thesis response field").
+
+## Files touched
+- `v2/backend/app/models/recommendation.py` — `InsightCard` gains `thesis_plain_english: Optional[dict] = None`. Additive, backward-compatible. Raw metric keys must never appear in this field's text.
+- `v2/backend/app/services/recommendation_engine.py` — Imports `build_thesis_plain_english`; `run_lookup` query extended to fetch `allocation` column; `_compute_insight_cards` extracts per-ticker thesis scorecard from `allocation["_thesis_v2"]`, generates `thesis_plain_english` with a broad except guard, and populates both `thesis_v2` and `thesis_plain_english` on `InsightCard`.
+- `v2/backend/tests/test_thesis_response_wiring.py` — **new test file**. 22 tests across 5 groups: payload presence, thesis_v2 preservation, raw metric key redaction, missing/partial/INSUFFICIENT_DATA safe handling, and no-IO determinism.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Response field contract (PR-8)
+- New field: `thesis_plain_english` — dict with keys: `headline`, `quality_label`, `valuation_label`, `risk_label`, `momentum_label`, `data_label`, `caveats`.
+- Present when `allocation["_thesis_v2"][ticker]` exists for the linked agent run; `None` otherwise.
+- Contains no raw metric keys (`fcf_margin`, `roic_ttm`, `net_debt_to_ebitda`, `ev_ebitda`, `ps_ttm`, etc.).
+- `thesis_v2` (raw scorecard dict) also populated at the same time from the same source.
+- Both fields are `None` for pre-PR-2 runs that lack `_thesis_v2` in allocation.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_plain_english.py tests/test_thesis_engine.py tests/test_thesis_mapper.py tests/test_thesis_response_wiring.py` — 143 passed, 0 failures.
+
+## Behavior change
+- `GET /recommendations/` and `/recommendations/jobs/{id}` (via insight cards) now include `thesis_plain_english` and `thesis_v2` per card when scorecard data is available.
+- No score math changes, no allocation/deploy changes, no LLM behavior changes, no Supabase SQL changes.
+
+## Frontend notes for next PR
+- `thesis_plain_english` is safe to render: no raw metric keys, no raw scores, plain-English strings only.
+- Shape is stable: `headline` (str), `quality_label` (str), `valuation_label` (str), `risk_label` (str), `momentum_label` (str), `data_label` (str), `caveats` (list[str]).
+- Do not render `thesis_v2` directly — it contains raw scorecard internals (scores, input lists, etc.) that are backend-only.
+
+---
+
+## Last change
 Intel v2 PR-7: backend-only deterministic plain-English thesis translation contract (PR: "feat(intel-v2-pr7): add backend-only plain-English thesis translation layer").
 
 ## Files touched

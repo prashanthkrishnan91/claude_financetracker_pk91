@@ -1,4 +1,39 @@
 ## Last change
+Intel v2 PR-4: backend quality coverage audit + safe net-debt mapping (PR: "feat(intel-v2-pr4): add safe net_debt_to_ebitda derivation from existing fundamentals").
+
+## Files touched
+- `v2/backend/app/services/agents/data_sources.py` — yfinance fundamentals payload now carries raw backend-only quality components when available: `total_debt`, `cash`, `ebitda` (additive; no existing keys removed).
+- `v2/backend/app/services/intelligence/thesis_mapper.py` — added exact deterministic derivation for `net_debt_to_ebitda = (total_debt - cash) / ebitda` only when all components are present and `ebitda > 0`; otherwise omitted. Keeps missing-data honesty and does not proxy-map from `debt_to_equity`.
+- `v2/backend/tests/test_thesis_mapper.py` — added focused tests for exact derivation math, invalid/missing omission behavior, and explicit unsafe proxy guardrails.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## PR-4 audit findings (quality field coverage)
+- **Found in current provider payload (`yfinance info`)**: `revenue_growth`, `earnings_growth`, `profit_margin`, `debt_to_equity`, `return_on_equity`, plus newly surfaced `total_debt`, `cash`, `ebitda`.
+- **Mapped now (safe/exact)**: `net_debt_to_ebitda` derived from (`total_debt`, `cash`, `ebitda`) only.
+- **Deferred (not reliably present in current payload contract)**: free cash flow / operating cash flow, total revenue, net income, interest expense / interest coverage inputs, invested capital components, share-count history fields.
+
+## Explicit semantic guardrails upheld
+- `profit_margin` is **not** used as `fcf_margin`.
+- `return_on_equity` is **not** used as `roic_ttm`.
+- `debt_to_equity` is **not** used as `net_debt_to_ebitda`.
+- `earnings_growth` is **not** used as `forward_revenue_growth_est`.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Behavior change
+- Additive backend-only thesis input coverage: when provider gives debt/cash/EBITDA components, thesis scoring now receives `net_debt_to_ebitda` deterministically.
+- PARTIAL / INSUFFICIENT_DATA behavior remains unchanged when fields are missing.
+- No frontend/UI/Deploy/LLM behavior changes.
+
+## Remaining provider/cache/schema work
+- To cover additional quality metrics safely, later PRs need explicit provider field plumbing and cache contract expansion for cash-flow, income-statement, and share-history data (not proxy substitution).
+- Raw metric names remain backend-only intelligence ingredients; user-facing Intel/Deploy continues to require plain-English translations.
+
+---
+
+## Last change
 Intel v2 PR-3: mapper hardening for semantic honesty (PR: "test(intel-v2-pr3): lock unsafe thesis proxy mappings").
 
 ## Files touched

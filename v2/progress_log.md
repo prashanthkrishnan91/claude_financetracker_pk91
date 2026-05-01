@@ -1,3 +1,4 @@
+- 2026-05-01 — Intel v2 PR-4: audited backend quality coverage; added safe deterministic `net_debt_to_ebitda` derivation from existing yfinance `total_debt`/`cash`/`ebitda` payload fields + focused mapper tests; no UI/LLM/Deploy changes.
 # v2 Progress Log
 
 > **Archiving policy**: Move entries older than 30 days (or closed milestones) to

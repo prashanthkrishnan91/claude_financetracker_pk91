@@ -60,8 +60,8 @@ _TREND_REGIME_MAP: dict[str, float] = {
 }
 
 # Intentionally deferred thesis inputs (do NOT proxy-map from non-equivalent
-# fundamentals): fcf_margin, roic_ttm, net_debt_to_ebitda,
-# forward_revenue_growth_est. Missing data must remain missing.
+# fundamentals): fcf_margin, roic_ttm, forward_revenue_growth_est.
+# Missing data must remain missing.
 
 
 def map_to_thesis_inputs(
@@ -116,6 +116,12 @@ def map_to_thesis_inputs(
     beta = _safe_float(fundamentals.get("beta"))
     if beta is not None:
         out["beta"] = beta
+
+    # net_debt_to_ebitda can be derived exactly when all components exist:
+    # (total_debt - cash) / ebitda. We do not derive from debt_to_equity.
+    nde = _derive_net_debt_to_ebitda(fundamentals)
+    if nde is not None:
+        out["net_debt_to_ebitda"] = nde
 
     # ── Momentum (from FeatureSet) ───────────────────────────────────────────
 
@@ -204,3 +210,16 @@ def _trend_to_regime_score(trend_regime: str) -> Optional[float]:
     Returns None for unrecognised labels so missing data is never faked.
     """
     return _TREND_REGIME_MAP.get(trend_regime)
+
+
+def _derive_net_debt_to_ebitda(fundamentals: dict[str, Any]) -> Optional[float]:
+    """Return (total_debt - cash) / ebitda when inputs are cleanly available."""
+    total_debt = _safe_float(fundamentals.get("total_debt"))
+    cash = _safe_float(fundamentals.get("cash"))
+    ebitda = _safe_float(fundamentals.get("ebitda"))
+
+    if total_debt is None or cash is None or ebitda is None:
+        return None
+    if ebitda <= 0:
+        return None
+    return (total_debt - cash) / ebitda

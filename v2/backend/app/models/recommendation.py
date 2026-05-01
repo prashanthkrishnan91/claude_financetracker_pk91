@@ -105,6 +105,10 @@ class InsightCard(BaseModel):
     differentiation: Optional[str] = None        # why THIS ticker vs alternatives
     reasoning_schema_version: Optional[str] = None  # e.g. "human_v2"
     reasoning_source: Optional[str] = None          # fresh_llm | fallback | cache | stale_db
+    # Intel v2 PR-2 — deterministic thesis scorecard (backend/log only).
+    # Populated when the orchestrator has run and a ScoreCard is available.
+    # Frontend must not render this field until a dedicated UI pass is done.
+    thesis_v2: Optional[dict] = None
 
 
 class AgentRunStatus(BaseModel):

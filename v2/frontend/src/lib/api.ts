@@ -894,6 +894,56 @@ export interface DepositRecommendation {
 export type RegimeLabel = "bull" | "neutral" | "risk_off";
 export type DeploymentMode = "full" | "partial" | "defensive" | "wait";
 
+// Deploy Logic v2 — deterministic mode classifier output
+export type DeploymentModeV2 =
+  | "full_deploy"
+  | "staged_deploy"
+  | "defensive_reserve"
+  | "skip_or_wait";
+
+export type TickerRole = "Primary" | "Supporting" | "Watch";
+
+export interface ReserveTriggerV2 {
+  reserve_reason: string;
+  reserve_target_tickers: string[];
+  reserve_purpose: string;
+  trigger_type: string;
+  trigger_condition: string;
+  suggested_review_event: string | null;
+  suggested_review_date: string | null;
+  when_to_deploy_reserve: string;
+}
+
+export interface PerTickerDeploymentV2 {
+  ticker: string;
+  role: TickerRole;
+  amount: number;
+  deploy_now: number;
+  reserve: number;
+  conviction_level: string;
+  rationale: string;
+  capped?: boolean;
+  cap_reason?: string | null;
+}
+
+export interface DeploymentDecisionV2 {
+  total_deposit: number;
+  deploy_now_amount: number;
+  reserve_amount: number;
+  deployment_mode: DeploymentModeV2;
+  deployment_confidence: number;
+  deployment_reason: string;
+  cash_drag_penalty_applied: boolean;
+  reserve_reason: string | null;
+  reserve_trigger: ReserveTriggerV2 | null;
+  per_ticker_allocations: PerTickerDeploymentV2[];
+  risks: string[];
+  data_quality: "high" | "medium" | "low";
+  evaluation_notes_for_future_decision_log: string[];
+  deployment_score: number;
+  adjustments_applied: string[];
+}
+
 export interface RegimeBlock {
   regime_label: RegimeLabel;
   regime_score: number;

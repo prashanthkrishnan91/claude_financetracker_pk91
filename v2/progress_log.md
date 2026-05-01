@@ -361,3 +361,5 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Validation:
   - `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` (116 passed)
 - No Supabase SQL. No frontend/UI changes. No Deploy or LLM behavior changes.
+
+- Intel v2 PR-7: added backend-only deterministic plain-English thesis translation module + focused tests; no UI/Deploy/LLM changes.

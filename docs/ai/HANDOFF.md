@@ -1,4 +1,27 @@
 ## Last change
+Intel v2 PR-7: backend-only deterministic plain-English thesis translation contract (PR: "feat(intel-v2-pr7): add backend-only plain-English thesis translation layer").
+
+## Files touched
+- `v2/backend/app/services/intelligence/thesis_plain_english.py` — **new module**. Adds deterministic translator `build_thesis_plain_english(scorecard)` with additive plain-English labels: `headline`, `quality_label`, `valuation_label`, `risk_label`, `momentum_label`, `data_label`, `caveats`.
+- `v2/backend/tests/test_thesis_plain_english.py` — **new test file**. Covers COMPLETE positive summary, PARTIAL data-incomplete caveat, INSUFFICIENT_DATA conservative summary, raw metric redaction, and deterministic output.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Contract notes
+- Translation is backend-only and additive; no frontend/UI wiring was introduced.
+- Raw metric names remain hidden from user-facing copy (`fcf_margin`, `roic_ttm`, `net_debt_to_ebitda`, `ev_ebitda`, `ps_ttm`, peer median labels, interest coverage).
+- Future UI should consume plain-English labels, not raw metric keys.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_plain_english.py tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Behavior change
+- New backend-only translation contract is available as a module for future API/UI integration.
+- No score math changes, no allocation/deploy changes, no LLM behavior changes.
+
+---
+
+## Last change
 Intel v2 PR-5: backend-only cash-flow quality coverage via safe fcf_margin derivation (PR: "feat(intel-v2-pr5): add safe fcf_margin derivation from yfinance fundamentals").
 
 ## Files touched
@@ -185,6 +208,29 @@ Fix Deploy Logic v2 deploy-now denominator mismatch (PR: "fix(deploy-v2): unify 
 - Allocation row immediate amounts must use backend row `immediate_amount` directly; no secondary frontend redistribution is allowed in Step 2/Step 3 paths.
 
 # AI Handoff — Investing App
+
+## Last change
+Intel v2 PR-7: backend-only deterministic plain-English thesis translation contract (PR: "feat(intel-v2-pr7): add backend-only plain-English thesis translation layer").
+
+## Files touched
+- `v2/backend/app/services/intelligence/thesis_plain_english.py` — **new module**. Adds deterministic translator `build_thesis_plain_english(scorecard)` that converts thesis_v2 scorecard status/subscores into additive plain-English labels (`headline`, `quality_label`, `valuation_label`, `risk_label`, `momentum_label`, `data_label`, `caveats`). Supports both `ScoreCard` objects and serialized dict scorecards.
+- `v2/backend/tests/test_thesis_plain_english.py` — **new test file**. Covers COMPLETE positive summary, PARTIAL data-incomplete caveat, INSUFFICIENT_DATA conservative summary, raw metric key redaction, and deterministic output.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Contract notes
+- Translation is backend-only and additive; no frontend/UI wiring was introduced.
+- Raw metric names remain hidden from user-facing copy (no `fcf_margin`, `roic_ttm`, `net_debt_to_ebitda`, `ev_ebitda`, `ps_ttm`, peer median labels, or interest coverage in translation text).
+- Future UI should consume plain-English translation labels, not raw metric keys.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_plain_english.py tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Behavior change
+- New backend-only translation contract is available as a module for future API/UI integration.
+- No score math changes, no allocation/deploy changes, no LLM behavior changes.
+
+---
 
 ## Last change
 Intel v2 PR-6: valuation context audit + safe backend-only valuation field mapping (PR: "feat(intel-v2-pr6): add safe valuation field coverage for ps_ttm and ev_ebitda").

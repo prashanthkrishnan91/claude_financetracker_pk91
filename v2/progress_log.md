@@ -6,6 +6,18 @@
 
 ## Recent Changes
 
+### feat(intel-v2-pr9): render plain-English thesis on Intel cards
+- **Date**: May 1, 2026
+
+Intel v2 PR-9 frontend rendering pass:
+
+- Added `ThesisPlainEnglish` interface to `api.ts` and `thesis_plain_english` optional field to `InsightCardData`.
+- Added compact `ThesisReadSection` component inside `InsightCard`: "Thesis read" label, headline, label pills, caveats. Omitted silently when field is absent.
+- Contract rule enforced: UI binds only to `thesis_plain_english`; `thesis_v2` is never rendered.
+- Raw metric keys (`fcf_margin`, `roic_ttm`, `ev_ebitda`, `ps_ttm`, `net_debt_to_ebitda`, etc.) must never appear in rendered copy — covered by contract tests.
+- 20 contract tests in `InsightCardThesis.test.ts` covering: present fields, missing field no-crash, thesis_v2 isolation, metric key redaction, and UI-binding correctness.
+- No backend changes, no Supabase SQL, no LLM calls, no Deploy changes.
+
 ### feat(intel-v2-pr8): expose plain-English thesis response field
 - **Date**: May 1, 2026
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
-import type { InsightCardData } from "@/lib/api";
+import type { InsightCardData, ThesisPlainEnglish } from "@/lib/api";
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string; badge: string }> = {
   BUY:    { bg: "bg-positive/5",       text: "text-positive",      border: "border-positive/20",      badge: "action-badge-buy" },
@@ -63,6 +63,11 @@ export function InsightCard({
         </p>
       )}
 
+      {/* Thesis read */}
+      {card.thesis_plain_english && (
+        <ThesisReadSection thesis={card.thesis_plain_english} />
+      )}
+
       {/* Footer pills */}
       <div className="flex flex-wrap gap-1.5 pt-0.5">
         {card.tax_note && (
@@ -81,6 +86,45 @@ export function InsightCard({
           </span>
         )}
       </div>
+    </div>
+  );
+}
+
+function ThesisReadSection({ thesis }: { thesis: ThesisPlainEnglish }) {
+  const labels = [
+    thesis.quality_label,
+    thesis.valuation_label,
+    thesis.risk_label,
+    thesis.momentum_label,
+    thesis.data_label,
+  ].filter(Boolean) as string[];
+
+  const caveats = thesis.caveats?.filter(Boolean) ?? [];
+
+  if (!thesis.headline && labels.length === 0 && caveats.length === 0) return null;
+
+  return (
+    <div className="border-t border-border/40 pt-2 space-y-1.5">
+      <span className="metric-label text-[10px] text-text-muted uppercase tracking-widest">
+        Thesis read
+      </span>
+      {thesis.headline && (
+        <p className="text-xs text-text-primary leading-snug">{thesis.headline}</p>
+      )}
+      {labels.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {labels.map((label) => (
+            <span key={label} className="badge-surface text-[10px]">
+              {label}
+            </span>
+          ))}
+        </div>
+      )}
+      {caveats.map((caveat, i) => (
+        <p key={i} className="text-[11px] text-text-muted leading-snug">
+          {caveat}
+        </p>
+      ))}
     </div>
   );
 }

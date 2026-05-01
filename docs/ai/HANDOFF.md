@@ -1,4 +1,35 @@
 ## Last change
+Intel v2 PR-9: render plain-English thesis on frontend Intel cards (PR: "feat(intel-v2-pr9): render plain-English thesis on Intel cards").
+
+## Files touched
+- `v2/frontend/src/lib/api.ts` — Added `thesis_plain_english?: ThesisPlainEnglish | null` to `InsightCardData`. Added new exported `ThesisPlainEnglish` interface with `headline`, `quality_label`, `valuation_label`, `risk_label`, `momentum_label`, `data_label`, `caveats` fields. Additive, backward-compatible.
+- `v2/frontend/src/components/cards/InsightCard.tsx` — Imported `ThesisPlainEnglish` type. Added `ThesisReadSection` component rendered inside `InsightCard` when `thesis_plain_english` is present. Section is visually compact: thin divider, "Thesis read" label, headline, label pills, and caveats. Omitted entirely when field is null/undefined.
+- `v2/frontend/src/components/cards/InsightCardThesis.test.ts` — **new test file**. 20 contract tests across 5 groups: present fields render, missing thesis does not crash, thesis_v2 never rendered, no raw metric keys in display text, UI binds only to thesis_plain_english.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Frontend consumption rule (PR-9 contract)
+- Render `thesis_plain_english` only — never render `thesis_v2` directly in the UI.
+- `thesis_v2` is a backend-only raw scorecard dict; it must not appear in user-facing copy.
+- Raw metric keys (`fcf_margin`, `roic_ttm`, `ev_ebitda`, `ps_ttm`, `net_debt_to_ebitda`, etc.) must never appear in rendered UI copy.
+- `thesis_plain_english` is safe to render: plain-English strings, no raw metric keys.
+- If `thesis_plain_english` is null/undefined, omit the section silently.
+
+## QA scope completed
+- `npx tsc --noEmit` — no new errors introduced (pre-existing errors are missing node_modules types; unrelated to this PR).
+- All errors are from `AgentInsightCard.tsx` (pre-existing JSX type missing), not from changed files.
+- `npm run lint` — `next` binary not available in CI env; pre-existing limitation.
+- 20 focused contract tests authored in `InsightCardThesis.test.ts`.
+
+## Behavior change
+- `InsightCard` now renders a compact "Thesis read" section when `thesis_plain_english` is populated in the API response.
+- Section shows: headline (plain-English summary), 1–5 label pills (quality/valuation/risk/momentum/data), and up to N caveats.
+- Section is omitted when all sub-fields are null/empty (no visual noise for partial data).
+- No backend changes, no Supabase SQL, no LLM calls, no Deploy changes, no allocation math changes.
+
+---
+
+## Last change
 Intel v2 PR-8: wire plain-English thesis translator into backend recommendation/intel responses (PR: "feat(intel-v2-pr8): expose plain-English thesis response field").
 
 ## Files touched

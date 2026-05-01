@@ -5,6 +5,17 @@
 
 ## Recent Changes
 
+### test(intel-v2-pr3): lock unsafe thesis proxy mappings
+- **Date**: May 1, 2026
+
+Intel v2 PR-3 hardening pass for deterministic thesis mapper honesty:
+
+- Added focused mapper tests that assert semantic non-equivalence remains unmapped: `profit_margin→fcf_margin` blocked, `return_on_equity→roic_ttm` blocked, `debt_to_equity→net_debt_to_ebitda` blocked, `earnings_growth→forward_revenue_growth_est` blocked.
+- Added explicit mapper note that these thesis inputs are intentionally deferred until true provider/cache fields exist.
+- Kept existing safe deterministic mappings unchanged (`pe`, `forward_pe`, `peg`, `revenue_growth`, `beta`, momentum normalization, RS passthrough, SMA signal).
+- Added Intel v2 UI guidance note: advanced scoring input names remain backend-only and should be translated to plain-English investor guidance in user-facing surfaces.
+- No UI changes, no Deploy changes, no Supabase SQL, no LLM behavior changes.
+
 ### feat(intel-v2-pr2): thesis mapper + score_thesis() wiring into recommendation pipeline
 - **Date**: May 1, 2026
 

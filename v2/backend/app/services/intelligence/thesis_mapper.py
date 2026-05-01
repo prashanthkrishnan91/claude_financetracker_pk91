@@ -59,6 +59,10 @@ _TREND_REGIME_MAP: dict[str, float] = {
     "downtrend": 20.0,
 }
 
+# Intentionally deferred thesis inputs (do NOT proxy-map from non-equivalent
+# fundamentals): fcf_margin, roic_ttm, net_debt_to_ebitda,
+# forward_revenue_growth_est. Missing data must remain missing.
+
 
 def map_to_thesis_inputs(
     fundamentals: dict[str, Any],

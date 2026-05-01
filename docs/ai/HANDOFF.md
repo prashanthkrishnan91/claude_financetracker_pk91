@@ -1,4 +1,31 @@
 ## Last change
+Intel v2 PR-3: mapper hardening for semantic honesty (PR: "test(intel-v2-pr3): lock unsafe thesis proxy mappings").
+
+## Files touched
+- `v2/backend/tests/test_thesis_mapper.py` — added focused guardrail tests proving semantically mismatched fundamentals are intentionally omitted: `profit_margin` does not map to `fcf_margin`, `return_on_equity` does not map to `roic_ttm`, `debt_to_equity` does not map to `net_debt_to_ebitda`, and `earnings_growth` does not map to `forward_revenue_growth_est` (or `revenue_yoy`) without an exact source field.
+- `v2/backend/app/services/intelligence/thesis_mapper.py` — added explicit deferred-input note documenting that non-equivalent proxy mappings are intentionally blocked for `fcf_margin`, `roic_ttm`, `net_debt_to_ebitda`, `forward_revenue_growth_est`.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Architecture principle enforced
+- Mapper honesty is locked: no fake/proxy thesis inputs from non-equivalent fundamentals.
+- PARTIAL / INSUFFICIENT_DATA remains expected and valid when provider coverage is incomplete.
+- No allocation/deploy/LLM behavior changes.
+
+## Behavior change
+- No new runtime mappings added.
+- New tests now explicitly fail if unsafe proxy mappings are introduced in future edits.
+
+## Next steps
+- Add true provider/cache support (not proxy substitution) for: `fcf_margin`, `roic_ttm`, `net_debt_to_ebitda`, forward revenue estimate inputs, peer medians, history metrics, and insider/guidance/drawdown risk data.
+- Intel v2 UI principle: keep advanced scoring ingredient names backend-only. User-facing Intel/Deploy should translate thesis_v2 into plain-English guidance rather than exposing raw metric keys.
+
+---
+
+## Last change
 Intel v2 PR-2: deterministic score_thesis() mapper + backend response wiring (PR: "feat(intel-v2-pr2): thesis mapper + score_thesis() wiring into recommendation pipeline").
 
 ## Files touched

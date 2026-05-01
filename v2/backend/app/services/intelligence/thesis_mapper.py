@@ -102,6 +102,14 @@ def map_to_thesis_inputs(
     if peg is not None:
         out["peg"] = peg
 
+    ps_ttm = _safe_float(fundamentals.get("ps_ttm"))
+    if ps_ttm is not None:
+        out["ps_ttm"] = ps_ttm
+
+    ev_ebitda = _safe_float(fundamentals.get("ev_ebitda"))
+    if ev_ebitda is not None:
+        out["ev_ebitda"] = ev_ebitda
+
     # ── Growth (from fundamentals) ───────────────────────────────────────────
     # yfinance revenueGrowth is a decimal fraction (0.12 = 12 %).
     # Defensive: convert to decimal if the value looks like percent-points.

@@ -187,6 +187,36 @@ Fix Deploy Logic v2 deploy-now denominator mismatch (PR: "fix(deploy-v2): unify 
 # AI Handoff — Investing App
 
 ## Last change
+Intel v2 PR-6: valuation context audit + safe backend-only valuation field mapping (PR: "feat(intel-v2-pr6): add safe valuation field coverage for ps_ttm and ev_ebitda").
+
+## Files touched
+- `v2/backend/app/services/agents/data_sources.py` — yfinance fundamentals payload now includes additive backend-only valuation fields when available: `ps_ttm` (`priceToSalesTrailing12Months`) and `ev_ebitda` (`enterpriseToEbitda`).
+- `v2/backend/app/services/intelligence/thesis_mapper.py` — added exact deterministic pass-through mappings: `ps_ttm -> ps_ttm` and `ev_ebitda -> ev_ebitda` (no conversion, no proxy derivation).
+- `v2/backend/tests/test_thesis_mapper.py` — added focused mapping/omission tests for `ps_ttm` and `ev_ebitda` including NaN/None omission behavior.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## PR-6 audit findings (valuation context)
+- **Found via existing provider path (`yfinance info`)**: trailing PE (`trailingPE`), forward PE (`forwardPE`), PEG (`pegRatio`), price-to-sales (`priceToSalesTrailing12Months`), EV/EBITDA (`enterpriseToEbitda`), sector, industry.
+- **Mapped now (safe/exact)**: `trailing_pe`, `forward_pe`, `peg`, `ps_ttm`, `ev_ebitda`.
+- **Found but deferred**: price-to-free-cash-flow (no stable exact provider key currently wired), peer/sector medians, own-history valuation baselines.
+- **Not present as reliable context in current pipeline**: true peer set with medians and historical valuation baselines for cheap/expensive labels.
+
+## Explicit semantic guardrails upheld
+- No “cheap/expensive” label from PE-only or PEG-only.
+- No sector-string-only peer baseline inference.
+- No synthetic peer medians or historical ranges.
+- Raw valuation metric names remain backend-only inputs.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Behavior change
+- Additive backend-only valuation coverage: when provider supplies P/S and EV/EBITDA, thesis scoring now receives exact `ps_ttm` and `ev_ebitda` inputs.
+- No user-facing Intel/Deploy wording changes.
+- No frontend/UI/LLM/Deploy behavior changes.
+
+## Last change
 Deploy Logic v2 PR 2: wire deterministic deployment engine into the live Deploy recommendation path (PR: "feat(deploy-v2-pr2): wire deployment_engine into live allocation router path").
 
 ## Files touched

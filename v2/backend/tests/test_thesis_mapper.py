@@ -106,6 +106,14 @@ class TestMapperMapsFields:
         inputs = map_to_thesis_inputs({"peg": 1.5})
         assert inputs["peg"] == 1.5
 
+    def test_ps_ttm_present(self):
+        inputs = map_to_thesis_inputs({"ps_ttm": 6.2})
+        assert inputs["ps_ttm"] == pytest.approx(6.2)
+
+    def test_ev_to_ebitda_present(self):
+        inputs = map_to_thesis_inputs({"ev_ebitda": 14.8})
+        assert inputs["ev_ebitda"] == pytest.approx(14.8)
+
     def test_beta_present(self):
         inputs = map_to_thesis_inputs({"beta": 1.1})
         assert inputs["beta"] == 1.1
@@ -126,6 +134,11 @@ class TestMapperMapsFields:
         inputs = map_to_thesis_inputs({"sector": "Tech", "market_cap": 1e12})
         assert "sector" not in inputs
         assert "market_cap" not in inputs
+
+    def test_nan_valuation_fields_are_omitted(self):
+        inputs = map_to_thesis_inputs({"ps_ttm": float("nan"), "ev_ebitda": None})
+        assert "ps_ttm" not in inputs
+        assert "ev_ebitda" not in inputs
 
 
 # ── 2. pe maps to trailing_pe ─────────────────────────────────────────────────

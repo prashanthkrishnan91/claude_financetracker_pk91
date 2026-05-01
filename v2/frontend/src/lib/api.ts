@@ -365,6 +365,18 @@ export interface InsightCardData {
   differentiation?: string | null;
   reasoning_schema_version?: string | null;
   reasoning_source?: "fresh_llm" | "fallback" | "cache" | "stale_db" | "no_analyst_data" | string | null;
+  // Intel v2 PR-9: plain-English thesis labels (never render thesis_v2 directly)
+  thesis_plain_english?: ThesisPlainEnglish | null;
+}
+
+export interface ThesisPlainEnglish {
+  headline?: string | null;
+  quality_label?: string | null;
+  valuation_label?: string | null;
+  risk_label?: string | null;
+  momentum_label?: string | null;
+  data_label?: string | null;
+  caveats?: string[] | null;
 }
 
 export interface AgentRunQueued {

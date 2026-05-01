@@ -691,6 +691,8 @@ def fetch_yfinance_fundamentals_sync(ticker: str) -> dict[str, Any]:
             "pe": _safe_float(info.get("trailingPE")),
             "forward_pe": _safe_float(info.get("forwardPE")),
             "peg": _safe_float(info.get("pegRatio")),
+            "ps_ttm": _safe_float(info.get("priceToSalesTrailing12Months")),
+            "ev_ebitda": _safe_float(info.get("enterpriseToEbitda")),
             "eps": _safe_float(info.get("trailingEps")),
             "profit_margin": _safe_float(info.get("profitMargins")),
             "revenue_growth": _safe_float(info.get("revenueGrowth")),

@@ -6,6 +6,17 @@
 
 ## Recent Changes
 
+### feat(intel-v2-pr6): add safe backend valuation mapping coverage
+- **Date**: May 1, 2026
+
+Intel v2 PR-6 backend-only valuation-context pass:
+
+- Added additive yfinance fundamentals payload fields: `ps_ttm` (`priceToSalesTrailing12Months`) and `ev_ebitda` (`enterpriseToEbitda`).
+- Added exact deterministic thesis mapper pass-through coverage for `ps_ttm` and `ev_ebitda`.
+- Added focused mapper tests covering exact mapping and omission of invalid/missing valuation fields (NaN/None).
+- Maintained semantic guardrails: no fake peer medians, no historical baseline fabrication, no PE/PEG-only cheap/expensive labels.
+- No Supabase SQL, no frontend/UI changes, no Deploy wiring changes, no LLM behavior changes.
+
 ### test(intel-v2-pr3): lock unsafe thesis proxy mappings
 - **Date**: May 1, 2026
 

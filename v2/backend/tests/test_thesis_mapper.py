@@ -282,6 +282,25 @@ class TestMissingFieldsOmitted:
         assert "revenue_yoy" not in inputs
 
 
+class TestUnsafeProxyMappingsAreOmitted:
+    def test_profit_margin_not_mapped_to_fcf_margin(self):
+        inputs = map_to_thesis_inputs({"profit_margin": 0.22})
+        assert "fcf_margin" not in inputs
+
+    def test_return_on_equity_not_mapped_to_roic_ttm(self):
+        inputs = map_to_thesis_inputs({"return_on_equity": 0.18})
+        assert "roic_ttm" not in inputs
+
+    def test_debt_to_equity_not_mapped_to_net_debt_to_ebitda(self):
+        inputs = map_to_thesis_inputs({"debt_to_equity": 1.8})
+        assert "net_debt_to_ebitda" not in inputs
+
+    def test_earnings_growth_not_mapped_to_forward_revenue_growth_est(self):
+        inputs = map_to_thesis_inputs({"earnings_growth": 0.25})
+        assert "forward_revenue_growth_est" not in inputs
+        assert "revenue_yoy" not in inputs
+
+
 # ── 9. score_thesis through mapper returns honest status ──────────────────────
 
 class TestScoreThroughMapper:

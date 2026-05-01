@@ -5,6 +5,18 @@
 
 ## Recent Changes
 
+### feat(deploy-v2-pr2): wire deployment_engine into live allocation router path
+- **Date**: May 1, 2026
+
+Deploy Logic v2 PR 2 — wiring/integration, no UI redesign, no Supabase SQL:
+
+- **Live wiring**: `classify_deployment()` called in `GET /api/v1/allocation/plan` after allocations are available. v2 decision now determines `deploy_now_amount`, `reserve_amount`, `deployment_mode`, `deployment_confidence`, `reserve_trigger`, and per-ticker `immediate_amount`/`reserve_amount`.
+- **Canonical plan amounts**: `plan.recommended_deploy_amount` and `plan.cash_reserve` now mirror v2 values; existing Deploy UI receives v2 decisions transparently.
+- **Backward compat**: all pre-existing response fields preserved; `adaptive` block retained for audit/behavior profile.
+- **Per-ticker**: `immediate_amount` and `reserve_amount` per row sourced from v2 `per_ticker_allocations`; adaptive `staging_instruction`/`execution_timing` preserved alongside.
+- **Frontend passthrough**: `deposit-plan/route.ts` forwards new v2 fields; `api.ts` types extended with `deployment_v2` block and v2 plan fields.
+- **Tests**: 16 new focused wiring tests in `test_deployment_wiring.py`; 97 total tests pass (0 regressions).
+
 ### feat(deploy-v2-pr1): deterministic deployment-mode classifier, output schema, and backend tests
 - **Commit**: `TBD`
 - **Date**: May 1, 2026

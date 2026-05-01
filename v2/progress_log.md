@@ -5,6 +5,16 @@
 
 ## Recent Changes
 
+### feat(intel-v2-pr1): deterministic thesis score engine foundation
+- **Date**: May 1, 2026
+
+Intel v2 PR-1 — backend-only, no UI changes, no Supabase SQL, no LLM calls:
+
+- **New module**: `v2/backend/app/services/intelligence/score_schema.py` — pure data models: `ScoreStatus` (READY/PARTIAL/INSUFFICIENT_DATA), `ConvictionBand` (HIGH/MEDIUM/LOW/INSUFFICIENT_DATA), `SubScore` and `ScoreCard` dataclasses with provenance fields (inputs_used, inputs_missing, data_quality, published).
+- **New module**: `v2/backend/app/services/intelligence/thesis_engine.py` — deterministic `score_thesis(ticker, inputs) → ScoreCard`. Five subscores: quality (30%), valuation (25%), risk (20%), growth (15%), momentum (10%). Data quality gates enforce honest PARTIAL/INSUFFICIENT_DATA status rather than guessing. All formulas are linear, transparent, and constant-driven. No IO, no LLM, no yfinance.
+- **Tests**: 40 focused tests in `test_thesis_engine.py` covering all 10 required scenarios. 40/40 passed.
+- Architecture principle: numbers are deterministic; LLM explains and challenges scores in future PRs, never invents them.
+
 ### fix(deploy-v2): unify deploy-now denominator across card/table/step3
 - **Date**: May 1, 2026
 

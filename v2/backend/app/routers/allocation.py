@@ -6,6 +6,7 @@ analyst insights + current holdings, and returns ranked dollar allocations.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from typing import Any
 
@@ -29,6 +30,7 @@ from ..services.allocation_engine import (
     build_allocation_plan,
 )
 from ..services.decision_log_service import DecisionLogService
+from ..services.deployment_engine import DeploymentDecision, classify_deployment
 from ..services.recommendation_engine import RecommendationService
 from ..services.regime_engine import RegimeOutput, detect_market_regime
 
@@ -169,6 +171,7 @@ def _plan_to_dict(
     strategy_mode: str = "allocation_engine",
     regime: RegimeOutput | None = None,
     adaptive: AdaptiveDecision | None = None,
+    deployment_v2: DeploymentDecision | None = None,
 ) -> dict:
     """Serialize the engine output into the JSON shape the Deploy UI expects."""
     staged_by_ticker: dict[str, StagedAllocation] = {}
@@ -177,10 +180,20 @@ def _plan_to_dict(
             s.ticker.upper(): s for s in adaptive.staged_allocations
         }
 
+    # Build v2 per-ticker lookup for O(1) access
+    v2_by_ticker: dict[str, Any] = {}
+    if deployment_v2 is not None:
+        for pt in deployment_v2.per_ticker_allocations:
+            v2_by_ticker[pt.ticker.upper()] = pt
+
     allocations: list[dict[str, Any]] = []
     for a in plan.allocations:
         staged = staged_by_ticker.get(a.ticker.upper())
-        allocations.append({
+        v2t = v2_by_ticker.get(a.ticker.upper())
+        # v2 canonical immediate/reserve; fall back to adaptive staging, then full deploy
+        immediate = v2t.deploy_now if v2t is not None else (staged.immediate_amount if staged else a.amount)
+        reserve = v2t.reserve if v2t is not None else (staged.reserve_amount if staged else 0.0)
+        row: dict[str, Any] = {
             "ticker": a.ticker,
             "symbol": a.ticker,                 # alias for existing Deploy UI
             "action": a.action,
@@ -199,12 +212,18 @@ def _plan_to_dict(
             "execution_style": a.do,
             "alt_view": a.alt_view,
             "category": a.category,
-            # Adaptive staging — falls back to (full, 0) if adapter not run.
-            "immediate_amount": staged.immediate_amount if staged else a.amount,
-            "reserve_amount": staged.reserve_amount if staged else 0.0,
+            # Canonical deploy-now / reserve (v2 when available, adaptive fallback)
+            "immediate_amount": immediate,
+            "reserve_amount": reserve,
             "staging_instruction": staged.staging_instruction if staged else None,
             "execution_timing": staged.execution_timing if staged else None,
-        })
+        }
+        # Additive v2 per-ticker fields
+        if v2t is not None:
+            row["ticker_role"] = v2t.role
+            row["capped"] = v2t.capped
+            row["cap_reason"] = v2t.cap_reason
+        allocations.append(row)
     exclusions = [{"ticker": e.ticker, "reason": e.reason} for e in plan.exclusions]
     trims = [
         {
@@ -226,6 +245,19 @@ def _plan_to_dict(
         plan_block["cash_reserve"] = adaptive.cash_reserve_amount
         plan_block["deploy_percentage"] = adaptive.deploy_percentage
         plan_block["deployment_mode"] = adaptive.deployment_mode
+    if deployment_v2 is not None:
+        # v2 canonical amounts — also override backward-compat fields so the
+        # existing Deploy UI picks up the v2 values transparently.
+        plan_block["deploy_now_amount"] = deployment_v2.deploy_now_amount
+        plan_block["reserve_amount"] = deployment_v2.reserve_amount
+        plan_block["deployment_mode_v2"] = deployment_v2.deployment_mode
+        plan_block["deployment_confidence"] = deployment_v2.deployment_confidence
+        plan_block["deployment_reason"] = deployment_v2.deployment_reason
+        plan_block["cash_drag_penalty_applied"] = deployment_v2.cash_drag_penalty_applied
+        plan_block["reserve_reason"] = deployment_v2.reserve_reason
+        # Override backward-compat fields with v2 canonical values
+        plan_block["recommended_deploy_amount"] = deployment_v2.deploy_now_amount
+        plan_block["cash_reserve"] = deployment_v2.reserve_amount
 
     explanation = plan.portfolio_explanation
     if adaptive is not None and adaptive.adaptive_reasons:
@@ -264,6 +296,26 @@ def _plan_to_dict(
             "adjustments_applied": adaptive.adjustments_applied,
             "style_messages": adaptive.style_messages,
             "behavior_profile": adaptive.behavior_profile,
+        }
+    if deployment_v2 is not None:
+        out["deployment_v2"] = {
+            "total_deposit": deployment_v2.total_deposit,
+            "deploy_now_amount": deployment_v2.deploy_now_amount,
+            "reserve_amount": deployment_v2.reserve_amount,
+            "deployment_mode": deployment_v2.deployment_mode,
+            "deployment_confidence": deployment_v2.deployment_confidence,
+            "deployment_reason": deployment_v2.deployment_reason,
+            "cash_drag_penalty_applied": deployment_v2.cash_drag_penalty_applied,
+            "reserve_reason": deployment_v2.reserve_reason,
+            "reserve_trigger": (
+                dataclasses.asdict(deployment_v2.reserve_trigger)
+                if deployment_v2.reserve_trigger else None
+            ),
+            "risks": deployment_v2.risks,
+            "data_quality": deployment_v2.data_quality,
+            "evaluation_notes_for_future_decision_log": deployment_v2.evaluation_notes_for_future_decision_log,
+            "deployment_score": deployment_v2.deployment_score,
+            "adjustments_applied": deployment_v2.adjustments_applied,
         }
     return out
 
@@ -364,6 +416,26 @@ async def get_allocation_plan(
             adaptive.deploy_percentage, adaptive.deployment_mode,
         )
 
+    deployment_v2: DeploymentDecision | None = None
+    try:
+        deployment_v2 = classify_deployment(
+            cash_to_deploy=cash_to_invest,
+            allocations=plan.allocations,
+            regime=regime,  # type: ignore[arg-type]
+            holdings=holdings,
+            portfolio_total=portfolio_total,
+        )
+        logger.info(
+            "allocation: v2 mode=%s deploy_now=$%.0f reserve=$%.0f score=%.1f",
+            deployment_v2.deployment_mode,
+            deployment_v2.deploy_now_amount,
+            deployment_v2.reserve_amount,
+            deployment_v2.deployment_score,
+        )
+    except Exception as exc:  # noqa: BLE001 — v2 classifier is optional; never fail Deploy
+        logger.warning("allocation: v2 deployment classification failed — %s", exc)
+        deployment_v2 = None
+
     cards_by_ticker = {str(getattr(c, "ticker", "")).upper(): c for c in cards}
     for exclusion in plan.exclusions[:5]:
         card = cards_by_ticker.get(exclusion.ticker.upper())
@@ -382,4 +454,4 @@ async def get_allocation_plan(
             getattr(card, "data_quality_label", None) if card else None,
             getattr(card, "analysis_source", None) if card else None,
         )
-    return _plan_to_dict(plan, regime=regime, adaptive=adaptive)
+    return _plan_to_dict(plan, regime=regime, adaptive=adaptive, deployment_v2=deployment_v2)

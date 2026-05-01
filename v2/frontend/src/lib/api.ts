@@ -999,6 +999,14 @@ export interface DepositPlanResult {
     cash_reserve?: number;
     deploy_percentage?: number;
     deployment_mode?: DeploymentMode;
+    // v2 canonical fields
+    deploy_now_amount?: number;
+    reserve_amount?: number;
+    deployment_mode_v2?: DeploymentModeV2;
+    deployment_confidence?: number;
+    deployment_reason?: string;
+    cash_drag_penalty_applied?: boolean;
+    reserve_reason?: string | null;
   };
   recommendations: DepositRecommendation[];
   allocations?: DepositRecommendation[];
@@ -1023,5 +1031,6 @@ export interface DepositPlanResult {
   deployment_risks?: string[];
   regime?: RegimeBlock | null;
   adaptive?: AdaptiveBlock | null;
+  deployment_v2?: DeploymentDecisionV2 | null;
   debug?: Record<string, unknown>;
 }

@@ -1,6 +1,45 @@
 # AI Handoff — Investing App
 
 ## Last change
+Deploy Logic v2 PR 2: wire deterministic deployment engine into the live Deploy recommendation path (PR: "feat(deploy-v2-pr2): wire deployment_engine into live allocation router path").
+
+## Files touched
+- `v2/backend/app/routers/allocation.py` — imported `classify_deployment` + `DeploymentDecision` from `deployment_engine`; added `deployment_v2` parameter to `_plan_to_dict()`; call `classify_deployment()` in route handler after adaptive layer; per-ticker `immediate_amount`/`reserve_amount` now come from v2 `per_ticker_allocations`; plan_block gains `deploy_now_amount`, `reserve_amount`, `deployment_mode_v2`, `deployment_confidence`, `deployment_reason`, `cash_drag_penalty_applied`, `reserve_reason` and overrides `recommended_deploy_amount`/`cash_reserve` with v2 canonical values; top-level `deployment_v2` block added.
+- `v2/frontend/src/app/api/deposit-plan/route.ts` — added `DeploymentV2Block` and `ReserveTriggerV2` types; extended `AllocationPlanPayload.plan` with v2 fields; forwards `deployment_v2` block and all v2 plan fields in the JSON response.
+- `v2/frontend/src/lib/api.ts` — added v2 fields to `DepositPlanResult.plan` (`deploy_now_amount`, `reserve_amount`, `deployment_mode_v2`, `deployment_confidence`, `deployment_reason`, `cash_drag_penalty_applied`, `reserve_reason`); added `deployment_v2?: DeploymentDecisionV2 | null` to `DepositPlanResult`.
+- `v2/backend/tests/test_deployment_wiring.py` — **new test file**. 16 focused tests verifying the live wiring contract: full_deploy deploys full $900 with no trigger; staged only reserves with trigger; per-ticker sums match deploy_now_amount; hard no-reserve-without-trigger rule upheld; backward-compat fields preserved; Watch-tier cap reflected in immediate_amount.
+- `v2/progress_log.md` — concise entry added.
+
+## QA scope completed
+- `pytest -q v2/backend/tests/test_deployment_engine.py` — 32 passed (no regressions).
+- `pytest -q v2/backend/tests/test_adaptive_deployment.py` — 32 passed (no regressions).
+- `pytest -q v2/backend/tests/test_allocation_engine.py` — 17 passed (no regressions).
+- `pytest -q v2/backend/tests/test_deployment_wiring.py` — 16 new wiring tests passed.
+- Total: 97 tests, 0 failures.
+- No Supabase SQL required.
+- No LLM calls added or changed.
+- `adaptive_deployment.py` and its tests untouched.
+
+## Behavior change
+- **Live**: `GET /api/v1/allocation/plan` now calls `classify_deployment()` for every request. The `deployment_v2` block is present in the response with `deploy_now_amount`, `reserve_amount`, `deployment_mode` (v2 labels), `deployment_confidence`, `reserve_trigger`, `risks`, and `adjustments_applied`.
+- **Plan-level canonical amounts**: `plan.recommended_deploy_amount` and `plan.cash_reserve` are now driven by the v2 engine (was adaptive). Old Deploy UI reads same field names and gets v2 values transparently.
+- **Per-ticker**: `immediate_amount` and `reserve_amount` per allocation row now come from v2's `per_ticker_allocations` (imm_frac × amount). Adaptive's `staging_instruction` and `execution_timing` are preserved alongside.
+- **Backward compat**: all pre-existing response fields (`adaptive`, `regime`, `plan.deployment_mode`, `plan.deploy_percentage`, `plan.cash_reserve`, `plan.recommended_deploy_amount`) remain in the response. The `adaptive` block retains its own values for audit/debug.
+- **Hard reserve rule**: enforced at the classify_deployment call site — reserve > $25 is only permitted if `_generate_reserve_trigger` returns a specific trigger; otherwise mode is forced to `full_deploy` and reserve to 0.
+
+## Known issues / next steps
+- Frontend Deploy UI still reads `plan.recommended_deploy_amount` (unchanged field name); it now receives the v2 value. No UI redesign needed.
+- `npm install` not run in CI; frontend type check requires deployment environment.
+- `adaptive_deployment.py` remains in codebase as a fallback and for its behavior profile / staging instruction details. Migration of old mode labels (`full/partial/defensive/wait`) to v2 labels can follow separately.
+
+## Debug notes
+- `classify_deployment()` is wrapped in a broad exception guard in the router — if it fails for any reason, `deployment_v2=None` is used and the response falls back to adaptive-only values.
+- `_plan_to_dict` applies v2 values after the adaptive block, so v2 always wins for `recommended_deploy_amount` and `cash_reserve` when both are present.
+- Score formula and constants are unchanged from PR 1 (`deployment_engine.py`).
+
+---
+
+## Previous change
 Deploy Logic v2 PR 1: deterministic deployment-mode classifier, output schema, and focused backend tests (PR: "feat(deploy-v2-pr1): deterministic deployment-mode classifier").
 
 ## Files touched

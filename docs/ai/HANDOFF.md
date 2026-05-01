@@ -1,4 +1,34 @@
 ## Last change
+Intel v2 PR-1: deterministic thesis score engine foundation (PR: "feat(intel-v2-pr1): deterministic thesis score engine foundation").
+
+## Files touched
+- `v2/backend/app/services/intelligence/score_schema.py` — **new module**. Pure data models: `ScoreStatus` enum (READY/PARTIAL/INSUFFICIENT_DATA), `ConvictionBand` enum (HIGH/MEDIUM/LOW/INSUFFICIENT_DATA), `SubScore` dataclass (score 0–100, data_quality 0–1, inputs_used, inputs_missing, published), `ScoreCard` dataclass (ticker, status, 5 subscores, conviction_score, conviction_band, blended_data_quality, inputs_used, inputs_missing, score_version).
+- `v2/backend/app/services/intelligence/thesis_engine.py` — **new module**. Deterministic scoring engine: `score_thesis(ticker, inputs) → ScoreCard`. Five subscores (quality, valuation, growth, risk, momentum). Blend weights: quality 0.30 / valuation 0.25 / risk 0.20 / growth 0.15 / momentum 0.10. Data quality gates: subscore not published if data_quality < 0.40; conviction not published if blended quality < 0.50; INSUFFICIENT_DATA when ≥2 major subscores have data_quality < 0.50. All normalizers are linear, clamped to [0, 1]; scores clamped to [0, 100]. No IO, no LLM, no yfinance, no DB.
+- `v2/backend/tests/test_thesis_engine.py` — **new test file**. 40 focused tests across 10 scenarios: READY with full data, PARTIAL with missing fields, INSUFFICIENT_DATA on empty inputs, exact conviction blend weights, valuation direction (cheaper = higher score), risk direction (safer = higher score), optional gaap_nongaap_gap, bounds clamping, determinism, momentum precomputed-only.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## QA scope completed
+- `pytest -q v2/backend/tests/test_thesis_engine.py` — 40 passed, 0 failures.
+- No existing tests run (this PR adds no wiring; regression scope is zero).
+
+## Architecture principle enforced
+- Numbers are deterministic. LLM must not invent metrics, scores, or allocation amounts.
+- Engine accepts already-collected numeric inputs; LLM layer (future PRs) explains results only.
+- Deploy v2 continues to own all allocation math.
+
+## Behavior change
+- None in production. New modules are not wired to any router, API, or frontend path.
+- No Supabase SQL required. No LLM calls added. No API contracts changed.
+
+## Known issues / next steps
+- Intel v2 PR-2 scope: wire `score_thesis()` into per-ticker data collection and expose scores via an Intel API endpoint or existing recommendation pipeline.
+- Subscore normalizer ranges are calibrated for growth-equity universe; may need tuning for value/dividend/crypto tickers.
+- `peer_ps_median`, `peer_ev_ebitda_median`, `own_5y_ps_median` contribute to scoring only when paired with the primary metric (ps_ttm / ev_ebitda); they still count toward data_quality if present alone.
+
+---
+
+## Previous change
 Fix Deploy Logic v2 deploy-now denominator mismatch (PR: "fix(deploy-v2): unify deploy-now denominator across card/table/step3").
 
 ## Files touched

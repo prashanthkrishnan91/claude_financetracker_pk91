@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.intelligence.thesis_mapper import (
+    _derive_net_debt_to_ebitda,
     _derive_sma_signal,
     _normalize_to_decimal,
     _trend_to_regime_score,
@@ -107,6 +108,10 @@ class TestMapperMapsFields:
     def test_beta_present(self):
         inputs = map_to_thesis_inputs({"beta": 1.1})
         assert inputs["beta"] == 1.1
+
+    def test_total_debt_cash_ebitda_derives_net_debt_to_ebitda(self):
+        inputs = map_to_thesis_inputs({"total_debt": 100.0, "cash": 25.0, "ebitda": 50.0})
+        assert inputs["net_debt_to_ebitda"] == pytest.approx(1.5)
 
     def test_revenue_growth_mapped_to_revenue_yoy(self):
         inputs = map_to_thesis_inputs({"revenue_growth": 0.15})
@@ -300,6 +305,28 @@ class TestUnsafeProxyMappingsAreOmitted:
         assert "forward_revenue_growth_est" not in inputs
         assert "revenue_yoy" not in inputs
 
+
+
+class TestNetDebtToEbitdaDerivation:
+    def test_derivation_omitted_when_any_component_missing(self):
+        assert "net_debt_to_ebitda" not in map_to_thesis_inputs({"total_debt": 100.0, "cash": 20.0})
+        assert "net_debt_to_ebitda" not in map_to_thesis_inputs({"total_debt": 100.0, "ebitda": 20.0})
+
+    def test_derivation_omitted_when_ebitda_non_positive(self):
+        assert "net_debt_to_ebitda" not in map_to_thesis_inputs({"total_debt": 100.0, "cash": 10.0, "ebitda": 0.0})
+        assert "net_debt_to_ebitda" not in map_to_thesis_inputs({"total_debt": 100.0, "cash": 10.0, "ebitda": -5.0})
+
+    def test_derivation_not_sourced_from_debt_to_equity_proxy(self):
+        assert "net_debt_to_ebitda" not in map_to_thesis_inputs({"debt_to_equity": 1.4})
+
+
+class TestNetDebtToEbitdaHelper:
+    def test_helper_returns_ratio(self):
+        assert _derive_net_debt_to_ebitda({"total_debt": 90.0, "cash": 10.0, "ebitda": 40.0}) == pytest.approx(2.0)
+
+    def test_helper_returns_none_for_invalid_inputs(self):
+        assert _derive_net_debt_to_ebitda({"total_debt": None, "cash": 10.0, "ebitda": 40.0}) is None
+        assert _derive_net_debt_to_ebitda({"total_debt": 90.0, "cash": 10.0, "ebitda": 0.0}) is None
 
 # ── 9. score_thesis through mapper returns honest status ──────────────────────
 

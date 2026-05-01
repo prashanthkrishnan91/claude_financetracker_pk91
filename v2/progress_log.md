@@ -329,3 +329,24 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Added/updated frontend unit tests for deterministic key generation and changed-key behavior when deposit context changes.
 - No Supabase SQL required.
 - Known limitation remains: historical duplicate rows already stored are not auto-deduplicated.
+## 2026-05-01 — Intel v2 PR-5: backend-only cash-flow quality coverage (safe fcf_margin)
+
+- Added additive yfinance provider fields to fundamentals payload:
+  - `free_cash_flow` (`info.freeCashflow`)
+  - `operating_cash_flow` (`info.operatingCashflow`)
+  - `revenue` (`info.totalRevenue`)
+- Added safe mapper derivation:
+  - `fcf_margin = free_cash_flow / revenue` only when both numeric and `revenue > 0`.
+  - Omit on missing/invalid/NaN/`revenue <= 0`.
+- Explicitly preserved no-proxy guardrails:
+  - `profit_margin` not mapped to `fcf_margin`.
+  - Existing semantic guardrails for ROE→ROIC, D/E→NDE, earnings_growth→forward_revenue_growth_est unchanged.
+- Added focused mapper tests for:
+  - exact fcf_margin math
+  - omission when FCF missing
+  - omission when revenue missing
+  - omission when revenue <= 0
+  - no proxy mapping from profit_margin
+- Validation:
+  - `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` (116 passed)
+- No Supabase SQL. No frontend/UI changes. No Deploy or LLM behavior changes.

@@ -1,4 +1,36 @@
 ## Last change
+Intel v2 PR-5: backend-only cash-flow quality coverage via safe fcf_margin derivation (PR: "feat(intel-v2-pr5): add safe fcf_margin derivation from yfinance fundamentals").
+
+## Files touched
+- `v2/backend/app/services/agents/data_sources.py` — yfinance fundamentals payload now includes additive backend-only raw fields: `free_cash_flow` (`freeCashflow`), `operating_cash_flow` (`operatingCashflow`), and `revenue` (`totalRevenue`) when available.
+- `v2/backend/app/services/intelligence/thesis_mapper.py` — added exact deterministic derivation `fcf_margin = free_cash_flow / revenue` only when both values are numeric and `revenue > 0`; otherwise omitted. No proxy mapping from `profit_margin`.
+- `v2/backend/tests/test_thesis_mapper.py` — added focused tests for exact fcf_margin math and omission guardrails (missing numerator/denominator, revenue <= 0, and explicit no-proxy mapping from profit_margin).
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## PR-5 audit findings (cash-flow fields)
+- **Found via existing provider path (`yfinance info`)**: `freeCashflow`, `operatingCashflow`, `totalRevenue`.
+- **Mapped now (safe/exact)**: `fcf_margin` derived from (`free_cash_flow`, `revenue`) only.
+- **Collected but deferred in mapper**: `operating_cash_flow` (no exact current thesis_engine input field for OCF ratio/quality).
+
+## Explicit semantic guardrails upheld
+- `profit_margin` is **not** used as `fcf_margin`.
+- `return_on_equity` is **not** used as `roic_ttm`.
+- `debt_to_equity` is **not** used as `net_debt_to_ebitda`.
+- `earnings_growth` is **not** used as `forward_revenue_growth_est`.
+
+## QA scope completed
+- `cd v2/backend && pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` — passed.
+
+## Behavior change
+- Additive backend-only thesis input coverage: when provider gives free cash flow and total revenue, thesis scoring now receives deterministic `fcf_margin`.
+- `operating_cash_flow` is collected in provider payload for future safe wiring but not mapped currently.
+- PARTIAL / INSUFFICIENT_DATA behavior remains unchanged when fields are missing.
+- No frontend/UI/Deploy/LLM behavior changes.
+
+---
+
+## Last change
 Intel v2 PR-4: backend quality coverage audit + safe net-debt mapping (PR: "feat(intel-v2-pr4): add safe net_debt_to_ebitda derivation from existing fundamentals").
 
 ## Files touched

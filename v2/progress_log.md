@@ -5,6 +5,14 @@
 
 ## Recent Changes
 
+### fix(deploy-v2): unify deploy-now denominator across card/table/step3
+- **Date**: May 1, 2026
+
+- Fixed Deploy tab consistency bug where top card deploy-now/reserve could diverge from Allocation Breakdown and Step 3.
+- Canonicalized frontend selection to v2 fields first: `plan.deploy_now_amount` + `plan.reserve_amount`.
+- Removed local Step 2/Step 3 redeployment re-scaling from totals path; row sums and "Deploy now total" now reflect backend `immediate_amount` values directly.
+- Added focused wiring tests for explicit staged ($900→$720/$180) and full-deploy ($900→$900/$0) fixtures.
+
 ### feat(deploy-v2-pr2): wire deployment_engine into live allocation router path
 - **Date**: May 1, 2026
 

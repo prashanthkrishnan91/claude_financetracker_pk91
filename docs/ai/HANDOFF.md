@@ -1,3 +1,23 @@
+## Last change
+Fix Deploy Logic v2 deploy-now denominator mismatch (PR: "fix(deploy-v2): unify deploy-now denominator across card/table/step3").
+
+## Files touched
+- `v2/frontend/src/app/dashboard/deposits/page.tsx` — deploy-now/reserve selection now uses canonical v2 fields (`plan.deploy_now_amount`/`plan.reserve_amount`) before adaptive/legacy fallbacks; Allocation Breakdown uses canonical per-row `immediate_amount` (no local recapping) so row sum and "Deploy now total" stay aligned; Step 3 `deploy_now_amount`, `reserve_amount`, and "Use AI Plan" prefill now use the same canonical denominator.
+- `v2/backend/tests/test_deployment_wiring.py` — added explicit $900 staged fixture test (`deploy_now=720`, `reserve=180`, rows sum to 720) and explicit full-deploy fixture test (`deploy_now=900`, `reserve=0`, rows sum to 900).
+- `v2/progress_log.md` — concise entry added.
+
+## QA scope completed
+- `pytest -q v2/backend/tests/test_deployment_engine.py v2/backend/tests/test_deployment_wiring.py` — passed.
+
+## Root cause
+- Frontend used mixed sources for deploy-now semantics: top card/Step 3 preferred adaptive values while Allocation Breakdown totals/rows were transformed again by `computeAdjustedAmounts` (local Watch-cap redistribution), which could diverge from backend `immediate_amount` values and from `deploy_now_amount`.
+- Result: contradictory totals (e.g., card shows deploy-now 720/reserve 180 while rows could still total 900).
+
+## Canonical rule
+- Canonical deploy-now denominator for Deploy Logic v2 is `plan.deploy_now_amount` (fallback to `plan.recommended_deploy_amount` only for backward compatibility).
+- Canonical reserve is `plan.reserve_amount` (fallback to `plan.cash_reserve`).
+- Allocation row immediate amounts must use backend row `immediate_amount` directly; no secondary frontend redistribution is allowed in Step 2/Step 3 paths.
+
 # AI Handoff — Investing App
 
 ## Last change

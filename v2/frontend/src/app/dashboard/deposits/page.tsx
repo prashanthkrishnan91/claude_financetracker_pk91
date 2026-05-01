@@ -233,6 +233,15 @@ function computeAdjustedAmounts(
   return result;
 }
 
+function getCanonicalDeployNow(plan: DepositPlanResult["plan"], adaptive: AdaptiveBlock | null, fallbackAmount: number): number {
+  return plan.deploy_now_amount ?? plan.recommended_deploy_amount ?? adaptive?.recommended_deploy_amount ?? fallbackAmount;
+}
+
+function getCanonicalReserve(plan: DepositPlanResult["plan"], adaptive: AdaptiveBlock | null, fallbackAmount: number): number {
+  const deployNow = getCanonicalDeployNow(plan, adaptive, fallbackAmount);
+  return plan.reserve_amount ?? plan.cash_reserve ?? adaptive?.cash_reserve_amount ?? Math.max(0, fallbackAmount - deployNow);
+}
+
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
@@ -351,7 +360,7 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
     }
     whySeen.add(enrichedAllocs[i].why_selected);
   }
-  const deployNowAmount = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
+  const deployNowAmount = getCanonicalDeployNow(plan, adaptive ?? null, plan.total_amount);
   const sortedByAmount = [...enrichedAllocs].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0));
   const primaryTickers = sortedByAmount
     .filter((rec, idx) => deriveRoleLabel(rec, idx, sortedByAmount.length) === "Primary")
@@ -479,8 +488,8 @@ function RecommendedDeploymentCard({
   primaryTickers?: string[];
 }) {
   const hasAdaptive = !!adaptive;
-  const immediate = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
-  const reserve = adaptive?.cash_reserve_amount ?? plan.cash_reserve ?? 0;
+  const immediate = getCanonicalDeployNow(plan, adaptive, plan.total_amount);
+  const reserve = getCanonicalReserve(plan, adaptive, plan.total_amount);
   const regimeBadge = regime ? regimeBadgeMeta(regime.regime_label) : null;
   const modeBadge = adaptive ? modeBadgeMeta(adaptive.deployment_mode) : null;
   const subtitleParts: string[] = [`Across ${allocationCount} ticker${allocationCount === 1 ? "" : "s"}`];
@@ -638,11 +647,11 @@ function AllocationBreakdownTable({
     (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
   );
   const roleMap = new Map(ranked.map((rec, idx) => [rec.symbol ?? "", deriveRoleLabel(rec, idx, ranked.length)]));
-  const adjustedAmounts = computeAdjustedAmounts(ranked, deployNowAmount);
+  const canonicalAmounts = new Map(ranked.map((rec) => [rec.symbol ?? "", Math.max(0, rec.immediate_amount ?? rec.amount ?? 0)]));
   const displayRanked = [...ranked].sort(
-    (a, b) => (adjustedAmounts.get(b.symbol ?? "") ?? 0) - (adjustedAmounts.get(a.symbol ?? "") ?? 0)
+    (a, b) => (canonicalAmounts.get(b.symbol ?? "") ?? 0) - (canonicalAmounts.get(a.symbol ?? "") ?? 0)
   );
-  const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (adjustedAmounts.get(rec.symbol ?? "") ?? 0), 0);
+  const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (canonicalAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
   return (
     <div className="card-glass overflow-hidden border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
@@ -678,7 +687,7 @@ function AllocationBreakdownTable({
               : role === "Watch"
                 ? "bg-amber-500/10 text-amber-300 border border-amber-400/30"
                 : "bg-blue-500/10 text-blue-300 border border-blue-400/25";
-          const immediate = adjustedAmounts.get(rec.symbol ?? "") ?? 0;
+          const immediate = canonicalAmounts.get(rec.symbol ?? "") ?? 0;
           const why = deriveAllocationWhy(rec, role);
           return (
             <div key={rec.symbol} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
@@ -1145,16 +1154,16 @@ function DecisionLogMemoryPanel({
   const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>([]);
   const [errorMessage, setErrorMessage] = useState("");
 
-  const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
-  const reserveAmount = Math.max(0, amount - deployNow);
+  const deployNow = getCanonicalDeployNow(deployPlan.plan, adaptive, amount);
+  const reserveAmount = getCanonicalReserve(deployPlan.plan, adaptive, amount);
 
   const rankedForLog = useMemo(
     () => [...recommendations].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)),
     [recommendations],
   );
   const adjustedAmountsForLog = useMemo(
-    () => computeAdjustedAmounts(rankedForLog, deployNow),
-    [rankedForLog, deployNow],
+    () => new Map(rankedForLog.map((rec) => [rec.symbol ?? "", Math.max(0, rec.immediate_amount ?? rec.amount ?? 0)])),
+    [rankedForLog],
   );
   const tickerContext = useMemo(
     () =>

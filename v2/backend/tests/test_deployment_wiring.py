@@ -250,6 +250,42 @@ class TestFullDeployWiring:
 # ── 3. Staged deploy: reserve only when trigger exists, never generic ─────────
 
 class TestStagedDeployWiring:
+    def test_explicit_900_deposit_staged_720_rows_sum_720(self):
+        allocs = [_alloc("RDDT", amount=360), _alloc("MSFT", amount=270), _alloc("TSM", amount=270)]
+        d = DeploymentDecision(
+            total_deposit=900.0,
+            deploy_now_amount=720.0,
+            reserve_amount=180.0,
+            deployment_mode="staged_deploy",
+            deployment_confidence=0.74,
+            deployment_reason="Explicit staged fixture",
+            cash_drag_penalty_applied=False,
+            reserve_reason="Wait for risk-off reversal signal on growth names",
+            reserve_trigger=ReserveTrigger(
+                reserve_reason="Wait for risk-off reversal signal on growth names",
+                reserve_target_tickers=["RDDT", "TSM"],
+                reserve_purpose="stage_high_beta",
+                trigger_type="event_driven",
+                trigger_condition="Deploy reserve when VIX < 20 and breadth improves",
+                suggested_review_event=None,
+                suggested_review_date=None,
+                when_to_deploy_reserve="Deploy reserve on confirmed risk-on reversal.",
+            ),
+            per_ticker_allocations=[
+                PerTickerDeployment("RDDT", "Primary", 360.0, 302.14, 57.86, "HIGH", "Fixture"),
+                PerTickerDeployment("MSFT", "Supporting", 270.0, 217.93, 52.07, "HIGH", "Fixture"),
+                PerTickerDeployment("TSM", "Supporting", 270.0, 199.93, 70.07, "MEDIUM", "Fixture"),
+            ],
+            risks=[],
+            data_quality="high",
+            evaluation_notes_for_future_decision_log=[],
+            deployment_score=61.0,
+            adjustments_applied=[],
+        )
+        rows = _map_plan_dict(d, allocs)
+        assert sum(r["immediate_amount"] for r in rows) == pytest.approx(720.0, abs=0.02)
+        assert _plan_block(d)["deploy_now_amount"] == 720.0
+
     def test_risk_off_staged_has_trigger(self):
         allocs = [_alloc("MSFT", amount=450), _alloc("VOO", amount=450)]
         d = classify_deployment(
@@ -375,6 +411,33 @@ class TestPerTickerMapping:
 # ── 5. Backward compat: adaptive and legacy fields survive ────────────────────
 
 class TestBackwardCompatContract:
+    def test_explicit_900_deposit_full_deploy_rows_sum_900(self):
+        allocs = [_alloc("MSFT", amount=300), _alloc("TSM", amount=300), _alloc("NVDA", amount=300)]
+        d = DeploymentDecision(
+            total_deposit=900.0,
+            deploy_now_amount=900.0,
+            reserve_amount=0.0,
+            deployment_mode="full_deploy",
+            deployment_confidence=0.9,
+            deployment_reason="Explicit full fixture",
+            cash_drag_penalty_applied=False,
+            reserve_reason=None,
+            reserve_trigger=None,
+            per_ticker_allocations=[
+                PerTickerDeployment("MSFT", "Primary", 300.0, 300.0, 0.0, "HIGH", "Fixture"),
+                PerTickerDeployment("TSM", "Supporting", 300.0, 300.0, 0.0, "HIGH", "Fixture"),
+                PerTickerDeployment("NVDA", "Supporting", 300.0, 300.0, 0.0, "HIGH", "Fixture"),
+            ],
+            risks=[],
+            data_quality="high",
+            evaluation_notes_for_future_decision_log=[],
+            deployment_score=76.0,
+            adjustments_applied=[],
+        )
+        rows = _map_plan_dict(d, allocs)
+        assert sum(r["immediate_amount"] for r in rows) == pytest.approx(900.0, abs=0.02)
+        assert _plan_block(d)["cash_reserve"] == 0.0
+
     def test_classify_deployment_does_not_break_adapt_allocation_plan(self):
         from app.services.adaptive_deployment import adapt_allocation_plan
         allocs = [_alloc("MSFT", amount=450), _alloc("VOO", amount=450)]

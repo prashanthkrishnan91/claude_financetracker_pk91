@@ -60,7 +60,7 @@ _TREND_REGIME_MAP: dict[str, float] = {
 }
 
 # Intentionally deferred thesis inputs (do NOT proxy-map from non-equivalent
-# fundamentals): fcf_margin, roic_ttm, forward_revenue_growth_est.
+# fundamentals): roic_ttm, forward_revenue_growth_est.
 # Missing data must remain missing.
 
 
@@ -122,6 +122,12 @@ def map_to_thesis_inputs(
     nde = _derive_net_debt_to_ebitda(fundamentals)
     if nde is not None:
         out["net_debt_to_ebitda"] = nde
+
+    # fcf_margin can be derived exactly when provider has both source fields:
+    # free_cash_flow / revenue. We do not proxy-map from profit_margin.
+    fcf_margin = _derive_fcf_margin(fundamentals)
+    if fcf_margin is not None:
+        out["fcf_margin"] = fcf_margin
 
     # ── Momentum (from FeatureSet) ───────────────────────────────────────────
 
@@ -223,3 +229,15 @@ def _derive_net_debt_to_ebitda(fundamentals: dict[str, Any]) -> Optional[float]:
     if ebitda <= 0:
         return None
     return (total_debt - cash) / ebitda
+
+
+def _derive_fcf_margin(fundamentals: dict[str, Any]) -> Optional[float]:
+    """Return free_cash_flow / revenue when inputs are cleanly available."""
+    free_cash_flow = _safe_float(fundamentals.get("free_cash_flow"))
+    revenue = _safe_float(fundamentals.get("revenue"))
+
+    if free_cash_flow is None or revenue is None:
+        return None
+    if revenue <= 0:
+        return None
+    return free_cash_flow / revenue

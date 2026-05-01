@@ -26,6 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.intelligence.thesis_mapper import (
+    _derive_fcf_margin,
     _derive_net_debt_to_ebitda,
     _derive_sma_signal,
     _normalize_to_decimal,
@@ -112,6 +113,10 @@ class TestMapperMapsFields:
     def test_total_debt_cash_ebitda_derives_net_debt_to_ebitda(self):
         inputs = map_to_thesis_inputs({"total_debt": 100.0, "cash": 25.0, "ebitda": 50.0})
         assert inputs["net_debt_to_ebitda"] == pytest.approx(1.5)
+
+    def test_free_cash_flow_and_revenue_derive_fcf_margin(self):
+        inputs = map_to_thesis_inputs({"free_cash_flow": 120.0, "revenue": 600.0})
+        assert inputs["fcf_margin"] == pytest.approx(0.20)
 
     def test_revenue_growth_mapped_to_revenue_yoy(self):
         inputs = map_to_thesis_inputs({"revenue_growth": 0.15})
@@ -285,6 +290,27 @@ class TestMissingFieldsOmitted:
     def test_none_revenue_growth_omitted(self):
         inputs = map_to_thesis_inputs({"revenue_growth": None})
         assert "revenue_yoy" not in inputs
+
+
+class TestFcfMarginDerivation:
+    def test_exact_math(self):
+        assert _derive_fcf_margin({"free_cash_flow": 150.0, "revenue": 600.0}) == pytest.approx(0.25)
+
+    def test_omitted_when_free_cash_flow_missing(self):
+        assert _derive_fcf_margin({"revenue": 600.0}) is None
+
+    def test_omitted_when_revenue_missing(self):
+        assert _derive_fcf_margin({"free_cash_flow": 150.0}) is None
+
+    def test_omitted_when_revenue_zero(self):
+        assert _derive_fcf_margin({"free_cash_flow": 150.0, "revenue": 0.0}) is None
+
+    def test_omitted_when_revenue_negative(self):
+        assert _derive_fcf_margin({"free_cash_flow": 150.0, "revenue": -10.0}) is None
+
+    def test_no_proxy_mapping_from_profit_margin(self):
+        inputs = map_to_thesis_inputs({"profit_margin": 0.33})
+        assert "fcf_margin" not in inputs
 
 
 class TestUnsafeProxyMappingsAreOmitted:

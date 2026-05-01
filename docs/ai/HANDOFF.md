@@ -1,4 +1,46 @@
 ## Last change
+Intel v2 PR-2: deterministic score_thesis() mapper + backend response wiring (PR: "feat(intel-v2-pr2): thesis mapper + score_thesis() wiring into recommendation pipeline").
+
+## Files touched
+- `v2/backend/app/services/intelligence/thesis_mapper.py` — **new module**. Pure deterministic mapper: `map_to_thesis_inputs(fundamentals, feature_set) → dict[str, Optional[float]]`. Maps yfinance fundamentals (pe→trailing_pe, forward_pe, peg, revenue_growth→revenue_yoy, beta) and FeatureSet momentum fields (return_5d/30d ÷100 for pp→decimal, relative_strength_30d as-is pp, sma20/sma50→sma_20_50_signal, trend_regime→trend_regime_score proxy). Omits missing fields; never fakes values.
+- `v2/backend/app/services/agents/orchestrator.py` — Phase 2.5 added: `_compute_thesis_scorecards(bundle)` method called immediately after Phase 2 (features ready). Logs per-ticker status/conviction_band/blended_quality. Serialized ScoreCards embedded in `agent_runs.allocation` under `_thesis_v2` key (no schema change needed — allocation is JSONB). Module-level `_scorecard_to_dict()` helper added. Imports for `score_thesis`, `map_to_thesis_inputs`, `ScoreCard` added.
+- `v2/backend/app/models/recommendation.py` — `InsightCard` gains nullable `thesis_v2: Optional[dict] = None` field. Backward compatible (always None until frontend PR). Existing fields unaffected.
+- `v2/backend/tests/test_thesis_mapper.py` — **new test file**. 59 focused tests across 12 scenarios: field mapping, pe→trailing_pe, revenue_growth decimal/pp normalization, return_5d/30d pp→decimal, relative_strength_30d no-conversion, sma signal derivation 1/0/-1, missing fields omitted, honest PARTIAL/INSUFFICIENT_DATA status, determinism, no-IO purity, InsightCard backward compat.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## QA scope completed
+- `pytest -q tests/test_thesis_mapper.py tests/test_thesis_engine.py` — 99 passed, 0 failures.
+- `pytest -q tests/test_feature_engine.py tests/test_thesis_mapper.py tests/test_thesis_engine.py` — 114 passed, 0 failures.
+- Existing recommendation engine tests require `supabase` module (not installed in CI env) — pre-existing limitation; not caused by this PR. The contract test `TestInsightCardBackwardCompat` covers the InsightCard API contract directly.
+
+## Architecture principle enforced
+- No DB schema change. ScoreCard stored in existing `agent_runs.allocation` JSONB.
+- No LLM calls added. No frontend changes. No new vendors.
+- Mapper is pure: no IO, no yfinance calls, no network.
+- Missing fields omitted; thesis engine returns honest PARTIAL/INSUFFICIENT_DATA.
+
+## Behavior change
+- **New**: Orchestrator Phase 2.5 computes ScoreCards for all tickers after feature engine runs. Logged at INFO level per ticker (status, conviction_band, blended_data_quality).
+- **New**: `agent_runs.allocation` JSONB gains `_thesis_v2` key with serialized per-ticker ScoreCards. Accessible via `GET /recommendations/jobs/{id}` as `allocation["_thesis_v2"]`.
+- **New**: `InsightCard.thesis_v2` nullable field added to backend schema (always null until frontend PR).
+- **No change** to existing allocation amounts, LLM behavior, recommendation logic, or any existing response fields.
+
+## Known issues / next steps
+- Intel v2 PR-3 scope: read `_thesis_v2` from `allocation` JSONB when building InsightCards (requires reading agent_runs.allocation in `get_insight_cards()`), populate `InsightCard.thesis_v2`, and design the UI conviction panel.
+- Many thesis fields remain missing (roic_ttm, gross_margin, fcf fields, peer medians, etc.) — these require new data source integrations and are out of scope per PR-2.
+- `trend_regime_score` is a categorical proxy (uptrend→70, range→40, downtrend→20); not a calibrated momentum score.
+
+## Unit normalization applied
+- `return_5d`, `return_30d`: FeatureSet stores percentage-points (e.g., 5.0 = 5 %); divided by 100 → decimal for thesis_engine.
+- `revenue_growth` → `revenue_yoy`: yfinance decimal (e.g., 0.12); defensive: if |v| > 5.0 treated as pp and divided by 100.
+- `relative_strength_30d` → `relative_strength_vs_spy`: already pp delta — no conversion.
+- `pe` → `trailing_pe`, `forward_pe`, `peg`, `beta`: raw multiples/float — no conversion.
+- `sma20/sma50` → `sma_20_50_signal`: +1/0/-1 from absolute price levels.
+
+---
+
+## Previous change
 Intel v2 PR-1: deterministic thesis score engine foundation (PR: "feat(intel-v2-pr1): deterministic thesis score engine foundation").
 
 ## Files touched

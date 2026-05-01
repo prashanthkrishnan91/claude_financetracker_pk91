@@ -5,6 +5,17 @@
 
 ## Recent Changes
 
+### feat(intel-v2-pr2): thesis mapper + score_thesis() wiring into recommendation pipeline
+- **Date**: May 1, 2026
+
+Intel v2 PR-2 — backend-only, no UI changes, no Supabase SQL, no LLM calls:
+
+- **New module**: `v2/backend/app/services/intelligence/thesis_mapper.py` — pure deterministic mapper `map_to_thesis_inputs(fundamentals, feature_set)`. Maps 10 source-backed fields: trailing_pe, forward_pe, peg, revenue_yoy (from revenue_growth), beta, return_5d/30d (pp→decimal ÷100), relative_strength_vs_spy (pp, no conversion), sma_20_50_signal (derived ±1/0), trend_regime_score (categorical proxy 70/40/20). Omits missing fields; never fakes.
+- **Orchestrator wired**: Phase 2.5 `_compute_thesis_scorecards()` runs after feature engine (Phase 2), before LLM (Phase 3). Logs per-ticker status/conviction_band/blended_quality at INFO. ScoreCards serialized into `agent_runs.allocation["_thesis_v2"]` (no schema change — allocation is existing JSONB).
+- **InsightCard extended**: nullable `thesis_v2: Optional[dict] = None` field added. Always null until frontend PR.
+- **Tests**: 59 focused mapper tests; 99 total (mapper + engine) passing. 12 test scenarios including normalization edge cases, sma signal, missing-field honesty, determinism, no-IO purity, InsightCard compat.
+- Architecture invariant upheld: LLM explains results only; numbers remain deterministic.
+
 ### feat(intel-v2-pr1): deterministic thesis score engine foundation
 - **Date**: May 1, 2026
 

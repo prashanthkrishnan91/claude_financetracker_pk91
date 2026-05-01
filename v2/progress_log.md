@@ -6,6 +6,18 @@
 
 ## Recent Changes
 
+### feat(intel-v2-pr8): expose plain-English thesis response field
+- **Date**: May 1, 2026
+
+Intel v2 PR-8 response-wiring pass:
+
+- Added `thesis_plain_english: Optional[dict]` to `InsightCard` (additive, backward-compatible).
+- Extended `run_lookup` query in `recommendation_engine._compute_insight_cards` to fetch `allocation` column so per-ticker thesis scorecards can be read from `allocation["_thesis_v2"]`.
+- Wired `build_thesis_plain_english()` into card assembly: generates plain-English labels from the scorecard dict; omitted with a debug log on any exception so the response never breaks.
+- Both `thesis_v2` (raw scorecard) and `thesis_plain_english` (translated labels) are now populated per card when scorecard data exists.
+- 22 new focused tests covering payload presence, thesis_v2 preservation, raw metric key redaction, safe degradation, and no-IO determinism.
+- No Supabase SQL, no frontend/UI changes, no Deploy changes, no LLM behavior changes.
+
 ### feat(intel-v2-pr6): add safe backend valuation mapping coverage
 - **Date**: May 1, 2026
 

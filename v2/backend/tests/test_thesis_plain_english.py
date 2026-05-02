@@ -83,6 +83,45 @@ def test_insufficient_data_gets_conservative_summary():
     assert summary["data_label"] == "Data is still incomplete"
 
 
+def test_insufficient_data_with_available_inputs_is_not_universal_fallback_copy():
+    # Representative mapper-like payload: enough real fields to produce
+    # directional dimension labels, but still insufficient overall.
+    inputs = {
+        "trailing_pe": 23.0,
+        "forward_pe": 20.0,
+        "peg": 1.3,
+        "ps_ttm": 6.2,
+        "ev_ebitda": 16.0,
+        "revenue_yoy": 0.14,
+        "beta": 1.1,
+        "net_debt_to_ebitda": 0.9,
+        "return_5d": 0.01,
+        "return_30d": 0.03,
+        "relative_strength_vs_spy": 1.5,
+        "trend_regime_score": 55.0,
+        "sma_20_50_signal": 1,
+    }
+    card = score_thesis("AAPL", inputs)
+    assert card.status.value == "INSUFFICIENT_DATA"
+    summary = build_thesis_plain_english(card)
+    assert summary["quality_label"] != "Business quality data is incomplete"
+    assert summary["valuation_label"] != "Valuation data is incomplete"
+    assert summary["risk_label"] != "Risk data is incomplete"
+    assert summary["momentum_label"] != "Momentum data is incomplete"
+
+
+def test_serialized_scorecard_dict_matches_object_translation():
+    card = score_thesis("ACME", _strong_inputs())
+    card_dict = {
+        "status": card.status.value,
+        "quality": {"score": card.quality.score, "published": card.quality.published},
+        "valuation": {"score": card.valuation.score, "published": card.valuation.published},
+        "risk": {"score": card.risk.score, "published": card.risk.published},
+        "momentum": {"score": card.momentum.score, "published": card.momentum.published},
+    }
+    assert build_thesis_plain_english(card) == build_thesis_plain_english(card_dict)
+
+
 def test_output_does_not_expose_raw_metric_names():
     card = score_thesis("ACME", _strong_inputs())
     summary = build_thesis_plain_english(card)

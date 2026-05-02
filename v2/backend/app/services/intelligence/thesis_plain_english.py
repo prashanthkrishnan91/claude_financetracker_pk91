@@ -52,12 +52,13 @@ def _build_summary(card: dict[str, Any]) -> ThesisPlainEnglishSummary:
     if status == ScoreStatus.INSUFFICIENT_DATA.value:
         return ThesisPlainEnglishSummary(
             headline="Not enough data for a reliable investment-case read",
-            quality_label="Business quality data is incomplete",
-            valuation_label="Valuation data is incomplete",
-            risk_label="Risk data is incomplete",
-            momentum_label="Momentum data is incomplete",
+            quality_label=quality,
+            valuation_label=valuation,
+            risk_label=risk,
+            momentum_label=momentum,
             data_label="Data is still incomplete",
             caveats=[
+                "Some dimensions may still carry useful directional signal",
                 "Use this as a directional read, not a final answer",
                 "Wait for more complete data before making a high-conviction decision",
             ],

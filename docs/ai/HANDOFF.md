@@ -1,4 +1,34 @@
 ## Last change
+Frontend CI/testability hardening: make lint/tests/build agent-runnable (PR: "chore(frontend): make lint and tests agent-runnable").
+
+## Files touched
+- `v2/frontend/.eslintrc.json` — **new file**. Adds explicit Next.js ESLint config (`next/core-web-vitals`) so `next lint` no longer prompts for interactive initialization.
+- `v2/frontend/jest.config.js` — **new file**. Adds deterministic Jest config using `ts-jest`, Node test env, `src` root, and `@/` path alias mapping.
+- `v2/frontend/package.json` — updates scripts/dependencies: `lint` now runs non-interactively (`next lint --no-cache`), `test` runs `jest --runInBand`, and adds minimal Jest dev dependencies (`jest`, `ts-jest`, `@types/jest`).
+- `v2/frontend/package-lock.json` — lockfile updated for new frontend dev dependencies.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Frontend validation commands (agent/CI-safe)
+- Install deps: `cd v2/frontend && npm install`
+- Lint (non-interactive): `cd v2/frontend && npm run lint`
+- Build with safe placeholder public Supabase vars:
+  - `cd v2/frontend && NEXT_PUBLIC_SUPABASE_URL=https://example.supabase.co NEXT_PUBLIC_SUPABASE_ANON_KEY=dummy-anon-key npm run build`
+- Test suite: `cd v2/frontend && npm test`
+- Focused thesis tests: `cd v2/frontend && npm test -- InsightCardThesis`
+
+## Env notes
+- `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_ANON_KEY` are required for static build paths that import the Supabase client.
+- For CI/local validation, use non-secret placeholders (public-style env vars only). Do not commit real keys.
+
+## Behavior change
+- No product/runtime behavior changes intended.
+- This PR is tooling/testability hardening only (lint/test/build determinism for unattended validation).
+- No backend changes, no Supabase SQL, no deploy behavior changes, no LLM behavior changes.
+
+---
+
+## Last change
 Intel v2 PR-9: render plain-English thesis on frontend Intel cards (PR: "feat(intel-v2-pr9): render plain-English thesis on Intel cards").
 
 ## Files touched

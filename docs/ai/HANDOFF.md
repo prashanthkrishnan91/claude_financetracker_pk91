@@ -534,3 +534,21 @@ Decision Log Performance v1: windowed evaluation statuses + minimal Deploy memor
 ## Known limitations
 - Window returns are based on available baseline-vs-current prices; no separate historical candles are fetched per window.
 - If price points are missing, window status reports `unavailable` and does not fabricate return percentages.
+
+## Last change
+Deploy allocation table compactness fix: move why under ticker and remove separate WHY column (PR: "fix(deploy): move allocation why text under ticker").
+
+## Files touched
+- `v2/frontend/src/app/dashboard/deposits/page.tsx` — Allocation Breakdown table header and row layout updated: removed standalone WHY column, expanded Ticker column, and now renders why text directly under ticker symbol. Added safe subtitle fallback to staging/execution text only when why is missing. No allocation math or role/amount/percent calculations changed.
+- `v2/progress_log.md` — concise entry added.
+- `docs/ai/HANDOFF.md` — this entry.
+
+## QA scope completed
+- `cd v2/frontend && npm run lint` — passed.
+- `cd v2/frontend && npm run build` — fails in this environment when Supabase public env vars are unset (`supabaseUrl is required` during prerender).
+- `cd v2/frontend && npm test -- --runInBand deposits` — could not run because `jest` binary is unavailable in current environment.
+
+## Behavior change
+- Deploy Allocation Breakdown is now more compact: WHY rationale appears beneath ticker in the Ticker cell.
+- Repetitive action subtitle no longer appears when why text exists; it is used only as fallback when why is missing.
+- No backend changes, no Supabase SQL, no Deploy allocation logic/math changes, no Step 3 persistence changes, no Intel changes.

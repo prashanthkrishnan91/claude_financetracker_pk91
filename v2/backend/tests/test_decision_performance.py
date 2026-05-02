@@ -178,3 +178,53 @@ def test_evaluate_decision_performance_zero_delta_is_baseline_not_underperforman
     perf = updated["performance_snapshot"]
     assert perf["status"] == "baseline_captured"
     assert perf["portfolio"]["summary_text"] == "Performance baseline captured. Return comparison will become meaningful after prices move."
+
+
+def test_evaluate_decision_performance_windows_pending_and_ready():
+    row = {
+        "id": "log-5",
+        "user_id": "u1",
+        "recommendation_snapshot": {"normalized_tickers": [{"ticker": "AAPL", "amount": 1000}]},
+        "price_snapshot": {
+            "AAPL": {"price": 100.0, "timestamp": "2026-01-01T00:00:00+00:00"},
+            "_meta": {"baseline_captured_at": "2026-04-20T00:00:00+00:00", "backfilled": False},
+        },
+        "actual_decisions": [{"ticker": "AAPL", "actual_action": "BOUGHT", "actual_amount": 1000}],
+    }
+    svc = object.__new__(DecisionLogService)
+    svc.client = _FakeClient(row)
+    svc.get = lambda user_id, decision_log_id, evaluate_if_missing=False: row
+
+    async def _fake_prices(_tickers):
+        return {"AAPL": {"price": 110.0, "timestamp": "2026-02-20T00:00:00+00:00"}}
+
+    svc._fetch_price_map_async = _fake_prices  # type: ignore[method-assign]
+    updated = svc.evaluateDecisionPerformance(user_id="u1", decision_log_id="log-5")
+    windows = updated["performance_snapshot"]["windows"]
+    assert windows["7d"]["status"] == "ready"
+    assert windows["30d"]["status"] == "pending"
+    assert windows["90d"]["status"] == "pending"
+
+
+def test_evaluate_decision_performance_windows_unavailable_on_missing_data():
+    row = {
+        "id": "log-6",
+        "user_id": "u1",
+        "recommendation_snapshot": {"normalized_tickers": [{"ticker": "AAPL", "amount": 1000}]},
+        "price_snapshot": {
+            "AAPL": {"price": 100.0, "timestamp": "2025-01-01T00:00:00+00:00"},
+            "_meta": {"baseline_captured_at": "2025-01-01T00:00:00+00:00", "backfilled": False},
+        },
+        "actual_decisions": [{"ticker": "AAPL", "actual_action": "BOUGHT", "actual_amount": 1000}],
+    }
+    svc = object.__new__(DecisionLogService)
+    svc.client = _FakeClient(row)
+    svc.get = lambda user_id, decision_log_id, evaluate_if_missing=False: row
+
+    async def _fake_prices(_tickers):
+        return {}
+
+    svc._fetch_price_map_async = _fake_prices  # type: ignore[method-assign]
+    updated = svc.evaluateDecisionPerformance(user_id="u1", decision_log_id="log-6")
+    windows = updated["performance_snapshot"]["windows"]
+    assert windows["7d"]["status"] == "unavailable"

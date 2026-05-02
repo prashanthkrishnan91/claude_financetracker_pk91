@@ -154,7 +154,7 @@ export function DataQualityBanner({
               band.cls
             )}
           >
-            Data {band.label}
+            Run data {band.label}
           </span>
         )}
         {decision?.total_tickers !== undefined && (

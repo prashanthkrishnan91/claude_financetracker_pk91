@@ -74,6 +74,34 @@ type TrimItem = {
   reason: string;
 };
 
+type ReserveTriggerV2 = {
+  reserve_reason: string;
+  reserve_target_tickers: string[];
+  reserve_purpose: string;
+  trigger_type: string;
+  trigger_condition: string;
+  suggested_review_event: string | null;
+  suggested_review_date: string | null;
+  when_to_deploy_reserve: string;
+};
+
+type DeploymentV2Block = {
+  total_deposit: number;
+  deploy_now_amount: number;
+  reserve_amount: number;
+  deployment_mode: "full_deploy" | "staged_deploy" | "defensive_reserve" | "skip_or_wait";
+  deployment_confidence: number;
+  deployment_reason: string;
+  cash_drag_penalty_applied: boolean;
+  reserve_reason: string | null;
+  reserve_trigger: ReserveTriggerV2 | null;
+  risks: string[];
+  data_quality: "high" | "medium" | "low";
+  evaluation_notes_for_future_decision_log: string[];
+  deployment_score: number;
+  adjustments_applied: string[];
+};
+
 type AllocationPlanPayload = {
   plan: {
     cash_to_invest: number;
@@ -84,6 +112,13 @@ type AllocationPlanPayload = {
     cash_reserve?: number;
     deploy_percentage?: number;
     deployment_mode?: "full" | "partial" | "defensive" | "wait";
+    deploy_now_amount?: number;
+    reserve_amount?: number;
+    deployment_mode_v2?: "full_deploy" | "staged_deploy" | "defensive_reserve" | "skip_or_wait";
+    deployment_confidence?: number;
+    deployment_reason?: string;
+    cash_drag_penalty_applied?: boolean;
+    reserve_reason?: string | null;
   };
   allocations: AllocationItem[];
   exclusions: Array<{ ticker: string; reason: string }>;
@@ -100,6 +135,7 @@ type AllocationPlanPayload = {
   };
   regime?: RegimeBlock | null;
   adaptive?: AdaptiveBlock | null;
+  deployment_v2?: DeploymentV2Block | null;
 };
 
 function safeNumber(v: unknown): number {
@@ -205,9 +241,18 @@ export async function GET(req: Request) {
       cash_reserve: payload.plan.cash_reserve,
       deploy_percentage: payload.plan.deploy_percentage,
       deployment_mode: payload.plan.deployment_mode,
+      // v2 canonical fields
+      deploy_now_amount: payload.plan.deploy_now_amount,
+      reserve_amount: payload.plan.reserve_amount,
+      deployment_mode_v2: payload.plan.deployment_mode_v2,
+      deployment_confidence: payload.plan.deployment_confidence,
+      deployment_reason: payload.plan.deployment_reason,
+      cash_drag_penalty_applied: payload.plan.cash_drag_penalty_applied,
+      reserve_reason: payload.plan.reserve_reason,
     },
     regime: payload.regime ?? null,
     adaptive: payload.adaptive ?? null,
+    deployment_v2: payload.deployment_v2 ?? null,
     recommendations,
     allocations: payload.allocations,
     exclusions: payload.exclusions,

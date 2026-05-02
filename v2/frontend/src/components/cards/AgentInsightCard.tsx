@@ -73,19 +73,19 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
     <div
       onClick={onClick}
       className={cn(
-        "card-glass p-2.5 md:p-3 space-y-1.5 border",
+        "card-glass p-3 md:p-3.5 space-y-2 border rounded-xl shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]",
         styles.border,
         styles.bg,
         onClick && "cursor-pointer hover:brightness-110"
       )}
     >
       {/* Header */}
-      <div className="flex items-start justify-between gap-2">
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <div className="font-mono font-bold text-text-primary text-sm md:text-base leading-tight">{card.ticker}</div>
-          <div className="text-xs text-text-muted">{card.category}{card.sector ? ` · ${card.sector}` : ""}</div>
+          <div className="font-mono font-bold text-text-primary text-base md:text-lg leading-tight">{card.ticker}</div>
+          <div className="text-[11px] text-text-muted">{card.category}{card.sector ? ` · ${card.sector}` : ""}</div>
         </div>
-        <div className="flex flex-col items-end gap-0.5 text-[10px]">
+        <div className="flex flex-col items-end gap-1 text-[10px]">
           <span className={cn("px-2 py-0.5 rounded border font-bold uppercase leading-tight", styles.bg, styles.text, styles.border)}>
             {action}
           </span>
@@ -106,7 +106,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       )}
 
       {/* Compact 2x2 reasoning grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-1.5">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
         {whyThisMatters && (
           <MemoSection
             label="WHY"
@@ -137,8 +137,9 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         )}
       </div>
 
+
       {/* Footer chips */}
-      <div className="flex flex-wrap md:flex-nowrap gap-1 pt-0.5">
+      <div className="flex flex-wrap gap-1.5 pt-0.5">
         {card.pnl_pct != null && (
           <Chip
             label={`P&L ${formatPercent(card.pnl_pct)}`}
@@ -146,7 +147,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
           />
         )}
         {card.data_quality_label && (
-          <Chip label={`Data: ${card.data_quality_label}`} tone="neutral" />
+          <Chip label={`Ticker data: ${card.data_quality_label}`} tone="neutral" />
         )}
         {(() => {
           const srcLabel = reasoningSourceLabel(card.reasoning_source) ?? (card.analysis_source === "live_llm" ? "Live analysis" : "Cached");
@@ -181,11 +182,11 @@ function MemoSection({
       : "text-text-muted";
 
   return (
-    <div className="rounded-md bg-surface-elevated/30 px-2 py-1">
+    <div className="rounded-md border border-border/50 bg-surface-elevated/35 px-2.5 py-1.5">
       <p className={cn("text-[10px] uppercase tracking-wide font-semibold mb-0.5", labelCls)}>
         {label}
       </p>
-      <p className="text-xs text-text-secondary leading-[1.4]">{text}</p>
+      <p className="text-xs text-text-secondary leading-[1.45]">{text}</p>
     </div>
   );
 }

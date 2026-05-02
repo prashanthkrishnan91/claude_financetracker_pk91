@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
+import { createPortal } from "react-dom";
 import { cn, formatCurrency } from "@/lib/utils";
 import {
   usePortfolioSummary,
@@ -27,7 +28,8 @@ import type {
 } from "@/lib/api";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
-import { buildInitialActualDecisions, buildRecommendationSnapshot } from "@/lib/decision-log";
+import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
+import type { ExecutionStatus } from "@/lib/decision-log";
 
 const MAX_REASON_WORDS = 12;
 
@@ -172,6 +174,74 @@ function deriveRoleLabel(rec: EnrichedAllocation, rank: number, total: number): 
   return "Supporting";
 }
 
+function deriveAllocationWhy(
+  rec: EnrichedAllocation,
+  role: "Primary" | "Supporting" | "Watch"
+): string {
+  const currentWeight = rec.current_weight ?? rec.portfolio_weight ?? 0;
+  const afterWeight = rec.after_weight ?? 0;
+  const delta = afterWeight - currentWeight;
+  const category = (rec.category || "").toLowerCase();
+  const isEtf = category === "etf" || ["VOO", "SPY", "QQQ", "VTI", "SCHD"].includes((rec.symbol || "").toUpperCase());
+
+  if (role === "Watch") {
+    if (currentWeight > 5) return "Large already, capped add";
+    if (currentWeight > 0) return "Existing risk, keep add small";
+    return "Starter size only, risk kept tight";
+  }
+  if (role === "Primary") {
+    if (isEtf) return "Core ballast, steady move toward target";
+    if (currentWeight < 1) return "New core position, starting allocation";
+    if (delta > 2) return "Core position, moving toward target";
+    return "Core position, moderate add toward target";
+  }
+  if (isEtf) return "Quality exposure, moderate add";
+  if (delta > 1.5) return "Growth exposure, sized below core";
+  if (currentWeight > 5) return "Near target, top up lightly";
+  return "Diversifier add, sized below core";
+}
+
+function computeAdjustedAmounts(
+  sorted: EnrichedAllocation[],
+  deployNowAmount: number
+): Map<string, number> {
+  const watchCap = Math.max(deployNowAmount * 0.075, 0);
+  const roles = sorted.map((rec, idx) => deriveRoleLabel(rec, idx, sorted.length));
+  const amounts = sorted.map(rec => Math.max(0, rec.immediate_amount ?? rec.amount ?? 0));
+  let pool = 0;
+
+  for (let i = 0; i < sorted.length; i++) {
+    if (roles[i] === "Watch" && amounts[i] > watchCap) {
+      pool += amounts[i] - watchCap;
+      amounts[i] = watchCap;
+    }
+  }
+
+  if (pool > 0) {
+    const psIndices: number[] = [];
+    roles.forEach((r, i) => { if (r !== "Watch") psIndices.push(i); });
+    const psTotal = psIndices.reduce((sum, i) => sum + amounts[i], 0);
+    if (psTotal > 0) {
+      for (const i of psIndices) {
+        amounts[i] += (amounts[i] / psTotal) * pool;
+      }
+    }
+  }
+
+  const result = new Map<string, number>();
+  sorted.forEach((rec, i) => result.set(rec.symbol ?? "", amounts[i]));
+  return result;
+}
+
+function getCanonicalDeployNow(plan: DepositPlanResult["plan"], adaptive: AdaptiveBlock | null, fallbackAmount: number): number {
+  return plan.deploy_now_amount ?? plan.recommended_deploy_amount ?? adaptive?.recommended_deploy_amount ?? fallbackAmount;
+}
+
+function getCanonicalReserve(plan: DepositPlanResult["plan"], adaptive: AdaptiveBlock | null, fallbackAmount: number): number {
+  const deployNow = getCanonicalDeployNow(plan, adaptive, fallbackAmount);
+  return plan.reserve_amount ?? plan.cash_reserve ?? adaptive?.cash_reserve_amount ?? Math.max(0, fallbackAmount - deployNow);
+}
+
 export default function DepositsPage() {
   const [amount, setAmount] = useState(900);
   const { data: summary } = usePortfolioSummary();
@@ -188,10 +258,10 @@ export default function DepositsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
-        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80">
+        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80 bg-gradient-to-b from-surface-elevated/25 to-transparent">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
                 Step 1 — How much are you investing?
               </p>
               <p className="text-xs text-text-muted mt-1">
@@ -214,7 +284,7 @@ export default function DepositsPage() {
                 type="number"
                 value={amount}
                 onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
-                className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border rounded-lg text-text-primary font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border/80 rounded-lg text-text-primary font-mono text-base focus:outline-none focus:ring-1 focus:ring-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
                 min={0}
                 step={50}
               />
@@ -226,10 +296,10 @@ export default function DepositsPage() {
                 key={preset}
                 onClick={() => setAmount(preset)}
                 className={cn(
-                  "px-3 py-1 text-xs rounded-md transition-colors",
+                  "px-3 py-1 text-xs rounded-md transition-colors border",
                   amount === preset
-                    ? "bg-accent text-background font-semibold"
-                    : "text-text-muted bg-surface-elevated hover:text-text-primary"
+                    ? "bg-accent text-background font-semibold border-accent"
+                    : "text-text-muted bg-surface-elevated border-border/70 hover:text-text-primary"
                 )}
               >
                 ${preset}
@@ -290,12 +360,18 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
     }
     whySeen.add(enrichedAllocs[i].why_selected);
   }
-  const deployNowAmount = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
+  const deployNowAmount = getCanonicalDeployNow(plan, adaptive ?? null, plan.total_amount);
+  const sortedByAmount = [...enrichedAllocs].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0));
+  const primaryTickers = sortedByAmount
+    .filter((rec, idx) => deriveRoleLabel(rec, idx, sortedByAmount.length) === "Primary")
+    .slice(0, 2)
+    .map(rec => rec.symbol ?? "")
+    .filter(Boolean);
 
   return (
     <div className="space-y-4">
-      <section className="card-glass p-4 space-y-4 border border-border/80">
-        <p className="text-xs font-semibold uppercase tracking-wide text-accent">
+      <section className="card-glass p-4 space-y-4 border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
           Step 2 — Where should this go?
         </p>
         <RecommendedDeploymentCard
@@ -309,6 +385,7 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
               ? adaptive.adaptive_reasons.join(" ")
               : (explanation ?? plan.intel_summary ?? notes.join(" "))
           }
+          primaryTickers={primaryTickers}
         />
         {allocs.length > 0 && (
           <AllocationBreakdownTable
@@ -322,7 +399,6 @@ function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult;
           </div>
         ) : (
           <>
-            <WhatToDoNowSection allocations={enrichedAllocs} adaptive={adaptive ?? null} />
             <WhyMadeCutSection allocations={enrichedAllocs} />
             <DeploymentRisksSection allocations={enrichedAllocs} adaptive={adaptive ?? null} />
           </>
@@ -401,6 +477,7 @@ function RecommendedDeploymentCard({
   regime,
   adaptive,
   explanation,
+  primaryTickers = [],
 }: {
   plan: DepositPlanResult["plan"];
   summary: DepositPlanResult["summary"];
@@ -408,29 +485,29 @@ function RecommendedDeploymentCard({
   regime: RegimeBlock | null;
   adaptive: AdaptiveBlock | null;
   explanation?: string;
+  primaryTickers?: string[];
 }) {
   const hasAdaptive = !!adaptive;
-  const immediate = adaptive?.recommended_deploy_amount ?? plan.recommended_deploy_amount ?? plan.total_amount;
-  const reserve = adaptive?.cash_reserve_amount ?? plan.cash_reserve ?? 0;
+  const immediate = getCanonicalDeployNow(plan, adaptive, plan.total_amount);
+  const reserve = getCanonicalReserve(plan, adaptive, plan.total_amount);
   const regimeBadge = regime ? regimeBadgeMeta(regime.regime_label) : null;
   const modeBadge = adaptive ? modeBadgeMeta(adaptive.deployment_mode) : null;
+  const subtitleParts: string[] = [`Across ${allocationCount} ticker${allocationCount === 1 ? "" : "s"}`];
+  if (reserve > 0) subtitleParts.push(`Hold ${formatCurrency(reserve)} for pullbacks`);
+  if (primaryTickers.length > 0) subtitleParts.push(`Prioritize ${primaryTickers.join(" & ")}`);
+  const subtitle = subtitleParts.join(" • ");
 
   return (
-    <div className="card-glass p-4 space-y-3 border border-accent/20">
+    <div className="card-glass p-4 space-y-4 border border-accent/25 bg-gradient-to-br from-accent/10 via-surface/80 to-blue-500/5">
       <div className="flex items-start justify-between gap-3 flex-wrap">
         <div>
-          <p className="text-[10px] uppercase tracking-wide font-semibold text-accent">
+          <p className="text-[10px] uppercase tracking-[0.14em] font-semibold text-accent">
             Recommended Deployment
           </p>
-          <p className="text-2xl font-display text-text-primary mt-1">
+          <p className="text-2xl sm:text-[1.8rem] font-display text-text-primary mt-1 leading-none">
             Deploy {formatCurrency(immediate)} now
           </p>
-          {hasAdaptive && reserve > 0 && (
-            <p className="text-xs text-text-secondary mt-0.5">
-              Hold {formatCurrency(reserve)} for pullbacks
-            </p>
-          )}
-          <p className="text-xs text-text-muted mt-0.5">{toCompactLine(explanation || plan.strategy, 18)}</p>
+          <p className="text-xs text-text-secondary mt-1">{subtitle}</p>
         </div>
         <div className="flex items-center gap-1.5 flex-wrap justify-end">
           {regimeBadge && (
@@ -469,19 +546,19 @@ function RecommendedDeploymentCard({
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2 text-xs">
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">Tickers</p>
-          <p className="font-mono text-text-primary">{allocationCount}</p>
+        <div className="bg-surface-elevated/70 border border-border/70 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">Tickers</p>
+          <p className="font-mono text-text-primary text-lg leading-tight">{allocationCount}</p>
         </div>
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">{hasAdaptive ? "Deploy now" : "Deployed"}</p>
-          <p className="font-mono text-text-primary">
+        <div className="bg-surface-elevated/70 border border-emerald-500/25 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">{hasAdaptive ? "Deploy now" : "Deployed"}</p>
+          <p className="font-mono text-emerald-300 text-lg leading-tight font-semibold">
             {formatCurrency(hasAdaptive ? immediate : summary.total_deployed)}
           </p>
         </div>
-        <div className="bg-surface-elevated rounded-md p-2">
-          <p className="text-text-muted">{hasAdaptive ? "Reserve" : "Considered"}</p>
-          <p className="font-mono text-text-primary">
+        <div className="bg-surface-elevated/70 border border-blue-500/25 rounded-md p-2.5">
+          <p className="text-text-muted uppercase tracking-wide text-[10px]">{hasAdaptive ? "Reserve" : "Considered"}</p>
+          <p className="font-mono text-blue-300 text-lg leading-tight font-semibold">
             {hasAdaptive
               ? formatCurrency(reserve)
               : summary.candidates_considered ?? summary.ranked_candidates}
@@ -569,51 +646,59 @@ function AllocationBreakdownTable({
   const ranked = [...allocations].sort(
     (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
   );
-  const allocatedNowTotal = ranked.reduce((sum, rec) => sum + Math.max(0, rec.immediate_amount ?? rec.amount ?? 0), 0);
+  const roleMap = new Map(ranked.map((rec, idx) => [rec.symbol ?? "", deriveRoleLabel(rec, idx, ranked.length)]));
+  const canonicalAmounts = new Map(ranked.map((rec) => [rec.symbol ?? "", Math.max(0, rec.immediate_amount ?? rec.amount ?? 0)]));
+  const displayRanked = [...ranked].sort(
+    (a, b) => (canonicalAmounts.get(b.symbol ?? "") ?? 0) - (canonicalAmounts.get(a.symbol ?? "") ?? 0)
+  );
+  const allocatedNowTotal = displayRanked.reduce((sum, rec) => sum + (canonicalAmounts.get(rec.symbol ?? "") ?? 0), 0);
   const denominator = deployNowAmount > 0 ? deployNowAmount : allocatedNowTotal;
-
   return (
-    <div className="card-glass overflow-hidden border border-border/80">
-      <div className="px-4 py-3 border-b border-border">
+    <div className="card-glass overflow-hidden border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
+      <div className="px-4 py-2.5 border-b border-border flex items-end justify-between gap-3">
+        <div>
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
           Allocation Breakdown
         </p>
         <p className="text-[11px] text-text-secondary mt-1">
-          Deploy {formatCurrency(denominator)} now across {ranked.length} ticker{ranked.length === 1 ? "" : "s"}.
+          Deploy {formatCurrency(denominator)} now across {displayRanked.length} ticker{displayRanked.length === 1 ? "" : "s"}.
         </p>
+        </div>
+        <div className="text-right">
+          <p className="text-[10px] uppercase tracking-wide text-text-muted">Deploy now total</p>
+          <p className="font-mono text-sm sm:text-base text-text-primary font-semibold">{formatCurrency(allocatedNowTotal)}</p>
+        </div>
       </div>
       <div className="divide-y divide-border">
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
-          <div className="col-span-2">Ticker</div>
+          <div className="col-span-6">Ticker</div>
           <div className="col-span-2">Role</div>
           <div className="col-span-2 text-right">Invest now</div>
-          <div className="col-span-2 text-right">Reserve</div>
-          <div className="col-span-2 text-right">Current %</div>
-          <div className="col-span-2 text-right">After %</div>
+          <div className="col-span-1 text-right">Now %</div>
+          <div className="col-span-1 text-right">After %</div>
         </div>
-        {ranked.map((rec, index) => {
-          const role = deriveRoleLabel(rec, index, ranked.length);
+        {displayRanked.map((rec) => {
+          const role = roleMap.get(rec.symbol ?? "") ?? "Supporting";
           const roleClass =
             role === "Primary"
-              ? "bg-accent/10 text-accent border border-accent/30"
+              ? "bg-emerald-500/10 text-emerald-300 border border-emerald-400/30"
               : role === "Watch"
-                ? "bg-yellow-500/10 text-yellow-300 border border-yellow-400/30"
-                : "bg-surface-elevated text-text-muted border border-border";
-          const immediate = Math.max(0, rec.immediate_amount ?? rec.amount ?? 0);
-          const reserve = Math.max(0, rec.reserve_amount ?? 0);
-          const showStaging = (rec.staging_instruction != null && rec.staging_instruction !== "") || reserve > 0;
-          const pct = denominator > 0 ? (immediate / denominator) * 100 : 0;
+                ? "bg-amber-500/10 text-amber-300 border border-amber-400/30"
+                : "bg-blue-500/10 text-blue-300 border border-blue-400/25";
+          const immediate = canonicalAmounts.get(rec.symbol ?? "") ?? 0;
+          const why = deriveAllocationWhy(rec, role);
+          const tickerSubtitle = why || toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now.", 10);
           return (
-            <div key={rec.symbol} className="px-4 py-3 text-sm">
-              <div className="grid grid-cols-12 gap-2 items-center">
-                <div className="col-span-6 sm:col-span-2">
+            <div key={rec.symbol} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
+              <div className="grid grid-cols-12 gap-2 items-start">
+                <div className="col-span-6">
                   <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
                   <p className="text-[11px] text-text-muted leading-snug mt-1">
-                    {toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now; reserve rest for pullback.", 10)}
+                    {tickerSubtitle}
                   </p>
                 </div>
-                <div className="col-span-6 sm:col-span-2">
+                <div className="col-span-6 sm:col-span-2 flex items-start pt-0.5 sm:justify-start justify-end">
                   <span
                     className={cn(
                       "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
@@ -623,83 +708,24 @@ function AllocationBreakdownTable({
                     {role}
                   </span>
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono font-semibold text-text-primary">
+                                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-emerald-300">
                   {formatCurrency(immediate)}
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-text-secondary">
-                  {formatCurrency(reserve)}
-                </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-text-muted">
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">
                   {(rec.current_weight ?? rec.portfolio_weight ?? 0).toFixed(1)}%
                 </div>
-                <div className="col-span-4 sm:col-span-2 text-right font-mono text-xs text-accent">
+                <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-blue-300 font-semibold">
                   {(rec.after_weight ?? 0).toFixed(1)}%
                 </div>
               </div>
-              {showStaging && <p className="text-[11px] text-text-muted mt-1 leading-snug">Now {pct.toFixed(1)}% of immediate deploy budget.</p>}
             </div>
           );
         })}
-        <div className="px-4 py-2 bg-surface-elevated/20 flex items-center justify-between text-xs">
+        <div className="px-4 py-2 bg-surface-elevated/30 flex items-center justify-between text-xs border-t border-border/70">
           <span className="text-text-muted uppercase tracking-wide font-semibold">Total deploying now</span>
-          <span className="font-mono font-semibold text-text-primary">{formatCurrency(allocatedNowTotal)}</span>
+          <span className="font-mono font-semibold text-emerald-300">{formatCurrency(allocatedNowTotal)}</span>
         </div>
       </div>
-    </div>
-  );
-}
-
-function WhatToDoNowSection({
-  allocations,
-  adaptive,
-}: {
-  allocations: EnrichedAllocation[];
-  adaptive: AdaptiveBlock | null;
-}) {
-  const deployBullets: string[] = [];
-  const ranked = [...allocations].sort(
-    (a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)
-  );
-  const immediateTickers = ranked.filter((rec) => (rec.immediate_amount ?? rec.amount ?? 0) > 0).map((rec) => rec.symbol);
-  const primary = immediateTickers.slice(0, Math.min(2, immediateTickers.length));
-
-  if (adaptive) {
-    const reserve = adaptive.cash_reserve_amount ?? 0;
-    const immediate = adaptive.recommended_deploy_amount ?? 0;
-    if (immediate > 0 && reserve > 0) {
-      deployBullets.push(
-        `Deploy ${formatCurrency(immediate)} now and hold ${formatCurrency(reserve)} for pullbacks.`
-      );
-    } else if (immediate > 0) {
-      deployBullets.push(`Deploy ${formatCurrency(immediate)} now in full.`);
-    } else {
-      deployBullets.push(
-        `Hold cash; conditions don't support deploying right now.`
-      );
-    }
-  }
-  if (immediateTickers.length > 0) {
-    deployBullets.unshift(`Deploy across ${immediateTickers.length} ticker${immediateTickers.length === 1 ? "" : "s"}.`);
-  }
-  if (primary.length > 0) {
-    deployBullets.push(`Prioritize ${primary.join(" and ")} as primary allocations.`);
-  }
-
-  const merged = deployBullets.slice(0, 3);
-  if (merged.length === 0 && allocations.length === 0) return null;
-
-  return (
-    <div className="p-3 space-y-2 border border-accent/20 rounded-lg bg-accent/5">
-      <p className="text-xs font-semibold uppercase tracking-wide text-accent">
-        What to Do Now
-      </p>
-      <ul className="space-y-1.5">
-        {merged.map((bullet) => (
-          <li key={bullet} className="text-xs text-text-secondary leading-snug">
-            • {bullet}
-          </li>
-        ))}
-      </ul>
     </div>
   );
 }
@@ -1063,7 +1089,40 @@ function DeployMemo({
   );
 }
 
-// Icons
+// ─── Step 3 + Decision History ────────────────────────────────────────────────
+
+function executionStatusLabel(status: ExecutionStatus): string {
+  switch (status) {
+    case "fully_executed": return "Fully executed";
+    case "partially_executed": return "Partially executed";
+    case "modified": return "Modified";
+    case "skipped": return "Skipped";
+  }
+}
+
+function executionStatusCls(status: ExecutionStatus): string {
+  switch (status) {
+    case "fully_executed": return "bg-emerald-500/10 text-emerald-300 border-emerald-500/30";
+    case "partially_executed": return "bg-yellow-500/10 text-yellow-300 border-yellow-500/30";
+    case "modified": return "bg-blue-500/10 text-blue-300 border-blue-500/30";
+    case "skipped": return "bg-surface-elevated text-text-muted border-border";
+  }
+}
+
+function buildExecutionCopy(
+  actualDeployed: number,
+  aiDeployNow: number,
+  totalDeposit: number,
+  status: ExecutionStatus,
+): string {
+  const reserve = totalDeposit - actualDeployed;
+  if (status === "skipped") {
+    return `Skipped this deploy-now plan. ${formatCurrency(totalDeposit)} remains uninvested/reserved.`;
+  }
+  const pct = aiDeployNow > 0 ? Math.round((actualDeployed / aiDeployNow) * 100) : 0;
+  const pctText = pct < 100 ? ` (${pct}% of deploy-now plan)` : "";
+  return `Executed ${formatCurrency(actualDeployed)} of ${formatCurrency(aiDeployNow)} planned now${pctText}. Reserved ${formatCurrency(reserve)} from your ${formatCurrency(totalDeposit)} deposit.`;
+}
 
 function DecisionLogMemoryPanel({
   deployPlan,
@@ -1076,7 +1135,8 @@ function DecisionLogMemoryPanel({
   amount: number;
   adaptive: AdaptiveBlock | null;
 }) {
-  const snapshot = useMemo(() => buildRecommendationSnapshot(deployPlan), [deployPlan]);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [editorOpen, setEditorOpen] = useState(false);
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
   const { data: recentLogs } = useDecisionMemoryLogs(6, true);
@@ -1085,406 +1145,576 @@ function DecisionLogMemoryPanel({
   const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
   const [saveMessage, setSaveMessage] = useState<string>("");
   const [notes, setNotes] = useState<string>("");
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [detailsOpen, setDetailsOpen] = useState(false);
-  const [executeMessage, setExecuteMessage] = useState("");
-  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>(
-    buildInitialActualDecisions(recommendations)
+  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>([]);
+  const [errorMessage, setErrorMessage] = useState("");
+
+  const deployNow = getCanonicalDeployNow(deployPlan.plan, adaptive, amount);
+  const reserveAmount = getCanonicalReserve(deployPlan.plan, adaptive, amount);
+
+  const rankedForLog = useMemo(
+    () => [...recommendations].sort((a, b) => (b.immediate_amount ?? b.amount ?? 0) - (a.immediate_amount ?? a.amount ?? 0)),
+    [recommendations],
   );
+  const adjustedAmountsForLog = useMemo(
+    () => new Map(rankedForLog.map((rec) => [rec.symbol ?? "", Math.max(0, rec.immediate_amount ?? rec.amount ?? 0)])),
+    [rankedForLog],
+  );
+  const tickerContext = useMemo(
+    () =>
+      rankedForLog.map((rec, idx) => ({
+        ticker: rec.symbol ?? "",
+        amount: adjustedAmountsForLog.get(rec.symbol ?? "") ?? 0,
+        role: deriveRoleLabel(rec, idx, rankedForLog.length),
+        why_reason: rec.why_selected ?? rec.why ?? rec.rationale ?? null,
+      })),
+    [adjustedAmountsForLog, rankedForLog],
+  );
+  const snapshot = useMemo(
+    () =>
+      buildRecommendationSnapshotWithContext(deployPlan, {
+        entered_capital_amount: amount,
+        deploy_now_amount: deployNow,
+        reserve_amount: reserveAmount,
+        ticker_context: tickerContext,
+      }),
+    [amount, deployNow, deployPlan, reserveAmount, tickerContext],
+  );
+  const currentSessionKey = useMemo(
+    () =>
+      ((snapshot as { decision_context?: { session_key?: unknown } }).decision_context?.session_key as string | undefined) ?? null,
+    [snapshot],
+  );
+  const logsToShow = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []), [recentLogs]);
+  const matchingRecentLog = useMemo(() => {
+    if (!recentLogs?.length || !currentSessionKey) return null;
+    return logsToShow.find((log) => getDecisionLogSessionKey(log) === currentSessionKey) ?? null;
+  }, [currentSessionKey, logsToShow, recentLogs]);
+
+  // Initialize actualDecisions from adjusted amounts (deploy-now, not full deposit)
+  useEffect(() => {
+    if (actualDecisions.length > 0) return;
+    if (rankedForLog.length === 0) return;
+    setActualDecisions(buildInitialActualDecisions(recommendations, adjustedAmountsForLog));
+  }, [actualDecisions.length, adjustedAmountsForLog, rankedForLog.length, recommendations]);
+
+  // Rehydrate from backend on load
+  useEffect(() => {
+    if (savedLog || !matchingRecentLog) return;
+    setSavedLog(matchingRecentLog);
+    setNotes(matchingRecentLog.notes ?? "");
+    setActualDecisions(
+      matchingRecentLog.actual_decisions?.length
+        ? matchingRecentLog.actual_decisions
+        : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+    );
+  }, [adjustedAmountsForLog, matchingRecentLog, recommendations, savedLog]);
 
   const activeLog = savedLog;
-  const delta = activeLog?.decision_delta;
-  const behaviorLabel =
-    activeLog?.risk_behavior === "more_conservative"
-      ? "More conservative than model"
-      : activeLog?.risk_behavior === "more_aggressive"
-      ? "More aggressive than model"
-      : "Aligned with model";
-  const deployedPct = delta?.total_recommended ? Math.round((delta.total_actual / delta.total_recommended) * 100) : 0;
-  const capitalBehavior = delta
-    ? delta.deploy_delta < -0.5
-      ? "Under-deployed"
-      : delta.deploy_delta > 0.5
-      ? "Over-deployed"
-      : "Fully deployed"
-    : "Fully deployed";
-  const styleShiftSummary = delta
-    ? delta.replaced_tickers.length
-      ? `${delta.replaced_tickers
-          .slice(0, 2)
-          .map((item) => `${item.from || "—"} → ${item.to || "—"}${item.reason ? ` (${item.reason})` : " (style shift)"}`)
-          .join(" • ")}${delta.replaced_tickers.length > 2 ? ` • +${delta.replaced_tickers.length - 2} more` : ""}`
-      : "No replacements"
-    : "No replacements";
-  const performance = activeLog?.performance_snapshot?.portfolio;
-  const performanceStatus = activeLog?.performance_snapshot?.status ?? "ready";
-  const perfDelta = performance?.delta ?? 0;
-  const hasQualityIssues = Boolean(activeLog?.performance_snapshot?.data_quality?.length);
-  const showPortfolioPerformance = performanceStatus === "ready" || performanceStatus === "partial_data";
-  const perfSummary = performanceStatus === "ready"
-    ? performance?.summary_text
-      ? performance.summary_text
-      : Math.abs(perfDelta) < 0.05
-      ? "You matched the model"
-      : perfDelta > 0.05
-      ? `You outperformed the model by ${perfDelta.toFixed(2)}%`
-      : `You underperformed the model by ${Math.abs(perfDelta).toFixed(2)}%`
-    : performance?.summary_text ?? "Performance comparison is still collecting data.";
 
   function updateDecision(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((row, i) => (i === index ? { ...row, ...patch } : row)));
   }
 
-  async function onSaveLog() {
-    if (createLog.isPending) return;
-    const created = await createLog.mutateAsync({ snapshot });
-    setSavedLog(created);
-    setNotes(created.notes ?? "");
-    setActualDecisions(created.actual_decisions?.length ? created.actual_decisions : buildInitialActualDecisions(recommendations));
-    setSaveMessage("Decision log saved");
+  async function onSaveLog(overrideDecisions?: ActualDecisionItem[]) {
+    const decisionData = overrideDecisions ?? actualDecisions;
+    if (createLog.isPending || updateLog.isPending) return;
+    try {
+      setErrorMessage("");
+      const targetLog = savedLog ?? matchingRecentLog;
+      if (targetLog) {
+        const updated = await updateLog.mutateAsync({ id: targetLog.id, patch: { actual_decisions: decisionData, notes } });
+        setSavedLog(updated);
+        setNotes(updated.notes ?? "");
+        if (!overrideDecisions) {
+          setActualDecisions(
+            updated.actual_decisions?.length
+              ? updated.actual_decisions
+              : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+          );
+        }
+      } else {
+        const created = await createLog.mutateAsync({ snapshot, actualDecisions: decisionData });
+        setSavedLog(created);
+        setNotes(created.notes ?? "");
+        if (!overrideDecisions) {
+          setActualDecisions(
+            created.actual_decisions?.length
+              ? created.actual_decisions
+              : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+          );
+        }
+      }
+      setSaveMessage("Decision log saved");
+    } catch (error) {
+      setSaveMessage("");
+      setErrorMessage(error instanceof Error ? error.message : "Failed to save decision log.");
+    }
   }
 
-  async function onSaveActual() {
-    if (!savedLog || updateLog.isPending) return;
-    const patch = {
-      actual_decisions: actualDecisions.map((row) => ({ ...row, executed_at: row.executed_at ?? new Date().toISOString() })),
-      notes,
-    };
-    const updated = await updateLog.mutateAsync({ id: savedLog.id, patch });
-    setSavedLog(updated);
-    setSaveMessage("Actual decisions updated");
+  async function onSkipPlan() {
+    const skipped = actualDecisions.map((row) => ({
+      ...row,
+      actual_action: "SKIPPED",
+      actual_amount: 0,
+      executed_at: new Date().toISOString(),
+    }));
+    setActualDecisions(skipped);
+    await onSaveLog(skipped);
   }
 
-  async function onEvaluatePerformance() {
-    if (!savedLog || evaluateLog.isPending) return;
-    const evaluated = await evaluateLog.mutateAsync(savedLog.id);
-    setSavedLog(evaluated);
+  async function onEvaluatePerformance(logId: string) {
+    const evaluated = await evaluateLog.mutateAsync(logId);
+    if (savedLog?.id === logId) setSavedLog(evaluated);
     setSaveMessage("Performance refreshed");
   }
 
-  const logsToShow = recentLogs ?? [];
+  // Execution status derived from the saved log's actual decisions vs deploy-now amount
+  const savedActuals = activeLog?.actual_decisions ?? [];
+  const savedActualTotal = savedActuals.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+  const savedStatus: ExecutionStatus | null = activeLog ? deriveExecutionStatus(savedActuals, deployNow) : null;
+
+  // Pending (unsaved) total for display in the editor
+  const pendingTotal = actualDecisions.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+
+  const executeRows = tickerContext.filter((item) => item.ticker && item.amount > 0);
+
   const insightsConfidenceLabel =
     insights?.confidence === "low" ? "Early signal" : insights?.confidence === "medium" ? "Building history" : "Higher confidence";
   const winCount = insights ? Math.round((insights.summary.win_rate_vs_model ?? 0) * insights.eligible_logs) : 0;
-  const replacementSummary = delta?.replaced_tickers?.length
-    ? delta.replaced_tickers
-        .slice(0, 2)
-        .map((item) => `${item.from || "—"} → ${item.to || "—"}`)
-        .join(" • ")
-    : "No replacements";
-  const performanceStatusLabel =
-    performanceStatus === "baseline_captured"
-      ? "Baseline captured"
-      : performanceStatus === "ready" || performanceStatus === "partial_data"
-      ? "Ready to evaluate"
-      : "Not enough history";
-  const deployNow = adaptive?.recommended_deploy_amount ?? deployPlan.plan.recommended_deploy_amount ?? amount;
 
   return (
-    <div className="card-glass p-4 space-y-3 border border-border/80">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          Step 3 — Execute &amp; record
-        </p>
-        <span
-          className={cn(
-            "text-[11px] px-2 py-1 rounded-full border",
-            activeLog ? "text-emerald-300 border-emerald-500/30 bg-emerald-500/10" : "text-text-muted border-border bg-surface-elevated/40"
+    <div className="space-y-4">
+
+      {/* ── Card A: Step 3 — Execute & Record ─────────────────────────────── */}
+      <div className="card-glass p-4 space-y-4 border border-border/80">
+        {/* Header */}
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+            Step 3 — Execute &amp; Record
+          </p>
+          {activeLog ? (
+            <span className={cn("text-[11px] px-2 py-0.5 rounded-full border font-semibold", executionStatusCls(savedStatus!))}>
+              {executionStatusLabel(savedStatus!)}
+            </span>
+          ) : (
+            <span className="text-[11px] px-2 py-0.5 rounded-full border text-text-muted border-border bg-surface-elevated/40">
+              Not saved
+            </span>
           )}
-        >
-          {activeLog ? "Saved" : "Not saved"}
-        </span>
-      </div>
-      {activeLog ? (
-        <div className="grid gap-2 sm:grid-cols-2 text-xs">
-          <p className="text-text-secondary">
-            Deployed: <span className="text-text-primary font-semibold">{delta ? formatCurrency(delta.total_actual) : "—"}</span>
-            {delta ? <span className="text-text-muted"> ({deployedPct}%)</span> : null}
-          </p>
-          <p className="text-text-secondary">
-            Replacements: <span className="text-text-primary">{replacementSummary}</span>
-          </p>
-          <p className="text-text-secondary sm:col-span-2">
-            Performance status: <span className="text-text-primary">{performanceStatusLabel}</span>
-          </p>
         </div>
-      ) : null}
-      <div className="flex flex-wrap gap-2">
-        <button
-          onClick={() => {
-            setDetailsOpen(true);
-            setExecuteMessage(`Execution focus set for ${formatCurrency(deployNow)}. Confirm orders in your broker, then save your decision log.`);
-          }}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
-        >
-          Execute Plan
-        </button>
-        <button
-          onClick={() => document.getElementById("step-1")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
-        >
-          Modify Plan
-        </button>
-        <button
-          onClick={activeLog ? onSaveActual : onSaveLog}
-          disabled={activeLog ? updateLog.isPending : createLog.isPending}
-          className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary disabled:opacity-60"
-        >
-          {activeLog
-            ? updateLog.isPending
-              ? "Saving..."
-              : "Update Actuals"
-            : createLog.isPending
-            ? "Saving..."
-            : "Save Decision Log"}
-        </button>
-        {activeLog ? (
+
+        {/* AI plan summary */}
+        <div className="grid grid-cols-3 gap-2 text-xs">
+          <div className="bg-surface-elevated/60 border border-border/70 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Deposit</p>
+            <p className="font-mono text-text-primary font-semibold">{formatCurrency(amount)}</p>
+          </div>
+          <div className="bg-surface-elevated/60 border border-emerald-500/25 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Invest now</p>
+            <p className="font-mono text-emerald-300 font-semibold">{formatCurrency(deployNow)}</p>
+          </div>
+          <div className="bg-surface-elevated/60 border border-blue-500/20 rounded-md p-2.5">
+            <p className="text-[10px] uppercase tracking-wide text-text-muted">Reserve</p>
+            <p className="font-mono text-blue-300 font-semibold">{formatCurrency(reserveAmount)}</p>
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="flex flex-wrap gap-2">
           <button
-            onClick={() => setDetailsOpen((prev) => !prev)}
-            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary inline-flex items-center gap-1"
+            onClick={() => {
+              setActualDecisions(buildInitialActualDecisions(recommendations, adjustedAmountsForLog));
+              setConfirmOpen(true);
+            }}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background hover:bg-accent-hover transition-colors"
           >
-            {detailsOpen ? "Hide details" : "View details"}
-            <ChevronIcon className={cn("w-3.5 h-3.5 transition-transform", detailsOpen ? "rotate-180" : "")} />
+            Use AI Plan
           </button>
-        ) : null}
-      </div>
-      {executeMessage && <p className="text-xs text-text-secondary">{executeMessage}</p>}
-      {saveMessage && <p className="text-xs text-green-400">{saveMessage}</p>}
+          <button
+            onClick={() => setEditorOpen(true)}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary hover:bg-surface-elevated transition-colors"
+          >
+            Modify Plan
+          </button>
+          <button
+            onClick={onSkipPlan}
+            disabled={createLog.isPending || updateLog.isPending}
+            className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-muted hover:text-text-primary transition-colors disabled:opacity-50"
+          >
+            Skip Plan
+          </button>
+        </div>
 
-      {detailsOpen && savedLog && (
-        <div className="space-y-2 border-t border-border pt-3">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual Decision</p>
-          <div className="space-y-2">
-            {actualDecisions.map((row, idx) => (
-              <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
-                <div className="col-span-2 flex items-center gap-1.5">
-                  <span className="font-mono text-text-primary">{row.ticker || "—"}</span>
-                  <span
-                    className={cn(
-                      "px-1.5 py-0.5 rounded text-[10px] font-semibold",
-                      String(row.actual_action || "BOUGHT") === "SKIPPED"
-                        ? "bg-red-500/15 text-red-300"
-                        : String(row.actual_action || "BOUGHT") === "REPLACED"
-                        ? "bg-amber-500/15 text-amber-300"
-                        : "bg-emerald-500/15 text-emerald-300"
-                    )}
+        {/* Execution copy — shown after save */}
+        {activeLog && savedStatus && (
+          <p className="text-xs text-text-secondary leading-snug">
+            {buildExecutionCopy(savedActualTotal, deployNow, amount, savedStatus)}
+          </p>
+        )}
+
+        {/* Editor */}
+        {editorOpen && (
+          <div className="space-y-3 border-t border-border pt-3">
+            <div className="flex items-center justify-between">
+              <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Actual execution</p>
+              <p className="text-[11px] text-text-muted">
+                Total: <span className="font-mono text-text-primary">{formatCurrency(pendingTotal)}</span>
+                {" "}of <span className="font-mono text-emerald-300">{formatCurrency(deployNow)}</span> planned
+              </p>
+            </div>
+            <div className="space-y-2">
+              {actualDecisions.map((row, idx) => (
+                <div key={`${row.ticker || "row"}-${idx}`} className="grid grid-cols-12 gap-2 items-center text-xs">
+                  <div className="col-span-2 font-mono text-text-primary">{row.ticker || "—"}</div>
+                  <select
+                    value={String(row.actual_action || "BOUGHT")}
+                    onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
+                    className="col-span-3 bg-surface border border-border rounded px-2 py-1"
                   >
-                    {String(row.actual_action || "BOUGHT") === "SKIPPED"
-                      ? "Skipped"
-                      : String(row.actual_action || "BOUGHT") === "REPLACED"
-                      ? "Replaced"
-                      : "Matched"}
-                  </span>
+                    <option value="BOUGHT">Bought</option>
+                    <option value="SKIPPED">Skipped</option>
+                    <option value="REPLACED">Replaced</option>
+                    <option value="WATCH">Watch</option>
+                  </select>
+                  <input
+                    type="number"
+                    value={row.actual_amount ?? 0}
+                    onChange={(e) => updateDecision(idx, { actual_amount: Number(e.target.value) || 0 })}
+                    className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                  />
+                  <input
+                    placeholder="Alt ticker"
+                    value={row.replacement_ticker ?? ""}
+                    onChange={(e) => updateDecision(idx, { replacement_ticker: e.target.value.toUpperCase() || undefined })}
+                    className="col-span-2 bg-surface border border-border rounded px-2 py-1"
+                  />
+                  <input
+                    placeholder="Reason"
+                    value={row.reason ?? ""}
+                    onChange={(e) => updateDecision(idx, { reason: e.target.value || undefined })}
+                    className="col-span-3 bg-surface border border-border rounded px-2 py-1"
+                  />
                 </div>
-                <select
-                  value={String(row.actual_action || "BOUGHT")}
-                  onChange={(e) => updateDecision(idx, { actual_action: e.target.value })}
-                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
-                >
-                  <option value="BOUGHT">Bought</option>
-                  <option value="SKIPPED">Skipped</option>
-                  <option value="REPLACED">Replaced</option>
-                  <option value="WATCH">Watch</option>
-                </select>
-                <input
-                  type="number"
-                  value={row.actual_amount ?? 0}
-                  onChange={(e) => updateDecision(idx, { actual_amount: Number(e.target.value) || 0 })}
-                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
-                />
-                <input
-                  placeholder="Replacement"
-                  value={row.replacement_ticker ?? ""}
-                  onChange={(e) => updateDecision(idx, { replacement_ticker: e.target.value.toUpperCase() || undefined })}
-                  className="col-span-2 bg-surface border border-border rounded px-2 py-1"
-                />
-                <input
-                  placeholder="Reason"
-                  value={row.reason ?? ""}
-                  onChange={(e) => updateDecision(idx, { reason: e.target.value || undefined })}
-                  className="col-span-3 bg-surface border border-border rounded px-2 py-1"
-                />
-              </div>
-            ))}
+              ))}
+            </div>
+            <textarea
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="Notes (optional)"
+              className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
+              rows={2}
+            />
+            <div className="flex gap-2">
+              <button
+                onClick={() => onSaveLog()}
+                disabled={createLog.isPending || updateLog.isPending}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background disabled:opacity-60"
+              >
+                {createLog.isPending || updateLog.isPending ? "Saving…" : activeLog ? "Update log" : "Save decision log"}
+              </button>
+              <button
+                onClick={() => setEditorOpen(false)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-muted"
+              >
+                Close
+              </button>
+            </div>
           </div>
-          <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            placeholder="Notes (optional)"
-            className="w-full bg-surface border border-border rounded px-2 py-1.5 text-xs"
-            rows={2}
-          />
-        </div>
+        )}
+
+        {saveMessage && <p className="text-xs text-emerald-400">{saveMessage}</p>}
+        {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
+      </div>
+
+      {/* ── Confirm modal (Use AI Plan) ─────────────────────────────────────── */}
+      {confirmOpen && createPortal(
+        <div className="fixed inset-0 z-[2000] bg-black/60 flex items-center justify-center p-4 pointer-events-auto">
+          <div className="w-full max-w-md rounded-lg border border-border bg-surface p-4 space-y-3">
+            <p className="text-sm font-semibold text-text-primary">Confirm — Use AI plan</p>
+            <div className="text-xs space-y-1">
+              <p className="text-text-secondary">
+                Invest now: <span className="font-mono text-emerald-300 font-semibold">{formatCurrency(deployNow)}</span>
+              </p>
+              <p className="text-text-secondary">
+                Reserve: <span className="font-mono text-blue-300 font-semibold">{formatCurrency(reserveAmount)}</span>
+                {" "}from your <span className="font-mono">{formatCurrency(amount)}</span> deposit
+              </p>
+            </div>
+            <div className="max-h-48 overflow-y-auto border border-border rounded-md divide-y divide-border">
+              {executeRows.map((row) => (
+                <div key={row.ticker} className="px-3 py-2 flex items-center justify-between text-xs">
+                  <span className="font-mono text-text-primary">{row.ticker}</span>
+                  <span className="font-mono text-emerald-300">{formatCurrency(row.amount)}</span>
+                </div>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConfirmOpen(false)}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold border border-border bg-surface-elevated/40 text-text-primary"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={async () => {
+                  setConfirmOpen(false);
+                  setEditorOpen(false);
+                  setErrorMessage("");
+                  const executedDecisions = actualDecisions.map((row) => ({
+                    ...row,
+                    actual_action: row.actual_action ?? "BOUGHT",
+                    actual_amount: row.actual_amount ?? row.recommended_amount ?? 0,
+                    executed_at: row.executed_at ?? new Date().toISOString(),
+                  }));
+                  setActualDecisions(executedDecisions);
+                  await onSaveLog(executedDecisions);
+                }}
+                className="px-3 py-1.5 rounded-md text-xs font-semibold bg-accent text-background"
+              >
+                Confirm
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
       )}
 
-      {detailsOpen && activeLog && delta && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Summary</p>
-          <p className="text-xs text-text-secondary">
-            You deployed {formatCurrency(delta.total_actual)} of {formatCurrency(delta.total_recommended)} recommended ({deployedPct}%).
+      {/* ── Card B: Decision History ──────────────────────────────────────── */}
+      {logsToShow.length > 0 && (
+        <div className="card-glass p-4 space-y-3 border border-border/80">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+            Decision History
           </p>
-          <p className="text-xs text-text-secondary">
-            Capital behavior: {capitalBehavior}
-          </p>
-          <p className="text-xs text-text-secondary">Style shift: {styleShiftSummary}</p>
-          <p className="text-xs text-text-secondary">Net effect: {behaviorLabel}</p>
-        </div>
-      )}
-      {detailsOpen && activeLog && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <div className="flex items-center justify-between gap-2">
-            <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Performance vs AI</p>
-            <button
-              onClick={onEvaluatePerformance}
-              disabled={evaluateLog.isPending}
-              className="px-2 py-1 rounded text-[11px] font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
-            >
-              {evaluateLog.isPending ? "Evaluating..." : "Evaluate"}
-            </button>
-          </div>
-          {performance ? (
-            <>
-              {performanceStatus === "baseline_captured" ? (
-                <p className="text-xs text-amber-300">
-                  Performance baseline captured. Re-evaluate next trading day or later.
-                </p>
-              ) : (
-                <p className={cn("text-xs", performanceStatus === "ready" ? (perfDelta >= 0 ? "text-emerald-300" : "text-red-300") : "text-amber-300")}>{perfSummary}</p>
-              )}
-              {hasQualityIssues ? (
-                <p className="text-xs text-amber-300">
-                  Data quality note: some tickers are excluded because entry or current prices are missing.
-                </p>
-              ) : null}
-              {showPortfolioPerformance ? (
-                <p className="text-xs text-text-secondary">
-                  Recommended return: {(performance.recommended_return ?? 0).toFixed(2)}% • Actual return: {(performance.actual_return ?? 0).toFixed(2)}%
-                </p>
-              ) : null}
-              {showPortfolioPerformance ? (
-                <p className="text-xs text-text-secondary">Delta: {(performance.delta ?? 0).toFixed(2)}%</p>
-              ) : null}
-              {activeLog.performance_snapshot?.per_ticker?.length ? (
-                <div className="space-y-1 pt-1">
-                  {activeLog.performance_snapshot.per_ticker.map((row) => (
-                    <p key={row.ticker} className={cn("text-[11px]", performanceStatus === "baseline_captured" ? "text-text-muted/70" : "text-text-muted")}>
-                      {(() => {
-                        const tickerLabel = row.recommended_ticker && row.actual_ticker && row.recommended_ticker !== row.actual_ticker
-                          ? `${row.recommended_ticker} → ${row.actual_ticker}`
-                          : row.actual_ticker ?? row.recommended_ticker ?? row.ticker;
-                        if (row.status === "missing_price") {
-                          return `${tickerLabel}: missing_price (${row.reason ?? "Missing entry price/current price"})`;
-                        }
-                        if (performanceStatus === "baseline_captured") {
-                          return `${tickerLabel}: baseline captured`;
-                        }
-                        return `${tickerLabel}: AI ${(row.recommended_return_pct ?? 0).toFixed(2)}% • You ${(row.actual_return_pct ?? 0).toFixed(2)}% • Δ ${(row.delta_pct ?? 0).toFixed(2)}%`;
-                      })()}
-                    </p>
-                  ))}
-                </div>
-              ) : null}
-            </>
-          ) : (
-            <p className="text-xs text-text-secondary">
-              Evaluate this log to compare your executed decisions against the model recommendations.
-            </p>
-          )}
-        </div>
-      )}
-      {detailsOpen && (
-        <div className="border-t border-border pt-3 space-y-1.5">
-          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Decision Insights</p>
-          {!insights || insights.eligible_logs < 3 ? (
-            <p className="text-xs text-text-secondary">Decision insights will appear after 3+ evaluated logs.</p>
-          ) : (
-            <div className="space-y-1">
-              {(insights.confidence === "low" || insights.confidence === "medium") ? (
-                <p className="text-[11px] text-amber-300">
-                  {insightsConfidenceLabel}: not enough history for a strong conclusion.
-                </p>
-              ) : null}
-              <p className="text-xs text-text-secondary">
-                You beat the model in {winCount} of {insights.eligible_logs} evaluated decisions.
+
+          {/* Global insights summary */}
+          {insights && insights.eligible_logs >= 3 && (
+            <div className="rounded-md border border-border/70 bg-surface-elevated/30 p-2.5 space-y-1">
+              <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">
+                {insightsConfidenceLabel} · {insights.eligible_logs} evaluated
               </p>
               <p className={cn("text-xs", (insights.summary.avg_delta ?? 0) >= 0 ? "text-emerald-300" : "text-red-300")}>
-                Average delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}%
+                Avg delta vs model: {(insights.summary.avg_delta ?? 0) >= 0 ? "+" : ""}{(insights.summary.avg_delta ?? 0).toFixed(2)}% · beat model {winCount}/{insights.eligible_logs}
               </p>
-              {insights.behavior_insights.etf_replacements.count > 0 && insights.behavior_insights.etf_replacements.avg_delta !== null ? (
-                <p className="text-xs text-text-secondary">
-                  ETF replacements: {(insights.behavior_insights.etf_replacements.avg_delta ?? 0) >= 0 ? "+" : ""}
-                  {(insights.behavior_insights.etf_replacements.avg_delta ?? 0).toFixed(2)}% avg delta
-                </p>
-              ) : null}
-              {insights.behavior_insights.under_deployment.count > 0 && insights.behavior_insights.under_deployment.avg_delta !== null ? (
-                <p className="text-xs text-text-secondary">
-                  Under-deployment ({insights.behavior_insights.under_deployment.count} logs): {(insights.behavior_insights.under_deployment.avg_delta ?? 0) >= 0 ? "helped" : "hurt"} by{" "}
-                  {Math.abs(insights.behavior_insights.under_deployment.avg_delta ?? 0).toFixed(2)}% avg delta.
-                </p>
-              ) : null}
-              {insights.summary.worst_override ? (
-                <p className="text-xs text-text-secondary">
-                  Worst override: {insights.summary.worst_override.ticker}, {insights.summary.worst_override.delta_pct >= 0 ? "+" : ""}
-                  {insights.summary.worst_override.delta_pct.toFixed(2)}%
-                </p>
-              ) : null}
             </div>
           )}
+
+          {/* Log entries */}
+          <div className="space-y-2">
+            {logsToShow.map((log) => (
+              <DecisionHistoryEntry
+                key={log.id}
+                log={log}
+                deployNow={deployNow}
+                isActive={activeLog?.id === log.id}
+                onEvaluate={() => onEvaluatePerformance(log.id)}
+                isEvaluating={evaluateLog.isPending}
+                onSelect={() => {
+                  setSavedLog(log);
+                  setActualDecisions(
+                    log.actual_decisions?.length
+                      ? log.actual_decisions
+                      : buildInitialActualDecisions(recommendations, adjustedAmountsForLog),
+                  );
+                  setNotes(log.notes ?? "");
+                  setSaveMessage("");
+                }}
+              />
+            ))}
+          </div>
         </div>
       )}
+    </div>
+  );
+}
 
-      {detailsOpen && logsToShow.length > 0 && (
-        <div className="border-t border-border pt-2">
-          <button onClick={() => setHistoryOpen((v) => !v)} className="w-full flex justify-between text-xs text-text-muted">
-            <span>Recent Decision Logs</span>
-            <span>{historyOpen ? "−" : "+"}</span>
-          </button>
-          {historyOpen && (
-            <div className="mt-2 space-y-1">
-              {logsToShow.map((log) => {
-                const recs = Array.isArray((log.recommendation_snapshot as any)?.normalized_tickers)
-                  ? ((log.recommendation_snapshot as any).normalized_tickers as Array<Record<string, unknown>>)
-                  : [];
-                const recTotal = recs.reduce((sum, row) => sum + (Number(row.amount) || 0), 0);
-                const actualTotal = (log.actual_decisions || []).reduce((sum, row) => sum + (Number(row.actual_amount) || 0), 0);
-                return (
-                  <button
-                    key={log.id}
-                    onClick={() => {
-                      setSavedLog(log);
-                      setActualDecisions(log.actual_decisions?.length ? log.actual_decisions : buildInitialActualDecisions(recommendations));
-                      setNotes(log.notes ?? "");
-                      setSaveMessage("");
-                    }}
-                    className="w-full text-left rounded border border-border px-2 py-1.5 text-xs hover:bg-surface-elevated"
-                  >
-                    <div className="flex justify-between text-text-primary">
-                      <span>{new Date(log.created_at).toLocaleDateString()}</span>
-                      <span className="uppercase">{log.status.replaceAll("_", " ")}</span>
-                    </div>
-                    <div className="text-text-muted mt-0.5">
-                      {(() => {
-                        const delta = log.decision_delta;
-                        const deployedPct = delta?.total_recommended
-                          ? Math.round((delta.total_actual / delta.total_recommended) * 100)
-                          : recTotal > 0
-                          ? Math.round((actualTotal / recTotal) * 100)
-                          : 0;
-                        const skippedCount = delta?.skipped_tickers?.length ?? 0;
-                        const replacedCount = delta?.replaced_tickers?.length ?? 0;
-                        const behavior =
-                          log.risk_behavior === "more_conservative"
-                            ? "Conservative"
-                            : log.risk_behavior === "more_aggressive"
-                            ? "Aggressive"
-                            : "Aligned";
-                        return `${deployedPct}% deployed • ${skippedCount} skipped • ${replacedCount} replaced • ${behavior}`;
-                      })()}
-                    </div>
-                  </button>
-                );
-              })}
+function DecisionHistoryEntry({
+  log,
+  deployNow,
+  isActive,
+  onEvaluate,
+  isEvaluating,
+  onSelect,
+}: {
+  log: DecisionMemoryLog;
+  deployNow: number;
+  isActive: boolean;
+  onEvaluate: () => void;
+  isEvaluating: boolean;
+  onSelect: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const snap = log.recommendation_snapshot as Record<string, unknown>;
+  const ctx = (snap?.decision_context as Record<string, unknown> | undefined) ?? {};
+  const totalDeposit = Number(ctx.entered_capital_amount) || 0;
+  const aiDeployNow = Number(ctx.deploy_now_amount) || deployNow;
+  const aiReserve = Number(ctx.reserve_amount) || 0;
+  const actuals = log.actual_decisions ?? [];
+  const actualTotal = actuals.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
+  const actualReserve = totalDeposit > 0 ? totalDeposit - actualTotal : aiReserve;
+  const status = deriveExecutionStatus(actuals, aiDeployNow);
+
+  const tickerActuals = actuals
+    .filter((r) => r.ticker && (r.actual_amount ?? 0) > 0)
+    .map((r) => `${r.ticker} ${formatCurrency(r.actual_amount ?? 0)}`)
+    .join(" · ");
+
+  const perf = log.performance_snapshot;
+  const perfStatus = perf?.status ?? null;
+  const portfolio = perf?.portfolio;
+  const perfDelta = portfolio?.delta ?? 0;
+  const showPerf = perfStatus === "ready" || perfStatus === "partial_data";
+
+  return (
+    <div className={cn("border rounded-lg overflow-hidden", isActive ? "border-accent/40" : "border-border/80")}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="w-full text-left px-3 py-2.5 hover:bg-surface-elevated/20 transition-colors"
+      >
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-xs text-text-muted">
+            {new Date(log.created_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+          </span>
+          <div className="flex items-center gap-1.5">
+            {isActive && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-accent/15 text-accent border border-accent/30 font-semibold">
+                Active
+              </span>
+            )}
+            <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full border font-semibold", executionStatusCls(status))}>
+              {executionStatusLabel(status)}
+            </span>
+            <ChevronIcon className={cn("w-3.5 h-3.5 text-text-muted transition-transform", open && "rotate-180")} />
+          </div>
+        </div>
+        <div className="flex gap-3 mt-1 text-[11px] text-text-muted flex-wrap">
+          {totalDeposit > 0 && <span>Deposit {formatCurrency(totalDeposit)}</span>}
+          <span>Invested <span className="text-text-primary font-semibold">{formatCurrency(actualTotal)}</span></span>
+          <span>Reserved <span className="text-text-primary">{formatCurrency(actualReserve)}</span></span>
+        </div>
+        {tickerActuals && (
+          <p className="text-[11px] text-text-secondary mt-1 truncate">{tickerActuals}</p>
+        )}
+      </button>
+
+      {open && (
+        <div className="border-t border-border px-3 pb-3 pt-2.5 space-y-2">
+          {/* Ticker detail */}
+          {actuals.filter((r) => r.ticker).length > 0 && (
+            <div className="divide-y divide-border border border-border rounded-md overflow-hidden">
+              {actuals.filter((r) => r.ticker).map((r, i) => (
+                <div key={`${r.ticker}-${i}`} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                  <span className="font-mono text-text-primary">{r.ticker}</span>
+                  <div className="flex items-center gap-2 text-text-muted">
+                    <span className={cn(
+                      "text-[10px] px-1 rounded font-semibold",
+                      r.actual_action === "SKIPPED" ? "text-red-300" :
+                      r.actual_action === "REPLACED" ? "text-amber-300" : "text-emerald-300"
+                    )}>{r.actual_action ?? "BOUGHT"}</span>
+                    {(r.actual_amount ?? 0) > 0 && (
+                      <span className="font-mono">{formatCurrency(r.actual_amount ?? 0)}</span>
+                    )}
+                    {r.replacement_ticker && (
+                      <span className="text-amber-300">→ {r.replacement_ticker}</span>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
+          )}
+
+          {/* Plan comparison */}
+          {aiDeployNow > 0 && (
+            <p className="text-[11px] text-text-muted">
+              AI planned: {formatCurrency(aiDeployNow)} now · {formatCurrency(aiReserve)} reserve
+            </p>
+          )}
+
+          {/* Performance */}
+          <div className="space-y-1">
+            <div className="flex items-center justify-between">
+              <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">Performance vs AI</p>
+              <button
+                onClick={onEvaluate}
+                disabled={isEvaluating}
+                className="px-2 py-0.5 rounded text-[10px] font-semibold bg-surface-elevated text-text-primary border border-border disabled:opacity-60"
+              >
+                {isEvaluating ? "…" : "Evaluate"}
+              </button>
+            </div>
+            {!perf ? (
+              <p className="text-[11px] text-text-muted">Not yet evaluated.</p>
+            ) : perfStatus === "baseline_captured" ? (
+              <p className="text-[11px] text-amber-300">Baseline captured — re-evaluate next trading day.</p>
+            ) : perfStatus === "pending" || perfStatus === "insufficient_data" ? (
+              <p className="text-[11px] text-text-muted">
+                {perfStatus === "pending" ? "Pending data." : "Insufficient data yet."}
+              </p>
+            ) : (
+              <>
+                {showPerf && portfolio && (
+                  <p className={cn("text-xs font-semibold", perfDelta >= 0 ? "text-emerald-300" : "text-red-300")}>
+                    {portfolio.summary_text
+                      ? portfolio.summary_text
+                      : `Delta vs model: ${perfDelta >= 0 ? "+" : ""}${perfDelta.toFixed(2)}%`}
+                  </p>
+                )}
+                {showPerf && portfolio && (
+                  <p className="text-[11px] text-text-muted">
+                    AI {(portfolio.recommended_return ?? 0).toFixed(2)}% · You {(portfolio.actual_return ?? 0).toFixed(2)}%
+                  </p>
+                )}
+                {perf.windows && (
+                  <div className="space-y-0.5">
+                    {(["7d", "30d", "90d"] as const).map((w) => {
+                      const win = perf.windows?.[w];
+                      if (!win) return null;
+                      if (win.status !== "ready") {
+                        return <p key={w} className="text-[11px] text-text-muted">{w}: {win.status.replace("_", " ")}</p>;
+                      }
+                      return (
+                        <p key={w} className="text-[11px] text-text-muted">
+                          {w}: AI {(win.recommended_return_pct ?? 0).toFixed(2)}% · You {(win.actual_return_pct ?? 0).toFixed(2)}% · Δ {(win.delta_pct ?? 0).toFixed(2)}%
+                        </p>
+                      );
+                    })}
+                  </div>
+                )}
+                {perf.per_ticker?.length ? (
+                  <div className="space-y-0.5">
+                    {perf.per_ticker.map((row) => {
+                      const label = row.recommended_ticker && row.actual_ticker && row.recommended_ticker !== row.actual_ticker
+                        ? `${row.recommended_ticker}→${row.actual_ticker}`
+                        : row.actual_ticker ?? row.recommended_ticker ?? row.ticker;
+                      if (row.status === "missing_price") {
+                        return <p key={row.ticker} className="text-[11px] text-text-muted">{label}: missing price</p>;
+                      }
+                      return (
+                        <p key={row.ticker} className="text-[11px] text-text-muted">
+                          {label}: AI {(row.recommended_return_pct ?? 0).toFixed(2)}% · You {(row.actual_return_pct ?? 0).toFixed(2)}% · Δ {(row.delta_pct ?? 0).toFixed(2)}%
+                        </p>
+                      );
+                    })}
+                  </div>
+                ) : null}
+                {perf.data_quality?.length ? (
+                  <p className="text-[11px] text-amber-300">Some tickers excluded due to missing price data.</p>
+                ) : null}
+              </>
+            )}
+          </div>
+
+          {/* Load into editor */}
+          {!isActive && (
+            <button
+              onClick={onSelect}
+              className="text-[11px] text-accent hover:text-accent-hover transition-colors font-semibold"
+            >
+              Load into editor
+            </button>
+          )}
+          {log.notes && (
+            <p className="text-[11px] text-text-muted italic">{log.notes}</p>
           )}
         </div>
       )}

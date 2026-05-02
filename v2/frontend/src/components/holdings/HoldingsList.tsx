@@ -25,7 +25,6 @@ export function HoldingsList() {
     );
   }
 
-  // Compute market value for sorting (use current_price if available, else avg_cost)
   const enriched = positions.map((p) => {
     const price = p.current_price ?? p.avg_cost;
     const marketValue = p.shares * price;
@@ -39,7 +38,6 @@ export function HoldingsList() {
     filter === "All" ? enriched : enriched.filter((p) => p.category === filter);
   const sorted = [...filtered].sort((a, b) => b.marketValue - a.marketValue);
 
-  // Category counts for filter badges
   const counts: Record<string, number> = { All: positions.length };
   for (const p of positions) {
     counts[p.category] = (counts[p.category] || 0) + 1;
@@ -48,67 +46,74 @@ export function HoldingsList() {
   return (
     <div className="space-y-3">
       {/* Category filter */}
-      <div className="flex gap-1.5 overflow-x-auto pb-1">
+      <div className="flex gap-1 overflow-x-auto pb-1 scrollbar-hide">
         {CATEGORIES.map((cat) => {
           const count = counts[cat] || 0;
           if (cat !== "All" && count === 0) return null;
+          const active = filter === cat;
           return (
             <button
               key={cat}
               onClick={() => setFilter(cat)}
               className={cn(
-                "px-3 py-1 text-xs rounded-md transition-colors whitespace-nowrap",
-                filter === cat
+                "px-3 py-1 text-[11px] rounded-md transition-colors whitespace-nowrap font-medium",
+                active
                   ? "bg-accent text-background font-semibold"
-                  : "text-text-muted hover:text-text-primary hover:bg-surface-elevated"
+                  : "text-text-muted hover:text-text-secondary bg-surface-elevated hover:bg-surface-hover border border-border/60"
               )}
             >
-              {cat} {count > 0 && <span className="opacity-60">{count}</span>}
+              {cat}
+              {count > 0 && (
+                <span className={cn("ml-1", active ? "opacity-70" : "opacity-40")}>
+                  {count}
+                </span>
+              )}
             </button>
           );
         })}
       </div>
 
       {/* Holdings list */}
-      <div className="space-y-1.5">
+      <div className="data-card overflow-hidden divide-y divide-border/50">
         {sorted.map((h) => (
           <Link
             key={h.ticker}
             href={`/dashboard/position/${h.ticker}`}
-            className="card-glass px-4 py-3 flex items-center justify-between hover:bg-surface-elevated/50 transition-colors cursor-pointer block"
+            className="flex items-center justify-between px-4 py-3 hover:bg-surface-hover/50 transition-colors block"
           >
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2">
-                <span className="font-mono font-semibold text-text-primary">
+                <span className="ticker-symbol text-sm">
                   {h.ticker}
                 </span>
-                <span className="text-xs px-1.5 py-0.5 rounded bg-surface-elevated text-text-muted">
+                <span className="badge-surface text-[9px]">
                   {h.category}
                 </span>
                 {h.lt_eligible && (
-                  <span className="text-[10px] px-1 py-0.5 rounded bg-accent/10 text-accent">
+                  <span className="badge-accent text-[9px]">
                     LT
                   </span>
                 )}
               </div>
-              <p className="text-xs text-text-secondary truncate">{h.name}</p>
+              <p className="text-xs text-text-muted truncate mt-0.5">{h.name}</p>
             </div>
 
-            <div className="text-right ml-4">
-              <p className="font-mono text-sm text-text-primary">
+            <div className="text-right ml-4 shrink-0">
+              <p className="data-value text-sm">
                 {formatCurrency(h.marketValue)}
               </p>
-              <p className={cn("text-xs font-mono", pnlClass(h.pnl))}>
-                {formatCurrency(h.pnl)} ({formatPercent(h.pnlPct)})
+              <p className={cn("text-xs font-mono tabular-nums", pnlClass(h.pnl))}>
+                {h.pnl >= 0 ? "+" : ""}{formatCurrency(h.pnl)}{" "}
+                <span className="opacity-70">({formatPercent(h.pnlPct)})</span>
               </p>
             </div>
           </Link>
         ))}
       </div>
 
-      <p className="text-xs text-text-muted text-center pt-2">
+      <p className="metric-label text-center pt-1">
         {sorted.length} position{sorted.length !== 1 ? "s" : ""}
-        {filter !== "All" ? ` in ${filter}` : ""}
+        {filter !== "All" ? ` · ${filter}` : ""}
       </p>
     </div>
   );

@@ -34,37 +34,199 @@
   body {
     @apply bg-background text-text-primary antialiased;
     font-family: "Inter", system-ui, sans-serif;
+    font-feature-settings: "tnum" 1, "kern" 1;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 }
 
-/* Robinhood-style glassmorphic cards */
+/* ─── Card primitives ─────────────────────────────────────────── */
 @layer components {
+  /* Legacy — kept for backward compatibility */
   .card-glass {
     @apply bg-surface/80 backdrop-blur-xl border border-border/50 rounded-lg;
   }
   .card-elevated {
     @apply bg-surface-elevated border border-border rounded-lg;
   }
-  .pnl-positive {
-    @apply text-pnl-positive;
+
+  /* Elite data cards */
+  .data-card {
+    @apply bg-surface border border-border rounded-lg;
   }
-  .pnl-negative {
-    @apply text-pnl-negative;
+  .data-card-elevated {
+    @apply bg-surface-elevated border border-border/80 rounded-lg;
+  }
+  .intel-card {
+    @apply bg-surface border border-border/60 rounded-lg transition-colors;
   }
 }
 
-/* Scrollbar styling */
+/* ─── Data state colors ───────────────────────────────────────── */
+@layer components {
+  .data-positive { @apply text-positive; }
+  .data-negative { @apply text-negative; }
+  .data-caution  { @apply text-caution; }
+  .data-neutral  { @apply text-text-secondary; }
+
+  /* Legacy P&L aliases */
+  .pnl-positive { @apply text-pnl-positive; }
+  .pnl-negative { @apply text-pnl-negative; }
+}
+
+/* ─── Badge / pill system ─────────────────────────────────────── */
+@layer components {
+  /* Base badge — shared shape */
+  .badge {
+    @apply inline-flex items-center text-[10px] px-2 py-0.5 rounded-full
+           font-semibold uppercase tracking-[0.07em] border;
+  }
+  .badge-sm {
+    @apply inline-flex items-center text-[9px] px-1.5 py-px rounded-full
+           font-semibold uppercase tracking-[0.06em] border;
+  }
+
+  /* Semantic badge variants */
+  .badge-positive { @apply badge bg-positive/10 text-positive border-positive/30; }
+  .badge-negative { @apply badge bg-negative/10 text-negative border-negative/30; }
+  .badge-caution  { @apply badge bg-caution/10  text-caution  border-caution/30; }
+  .badge-info     { @apply badge bg-accent-blue/10 text-accent-blue border-accent-blue/30; }
+  .badge-accent   { @apply badge bg-accent/10  text-accent  border-accent/30; }
+  .badge-purple   { @apply badge bg-accent-purple/10 text-accent-purple border-accent-purple/30; }
+  .badge-surface  { @apply badge bg-surface-elevated text-text-muted border-border; }
+
+  /* Action badge — rectangular, bolder */
+  .action-badge {
+    @apply px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wide;
+  }
+  .action-badge-buy    { @apply action-badge bg-positive/10 text-positive; }
+  .action-badge-sell   { @apply action-badge bg-negative/10 text-negative; }
+  .action-badge-trim   { @apply action-badge bg-caution/10 text-caution; }
+  .action-badge-hold   { @apply action-badge bg-accent-blue/10 text-accent-blue; }
+  .action-badge-review { @apply action-badge bg-accent-purple/10 text-accent-purple; }
+}
+
+/* ─── Typography primitives ───────────────────────────────────── */
+@layer components {
+  /* Dense uppercase label — used for section headers and data labels */
+  .metric-label {
+    @apply text-[10px] uppercase tracking-[0.08em] font-semibold text-text-muted;
+  }
+
+  /* Section header — slightly larger than metric-label */
+  .section-header {
+    @apply text-xs uppercase tracking-[0.07em] font-semibold text-text-muted;
+  }
+
+  /* Mono data value */
+  .data-value {
+    @apply font-mono font-semibold text-text-primary tabular-nums;
+  }
+  .data-value-sm {
+    @apply font-mono text-sm font-semibold text-text-primary tabular-nums;
+  }
+  .data-value-xs {
+    @apply font-mono text-xs text-text-secondary tabular-nums;
+  }
+
+  /* Ticker symbol */
+  .ticker-symbol {
+    @apply font-mono font-bold text-text-primary tracking-tight;
+  }
+}
+
+/* ─── Table primitives ────────────────────────────────────────── */
+@layer components {
+  .data-table {
+    @apply w-full text-sm;
+  }
+  .data-table-header {
+    @apply border-b border-border bg-surface-elevated/50 px-4 py-2
+           text-[10px] uppercase tracking-[0.07em] font-semibold text-text-muted;
+  }
+  .data-table-row {
+    @apply border-b border-border/50 transition-colors;
+  }
+  .data-table-row:hover {
+    @apply bg-surface-hover/40;
+  }
+  .data-table-row:last-child {
+    @apply border-b-0;
+  }
+  .data-table-footer {
+    @apply px-4 py-2.5 bg-surface-elevated/20 border-t border-border;
+  }
+}
+
+/* ─── Button primitives ───────────────────────────────────────── */
+@layer components {
+  .btn-primary {
+    @apply px-3 py-1.5 bg-accent text-background rounded-md text-xs font-semibold
+           hover:bg-accent-hover transition-colors
+           disabled:opacity-50 disabled:cursor-not-allowed;
+  }
+  .btn-secondary {
+    @apply px-3 py-1.5 bg-surface-elevated text-text-primary border border-border
+           rounded-md text-xs font-semibold
+           hover:bg-surface-hover hover:border-border-strong transition-colors;
+  }
+  .btn-ghost {
+    @apply px-2 py-1 text-text-muted hover:text-text-primary
+           rounded-md hover:bg-surface-elevated transition-colors text-xs;
+  }
+  .btn-danger {
+    @apply px-3 py-1.5 bg-negative/10 text-negative border border-negative/30
+           rounded-md text-xs font-semibold hover:bg-negative/20 transition-colors;
+  }
+}
+
+/* ─── Page shell ──────────────────────────────────────────────── */
+@layer components {
+  .page-header {
+    @apply sticky top-0 z-50 bg-background/90 backdrop-blur-xl border-b border-border;
+  }
+  .page-header-inner {
+    @apply max-w-7xl mx-auto px-4 py-3 flex items-center justify-between;
+  }
+  .page-title {
+    @apply text-base font-semibold text-text-primary tracking-tight;
+  }
+  .page-main {
+    @apply max-w-7xl mx-auto px-4 py-6 space-y-6;
+  }
+}
+
+/* ─── Warning / risk block ────────────────────────────────────── */
+@layer components {
+  .risk-block {
+    @apply p-3 rounded-lg border border-caution/30 bg-caution/5;
+  }
+  .risk-block-title {
+    @apply text-xs font-semibold uppercase tracking-[0.07em] text-caution;
+  }
+  .info-block {
+    @apply p-3 rounded-lg border border-border/80 bg-surface-elevated/40;
+  }
+}
+
+/* ─── Scrollbar ───────────────────────────────────────────────── */
 ::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 4px;
+  height: 4px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
   background: #21262d;
-  border-radius: 3px;
+  border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
   background: #30363d;
+}
+
+/* ─── Selection ───────────────────────────────────────────────── */
+::selection {
+  background-color: rgba(0, 230, 118, 0.15);
+  color: #e8eaed;
 }

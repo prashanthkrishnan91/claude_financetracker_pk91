@@ -77,6 +77,70 @@ export function buildRecommendationSnapshot(plan: DepositPlanResult): Record<str
   };
 }
 
+export function buildRecommendationSnapshotWithContext(
+  plan: DepositPlanResult,
+  context: {
+    entered_capital_amount: number;
+    deploy_now_amount: number;
+    reserve_amount: number;
+    ticker_context: Array<{ ticker: string; amount: number; role: string; why_reason: string | null }>;
+  },
+): Record<string, unknown> {
+  const base = buildRecommendationSnapshot(plan);
+  const tickerKey = context.ticker_context
+    .map((item) => `${item.ticker}:${Math.round(item.amount * 100) / 100}`)
+    .sort()
+    .join("|");
+  const recommendationKey = [
+    `entered:${Math.round(context.entered_capital_amount * 100) / 100}`,
+    `deploy:${Math.round(context.deploy_now_amount * 100) / 100}`,
+    `reserve:${Math.round(context.reserve_amount * 100) / 100}`,
+    `tickers:${tickerKey}`,
+  ].join(";");
+  return {
+    ...base,
+    decision_context: {
+      entered_capital_amount: context.entered_capital_amount,
+      deploy_now_amount: context.deploy_now_amount,
+      reserve_amount: context.reserve_amount,
+      ticker_allocations: context.ticker_context,
+      role_and_why_summary: context.ticker_context.map((item) => ({
+        ticker: item.ticker,
+        role: item.role,
+        why_reason: item.why_reason,
+        amount: item.amount,
+      })),
+      recommendation_key: recommendationKey,
+      session_key: recommendationKey,
+      timestamp: new Date().toISOString(),
+    },
+  };
+}
+
+function logSortTime(log: DecisionMemoryLog): number {
+  const updated = Date.parse(log.updated_at || "");
+  if (Number.isFinite(updated)) return updated;
+  const created = Date.parse(log.created_at || "");
+  return Number.isFinite(created) ? created : 0;
+}
+
+export function getDecisionLogSessionKey(log: DecisionMemoryLog | null | undefined): string | null {
+  const key = (log?.recommendation_snapshot as { decision_context?: { session_key?: unknown } } | undefined)?.decision_context?.session_key;
+  return typeof key === "string" && key.trim() ? key : null;
+}
+
+export function dedupeDecisionLogsForDisplay(logs: DecisionMemoryLog[]): DecisionMemoryLog[] {
+  const map = new Map<string, DecisionMemoryLog>();
+  for (const log of logs) {
+    const key = getDecisionLogSessionKey(log) ?? `id:${log.id}`;
+    const current = map.get(key);
+    if (!current || logSortTime(log) > logSortTime(current)) {
+      map.set(key, log);
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => logSortTime(b) - logSortTime(a));
+}
+
 export const decisionLogApi = {
   createDecisionLog: (snapshot: Record<string, unknown>) =>
     api.decisionLogs.createDecisionLog(snapshot),
@@ -86,14 +150,40 @@ export const decisionLogApi = {
   deleteDecisionLog: (id: string) => api.decisionLogs.deleteDecisionLog(id),
 };
 
-export function buildInitialActualDecisions(recommendations: DepositRecommendation[]): ActualDecisionItem[] {
-  return recommendations.map((rec) => ({
-    ticker: rec.symbol,
-    recommended_action: rec.action,
-    actual_action: "BOUGHT",
-    recommended_amount: rec.amount,
-    actual_amount: rec.amount,
-  }));
+export function buildInitialActualDecisions(
+  recommendations: DepositRecommendation[],
+  adjustedAmounts?: Map<string, number>,
+): ActualDecisionItem[] {
+  return recommendations.map((rec) => {
+    const amount = adjustedAmounts?.get(rec.symbol ?? "") ?? rec.amount;
+    return {
+      ticker: rec.symbol,
+      recommended_action: rec.action,
+      actual_action: "BOUGHT",
+      recommended_amount: amount,
+      actual_amount: amount,
+    };
+  });
+}
+
+export type ExecutionStatus = "fully_executed" | "partially_executed" | "skipped" | "modified";
+
+export function deriveExecutionStatus(
+  actualDecisions: ActualDecisionItem[],
+  aiDeployNowAmount: number,
+): ExecutionStatus {
+  const totalActual = actualDecisions.reduce((sum, row) => sum + (Number(row.actual_amount) || 0), 0);
+  if (totalActual <= 0) return "skipped";
+  const tolerance = 0.51;
+  const hasReplacements = actualDecisions.some(
+    (r) => r.actual_action === "REPLACED" || (r.replacement_ticker && r.replacement_ticker.trim()),
+  );
+  const hasSkips = actualDecisions.some((r) => r.actual_action === "SKIPPED");
+  if (Math.abs(totalActual - aiDeployNowAmount) > tolerance) {
+    return totalActual < aiDeployNowAmount - tolerance ? "partially_executed" : "modified";
+  }
+  if (hasReplacements || hasSkips) return "modified";
+  return "fully_executed";
 }
 
 export type { DecisionMemoryLog };

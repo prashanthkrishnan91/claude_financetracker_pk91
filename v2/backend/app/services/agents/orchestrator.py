@@ -45,6 +45,9 @@ from ..intelligence import (
     projected_full_mode_cost,
     synthesize_portfolio,
 )
+from ..intelligence.score_schema import ScoreCard
+from ..intelligence.thesis_engine import score_thesis
+from ..intelligence.thesis_mapper import map_to_thesis_inputs
 from ..recommendation_engine import invalidate_recommendations_aggregate_cache
 from ..agent_run_status import assert_db_status
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
@@ -54,6 +57,33 @@ from .llm import LLMClient, FALLBACK_MODEL
 from .state import AgentState, TickerInsight
 
 logger = logging.getLogger(__name__)
+
+
+def _scorecard_to_dict(card: "ScoreCard") -> dict:
+    """Serialise a ScoreCard to a plain dict for JSONB storage."""
+    def _ss(ss) -> dict:
+        return {
+            "score": ss.score,
+            "data_quality": ss.data_quality,
+            "inputs_used": ss.inputs_used,
+            "inputs_missing": ss.inputs_missing,
+            "published": ss.published,
+        }
+    return {
+        "ticker": card.ticker,
+        "status": card.status.value,
+        "conviction_score": card.conviction_score,
+        "conviction_band": card.conviction_band.value,
+        "blended_data_quality": card.blended_data_quality,
+        "inputs_used": card.inputs_used,
+        "inputs_missing": card.inputs_missing,
+        "score_version": card.score_version,
+        "quality": _ss(card.quality),
+        "valuation": _ss(card.valuation),
+        "growth": _ss(card.growth),
+        "risk": _ss(card.risk),
+        "momentum": _ss(card.momentum),
+    }
 
 
 # Module-level lock: enforces a single LLM call in flight per process for the
@@ -290,6 +320,14 @@ class AgentOrchestrator:
                 bundle=market_bundle,
             )
             timings["features_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            # Phase 2.5 — deterministic thesis scoring (Intel v2 PR-2).
+            # Pure, no LLM, no IO.  Runs immediately after features are
+            # available so all per-ticker ScoreCards are computed before
+            # the LLM stage.  Additive only — does not affect existing paths.
+            t0 = time.perf_counter()
+            self._thesis_scorecards = self._compute_thesis_scorecards(market_bundle)
+            timings["thesis_v2_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
             # Phase 5 — run-mode classification. Based on snapshots
             # because features propagate snapshot quality; snapshots
@@ -1046,6 +1084,55 @@ class AgentOrchestrator:
             logger.warning("agent_features persist raised (swallowed): %s", exc)
 
         return features
+
+    # ── Thesis scoring stage (Phase 2.5 — Intel v2 PR-2) ────────────────────
+
+    def _compute_thesis_scorecards(
+        self,
+        bundle: dict[str, Any],
+    ) -> dict[str, "ScoreCard"]:
+        """Compute deterministic thesis ScoreCards for all tickers.
+
+        Uses features from Phase 2 (``self._features``) plus the raw
+        fundamentals bundle.  Pure — no IO, no LLM.  Never raises; on
+        per-ticker failure the ticker is skipped and a warning is logged.
+        """
+        features = getattr(self, "_features", {}) or {}
+        fundamentals_map = (bundle or {}).get("fundamentals") or {}
+        scorecards: dict[str, ScoreCard] = {}
+
+        for ticker, fs in features.items():
+            try:
+                raw_funds = fundamentals_map.get(ticker) or {}
+                inputs = map_to_thesis_inputs(raw_funds, fs)
+                card = score_thesis(ticker, inputs)
+                scorecards[ticker] = card
+                logger.info(
+                    "thesis_v2 ticker=%s status=%s conviction_band=%s "
+                    "blended_quality=%.3f inputs_used=%d inputs_missing=%d",
+                    ticker,
+                    card.status.value,
+                    card.conviction_band.value,
+                    card.blended_data_quality,
+                    len(card.inputs_used),
+                    len(card.inputs_missing),
+                )
+            except Exception as exc:  # noqa: BLE001 — never fail the pipeline
+                logger.warning(
+                    "thesis_v2 scoring failed ticker=%s err=%s", ticker, exc
+                )
+
+        logger.info(
+            "thesis_v2 complete — tickers=%d ready=%d partial=%d insufficient=%d",
+            len(scorecards),
+            sum(1 for sc in scorecards.values() if sc.status.value == "READY"),
+            sum(1 for sc in scorecards.values() if sc.status.value == "PARTIAL"),
+            sum(
+                1 for sc in scorecards.values()
+                if sc.status.value == "INSUFFICIENT_DATA"
+            ),
+        )
+        return scorecards
 
     # ── Portfolio synthesis stage (Phase 4) ─────────────────────────────────
 

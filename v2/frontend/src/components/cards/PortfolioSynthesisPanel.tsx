@@ -21,23 +21,26 @@ export function PortfolioSynthesisPanel({ synthesis }: { synthesis: PortfolioSyn
   const riskBuckets = synthesis.exposures?.risk_buckets || [];
 
   return (
-    <section className="card-glass rounded-xl border border-border p-4 space-y-4">
-      <div className="space-y-2">
+    <section className="card-glass rounded-xl border border-border/70 p-4 md:p-5 space-y-4 md:space-y-5 bg-gradient-to-b from-surface-elevated/40 to-transparent">
+      <div className="space-y-2.5 md:space-y-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">Portfolio Command Center</span>
           <span className={cn("text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase", bias.cls)}>{bias.label}</span>
-          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">Data {quality}</span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">Run data {quality}</span>
           {synthesis.quality_breakdown?.enriched !== undefined && (
             <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">
               Enriched {synthesis.quality_breakdown.enriched}/{synthesis.quality_breakdown.total_cards}
             </span>
           )}
         </div>
-        <p className="text-sm text-text-primary leading-relaxed">{synthesis.headline || synthesis.summary}</p>
-        <p className="text-xs text-text-secondary leading-relaxed">{synthesis.executive_summary || "Portfolio intelligence is generated from current recommendations, risk tags, and confidence signals."}</p>
-        <p className="text-xs text-text-muted">
-          {(actionCounts.BUY || 0)} Buy / {(actionCounts.HOLD || 0)} Hold / {(actionCounts.TRIM || 0)} Trim / {(actionCounts.SELL || 0)} Sell
-        </p>
+        <p className="text-sm md:text-[15px] text-text-primary leading-relaxed font-medium">{synthesis.headline || synthesis.summary}</p>
+        <p className="text-xs text-text-secondary leading-relaxed max-w-4xl">{synthesis.executive_summary || "Portfolio intelligence is generated from current recommendations, risk tags, and confidence signals."}</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 pt-0.5">
+          <MetricChip label="Buy" value={actionCounts.BUY || 0} tone="positive" />
+          <MetricChip label="Hold" value={actionCounts.HOLD || 0} tone="neutral" />
+          <MetricChip label="Trim" value={actionCounts.TRIM || 0} tone="caution" />
+          <MetricChip label="Sell" value={actionCounts.SELL || 0} tone="negative" />
+        </div>
       </div>
 
       <div className="grid md:grid-cols-3 gap-3">
@@ -73,15 +76,15 @@ export function PortfolioSynthesisPanel({ synthesis }: { synthesis: PortfolioSyn
 
 function BucketBlock({ title, buckets }: { title: string; buckets: Array<{ name: string; percentage: number; top_tickers?: string[]; why_it_matters?: string }> }) {
   return (
-    <div className="rounded-lg border border-border p-3 space-y-2">
+    <div className="rounded-lg border border-border/70 bg-surface-elevated/20 p-3 space-y-2.5">
       <p className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">{title}</p>
       {(buckets || []).slice(0, 4).map((bucket, idx) => (
-        <div key={`${bucket.name}-${idx}`} className="space-y-1">
+        <div key={`${bucket.name}-${idx}`} className="space-y-1.5">
           <div className="flex items-center justify-between text-xs">
             <span className="text-text-primary">{bucket.name}</span>
             <span className="text-text-muted">{Math.round(Number(bucket.percentage || 0))}%</span>
           </div>
-          {bucket.top_tickers?.length ? <p className="text-[11px] text-text-secondary">{bucket.top_tickers.join(", ")}</p> : null}
+          {bucket.top_tickers?.length ? <p className="text-[11px] text-text-secondary leading-relaxed">{bucket.top_tickers.join(", ")}</p> : null}
           {bucket.why_it_matters ? <p className="text-[11px] text-text-muted">{bucket.why_it_matters}</p> : null}
         </div>
       ))}
@@ -92,15 +95,32 @@ function BucketBlock({ title, buckets }: { title: string; buckets: Array<{ name:
 
 function ListBlock({ title, items }: { title: string; items: string[] }) {
   return (
-    <div className="rounded-lg border border-border p-3 space-y-2">
+    <div className="rounded-lg border border-border/70 bg-surface-elevated/15 p-3 space-y-2.5">
       <p className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">{title}</p>
       {items.length === 0 ? <p className="text-xs text-text-muted">No items available.</p> : (
-        <ul className="space-y-1">
+        <ul className="space-y-1.5">
           {items.map((item, idx) => (
             <li key={idx} className="text-xs text-text-secondary flex items-start gap-1.5"><span className="text-accent mt-0.5">•</span><span>{item}</span></li>
           ))}
         </ul>
       )}
+    </div>
+  );
+}
+
+function MetricChip({ label, value, tone }: { label: string; value: number; tone: "positive" | "neutral" | "caution" | "negative" }) {
+  const toneCls =
+    tone === "positive"
+      ? "border-green-500/30 text-green-300 bg-green-500/10"
+      : tone === "negative"
+      ? "border-red-500/30 text-red-300 bg-red-500/10"
+      : tone === "caution"
+      ? "border-yellow-500/30 text-yellow-300 bg-yellow-500/10"
+      : "border-border text-text-secondary bg-surface-elevated/40";
+  return (
+    <div className={cn("rounded-md border px-2.5 py-1.5", toneCls)}>
+      <p className="text-[10px] uppercase tracking-wide">{label}</p>
+      <p className="text-base font-display leading-tight">{value}</p>
     </div>
   );
 }

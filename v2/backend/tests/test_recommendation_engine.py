@@ -14,6 +14,9 @@ from app.services.recommendation_engine import (
     DCA_ALWAYS,
     DRIP_YIELD,
     ACTION_COLORS,
+    _normalize_ticker_lookup_key,
+    _resolve_thesis_scorecard_for_ticker,
+    _build_thesis_fields_for_card,
 )
 
 
@@ -169,6 +172,266 @@ class TestConstants:
         assert ACTION_COLORS["TRIM"] == "orange"
         assert ACTION_COLORS["HOLD"] == "blue"
         assert ACTION_COLORS["REVIEW"] == "purple"
+
+
+class TestThesisTickerLookupNormalization:
+    def test_normalize_ticker_lookup_key_strips_case_and_separators(self):
+        assert _normalize_ticker_lookup_key("brk-b") == "BRKB"
+        assert _normalize_ticker_lookup_key("BRK.B") == "BRKB"
+        assert _normalize_ticker_lookup_key(" brk b ") == "BRKB"
+
+    def test_resolve_scorecard_direct_key_match(self):
+        scorecard = {"status": "PARTIAL"}
+        thesis_map = {"AAPL": scorecard}
+        assert _resolve_thesis_scorecard_for_ticker(thesis_map, "AAPL") == scorecard
+
+    def test_resolve_scorecard_normalized_key_match(self):
+        scorecard = {"status": "PARTIAL"}
+        thesis_map = {"brk.b": scorecard}
+        assert _resolve_thesis_scorecard_for_ticker(thesis_map, "BRK-B") == scorecard
+
+    def test_resolve_scorecard_missing_or_malformed_map_safely_returns_none(self):
+        assert _resolve_thesis_scorecard_for_ticker({}, "AAPL") is None
+        assert _resolve_thesis_scorecard_for_ticker({"AAPL": None}, "AAPL") is None
+        assert _resolve_thesis_scorecard_for_ticker(None, "AAPL") is None
+
+
+class TestThesisPlainEnglishCardWiring:
+    def test_emits_plain_english_when_exact_ticker_exists(self):
+        run_lookup = {
+            "run-1": {"allocation": {"_thesis_v2": {"AAPL": {"status": "PARTIAL"}}}}
+        }
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "attached"
+        assert thesis_v2 == {"status": "PARTIAL"}
+        assert isinstance(plain, dict)
+        assert plain.get("headline")
+
+    def test_emits_plain_english_when_key_differs_by_safe_normalization(self):
+        run_lookup = {
+            "run-1": {"allocation": {"_thesis_v2": {" brk.b ": {"status": "PARTIAL"}}}}
+        }
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="BRK-B", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "attached"
+        assert thesis_v2 == {"status": "PARTIAL"}
+        assert isinstance(plain, dict)
+
+    def test_missing_thesis_map_leaves_fields_none(self):
+        run_lookup = {"run-1": {"allocation": {}}}
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "thesis_map_missing"
+        assert thesis_v2 is None
+        assert plain is None
+
+
+class TestLiveStyleSerializedThesisContract:
+    def test_live_style_serialized_thesis_v2_keeps_directional_labels_per_ticker(self):
+        run_lookup = {
+            "run-live": {
+                "allocation": {
+                    "_thesis_v2": {
+                        "GOOGL": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": 74.0, "published": True},
+                            "valuation": {"score": 58.0, "published": True},
+                            "risk": {"score": 71.0, "published": True},
+                            "momentum": {"score": 55.0, "published": True},
+                        },
+                        "META": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": 78.0, "published": True},
+                            "valuation": {"score": 42.0, "published": True},
+                            "risk": {"score": 49.0, "published": True},
+                            "momentum": {"score": 67.0, "published": True},
+                        },
+                        "NVDA": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": None, "published": False},
+                            "valuation": {"score": 81.0, "published": True},
+                            "risk": {"score": 52.0, "published": True},
+                            "momentum": {"score": 73.0, "published": True},
+                        },
+                    }
+                }
+            }
+        }
+
+        googl_v2, googl_plain, googl_diag = _build_thesis_fields_for_card(
+            ticker="GOOGL", run_id="run-live", run_lookup=run_lookup
+        )
+        meta_v2, meta_plain, meta_diag = _build_thesis_fields_for_card(
+            ticker="META", run_id="run-live", run_lookup=run_lookup
+        )
+        nvda_v2, nvda_plain, nvda_diag = _build_thesis_fields_for_card(
+            ticker="NVDA", run_id="run-live", run_lookup=run_lookup
+        )
+
+        assert googl_diag == meta_diag == nvda_diag == "attached"
+        assert googl_v2 and meta_v2 and nvda_v2
+
+        assert googl_plain["quality_label"] == "Business quality looks strong"
+        assert meta_plain["quality_label"] == "Business quality looks strong"
+        assert nvda_plain["quality_label"] == "Business quality signal is limited"
+        assert googl_plain["valuation_label"] != meta_plain["valuation_label"]
+        assert googl_plain["momentum_label"] != nvda_plain["momentum_label"]
+        assert googl_plain["headline"] == "Not enough data for a reliable investment-case read"
+
+
+class TestThesisRunFallbackBehavior:
+    """Verify that _build_thesis_fields_for_card falls back to the latest
+    completed run when a card's own agent_run_id run lacks _thesis_v2.
+
+    This covers: stale run binding (_persist failure leaving old recs active),
+    and the timing window between _persist.finally and _update_run writing
+    _thesis_v2 to agent_runs.allocation.
+    """
+
+    _VARIED_THESIS_MAP = {
+        "GOOGL": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": 74.0, "published": True},
+            "valuation": {"score": 58.0, "published": True},
+            "risk": {"score": 71.0, "published": True},
+            "momentum": {"score": 55.0, "published": True},
+        },
+        "META": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": 78.0, "published": True},
+            "valuation": {"score": 42.0, "published": True},
+            "risk": {"score": 49.0, "published": True},
+            "momentum": {"score": 67.0, "published": True},
+        },
+        "NVDA": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": None, "published": False},
+            "valuation": {"score": 81.0, "published": True},
+            "risk": {"score": 52.0, "published": True},
+            "momentum": {"score": 73.0, "published": True},
+        },
+    }
+
+    def test_old_run_lacks_thesis_map_falls_back_to_newer_run(self):
+        """Card's own run has no _thesis_v2; fallback run has varied map."""
+        run_lookup = {
+            "old-run": {"allocation": {}},  # no _thesis_v2
+            "new-run": {"allocation": {"_thesis_v2": self._VARIED_THESIS_MAP}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="GOOGL",
+            run_id="old-run",
+            run_lookup=run_lookup,
+            fallback_run_id="new-run",
+        )
+        assert diag == "attached_via_latest_run", diag
+        assert isinstance(plain, dict)
+        assert plain["quality_label"] == "Business quality looks strong"
+
+    def test_fallback_run_provides_varied_labels_per_ticker(self):
+        """Different tickers get different Business read lines from the same fallback run."""
+        run_lookup = {
+            "stale-run": {"allocation": {}},
+            "latest-run": {"allocation": {"_thesis_v2": self._VARIED_THESIS_MAP}},
+        }
+        _, googl_plain, googl_diag = _build_thesis_fields_for_card(
+            ticker="GOOGL", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        _, meta_plain, meta_diag = _build_thesis_fields_for_card(
+            ticker="META", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        _, nvda_plain, nvda_diag = _build_thesis_fields_for_card(
+            ticker="NVDA", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        assert googl_diag == meta_diag == nvda_diag == "attached_via_latest_run"
+        # Valuation differs: GOOGL 58 (neutral) vs META 42 (cautious)
+        assert googl_plain["valuation_label"] != meta_plain["valuation_label"]
+        # Quality differs: NVDA unpublished vs GOOGL published strong
+        assert nvda_plain["quality_label"] != googl_plain["quality_label"]
+
+    def test_both_runs_lack_thesis_returns_none_safely(self):
+        """Neither primary nor fallback run has _thesis_v2 — safe None return."""
+        run_lookup = {
+            "run-a": {"allocation": {}},
+            "run-b": {"allocation": {"some_key": "value"}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-a",
+            run_lookup=run_lookup,
+            fallback_run_id="run-b",
+        )
+        assert v2 is None
+        assert plain is None
+        assert diag in ("thesis_map_missing", "run_not_found")
+
+    def test_run_not_in_lookup_falls_back_to_latest(self):
+        """Card's run_id not in run_lookup at all — fallback serves thesis."""
+        run_lookup = {
+            "latest-run": {"allocation": {"_thesis_v2": {"AAPL": {"status": "PARTIAL"}}}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="missing-run",
+            run_lookup=run_lookup,
+            fallback_run_id="latest-run",
+        )
+        assert diag == "attached_via_latest_run"
+        assert isinstance(plain, dict)
+
+    def test_primary_run_has_thesis_no_fallback_needed(self):
+        """When card's own run has valid _thesis_v2, fallback run is not used."""
+        run_lookup = {
+            "primary-run": {"allocation": {"_thesis_v2": {"AAPL": {
+                "status": "PARTIAL",
+                "quality": {"score": 80.0, "published": True},
+                "valuation": {"score": 55.0, "published": True},
+                "risk": {"score": 60.0, "published": True},
+                "momentum": {"score": 70.0, "published": True},
+            }}}},
+            "other-run": {"allocation": {"_thesis_v2": {"AAPL": {"status": "INSUFFICIENT_DATA"}}}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="primary-run",
+            run_lookup=run_lookup,
+            fallback_run_id="other-run",
+        )
+        # Primary succeeds — diag must be "attached" (not via fallback)
+        assert diag == "attached"
+        assert v2 is not None
+
+    def test_active_run_reuse_no_fallback_same_run_id(self):
+        """When fallback_run_id equals the primary run_id, no duplicate lookup."""
+        run_lookup = {
+            "run-1": {"allocation": {}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-1",
+            run_lookup=run_lookup,
+            fallback_run_id="run-1",  # same as primary — must not loop
+        )
+        assert v2 is None
+        assert diag == "thesis_map_missing"
+
+    def test_no_fallback_run_id_degrades_gracefully(self):
+        """When fallback_run_id is None, behaviour is identical to old contract."""
+        run_lookup = {
+            "run-x": {"allocation": {}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-x",
+            run_lookup=run_lookup,
+            fallback_run_id=None,
+        )
+        assert v2 is None
+        assert diag == "thesis_map_missing"
 
 
 # ── generate_rec decision tree tests ────────────────────────────────────────
@@ -338,7 +601,7 @@ class TestGenerateRecDecliningThesis:
                            bear=50, bull=120, lt_ready=True, lt_date="2024-01-01",
                            price=60)
         assert rec.action == "BUY"
-        assert "declining thesis" in rec.detail.lower()
+        assert "declining investment case" in rec.detail.lower()
 
     def test_declining_at_target_lt_ready(self):
         # target=90 < cost=100, upside between -10 and 5, lt_ready

@@ -218,7 +218,7 @@ export default function RecommendationsPage() {
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-6 space-y-4">
+      <main className="max-w-7xl mx-auto px-4 py-6 space-y-4 md:space-y-5">
         {view === "performance" ? (
           <StrategyPerformanceTable data={strategyPerf} isLoading={perfLoading} />
         ) : (
@@ -249,25 +249,25 @@ export default function RecommendationsPage() {
             />
 
             {/* Filter cards */}
-            <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
               {ACTION_FILTERS.map((f) => (
                 <button
                   key={f.key}
                   onClick={() => setFilter(f.key)}
                   className={cn(
-                    "px-3 py-2 rounded-lg text-xs font-semibold text-center border transition-colors",
+                    "px-3 py-2.5 rounded-lg text-xs font-semibold text-center border transition-all duration-150",
                     filter === f.key
-                      ? cn(f.color, "border-current")
-                      : "border-border text-text-muted hover:bg-surface-elevated"
+                      ? cn(f.color, "border-current shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]")
+                      : "border-border/70 bg-surface-elevated/20 text-text-muted hover:bg-surface-elevated/50 hover:text-text-primary"
                   )}
                 >
-                  {f.label}
+                  <span className="uppercase tracking-wide text-[10px]">{f.label}</span>
                   {counts[f.key] ? (
-                    <span className="block text-lg font-display mt-0.5">
+                    <span className="block text-lg font-display mt-1 leading-none">
                       {counts[f.key]}
                     </span>
                   ) : (
-                    <span className="block text-lg font-display mt-0.5 opacity-30">
+                    <span className="block text-lg font-display mt-1 leading-none opacity-30">
                       0
                     </span>
                   )}
@@ -318,7 +318,7 @@ export default function RecommendationsPage() {
                 />
               )
             ) : (
-              <div className="space-y-3">
+              <div className="space-y-2.5 md:space-y-3">
                 {filtered.map((card) => (
                   <AgentInsightCard
                     key={card.id}

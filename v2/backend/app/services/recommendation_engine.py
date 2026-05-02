@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
+from .intelligence.thesis_plain_english import build_thesis_plain_english
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -50,6 +51,112 @@ ACTION_COLORS = {
     "HOLD": "blue",
     "REVIEW": "purple",
 }
+
+
+def _normalize_ticker_lookup_key(ticker: Any) -> str:
+    """Normalize ticker symbols for tolerant scorecard lookups.
+
+    Keeps user-facing symbols untouched; used only for backend key matching.
+    Examples that should match: BRK-B / brk.b / brk b.
+    """
+    if ticker is None:
+        return ""
+    return "".join(ch for ch in str(ticker).upper() if ch.isalnum())
+
+
+def _resolve_thesis_scorecard_for_ticker(
+    thesis_map: Any,
+    ticker: str,
+) -> Optional[dict]:
+    """Return best-match thesis_v2 scorecard for a card ticker, if any."""
+    if not isinstance(thesis_map, dict) or not thesis_map:
+        return None
+    direct = thesis_map.get(ticker)
+    if isinstance(direct, dict) and direct:
+        return direct
+    normalized_ticker = _normalize_ticker_lookup_key(ticker)
+    if not normalized_ticker:
+        return None
+    for key, value in thesis_map.items():
+        if not (isinstance(value, dict) and value):
+            continue
+        if _normalize_ticker_lookup_key(key) == normalized_ticker:
+            return value
+    return None
+
+
+def _build_thesis_fields_for_card(
+    *,
+    ticker: str,
+    run_id: Any,
+    run_lookup: dict[str, dict],
+    fallback_run_id: Optional[str] = None,
+) -> tuple[Optional[dict], Optional[dict], str]:
+    """Resolve thesis_v2 + thesis_plain_english payloads for one card.
+
+    Tries the card's own agent_run_id first. When that run is absent from
+    run_lookup or lacks _thesis_v2, falls back to fallback_run_id (the
+    latest completed run that has _thesis_v2). This makes the live contract
+    resilient to stale run binding, _persist failures, and the small timing
+    window between _persist.finally and _update_run writing _thesis_v2.
+
+    Returns (thesis_v2, thesis_plain_english, diagnostic_code).
+    Diagnostic codes:
+      attached                — primary run used, exact/normalized match
+      attached_via_latest_run — fallback run used
+      translation_failed      — scorecard found but translator raised
+      no_run_id               — card has no agent_run_id
+      run_not_found           — agent_run_id not in run_lookup
+      allocation_missing_or_invalid — allocation column missing/not a dict
+      thesis_map_missing      — _thesis_v2 absent or empty in allocation
+      ticker_not_in_thesis_map — no scorecard for this ticker in _thesis_v2
+    """
+    def _try_run(rid: Any, diag_suffix: str = "") -> tuple[Optional[dict], Optional[dict], str]:
+        rid_str = str(rid or "")
+        if not rid_str:
+            return None, None, "no_run_id"
+        run_row = run_lookup.get(rid_str)
+        if not run_row:
+            return None, None, "run_not_found"
+        allocation = run_row.get("allocation")
+        if not isinstance(allocation, dict):
+            return None, None, "allocation_missing_or_invalid"
+        thesis_map = allocation.get("_thesis_v2")
+        if not isinstance(thesis_map, dict) or not thesis_map:
+            return None, None, "thesis_map_missing"
+        scorecard = _resolve_thesis_scorecard_for_ticker(thesis_map, ticker)
+        if not (isinstance(scorecard, dict) and scorecard):
+            return None, None, "ticker_not_in_thesis_map"
+        try:
+            return scorecard, build_thesis_plain_english(scorecard), f"attached{diag_suffix}"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "thesis_plain_english generation skipped ticker=%s run_id=%s err=%s",
+                ticker, rid_str, exc,
+            )
+            return scorecard, None, f"translation_failed{diag_suffix}"
+
+    run_id_str = str(run_id or "")
+    primary = _try_run(run_id)
+    # If primary succeeded or failed for a terminal reason (no run_id, ticker
+    # missing), return immediately — fallback cannot help.
+    _TERMINAL_DIAGS = {"attached", "translation_failed", "no_run_id", "ticker_not_in_thesis_map"}
+    if primary[2] in _TERMINAL_DIAGS:
+        return primary
+
+    # Primary run is missing from run_lookup or has no _thesis_v2.
+    # Try the latest completed run that has _thesis_v2 as a fallback.
+    if fallback_run_id and str(fallback_run_id) != run_id_str:
+        fb = _try_run(fallback_run_id, "_via_latest_run")
+        if fb[2].startswith("attached") or fb[2].startswith("translation_failed"):
+            logger.info(
+                "thesis.fallback_used ticker=%s card_run=%s primary_diag=%s "
+                "fallback_run=%s fallback_diag=%s",
+                ticker, run_id_str, primary[2], fallback_run_id, fb[2],
+            )
+            return fb
+
+    return primary
 
 # DRIP yield estimates (annual %, approximate 2026 values)
 DRIP_YIELD: dict[str, float] = {
@@ -263,7 +370,7 @@ def generate_rec(
         if upside > 20:
             return _make(
                 "ACCUMULATE",
-                f"{upside:.0f}% to analyst target (below cost — declining thesis). {drip_n}",
+                f"{upside:.0f}% to analyst target (below cost — declining investment case). {drip_n}",
                 "gold", 2, tax_n, drip_n,
             )
         if 5 >= upside > -10:
@@ -292,7 +399,7 @@ def generate_rec(
             )
         return _make(
             "HOLD",
-            f"Declining thesis — monitor analyst revisions. {drip_n}",
+            f"Declining investment case — monitor analyst revisions. {drip_n}",
             "gray", 0, tax_n, drip_n,
         )
 
@@ -993,7 +1100,7 @@ def build_portfolio_intel(cards: list[InsightCard], holdings: Optional[list[dict
     if not what_changed:
         for row in per_card:
             if row["action"] in {"TRIM", "SELL"} and len(what_changed) < 5:
-                what_changed.append({"ticker": row["ticker"], "change": "Action downgraded to risk-control posture; monitor momentum and thesis drift."})
+                what_changed.append({"ticker": row["ticker"], "change": "Action downgraded to risk-control posture; monitor momentum and business-case drift."})
 
     watchlist = []
     for row in per_card:
@@ -1315,7 +1422,7 @@ class RecommendationService:
                     self._db(
                         "agent_runs.select_for_cards",
                         lambda: self.client.table("agent_runs")
-                        .select("id, status, cost_metrics")
+                        .select("id, status, cost_metrics, allocation")
                         .eq("user_id", str(self.user_id))
                         .in_("id", [str(r) for r in run_ids_needed])
                         .execute(),
@@ -1326,6 +1433,46 @@ class RecommendationService:
                         run_lookup[str(row["id"])] = row
             except Exception as exc:  # noqa: BLE001
                 logger.debug("get_insight_cards: run metadata lookup failed: %s", exc)
+
+        # Thesis contract: find the latest completed run with _thesis_v2.
+        # Used as fallback when a card's agent_run_id run is absent from
+        # run_lookup or its allocation lacks _thesis_v2. This covers stale
+        # run binding (e.g. _persist failed, leaving old recs active) and
+        # the small timing window between _persist.finally (which invalidates
+        # the aggregate cache) and _update_run writing _thesis_v2 to the DB.
+        latest_thesis_run_id: Optional[str] = None
+        if run_ids_needed:
+            try:
+                latest_for_thesis = (
+                    self._db(
+                        "agent_runs.select_latest_completed_with_thesis",
+                        lambda: self.client.table("agent_runs")
+                        .select("id, finished_at, allocation")
+                        .eq("user_id", str(self.user_id))
+                        .eq("status", "completed")
+                        .order("finished_at", desc=True)
+                        .limit(5)
+                        .execute(),
+                    )
+                ).data or []
+                for thesis_row in latest_for_thesis:
+                    rid = str(thesis_row.get("id") or "")
+                    if not rid:
+                        continue
+                    alloc = thesis_row.get("allocation") or {}
+                    tmap = alloc.get("_thesis_v2") if isinstance(alloc, dict) else None
+                    if isinstance(tmap, dict) and tmap:
+                        latest_thesis_run_id = rid
+                        if rid not in run_lookup:
+                            run_lookup[rid] = thesis_row
+                        break
+                logger.info(
+                    "thesis.contract card_run_ids=%s latest_thesis_run=%s",
+                    sorted(str(r) for r in run_ids_needed),
+                    latest_thesis_run_id or "none",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_insight_cards: latest thesis run lookup failed: %s", exc)
 
         # Fetch live prices if price service available
         prices: dict[str, float] = {}
@@ -1342,6 +1489,7 @@ class RecommendationService:
         cards = []
         normalized_count = degraded_count = skipped_count = 0
         fallback_cards = reused_cached_cards = 0
+        thesis_diag_counts: dict[str, int] = {}
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -1422,6 +1570,21 @@ class RecommendationService:
                 if reused_cached:
                     reused_cached_cards += 1
 
+                # Intel v2: extract per-ticker thesis scorecard from
+                # agent_runs.allocation["_thesis_v2"] and generate the
+                # plain-English translation. Tries the card's own
+                # agent_run_id first; falls back to the latest completed
+                # run with _thesis_v2 when the primary run is absent or
+                # lacks the map. Fails safely — both fields remain None
+                # if data is unavailable or malformed.
+                thesis_v2_dict, thesis_plain_english_dict, thesis_diag = _build_thesis_fields_for_card(
+                    ticker=ticker,
+                    run_id=rec.get("agent_run_id"),
+                    run_lookup=run_lookup,
+                    fallback_run_id=latest_thesis_run_id,
+                )
+                thesis_diag_counts[thesis_diag] = thesis_diag_counts.get(thesis_diag, 0) + 1
+
                 card = InsightCard(
                     id=rec["id"],
                     ticker=ticker,
@@ -1479,6 +1642,8 @@ class RecommendationService:
                     reasoning_source=_reasoning_source,
                     reasoning_schema_version=_reasoning_schema_version,
                     differentiation=reasoning.get("differentiation"),
+                    thesis_v2=thesis_v2_dict,
+                    thesis_plain_english=thesis_plain_english_dict,
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",
@@ -1534,7 +1699,7 @@ class RecommendationService:
             llm_enriched_cards += int(cm.get("llm_enriched_cards") or 0)
             discarded_llm_calls += int(cm.get("discarded_llm_calls") or 0)
         logger.info(
-            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d",
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d thesis_diag=%s",
             self.user_id,
             len(recs),
             len(cards),
@@ -1551,6 +1716,7 @@ class RecommendationService:
             discarded_llm_calls,
             fallback_cards,
             reused_cached_cards,
+            thesis_diag_counts,
         )
         return cards
 

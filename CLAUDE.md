@@ -1,82 +1,56 @@
-# Claude Code — RuFlo V3
+# Claude Instructions — Investing App
 
-## Stack
-Vercel (serverless) · Supabase (DB) · Python/JS frontend
+Use this repo through a browser/mobile Claude + Codex workflow unless the user explicitly says CLI is available.
 
-## MOST IMPORTANT: Be as token efficient as possible when reading files, running commands and in conversations. Your focus is to build and deploy code, save tokens everywhere else.
+Before work, read only the smallest needed subset of:
 
-## Code Graph
-Auto-loaded — never re-read raw source for structural questions; graph is rebuilt automatically after code edits.
-@graphify-out/GRAPH_REPORT.md
-@graphify-out/wiki/index.md
+1. `docs/ai/HANDOFF.md` — current state
+2. `docs/ai/PROMPT_LIBRARY.md` — workflow, budget, prompt, UI, and review rules
+3. `docs/ai/skills/README.md` — task-specific workflow skill router
+4. `docs/ai/CLAUDE_PERSONAL_SKILLS.md` — optional personal Claude skill routing when a prompt names a personal skill
+5. `docs/ai/DESIGN_VISION.md` — long-term aspirational UI direction and timing gate when doing major design work
+6. `docs/ai/UI_BASELINE.md` — UI baseline and known visual costs when doing UI work
+7. `docs/ai/CLAUDE_WORKFLOW_KIT.md` — stable project constraints only when needed
+8. `README.md` — public/setup context only when needed
 
-## Core Rules
-- Do only what was asked — nothing more, nothing less
-- Read only files needed for the task; never index `node_modules/`, `.next/`, `venv/`, `*.csv`, `*.pdf`
-- Output only diffs/snippets — never full files unless asked
-- Prefer editing existing files; never create files unless strictly required
-- Never save to root — use `/src`, `/tests`, `/docs`, `/config`, `/scripts`, `/examples`
-- Always read a file before editing it
-- Always run tests after code changes; verify build before committing
-- Never hardcode API keys, credentials, or commit `.env` files
-- Always validate user input and sanitize file paths at system boundaries
-- Run `npx @claude-flow/cli@latest security scan` after security-related changes
-- Max 2 fix attempts before asking the user what to try next
-- After each feature/bug fix, prompt: "Run /compact before next task."
-- No conversational filler. Plan → Code → Verify.
+Use one primary workflow skill when it matches the task:
 
-## Workflow
-- Tasks >2 steps: write plan to `tasks/todo.md`, await approval, then execute
-- One objective at a time — log unrelated bugs to `tasks/todo.md`, do NOT fix mid-task
-- Never mark done without running tests or diffing behavior — show proof
-- After any user correction, log the pattern in `tasks/lessons.md`; review at session start
+- `docs/ai/skills/discovery.md` — map unknown files or visual surfaces before implementation
+- `docs/ai/skills/bugfix.md` — focused bug fix or small behavior correction
+- `docs/ai/skills/ui_fix.md` — capped UI polish or visual consistency pass
+- `docs/ai/skills/implementation.md` — focused multi-file feature implementation
+- `docs/ai/skills/merge_gate.md` — cheap PR review before merge
+- `docs/ai/skills/workflow_update.md` — workflow/documentation updates
+- `docs/ai/skills/supabase_change.md` — any Supabase SQL, schema, RLS, auth, or persistence-contract change
 
-## Skill Loading (load only when task matches — no preloading)
+Core rules:
 
-| Task Type | Skill |
-|---|---|
-| UI / layout / components | `/mnt/skills/user/frontend-design/SKILL.md` |
-| New feature (design phase) | `/mnt/skills/user/brainstorming/SKILL.md` |
-| Writing implementation spec | `/mnt/skills/user/writing-plans/SKILL.md` |
-| Executing a written plan | `/mnt/skills/user/executing-plans/SKILL.md` |
-| 2+ independent parallel tasks | `/mnt/skills/user/dispatching-parallel-agents/SKILL.md` |
-| Bug investigation | `/mnt/skills/user/systematic-debugging/SKILL.md` |
-| New feature (implementation) | `/mnt/skills/user/test-driven-development/SKILL.md` |
-| About to claim task complete | `/mnt/skills/user/verification-before-completion/SKILL.md` |
-| Word / PDF / Excel output | `/mnt/skills/public/{docx\|pdf\|xlsx}/SKILL.md` |
+- No broad discovery. Read primary target files first; fallback reads only if blocked.
+- Smallest safe patch. No unrelated refactors.
+- Use repo-local workflow skills instead of repeating large instruction blocks in prompts.
+- Personal Claude skills are optional accelerators only; they do not replace repo rules, budget gates, or project invariants.
+- Major design transformation must wait until `docs/ai/DESIGN_VISION.md` timing gate is satisfied; do small UI fixes only when needed before then.
+- If a task needs three or more skill types, split it before implementation.
+- Update `docs/ai/HANDOFF.md` in the same PR for any implementation, bug fix, UI change, architecture change, migration, or workflow change.
+- State Supabase SQL requirement in every PR summary.
+- Stop after opening any Medium-High/High usage PR. Do not propose the next implementation prompt.
 
-## Architecture
-- Domain-Driven Design with bounded contexts
-- Typed interfaces for all public APIs
-- TDD London School (mock-first) for new code
-- Event sourcing for state changes
-- Input validation at system boundaries
+Project invariants:
 
-**Config**: topology `hierarchical-mesh` · maxAgents `15` · memory `hybrid` · HNSW `on` · Neural `on`
+- Primary app path: `v2/`.
+- Intel must stay concise and signal-rich.
+- Deploy must preserve allocation math and clarity.
+- Decision logs must remain deterministic with no LLM dependency.
+- No backend/API/business-logic changes during UI-only work.
 
-## Build & Test
-```bash
-npm run build  # build
-npm test       # test
-npm run lint   # lint
+Final response format:
+
+```md
+Root cause/plan:
+Files changed:
+Tests:
+Risks:
+Supabase SQL: Yes/No
+HANDOFF.md edited: Yes/No + reason
+README.md edited: Yes/No + reason
 ```
-
-## Concurrency — 1 message = all related operations
-- Batch ALL file reads/writes/edits in one message
-- Batch ALL Bash commands in one message
-- Spawn ALL agents in one message via Agent tool
-
-## Swarm
-- Init swarm with CLI tools for complex tasks; Agent tool does the actual work — call BOTH in ONE message
-- Use hierarchical topology; maxAgents 6–8; specialized strategy; `raft` consensus
-- Shared memory namespace for all agents; run checkpoints via `post-task` hooks
-- Set `run_in_background: true` for all Agent calls
-- After spawning, STOP — do not poll or check status; review ALL results before proceeding
-
-## 3-Tier Model Routing (ADR-026)
-
-| Tier | Handler | Use Cases |
-|---|---|---|
-| 1 | Agent Booster WASM (<1ms, $0) | Simple transforms — use Edit tool directly, skip LLM |
-| 2 | Haiku (~500ms) | Low complexity (<30%) |
-| 3 | Sonnet/Opus (2–5s) | Complex reasoning, architecture, security (>30%) |

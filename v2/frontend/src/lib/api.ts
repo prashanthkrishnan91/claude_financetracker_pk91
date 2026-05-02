@@ -212,10 +212,10 @@ export const api = {
   },
 
   decisionLogs: {
-    createDecisionLog: (snapshot: Record<string, unknown>) =>
+    createDecisionLog: (snapshot: Record<string, unknown>, actualDecisions?: ActualDecisionItem[]) =>
       fetchApi<DecisionMemoryLog>("/api/v1/decision-logs", {
         method: "POST",
-        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy" }),
+        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy", actual_decisions: actualDecisions ?? [] }),
       }),
     listDecisionLogs: (limit = 25) =>
       fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),
@@ -365,6 +365,18 @@ export interface InsightCardData {
   differentiation?: string | null;
   reasoning_schema_version?: string | null;
   reasoning_source?: "fresh_llm" | "fallback" | "cache" | "stale_db" | "no_analyst_data" | string | null;
+  // Intel v2 PR-9: plain-English thesis labels (never render thesis_v2 directly)
+  thesis_plain_english?: ThesisPlainEnglish | null;
+}
+
+export interface ThesisPlainEnglish {
+  headline?: string | null;
+  quality_label?: string | null;
+  valuation_label?: string | null;
+  risk_label?: string | null;
+  momentum_label?: string | null;
+  data_label?: string | null;
+  caveats?: string[] | null;
 }
 
 export interface AgentRunQueued {
@@ -698,7 +710,7 @@ export interface DecisionMemoryLog {
   price_snapshot?: Record<string, { price?: number; timestamp?: string } | unknown> | null;
   actual_decisions: ActualDecisionItem[];
   performance_snapshot?: {
-    status?: "baseline_captured" | "ready" | "partial_data" | "missing_price";
+    status?: "baseline_captured" | "ready" | "partial_data" | "missing_price" | "pending" | "insufficient_data" | "unavailable";
     evaluated_at: string;
     baseline_captured_at?: string;
     portfolio: {
@@ -714,6 +726,15 @@ export interface DecisionMemoryLog {
       total_delta?: number;
       best_decision?: { ticker: string; delta_pct: number } | null;
       worst_decision?: { ticker: string; delta_pct: number } | null;
+    };
+    windows?: {
+      [key in "7d" | "30d" | "90d"]?: {
+        status: "pending" | "ready" | "insufficient_data" | "unavailable";
+        recommended_return_pct: number | null;
+        actual_return_pct: number | null;
+        delta_pct: number | null;
+        as_of: string;
+      };
     };
     per_ticker: Array<{
       ticker: string;
@@ -885,6 +906,56 @@ export interface DepositRecommendation {
 export type RegimeLabel = "bull" | "neutral" | "risk_off";
 export type DeploymentMode = "full" | "partial" | "defensive" | "wait";
 
+// Deploy Logic v2 — deterministic mode classifier output
+export type DeploymentModeV2 =
+  | "full_deploy"
+  | "staged_deploy"
+  | "defensive_reserve"
+  | "skip_or_wait";
+
+export type TickerRole = "Primary" | "Supporting" | "Watch";
+
+export interface ReserveTriggerV2 {
+  reserve_reason: string;
+  reserve_target_tickers: string[];
+  reserve_purpose: string;
+  trigger_type: string;
+  trigger_condition: string;
+  suggested_review_event: string | null;
+  suggested_review_date: string | null;
+  when_to_deploy_reserve: string;
+}
+
+export interface PerTickerDeploymentV2 {
+  ticker: string;
+  role: TickerRole;
+  amount: number;
+  deploy_now: number;
+  reserve: number;
+  conviction_level: string;
+  rationale: string;
+  capped?: boolean;
+  cap_reason?: string | null;
+}
+
+export interface DeploymentDecisionV2 {
+  total_deposit: number;
+  deploy_now_amount: number;
+  reserve_amount: number;
+  deployment_mode: DeploymentModeV2;
+  deployment_confidence: number;
+  deployment_reason: string;
+  cash_drag_penalty_applied: boolean;
+  reserve_reason: string | null;
+  reserve_trigger: ReserveTriggerV2 | null;
+  per_ticker_allocations: PerTickerDeploymentV2[];
+  risks: string[];
+  data_quality: "high" | "medium" | "low";
+  evaluation_notes_for_future_decision_log: string[];
+  deployment_score: number;
+  adjustments_applied: string[];
+}
+
 export interface RegimeBlock {
   regime_label: RegimeLabel;
   regime_score: number;
@@ -940,6 +1011,14 @@ export interface DepositPlanResult {
     cash_reserve?: number;
     deploy_percentage?: number;
     deployment_mode?: DeploymentMode;
+    // v2 canonical fields
+    deploy_now_amount?: number;
+    reserve_amount?: number;
+    deployment_mode_v2?: DeploymentModeV2;
+    deployment_confidence?: number;
+    deployment_reason?: string;
+    cash_drag_penalty_applied?: boolean;
+    reserve_reason?: string | null;
   };
   recommendations: DepositRecommendation[];
   allocations?: DepositRecommendation[];
@@ -964,5 +1043,6 @@ export interface DepositPlanResult {
   deployment_risks?: string[];
   regime?: RegimeBlock | null;
   adaptive?: AdaptiveBlock | null;
+  deployment_v2?: DeploymentDecisionV2 | null;
   debug?: Record<string, unknown>;
 }

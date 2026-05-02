@@ -84,6 +84,12 @@ def _pct_return(entry_price: float, current_price: float) -> float:
     return ((current_price - entry_price) / entry_price) * 100.0
 
 
+def _window_status(days_elapsed: float, window_days: int, has_any_data: bool) -> str:
+    if days_elapsed < window_days:
+        return "pending"
+    return "ready" if has_any_data else "unavailable"
+
+
 def _is_near_zero(value: float, tolerance: float = 0.05) -> bool:
     return abs(value) <= tolerance
 
@@ -237,9 +243,53 @@ class DecisionLogService:
             "style_shift": analysis["style_shift"],
             "execution_gap_percent": analysis["execution_gap_percent"],
         }
+        recommendation_key = self._extract_recommendation_key(recommendation_snapshot)
+        if recommendation_key:
+            existing = self._find_by_recommendation_key(user_id=user_id, recommendation_key=recommendation_key)
+            if existing:
+                logger.info("decision_log.create idempotent_update user_id=%s id=%s key=%s", user_id, existing.get("id"), recommendation_key)
+                updated = self.update(user_id=user_id, decision_log_id=str(existing.get("id")), patch=payload)
+                return updated or existing
         logger.info("decision_log.create user_id=%s status=%s", user_id, payload.get("status"))
         result = self.client.table("decision_logs").insert(payload).execute()
         return result.data[0] if result.data else {}
+
+    def _extract_recommendation_key(self, recommendation_snapshot: Any) -> str | None:
+        if not isinstance(recommendation_snapshot, dict):
+            return None
+        context = recommendation_snapshot.get("decision_context")
+        if not isinstance(context, dict):
+            return None
+        key = context.get("recommendation_key") or context.get("session_key")
+        if not isinstance(key, str):
+            return None
+        normalized = key.strip()
+        return normalized or None
+
+    def _find_by_recommendation_key(self, user_id: str, recommendation_key: str) -> dict[str, Any] | None:
+        result = (
+            self.client.table("decision_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .contains("recommendation_snapshot", {"decision_context": {"recommendation_key": recommendation_key}})
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = result.data or []
+        if rows:
+            return rows[0]
+        fallback = (
+            self.client.table("decision_logs")
+            .select("*")
+            .eq("user_id", user_id)
+            .contains("recommendation_snapshot", {"decision_context": {"session_key": recommendation_key}})
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        fallback_rows = fallback.data or []
+        return fallback_rows[0] if fallback_rows else None
 
     def list(self, user_id: str, limit: int = 50) -> list[dict[str, Any]]:
         logger.info("decision_log.list user_id=%s limit=%s", user_id, limit)
@@ -465,6 +515,8 @@ class DecisionLogService:
         )
         baseline_guard = bool(snapshot_meta.get("backfilled")) or less_than_one_trading_day or tiny_moves or equal_entry_and_current
         has_missing_rows = any(item.get("status") == "missing_price" for item in per_ticker)
+        has_any_rows = bool(per_ticker)
+        has_any_comparable = bool(comparable_rows)
 
         if not comparable_rows:
             evaluation_status = "missing_price"
@@ -474,6 +526,21 @@ class DecisionLogService:
             evaluation_status = "partial_data"
         else:
             evaluation_status = "ready"
+
+        days_elapsed = max(0.0, (evaluated_dt - baseline_dt).total_seconds() / 86400.0)
+        windows: dict[str, Any] = {}
+        for window_days in (7, 30, 90):
+            key = f"{window_days}d"
+            window_eval_status = _window_status(days_elapsed, window_days, has_any_comparable)
+            if not has_any_rows:
+                window_eval_status = "insufficient_data"
+            windows[key] = {
+                "status": window_eval_status,
+                "recommended_return_pct": round(total_recommended, 4) if window_eval_status == "ready" else None,
+                "actual_return_pct": round(total_actual, 4) if window_eval_status == "ready" else None,
+                "delta_pct": round(total_delta, 4) if window_eval_status == "ready" else None,
+                "as_of": evaluated_at,
+            }
 
         matched_model = (
             evaluation_status == "ready"
@@ -514,6 +581,7 @@ class DecisionLogService:
                 "backfilled_baseline": bool(snapshot_meta.get("backfilled")),
                 "summary_text": summary_text,
             },
+            "windows": windows,
             "per_ticker": per_ticker,
             "data_quality": data_quality,
         }

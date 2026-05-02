@@ -455,3 +455,11 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 
 
 - 2026-05-02: Added Intel live-contract diagnostic test for live-style serialized `_thesis_v2` (GOOGL/META/NVDA) to verify backend no longer emits universal INSUFFICIENT_DATA dimension fallback when published dimensions exist.
+
+## 2026-05-02 — Intel reasoning_v2: actionable INSUFFICIENT_DATA diagnostics fix
+
+- Root cause: reasoning_v2 diagnostics read missing_fields/stale_fields, but live thesis_v2 serialization provides inputs_missing instead; this produced INSUFFICIENT_DATA with missing=[] and stale=[].
+- Fix: fallback to inputs_missing and emit suppressed dimension markers (suppressed:<dimension>) for INSUFFICIENT_DATA when dimensions are unpublished and missing/stale would otherwise be empty.
+- Preserved safety contract: INSUFFICIENT_DATA still forces WATCH and deterministic evidence remains empty.
+- Added focused reasoning_v2 builder regression tests for the live-style serialized shape and suppression diagnostics.
+- No Supabase SQL. No frontend/UI, Deploy, or LLM behavior changes.

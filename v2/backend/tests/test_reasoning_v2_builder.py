@@ -1060,6 +1060,48 @@ def test_thesis_insufficient_data_evidence_deterministic_empty():
     assert result["evidence"]["deterministic"] == {}
 
 
+def test_insufficient_data_with_serialized_thesis_inputs_missing_is_actionable():
+    """Serialized thesis dicts use inputs_missing; diagnostics must not go empty."""
+    sc = dict(THESIS_INSUFFICIENT_DICT)
+    # Live serialized thesis shape from orchestrator does not include missing_fields.
+    sc.pop("missing_fields", None)
+    sc.pop("stale_fields", None)
+
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=sc,
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    dq = result["data_quality"]
+    assert dq["status"] == "INSUFFICIENT_DATA"
+    assert len(dq["missing"]) > 0
+    assert "trailing_pe" in dq["missing"]
+
+
+def test_insufficient_data_never_reports_both_missing_and_stale_empty_when_suppressed():
+    """If major dimensions are suppressed, diagnostics must remain actionable."""
+    sc = {
+        "ticker": "GOOGL",
+        "status": "INSUFFICIENT_DATA",
+        "data_quality_score": 0.42,
+        "quality": {"score": 0.0, "data_quality": 0.0, "published": False},
+        "valuation": {"score": 45.0, "data_quality": 0.2, "published": False},
+        "growth": {"score": 0.0, "data_quality": 0.0, "published": False},
+        "risk": {"score": 58.0, "data_quality": 0.49, "published": False},
+        "momentum": {"score": 62.0, "data_quality": 0.6, "published": True},
+    }
+    result = build_reasoning_v2(
+        ticker="GOOGL",
+        scorecard=sc,
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    dq = result["data_quality"]
+    assert dq["status"] == "INSUFFICIENT_DATA"
+    assert dq["missing"] or dq["stale"]
+    assert any(str(m).startswith("suppressed:") for m in dq["missing"])
+    assert "Suppressed dimensions due to low coverage" in dq["user_safe_note"]
+
+
 # ── Test PR2-7: PARTIAL scorecard with useful published dimensions ─────────────
 
 def test_thesis_partial_published_dimensions_appear_in_evidence():

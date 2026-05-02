@@ -421,3 +421,12 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Updated portfolio synthesis prompt rules to explicitly require plain wording and avoid `thesis` jargon in user-facing lines.
 - Scope limited to v2 copy/template text only; no scoring, recommendation, deploy, SQL, or LLM-call wiring changes.
 - Validation: `python -m compileall v2/backend/app/services/intelligence/per_ticker_analyst.py v2/backend/app/services/intelligence/portfolio_synthesis.py`.
+
+## 2026-05-02 — Intel v2 thesis_plain_english coverage diagnostics hardening
+
+- Investigated live Intel card thesis coverage path across orchestrator write path and recommendation card read path.
+- Confirmed `_thesis_v2` write path exists in orchestrator completion allocation payload; patch focused on card read-path reliability/observability.
+- Added deterministic helper to resolve + translate thesis fields per card with explicit diagnostic outcomes (`attached`, `run_not_found`, `thesis_map_missing`, etc.).
+- Added focused backend tests for exact-key attach, safe normalized-key attach, and missing-map omission behavior.
+- No score math, LLM behavior, Deploy, SQL, or frontend changes.
+

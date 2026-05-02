@@ -362,7 +362,7 @@ class TestGenerateRecDecliningThesis:
                            bear=50, bull=120, lt_ready=True, lt_date="2024-01-01",
                            price=60)
         assert rec.action == "BUY"
-        assert "declining thesis" in rec.detail.lower()
+        assert "declining investment case" in rec.detail.lower()
 
     def test_declining_at_target_lt_ready(self):
         # target=90 < cost=100, upside between -10 and 5, lt_ready

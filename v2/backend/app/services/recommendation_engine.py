@@ -296,7 +296,7 @@ def generate_rec(
         if upside > 20:
             return _make(
                 "ACCUMULATE",
-                f"{upside:.0f}% to analyst target (below cost — declining thesis). {drip_n}",
+                f"{upside:.0f}% to analyst target (below cost — declining investment case). {drip_n}",
                 "gold", 2, tax_n, drip_n,
             )
         if 5 >= upside > -10:
@@ -325,7 +325,7 @@ def generate_rec(
             )
         return _make(
             "HOLD",
-            f"Declining thesis — monitor analyst revisions. {drip_n}",
+            f"Declining investment case — monitor analyst revisions. {drip_n}",
             "gray", 0, tax_n, drip_n,
         )
 
@@ -1026,7 +1026,7 @@ def build_portfolio_intel(cards: list[InsightCard], holdings: Optional[list[dict
     if not what_changed:
         for row in per_card:
             if row["action"] in {"TRIM", "SELL"} and len(what_changed) < 5:
-                what_changed.append({"ticker": row["ticker"], "change": "Action downgraded to risk-control posture; monitor momentum and thesis drift."})
+                what_changed.append({"ticker": row["ticker"], "change": "Action downgraded to risk-control posture; monitor momentum and business-case drift."})
 
     watchlist = []
     for row in per_card:

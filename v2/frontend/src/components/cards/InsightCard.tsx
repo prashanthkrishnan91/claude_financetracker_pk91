@@ -63,7 +63,7 @@ export function InsightCard({
         </p>
       )}
 
-      {/* Thesis read */}
+      {/* Investment case read */}
       {card.thesis_plain_english && (
         <ThesisReadSection thesis={card.thesis_plain_english} />
       )}
@@ -106,7 +106,7 @@ function ThesisReadSection({ thesis }: { thesis: ThesisPlainEnglish }) {
   return (
     <div className="border-t border-border/40 pt-2 space-y-1.5">
       <span className="metric-label text-[10px] text-text-muted uppercase tracking-widest">
-        Thesis read
+        Investment case read
       </span>
       {thesis.headline && (
         <p className="text-xs text-text-primary leading-snug">{thesis.headline}</p>

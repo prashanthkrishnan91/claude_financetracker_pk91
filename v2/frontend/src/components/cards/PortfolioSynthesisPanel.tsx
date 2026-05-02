@@ -26,7 +26,7 @@ export function PortfolioSynthesisPanel({ synthesis }: { synthesis: PortfolioSyn
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[10px] uppercase tracking-wide text-text-muted font-semibold">Portfolio Command Center</span>
           <span className={cn("text-[10px] px-2 py-0.5 rounded-full border font-semibold uppercase", bias.cls)}>{bias.label}</span>
-          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">Data {quality}</span>
+          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">Run data {quality}</span>
           {synthesis.quality_breakdown?.enriched !== undefined && (
             <span className="text-[10px] px-2 py-0.5 rounded-full border border-border text-text-secondary">
               Enriched {synthesis.quality_breakdown.enriched}/{synthesis.quality_breakdown.total_cards}

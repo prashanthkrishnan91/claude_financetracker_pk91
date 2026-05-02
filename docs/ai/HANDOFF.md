@@ -1,4 +1,21 @@
 ## Last change
+Intel UI label clarification: run-level vs ticker-level data quality labels (PR: "fix(intel): clarify run vs ticker data quality labels").
+
+## Files touched
+- `v2/frontend/src/components/cards/DataQualityBanner.tsx` — top quality chip text changed from `Data {label}` to `Run data {label}`.
+- `v2/frontend/src/components/cards/PortfolioSynthesisPanel.tsx` — synthesis quality chip text changed from `Data {quality}` to `Run data {quality}`.
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx` — per-card chip text changed from `Data: {label}` to `Ticker data: {label}`.
+- `v2/progress_log.md` — concise entry added.
+- `docs/ai/HANDOFF.md` — this entry.
+
+## Behavior change
+- UI copy only: clarifies that top/batch quality is run-level while card quality is ticker-level.
+- No scoring/math/data-quality computation changes.
+- No backend/API/LLM/Deploy/Supabase changes.
+
+---
+
+## Last change
 Frontend CI/testability hardening: make lint/tests/build agent-runnable (PR: "chore(frontend): make lint and tests agent-runnable").
 
 ## Files touched

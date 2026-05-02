@@ -395,3 +395,10 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Kept role/invest-now/now%/after% columns and all allocation math unchanged.
 - Validation: lint passed; build requires Supabase public env vars in this environment; targeted deploy test command unavailable due to missing `jest` binary.
 - No backend changes. No Supabase SQL.
+
+## 2026-05-02 — Intel UI: clarify run vs ticker data-quality labels
+
+- Clarified top Intel quality chips to read `Run data {HIGH|MEDIUM|LOW}` (run/portfolio aggregate context).
+- Clarified per-card quality chip to read `Ticker data: {HIGH|MEDIUM|LOW}` (ticker-level context).
+- Kept styling/layout unchanged; copy-only update for mobile-safe compact labels.
+- No backend/scoring/data-quality logic changes. No Supabase SQL.

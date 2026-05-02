@@ -11,6 +11,23 @@
 
 ## Recent Changes
 
+### feat(intel): reasoning_v2 builder + dormant persistence (PR 1)
+- **Date**: 2026-05-02
+
+Added `v2/backend/app/services/intelligence/reasoning_v2_builder.py` — a pure
+deterministic function that fuses analyst verdict data into a structured
+`reasoning_v2.0` object. Written dormant into `agent_runs.allocation["_reasoning_v2"]`
+per ticker at the end of every Run Agents execution.
+
+- No InsightCard change. No API exposure. No SQL migration. No LLM change.
+- No frontend change. No Deploy change. Business read remains hidden.
+- Scorecard inputs are always `None` in PR 1 (no thesis_engine yet); builder is forward-compatible.
+- See `docs/ai/HANDOFF.md` for inspection SQL and PR 2 guidance.
+
+**Files**: `reasoning_v2_builder.py` (new), `test_reasoning_v2_builder.py` (new),
+`orchestrator.py` (wire-up), `docs/ai/HANDOFF.md` (new), `v2/progress_log.md` (updated).
+
+---
 ### feat(intel-v2-pr9): render plain-English thesis on Intel cards
 - **Date**: May 1, 2026
 

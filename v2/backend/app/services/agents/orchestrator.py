@@ -443,16 +443,49 @@ class AgentOrchestrator:
                 for i in state.insights.values()
                 if i.suggested_allocation > 0
             }
-            # Intel v2 PR-2: embed serialised thesis scorecards in the
-            # allocation JSONB under a reserved key so consumers can read
-            # per-ticker ScoreCards from AgentRunStatus.allocation without
-            # a DB schema change.  Frontend should ignore this key.
-            thesis_map = getattr(self, "_thesis_scorecards", None)
-            if thesis_map:
-                allocation_map["_thesis_v2"] = {
-                    ticker: _scorecard_to_dict(sc)
-                    for ticker, sc in thesis_map.items()
-                }
+
+            # Preserve deterministic thesis scorecards for the existing
+            # recommendation contract (thesis_plain_english generation).
+            try:
+                _thesis_cards = getattr(self, "_thesis_scorecards", {}) or {}
+                if isinstance(_thesis_cards, dict) and _thesis_cards:
+                    allocation_map["_thesis_v2"] = {
+                        _ticker: _scorecard_to_dict(_card)
+                        for _ticker, _card in _thesis_cards.items()
+                    }
+            except Exception as _thesis_exc:
+                logger.warning(
+                    "thesis_v2.persist_failed error_type=%s",
+                    type(_thesis_exc).__name__,
+                )
+
+            # Intel Reasoning v2 — dormant persistence alongside allocation.
+            # Failure here must never break the run or recommendation generation.
+            try:
+                from ..intelligence.reasoning_v2_builder import build_reasoning_v2 as _build_r2
+                _r2_map: dict[str, Any] = {}
+                for _r2_ticker, _r2_verdict in (getattr(self, "_verdicts", {}) or {}).items():
+                    try:
+                        _r2_av = _r2_verdict.to_dict() if hasattr(_r2_verdict, "to_dict") else None
+                        _r2_map[_r2_ticker] = _build_r2(
+                            ticker=_r2_ticker,
+                            scorecard=None,
+                            analyst_verdict=_r2_av,
+                        )
+                    except Exception as _r2_ticker_exc:
+                        logger.warning(
+                            "reasoning_v2.build_failed ticker=%s error_type=%s",
+                            _r2_ticker,
+                            type(_r2_ticker_exc).__name__,
+                        )
+                if _r2_map:
+                    allocation_map["_reasoning_v2"] = _r2_map
+            except Exception as _r2_exc:
+                logger.warning(
+                    "reasoning_v2.build_failed error_type=%s",
+                    type(_r2_exc).__name__,
+                )
+
             final_summary = (state.portfolio_advice.get("summary", "") or state.pm_summary or "").strip()
             if not final_summary:
                 final_summary = (

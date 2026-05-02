@@ -1,3 +1,4 @@
+- 2026-05-02: Intel diagnostic fix (v2/frontend): root cause was live route uses AgentInsightCard (WHY/RISK/ACTION/ALT VIEW) while thesis_plain_english was only rendered in InsightCard; added Business read thesis_plain_english section + focused visibility tests.
 - 2026-05-01: Frontend CI/testability hardening (v2/frontend): added explicit ESLint + Jest config and scripts so lint/tests/build run unattended; documented safe placeholder Supabase env usage for local/CI validation.
 - 2026-05-01 — Intel v2 PR-4: audited backend quality coverage; added safe deterministic `net_debt_to_ebitda` derivation from existing yfinance `total_debt`/`cash`/`ebitda` payload fields + focused mapper tests; no UI/LLM/Deploy changes.
 # v2 Progress Log

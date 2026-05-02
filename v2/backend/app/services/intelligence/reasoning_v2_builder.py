@@ -284,6 +284,31 @@ def _derive_posture(
     return "WATCH"
 
 
+def _enforce_insufficient_data_contract(
+    *,
+    sc_status: str,
+    action_posture: str,
+    deploy_action_posture: str,
+    blockers: list[str],
+    conviction_band: str,
+) -> tuple[str, str, list[str], str]:
+    """Force safe WATCH contract when deterministic data quality is insufficient."""
+    if sc_status != "INSUFFICIENT_DATA":
+        return action_posture, deploy_action_posture, blockers, conviction_band
+
+    next_blockers = list(blockers)
+    if "insufficient_data" not in next_blockers:
+        next_blockers.append("insufficient_data")
+
+    safe_conviction = (
+        "INSUFFICIENT_DATA" if conviction_band == "HIGH" else conviction_band
+    )
+    if safe_conviction not in VALID_CONVICTION_BANDS:
+        safe_conviction = "INSUFFICIENT_DATA"
+
+    return "WATCH", "WATCH", next_blockers, safe_conviction
+
+
 # ── Section builders ─────────────────────────────────────────────────────────
 
 
@@ -570,6 +595,14 @@ def build_reasoning_v2(
     if isinstance(av, dict) and bool(av.get("used_fallback", False)):
         caveats.append("analyst_fallback_recorded")
 
+    posture, deploy_posture, blockers, conviction_band = _enforce_insufficient_data_contract(
+        sc_status=sc_status,
+        action_posture=posture,
+        deploy_action_posture=posture,
+        blockers=blockers,
+        conviction_band=conviction_band,
+    )
+
     watchlist_reason: Optional[str] = None
     if posture == "WATCH":
         if "insufficient_data" in blockers:
@@ -629,7 +662,7 @@ def build_reasoning_v2(
             "conviction_band": conviction_band,
             "risk_band": risk_band,
             "data_quality_band": dq_band,
-            "action_posture": posture,
+            "action_posture": deploy_posture,
             "watchlist_reason": watchlist_reason,
             "blockers": blockers,
             "caveats": caveats,

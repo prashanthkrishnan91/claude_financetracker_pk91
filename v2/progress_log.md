@@ -432,3 +432,5 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Added focused backend tests for exact-key attach, safe normalized-key attach, and missing-map omission behavior.
 - No score math, LLM behavior, Deploy, SQL, or frontend changes.
 
+
+- 2026-05-02: Added Intel live-contract diagnostic test for live-style serialized `_thesis_v2` (GOOGL/META/NVDA) to verify backend no longer emits universal INSUFFICIENT_DATA dimension fallback when published dimensions exist.

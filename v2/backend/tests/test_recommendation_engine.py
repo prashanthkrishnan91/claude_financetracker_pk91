@@ -230,6 +230,59 @@ class TestThesisPlainEnglishCardWiring:
         assert plain is None
 
 
+class TestLiveStyleSerializedThesisContract:
+    def test_live_style_serialized_thesis_v2_keeps_directional_labels_per_ticker(self):
+        run_lookup = {
+            "run-live": {
+                "allocation": {
+                    "_thesis_v2": {
+                        "GOOGL": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": 74.0, "published": True},
+                            "valuation": {"score": 58.0, "published": True},
+                            "risk": {"score": 71.0, "published": True},
+                            "momentum": {"score": 55.0, "published": True},
+                        },
+                        "META": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": 78.0, "published": True},
+                            "valuation": {"score": 42.0, "published": True},
+                            "risk": {"score": 49.0, "published": True},
+                            "momentum": {"score": 67.0, "published": True},
+                        },
+                        "NVDA": {
+                            "status": "INSUFFICIENT_DATA",
+                            "quality": {"score": None, "published": False},
+                            "valuation": {"score": 81.0, "published": True},
+                            "risk": {"score": 52.0, "published": True},
+                            "momentum": {"score": 73.0, "published": True},
+                        },
+                    }
+                }
+            }
+        }
+
+        googl_v2, googl_plain, googl_diag = _build_thesis_fields_for_card(
+            ticker="GOOGL", run_id="run-live", run_lookup=run_lookup
+        )
+        meta_v2, meta_plain, meta_diag = _build_thesis_fields_for_card(
+            ticker="META", run_id="run-live", run_lookup=run_lookup
+        )
+        nvda_v2, nvda_plain, nvda_diag = _build_thesis_fields_for_card(
+            ticker="NVDA", run_id="run-live", run_lookup=run_lookup
+        )
+
+        assert googl_diag == meta_diag == nvda_diag == "attached"
+        assert googl_v2 and meta_v2 and nvda_v2
+
+        assert googl_plain["quality_label"] == "Business quality looks strong"
+        assert meta_plain["quality_label"] == "Business quality looks strong"
+        assert nvda_plain["quality_label"] == "Business quality signal is limited"
+        assert googl_plain["valuation_label"] != meta_plain["valuation_label"]
+        assert googl_plain["momentum_label"] != nvda_plain["momentum_label"]
+        assert googl_plain["headline"] == "Not enough data for a reliable investment-case read"
+
+
 # ── generate_rec decision tree tests ────────────────────────────────────────
 
 

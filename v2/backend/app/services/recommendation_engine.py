@@ -52,6 +52,38 @@ ACTION_COLORS = {
     "REVIEW": "purple",
 }
 
+
+def _normalize_ticker_lookup_key(ticker: Any) -> str:
+    """Normalize ticker symbols for tolerant scorecard lookups.
+
+    Keeps user-facing symbols untouched; used only for backend key matching.
+    Examples that should match: BRK-B / brk.b / brk b.
+    """
+    if ticker is None:
+        return ""
+    return "".join(ch for ch in str(ticker).upper() if ch.isalnum())
+
+
+def _resolve_thesis_scorecard_for_ticker(
+    thesis_map: Any,
+    ticker: str,
+) -> Optional[dict]:
+    """Return best-match thesis_v2 scorecard for a card ticker, if any."""
+    if not isinstance(thesis_map, dict) or not thesis_map:
+        return None
+    direct = thesis_map.get(ticker)
+    if isinstance(direct, dict) and direct:
+        return direct
+    normalized_ticker = _normalize_ticker_lookup_key(ticker)
+    if not normalized_ticker:
+        return None
+    for key, value in thesis_map.items():
+        if not (isinstance(value, dict) and value):
+            continue
+        if _normalize_ticker_lookup_key(key) == normalized_ticker:
+            return value
+    return None
+
 # DRIP yield estimates (annual %, approximate 2026 values)
 DRIP_YIELD: dict[str, float] = {
     "VYM": 2.8, "SCHD": 3.5, "BND": 3.2, "VWO": 2.1, "VXUS": 1.8,
@@ -1435,7 +1467,7 @@ class RecommendationService:
                     if _run_row:
                         _allocation = _run_row.get("allocation") or {}
                         _thesis_map = _allocation.get("_thesis_v2") or {}
-                        _scorecard = _thesis_map.get(ticker)
+                        _scorecard = _resolve_thesis_scorecard_for_ticker(_thesis_map, ticker)
                         if isinstance(_scorecard, dict) and _scorecard:
                             thesis_v2_dict = _scorecard
                             try:

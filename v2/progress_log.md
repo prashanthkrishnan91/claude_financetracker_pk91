@@ -402,3 +402,14 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Clarified per-card quality chip to read `Ticker data: {HIGH|MEDIUM|LOW}` (ticker-level context).
 - Kept styling/layout unchanged; copy-only update for mobile-safe compact labels.
 - No backend/scoring/data-quality logic changes. No Supabase SQL.
+
+## 2026-05-02 — Intel v2: thesis_plain_english card coverage reliability fix
+
+- Root cause: strict exact ticker-key lookup into `agent_runs.allocation["_thesis_v2"]` dropped valid scorecards when symbol formats differed (case, dot/dash/space variants).
+- Added backend-only tolerant lookup normalization for thesis scorecard retrieval:
+  - exact key match first
+  - fallback normalized key match (uppercase alphanumeric-only).
+- Preserved safe behavior: when `_thesis_v2` missing/malformed or no ticker match, thesis fields are omitted without breaking card responses.
+- Added focused recommendation_engine tests for normalization and malformed/missing map handling.
+- Validation: `cd v2/backend && pytest tests/test_thesis_response_wiring.py tests/test_thesis_plain_english.py tests/test_recommendation_engine.py -k thesis -q`
+- No Supabase SQL. No frontend/UI changes. No scoring/Deploy/LLM behavior changes.

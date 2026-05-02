@@ -283,6 +283,157 @@ class TestLiveStyleSerializedThesisContract:
         assert googl_plain["headline"] == "Not enough data for a reliable investment-case read"
 
 
+class TestThesisRunFallbackBehavior:
+    """Verify that _build_thesis_fields_for_card falls back to the latest
+    completed run when a card's own agent_run_id run lacks _thesis_v2.
+
+    This covers: stale run binding (_persist failure leaving old recs active),
+    and the timing window between _persist.finally and _update_run writing
+    _thesis_v2 to agent_runs.allocation.
+    """
+
+    _VARIED_THESIS_MAP = {
+        "GOOGL": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": 74.0, "published": True},
+            "valuation": {"score": 58.0, "published": True},
+            "risk": {"score": 71.0, "published": True},
+            "momentum": {"score": 55.0, "published": True},
+        },
+        "META": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": 78.0, "published": True},
+            "valuation": {"score": 42.0, "published": True},
+            "risk": {"score": 49.0, "published": True},
+            "momentum": {"score": 67.0, "published": True},
+        },
+        "NVDA": {
+            "status": "INSUFFICIENT_DATA",
+            "quality": {"score": None, "published": False},
+            "valuation": {"score": 81.0, "published": True},
+            "risk": {"score": 52.0, "published": True},
+            "momentum": {"score": 73.0, "published": True},
+        },
+    }
+
+    def test_old_run_lacks_thesis_map_falls_back_to_newer_run(self):
+        """Card's own run has no _thesis_v2; fallback run has varied map."""
+        run_lookup = {
+            "old-run": {"allocation": {}},  # no _thesis_v2
+            "new-run": {"allocation": {"_thesis_v2": self._VARIED_THESIS_MAP}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="GOOGL",
+            run_id="old-run",
+            run_lookup=run_lookup,
+            fallback_run_id="new-run",
+        )
+        assert diag == "attached_via_latest_run", diag
+        assert isinstance(plain, dict)
+        assert plain["quality_label"] == "Business quality looks strong"
+
+    def test_fallback_run_provides_varied_labels_per_ticker(self):
+        """Different tickers get different Business read lines from the same fallback run."""
+        run_lookup = {
+            "stale-run": {"allocation": {}},
+            "latest-run": {"allocation": {"_thesis_v2": self._VARIED_THESIS_MAP}},
+        }
+        _, googl_plain, googl_diag = _build_thesis_fields_for_card(
+            ticker="GOOGL", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        _, meta_plain, meta_diag = _build_thesis_fields_for_card(
+            ticker="META", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        _, nvda_plain, nvda_diag = _build_thesis_fields_for_card(
+            ticker="NVDA", run_id="stale-run", run_lookup=run_lookup, fallback_run_id="latest-run"
+        )
+        assert googl_diag == meta_diag == nvda_diag == "attached_via_latest_run"
+        # Valuation differs: GOOGL 58 (neutral) vs META 42 (cautious)
+        assert googl_plain["valuation_label"] != meta_plain["valuation_label"]
+        # Quality differs: NVDA unpublished vs GOOGL published strong
+        assert nvda_plain["quality_label"] != googl_plain["quality_label"]
+
+    def test_both_runs_lack_thesis_returns_none_safely(self):
+        """Neither primary nor fallback run has _thesis_v2 — safe None return."""
+        run_lookup = {
+            "run-a": {"allocation": {}},
+            "run-b": {"allocation": {"some_key": "value"}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-a",
+            run_lookup=run_lookup,
+            fallback_run_id="run-b",
+        )
+        assert v2 is None
+        assert plain is None
+        assert diag in ("thesis_map_missing", "run_not_found")
+
+    def test_run_not_in_lookup_falls_back_to_latest(self):
+        """Card's run_id not in run_lookup at all — fallback serves thesis."""
+        run_lookup = {
+            "latest-run": {"allocation": {"_thesis_v2": {"AAPL": {"status": "PARTIAL"}}}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="missing-run",
+            run_lookup=run_lookup,
+            fallback_run_id="latest-run",
+        )
+        assert diag == "attached_via_latest_run"
+        assert isinstance(plain, dict)
+
+    def test_primary_run_has_thesis_no_fallback_needed(self):
+        """When card's own run has valid _thesis_v2, fallback run is not used."""
+        run_lookup = {
+            "primary-run": {"allocation": {"_thesis_v2": {"AAPL": {
+                "status": "PARTIAL",
+                "quality": {"score": 80.0, "published": True},
+                "valuation": {"score": 55.0, "published": True},
+                "risk": {"score": 60.0, "published": True},
+                "momentum": {"score": 70.0, "published": True},
+            }}}},
+            "other-run": {"allocation": {"_thesis_v2": {"AAPL": {"status": "INSUFFICIENT_DATA"}}}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="primary-run",
+            run_lookup=run_lookup,
+            fallback_run_id="other-run",
+        )
+        # Primary succeeds — diag must be "attached" (not via fallback)
+        assert diag == "attached"
+        assert v2 is not None
+
+    def test_active_run_reuse_no_fallback_same_run_id(self):
+        """When fallback_run_id equals the primary run_id, no duplicate lookup."""
+        run_lookup = {
+            "run-1": {"allocation": {}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-1",
+            run_lookup=run_lookup,
+            fallback_run_id="run-1",  # same as primary — must not loop
+        )
+        assert v2 is None
+        assert diag == "thesis_map_missing"
+
+    def test_no_fallback_run_id_degrades_gracefully(self):
+        """When fallback_run_id is None, behaviour is identical to old contract."""
+        run_lookup = {
+            "run-x": {"allocation": {}},
+        }
+        v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL",
+            run_id="run-x",
+            run_lookup=run_lookup,
+            fallback_run_id=None,
+        )
+        assert v2 is None
+        assert diag == "thesis_map_missing"
+
+
 # ── generate_rec decision tree tests ────────────────────────────────────────
 
 

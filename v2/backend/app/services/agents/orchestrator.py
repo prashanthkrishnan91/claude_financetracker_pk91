@@ -444,6 +444,21 @@ class AgentOrchestrator:
                 if i.suggested_allocation > 0
             }
 
+            # Preserve deterministic thesis scorecards for the existing
+            # recommendation contract (thesis_plain_english generation).
+            try:
+                _thesis_cards = getattr(self, "_thesis_scorecards", {}) or {}
+                if isinstance(_thesis_cards, dict) and _thesis_cards:
+                    allocation_map["_thesis_v2"] = {
+                        _ticker: _scorecard_to_dict(_card)
+                        for _ticker, _card in _thesis_cards.items()
+                    }
+            except Exception as _thesis_exc:
+                logger.warning(
+                    "thesis_v2.persist_failed error_type=%s",
+                    type(_thesis_exc).__name__,
+                )
+
             # Intel Reasoning v2 — dormant persistence alongside allocation.
             # Failure here must never break the run or recommendation generation.
             try:

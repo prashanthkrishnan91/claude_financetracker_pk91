@@ -672,9 +672,8 @@ function AllocationBreakdownTable({
       <div className="divide-y divide-border">
         {/* Header */}
         <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
-          <div className="col-span-2">Ticker</div>
+          <div className="col-span-6">Ticker</div>
           <div className="col-span-2">Role</div>
-          <div className="col-span-4">Why</div>
           <div className="col-span-2 text-right">Invest now</div>
           <div className="col-span-1 text-right">Now %</div>
           <div className="col-span-1 text-right">After %</div>
@@ -689,19 +688,17 @@ function AllocationBreakdownTable({
                 : "bg-blue-500/10 text-blue-300 border border-blue-400/25";
           const immediate = canonicalAmounts.get(rec.symbol ?? "") ?? 0;
           const why = deriveAllocationWhy(rec, role);
+          const tickerSubtitle = why || toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now.", 10);
           return (
             <div key={rec.symbol} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
               <div className="grid grid-cols-12 gap-2 items-start">
-                <div className="col-span-6 sm:col-span-2">
+                <div className="col-span-6">
                   <span className="font-mono font-bold text-text-primary">{rec.symbol}</span>
                   <p className="text-[11px] text-text-muted leading-snug mt-1">
-                    {toCompactLine(rec.staging_instruction || rec.execution_plan || "Buy first tranche now.", 10)}
-                  </p>
-                  <p className="sm:hidden text-[11px] text-text-muted leading-snug mt-1">
-                    {why}
+                    {tickerSubtitle}
                   </p>
                 </div>
-                <div className="col-span-6 sm:col-span-2 flex items-start pt-0.5">
+                <div className="col-span-6 sm:col-span-2 flex items-start pt-0.5 sm:justify-start justify-end">
                   <span
                     className={cn(
                       "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
@@ -711,10 +708,7 @@ function AllocationBreakdownTable({
                     {role}
                   </span>
                 </div>
-                <div className="hidden sm:block sm:col-span-4 text-[11px] text-text-muted leading-snug pt-0.5">
-                  {why}
-                </div>
-                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-emerald-300">
+                                <div className="col-span-6 sm:col-span-2 text-right font-mono font-semibold text-emerald-300">
                   {formatCurrency(immediate)}
                 </div>
                 <div className="col-span-3 sm:col-span-1 text-right font-mono text-xs text-text-muted">

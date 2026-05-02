@@ -388,3 +388,10 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - No Supabase SQL. No frontend/UI changes. No Deploy or LLM behavior changes.
 
 - Intel v2 PR-7: added backend-only deterministic plain-English thesis translation module + focused tests; no UI/Deploy/LLM changes.
+## 2026-05-02 — Deploy UI: allocation table why moved under ticker
+
+- Removed separate WHY column from Deploy Allocation Breakdown in `v2/frontend/src/app/dashboard/deposits/page.tsx`.
+- Ticker cell now shows symbol + why text inline, with fallback to existing staging/execution subtitle only when why is absent.
+- Kept role/invest-now/now%/after% columns and all allocation math unchanged.
+- Validation: lint passed; build requires Supabase public env vars in this environment; targeted deploy test command unavailable due to missing `jest` binary.
+- No backend changes. No Supabase SQL.

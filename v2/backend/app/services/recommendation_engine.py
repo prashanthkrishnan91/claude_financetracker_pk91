@@ -90,36 +90,73 @@ def _build_thesis_fields_for_card(
     ticker: str,
     run_id: Any,
     run_lookup: dict[str, dict],
+    fallback_run_id: Optional[str] = None,
 ) -> tuple[Optional[dict], Optional[dict], str]:
     """Resolve thesis_v2 + thesis_plain_english payloads for one card.
 
+    Tries the card's own agent_run_id first. When that run is absent from
+    run_lookup or lacks _thesis_v2, falls back to fallback_run_id (the
+    latest completed run that has _thesis_v2). This makes the live contract
+    resilient to stale run binding, _persist failures, and the small timing
+    window between _persist.finally and _update_run writing _thesis_v2.
+
     Returns (thesis_v2, thesis_plain_english, diagnostic_code).
+    Diagnostic codes:
+      attached                — primary run used, exact/normalized match
+      attached_via_latest_run — fallback run used
+      translation_failed      — scorecard found but translator raised
+      no_run_id               — card has no agent_run_id
+      run_not_found           — agent_run_id not in run_lookup
+      allocation_missing_or_invalid — allocation column missing/not a dict
+      thesis_map_missing      — _thesis_v2 absent or empty in allocation
+      ticker_not_in_thesis_map — no scorecard for this ticker in _thesis_v2
     """
+    def _try_run(rid: Any, diag_suffix: str = "") -> tuple[Optional[dict], Optional[dict], str]:
+        rid_str = str(rid or "")
+        if not rid_str:
+            return None, None, "no_run_id"
+        run_row = run_lookup.get(rid_str)
+        if not run_row:
+            return None, None, "run_not_found"
+        allocation = run_row.get("allocation")
+        if not isinstance(allocation, dict):
+            return None, None, "allocation_missing_or_invalid"
+        thesis_map = allocation.get("_thesis_v2")
+        if not isinstance(thesis_map, dict) or not thesis_map:
+            return None, None, "thesis_map_missing"
+        scorecard = _resolve_thesis_scorecard_for_ticker(thesis_map, ticker)
+        if not (isinstance(scorecard, dict) and scorecard):
+            return None, None, "ticker_not_in_thesis_map"
+        try:
+            return scorecard, build_thesis_plain_english(scorecard), f"attached{diag_suffix}"
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "thesis_plain_english generation skipped ticker=%s run_id=%s err=%s",
+                ticker, rid_str, exc,
+            )
+            return scorecard, None, f"translation_failed{diag_suffix}"
+
     run_id_str = str(run_id or "")
-    if not run_id_str:
-        return None, None, "no_run_id"
-    run_row = run_lookup.get(run_id_str)
-    if not run_row:
-        return None, None, "run_not_found"
-    allocation = run_row.get("allocation")
-    if not isinstance(allocation, dict):
-        return None, None, "allocation_missing_or_invalid"
-    thesis_map = allocation.get("_thesis_v2")
-    if not isinstance(thesis_map, dict) or not thesis_map:
-        return None, None, "thesis_map_missing"
+    primary = _try_run(run_id)
+    # If primary succeeded or failed for a terminal reason (no run_id, ticker
+    # missing), return immediately — fallback cannot help.
+    _TERMINAL_DIAGS = {"attached", "translation_failed", "no_run_id", "ticker_not_in_thesis_map"}
+    if primary[2] in _TERMINAL_DIAGS:
+        return primary
 
-    scorecard = _resolve_thesis_scorecard_for_ticker(thesis_map, ticker)
-    if not (isinstance(scorecard, dict) and scorecard):
-        return None, None, "ticker_not_in_thesis_map"
+    # Primary run is missing from run_lookup or has no _thesis_v2.
+    # Try the latest completed run that has _thesis_v2 as a fallback.
+    if fallback_run_id and str(fallback_run_id) != run_id_str:
+        fb = _try_run(fallback_run_id, "_via_latest_run")
+        if fb[2].startswith("attached") or fb[2].startswith("translation_failed"):
+            logger.info(
+                "thesis.fallback_used ticker=%s card_run=%s primary_diag=%s "
+                "fallback_run=%s fallback_diag=%s",
+                ticker, run_id_str, primary[2], fallback_run_id, fb[2],
+            )
+            return fb
 
-    try:
-        return scorecard, build_thesis_plain_english(scorecard), "attached"
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "thesis_plain_english generation skipped ticker=%s run_id=%s err=%s",
-            ticker, run_id_str, exc,
-        )
-        return scorecard, None, "translation_failed"
+    return primary
 
 # DRIP yield estimates (annual %, approximate 2026 values)
 DRIP_YIELD: dict[str, float] = {
@@ -1397,6 +1434,46 @@ class RecommendationService:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("get_insight_cards: run metadata lookup failed: %s", exc)
 
+        # Thesis contract: find the latest completed run with _thesis_v2.
+        # Used as fallback when a card's agent_run_id run is absent from
+        # run_lookup or its allocation lacks _thesis_v2. This covers stale
+        # run binding (e.g. _persist failed, leaving old recs active) and
+        # the small timing window between _persist.finally (which invalidates
+        # the aggregate cache) and _update_run writing _thesis_v2 to the DB.
+        latest_thesis_run_id: Optional[str] = None
+        if run_ids_needed:
+            try:
+                latest_for_thesis = (
+                    self._db(
+                        "agent_runs.select_latest_completed_with_thesis",
+                        lambda: self.client.table("agent_runs")
+                        .select("id, finished_at, allocation")
+                        .eq("user_id", str(self.user_id))
+                        .eq("status", "completed")
+                        .order("finished_at", desc=True)
+                        .limit(5)
+                        .execute(),
+                    )
+                ).data or []
+                for thesis_row in latest_for_thesis:
+                    rid = str(thesis_row.get("id") or "")
+                    if not rid:
+                        continue
+                    alloc = thesis_row.get("allocation") or {}
+                    tmap = alloc.get("_thesis_v2") if isinstance(alloc, dict) else None
+                    if isinstance(tmap, dict) and tmap:
+                        latest_thesis_run_id = rid
+                        if rid not in run_lookup:
+                            run_lookup[rid] = thesis_row
+                        break
+                logger.info(
+                    "thesis.contract card_run_ids=%s latest_thesis_run=%s",
+                    sorted(str(r) for r in run_ids_needed),
+                    latest_thesis_run_id or "none",
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("get_insight_cards: latest thesis run lookup failed: %s", exc)
+
         # Fetch live prices if price service available
         prices: dict[str, float] = {}
         if self._price_service and positions:
@@ -1493,14 +1570,18 @@ class RecommendationService:
                 if reused_cached:
                     reused_cached_cards += 1
 
-                # Intel v2 PR-8: extract per-ticker thesis scorecard from
+                # Intel v2: extract per-ticker thesis scorecard from
                 # agent_runs.allocation["_thesis_v2"] and generate the
-                # plain-English translation. Fails safely — both fields
-                # remain None if data is unavailable or malformed.
+                # plain-English translation. Tries the card's own
+                # agent_run_id first; falls back to the latest completed
+                # run with _thesis_v2 when the primary run is absent or
+                # lacks the map. Fails safely — both fields remain None
+                # if data is unavailable or malformed.
                 thesis_v2_dict, thesis_plain_english_dict, thesis_diag = _build_thesis_fields_for_card(
                     ticker=ticker,
                     run_id=rec.get("agent_run_id"),
                     run_lookup=run_lookup,
+                    fallback_run_id=latest_thesis_run_id,
                 )
                 thesis_diag_counts[thesis_diag] = thesis_diag_counts.get(thesis_diag, 0) + 1
 

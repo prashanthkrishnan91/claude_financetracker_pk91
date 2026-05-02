@@ -1,4 +1,58 @@
 ## Last change
+Intel Business read end-to-end freshness repair (PR: "fix(intel-v2): end-to-end Business read freshness and coverage repair").
+
+## Files touched
+- `v2/backend/app/services/recommendation_engine.py` — Two changes:
+  (1) `_build_thesis_fields_for_card` now accepts `fallback_run_id`; when the card's own `agent_run_id` run is absent from `run_lookup` or its allocation lacks `_thesis_v2`, it tries the fallback run and returns diagnostic code `attached_via_latest_run`.
+  (2) `_compute_insight_cards` now queries the latest 5 completed runs after building `run_lookup` to find `latest_thesis_run_id` (most recent completed run with non-empty `_thesis_v2`); adds it to `run_lookup` if not already present; logs it as `thesis.contract`; passes it as `fallback_run_id` to every `_build_thesis_fields_for_card` call.
+- `v2/backend/tests/test_recommendation_engine.py` — Added `TestThesisRunFallbackBehavior` class (7 tests): old run lacks `_thesis_v2` → fallback serves varied labels; varied labels per ticker via fallback; both runs lack thesis → safe None; run_not_found falls back; primary wins when it already has thesis; same run_id not double-used; None fallback degrades gracefully.
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.ts` — Extended with 5 new tests: per-ticker varied Business read lines, all 7 field types rendered, empty-string field omission, missing caveats array safety, invalidation query key contract.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Exact root cause
+Three overlapping issues all converge to the same symptom (universal identical Business read fallback):
+
+1. **Stale run binding** (primary): `recommendations.agent_run_id` on active cards points to an older run whose `agent_runs.allocation` pre-dates `_thesis_v2` (introduced in PR-2). This happens when `_persist` fails silently — the orchestrator catches the exception (`persistence_warning`) and continues, but old recommendations remain active with old `agent_run_id`s. Those old runs have no `_thesis_v2`.
+
+2. **Timing race** (secondary): `_persist.finally` calls `invalidate_recommendations_aggregate_cache` immediately after writing new recommendations. If any request (e.g., from `get_job_status` polling) hits `get_insight_cards` in the small window before `_update_run` writes `_thesis_v2` to `agent_runs.allocation`, the backend aggregate cache is populated with no-thesis results. The 20-second TTL then serves this stale result.
+
+3. **No fallback path** (design gap): `_build_thesis_fields_for_card` only tried the card's own `agent_run_id` run. There was no fallback to the latest completed run that has `_thesis_v2`.
+
+## Final end-to-end contract (after fix)
+1. User clicks Run Agents → `POST /api/v1/recommendations/refresh` → backend creates new run or returns `in_progress` for active run
+2. Frontend sets `activeJobId`, polls `GET /api/v1/recommendations/jobs/{job_id}` every 3 seconds
+3. Orchestrator: Phase 2.5 computes `_thesis_scorecards`; after LLM phase, `_persist` inserts new recommendations with new `agent_run_id` and expires old ones; `_update_run(status="completed", allocation=allocation_map)` writes `_thesis_v2` to `agent_runs.allocation`
+4. Frontend detects `status="completed"` → invalidates `["recommendations"]` cache → calls `refetchQueries`
+5. `GET /api/v1/recommendations/` → `_compute_insight_cards`:
+   - Fetches active recommendations (new ones from step 3)
+   - Builds `run_lookup` from their `agent_run_id`s
+   - **NEW**: queries latest 5 completed runs, finds `latest_thesis_run_id` (newest with `_thesis_v2`), adds to `run_lookup`, logs `thesis.contract`
+   - For each card: calls `_build_thesis_fields_for_card(fallback_run_id=latest_thesis_run_id)`
+   - **NEW**: if card's own run lacks `_thesis_v2`, uses fallback run; logs `thesis.fallback_used`
+   - Generates `thesis_plain_english` from the best-available scorecard
+6. Frontend receives cards with `thesis_plain_english` populated (if any run has data)
+7. `AgentInsightCard` renders Business read section
+
+## How to verify manually after deployment
+1. Click Run Agents
+2. Wait for progress tracker to show completion (or poll manually if in_progress)
+3. Confirm recommendations list is refetched (network tab shows new GET /recommendations/ request)
+4. Inspect GOOGL, META, NVDA cards — Business read section should be present
+5. Check backend logs for `thesis.contract` log showing `latest_thesis_run=<uuid>` (not `none`)
+6. If fallback was used, check for `thesis.fallback_used` log per ticker
+7. Business read quality labels should differ between tickers when `_thesis_v2` dimensions vary
+
+## Confirmation of invariants
+- No score math changes.
+- No LLM behavior or prompts changed.
+- No Deploy changes.
+- No Supabase SQL or migrations (all reads from existing JSONB columns).
+- No frontend/UI redesign.
+
+---
+
+## Last change
 Intel live-contract diagnostic: business-read repetition root-cause verification (PR: "test(intel-v2): add live-style thesis contract diagnostic").
 
 ## Files touched

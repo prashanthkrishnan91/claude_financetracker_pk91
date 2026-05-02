@@ -614,3 +614,28 @@ Deploy allocation table compactness fix: move why under ticker and remove separa
 - Deploy Allocation Breakdown is now more compact: WHY rationale appears beneath ticker in the Ticker cell.
 - Repetitive action subtitle no longer appears when why text exists; it is used only as fallback when why is missing.
 - No backend changes, no Supabase SQL, no Deploy allocation logic/math changes, no Step 3 persistence changes, no Intel changes.
+
+## Last change
+Intel v2: improve thesis_plain_english live card coverage diagnostics and wiring resilience (PR: "fix(intel-v2): harden thesis_plain_english card attachment diagnostics").
+
+## Files touched
+- `v2/backend/app/services/recommendation_engine.py` — Added `_build_thesis_fields_for_card(...)` helper to centralize thesis scorecard extraction + translation from `agent_runs.allocation["_thesis_v2"]`; preserves exact-key priority with normalized fallback via existing resolver, and returns lightweight diagnostic codes for deterministic coverage telemetry. `_compute_insight_cards` now uses this helper and logs aggregate `thesis_diag` counts in the existing aggregate completion log.
+- `v2/backend/tests/test_recommendation_engine.py` — Added focused tests that verify card thesis attachment behavior for: exact ticker key, safe normalization key mismatch (`BRK-B` vs ` brk.b `), and missing `_thesis_v2` map.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Investigation + root cause
+- `_thesis_v2` write path exists in the current orchestrator completion path (`allocation_map["_thesis_v2"] = ...`) and is persisted on `agent_runs` completion.
+- The card assembly path already reads from `agent_runs.allocation`, but live coverage gaps still occur when run/card linkage or per-card lookup fails quietly.
+- Primary deterministic gap class remains ticker/run mapping miss cases (`run_not_found`, missing `_thesis_v2`, or per-ticker key mismatch variants). This PR tightens observability with explicit diagnostic buckets while keeping attachment logic safe and additive.
+
+## Coverage fix type
+- Coverage was improved via **lookup/read-path hardening + diagnostics** (no write-path changes needed in this patch).
+- Exact ticker key remains preferred; normalized fallback remains conservative and backend-only.
+
+## Explicit no-change confirmations
+- No score math changes.
+- No LLM behavior or prompts changed.
+- No Deploy changes.
+- No Supabase SQL or migrations.
+- No frontend/UI changes.

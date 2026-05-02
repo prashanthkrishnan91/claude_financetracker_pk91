@@ -84,6 +84,43 @@ def _resolve_thesis_scorecard_for_ticker(
             return value
     return None
 
+
+def _build_thesis_fields_for_card(
+    *,
+    ticker: str,
+    run_id: Any,
+    run_lookup: dict[str, dict],
+) -> tuple[Optional[dict], Optional[dict], str]:
+    """Resolve thesis_v2 + thesis_plain_english payloads for one card.
+
+    Returns (thesis_v2, thesis_plain_english, diagnostic_code).
+    """
+    run_id_str = str(run_id or "")
+    if not run_id_str:
+        return None, None, "no_run_id"
+    run_row = run_lookup.get(run_id_str)
+    if not run_row:
+        return None, None, "run_not_found"
+    allocation = run_row.get("allocation")
+    if not isinstance(allocation, dict):
+        return None, None, "allocation_missing_or_invalid"
+    thesis_map = allocation.get("_thesis_v2")
+    if not isinstance(thesis_map, dict) or not thesis_map:
+        return None, None, "thesis_map_missing"
+
+    scorecard = _resolve_thesis_scorecard_for_ticker(thesis_map, ticker)
+    if not (isinstance(scorecard, dict) and scorecard):
+        return None, None, "ticker_not_in_thesis_map"
+
+    try:
+        return scorecard, build_thesis_plain_english(scorecard), "attached"
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "thesis_plain_english generation skipped ticker=%s run_id=%s err=%s",
+            ticker, run_id_str, exc,
+        )
+        return scorecard, None, "translation_failed"
+
 # DRIP yield estimates (annual %, approximate 2026 values)
 DRIP_YIELD: dict[str, float] = {
     "VYM": 2.8, "SCHD": 3.5, "BND": 3.2, "VWO": 2.1, "VXUS": 1.8,
@@ -1375,6 +1412,7 @@ class RecommendationService:
         cards = []
         normalized_count = degraded_count = skipped_count = 0
         fallback_cards = reused_cached_cards = 0
+        thesis_diag_counts: dict[str, int] = {}
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -1459,24 +1497,12 @@ class RecommendationService:
                 # agent_runs.allocation["_thesis_v2"] and generate the
                 # plain-English translation. Fails safely — both fields
                 # remain None if data is unavailable or malformed.
-                thesis_v2_dict: Optional[dict] = None
-                thesis_plain_english_dict: Optional[dict] = None
-                _run_id_str = str(rec.get("agent_run_id") or "")
-                if _run_id_str:
-                    _run_row = run_lookup.get(_run_id_str)
-                    if _run_row:
-                        _allocation = _run_row.get("allocation") or {}
-                        _thesis_map = _allocation.get("_thesis_v2") or {}
-                        _scorecard = _resolve_thesis_scorecard_for_ticker(_thesis_map, ticker)
-                        if isinstance(_scorecard, dict) and _scorecard:
-                            thesis_v2_dict = _scorecard
-                            try:
-                                thesis_plain_english_dict = build_thesis_plain_english(_scorecard)
-                            except Exception as _tpe_exc:  # noqa: BLE001
-                                logger.debug(
-                                    "thesis_plain_english generation skipped ticker=%s err=%s",
-                                    ticker, _tpe_exc,
-                                )
+                thesis_v2_dict, thesis_plain_english_dict, thesis_diag = _build_thesis_fields_for_card(
+                    ticker=ticker,
+                    run_id=rec.get("agent_run_id"),
+                    run_lookup=run_lookup,
+                )
+                thesis_diag_counts[thesis_diag] = thesis_diag_counts.get(thesis_diag, 0) + 1
 
                 card = InsightCard(
                     id=rec["id"],
@@ -1592,7 +1618,7 @@ class RecommendationService:
             llm_enriched_cards += int(cm.get("llm_enriched_cards") or 0)
             discarded_llm_calls += int(cm.get("discarded_llm_calls") or 0)
         logger.info(
-            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d",
+            "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d thesis_diag=%s",
             self.user_id,
             len(recs),
             len(cards),
@@ -1609,6 +1635,7 @@ class RecommendationService:
             discarded_llm_calls,
             fallback_cards,
             reused_cached_cards,
+            thesis_diag_counts,
         )
         return cards
 

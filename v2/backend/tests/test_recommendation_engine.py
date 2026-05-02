@@ -16,6 +16,7 @@ from app.services.recommendation_engine import (
     ACTION_COLORS,
     _normalize_ticker_lookup_key,
     _resolve_thesis_scorecard_for_ticker,
+    _build_thesis_fields_for_card,
 )
 
 
@@ -193,6 +194,40 @@ class TestThesisTickerLookupNormalization:
         assert _resolve_thesis_scorecard_for_ticker({}, "AAPL") is None
         assert _resolve_thesis_scorecard_for_ticker({"AAPL": None}, "AAPL") is None
         assert _resolve_thesis_scorecard_for_ticker(None, "AAPL") is None
+
+
+class TestThesisPlainEnglishCardWiring:
+    def test_emits_plain_english_when_exact_ticker_exists(self):
+        run_lookup = {
+            "run-1": {"allocation": {"_thesis_v2": {"AAPL": {"status": "PARTIAL"}}}}
+        }
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "attached"
+        assert thesis_v2 == {"status": "PARTIAL"}
+        assert isinstance(plain, dict)
+        assert plain.get("headline")
+
+    def test_emits_plain_english_when_key_differs_by_safe_normalization(self):
+        run_lookup = {
+            "run-1": {"allocation": {"_thesis_v2": {" brk.b ": {"status": "PARTIAL"}}}}
+        }
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="BRK-B", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "attached"
+        assert thesis_v2 == {"status": "PARTIAL"}
+        assert isinstance(plain, dict)
+
+    def test_missing_thesis_map_leaves_fields_none(self):
+        run_lookup = {"run-1": {"allocation": {}}}
+        thesis_v2, plain, diag = _build_thesis_fields_for_card(
+            ticker="AAPL", run_id="run-1", run_lookup=run_lookup
+        )
+        assert diag == "thesis_map_missing"
+        assert thesis_v2 is None
+        assert plain is None
 
 
 # ── generate_rec decision tree tests ────────────────────────────────────────

@@ -145,7 +145,7 @@ export function computePortfolioSynthesisFromCards(cards: InsightCardData[] | nu
       `Recycle proceeds from ${trimCandidates.slice(0, 3).map((o) => o.ticker).join(", ") || "trim candidates"} toward higher-conviction setups.`,
     ],
     what_changed: roster.filter((c) => c.what_changed).slice(0, 6).map((c) => ({ ticker: c.ticker, change: c.what_changed?.split("\n").find(Boolean) })),
-    watchlist: roster.filter((c) => (c.technical_signal || "").toUpperCase() === "SELL" || (c.data_quality_label || "").toUpperCase() === "LOW").slice(0, 6).map((c) => ({ ticker: c.ticker, focus: c.analyst_risks?.[0] || "Recheck thesis and business evidence", trigger: c.what_changed?.split("\n").find(Boolean) || "Review after earnings" })),
+    watchlist: roster.filter((c) => (c.technical_signal || "").toUpperCase() === "SELL" || (c.data_quality_label || "").toUpperCase() === "LOW").slice(0, 6).map((c) => ({ ticker: c.ticker, focus: c.analyst_risks?.[0] || "Recheck the business case and evidence", trigger: c.what_changed?.split("\n").find(Boolean) || "Review after earnings" })),
     top_sectors: Object.keys(sectorCounts).slice(0, 3),
     sector_allocation: Object.fromEntries(Object.entries(sectorCounts).map(([k, v]) => [k, Number(((v / total) * 100).toFixed(1))])),
     quality_breakdown: { total_cards: total, enriched, high_quality: highQuality, fallback },

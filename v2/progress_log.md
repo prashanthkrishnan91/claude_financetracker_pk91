@@ -413,3 +413,4 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Added focused recommendation_engine tests for normalization and malformed/missing map handling.
 - Validation: `cd v2/backend && pytest tests/test_thesis_response_wiring.py tests/test_thesis_plain_english.py tests/test_recommendation_engine.py -k thesis -q`
 - No Supabase SQL. No frontend/UI changes. No scoring/Deploy/LLM behavior changes.
+- 2026-05-02: fix(intel): replaced user-facing "thesis" wording with plain-English "investment case"/"business case" copy in Intel backend/frontend templates; no logic changes.

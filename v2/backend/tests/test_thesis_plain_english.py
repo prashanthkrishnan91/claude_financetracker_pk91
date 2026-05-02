@@ -59,7 +59,7 @@ def _flatten_text(summary: dict) -> str:
 def test_complete_strong_scorecard_produces_positive_summary():
     card = score_thesis("ACME", _strong_inputs())
     summary = build_thesis_plain_english(card)
-    assert summary["headline"] == "Overall thesis read looks constructive"
+    assert summary["headline"] == "Overall investment case looks constructive"
     assert summary["quality_label"] == "Business quality looks strong"
     assert summary["risk_label"] == "Balance sheet risk looks manageable"
     assert summary["data_label"] == "Data coverage looks usable"
@@ -79,7 +79,7 @@ def test_partial_scorecard_flags_data_incomplete():
 def test_insufficient_data_gets_conservative_summary():
     card = score_thesis("ACME", {})
     summary = build_thesis_plain_english(card)
-    assert summary["headline"] == "Not enough data for a reliable thesis read"
+    assert summary["headline"] == "Not enough data for a reliable investment-case read"
     assert summary["data_label"] == "Data is still incomplete"
 
 

@@ -1,4 +1,26 @@
 ## Last change
+Intel copy cleanup: remove user-facing "thesis" jargon from Intel text (PR: "fix(intel): replace thesis jargon in user-facing copy").
+
+## Files touched
+- `v2/backend/app/services/recommendation_engine.py` — Updated user-facing recommendation/synthesis strings from "thesis" phrasing to plain-English "investment case" / "business-case" wording.
+- `v2/backend/app/services/intelligence/thesis_plain_english.py` — Updated user-facing headline text from "thesis read" to "investment-case read" while preserving backend field names.
+- `v2/frontend/src/components/cards/portfolioSynthesisRuntime.ts` — Updated watchlist fallback copy to "Recheck the business case and evidence".
+- `v2/frontend/src/components/cards/InsightCard.tsx` — Changed section label from "Thesis read" to "Investment case read".
+- `v2/backend/tests/test_recommendation_engine.py` — Updated copy assertion for declining-case wording.
+- `v2/backend/tests/test_thesis_plain_english.py` — Updated expected headline strings.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Copy rule update
+- "thesis" is allowed as an internal/backend concept and field name (`thesis_v2`, `thesis_plain_english`), but user-facing copy should use plain-English wording such as "business case", "investment case", "setup", or "reasoning".
+
+## Behavior change
+- User-facing Intel/recommendation text no longer surfaces "thesis" in the updated templates/labels.
+- No scoring logic changes, no recommendation/allocation/deploy behavior changes, no LLM behavior changes, no Supabase SQL changes.
+
+---
+
+## Last change
 Intel v2: improve thesis plain-English card coverage via tolerant thesis_v2 ticker lookup (PR: "fix(intel-v2): improve thesis plain-English card coverage").
 
 ## Files touched

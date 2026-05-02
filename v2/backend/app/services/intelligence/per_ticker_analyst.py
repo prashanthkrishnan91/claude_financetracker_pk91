@@ -124,7 +124,7 @@ Return ONLY valid JSON:
   "conviction": 0.00,
   "conviction_level": "HIGH" | "MEDIUM" | "LOW",
   "why": "core demand driver or structural edge — named catalyst, ≤14 words",
-  "risk": "real-world risk that breaks thesis — business/macro/regulatory, ≤14 words",
+  "risk": "real-world risk that breaks the business case — business/macro/regulatory, ≤14 words",
   "do": "decision only — Accumulate / Hold / Trim / Buy — no sizing or % numbers, ≤14 words",
   "alt_view": "why this over [named peer or ETF] — e.g. 'vs MSFT: …', ≤14 words",
   "confidence": 0.00,

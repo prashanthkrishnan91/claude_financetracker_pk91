@@ -152,6 +152,7 @@ RULES (hard requirements):
   7. ``rebalancing_suggestions``: 0-5 items. Cross-ticker moves like
      "trim TSLA into NVDA", "reduce Auto exposure via REDUCE verdicts".
   8. ``summary``: 2-3 sentences. Portfolio-level only.
+  9. Use plain wording; avoid jargon like "thesis" in user-facing lines.
 
 OUTPUT CONTRACT (strict):
   - Return exactly one JSON object.

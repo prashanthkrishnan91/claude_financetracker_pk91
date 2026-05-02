@@ -1,4 +1,25 @@
 ## Last change
+Intel v2 thesis plain-English data-quality regression fix: avoid universal incomplete fallback for data-bearing insufficient scorecards (PR: "fix(intel-v2): preserve directional dimension labels for insufficient scorecards").
+
+## Files touched
+- `v2/backend/app/services/intelligence/thesis_plain_english.py` — Narrowed only the `INSUFFICIENT_DATA` plain-English branch: keeps conservative headline/data label/caveats, but now reuses computed per-dimension labels (`quality`/`valuation`/`risk`/`momentum`) instead of hardcoded identical "data is incomplete" strings.
+- `v2/backend/tests/test_thesis_plain_english.py` — Added regression tests proving: (1) data-bearing insufficient scorecards do not collapse into universal fallback labels, and (2) serialized dict input produces same plain-English output as ScoreCard object input.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Exact root cause
+- Pipeline wiring from collected provider data → `score_thesis()` → `_thesis_v2` storage → `InsightCard.thesis_plain_english` was functioning.
+- Regression was in the translator behavior for `INSUFFICIENT_DATA`: `build_thesis_plain_english()` used a fully hardcoded fallback block that ignored available published dimension subscores in the scorecard.
+- Because many live tickers legitimately remain `INSUFFICIENT_DATA` under unchanged quality gates, every visible card rendered nearly identical Business read copy.
+
+## Final behavior
+- `INSUFFICIENT_DATA` remains conservative and honest (same status semantics, same cautionary posture).
+- When an insufficient scorecard still has some published dimensions, those directional labels now surface, so cards no longer all read identically.
+- No score math changes, no mapper/proxy fabrication, no data-gate loosening, no LLM changes, no Deploy changes, no Supabase SQL.
+
+---
+
+## Last change
 Intel v2 diagnostic fix: thesis_plain_english visibility on live Intel cards (PR: "fix(intel-v2): render thesis_plain_english on AgentInsightCard").
 
 ## Files touched

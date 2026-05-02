@@ -1,7 +1,7 @@
 "use client";
 
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
-import type { InsightCardData } from "@/lib/api";
+import type { InsightCardData, ThesisPlainEnglish } from "@/lib/api";
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY: { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
@@ -137,6 +137,10 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         )}
       </div>
 
+      {card.thesis_plain_english && (
+        <IntelThesisSection thesis={card.thesis_plain_english} />
+      )}
+
       {/* Footer chips */}
       <div className="flex flex-wrap gap-1.5 pt-0.5">
         {card.pnl_pct != null && (
@@ -162,6 +166,34 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       </div>
     </div>
   );
+}
+
+function IntelThesisSection({ thesis }: { thesis: ThesisPlainEnglish }) {
+  const lines = collectIntelThesisLines(thesis);
+  if (lines.length === 0) return null;
+  return (
+    <div className="rounded-md border border-border/50 bg-surface-elevated/35 px-2.5 py-1.5 space-y-1">
+      <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">Business read</p>
+      {lines.map((line, i) => (
+        <p key={i} className="text-xs text-text-secondary leading-[1.45]">{line}</p>
+      ))}
+    </div>
+  );
+}
+
+export function collectIntelThesisLines(thesis: ThesisPlainEnglish | null | undefined): string[] {
+  if (!thesis) return [];
+  const lines: string[] = [];
+  if (thesis.headline) lines.push(thesis.headline);
+  if (thesis.quality_label) lines.push(thesis.quality_label);
+  if (thesis.valuation_label) lines.push(thesis.valuation_label);
+  if (thesis.risk_label) lines.push(thesis.risk_label);
+  if (thesis.momentum_label) lines.push(thesis.momentum_label);
+  if (thesis.data_label) lines.push(thesis.data_label);
+  for (const caveat of thesis.caveats ?? []) {
+    if (caveat) lines.push(caveat);
+  }
+  return lines;
 }
 
 function MemoSection({

@@ -1,4 +1,26 @@
 ## Last change
+Intel v2 diagnostic fix: thesis_plain_english visibility on live Intel cards (PR: "fix(intel-v2): render thesis_plain_english on AgentInsightCard").
+
+## Files touched
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx` — Added `thesis_plain_english` rendering block for the **live Intel card** surface (`AgentInsightCard`) using a compact plain-English section labeled **Business read**; added exported helper `collectIntelThesisLines()` to keep render condition explicit and testable.
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.ts` — **new test file**. Adds focused visibility tests that prove lines are emitted when `thesis_plain_english` is present and omitted when null/missing.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Exact root cause
+- Backend wiring for `thesis_plain_english` already existed and was attachable when `_thesis_v2` scorecards were present.
+- Frontend API typing also already included `thesis_plain_english`.
+- **But live Intel page (`/dashboard/recommendations`) renders `AgentInsightCard`, not `InsightCard`.**
+- Prior PR rendered `thesis_plain_english` only in `InsightCard.tsx` (unused on the live Intel route), so users only saw old memo sections (WHY/RISK/ACTION/ALT VIEW).
+
+## Final contract behavior
+- If backend provides `thesis_plain_english`, live Intel cards now render a visible plain-English block (`Business read`) with headline/labels/caveats.
+- If `thesis_plain_english` is null/missing, cards render safely with no extra section.
+- No changes to scoring math, LLM behavior, deploy behavior, or Supabase.
+
+---
+
+## Last change
 Intel copy cleanup: remove user-facing "thesis" jargon from Intel text (PR: "fix(intel): replace thesis jargon in user-facing copy").
 
 ## Files touched

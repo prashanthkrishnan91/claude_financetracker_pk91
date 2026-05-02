@@ -199,15 +199,16 @@ def test_insufficient_data_scorecard_no_analyst_forces_watch():
 
 
 def test_no_scorecard_with_valid_analyst_watch_is_allowed_only_when_expected():
-    # With valid analyst + no scorecard: posture comes from analyst action
+    # With valid analyst + no scorecard: insufficient-data contract forces WATCH
     result = build_reasoning_v2(
         ticker="AAPL",
         scorecard=None,
         analyst_verdict=dict(COMPACT_V1_VERDICT),
     )
-    # Scorecard absent → INSUFFICIENT_DATA status → analyst_only agreement
-    # Posture should be ACCUMULATE (BUY → ACCUMULATE) because analyst is usable
-    assert result["action"]["posture"] == "ACCUMULATE"
+    # Scorecard absent → INSUFFICIENT_DATA status → WATCH contract
+    assert result["action"]["posture"] == "WATCH"
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "insufficient_data" in result["deploy_signals"]["blockers"]
     assert result["confidence"]["agreement"] == "analyst_only"
 
 
@@ -597,6 +598,48 @@ def test_snapshot_insufficient_data_no_analyst():
     assert result["why"]["support"] == "insufficient"
 
 
+def test_insufficient_data_with_strong_analyst_buy_forces_watch_posture():
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(INSUFFICIENT_SCORECARD_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    assert result["data_quality"]["status"] == "INSUFFICIENT_DATA"
+    assert result["action"]["posture"] == "WATCH"
+    assert "accumulate" not in result["action"]["user_text"].lower()
+
+
+def test_insufficient_data_with_strong_analyst_buy_forces_deploy_watch_posture():
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(INSUFFICIENT_SCORECARD_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "insufficient_data" in result["deploy_signals"]["blockers"]
+
+
+def test_insufficient_data_with_strong_analyst_buy_not_high_conviction():
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(INSUFFICIENT_SCORECARD_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    assert result["confidence"]["conviction_band"] != "HIGH"
+    assert result["deploy_signals"]["conviction_band"] != "HIGH"
+
+
+def test_insufficient_data_preserves_analyst_evidence():
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(INSUFFICIENT_SCORECARD_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    analyst_ev = result["evidence"]["analyst"]
+    assert analyst_ev.get("action") == "BUY"
+    assert analyst_ev.get("primary_driver")
+
+
 # ── Additional edge cases ────────────────────────────────────────────────────
 
 def test_ticker_is_uppercased():
@@ -623,13 +666,13 @@ def test_no_provider_meta_is_none():
 def test_hold_analyst_maps_to_hold_posture():
     av = dict(COMPACT_V1_VERDICT, action="HOLD", conviction=0.5)
     result = build_reasoning_v2(ticker="MSFT", scorecard=None, analyst_verdict=av)
-    assert result["action"]["posture"] == "HOLD"
+    assert result["action"]["posture"] == "WATCH"
 
 
 def test_reduce_analyst_maps_to_trim_posture():
     av = dict(COMPACT_V1_VERDICT, action="REDUCE", conviction=0.5)
     result = build_reasoning_v2(ticker="NVDA", scorecard=None, analyst_verdict=av)
-    assert result["action"]["posture"] == "TRIM"
+    assert result["action"]["posture"] == "WATCH"
 
 
 def test_medium_conviction_band():

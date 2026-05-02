@@ -1,3 +1,38 @@
+
+
+## Last change
+Intel Reasoning v2 PR-1 contract hardening after live-run inspection (PR: "fix(intel-v2): enforce insufficient-data WATCH contract in reasoning_v2").
+
+## Live-run inspection result
+- Confirmed on Supabase completed run output: `agent_runs.allocation["_reasoning_v2"]` exists and `_thesis_v2` remains present/dormant.
+- Live `NVDA` `reasoning_v2.0` sample showed contract inconsistency: `data_quality.status=INSUFFICIENT_DATA` while `action.posture=ACCUMULATE`, `deploy_signals.action_posture=ACCUMULATE`, and `confidence.conviction_band=HIGH`.
+
+## Exact contract inconsistency fixed
+- Previous builder behavior allowed strong analyst BUY verdicts to set high-conviction ACCUMULATE even when deterministic status was `INSUFFICIENT_DATA`.
+- This could leak unsafe posture into downstream deploy consumers if they read `reasoning_v2`.
+
+## Fixed rule now enforced
+- If `data_quality.status == INSUFFICIENT_DATA`, force:
+  - `action.posture = WATCH`
+  - `deploy_signals.action_posture = WATCH`
+  - `deploy_signals.blockers` includes `insufficient_data`
+  - high conviction is prevented (`confidence.conviction_band` and `deploy_signals.conviction_band` are downgraded from HIGH to `INSUFFICIENT_DATA`).
+- Analyst evidence remains preserved under `evidence.analyst` for traceability and review.
+- Analyst copy can still inform non-action evidence fields, but it no longer overrides WATCH posture under insufficient data.
+
+## Files touched
+- `v2/backend/app/services/intelligence/reasoning_v2_builder.py` — added deterministic insufficient-data contract enforcement helper and wired it before payload assembly.
+- `v2/backend/tests/test_reasoning_v2_builder.py` — updated/added focused tests for insufficient-data + strong analyst BUY WATCH forcing, conviction downgrade, and analyst evidence preservation; fallback/no-leakage tests remain in suite.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Confirmation of non-changes
+- No frontend/UI change (reasoning_v2 remains non-exposed).
+- No Deploy code change.
+- No Supabase SQL/migration change.
+- No LLM prompt/model/analyst generation change.
+- `_thesis_v2` untouched.
+
 # AI Engineering Handoff
 
 ## Intel Reasoning v2 — PR 1 (Dormant Backend Builder)

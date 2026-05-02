@@ -576,8 +576,19 @@ def _build_data_quality(
     missing: list[str] = []
     stale: list[str] = []
     if sc is not None:
-        missing = [str(m) for m in (sc.get("missing_fields") or []) if m]
+        missing_fields = sc.get("missing_fields")
+        if not missing_fields:
+            # thesis_engine scorecards are serialized with inputs_missing, not missing_fields.
+            missing_fields = sc.get("inputs_missing")
+        missing = [str(m) for m in (missing_fields or []) if m]
         stale = [str(s) for s in (sc.get("stale_fields") or []) if s]
+
+    suppressed_dimensions: list[str] = []
+    if sc is not None:
+        for dim_key in ("quality", "valuation", "growth", "risk", "momentum"):
+            dim = sc.get(dim_key)
+            if isinstance(dim, dict) and not bool(dim.get("published")):
+                suppressed_dimensions.append(dim_key)
 
     # Blended quality: conservative average of scorecard and analyst signal presence
     if sc_quality > 0 and analyst_is_usable:
@@ -592,6 +603,14 @@ def _build_data_quality(
 
     if sc_status == "INSUFFICIENT_DATA":
         note = "Data coverage is too thin to support confident signals for this ticker."
+        if suppressed_dimensions:
+            note += (
+                " Suppressed dimensions due to low coverage: "
+                + ", ".join(suppressed_dimensions)
+                + "."
+            )
+        if not missing and not stale and suppressed_dimensions:
+            missing = [f"suppressed:{d}" for d in suppressed_dimensions]
     elif sc_status == "PARTIAL":
         note = "Partial data available. Some signals may be missing or stale."
     else:

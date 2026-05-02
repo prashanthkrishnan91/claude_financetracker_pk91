@@ -1,3 +1,45 @@
+## Last change
+Intel Reasoning v2 PR 3: actionable INSUFFICIENT_DATA diagnostics for thesis_v2 scorecards (PR: "fix(intel-v2-pr3): make insufficient thesis diagnostics actionable").
+
+## Exact root cause
+- `reasoning_v2_builder._build_data_quality()` only read `scorecard["missing_fields"]` / `scorecard["stale_fields"]`.
+- Live thesis_v2 scorecards persisted by orchestrator (`_scorecard_to_dict`) use `inputs_missing` / `inputs_used` and do **not** include `missing_fields`.
+- Result: `data_quality.status` correctly stayed `INSUFFICIENT_DATA`, but diagnostics collapsed to `missing=[]` and `stale=[]`.
+- `evidence.deterministic` stayed `{}` by design for INSUFFICIENT_DATA (WATCH hardening), so there was no alternate clue for why data was thin.
+
+## What was fixed
+- Added backward-compatible diagnostics fallback in `reasoning_v2_builder`:
+  - read `missing_fields` first, fallback to `inputs_missing` for serialized thesis_v2 scorecards.
+  - detect suppressed thesis dimensions (`quality`, `valuation`, `growth`, `risk`, `momentum`) when `published=False`.
+  - for INSUFFICIENT_DATA with empty missing/stale but suppressed dimensions present, inject actionable missing markers (`suppressed:<dimension>`) and append explicit suppression detail to `user_safe_note`.
+- Kept all guardrails intact:
+  - INSUFFICIENT_DATA still forces WATCH.
+  - deterministic evidence remains empty under INSUFFICIENT_DATA (no score leakage).
+  - no threshold/score math relaxation.
+
+## Verification findings (live-contract equivalent)
+- The issue was a **diagnostics key mismatch + suppression observability gap**, not a reasoning_v2 WATCH-gate bug.
+- Mapper coverage for safe stock fields remains intact; no unsafe proxy mapping added.
+- Asset-type gating was not changed in this patch; diagnostics are now honest when scorecards are insufficient regardless of ticker class.
+
+## Tests added
+- Reproduced live-style failure mode: serialized thesis scorecard with `inputs_missing` and no `missing_fields` now reports actionable `data_quality.missing`.
+- Added guard test ensuring INSUFFICIENT_DATA cannot surface with both `missing=[]` and `stale=[]` when dimensions are suppressed.
+
+## Files touched
+- `v2/backend/app/services/intelligence/reasoning_v2_builder.py`
+- `v2/backend/tests/test_reasoning_v2_builder.py`
+- `docs/ai/HANDOFF.md`
+- `v2/progress_log.md`
+
+## Confirmation of non-changes
+- No frontend/UI changes.
+- No Deploy changes.
+- No Supabase SQL/migrations.
+- No LLM prompt/model behavior changes.
+
+---
+
 
 
 ## Last change

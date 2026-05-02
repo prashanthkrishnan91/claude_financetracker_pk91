@@ -146,7 +146,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
           />
         )}
         {card.data_quality_label && (
-          <Chip label={`Data: ${card.data_quality_label}`} tone="neutral" />
+          <Chip label={`Ticker data: ${card.data_quality_label}`} tone="neutral" />
         )}
         {(() => {
           const srcLabel = reasoningSourceLabel(card.reasoning_source) ?? (card.analysis_source === "live_llm" ? "Live analysis" : "Cached");

@@ -414,3 +414,10 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Validation: `cd v2/backend && pytest tests/test_thesis_response_wiring.py tests/test_thesis_plain_english.py tests/test_recommendation_engine.py -k thesis -q`
 - No Supabase SQL. No frontend/UI changes. No scoring/Deploy/LLM behavior changes.
 - 2026-05-02: fix(intel): replaced user-facing "thesis" wording with plain-English "investment case"/"business case" copy in Intel backend/frontend templates; no logic changes.
+
+## 2026-05-02 — Intel v2 copy cleanup: remove remaining user-facing “thesis” jargon
+
+- Updated Intel analyst prompt copy to replace user-facing phrasing `breaks thesis` with `breaks the business case` in the risk field guidance.
+- Updated portfolio synthesis prompt rules to explicitly require plain wording and avoid `thesis` jargon in user-facing lines.
+- Scope limited to v2 copy/template text only; no scoring, recommendation, deploy, SQL, or LLM-call wiring changes.
+- Validation: `python -m compileall v2/backend/app/services/intelligence/per_ticker_analyst.py v2/backend/app/services/intelligence/portfolio_synthesis.py`.

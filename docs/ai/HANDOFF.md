@@ -1,4 +1,23 @@
 ## Last change
+Intel live-contract diagnostic: business-read repetition root-cause verification (PR: "test(intel-v2): add live-style thesis contract diagnostic").
+
+## Files touched
+- `v2/backend/tests/test_recommendation_engine.py` — Added focused contract test (`TestLiveStyleSerializedThesisContract`) that simulates a live-style serialized `agent_runs.allocation["_thesis_v2"]` payload for `GOOGL`, `META`, and `NVDA` and verifies `_build_thesis_fields_for_card()` + `build_thesis_plain_english()` produce per-ticker directional labels (not a universal incomplete fallback) while preserving `INSUFFICIENT_DATA` headline semantics.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise diagnostic entry added.
+
+## Exact diagnosis
+- Backend translator branch is already updated: for `INSUFFICIENT_DATA` it reuses computed per-dimension labels when available, not hardcoded universal "dimension incomplete" strings.
+- Intel page fetch path is `GET /api/v1/recommendations/` (`useRecommendations`), rendered via `AgentInsightCard` on `/dashboard/recommendations`.
+- "Run Agents" calls `POST /api/v1/recommendations/refresh` and may reuse an existing active run (`status=in_progress`) by design; it does not guarantee a brand-new run id when one is already active.
+- Each recommendation card binds to its own persisted `recommendations.agent_run_id`; card thesis payload comes from that run’s `agent_runs.allocation["_thesis_v2"]` map.
+- Therefore repeated identical business-read copy across cards is primarily a data/run-selection contract issue (same/old run payload attached to many cards, or scorecards lacking published dimension variation), not the translator logic itself.
+
+## Final behavior
+- Added regression-level proof that live-style serialized `_thesis_v2` with varied published dimensions yields varied `thesis_plain_english` labels across tickers.
+- No score math changes, no data-quality gate changes, no LLM changes, no deploy changes, no Supabase SQL.
+
+## Last change
 Intel v2 thesis plain-English data-quality regression fix: avoid universal incomplete fallback for data-bearing insufficient scorecards (PR: "fix(intel-v2): preserve directional dimension labels for insufficient scorecards").
 
 ## Files touched

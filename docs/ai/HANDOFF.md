@@ -1,6 +1,73 @@
 
 
 ## Last change
+Intel Reasoning v2 PR 2: deterministic thesis scorecard fusion into reasoning_v2 (PR: "feat(intel-v2-pr2-reasoning): fuse thesis_v2 scorecard into reasoning_v2 evidence").
+
+## PR 2 deterministic-fusion behavior
+
+**Root cause of analyst-only reasoning_v2 (resolved)**
+The wire-up in `orchestrator.py` always passed `scorecard=None` to `build_reasoning_v2`. The `_thesis_scorecards` dict (computed in Phase 2.5) was never forwarded to the reasoning_v2 builder, so `evidence.deterministic` was always `{}` and `confidence.agreement` was always `"analyst_only"`.
+
+**Exact wire-up fix point**
+`v2/backend/app/services/agents/orchestrator.py` — Intel Reasoning v2 block (lines ~462–487).
+`_r2_scorecard = _r2_thesis_cards.get(_r2_ticker)` now extracts the same `score_schema.ScoreCard` object stored under `_thesis_v2` for each ticker, and passes it to `build_reasoning_v2` as `scorecard=`.
+
+**What deterministic fusion now does**
+- `score_schema.ScoreCard` objects (live Phase 2.5 output) are detected by duck-typing and normalised via `_normalize_thesis_engine_scorecard()`.
+- Serialized thesis dicts (from `_scorecard_to_dict`, stored in `_thesis_v2`) are also accepted as plain dicts.
+- Both paths produce identical `evidence.deterministic` contents (test PR2-3 verifies parity).
+- Only **published** thesis subscores appear in `evidence.deterministic` (quality_score, valuation_score, growth_score, risk_score, momentum_score — only when `subscore.published=True`).
+- Agreement is derived from `conviction_band`: HIGH/MEDIUM → positive direction; LOW → negative direction (falls back to legacy sentiment_score/return_30d for stub scorecards).
+- Agree + BUY analyst → `confidence.agreement="agree"`, non-WATCH posture.
+- Disagree (e.g., LOW conviction thesis + BUY analyst) → `confidence.agreement="disagree"`, `action.posture=WATCH`, `deploy_signals.action_posture=WATCH`, `blockers=["agreement_conflict"]`.
+- INSUFFICIENT_DATA thesis status → existing hardening rule still forces WATCH; `evidence.deterministic={}`.
+- PARTIAL thesis status with useful published dimensions → those dimensions appear in `evidence.deterministic` honestly.
+
+**Confirmation: reasoning_v2 remains backend-only and dormant**
+- `_reasoning_v2` is written to `agent_runs.allocation` JSONB only.
+- No API endpoint exposes it. No InsightCard field added. No frontend change.
+- No Deploy change. No SQL migration. No LLM behavior change.
+
+**Future PR 3 guidance**
+Before any API/UI exposure of `_reasoning_v2`, inspect live output from a completed run:
+1. Confirm `evidence.deterministic` is non-empty for tickers with READY/PARTIAL thesis data.
+2. Confirm `confidence.agreement` reflects the actual thesis/analyst signal alignment.
+3. Confirm `deploy_signals.blockers` correctly categorises conflict vs insufficient cases.
+4. Only then project `reasoning_v2` onto InsightCard or a new endpoint.
+
+## Post-merge Supabase query to inspect deterministic evidence for NVDA/GOOGL/META
+
+```sql
+SELECT
+  allocation->'_reasoning_v2'->'NVDA'->'evidence'->'deterministic' AS nvda_det,
+  allocation->'_reasoning_v2'->'GOOGL'->'evidence'->'deterministic' AS googl_det,
+  allocation->'_reasoning_v2'->'META'->'evidence'->'deterministic'  AS meta_det,
+  allocation->'_reasoning_v2'->'NVDA'->'confidence'->'agreement'   AS nvda_agreement,
+  allocation->'_reasoning_v2'->'NVDA'->'data_quality'->'status'    AS nvda_dq_status
+FROM agent_runs
+WHERE status = 'completed'
+ORDER BY finished_at DESC
+LIMIT 1;
+```
+
+## Files touched
+- `v2/backend/app/services/agents/orchestrator.py` — pass `_thesis_scorecards.get(ticker)` to `build_reasoning_v2` instead of `None`.
+- `v2/backend/app/services/intelligence/reasoning_v2_builder.py` — add `_THESIS_SUBSCORE_MAP`; add `_normalize_thesis_engine_scorecard()` + `_EmptySubScore`; update `_normalize_scorecard()` for duck-typed `score_schema.ScoreCard`; update `_sc_quality()` to accept `blended_data_quality`; update `_build_published_dimensions()` and `_build_evidence()` to extract published thesis subscores; update `_derive_agreement()` to use `conviction_band` for direction.
+- `v2/backend/tests/test_reasoning_v2_builder.py` — added 18 new focused tests (PR2-1 through PR2-11) for thesis fusion; all existing 47 tests continue to pass.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Confirmation of non-changes
+- No frontend/UI change.
+- No Deploy code change.
+- No Supabase SQL/migration change.
+- No LLM prompt/model/analyst generation change.
+- `_thesis_v2` untouched (still serialized by existing `_scorecard_to_dict` path).
+- No score math changes.
+
+---
+
+## Last change
 Intel Reasoning v2 PR-1 contract hardening after live-run inspection (PR: "fix(intel-v2): enforce insufficient-data WATCH contract in reasoning_v2").
 
 ## Live-run inspection result

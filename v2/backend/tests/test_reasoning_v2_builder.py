@@ -736,3 +736,444 @@ def test_no_analyst_verdict_confidence_score_is_none_or_zero():
     result = build_reasoning_v2(ticker="STUB", scorecard=None, analyst_verdict=None)
     # No analyst → score is None
     assert result["confidence"]["score"] is None
+
+
+# ── Thesis engine scorecard fusion tests (PR 2) ──────────────────────────────
+#
+# These tests use the serialized thesis dict format produced by
+# orchestrator._scorecard_to_dict() so they run without importing
+# score_schema or thesis_engine (which avoids circular dependencies
+# in the test suite).  Test 4 additionally imports score_schema.ScoreCard
+# to verify the object path through _normalize_thesis_engine_scorecard.
+
+# Thesis dict with multiple published dimensions (READY status)
+THESIS_READY_DICT: dict[str, Any] = {
+    "ticker": "NVDA",
+    "status": "READY",
+    "conviction_score": 72.5,
+    "conviction_band": "HIGH",
+    "blended_data_quality": 0.82,
+    "inputs_used": ["trailing_pe", "forward_pe", "beta", "return_5d", "return_30d"],
+    "inputs_missing": ["roic_ttm", "gross_margin", "fcf_margin"],
+    "score_version": "v1",
+    "quality": {
+        "score": 55.0, "data_quality": 0.43,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "valuation": {
+        "score": 64.0, "data_quality": 0.72,
+        "inputs_used": ["trailing_pe", "forward_pe"], "inputs_missing": [], "published": True,
+    },
+    "growth": {
+        "score": 70.0, "data_quality": 0.60,
+        "inputs_used": ["revenue_yoy"], "inputs_missing": [], "published": True,
+    },
+    "risk": {
+        "score": 68.0, "data_quality": 0.71,
+        "inputs_used": ["beta", "net_debt_to_ebitda"], "inputs_missing": [], "published": True,
+    },
+    "momentum": {
+        "score": 73.0, "data_quality": 0.80,
+        "inputs_used": ["return_5d", "return_30d"], "inputs_missing": [], "published": True,
+    },
+}
+
+# Thesis dict where analyst (BUY) and deterministic (LOW = negative) disagree
+THESIS_LOW_CONVICTION_DICT: dict[str, Any] = {
+    "ticker": "WEAK",
+    "status": "READY",
+    "conviction_score": 38.0,
+    "conviction_band": "LOW",
+    "blended_data_quality": 0.60,
+    "inputs_used": ["trailing_pe", "beta"],
+    "inputs_missing": ["roic_ttm", "gross_margin", "fcf_margin", "revenue_yoy"],
+    "score_version": "v1",
+    "quality": {
+        "score": 32.0, "data_quality": 0.43,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "valuation": {
+        "score": 40.0, "data_quality": 0.55,
+        "inputs_used": ["trailing_pe"], "inputs_missing": [], "published": True,
+    },
+    "growth": {
+        "score": 35.0, "data_quality": 0.40,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "risk": {
+        "score": 42.0, "data_quality": 0.57,
+        "inputs_used": ["beta"], "inputs_missing": [], "published": True,
+    },
+    "momentum": {
+        "score": 38.0, "data_quality": 0.52,
+        "inputs_used": [], "inputs_missing": [], "published": True,
+    },
+}
+
+# Thesis dict with INSUFFICIENT_DATA status
+THESIS_INSUFFICIENT_DICT: dict[str, Any] = {
+    "ticker": "MISS",
+    "status": "INSUFFICIENT_DATA",
+    "conviction_score": None,
+    "conviction_band": "INSUFFICIENT_DATA",
+    "blended_data_quality": 0.22,
+    "inputs_used": [],
+    "inputs_missing": ["roic_ttm", "gross_margin", "fcf_margin", "trailing_pe"],
+    "score_version": "v1",
+    "quality": {
+        "score": 0.0, "data_quality": 0.0,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "valuation": {
+        "score": 0.0, "data_quality": 0.28,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "growth": {
+        "score": 0.0, "data_quality": 0.0,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "risk": {
+        "score": 0.0, "data_quality": 0.14,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "momentum": {
+        "score": 0.0, "data_quality": 0.0,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+}
+
+# Thesis dict with PARTIAL status — some published dimensions
+THESIS_PARTIAL_DICT: dict[str, Any] = {
+    "ticker": "PART",
+    "status": "PARTIAL",
+    "conviction_score": 58.0,
+    "conviction_band": "MEDIUM",
+    "blended_data_quality": 0.62,
+    "inputs_used": ["trailing_pe", "beta"],
+    "inputs_missing": ["roic_ttm", "gross_margin", "fcf_margin"],
+    "score_version": "v1",
+    "quality": {
+        "score": 45.0, "data_quality": 0.29,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "valuation": {
+        "score": 60.0, "data_quality": 0.55,
+        "inputs_used": ["trailing_pe"], "inputs_missing": [], "published": True,
+    },
+    "growth": {
+        "score": 55.0, "data_quality": 0.40,
+        "inputs_used": [], "inputs_missing": [], "published": False,
+    },
+    "risk": {
+        "score": 62.0, "data_quality": 0.57,
+        "inputs_used": ["beta"], "inputs_missing": [], "published": True,
+    },
+    "momentum": {
+        "score": 58.0, "data_quality": 0.52,
+        "inputs_used": [], "inputs_missing": [], "published": True,
+    },
+}
+
+
+# ── Test PR2-1: wire-up — scorecard passes into builder, evidence populated ───
+
+def test_thesis_scorecard_produces_non_empty_deterministic_evidence():
+    """When _thesis_v2 has published scorecard dimensions, evidence.deterministic is populated."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=None,
+    )
+    det = result["evidence"]["deterministic"]
+    # At least the published dimensions should appear
+    assert len(det) > 0, "evidence.deterministic must be non-empty for READY scorecard"
+    assert "valuation_score" in det
+    assert "risk_score" in det
+    assert "momentum_score" in det
+
+
+def test_thesis_ready_scorecard_published_scores_are_correct():
+    """Published subscore scores are rounded floats matching the input dict."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=None,
+    )
+    det = result["evidence"]["deterministic"]
+    assert det["valuation_score"] == 64.0
+    assert det["growth_score"] == 70.0
+    assert det["risk_score"] == 68.0
+    assert det["momentum_score"] == 73.0
+
+
+def test_thesis_unpublished_dimension_excluded_from_evidence():
+    """quality.published=False → quality_score must NOT appear in evidence.deterministic."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=None,
+    )
+    det = result["evidence"]["deterministic"]
+    # quality.published=False in THESIS_READY_DICT
+    assert "quality_score" not in det
+
+
+# ── Test PR2-2: sibling keys coexist in allocation_map ───────────────────────
+
+def test_thesis_v2_and_reasoning_v2_can_coexist_as_sibling_keys():
+    """Both _thesis_v2 and _reasoning_v2 can be sibling keys in one allocation map."""
+    scorecard_dict = dict(THESIS_READY_DICT)
+    r2 = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=scorecard_dict,
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    allocation_map = {
+        "NVDA": 450.0,
+        "_thesis_v2": {"NVDA": scorecard_dict},
+        "_reasoning_v2": {"NVDA": r2},
+    }
+    assert "_thesis_v2" in allocation_map
+    assert "_reasoning_v2" in allocation_map
+    assert allocation_map["_thesis_v2"]["NVDA"]["conviction_band"] == "HIGH"
+    assert allocation_map["_reasoning_v2"]["NVDA"]["schema_version"] == "reasoning_v2.0"
+
+
+# ── Test PR2-3: score_schema.ScoreCard object vs serialized dict equivalence ──
+
+def test_thesis_scorecard_object_and_dict_produce_equivalent_evidence():
+    """score_schema.ScoreCard object and its serialized dict produce the same evidence."""
+    from app.services.intelligence.score_schema import (
+        ConvictionBand, ScoreCard as ThesisScoreCard, ScoreStatus, SubScore
+    )
+
+    def _make_subscore(score, dq, published) -> SubScore:
+        return SubScore(
+            score=score, data_quality=dq, inputs_used=[], inputs_missing=[],
+            published=published,
+        )
+
+    card_obj = ThesisScoreCard(
+        ticker="NVDA",
+        status=ScoreStatus.READY,
+        quality=_make_subscore(55.0, 0.43, False),
+        valuation=_make_subscore(64.0, 0.72, True),
+        growth=_make_subscore(70.0, 0.60, True),
+        risk=_make_subscore(68.0, 0.71, True),
+        momentum=_make_subscore(73.0, 0.80, True),
+        conviction_score=72.5,
+        conviction_band=ConvictionBand.HIGH,
+        blended_data_quality=0.82,
+        inputs_used=["trailing_pe", "forward_pe"],
+        inputs_missing=["roic_ttm"],
+    )
+    card_dict = dict(THESIS_READY_DICT)
+
+    result_obj = build_reasoning_v2(ticker="NVDA", scorecard=card_obj, analyst_verdict=None)
+    result_dict = build_reasoning_v2(ticker="NVDA", scorecard=card_dict, analyst_verdict=None)
+
+    # Both should produce the same deterministic evidence keys
+    assert set(result_obj["evidence"]["deterministic"].keys()) == set(
+        result_dict["evidence"]["deterministic"].keys()
+    )
+    # And the same agreement / status
+    assert result_obj["confidence"]["agreement"] == result_dict["confidence"]["agreement"]
+    assert result_obj["data_quality"]["status"] == result_dict["data_quality"]["status"]
+
+
+# ── Test PR2-4: deterministic + analyst agree ─────────────────────────────────
+
+def test_thesis_high_conviction_plus_buy_analyst_agree():
+    """HIGH conviction thesis + BUY analyst → agreement = 'agree', non-WATCH posture."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),   # conviction_band=HIGH
+        analyst_verdict=dict(COMPACT_V1_VERDICT),  # action=BUY
+    )
+    assert result["confidence"]["agreement"] == "agree"
+    assert result["action"]["posture"] in {"ACCUMULATE", "HOLD"}
+    assert "agreement_conflict" not in result["deploy_signals"]["blockers"]
+
+
+def test_thesis_medium_conviction_plus_buy_analyst_agree():
+    """MEDIUM conviction thesis + BUY analyst → agreement = 'agree'."""
+    result = build_reasoning_v2(
+        ticker="PART",
+        scorecard=dict(THESIS_PARTIAL_DICT),  # conviction_band=MEDIUM
+        analyst_verdict=dict(COMPACT_V1_VERDICT),  # action=BUY
+    )
+    assert result["confidence"]["agreement"] == "agree"
+    assert "agreement_conflict" not in result["deploy_signals"]["blockers"]
+
+
+# ── Test PR2-5: deterministic + analyst disagree ──────────────────────────────
+
+def test_thesis_low_conviction_plus_buy_analyst_disagree():
+    """LOW conviction thesis + BUY analyst → agreement = 'disagree', WATCH posture."""
+    result = build_reasoning_v2(
+        ticker="WEAK",
+        scorecard=dict(THESIS_LOW_CONVICTION_DICT),  # conviction_band=LOW
+        analyst_verdict=dict(COMPACT_V1_VERDICT),      # action=BUY
+    )
+    assert result["confidence"]["agreement"] == "disagree"
+    assert result["action"]["posture"] == "WATCH"
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "agreement_conflict" in result["deploy_signals"]["blockers"]
+
+
+def test_thesis_high_conviction_plus_reduce_analyst_disagree():
+    """HIGH conviction thesis + REDUCE analyst → agreement = 'disagree', WATCH posture."""
+    reduce_verdict = dict(COMPACT_V1_VERDICT, action="REDUCE")
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),  # conviction_band=HIGH → positive
+        analyst_verdict=reduce_verdict,       # REDUCE → bearish
+    )
+    assert result["confidence"]["agreement"] == "disagree"
+    assert result["action"]["posture"] == "WATCH"
+    assert "agreement_conflict" in result["deploy_signals"]["blockers"]
+
+
+# ── Test PR2-6: INSUFFICIENT_DATA thesis still forces WATCH ──────────────────
+
+def test_thesis_insufficient_data_with_buy_analyst_forces_watch():
+    """INSUFFICIENT_DATA thesis + strong BUY analyst → WATCH contract still enforced."""
+    result = build_reasoning_v2(
+        ticker="MISS",
+        scorecard=dict(THESIS_INSUFFICIENT_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),  # action=BUY
+    )
+    assert result["data_quality"]["status"] == "INSUFFICIENT_DATA"
+    assert result["action"]["posture"] == "WATCH"
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "insufficient_data" in result["deploy_signals"]["blockers"]
+    assert result["confidence"]["conviction_band"] != "HIGH"
+
+
+def test_thesis_insufficient_data_evidence_deterministic_empty():
+    """INSUFFICIENT_DATA thesis → evidence.deterministic must be empty (no score leakage)."""
+    result = build_reasoning_v2(
+        ticker="MISS",
+        scorecard=dict(THESIS_INSUFFICIENT_DICT),
+        analyst_verdict=None,
+    )
+    assert result["evidence"]["deterministic"] == {}
+
+
+# ── Test PR2-7: PARTIAL scorecard with useful published dimensions ─────────────
+
+def test_thesis_partial_published_dimensions_appear_in_evidence():
+    """PARTIAL thesis with published dimensions populates evidence.deterministic."""
+    result = build_reasoning_v2(
+        ticker="PART",
+        scorecard=dict(THESIS_PARTIAL_DICT),  # valuation, risk, momentum published
+        analyst_verdict=None,
+    )
+    det = result["evidence"]["deterministic"]
+    assert len(det) > 0
+    assert "valuation_score" in det
+    assert "risk_score" in det
+    assert "momentum_score" in det
+    # quality is not published in THESIS_PARTIAL_DICT
+    assert "quality_score" not in det
+
+
+# ── Test PR2-8: no allocation leakage into deploy_signals ────────────────────
+
+def test_thesis_scorecard_no_allocation_leakage_in_deploy_signals():
+    """No dollar/percent/position-target keys appear in deploy_signals for thesis scorecards."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    ds = result["deploy_signals"]
+    forbidden = {
+        "allocation_amount", "allocation_pct", "dollar_amount",
+        "shares", "share_count", "position_target", "target_weight",
+        "deploy_amount", "deploy_pct",
+    }
+    assert not forbidden.intersection(ds.keys())
+
+
+# ── Test PR2-9: no raw metric keys in user-facing text ───────────────────────
+
+_RAW_METRIC_KEYS = [
+    "quality_score", "valuation_score", "growth_score", "risk_score", "momentum_score",
+    "fcf_margin", "roic_ttm", "ev_ebitda", "ps_ttm", "net_debt_to_ebitda",
+    "trailing_pe", "forward_pe", "blended_data_quality", "conviction_score",
+]
+
+
+@pytest.mark.parametrize("metric_key", _RAW_METRIC_KEYS)
+def test_no_raw_metric_keys_in_user_text_thesis_scorecard(metric_key):
+    """Raw metric/score keys must never appear verbatim in user-facing text fields."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    user_texts = [
+        result["why"]["user_text"],
+        result["risk"]["user_text"],
+        result["action"]["user_text"],
+        result["alt_view"]["user_text"],
+    ]
+    for text in user_texts:
+        assert metric_key.lower() not in text.lower(), (
+            f"Raw metric key '{metric_key}' found in user_text: {text!r}"
+        )
+
+
+# ── Test PR2-10: blended_data_quality used when data_quality_score absent ────
+
+def test_thesis_serialized_dict_blended_data_quality_used_for_sc_quality():
+    """Serialized thesis dict uses blended_data_quality (not data_quality_score) for quality."""
+    # Thesis dict has blended_data_quality=0.82; if _sc_quality falls back correctly
+    # the blended_quality in data_quality will be non-zero.
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=None,
+    )
+    # blended_data_quality from scorecard (0.82) should feed _sc_quality
+    assert result["data_quality"]["blended_quality"] > 0.0
+
+
+# ── Test PR2-11: score_schema.ScoreCard object normalised to dict correctly ───
+
+def test_thesis_engine_scorecard_object_normalised_correctly():
+    """score_schema.ScoreCard object goes through _normalize_thesis_engine_scorecard."""
+    from app.services.intelligence.score_schema import (
+        ConvictionBand, ScoreCard as ThesisScoreCard, ScoreStatus, SubScore
+    )
+
+    def _make_subscore(score, dq, published) -> SubScore:
+        return SubScore(
+            score=score, data_quality=dq, inputs_used=[], inputs_missing=[],
+            published=published,
+        )
+
+    card = ThesisScoreCard(
+        ticker="GOOG",
+        status=ScoreStatus.PARTIAL,
+        quality=_make_subscore(40.0, 0.29, False),
+        valuation=_make_subscore(58.0, 0.55, True),
+        growth=_make_subscore(65.0, 0.60, True),
+        risk=_make_subscore(70.0, 0.71, True),
+        momentum=_make_subscore(55.0, 0.50, True),
+        conviction_score=58.0,
+        conviction_band=ConvictionBand.MEDIUM,
+        blended_data_quality=0.62,
+        inputs_used=["trailing_pe"],
+        inputs_missing=["roic_ttm"],
+    )
+
+    result = build_reasoning_v2(ticker="GOOG", scorecard=card, analyst_verdict=None)
+    det = result["evidence"]["deterministic"]
+    assert "valuation_score" in det
+    assert "growth_score" in det
+    assert "risk_score" in det
+    assert "momentum_score" in det
+    assert "quality_score" not in det  # quality.published=False
+    assert result["data_quality"]["status"] == "PARTIAL"

@@ -40,6 +40,17 @@ _SUBSCORE_KEY_MAP: tuple[tuple[str, str], ...] = (
     ("relative_strength", "relative_strength"),
 )
 
+# Thesis-engine subscore dimension keys: maps thesis ScoreCard subscore name →
+# evidence.deterministic key. Only published (data_quality >= threshold) subscores
+# are included. Keep this list stable — removing entries breaks traceability.
+_THESIS_SUBSCORE_MAP: tuple[tuple[str, str], ...] = (
+    ("quality", "quality_score"),
+    ("valuation", "valuation_score"),
+    ("growth", "growth_score"),
+    ("risk", "risk_score"),
+    ("momentum", "momentum_score"),
+)
+
 # Strings that indicate high-risk business situations (not technical indicators).
 _HIGH_RISK_SIGNALS = ("halt", "bankruptcy", "collapse", "fraud", "delist", "liquidat")
 _MED_RISK_SIGNALS = (
@@ -95,10 +106,66 @@ def _safe_user_text(raw: str, max_len: int = 180) -> str:
     return _scrub_forbidden(raw)[:max_len].rstrip()
 
 
+def _normalize_thesis_engine_scorecard(card: Any) -> dict[str, Any]:
+    """Normalise a score_schema.ScoreCard (thesis engine output) to a plain dict.
+
+    Detected via duck-typing: ``hasattr(card, 'quality') and hasattr(card, 'blended_data_quality')``.
+    Keeps the same top-level key shape as ``_scorecard_to_dict()`` in the orchestrator
+    so serialized thesis dicts and live ScoreCard objects produce identical evidence.
+    """
+    def _ss(ss: Any) -> dict:
+        return {
+            "score": float(getattr(ss, "score", 0.0)),
+            "data_quality": float(getattr(ss, "data_quality", 0.0)),
+            "published": bool(getattr(ss, "published", False)),
+        }
+
+    status_raw = getattr(card, "status", None)
+    status_val = status_raw.value if hasattr(status_raw, "value") else str(status_raw or "INSUFFICIENT_DATA")
+    band_raw = getattr(card, "conviction_band", None)
+    band_val = band_raw.value if hasattr(band_raw, "value") else str(band_raw or "INSUFFICIENT_DATA")
+
+    return {
+        "ticker": str(getattr(card, "ticker", "") or ""),
+        "status": status_val,
+        "data_quality_score": float(getattr(card, "blended_data_quality", 0.0) or 0.0),
+        "missing_fields": list(getattr(card, "inputs_missing", []) or []),
+        "stale_fields": [],
+        "conviction_score": getattr(card, "conviction_score", None),
+        "conviction_band": band_val,
+        "quality": _ss(getattr(card, "quality", None) or _EmptySubScore()),
+        "valuation": _ss(getattr(card, "valuation", None) or _EmptySubScore()),
+        "growth": _ss(getattr(card, "growth", None) or _EmptySubScore()),
+        "risk": _ss(getattr(card, "risk", None) or _EmptySubScore()),
+        "momentum": _ss(getattr(card, "momentum", None) or _EmptySubScore()),
+    }
+
+
+class _EmptySubScore:
+    """Sentinel used by _normalize_thesis_engine_scorecard when a subscore is missing."""
+    score = 0.0
+    data_quality = 0.0
+    published = False
+
+
 def _normalize_scorecard(scorecard: Any) -> Optional[dict[str, Any]]:
-    """Normalise ScoreCard object or dict to a plain dict, or None."""
+    """Normalise ScoreCard object or dict to a plain dict, or None.
+
+    Handles three input types in order:
+    1. score_schema.ScoreCard (thesis engine output) — detected via duck-typing.
+    2. Local ScoreCard stub (reasoning_v2_builder.ScoreCard).
+    3. Plain dict (serialized scorecard from _scorecard_to_dict or caller).
+    """
     if scorecard is None:
         return None
+    # score_schema.ScoreCard has `quality` (SubScore) and `blended_data_quality`;
+    # the local stub ScoreCard has neither of those attributes.
+    if (
+        not isinstance(scorecard, (ScoreCard, dict))
+        and hasattr(scorecard, "quality")
+        and hasattr(scorecard, "blended_data_quality")
+    ):
+        return _normalize_thesis_engine_scorecard(scorecard)
     if isinstance(scorecard, ScoreCard):
         return {
             "ticker": scorecard.ticker,
@@ -132,7 +199,9 @@ def _sc_quality(sc: Optional[dict]) -> float:
     if sc is None:
         return 0.0
     try:
-        return max(0.0, min(1.0, float(sc.get("data_quality_score") or 0.0)))
+        # Support both stub field (data_quality_score) and serialized thesis field (blended_data_quality).
+        v = sc.get("data_quality_score") or sc.get("blended_data_quality") or 0.0
+        return max(0.0, min(1.0, float(v)))
     except (TypeError, ValueError):
         return 0.0
 
@@ -205,6 +274,11 @@ def _build_published_dimensions(sc: Optional[dict], status: str) -> list[str]:
     for sc_key, ev_key in _SUBSCORE_KEY_MAP:
         if sc.get(sc_key) is not None:
             published.append(ev_key)
+    # Thesis-engine subscore dimensions (published flag must be True)
+    for dim_key, ev_key in _THESIS_SUBSCORE_MAP:
+        dim = sc.get(dim_key)
+        if isinstance(dim, dict) and dim.get("published") and dim.get("score") is not None:
+            published.append(ev_key)
     return published
 
 
@@ -223,17 +297,26 @@ def _derive_agreement(
     if not analyst_is_usable:
         return "deterministic_only"
 
-    # Both present: derive a simple scorecard direction from sentiment/return
+    # Both present: derive a simple scorecard direction.
+    # Priority 1: thesis-engine conviction_band (HIGH/MEDIUM = positive, LOW = negative).
+    # Priority 2: legacy stub fields (sentiment_score, return_30d).
     sc_direction: Optional[str] = None
     if sc is not None:
-        try:
-            ss = float(sc.get("sentiment_score") or 0)
-            if ss >= 0.2:
-                sc_direction = "positive"
-            elif ss <= -0.2:
-                sc_direction = "negative"
-        except (TypeError, ValueError):
-            pass
+        conviction_band_val = str(sc.get("conviction_band") or "").upper().strip()
+        if conviction_band_val in ("HIGH", "MEDIUM"):
+            sc_direction = "positive"
+        elif conviction_band_val == "LOW":
+            sc_direction = "negative"
+        # Fallback to legacy stub market-data fields when no conviction_band.
+        if sc_direction is None:
+            try:
+                ss = float(sc.get("sentiment_score") or 0)
+                if ss >= 0.2:
+                    sc_direction = "positive"
+                elif ss <= -0.2:
+                    sc_direction = "negative"
+            except (TypeError, ValueError):
+                pass
         if sc_direction is None:
             try:
                 r30 = float(sc.get("return_30d") or 0)
@@ -446,10 +529,19 @@ def _build_evidence(
     # Deterministic: only publish dimensions with actual values
     det: dict[str, Any] = {}
     if sc is not None and sc_status != "INSUFFICIENT_DATA":
+        # Legacy market-data stub scorecard fields (return_*, sentiment_score, etc.)
         for sc_key, ev_key in _SUBSCORE_KEY_MAP:
             val = sc.get(sc_key)
             if val is not None:
                 det[ev_key] = val
+        # Thesis-engine subscore dimensions: include only published ones.
+        # These are top-level keys in the serialized thesis dict (quality, valuation, …).
+        for dim_key, ev_key in _THESIS_SUBSCORE_MAP:
+            dim = sc.get(dim_key)
+            if isinstance(dim, dict) and dim.get("published"):
+                score = dim.get("score")
+                if score is not None:
+                    det[ev_key] = round(float(score), 1)
 
     # Analyst: pass-through only — no synthesis
     analyst_ev: dict[str, Any] = {}

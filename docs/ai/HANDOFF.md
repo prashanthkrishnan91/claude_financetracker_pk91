@@ -1,4 +1,27 @@
 ## Last change
+Intel UI cleanup: hide Business read section on live Intel cards (PR: "fix(intel-v2): hide Business read on AgentInsightCard").
+
+## Files touched
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx` — Removed Business read rendering block from live Intel card surface; WHY/RISK/ACTION/ALT VIEW sections remain unchanged.
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.ts` — Replaced visibility tests with assertions that cards still render WHY/RISK/ACTION/ALT VIEW and do not render Business read, even when `thesis_plain_english` exists in payload; retained raw metric key non-visibility checks.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Product decision
+- Business read UI is hidden for now because live signal quality remains low-value and repetitive across cards.
+- Backend `thesis_plain_english` generation/storage remains intact and dormant for future re-enable.
+- Re-enable gate: show real-run payload proof across representative tickers with clearly differentiated, useful output before restoring UI visibility.
+
+## Confirmation of non-changes
+- No score math changes.
+- No LLM behavior/prompt changes.
+- No Deploy changes.
+- No Supabase SQL changes.
+- No Run Agents lifecycle changes.
+
+---
+
+## Last change
 Intel Business read end-to-end freshness repair (PR: "fix(intel-v2): end-to-end Business read freshness and coverage repair").
 
 ## Files touched

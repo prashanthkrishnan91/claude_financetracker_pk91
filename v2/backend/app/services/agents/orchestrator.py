@@ -464,12 +464,16 @@ class AgentOrchestrator:
             try:
                 from ..intelligence.reasoning_v2_builder import build_reasoning_v2 as _build_r2
                 _r2_map: dict[str, Any] = {}
+                _r2_thesis_cards = getattr(self, "_thesis_scorecards", {}) or {}
                 for _r2_ticker, _r2_verdict in (getattr(self, "_verdicts", {}) or {}).items():
                     try:
                         _r2_av = _r2_verdict.to_dict() if hasattr(_r2_verdict, "to_dict") else None
+                        # Pass the same ScoreCard computed in Phase 2.5 so
+                        # evidence.deterministic is populated from real thesis data.
+                        _r2_scorecard = _r2_thesis_cards.get(_r2_ticker)
                         _r2_map[_r2_ticker] = _build_r2(
                             ticker=_r2_ticker,
-                            scorecard=None,
+                            scorecard=_r2_scorecard,
                             analyst_verdict=_r2_av,
                         )
                     except Exception as _r2_ticker_exc:

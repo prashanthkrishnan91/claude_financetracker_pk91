@@ -1,4 +1,27 @@
 ## Last change
+Intel v2: improve thesis plain-English card coverage via tolerant thesis_v2 ticker lookup (PR: "fix(intel-v2): improve thesis plain-English card coverage").
+
+## Files touched
+- `v2/backend/app/services/recommendation_engine.py` — Added backend-only ticker lookup normalization helpers (`_normalize_ticker_lookup_key`, `_resolve_thesis_scorecard_for_ticker`) and switched thesis scorecard retrieval to tolerant matching across case/separator variants (e.g., `BRK-B`, `brk.b`, `brk b`). Direct key match remains first; no scoring or UI changes.
+- `v2/backend/tests/test_recommendation_engine.py` — Added focused tests for ticker normalization, exact key lookup, normalized key lookup, and malformed/missing map safety.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise entry added.
+
+## Coverage/wiring rule (updated)
+- `InsightCard.thesis_plain_english` generation still requires `agent_run_id` + `agent_runs.allocation["_thesis_v2"]` scorecard presence.
+- Scorecard lookup now uses:
+  1) exact ticker key match first;
+  2) normalized fallback key match using uppercase alphanumeric-only keys for safe symbol format tolerance.
+- This improves attachment reliability when ticker formatting differs by case/dot/dash/spacing, while preserving original display ticker symbols.
+- If `_thesis_v2` is missing, not a dict, ticker has no match, or scorecard shape is malformed, both `thesis_v2` and `thesis_plain_english` remain omitted safely.
+
+## Behavior change
+- Backend card assembly now attaches `thesis_plain_english` for more valid existing `_thesis_v2` scorecards that were previously skipped due to ticker key-format mismatch.
+- No score math changes, no LLM behavior changes, no frontend changes, no Deploy changes, no Supabase SQL changes.
+
+---
+
+## Last change
 Intel UI label clarification: run-level vs ticker-level data quality labels (PR: "fix(intel): clarify run vs ticker data quality labels").
 
 ## Files touched

@@ -14,6 +14,8 @@ from app.services.recommendation_engine import (
     DCA_ALWAYS,
     DRIP_YIELD,
     ACTION_COLORS,
+    _normalize_ticker_lookup_key,
+    _resolve_thesis_scorecard_for_ticker,
 )
 
 
@@ -169,6 +171,28 @@ class TestConstants:
         assert ACTION_COLORS["TRIM"] == "orange"
         assert ACTION_COLORS["HOLD"] == "blue"
         assert ACTION_COLORS["REVIEW"] == "purple"
+
+
+class TestThesisTickerLookupNormalization:
+    def test_normalize_ticker_lookup_key_strips_case_and_separators(self):
+        assert _normalize_ticker_lookup_key("brk-b") == "BRKB"
+        assert _normalize_ticker_lookup_key("BRK.B") == "BRKB"
+        assert _normalize_ticker_lookup_key(" brk b ") == "BRKB"
+
+    def test_resolve_scorecard_direct_key_match(self):
+        scorecard = {"status": "PARTIAL"}
+        thesis_map = {"AAPL": scorecard}
+        assert _resolve_thesis_scorecard_for_ticker(thesis_map, "AAPL") == scorecard
+
+    def test_resolve_scorecard_normalized_key_match(self):
+        scorecard = {"status": "PARTIAL"}
+        thesis_map = {"brk.b": scorecard}
+        assert _resolve_thesis_scorecard_for_ticker(thesis_map, "BRK-B") == scorecard
+
+    def test_resolve_scorecard_missing_or_malformed_map_safely_returns_none(self):
+        assert _resolve_thesis_scorecard_for_ticker({}, "AAPL") is None
+        assert _resolve_thesis_scorecard_for_ticker({"AAPL": None}, "AAPL") is None
+        assert _resolve_thesis_scorecard_for_ticker(None, "AAPL") is None
 
 
 # ── generate_rec decision tree tests ────────────────────────────────────────

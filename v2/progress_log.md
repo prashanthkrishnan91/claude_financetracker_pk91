@@ -1,3 +1,12 @@
+## 2026-05-03 — Intel reasoning_v2 UI: "Why this view?" section on AgentInsightCard
+
+- Added backend translator `reasoning_v2_plain_english.py`: pure deterministic `build_intel_read()` maps coverage block (published/suppressed dimensions + posture + blockers) → plain-English `{title, posture_label, summary, trusted_signals, incomplete_signals, caveat}`; no raw metric keys, no LLM, no IO.
+- Added `InsightCard.intel_read: Optional[dict] = None` and `_build_intel_read_for_card` function in recommendation engine (reads `_reasoning_v2` from same run_lookup allocation; null-safe).
+- Added `IntelRead` interface and `intel_read` field to `InsightCardData` in `api.ts`.
+- Added compact `WhyThisView` component in `AgentInsightCard.tsx`: renders trusted signals (green chips), incomplete signals (muted chips), summary, and caveat when `intel_read` present; hidden when null/undefined.
+- Business Read remains hidden. No raw metric keys in frontend. No Deploy/SQL/LLM/score changes.
+- Tests: 22 new backend translator tests, 11 projection tests, 14 frontend data-contract tests (all pass); 1 pre-existing supabase failure unchanged.
+
 ## 2026-05-03 — Intel thesis-v2 acceleration: reasoning_v2 coverage aggregation + safe input coverage
 
 - **Part 1**: Added `reasoning_v2.evidence.deterministic.coverage` block — aggregates published_dimensions, suppressed_dimensions, inputs_used, inputs_missing across published thesis dimensions; empty shape when no dimensions published; WATCH/INSUFFICIENT_DATA contract unchanged.

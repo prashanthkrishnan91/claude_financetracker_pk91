@@ -113,6 +113,10 @@ class InsightCard(BaseModel):
     # optional: present only when thesis_v2 is available. Safe for future
     # frontend use; contains no raw metric keys.
     thesis_plain_english: Optional[dict] = None
+    # Intel v2 reasoning_v2 UI PR — plain-English projection from reasoning_v2
+    # coverage block. Populated when _reasoning_v2 exists in agent_runs.allocation.
+    # Contains no raw metric keys. Frontend renders as "Why this view?" section.
+    intel_read: Optional[dict] = None
 
 
 class AgentRunStatus(BaseModel):

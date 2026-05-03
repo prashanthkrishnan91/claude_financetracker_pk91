@@ -1,7 +1,7 @@
 "use client";
 
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
-import type { InsightCardData } from "@/lib/api";
+import type { InsightCardData, IntelRead } from "@/lib/api";
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY: { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
@@ -138,6 +138,9 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       </div>
 
 
+      {/* Why this view? — intel_read compact section */}
+      {card.intel_read && <WhyThisView intelRead={card.intel_read} />}
+
       {/* Footer chips */}
       <div className="flex flex-wrap gap-1.5 pt-0.5">
         {card.pnl_pct != null && (
@@ -199,6 +202,41 @@ function Chip({ label, tone }: { label: string; tone: "good" | "bad" | "neutral"
       ? "bg-red-500/10 text-red-400"
       : "bg-surface-elevated text-text-secondary";
   return <span className={cn("text-[10px] px-2 py-0.5 rounded-full", cls)}>{label}</span>;
+}
+
+function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
+  const hasTrusted = intelRead.trusted_signals.length > 0;
+  const hasIncomplete = intelRead.incomplete_signals.length > 0;
+
+  return (
+    <div className="rounded-md border border-border/30 bg-surface-elevated/20 px-2.5 py-2 space-y-1.5">
+      <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">
+        {intelRead.title}
+      </p>
+      <p className="text-xs text-text-secondary leading-snug">{intelRead.summary}</p>
+      {(hasTrusted || hasIncomplete) && (
+        <div className="flex flex-wrap gap-1">
+          {intelRead.trusted_signals.map((s) => (
+            <span
+              key={s}
+              className="text-[10px] px-1.5 py-0.5 rounded border bg-green-500/10 text-green-400 border-green-500/20"
+            >
+              {s}
+            </span>
+          ))}
+          {intelRead.incomplete_signals.map((s) => (
+            <span
+              key={s}
+              className="text-[10px] px-1.5 py-0.5 rounded border bg-surface-elevated text-text-muted border-border/40"
+            >
+              {s}
+            </span>
+          ))}
+        </div>
+      )}
+      <p className="text-[10px] text-text-muted leading-tight">{intelRead.caveat}</p>
+    </div>
+  );
 }
 
 function _resolveConvictionLevel(card: InsightCardData): "HIGH" | "MEDIUM" | "LOW" {

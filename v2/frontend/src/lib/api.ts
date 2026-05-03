@@ -367,6 +367,18 @@ export interface InsightCardData {
   reasoning_source?: "fresh_llm" | "fallback" | "cache" | "stale_db" | "no_analyst_data" | string | null;
   // Intel v2 PR-9: plain-English thesis labels (never render thesis_v2 directly)
   thesis_plain_english?: ThesisPlainEnglish | null;
+  // Intel v2 reasoning_v2 UI: compact "Why this view?" projection.
+  // Populated when _reasoning_v2 exists. Contains no raw metric keys.
+  intel_read?: IntelRead | null;
+}
+
+export interface IntelRead {
+  title: string;
+  posture_label: string;
+  summary: string;
+  trusted_signals: string[];
+  incomplete_signals: string[];
+  caveat: string;
 }
 
 export interface ThesisPlainEnglish {

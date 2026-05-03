@@ -1,4 +1,79 @@
 ## Last change
+Intel Reasoning v2 thesis-v2 acceleration: coverage aggregation + safe info-derived input coverage (PR: "feat(intel-v2-pr5): reasoning_v2 coverage aggregation + safe info-derived input coverage").
+
+## Combined PR scope (PR A + PR B-1 safest part)
+This PR combines:
+- **Part 1 (PR A)**: Add `reasoning_v2.evidence.deterministic.coverage` aggregation block.
+- **Part 2 (PR B-1 safe)**: Add 4 safe info-derived mapper inputs from existing yfinance info/fundamentals payload: `gross_margin`, `fcf_to_net_income`, `p_fcf`, `fcf_yield`.
+
+## Coverage block contract (reasoning_v2.evidence.deterministic.coverage)
+
+Shape:
+```json
+{
+  "published_dimensions": ["momentum_score", "valuation_score"],
+  "suppressed_dimensions": ["quality", "growth", "risk"],
+  "inputs_used": ["forward_pe", "return_30d", "return_5d", "trailing_pe"],
+  "inputs_missing": ["p_fcf"]
+}
+```
+
+- `published_dimensions`: sorted list of thesis subscore evidence keys present in deterministic (e.g., `["momentum_score", "valuation_score"]`).
+- `suppressed_dimensions`: thesis dimensions with `published=False` in the scorecard.
+- `inputs_used`: sorted union of `inputs_used` from all published dimensions.
+- `inputs_missing`: sorted union of `inputs_missing` from all published dimensions.
+- Empty shape `{published_dimensions:[], suppressed_dimensions:[], inputs_used:[], inputs_missing:[]}` returned when no thesis dimensions are published or scorecard is absent.
+- WATCH/INSUFFICIENT_DATA enforcement is unchanged.
+- Agreement logic is unchanged.
+- Analyst evidence is unchanged.
+
+## Safe input mappings added (Part 2)
+
+| Field | Source | Derivation |
+|---|---|---|
+| `gross_margin` | `yfinance info.grossMargins` | Direct pass-through when numeric |
+| `fcf_to_net_income` | `free_cash_flow / net_income` | Only when denominator non-zero |
+| `p_fcf` | `market_cap / free_cash_flow` | Only when both strictly positive |
+| `fcf_yield` | `free_cash_flow / market_cap` | Only when market_cap > 0 |
+
+Provider additions: `gross_margin` (`grossMargins`) and `net_income` (`netIncomeToCommon`) added to `fetch_yfinance_fundamentals_sync` payload (additive, no existing keys removed).
+
+## Explicit exclusions / deferred to future PRs
+- No income_stmt, cash_flow, growth_estimates, insider_transactions, SEC filings, or new provider endpoints fetched.
+- No history window extension to 1 year.
+- No `max_drawdown_1y`, `revenue_cagr_3y`, `fcf_cagr_3y`, `gross_profit_yoy`.
+- No ETF/crypto asset-class diagnostics.
+- No `thesis_engine` threshold or score math changes.
+- No gate loosening.
+- No unsafe proxies: `profit_margin→fcf_margin`, `return_on_equity→roic_ttm`, `debt_to_equity→net_debt_to_ebitda`, `dividend_yield→fcf_yield`, `earnings_growth→forward_revenue_growth_est` all remain blocked.
+- No reasoning_v2 API/UI exposure.
+- No frontend, Deploy, or SQL changes.
+- No LLM prompt/model behavior changes.
+- No Business read UI re-enable.
+
+## Confirmation of non-changes
+- No frontend/UI changes.
+- No Deploy changes.
+- No Supabase SQL/migrations.
+- No LLM prompt/model behavior changes.
+- No score math changes.
+
+## Post-merge Supabase validation query for NVDA/GOOGL/META
+```sql
+SELECT
+  allocation->'_reasoning_v2'->'NVDA'->'evidence'->'deterministic'->'coverage' AS nvda_coverage,
+  allocation->'_reasoning_v2'->'GOOGL'->'evidence'->'deterministic'->'coverage' AS googl_coverage,
+  allocation->'_reasoning_v2'->'META'->'evidence'->'deterministic'->'coverage' AS meta_coverage,
+  allocation->'_reasoning_v2'->'NVDA'->'data_quality'->'status' AS nvda_dq_status
+FROM agent_runs
+WHERE status = 'completed'
+ORDER BY finished_at DESC
+LIMIT 1;
+```
+
+---
+
+## Last change
 Intel Reasoning v2 PR 4: preserve published deterministic evidence under INSUFFICIENT_DATA (PR: "fix(intel-v2-pr4): preserve published deterministic dimensions in reasoning_v2").
 
 ## Exact root cause

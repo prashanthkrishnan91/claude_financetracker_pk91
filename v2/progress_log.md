@@ -1,3 +1,11 @@
+## 2026-05-03 — Intel thesis-v2 acceleration: reasoning_v2 coverage aggregation + safe input coverage
+
+- **Part 1**: Added `reasoning_v2.evidence.deterministic.coverage` block — aggregates published_dimensions, suppressed_dimensions, inputs_used, inputs_missing across published thesis dimensions; empty shape when no dimensions published; WATCH/INSUFFICIENT_DATA contract unchanged.
+- **Part 2**: Added 4 safe info-derived mapper inputs from existing yfinance info payload: `gross_margin` (grossMargins pass-through), `fcf_to_net_income` (FCF/net_income when denominator non-zero), `p_fcf` (market_cap/FCF when both positive), `fcf_yield` (FCF/market_cap when market_cap > 0). Added provider fields: `gross_margin` and `net_income`.
+- All unsafe proxy guardrails preserved and unchanged.
+- No frontend, Deploy, SQL, LLM, or score math changes.
+- 6 new coverage block tests + 30 new mapper tests (262 total passing; 5 pre-existing env failures).
+
 ## 2026-05-03 — Intel reasoning_v2: keep published deterministic dimensions under INSUFFICIENT_DATA
 
 - Fixed reasoning_v2 builder to preserve published thesis dimensions (e.g., valuation/momentum) in `evidence.deterministic` even when overall scorecard status is `INSUFFICIENT_DATA`.

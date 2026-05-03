@@ -118,6 +118,33 @@ def map_to_thesis_inputs(
     if rev_growth is not None:
         out["revenue_yoy"] = _normalize_to_decimal(rev_growth)
 
+    # ── Quality (from fundamentals) ──────────────────────────────────────────
+
+    # gross_margin: direct pass-through when provider supplies grossMargins.
+    gross_margin = _safe_float(fundamentals.get("gross_margin"))
+    if gross_margin is not None:
+        out["gross_margin"] = gross_margin
+
+    # fcf_to_net_income: free_cash_flow / net_income when both valid and
+    # denominator non-zero. We do not proxy from profit_margin.
+    fcf_to_net_income = _derive_fcf_to_net_income(fundamentals)
+    if fcf_to_net_income is not None:
+        out["fcf_to_net_income"] = fcf_to_net_income
+
+    # ── Valuation (from fundamentals) ────────────────────────────────────────
+
+    # p_fcf: market_cap / free_cash_flow when both are strictly positive.
+    # We do not use dividend_yield or earnings as proxy.
+    p_fcf = _derive_p_fcf(fundamentals)
+    if p_fcf is not None:
+        out["p_fcf"] = p_fcf
+
+    # fcf_yield: free_cash_flow / market_cap when market_cap > 0 and FCF valid.
+    # We do not use dividend_yield as proxy.
+    fcf_yield = _derive_fcf_yield(fundamentals)
+    if fcf_yield is not None:
+        out["fcf_yield"] = fcf_yield
+
     # ── Risk (from fundamentals) ─────────────────────────────────────────────
     # beta is a raw float — no conversion.
 
@@ -249,3 +276,52 @@ def _derive_fcf_margin(fundamentals: dict[str, Any]) -> Optional[float]:
     if revenue <= 0:
         return None
     return free_cash_flow / revenue
+
+
+def _derive_fcf_to_net_income(fundamentals: dict[str, Any]) -> Optional[float]:
+    """Return free_cash_flow / net_income when both valid and denominator non-zero.
+
+    Source: free_cash_flow (freeCashflow) and net_income (netIncomeToCommon)
+    from yfinance info. We do not proxy from profit_margin.
+    """
+    free_cash_flow = _safe_float(fundamentals.get("free_cash_flow"))
+    net_income = _safe_float(fundamentals.get("net_income"))
+
+    if free_cash_flow is None or net_income is None:
+        return None
+    if net_income == 0:
+        return None
+    return free_cash_flow / net_income
+
+
+def _derive_p_fcf(fundamentals: dict[str, Any]) -> Optional[float]:
+    """Return market_cap / free_cash_flow when both are strictly positive.
+
+    Source: market_cap (marketCap) and free_cash_flow (freeCashflow) from
+    yfinance info. We do not use dividend_yield or earnings as proxy.
+    """
+    market_cap = _safe_float(fundamentals.get("market_cap"))
+    free_cash_flow = _safe_float(fundamentals.get("free_cash_flow"))
+
+    if market_cap is None or free_cash_flow is None:
+        return None
+    if market_cap <= 0 or free_cash_flow <= 0:
+        return None
+    return market_cap / free_cash_flow
+
+
+def _derive_fcf_yield(fundamentals: dict[str, Any]) -> Optional[float]:
+    """Return free_cash_flow / market_cap when market_cap > 0 and FCF is valid.
+
+    Source: free_cash_flow (freeCashflow) and market_cap (marketCap) from
+    yfinance info. We do not use dividend_yield as proxy.
+    FCF may be negative (negative yield is a valid signal).
+    """
+    market_cap = _safe_float(fundamentals.get("market_cap"))
+    free_cash_flow = _safe_float(fundamentals.get("free_cash_flow"))
+
+    if market_cap is None or free_cash_flow is None:
+        return None
+    if market_cap <= 0:
+        return None
+    return free_cash_flow / market_cap

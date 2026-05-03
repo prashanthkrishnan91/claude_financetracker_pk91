@@ -493,6 +493,7 @@ def test_evidence_deterministic_has_all_non_null_dimensions():
     expected_keys = {
         "1d_return", "5d_return", "30d_return", "volatility_30d",
         "sentiment_score", "momentum_score", "trend_regime", "relative_strength",
+        "coverage",  # PR-5: coverage block always present in evidence.deterministic
     }
     assert expected_keys == set(det.keys())
 
@@ -1110,13 +1111,25 @@ def test_thesis_insufficient_data_with_buy_analyst_forces_watch():
 
 
 def test_thesis_insufficient_data_evidence_deterministic_empty():
-    """INSUFFICIENT_DATA thesis → evidence.deterministic must be empty (no score leakage)."""
+    """INSUFFICIENT_DATA thesis → evidence.deterministic has no dimension scores (no leakage).
+
+    The coverage key is allowed; dimension score entries must not leak.
+    """
     result = build_reasoning_v2(
         ticker="MISS",
         scorecard=dict(THESIS_INSUFFICIENT_DICT),
         analyst_verdict=None,
     )
-    assert result["evidence"]["deterministic"] == {}
+    det = result["evidence"]["deterministic"]
+    # No dimension scores should leak out for fully-suppressed INSUFFICIENT_DATA
+    for dim_key in ("quality_score", "valuation_score", "growth_score", "risk_score", "momentum_score"):
+        assert dim_key not in det, f"Dimension score '{dim_key}' must not leak under INSUFFICIENT_DATA"
+    # Coverage block must be present with empty shape
+    assert "coverage" in det
+    coverage = det["coverage"]
+    assert coverage["published_dimensions"] == []
+    assert coverage["inputs_used"] == []
+    assert coverage["inputs_missing"] == []
 
 
 def test_insufficient_data_with_serialized_thesis_inputs_missing_is_actionable():
@@ -1325,3 +1338,122 @@ def test_thesis_engine_scorecard_object_normalised_correctly():
     assert "momentum_score" in det
     assert "quality_score" not in det  # quality.published=False
     assert result["data_quality"]["status"] == "PARTIAL"
+
+
+# ── Test PR5: reasoning_v2 coverage aggregation ───────────────────────────────
+
+# Live-style INSUFFICIENT_DATA thesis with some dimensions published (NVDA/GOOGL pattern)
+THESIS_LIVE_INSUFFICIENT_WITH_PUBLISHED: dict = {
+    "ticker": "NVDA",
+    "status": "INSUFFICIENT_DATA",
+    "conviction_score": None,
+    "conviction_band": "INSUFFICIENT_DATA",
+    "blended_data_quality": 0.38,
+    "inputs_used": ["trailing_pe", "return_5d"],
+    "inputs_missing": ["roic_ttm", "gross_margin", "fcf_margin"],
+    "score_version": "v1",
+    "quality": {
+        "score": 0.0, "data_quality": 0.0, "published": False,
+        "inputs_used": [], "inputs_missing": ["roic_ttm", "gross_margin"],
+    },
+    "valuation": {
+        "score": 61.0, "data_quality": 0.62, "published": True,
+        "inputs_used": ["trailing_pe", "forward_pe"], "inputs_missing": ["p_fcf"],
+    },
+    "growth": {
+        "score": 0.0, "data_quality": 0.0, "published": False,
+        "inputs_used": [], "inputs_missing": ["revenue_yoy"],
+    },
+    "risk": {
+        "score": 0.0, "data_quality": 0.0, "published": False,
+        "inputs_used": [], "inputs_missing": ["beta"],
+    },
+    "momentum": {
+        "score": 59.0, "data_quality": 0.60, "published": True,
+        "inputs_used": ["return_5d", "return_30d"], "inputs_missing": [],
+    },
+}
+
+
+def test_coverage_published_dimensions_for_insufficient_with_valuation_momentum():
+    """PR5-1: INSUFFICIENT_DATA with valuation/momentum published → coverage lists both."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_LIVE_INSUFFICIENT_WITH_PUBLISHED),
+        analyst_verdict=None,
+    )
+    coverage = result["evidence"]["deterministic"]["coverage"]
+    assert "momentum_score" in coverage["published_dimensions"]
+    assert "valuation_score" in coverage["published_dimensions"]
+    assert coverage["published_dimensions"] == sorted(coverage["published_dimensions"])
+
+
+def test_coverage_inputs_used_is_sorted_union_of_published_dimensions():
+    """PR5-2: inputs_used is sorted union of inputs_used from published dimensions."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_LIVE_INSUFFICIENT_WITH_PUBLISHED),
+        analyst_verdict=None,
+    )
+    coverage = result["evidence"]["deterministic"]["coverage"]
+    # Valuation inputs_used = ["trailing_pe", "forward_pe"]
+    # Momentum inputs_used = ["return_5d", "return_30d"]
+    expected = sorted({"trailing_pe", "forward_pe", "return_5d", "return_30d"})
+    assert coverage["inputs_used"] == expected
+
+
+def test_coverage_suppressed_dimensions_from_scorecard():
+    """PR5-3: suppressed_dimensions contains dimensions with published=False."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_LIVE_INSUFFICIENT_WITH_PUBLISHED),
+        analyst_verdict=None,
+    )
+    coverage = result["evidence"]["deterministic"]["coverage"]
+    # quality, growth, risk have published=False
+    assert "quality" in coverage["suppressed_dimensions"]
+    assert "growth" in coverage["suppressed_dimensions"]
+    assert "risk" in coverage["suppressed_dimensions"]
+    # valuation, momentum have published=True → not suppressed
+    assert "valuation" not in coverage["suppressed_dimensions"]
+    assert "momentum" not in coverage["suppressed_dimensions"]
+
+
+def test_coverage_ready_scorecard_all_published_empty_suppressed():
+    """PR5-4: READY scorecard with all dimensions published → empty suppressed list."""
+    # THESIS_READY_DICT has quality.published=False; use a fully-published version
+    fully_published = dict(THESIS_READY_DICT)
+    fully_published["quality"] = {
+        "score": 70.0, "data_quality": 0.75, "published": True,
+        "inputs_used": ["gross_margin", "fcf_margin"], "inputs_missing": [],
+    }
+    result = build_reasoning_v2(ticker="NVDA", scorecard=fully_published, analyst_verdict=None)
+    coverage = result["evidence"]["deterministic"]["coverage"]
+    assert set(coverage["published_dimensions"]) == {
+        "quality_score", "valuation_score", "growth_score", "risk_score", "momentum_score"
+    }
+    assert coverage["suppressed_dimensions"] == []
+
+
+def test_coverage_empty_shape_when_scorecard_absent():
+    """PR5-5: No scorecard → coverage block present with all empty lists."""
+    result = build_reasoning_v2(ticker="STUB", scorecard=None, analyst_verdict=None)
+    coverage = result["evidence"]["deterministic"]["coverage"]
+    assert coverage == {
+        "published_dimensions": [],
+        "suppressed_dimensions": [],
+        "inputs_used": [],
+        "inputs_missing": [],
+    }
+
+
+def test_coverage_insufficient_data_watch_posture_unchanged():
+    """PR5-6: Adding coverage block does not alter WATCH posture for INSUFFICIENT_DATA."""
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_LIVE_INSUFFICIENT_WITH_PUBLISHED),
+        analyst_verdict=None,
+    )
+    assert result["action"]["posture"] == "WATCH"
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "insufficient_data" in result["deploy_signals"]["blockers"]

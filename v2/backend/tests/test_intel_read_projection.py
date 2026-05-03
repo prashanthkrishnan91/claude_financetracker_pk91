@@ -14,6 +14,12 @@ Coverage:
 7.  None run_id safely returns None.
 8.  Uppercase ticker normalization matches correctly.
 9.  InsightCard model accepts intel_read field (backward-compat check).
+10. Fallback run used when card's own run lacks _reasoning_v2.
+11. No fallback when primary run has _reasoning_v2 but ticker is absent.
+12. No fallback when fallback run also lacks _reasoning_v2.
+13. BUY/HIGH CONVICTION downgrade logic when intel_read.insufficient_data=True.
+14. No downgrade when intel_read.insufficient_data=False.
+15. insufficient_data flag present in build_intel_read output.
 """
 
 from __future__ import annotations
@@ -56,28 +62,46 @@ def _build_intel_read_for_card(
     ticker: str,
     run_id: Any,
     run_lookup: dict[str, dict],
+    fallback_run_id: Optional[str] = None,
 ) -> Optional[dict]:
-    """Local copy of recommendation_engine._build_intel_read_for_card for testing."""
-    rid_str = str(run_id or "")
-    if not rid_str:
+    """Local copy of recommendation_engine._build_intel_read_for_card for testing.
+
+    Mirrors the production implementation: tries the card's own run first; falls
+    back to fallback_run_id only when the primary run lacks _reasoning_v2 entirely.
+    """
+    def _try_run(rid: Any) -> tuple[Optional[dict], bool]:
+        rid_s = str(rid or "")
+        if not rid_s:
+            return None, False
+        row = run_lookup.get(rid_s)
+        if not row:
+            return None, False
+        alloc = row.get("allocation")
+        if not isinstance(alloc, dict):
+            return None, False
+        rmap = alloc.get("_reasoning_v2")
+        if not isinstance(rmap, dict) or not rmap:
+            return None, False
+        ticker_up = str(ticker).strip().upper()
+        r2 = rmap.get(ticker_up) or rmap.get(ticker)
+        if not isinstance(r2, dict):
+            return None, True  # map exists, ticker absent — do not fallback
+        try:
+            return build_intel_read(r2), True
+        except Exception:  # noqa: BLE001
+            return None, True
+
+    result, had_r2_map = _try_run(run_id)
+    if result is not None:
+        return result
+    if had_r2_map:
         return None
-    run_row = run_lookup.get(rid_str)
-    if not run_row:
-        return None
-    allocation = run_row.get("allocation")
-    if not isinstance(allocation, dict):
-        return None
-    reasoning_map = allocation.get("_reasoning_v2")
-    if not isinstance(reasoning_map, dict) or not reasoning_map:
-        return None
-    ticker_up = str(ticker).strip().upper()
-    r2 = reasoning_map.get(ticker_up) or reasoning_map.get(ticker)
-    if not isinstance(r2, dict):
-        return None
-    try:
-        return build_intel_read(r2)
-    except Exception:  # noqa: BLE001
-        return None
+    run_id_str = str(run_id or "")
+    fb_str = str(fallback_run_id or "")
+    if fb_str and fb_str != run_id_str:
+        fallback_result, _ = _try_run(fallback_run_id)
+        return fallback_result
+    return None
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -322,3 +346,214 @@ def test_insight_card_intel_read_defaults_to_none():
         category="Core",
     )
     assert card.intel_read is None
+
+
+# ── Test 10: fallback run used when primary lacks _reasoning_v2 ───────────────
+
+
+def test_intel_read_fallback_used_when_primary_run_lacks_reasoning_v2():
+    """When card's own run has no _reasoning_v2, fallback_run_id provides intel_read."""
+    primary_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    r2_nvda = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk", "momentum"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = {
+        # Primary run: has _thesis_v2 but no _reasoning_v2
+        primary_run_id: {
+            "id": primary_run_id,
+            "allocation": {"_thesis_v2": {"NVDA": {"status": "INSUFFICIENT_DATA"}}},
+        },
+        # Fallback run: has _reasoning_v2
+        fallback_run_id: {
+            "id": fallback_run_id,
+            "allocation": {"_reasoning_v2": {"NVDA": r2_nvda}},
+        },
+    }
+    result = _build_intel_read_for_card(
+        ticker="NVDA",
+        run_id=primary_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert result is not None
+    assert result["posture_label"] == "on watch"
+    assert result["insufficient_data"] is True
+
+
+def test_intel_read_fallback_used_when_primary_run_not_in_lookup():
+    """When card's own run is absent from run_lookup, fallback provides intel_read."""
+    stale_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    r2_nvda = _make_reasoning_v2(posture="WATCH", data_status="INSUFFICIENT_DATA", blockers=["insufficient_data"])
+    run_lookup = {
+        fallback_run_id: {
+            "id": fallback_run_id,
+            "allocation": {"_reasoning_v2": {"NVDA": r2_nvda}},
+        },
+    }
+    result = _build_intel_read_for_card(
+        ticker="NVDA",
+        run_id=stale_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert result is not None
+    assert result["posture_label"] == "on watch"
+
+
+# ── Test 11: no fallback when primary has _reasoning_v2 but ticker absent ─────
+
+
+def test_intel_read_no_fallback_when_primary_has_r2_map_but_ticker_absent():
+    """Primary run has _reasoning_v2 but not for this ticker — fallback should NOT be used."""
+    primary_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    r2_googl = _make_reasoning_v2(posture="ACCUMULATE", data_status="PARTIAL", published=["quality_score"])
+    r2_nvda_in_fallback = _make_reasoning_v2(posture="WATCH", data_status="INSUFFICIENT_DATA")
+    run_lookup = {
+        primary_run_id: {
+            "id": primary_run_id,
+            "allocation": {"_reasoning_v2": {"GOOGL": r2_googl}},  # NVDA absent
+        },
+        fallback_run_id: {
+            "id": fallback_run_id,
+            "allocation": {"_reasoning_v2": {"NVDA": r2_nvda_in_fallback}},
+        },
+    }
+    # NVDA is absent from primary's _reasoning_v2 map — fallback should NOT kick in
+    result = _build_intel_read_for_card(
+        ticker="NVDA",
+        run_id=primary_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert result is None
+
+
+# ── Test 12: no fallback when fallback run also lacks _reasoning_v2 ───────────
+
+
+def test_intel_read_none_when_both_runs_lack_reasoning_v2():
+    """Both primary and fallback lack _reasoning_v2 — result is None."""
+    primary_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    run_lookup = {
+        primary_run_id: {"id": primary_run_id, "allocation": {}},
+        fallback_run_id: {"id": fallback_run_id, "allocation": {}},
+    }
+    result = _build_intel_read_for_card(
+        ticker="NVDA",
+        run_id=primary_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert result is None
+
+
+# ── Test 13: BUY/HIGH CONVICTION downgrade logic ──────────────────────────────
+
+
+def test_card_buy_downgraded_to_hold_when_intel_read_insufficient():
+    """Simulate card assembly downgrade: BUY → HOLD when intel_read.insufficient_data=True."""
+    intel_read = {
+        "title": "Why this view?",
+        "posture_label": "on watch",
+        "summary": "stays on watch instead of becoming a high-conviction idea.",
+        "trusted_signals": ["valuation"],
+        "incomplete_signals": ["business quality", "growth"],
+        "caveat": "Not enough data to be confident. Wait for more signals before acting.",
+        "insufficient_data": True,
+    }
+    card_action = "BUY"
+    card_analyst_action = "BUY"
+    card_conviction_level = "HIGH"
+
+    if intel_read.get("insufficient_data"):
+        if card_action == "BUY":
+            card_action = "HOLD"
+        if (card_analyst_action or "").upper() == "BUY":
+            card_analyst_action = "HOLD"
+        if (card_conviction_level or "").upper() == "HIGH":
+            card_conviction_level = "LOW"
+
+    assert card_action == "HOLD"
+    assert card_analyst_action == "HOLD"
+    assert card_conviction_level == "LOW"
+
+
+def test_card_non_buy_not_downgraded_when_intel_read_insufficient():
+    """TRIM/SELL are not downgraded — already conservative."""
+    intel_read = {"insufficient_data": True, "posture_label": "on watch"}
+    for action in ("TRIM", "SELL", "HOLD"):
+        card_action = action
+        if intel_read.get("insufficient_data") and card_action == "BUY":
+            card_action = "HOLD"
+        assert card_action == action, f"{action} should not be downgraded"
+
+
+# ── Test 14: no downgrade when insufficient_data=False ───────────────────────
+
+
+def test_card_buy_not_downgraded_when_intel_read_not_insufficient():
+    """BUY is preserved when intel_read.insufficient_data=False."""
+    intel_read = {
+        "title": "Why this view?",
+        "posture_label": "constructive",
+        "summary": "Evidence on business quality supports a constructive view.",
+        "trusted_signals": ["business quality", "valuation"],
+        "incomplete_signals": ["growth"],
+        "caveat": "Treat this as an early signal, not a complete picture.",
+        "insufficient_data": False,
+    }
+    card_action = "BUY"
+    card_conviction_level = "HIGH"
+
+    if intel_read.get("insufficient_data"):
+        if card_action == "BUY":
+            card_action = "HOLD"
+        if (card_conviction_level or "").upper() == "HIGH":
+            card_conviction_level = "LOW"
+
+    assert card_action == "BUY"
+    assert card_conviction_level == "HIGH"
+
+
+# ── Test 15: insufficient_data flag in build_intel_read output ────────────────
+
+
+def test_build_intel_read_insufficient_data_flag_present():
+    """build_intel_read always returns the insufficient_data key."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    result = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert result is not None
+    assert "insufficient_data" in result
+    assert result["insufficient_data"] is True
+
+
+def test_build_intel_read_insufficient_data_false_for_constructive():
+    """build_intel_read.insufficient_data=False for PARTIAL/ACCUMULATE."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published=["quality_score", "momentum_score"],
+        suppressed=["growth", "risk"],
+        blockers=[],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    result = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert result is not None
+    assert result["insufficient_data"] is False

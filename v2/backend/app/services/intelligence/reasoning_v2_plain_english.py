@@ -209,6 +209,13 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
         has_trusted=bool(trusted_signals),
     )
 
+    # Backend hint: True when data is insufficient and WATCH is forced.
+    # Not rendered by the frontend WhyThisView component; used by card assembly
+    # to downgrade BUY/HIGH CONVICTION labels that would contradict intel_read.
+    is_insufficient_data = (
+        data_status == "INSUFFICIENT_DATA" or "insufficient_data" in blockers
+    )
+
     return {
         "title": "Why this view?",
         "posture_label": posture_label,
@@ -216,4 +223,5 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
         "trusted_signals": trusted_signals,
         "incomplete_signals": incomplete_signals,
         "caveat": caveat,
+        "insufficient_data": is_insufficient_data,
     }

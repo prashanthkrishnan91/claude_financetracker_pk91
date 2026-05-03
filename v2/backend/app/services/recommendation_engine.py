@@ -164,37 +164,61 @@ def _build_intel_read_for_card(
     ticker: str,
     run_id: Any,
     run_lookup: dict[str, dict],
+    fallback_run_id: Optional[str] = None,
 ) -> Optional[dict]:
     """Resolve intel_read plain-English projection from _reasoning_v2 for one card.
 
     Reads allocation["_reasoning_v2"][ticker] from the card's own agent_run_id run.
-    Returns None safely when _reasoning_v2 is absent, run is not in run_lookup,
-    or the translator raises. No fallback to a latest run — intel_read is additive.
+    When that run is absent from run_lookup or lacks _reasoning_v2 entirely, falls
+    back to fallback_run_id (latest completed run with _reasoning_v2). Fallback is
+    NOT used when the primary run has _reasoning_v2 but the ticker is simply absent
+    (caller should treat that as genuinely missing data).
+    Returns None safely in all failure cases.
     """
-    rid_str = str(run_id or "")
-    if not rid_str:
+    def _try_run(rid: Any) -> tuple[Optional[dict], bool]:
+        """Returns (intel_read_or_None, had_reasoning_v2_map).
+
+        had_reasoning_v2_map=True means the run has a _reasoning_v2 map (even if
+        this ticker is absent from it). Used to decide whether the fallback is
+        appropriate: fallback only when the primary run lacks the map entirely.
+        """
+        rid_s = str(rid or "")
+        if not rid_s:
+            return None, False
+        row = run_lookup.get(rid_s)
+        if not row:
+            return None, False
+        alloc = row.get("allocation")
+        if not isinstance(alloc, dict):
+            return None, False
+        rmap = alloc.get("_reasoning_v2")
+        if not isinstance(rmap, dict) or not rmap:
+            return None, False
+        ticker_up = str(ticker).strip().upper()
+        r2 = rmap.get(ticker_up) or rmap.get(ticker)
+        if not isinstance(r2, dict):
+            return None, True  # map exists, ticker absent — do not fallback
+        try:
+            return build_intel_read(r2), True
+        except Exception as exc:  # noqa: BLE001
+            logger.debug(
+                "intel_read generation skipped ticker=%s run_id=%s err=%s",
+                ticker, rid_s, exc,
+            )
+            return None, True
+
+    result, had_r2_map = _try_run(run_id)
+    if result is not None:
+        return result
+    # Fallback only when primary run had no _reasoning_v2 map at all.
+    if had_r2_map:
         return None
-    run_row = run_lookup.get(rid_str)
-    if not run_row:
-        return None
-    allocation = run_row.get("allocation")
-    if not isinstance(allocation, dict):
-        return None
-    reasoning_map = allocation.get("_reasoning_v2")
-    if not isinstance(reasoning_map, dict) or not reasoning_map:
-        return None
-    ticker_up = str(ticker).strip().upper()
-    r2 = reasoning_map.get(ticker_up) or reasoning_map.get(ticker)
-    if not isinstance(r2, dict):
-        return None
-    try:
-        return build_intel_read(r2)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug(
-            "intel_read generation skipped ticker=%s run_id=%s err=%s",
-            ticker, rid_str, exc,
-        )
-        return None
+    run_id_str = str(run_id or "")
+    fb_str = str(fallback_run_id or "")
+    if fb_str and fb_str != run_id_str:
+        fallback_result, _ = _try_run(fallback_run_id)
+        return fallback_result
+    return None
 
 
 # DRIP yield estimates (annual %, approximate 2026 values)
@@ -1473,16 +1497,17 @@ class RecommendationService:
             except Exception as exc:  # noqa: BLE001
                 logger.debug("get_insight_cards: run metadata lookup failed: %s", exc)
 
-        # Thesis contract: find the latest completed run with _thesis_v2.
-        # Used as fallback when a card's agent_run_id run is absent from
-        # run_lookup or its allocation lacks _thesis_v2. This covers stale
-        # run binding (e.g. _persist failed, leaving old recs active) and
-        # the small timing window between _persist.finally (which invalidates
-        # the aggregate cache) and _update_run writing _thesis_v2 to the DB.
+        # Fallback contract: find the latest completed runs with _thesis_v2 and
+        # _reasoning_v2. Used as fallbacks when a card's agent_run_id run is absent
+        # from run_lookup or its allocation lacks these keys. This covers stale
+        # run binding (e.g. _persist failed, leaving old recs active) and the small
+        # timing window between _persist.finally and _update_run writing to the DB.
+        # A single query for the latest 5 runs serves both fallback lookups.
         latest_thesis_run_id: Optional[str] = None
+        latest_reasoning_v2_run_id: Optional[str] = None
         if run_ids_needed:
             try:
-                latest_for_thesis = (
+                latest_for_fallback = (
                     self._db(
                         "agent_runs.select_latest_completed_with_thesis",
                         lambda: self.client.table("agent_runs")
@@ -1494,24 +1519,35 @@ class RecommendationService:
                         .execute(),
                     )
                 ).data or []
-                for thesis_row in latest_for_thesis:
-                    rid = str(thesis_row.get("id") or "")
+                for fb_row in latest_for_fallback:
+                    rid = str(fb_row.get("id") or "")
                     if not rid:
                         continue
-                    alloc = thesis_row.get("allocation") or {}
-                    tmap = alloc.get("_thesis_v2") if isinstance(alloc, dict) else None
-                    if isinstance(tmap, dict) and tmap:
-                        latest_thesis_run_id = rid
-                        if rid not in run_lookup:
-                            run_lookup[rid] = thesis_row
+                    alloc = fb_row.get("allocation") or {}
+                    if not isinstance(alloc, dict):
+                        continue
+                    if latest_thesis_run_id is None:
+                        tmap = alloc.get("_thesis_v2")
+                        if isinstance(tmap, dict) and tmap:
+                            latest_thesis_run_id = rid
+                            if rid not in run_lookup:
+                                run_lookup[rid] = fb_row
+                    if latest_reasoning_v2_run_id is None:
+                        rmap = alloc.get("_reasoning_v2")
+                        if isinstance(rmap, dict) and rmap:
+                            latest_reasoning_v2_run_id = rid
+                            if rid not in run_lookup:
+                                run_lookup[rid] = fb_row
+                    if latest_thesis_run_id and latest_reasoning_v2_run_id:
                         break
                 logger.info(
-                    "thesis.contract card_run_ids=%s latest_thesis_run=%s",
+                    "thesis.contract card_run_ids=%s latest_thesis_run=%s latest_r2_run=%s",
                     sorted(str(r) for r in run_ids_needed),
                     latest_thesis_run_id or "none",
+                    latest_reasoning_v2_run_id or "none",
                 )
             except Exception as exc:  # noqa: BLE001
-                logger.debug("get_insight_cards: latest thesis run lookup failed: %s", exc)
+                logger.debug("get_insight_cards: latest thesis/r2 run lookup failed: %s", exc)
 
         # Fetch live prices if price service available
         prices: dict[str, float] = {}
@@ -1625,22 +1661,44 @@ class RecommendationService:
                 thesis_diag_counts[thesis_diag] = thesis_diag_counts.get(thesis_diag, 0) + 1
 
                 # Intel v2 reasoning_v2 UI: build plain-English intel_read from
-                # _reasoning_v2 coverage block. Safe when _reasoning_v2 is absent.
+                # _reasoning_v2 coverage block. Falls back to the latest run with
+                # _reasoning_v2 when the card's own run lacks it. Safe when absent.
                 intel_read_dict = _build_intel_read_for_card(
                     ticker=ticker,
                     run_id=rec.get("agent_run_id"),
                     run_lookup=run_lookup,
+                    fallback_run_id=latest_reasoning_v2_run_id,
                 )
+
+                # Resolve action/conviction before card construction so we can
+                # apply the INSUFFICIENT_DATA consistency gate below.
+                _card_action = (rec.get("action") or "HOLD").upper()
+                _card_analyst_action = analyst_fields["action"]
+                _card_conviction_level = reasoning.get("conviction_level")
+                _card_color = ACTION_COLORS.get(_card_action, "gray")
+
+                # Posture consistency: when reasoning_v2 forces WATCH due to
+                # INSUFFICIENT_DATA, the card must not show BUY / HIGH CONVICTION.
+                # Downgrade BUY → HOLD and HIGH conviction → LOW so the card
+                # posture is consistent with the intel_read "Why this view?" section.
+                if intel_read_dict and intel_read_dict.get("insufficient_data"):
+                    if _card_action == "BUY":
+                        _card_action = "HOLD"
+                        _card_color = ACTION_COLORS.get("HOLD", "blue")
+                    if (_card_analyst_action or "").upper() == "BUY":
+                        _card_analyst_action = "HOLD"
+                    if (_card_conviction_level or "").upper() == "HIGH":
+                        _card_conviction_level = "LOW"
 
                 card = InsightCard(
                     id=rec["id"],
                     ticker=ticker,
                     name=pos.get("name", ticker),
-                    action=(rec.get("action") or "HOLD").upper(),
+                    action=_card_action,
                     detail=rec.get("detail") or "Data-backed recommendation available; AI reasoning is unavailable.",
                     rationale=rec.get("rationale", ""),
                     urgency=int(rec.get("urgency") or 0),
-                    color=ACTION_COLORS.get((rec.get("action") or "HOLD").upper(), "gray"),
+                    color=_card_color,
                     tax_note=rec.get("tax_note", ""),
                     drip_note=rec.get("drip_note", ""),
                     current_price=price,
@@ -1664,7 +1722,7 @@ class RecommendationService:
                     data_confidence_score=data_confidence_score,
                     data_quality_label=data_quality_label,
                     reason_tags=reason_tags,
-                    analyst_action=analyst_fields["action"],
+                    analyst_action=_card_analyst_action,
                     analyst_conviction=analyst_fields["conviction"],
                     analyst_confidence=analyst_fields["confidence"],
                     analyst_drivers=analyst_fields["drivers"],
@@ -1682,7 +1740,7 @@ class RecommendationService:
                     plain_language_explanation=reasoning.get("plain_language_explanation"),
                     fallback_flags=reasoning.get("fallback_flags"),
                     analysis_source=source,
-                    conviction_level=reasoning.get("conviction_level"),
+                    conviction_level=_card_conviction_level,
                     primary_driver=reasoning.get("primary_driver"),
                     risk_flag=reasoning.get("risk_flag"),
                     action_reason=reasoning.get("action_reason"),

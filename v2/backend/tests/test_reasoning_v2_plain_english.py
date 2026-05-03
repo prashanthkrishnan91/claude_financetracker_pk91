@@ -352,9 +352,82 @@ def test_output_schema_keys():
     )
     result = build_intel_read(r2)
     assert result is not None
-    required_keys = {"title", "posture_label", "summary", "trusted_signals", "incomplete_signals", "caveat"}
+    required_keys = {"title", "posture_label", "summary", "trusted_signals", "incomplete_signals", "caveat", "insufficient_data"}
     assert required_keys.issubset(result.keys())
     assert isinstance(result["trusted_signals"], list)
     assert isinstance(result["incomplete_signals"], list)
     assert isinstance(result["summary"], str)
     assert len(result["summary"]) > 0
+
+
+# ── Test 12: insufficient_data flag ──────────────────────────────────────────
+
+
+def test_insufficient_data_flag_true_when_status_insufficient():
+    """insufficient_data=True when data_status==INSUFFICIENT_DATA."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["quality", "growth"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is True
+
+
+def test_insufficient_data_flag_true_via_blocker_only():
+    """insufficient_data=True when blocker contains 'insufficient_data' even if status is not INSUFFICIENT_DATA."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="PARTIAL",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["quality"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is True
+
+
+def test_insufficient_data_flag_false_when_partial_constructive():
+    """insufficient_data=False when data is PARTIAL but posture is ACCUMULATE."""
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published_dimensions=["quality_score", "momentum_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=[],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is False
+
+
+def test_insufficient_data_flag_false_when_ready():
+    """insufficient_data=False when data is READY."""
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="READY",
+        published_dimensions=["quality_score", "valuation_score", "momentum_score"],
+        suppressed_dimensions=[],
+        blockers=[],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is False
+
+
+def test_insufficient_data_flag_false_for_agreement_conflict_watch():
+    """insufficient_data=False for WATCH caused by agreement_conflict (not data gap)."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="PARTIAL",
+        published_dimensions=["momentum_score"],
+        suppressed_dimensions=["quality", "risk"],
+        blockers=["agreement_conflict"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is False

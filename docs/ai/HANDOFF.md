@@ -1,4 +1,48 @@
 ## Last change
+Intel thesis_v2 diagnostics live serialization fix (PR: "fix(intel-v2): persist thesis_v2 diagnostics in live allocation payload").
+
+## Exact root cause
+- Prior diagnostics work only hardened `reasoning_v2_builder.data_quality`; it did **not** add a `diagnostics` field to the serialized `_thesis_v2` scorecard persisted by orchestrator.
+- Live persistence path is `orchestrator._scorecard_to_dict() -> allocation["_thesis_v2"][ticker]`.
+- That serializer emitted status/subscores/inputs but no diagnostics key, so Supabase queries like `allocation->'_thesis_v2'->'NVDA'->'diagnostics'` returned `null` for every ticker.
+
+## What was fixed
+- Added deterministic `diagnostics` construction inside `orchestrator._scorecard_to_dict()` and persisted it into each `_thesis_v2` ticker object.
+- Contract now includes:
+  - `missing_dimensions`
+  - `suppressed_dimensions`
+  - `published_dimensions`
+  - `unpublished_reasons`
+  - `user_safe_note`
+- No score math or quality-gate logic changed; this is serialization/observability only.
+
+## Regression coverage added
+- Test ensures INSUFFICIENT_DATA thesis payload can carry non-null diagnostics pre-serialization.
+- Test ensures orchestrator live serialization of INSUFFICIENT_DATA ScoreCard includes non-null diagnostics in exact `_thesis_v2` shape.
+
+## Post-merge Supabase verification query
+```sql
+SELECT
+  allocation->'_thesis_v2'->'NVDA'->>'status' AS nvda_status,
+  allocation->'_thesis_v2'->'NVDA'->'diagnostics' AS nvda_diagnostics,
+  allocation->'_thesis_v2'->'GOOGL'->'diagnostics' AS googl_diagnostics,
+  allocation->'_thesis_v2'->'META'->'diagnostics' AS meta_diagnostics
+FROM agent_runs
+WHERE status = 'completed'
+ORDER BY finished_at DESC
+LIMIT 1;
+```
+
+## Confirmation of non-changes
+- No frontend/UI changes.
+- No Deploy changes.
+- No Supabase SQL/migrations.
+- No LLM prompt/model behavior changes.
+
+
+---
+
+## Last change
 Intel Reasoning v2 PR 3: actionable INSUFFICIENT_DATA diagnostics for thesis_v2 scorecards (PR: "fix(intel-v2-pr3): make insufficient thesis diagnostics actionable").
 
 ## Exact root cause

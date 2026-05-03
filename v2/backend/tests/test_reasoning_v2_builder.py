@@ -1102,6 +1102,53 @@ def test_insufficient_data_never_reports_both_missing_and_stale_empty_when_suppr
     assert "Suppressed dimensions due to low coverage" in dq["user_safe_note"]
 
 
+def test_insufficient_data_scorecard_has_non_null_diagnostics_before_serialization():
+    """Live-style INSUFFICIENT_DATA thesis dict must include actionable diagnostics."""
+    sc = dict(THESIS_INSUFFICIENT_DICT)
+    sc["diagnostics"] = {
+        "missing_dimensions": ["quality", "growth"],
+        "suppressed_dimensions": ["quality", "valuation", "growth", "risk"],
+        "published_dimensions": [],
+        "unpublished_reasons": {
+            "quality": "suppressed_low_quality",
+            "valuation": "suppressed_low_quality",
+            "growth": "suppressed_low_quality",
+            "risk": "suppressed_low_quality",
+            "momentum": "suppressed_low_quality",
+        },
+    }
+    assert sc["status"] == "INSUFFICIENT_DATA"
+    assert sc["diagnostics"] is not None
+    assert len(sc["diagnostics"]["suppressed_dimensions"]) > 0
+
+
+def test_orchestrator_serialized_thesis_v2_includes_diagnostics_for_insufficient_data():
+    """Regression: serialized _thesis_v2 payload must keep diagnostics non-null."""
+    from app.services.agents.orchestrator import _scorecard_to_dict
+    from app.services.intelligence.score_schema import ConvictionBand, ScoreCard, ScoreStatus, SubScore
+
+    ss = SubScore(score=0.0, data_quality=0.0, inputs_used=[], inputs_missing=["roic_ttm"], published=False)
+    card = ScoreCard(
+        ticker="NVDA",
+        status=ScoreStatus.INSUFFICIENT_DATA,
+        quality=ss,
+        valuation=ss,
+        growth=ss,
+        risk=ss,
+        momentum=ss,
+        conviction_score=None,
+        conviction_band=ConvictionBand.INSUFFICIENT_DATA,
+        blended_data_quality=0.0,
+        inputs_used=[],
+        inputs_missing=["roic_ttm"],
+    )
+    serialized = _scorecard_to_dict(card)
+    assert serialized["status"] == "INSUFFICIENT_DATA"
+    assert serialized.get("diagnostics") is not None
+    assert "suppressed_dimensions" in serialized["diagnostics"]
+    assert len(serialized["diagnostics"]["suppressed_dimensions"]) > 0
+
+
 # ── Test PR2-7: PARTIAL scorecard with useful published dimensions ─────────────
 
 def test_thesis_partial_published_dimensions_appear_in_evidence():

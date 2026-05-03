@@ -69,6 +69,66 @@ def _scorecard_to_dict(card: "ScoreCard") -> dict:
             "inputs_missing": ss.inputs_missing,
             "published": ss.published,
         }
+    suppressed_dimensions = [
+        name
+        for name, ss in (
+            ("quality", card.quality),
+            ("valuation", card.valuation),
+            ("growth", card.growth),
+            ("risk", card.risk),
+            ("momentum", card.momentum),
+        )
+        if not bool(ss.published)
+    ]
+    published_dimensions = [
+        name
+        for name, ss in (
+            ("quality", card.quality),
+            ("valuation", card.valuation),
+            ("growth", card.growth),
+            ("risk", card.risk),
+            ("momentum", card.momentum),
+        )
+        if bool(ss.published)
+    ]
+    missing_dimensions = [
+        name
+        for name, ss in (
+            ("quality", card.quality),
+            ("valuation", card.valuation),
+            ("growth", card.growth),
+            ("risk", card.risk),
+            ("momentum", card.momentum),
+        )
+        if len(ss.inputs_used) == 0
+    ]
+    unpublished_reasons = {
+        name: (
+            "suppressed_low_quality"
+            if not bool(ss.published)
+            else "published"
+        )
+        for name, ss in (
+            ("quality", card.quality),
+            ("valuation", card.valuation),
+            ("growth", card.growth),
+            ("risk", card.risk),
+            ("momentum", card.momentum),
+        )
+    }
+    diagnostics = {
+        "missing_dimensions": missing_dimensions,
+        "suppressed_dimensions": suppressed_dimensions,
+        "published_dimensions": published_dimensions,
+        "unpublished_reasons": unpublished_reasons,
+        "user_safe_note": (
+            "Data is insufficient: one or more dimensions were unavailable or "
+            "suppressed by quality gates."
+            if card.status.value == "INSUFFICIENT_DATA"
+            else "Diagnostics included for data coverage transparency."
+        ),
+    }
+
     return {
         "ticker": card.ticker,
         "status": card.status.value,
@@ -83,6 +143,7 @@ def _scorecard_to_dict(card: "ScoreCard") -> dict:
         "growth": _ss(card.growth),
         "risk": _ss(card.risk),
         "momentum": _ss(card.momentum),
+        "diagnostics": diagnostics,
     }
 
 

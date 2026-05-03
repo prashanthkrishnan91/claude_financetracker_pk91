@@ -1,0 +1,219 @@
+"""reasoning_v2 plain-English translator — deterministic, pure, no IO.
+
+Translates a reasoning_v2 dict (from agent_runs.allocation["_reasoning_v2"])
+into a compact plain-English intel_read projection suitable for the frontend.
+
+Contract invariants:
+  * Pure function: no IO, DB, network, randomness, datetime.now, or LLM calls.
+  * Same inputs always produce identical dict output.
+  * Output contains no raw metric key names.
+  * Missing or malformed input returns None safely.
+  * INSUFFICIENT_DATA remains conservative and never fabricates confidence.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+# Evidence key → plain-English label (published_dimensions use _score suffix).
+_EV_KEY_TO_LABEL: dict[str, str] = {
+    "quality_score": "business quality",
+    "valuation_score": "valuation",
+    "growth_score": "growth",
+    "risk_score": "risk",
+    "momentum_score": "recent market behavior",
+}
+
+# Raw dimension key → plain-English label (suppressed_dimensions use bare names).
+_DIM_KEY_TO_LABEL: dict[str, str] = {
+    "quality": "business quality",
+    "valuation": "valuation",
+    "growth": "growth",
+    "risk": "risk",
+    "momentum": "recent market behavior",
+}
+
+_POSTURE_LABEL: dict[str, str] = {
+    "ACCUMULATE": "constructive",
+    "HOLD": "neutral",
+    "TRIM": "cautious",
+    "AVOID": "cautious",
+    "WATCH": "on watch",
+}
+
+_VALID_POSTURES = frozenset(_POSTURE_LABEL)
+
+
+def _join_plain(items: list[str]) -> str:
+    """Join list into plain-English comma list with 'and'."""
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    if len(items) == 2:
+        return f"{items[0]} and {items[1]}"
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
+
+
+def _build_summary(
+    *,
+    posture: str,
+    posture_label: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+    data_status: str,
+    blockers: list[str],
+) -> str:
+    has_trusted = bool(trusted_signals)
+    has_incomplete = bool(incomplete_signals)
+
+    if not has_trusted and not has_incomplete:
+        return (
+            "Not enough evidence on any dimension yet. "
+            "Staying on watch until signals strengthen."
+        )
+
+    if not has_trusted:
+        incomplete_str = _join_plain(incomplete_signals)
+        return (
+            f"Data on {incomplete_str} is still incomplete. "
+            "Not enough evidence to comment on any dimension yet."
+        )
+
+    trusted_str = _join_plain(trusted_signals)
+
+    if not has_incomplete:
+        if posture == "WATCH":
+            return (
+                f"Evidence on {trusted_str} is available, "
+                "but the overall picture still calls for watching this one closely."
+            )
+        return f"Evidence on {trusted_str} supports a {posture_label} view."
+
+    incomplete_str = _join_plain(incomplete_signals)
+    are_str = "are" if len(incomplete_signals) > 1 else "is"
+
+    if posture == "WATCH":
+        return (
+            f"The system has enough evidence to comment on {trusted_str}, "
+            f"but {incomplete_str} {are_str} still incomplete. "
+            "That is why this stays on watch instead of becoming a high-conviction idea."
+        )
+
+    return (
+        f"Some evidence on {trusted_str} is available, "
+        f"but {incomplete_str} {are_str} still incomplete. "
+        f"Treat this as a {posture_label} read, not a complete picture."
+    )
+
+
+def _build_caveat(
+    *,
+    posture: str,
+    data_status: str,
+    blockers: list[str],
+    has_trusted: bool,
+) -> str:
+    if "insufficient_data" in blockers or data_status == "INSUFFICIENT_DATA":
+        return "Not enough data to be confident. Wait for more signals before acting."
+    if "agreement_conflict" in blockers:
+        return "There is a conflict between market signals and analyst view. Stay cautious."
+    if not has_trusted:
+        return "No complete dimension evidence yet. This is a placeholder watch only."
+    return "Treat this as an early signal, not a complete picture."
+
+
+def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
+    """Translate a reasoning_v2 dict into a safe plain-English intel_read projection.
+
+    Pure function — no IO, DB, network, randomness, datetime.now, or LLM calls.
+    Same inputs always produce identical dict output.
+
+    Args:
+        r2: Full reasoning_v2 dict from agent_runs.allocation["_reasoning_v2"][ticker].
+            Must contain evidence.deterministic.coverage, action.posture, and
+            deploy_signals.blockers for a complete projection.
+
+    Returns:
+        Plain-English intel_read dict with keys: title, posture_label, summary,
+        trusted_signals, incomplete_signals, caveat. Returns None if input is
+        not a valid dict or structurally unusable.
+    """
+    if not isinstance(r2, dict):
+        return None
+
+    # Extract posture
+    action = r2.get("action") or {}
+    posture = str(action.get("posture") or "WATCH").upper().strip()
+    if posture not in _VALID_POSTURES:
+        posture = "WATCH"
+    posture_label = _POSTURE_LABEL[posture]
+
+    # Extract data quality status
+    data_quality = r2.get("data_quality") or {}
+    data_status = str(data_quality.get("status") or "INSUFFICIENT_DATA").upper().strip()
+
+    # Extract coverage block from evidence
+    evidence = r2.get("evidence") or {}
+    deterministic = evidence.get("deterministic") or {}
+    coverage = deterministic.get("coverage") or {}
+
+    published_dimensions = list(coverage.get("published_dimensions") or [])
+    suppressed_dimensions = list(coverage.get("suppressed_dimensions") or [])
+
+    # Extract deploy blockers
+    deploy_signals = r2.get("deploy_signals") or {}
+    blockers = list(deploy_signals.get("blockers") or [])
+
+    # Map evidence keys → plain-English labels (no raw metric names in output)
+    trusted_signals = [
+        _EV_KEY_TO_LABEL[d]
+        for d in published_dimensions
+        if d in _EV_KEY_TO_LABEL
+    ]
+    # Deduplicate while preserving order (coverage aggregation may produce duplicates
+    # if a dimension appears in both evidence keys and subscore keys)
+    seen: set[str] = set()
+    trusted_signals_dedup: list[str] = []
+    for s in trusted_signals:
+        if s not in seen:
+            seen.add(s)
+            trusted_signals_dedup.append(s)
+    trusted_signals = trusted_signals_dedup
+
+    incomplete_signals = [
+        _DIM_KEY_TO_LABEL[d]
+        for d in suppressed_dimensions
+        if d in _DIM_KEY_TO_LABEL
+    ]
+    seen_inc: set[str] = set()
+    incomplete_signals_dedup: list[str] = []
+    for s in incomplete_signals:
+        if s not in seen_inc:
+            seen_inc.add(s)
+            incomplete_signals_dedup.append(s)
+    incomplete_signals = incomplete_signals_dedup
+
+    summary = _build_summary(
+        posture=posture,
+        posture_label=posture_label,
+        trusted_signals=trusted_signals,
+        incomplete_signals=incomplete_signals,
+        data_status=data_status,
+        blockers=blockers,
+    )
+    caveat = _build_caveat(
+        posture=posture,
+        data_status=data_status,
+        blockers=blockers,
+        has_trusted=bool(trusted_signals),
+    )
+
+    return {
+        "title": "Why this view?",
+        "posture_label": posture_label,
+        "summary": summary,
+        "trusted_signals": trusted_signals,
+        "incomplete_signals": incomplete_signals,
+        "caveat": caveat,
+    }

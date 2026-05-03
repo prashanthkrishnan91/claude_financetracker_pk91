@@ -23,6 +23,7 @@ from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
 from .intelligence.thesis_plain_english import build_thesis_plain_english
+from .intelligence.reasoning_v2_plain_english import build_intel_read
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -157,6 +158,44 @@ def _build_thesis_fields_for_card(
             return fb
 
     return primary
+
+def _build_intel_read_for_card(
+    *,
+    ticker: str,
+    run_id: Any,
+    run_lookup: dict[str, dict],
+) -> Optional[dict]:
+    """Resolve intel_read plain-English projection from _reasoning_v2 for one card.
+
+    Reads allocation["_reasoning_v2"][ticker] from the card's own agent_run_id run.
+    Returns None safely when _reasoning_v2 is absent, run is not in run_lookup,
+    or the translator raises. No fallback to a latest run — intel_read is additive.
+    """
+    rid_str = str(run_id or "")
+    if not rid_str:
+        return None
+    run_row = run_lookup.get(rid_str)
+    if not run_row:
+        return None
+    allocation = run_row.get("allocation")
+    if not isinstance(allocation, dict):
+        return None
+    reasoning_map = allocation.get("_reasoning_v2")
+    if not isinstance(reasoning_map, dict) or not reasoning_map:
+        return None
+    ticker_up = str(ticker).strip().upper()
+    r2 = reasoning_map.get(ticker_up) or reasoning_map.get(ticker)
+    if not isinstance(r2, dict):
+        return None
+    try:
+        return build_intel_read(r2)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "intel_read generation skipped ticker=%s run_id=%s err=%s",
+            ticker, rid_str, exc,
+        )
+        return None
+
 
 # DRIP yield estimates (annual %, approximate 2026 values)
 DRIP_YIELD: dict[str, float] = {
@@ -1585,6 +1624,14 @@ class RecommendationService:
                 )
                 thesis_diag_counts[thesis_diag] = thesis_diag_counts.get(thesis_diag, 0) + 1
 
+                # Intel v2 reasoning_v2 UI: build plain-English intel_read from
+                # _reasoning_v2 coverage block. Safe when _reasoning_v2 is absent.
+                intel_read_dict = _build_intel_read_for_card(
+                    ticker=ticker,
+                    run_id=rec.get("agent_run_id"),
+                    run_lookup=run_lookup,
+                )
+
                 card = InsightCard(
                     id=rec["id"],
                     ticker=ticker,
@@ -1644,6 +1691,7 @@ class RecommendationService:
                     differentiation=reasoning.get("differentiation"),
                     thesis_v2=thesis_v2_dict,
                     thesis_plain_english=thesis_plain_english_dict,
+                    intel_read=intel_read_dict,
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",

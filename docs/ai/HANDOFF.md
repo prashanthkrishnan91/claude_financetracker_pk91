@@ -1,4 +1,60 @@
 ## Last change
+Intel Reasoning v2 UI: surface reasoning_v2 coverage as "Why this view?" on AgentInsightCard (PR: "feat(intel-ui): surface reasoning_v2 coverage as plain-English Why this view section").
+
+## intel_read contract (reasoning_v2 plain-English projection)
+
+**New backend translator**: `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py`
+- Pure function `build_intel_read(r2: dict) -> Optional[dict]`
+- Input: full `reasoning_v2` dict from `agent_runs.allocation["_reasoning_v2"][ticker]`
+- Output keys: `title`, `posture_label`, `summary`, `trusted_signals`, `incomplete_signals`, `caveat`
+- Contains NO raw metric keys (`momentum_score`, `valuation_score`, `fcf_margin`, etc.)
+- Returns `None` when input is not a valid dict
+
+**Dimension label mapping** (published_dimensions use `_score` suffix; suppressed_dimensions use bare names):
+- `quality_score` / `quality` → "business quality"
+- `valuation_score` / `valuation` → "valuation"
+- `growth_score` / `growth` → "growth"
+- `risk_score` / `risk` → "risk"
+- `momentum_score` / `momentum` → "recent market behavior"
+
+**Posture label mapping**:
+- ACCUMULATE → "constructive"
+- HOLD → "neutral"
+- TRIM → "cautious"
+- AVOID → "cautious"
+- WATCH → "on watch"
+
+**API field**: `InsightCard.intel_read: Optional[dict] = None` (additive, backward-compatible)
+- Populated in `_compute_insight_cards` via `_build_intel_read_for_card(ticker, run_id, run_lookup)`
+- Reads `allocation["_reasoning_v2"][ticker]` from same run_lookup as thesis fields
+- If `_reasoning_v2` is absent or ticker missing, field is `null` safely (no fallback needed)
+
+**Frontend contract**:
+- `IntelRead` interface added to `v2/frontend/src/lib/api.ts`
+- `InsightCardData.intel_read?: IntelRead | null` added
+- `AgentInsightCard.tsx` renders compact `WhyThisView` component when `intel_read` is present
+- `WhyThisView` displays: title, summary, trusted_signals (green chips), incomplete_signals (muted chips), caveat
+- When `intel_read` is `null`/`undefined`, section is omitted entirely
+
+**Raw metric leak guardrail**:
+- Translator output only ever contains hardcoded plain-English strings from `_EV_KEY_TO_LABEL` / `_DIM_KEY_TO_LABEL`
+- No raw metric keys (`momentum_score`, `valuation_score`, `fcf_margin`, etc.) appear in any output field
+- Backend test `test_no_raw_metric_keys_in_output` locks this invariant
+
+**Business Read remains hidden**: `thesis_plain_english` is still NOT rendered by `AgentInsightCard`. The new "Why this view?" section is separate and driven by `_reasoning_v2` coverage, not `_thesis_v2`.
+
+## Explicit exclusions
+- No Deploy changes.
+- No allocation math changes.
+- No score math changes.
+- No SQL/Supabase migration.
+- No LLM calls.
+- No Business Read UI re-enable.
+- No app-wide redesign.
+
+---
+
+## Last change
 Intel Reasoning v2 thesis-v2 acceleration: coverage aggregation + safe info-derived input coverage (PR: "feat(intel-v2-pr5): reasoning_v2 coverage aggregation + safe info-derived input coverage").
 
 ## Combined PR scope (PR A + PR B-1 safest part)

@@ -1,4 +1,30 @@
 ## Last change
+Intel Reasoning v2 PR 4: preserve published deterministic evidence under INSUFFICIENT_DATA (PR: "fix(intel-v2-pr4): preserve published deterministic dimensions in reasoning_v2").
+
+## Exact root cause
+- `reasoning_v2_builder` gated deterministic extraction on `scorecard.status != INSUFFICIENT_DATA`.
+- Live thesis_v2/ScoreCard payloads can validly contain `published=true` dimensions (e.g., valuation/momentum) while overall status remains `INSUFFICIENT_DATA`.
+- Because of the status gate, `evidence.deterministic` was emptied and agreement defaulted to `analyst_only` even when deterministic dimensions were published.
+
+## What was fixed
+- Removed the hard status gate for deterministic extraction and now preserve published thesis dimensions regardless of overall status.
+- Deterministic thesis dimension evidence now keeps machine-readable fields: `score`, `published`, `inputs_used`, `data_quality`, `inputs_missing`.
+- Agreement logic now considers actual published deterministic presence, so INSUFFICIENT_DATA + published deterministic dimensions no longer collapses to `analyst_only`.
+- Safety contract unchanged: INSUFFICIENT_DATA still forces WATCH posture and insufficient_data blocker.
+
+## Tests added/updated
+- Added live-style INSUFFICIENT_DATA thesis regression tests where valuation/momentum are published and quality/growth/risk remain suppressed.
+- Verified deterministic evidence inclusion, WATCH safety persistence, non-analyst_only agreement when deterministic evidence exists, and user-text non-leakage of raw advanced metric keys.
+
+## Confirmation of non-changes
+- No frontend/UI changes.
+- No Deploy changes.
+- No Supabase SQL/migrations.
+- No LLM prompt/model behavior changes.
+
+---
+
+## Last change
 Intel thesis_v2 diagnostics live serialization fix (PR: "fix(intel-v2): persist thesis_v2 diagnostics in live allocation payload").
 
 ## Exact root cause

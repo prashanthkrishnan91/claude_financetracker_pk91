@@ -268,7 +268,7 @@ def _risk_band_from_analyst(av: Optional[dict]) -> str:
 
 def _build_published_dimensions(sc: Optional[dict], status: str) -> list[str]:
     """Return evidence key names for deterministic subscores that have non-None values."""
-    if sc is None or status == "INSUFFICIENT_DATA":
+    if sc is None:
         return []
     published = []
     for sc_key, ev_key in _SUBSCORE_KEY_MAP:
@@ -290,12 +290,16 @@ def _derive_agreement(
     sc: Optional[dict],
 ) -> str:
     """Return agreement label between deterministic signals and analyst."""
-    if sc_status == "INSUFFICIENT_DATA" and not analyst_is_usable:
+    has_published_deterministic = bool(_build_published_dimensions(sc, sc_status))
+
+    if not has_published_deterministic and sc_status == "INSUFFICIENT_DATA" and not analyst_is_usable:
         return "insufficient"
-    if sc_status == "INSUFFICIENT_DATA":
+    if not has_published_deterministic and sc_status == "INSUFFICIENT_DATA":
         return "analyst_only"
-    if not analyst_is_usable:
+    if has_published_deterministic and not analyst_is_usable:
         return "deterministic_only"
+    if not analyst_is_usable:
+        return "analyst_only"
 
     # Both present: derive a simple scorecard direction.
     # Priority 1: thesis-engine conviction_band (HIGH/MEDIUM = positive, LOW = negative).
@@ -528,7 +532,7 @@ def _build_evidence(
 ) -> dict[str, Any]:
     # Deterministic: only publish dimensions with actual values
     det: dict[str, Any] = {}
-    if sc is not None and sc_status != "INSUFFICIENT_DATA":
+    if sc is not None:
         # Legacy market-data stub scorecard fields (return_*, sentiment_score, etc.)
         for sc_key, ev_key in _SUBSCORE_KEY_MAP:
             val = sc.get(sc_key)
@@ -541,7 +545,13 @@ def _build_evidence(
             if isinstance(dim, dict) and dim.get("published"):
                 score = dim.get("score")
                 if score is not None:
-                    det[ev_key] = round(float(score), 1)
+                    det[ev_key] = {
+                        "score": round(float(score), 1),
+                        "published": True,
+                        "inputs_used": list(dim.get("inputs_used") or []),
+                        "data_quality": float(dim.get("data_quality") or 0.0),
+                        "inputs_missing": list(dim.get("inputs_missing") or []),
+                    }
 
     # Analyst: pass-through only — no synthesis
     analyst_ev: dict[str, Any] = {}

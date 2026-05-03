@@ -1,3 +1,11 @@
+## 2026-05-03 — Intel reasoning_v2: keep published deterministic dimensions under INSUFFICIENT_DATA
+
+- Fixed reasoning_v2 builder to preserve published thesis dimensions (e.g., valuation/momentum) in `evidence.deterministic` even when overall scorecard status is `INSUFFICIENT_DATA`.
+- Updated agreement derivation to avoid `analyst_only` when deterministic published evidence exists.
+- Preserved INSUFFICIENT_DATA safety hardening: WATCH posture + insufficient_data blocker remain enforced.
+- Added focused backend tests for live-style serialized thesis shape and suppression-safe evidence inclusion.
+- No frontend/UI, Deploy, SQL, or LLM behavior changes.
+
 - 2026-05-03: Fixed live `_thesis_v2` diagnostics nulls by adding diagnostics serialization in `orchestrator._scorecard_to_dict`; added regression tests for INSUFFICIENT_DATA live payload shape.
 - 2026-05-02: feat(intel-v2-pr2-reasoning): fused thesis_v2 scorecard into reasoning_v2 evidence; orchestrator now passes _thesis_scorecards[ticker] to build_reasoning_v2 instead of None; builder handles score_schema.ScoreCard objects and serialized thesis dicts; published subscore dimensions (valuation/growth/risk/momentum) appear in evidence.deterministic; agreement derived from conviction_band (HIGH/MEDIUM=agree with BUY, LOW=disagree+WATCH); 18 new focused tests; reasoning_v2 remains backend-only dormant.
 - 2026-05-02: fix(intel-v2): hardened reasoning_v2 insufficient-data contract after live-run inspection; when data_quality.status=INSUFFICIENT_DATA, builder now forces action.posture=WATCH and deploy_signals.action_posture=WATCH, ensures insufficient_data blocker, and prevents HIGH conviction carry-through while preserving analyst evidence; no frontend/Deploy/SQL/LLM changes.

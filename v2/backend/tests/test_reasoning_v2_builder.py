@@ -900,10 +900,24 @@ def test_thesis_ready_scorecard_published_scores_are_correct():
         analyst_verdict=None,
     )
     det = result["evidence"]["deterministic"]
-    assert det["valuation_score"] == 64.0
-    assert det["growth_score"] == 70.0
-    assert det["risk_score"] == 68.0
-    assert det["momentum_score"] == 73.0
+    assert det["valuation_score"]["score"] == 64.0
+    assert det["growth_score"]["score"] == 70.0
+    assert det["risk_score"]["score"] == 68.0
+    assert det["momentum_score"]["score"] == 73.0
+
+
+def test_thesis_ready_scorecard_evidence_keeps_machine_readable_fields():
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=dict(THESIS_READY_DICT),
+        analyst_verdict=None,
+    )
+    valuation = result["evidence"]["deterministic"]["valuation_score"]
+    assert set(valuation.keys()) == {
+        "score", "published", "inputs_used", "data_quality", "inputs_missing"
+    }
+    assert valuation["published"] is True
+    assert valuation["inputs_used"] == ["trailing_pe", "forward_pe"]
 
 
 def test_thesis_unpublished_dimension_excluded_from_evidence():
@@ -978,7 +992,52 @@ def test_thesis_scorecard_object_and_dict_produce_equivalent_evidence():
     )
     # And the same agreement / status
     assert result_obj["confidence"]["agreement"] == result_dict["confidence"]["agreement"]
-    assert result_obj["data_quality"]["status"] == result_dict["data_quality"]["status"]
+
+
+def test_insufficient_data_with_published_dimensions_keeps_deterministic_evidence():
+    live_style = dict(THESIS_INSUFFICIENT_DICT)
+    live_style["valuation"] = {
+        "score": 61.0, "data_quality": 0.62, "published": True,
+        "inputs_used": ["trailing_pe"], "inputs_missing": [],
+    }
+    live_style["momentum"] = {
+        "score": 59.0, "data_quality": 0.60, "published": True,
+        "inputs_used": ["return_5d"], "inputs_missing": [],
+    }
+    result = build_reasoning_v2(ticker="NVDA", scorecard=live_style, analyst_verdict=None)
+    det = result["evidence"]["deterministic"]
+    assert "valuation_score" in det
+    assert "momentum_score" in det
+    assert "quality_score" not in det
+    assert "growth_score" not in det
+    assert "risk_score" not in det
+    assert result["action"]["posture"] == "WATCH"
+    assert result["deploy_signals"]["action_posture"] == "WATCH"
+    assert "insufficient_data" in result["deploy_signals"]["blockers"]
+    assert result["confidence"]["agreement"] == "deterministic_only"
+
+
+def test_insufficient_data_with_published_dimensions_and_analyst_not_analyst_only():
+    live_style = dict(THESIS_INSUFFICIENT_DICT)
+    live_style["valuation"] = {
+        "score": 61.0, "data_quality": 0.62, "published": True,
+        "inputs_used": ["trailing_pe"], "inputs_missing": [],
+    }
+    live_style["momentum"] = {
+        "score": 59.0, "data_quality": 0.60, "published": True,
+        "inputs_used": ["return_5d"], "inputs_missing": [],
+    }
+    result = build_reasoning_v2(
+        ticker="NVDA",
+        scorecard=live_style,
+        analyst_verdict=dict(COMPACT_V1_VERDICT),
+    )
+    assert result["confidence"]["agreement"] in {"agree", "disagree"}
+    assert result["confidence"]["agreement"] != "analyst_only"
+    for section in ("why", "risk", "action", "alt_view"):
+        text = result[section]["user_text"].lower()
+        assert "trailing_pe" not in text
+        assert "return_5d" not in text
 
 
 # ── Test PR2-4: deterministic + analyst agree ─────────────────────────────────

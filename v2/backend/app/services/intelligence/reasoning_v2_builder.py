@@ -27,6 +27,10 @@ VALID_SEVERITY = frozenset({"LOW", "MEDIUM", "HIGH", "UNKNOWN"})
 VALID_CONVICTION_BANDS = frozenset({"HIGH", "MEDIUM", "LOW", "INSUFFICIENT_DATA"})
 VALID_DATA_STATUSES = frozenset({"READY", "PARTIAL", "INSUFFICIENT_DATA"})
 
+# Thesis-engine evidence keys that represent published dimension subscores.
+# Used to distinguish them from legacy numeric fields in coverage aggregation.
+_THESIS_EV_KEYS: frozenset[str] = frozenset()  # populated after _THESIS_SUBSCORE_MAP is defined
+
 # Numeric subscore keys: maps scorecard dict key → evidence.deterministic key.
 # Keep this list stable across PRs — removing entries breaks evidence traceability.
 _SUBSCORE_KEY_MAP: tuple[tuple[str, str], ...] = (
@@ -50,6 +54,9 @@ _THESIS_SUBSCORE_MAP: tuple[tuple[str, str], ...] = (
     ("risk", "risk_score"),
     ("momentum", "momentum_score"),
 )
+
+# Populate the frozenset of thesis evidence keys from _THESIS_SUBSCORE_MAP.
+_THESIS_EV_KEYS = frozenset(ev_key for _, ev_key in _THESIS_SUBSCORE_MAP)
 
 # Strings that indicate high-risk business situations (not technical indicators).
 _HIGH_RISK_SIGNALS = ("halt", "bankruptcy", "collapse", "fraud", "delist", "liquidat")
@@ -553,6 +560,9 @@ def _build_evidence(
                         "inputs_missing": list(dim.get("inputs_missing") or []),
                     }
 
+    # Coverage summary: published/suppressed dimensions + aggregated inputs
+    det["coverage"] = _build_coverage(evidence_deterministic=det, sc=sc)
+
     # Analyst: pass-through only — no synthesis
     analyst_ev: dict[str, Any] = {}
     if isinstance(av, dict):
@@ -573,6 +583,63 @@ def _build_evidence(
         "deterministic": det,
         "analyst": analyst_ev,
         "provider": provider_meta if isinstance(provider_meta, dict) else None,
+    }
+
+
+def _build_coverage(
+    *,
+    evidence_deterministic: dict[str, Any],
+    sc: Optional[dict],
+) -> dict[str, Any]:
+    """Build coverage summary block for evidence.deterministic.coverage.
+
+    Aggregates published thesis-dimension keys plus their input provenance
+    into a single top-level block for downstream observability.
+
+    Empty shape is returned when no thesis dimensions are published or
+    when the scorecard is absent.
+    """
+    empty_shape: dict[str, Any] = {
+        "published_dimensions": [],
+        "suppressed_dimensions": [],
+        "inputs_used": [],
+        "inputs_missing": [],
+    }
+
+    # published_dimensions = thesis-subscore evidence keys present in deterministic
+    published_dimensions = sorted(
+        k for k in evidence_deterministic if k in _THESIS_EV_KEYS
+    )
+
+    if not published_dimensions:
+        return empty_shape
+
+    # Aggregate inputs across published dimensions
+    inputs_used_set: set[str] = set()
+    inputs_missing_set: set[str] = set()
+    for dim_key in published_dimensions:
+        dim = evidence_deterministic.get(dim_key)
+        if isinstance(dim, dict):
+            inputs_used_set.update(
+                str(x) for x in (dim.get("inputs_used") or []) if x
+            )
+            inputs_missing_set.update(
+                str(x) for x in (dim.get("inputs_missing") or []) if x
+            )
+
+    # Suppressed dimensions from scorecard (dimensions with published=False)
+    suppressed_dimensions: list[str] = []
+    if sc is not None:
+        for dim_key in ("quality", "valuation", "growth", "risk", "momentum"):
+            dim = sc.get(dim_key)
+            if isinstance(dim, dict) and not bool(dim.get("published")):
+                suppressed_dimensions.append(dim_key)
+
+    return {
+        "published_dimensions": published_dimensions,
+        "suppressed_dimensions": suppressed_dimensions,
+        "inputs_used": sorted(inputs_used_set),
+        "inputs_missing": sorted(inputs_missing_set),
     }
 
 

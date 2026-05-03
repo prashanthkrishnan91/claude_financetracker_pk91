@@ -593,3 +593,192 @@ class TestTrendToRegimeScore:
 
     def test_empty_returns_none(self):
         assert _trend_to_regime_score("") is None
+
+
+# ── PR5 Part 2: safe info-derived input coverage ──────────────────────────────
+
+from app.services.intelligence.thesis_mapper import (
+    _derive_fcf_to_net_income,
+    _derive_p_fcf,
+    _derive_fcf_yield,
+)
+
+
+class TestGrossMarginMapping:
+    """gross_margin: pass-through from yfinance grossMargins when numeric."""
+
+    def test_gross_margin_maps_when_present(self):
+        inputs = map_to_thesis_inputs({"gross_margin": 0.60})
+        assert inputs["gross_margin"] == pytest.approx(0.60)
+
+    def test_gross_margin_missing_omitted(self):
+        inputs = map_to_thesis_inputs({})
+        assert "gross_margin" not in inputs
+
+    def test_gross_margin_none_omitted(self):
+        inputs = map_to_thesis_inputs({"gross_margin": None})
+        assert "gross_margin" not in inputs
+
+    def test_gross_margin_nan_omitted(self):
+        inputs = map_to_thesis_inputs({"gross_margin": float("nan")})
+        assert "gross_margin" not in inputs
+
+    def test_profit_margin_does_not_map_to_gross_margin(self):
+        """profit_margin is not a proxy for gross_margin."""
+        inputs = map_to_thesis_inputs({"profit_margin": 0.25})
+        assert "gross_margin" not in inputs
+
+
+class TestFcfToNetIncomeDerivation:
+    """fcf_to_net_income = free_cash_flow / net_income when both valid and denominator != 0."""
+
+    def test_derives_correctly(self):
+        result = _derive_fcf_to_net_income({"free_cash_flow": 80.0, "net_income": 100.0})
+        assert result == pytest.approx(0.80)
+
+    def test_negative_net_income_derives(self):
+        result = _derive_fcf_to_net_income({"free_cash_flow": 80.0, "net_income": -100.0})
+        assert result == pytest.approx(-0.80)
+
+    def test_zero_net_income_omits(self):
+        result = _derive_fcf_to_net_income({"free_cash_flow": 80.0, "net_income": 0.0})
+        assert result is None
+
+    def test_missing_free_cash_flow_omits(self):
+        result = _derive_fcf_to_net_income({"net_income": 100.0})
+        assert result is None
+
+    def test_missing_net_income_omits(self):
+        result = _derive_fcf_to_net_income({"free_cash_flow": 80.0})
+        assert result is None
+
+    def test_none_inputs_omit(self):
+        result = _derive_fcf_to_net_income({"free_cash_flow": None, "net_income": None})
+        assert result is None
+
+    def test_map_to_thesis_inputs_includes_fcf_to_net_income_when_valid(self):
+        inputs = map_to_thesis_inputs({"free_cash_flow": 120.0, "net_income": 100.0})
+        assert "fcf_to_net_income" in inputs
+        assert inputs["fcf_to_net_income"] == pytest.approx(1.20)
+
+    def test_profit_margin_not_used_as_proxy(self):
+        """profit_margin is not proxied to fcf_to_net_income."""
+        inputs = map_to_thesis_inputs({"profit_margin": 0.25})
+        assert "fcf_to_net_income" not in inputs
+
+
+class TestPFcfDerivation:
+    """p_fcf = market_cap / free_cash_flow when both strictly positive."""
+
+    def test_derives_correctly(self):
+        result = _derive_p_fcf({"market_cap": 2_000_000.0, "free_cash_flow": 100_000.0})
+        assert result == pytest.approx(20.0)
+
+    def test_negative_free_cash_flow_omits(self):
+        result = _derive_p_fcf({"market_cap": 1_000_000.0, "free_cash_flow": -50_000.0})
+        assert result is None
+
+    def test_zero_free_cash_flow_omits(self):
+        result = _derive_p_fcf({"market_cap": 1_000_000.0, "free_cash_flow": 0.0})
+        assert result is None
+
+    def test_zero_market_cap_omits(self):
+        result = _derive_p_fcf({"market_cap": 0.0, "free_cash_flow": 50_000.0})
+        assert result is None
+
+    def test_negative_market_cap_omits(self):
+        result = _derive_p_fcf({"market_cap": -1_000_000.0, "free_cash_flow": 50_000.0})
+        assert result is None
+
+    def test_missing_market_cap_omits(self):
+        result = _derive_p_fcf({"free_cash_flow": 50_000.0})
+        assert result is None
+
+    def test_missing_free_cash_flow_omits(self):
+        result = _derive_p_fcf({"market_cap": 1_000_000.0})
+        assert result is None
+
+    def test_map_to_thesis_inputs_includes_p_fcf_when_valid(self):
+        inputs = map_to_thesis_inputs({"market_cap": 500_000.0, "free_cash_flow": 25_000.0})
+        assert "p_fcf" in inputs
+        assert inputs["p_fcf"] == pytest.approx(20.0)
+
+    def test_dividend_yield_not_used_as_proxy(self):
+        """dividend_yield is not proxied to p_fcf."""
+        inputs = map_to_thesis_inputs({"dividend_yield": 0.03})
+        assert "p_fcf" not in inputs
+
+
+class TestFcfYieldDerivation:
+    """fcf_yield = free_cash_flow / market_cap when market_cap > 0 and FCF is valid."""
+
+    def test_derives_correctly(self):
+        result = _derive_fcf_yield({"free_cash_flow": 100_000.0, "market_cap": 2_000_000.0})
+        assert result == pytest.approx(0.05)
+
+    def test_negative_free_cash_flow_derives(self):
+        """Negative FCF yields a valid (negative) fcf_yield."""
+        result = _derive_fcf_yield({"free_cash_flow": -50_000.0, "market_cap": 1_000_000.0})
+        assert result == pytest.approx(-0.05)
+
+    def test_zero_market_cap_omits(self):
+        result = _derive_fcf_yield({"free_cash_flow": 50_000.0, "market_cap": 0.0})
+        assert result is None
+
+    def test_negative_market_cap_omits(self):
+        result = _derive_fcf_yield({"free_cash_flow": 50_000.0, "market_cap": -1_000_000.0})
+        assert result is None
+
+    def test_missing_market_cap_omits(self):
+        result = _derive_fcf_yield({"free_cash_flow": 50_000.0})
+        assert result is None
+
+    def test_missing_free_cash_flow_omits(self):
+        result = _derive_fcf_yield({"market_cap": 1_000_000.0})
+        assert result is None
+
+    def test_map_to_thesis_inputs_includes_fcf_yield_when_valid(self):
+        inputs = map_to_thesis_inputs({"free_cash_flow": 80_000.0, "market_cap": 1_000_000.0})
+        assert "fcf_yield" in inputs
+        assert inputs["fcf_yield"] == pytest.approx(0.08)
+
+    def test_dividend_yield_not_used_as_proxy(self):
+        """dividend_yield is not proxied to fcf_yield."""
+        inputs = map_to_thesis_inputs({"dividend_yield": 0.03})
+        assert "fcf_yield" not in inputs
+
+
+class TestExistingMappingsUnchanged:
+    """Existing safe mappings must still work after PR5 additions."""
+
+    def test_net_debt_to_ebitda_still_derives(self):
+        inputs = map_to_thesis_inputs({"total_debt": 200.0, "cash": 50.0, "ebitda": 100.0})
+        assert inputs["net_debt_to_ebitda"] == pytest.approx(1.50)
+
+    def test_fcf_margin_still_derives(self):
+        inputs = map_to_thesis_inputs({"free_cash_flow": 30.0, "revenue": 100.0})
+        assert inputs["fcf_margin"] == pytest.approx(0.30)
+
+    def test_ps_ttm_still_maps(self):
+        inputs = map_to_thesis_inputs({"ps_ttm": 8.5})
+        assert inputs["ps_ttm"] == pytest.approx(8.5)
+
+    def test_ev_ebitda_still_maps(self):
+        inputs = map_to_thesis_inputs({"ev_ebitda": 15.2})
+        assert inputs["ev_ebitda"] == pytest.approx(15.2)
+
+    def test_unsafe_proxies_still_absent(self):
+        """All previously-locked unsafe proxy guardrails remain."""
+        inputs = map_to_thesis_inputs({
+            "profit_margin": 0.25,
+            "return_on_equity": 0.18,
+            "debt_to_equity": 1.5,
+            "earnings_growth": 0.15,
+            "dividend_yield": 0.03,
+        })
+        assert "fcf_margin" not in inputs
+        assert "roic_ttm" not in inputs
+        assert "net_debt_to_ebitda" not in inputs
+        assert "forward_revenue_growth_est" not in inputs
+        assert "fcf_yield" not in inputs
+        assert "p_fcf" not in inputs

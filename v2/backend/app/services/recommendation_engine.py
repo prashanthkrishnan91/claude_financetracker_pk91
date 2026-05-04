@@ -1578,7 +1578,8 @@ class RecommendationService:
                 analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
                 preferred_live_row = latest_live_llm_by_ticker.get(ticker)
                 _used_preferred = False
-                _current_av_for_pref = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+                _current_av_raw = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+                _current_av_for_pref = _current_av_raw if isinstance(_current_av_raw, dict) else {}
                 # Also prefer the freshest live LLM row when the current verdict was written before
                 # Phase-7 memo fields (primary_driver, conviction_level) existed. This closes the
                 # page-load vs Run Agents inconsistency: stale rows without primary_driver now
@@ -1591,7 +1592,8 @@ class RecommendationService:
                 ):
                     analyst_row = preferred_live_row
                     _used_preferred = True
-                analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
+                _analyst_verdict_raw = (analyst_row or {}).get("analyst_verdict") or None
+                analyst_verdict = _analyst_verdict_raw if isinstance(_analyst_verdict_raw, dict) else None
                 # Determine reasoning_source for observability + frontend badge.
                 _av_gen = str((analyst_verdict or {}).get("generation_version") or "").lower()
                 _av_src = str((analyst_verdict or {}).get("analysis_source") or "").lower()

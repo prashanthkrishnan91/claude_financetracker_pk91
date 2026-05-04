@@ -1098,3 +1098,37 @@ def test_page_load_keeps_current_row_when_primary_driver_present():
 
     assert _used_preferred is False, "Should not replace row when primary_driver already present"
     assert analyst_row is current_row
+
+
+def test_page_load_pref_logic_tolerates_malformed_analyst_verdict():
+    """Malformed analyst_verdict should degrade safely and prefer fresh row when available."""
+    malformed_current_row = {"analyst_verdict": ["not", "a", "dict"]}
+    fresh_row = {
+        "analyst_verdict": {
+            "primary_driver": "Valid ticker-specific WHY from latest live row.",
+            "used_fallback": False,
+        }
+    }
+
+    analyst_row = malformed_current_row
+    preferred_live_row = fresh_row
+    _used_preferred = False
+
+    _current_av_raw = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+    _current_av_for_pref = _current_av_raw if isinstance(_current_av_raw, dict) else {}
+    _lacks_memo_fields = not bool((_current_av_for_pref.get("primary_driver") or "").strip())
+
+    if preferred_live_row and (
+        analyst_row is None
+        or bool(_current_av_for_pref.get("used_fallback", False))
+        or _lacks_memo_fields
+    ):
+        analyst_row = preferred_live_row
+        _used_preferred = True
+
+    _analyst_verdict_raw = (analyst_row or {}).get("analyst_verdict") or None
+    analyst_verdict = _analyst_verdict_raw if isinstance(_analyst_verdict_raw, dict) else None
+
+    assert _used_preferred is True
+    assert isinstance(analyst_verdict, dict)
+    assert analyst_verdict.get("primary_driver") == "Valid ticker-specific WHY from latest live row."

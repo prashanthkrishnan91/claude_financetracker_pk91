@@ -13,6 +13,7 @@ Contract invariants:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 # Evidence key → plain-English label (published_dimensions use _score suffix).
@@ -42,6 +43,46 @@ _POSTURE_LABEL: dict[str, str] = {
 }
 
 _VALID_POSTURES = frozenset(_POSTURE_LABEL)
+
+# Forbidden bullish phrases for the insufficient_data card copy sanitizer.
+# Any primary_driver or differentiation text containing these phrases must not
+# be rendered on an insufficient-data card — replace with conservative fallback.
+_FORBIDDEN_BULLISH_PHRASES: frozenset[str] = frozenset([
+    "accumulate",
+    "buy",
+    "entry opportunity",
+    "re-rating opportunity",
+    "high-conviction idea",
+    "add aggressively",
+    "strong buy",
+    "deploy",
+])
+
+
+def is_safe_for_insufficient_data(text: str | None) -> bool:
+    """Return True if text contains no forbidden bullish phrases.
+
+    Pure function — deterministic, no IO, no LLM.
+    Used by card assembly to decide whether to preserve ticker-specific copy
+    or fall back to conservative_why / null under insufficient_data.
+
+    None or empty string is treated as safe (no forbidden content).
+    """
+    if not text:
+        return True
+    lower = text.lower()
+    phrase_patterns: tuple[re.Pattern[str], ...] = (
+        re.compile(r"\baccumulate\b"),
+        re.compile(r"\bbuy\b"),
+        re.compile(r"\bentry(?:\s+point|\s+opportunity)\b"),
+        re.compile(r"\bre-rating opportunity\b"),
+        re.compile(r"\bhigh-conviction idea\b"),
+        re.compile(r"\badd aggressively\b"),
+        re.compile(r"\badd\s+shares\b"),
+        re.compile(r"\bstrong buy\b"),
+        re.compile(r"\bdeploy(?:\s+capital)?\b"),
+    )
+    return not any(pattern.search(lower) for pattern in phrase_patterns)
 
 
 def _join_plain(items: list[str]) -> str:

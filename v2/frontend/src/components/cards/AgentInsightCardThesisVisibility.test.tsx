@@ -419,6 +419,7 @@ describe("IntelRead.bottom_line — displayed in WHY THIS VIEW when present", ()
 
 // ── 8. WHY and WHY THIS VIEW are not redundant for insufficient-data cards ────
 
+
 describe("WHY and WHY THIS VIEW — not redundant for insufficient-data cards", () => {
   it("primary_driver (WHY) and intel_read display text (WHY THIS VIEW) differ", () => {
     const conservativeWhy =
@@ -476,5 +477,152 @@ describe("WHY and WHY THIS VIEW — not redundant for insufficient-data cards", 
       intelRead.incomplete_signals.includes(s)
     );
     expect(sharedSignals).toHaveLength(0);
+  });
+});
+
+// ── 9. Ticker-specific WHY preserved for insufficient-data cards ──────────────
+
+const FORBIDDEN_BULLISH_PHRASES_FULL = [
+  "accumulate",
+  "buy",
+  "entry opportunity",
+  "re-rating opportunity",
+  "high-conviction idea",
+  "add aggressively",
+  "strong buy",
+  "deploy",
+];
+
+describe("Insufficient-data cards — ticker-specific WHY preserved when safe", () => {
+  it("safe ticker-specific primary_driver (NVDA) appears in card output", () => {
+    const tickerSpecificWhy =
+      "AI infrastructure demand remains the main watchlist reason — " +
+      "hyperscaler capex and H100-B200 ramp keep NVDA relevant.";
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      primary_driver: tickerSpecificWhy,
+      action_reason:
+        "Stay on watchlist. Recheck after growth and risk evidence improves or a new agent run fills those gaps.",
+      differentiation: undefined,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Evidence on recent market behavior and valuation is available, but growth and risk are still incomplete.",
+        trusted_signals: ["recent market behavior", "valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data to be confident. Wait for more signals before acting.",
+        bottom_line: "Interesting setup, but growth and risk are still missing — not enough complete evidence for a confident position.",
+      },
+    });
+    const allText = collectInsufficientDataCardText(card);
+    // Ticker-specific WHY must be present
+    expect(allText).toContain("hyperscaler capex");
+    expect(allText).toContain("H100-B200");
+    // ACTION must be conservative
+    expect(card.action_reason?.toLowerCase()).toContain("watchlist");
+    // No forbidden phrases in any field
+    const lower = allText.toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES_FULL) {
+      expect(lower).not.toContain(phrase);
+    }
+  });
+
+  it("safe ticker-specific primary_driver (MSFT) appears in card output", () => {
+    const tickerSpecificWhy =
+      "Azure AI consumption and Copilot expansion keep MSFT worth monitoring, " +
+      "but incomplete growth and risk coverage keeps this below a conviction position.";
+    const card = makeCard({
+      ticker: "MSFT",
+      action: "HOLD",
+      conviction_level: "LOW",
+      primary_driver: tickerSpecificWhy,
+      action_reason: "Stay on watchlist. Recheck after growth and risk evidence improves.",
+      differentiation: undefined,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Evidence on valuation is available, but growth and risk are still incomplete.",
+        trusted_signals: ["valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data to be confident.",
+        bottom_line: "Interesting setup, but growth and risk are still missing.",
+      },
+    });
+    const allText = collectInsufficientDataCardText(card);
+    expect(allText).toContain("Azure AI");
+    expect(allText).toContain("Copilot");
+    const lower = allText.toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES_FULL) {
+      expect(lower).not.toContain(phrase);
+    }
+  });
+
+  it("safe ticker-specific differentiation (RISK) is preserved when no forbidden phrases", () => {
+    const tickerRisk =
+      "Export restriction risk to China could materially cut data-center revenue outlook.";
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      primary_driver: "AI infrastructure demand keeps NVDA on watchlist.",
+      action_reason: "Stay on watchlist.",
+      differentiation: tickerRisk,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Evidence on valuation is available, but growth and risk are still incomplete.",
+        trusted_signals: ["valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data to be confident.",
+      },
+    });
+    const allText = collectInsufficientDataCardText(card);
+    expect(allText).toContain("Export restriction");
+    expect(allText).toContain("data-center revenue");
+    const lower = allText.toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES_FULL) {
+      expect(lower).not.toContain(phrase);
+    }
+  });
+
+  it("different tickers show different WHY text — not identical generic copy", () => {
+    const nvdaWhy =
+      "AI infrastructure demand remains the main watchlist reason — H100-B200 ramp keeps NVDA relevant.";
+    const msftWhy =
+      "Azure AI consumption and Copilot expansion keep MSFT worth monitoring.";
+
+    const nvdaCard = makeCard({
+      ticker: "NVDA",
+      action: "HOLD",
+      primary_driver: nvdaWhy,
+      action_reason: "Stay on watchlist.",
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Evidence on valuation is available but growth and risk are incomplete.",
+        trusted_signals: ["valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data.",
+      },
+    });
+    const msftCard = makeCard({
+      ticker: "MSFT",
+      action: "HOLD",
+      primary_driver: msftWhy,
+      action_reason: "Stay on watchlist.",
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Evidence on valuation is available but growth and risk are incomplete.",
+        trusted_signals: ["valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data.",
+      },
+    });
+
+    // WHY text must differ between tickers
+    expect(nvdaCard.primary_driver).not.toEqual(msftCard.primary_driver);
+    expect(nvdaCard.primary_driver).toContain("H100-B200");
+    expect(msftCard.primary_driver).toContain("Azure AI");
   });
 });

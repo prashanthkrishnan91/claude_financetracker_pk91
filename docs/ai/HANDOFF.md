@@ -1,4 +1,63 @@
 ## Last change
+Restore ticker-specific Intel card WHY while preserving insufficient-data safety (PR: "feat(intel-card): restore ticker-specific WHY on insufficient-data cards via sanitizer").
+
+## Root cause
+After the conservative consistency PR, the `insufficient_data` gate in `_compute_insight_cards` replaced `primary_driver` (WHY) and `differentiation` (ALT VIEW) unconditionally with generic signal-list copy (`conservative_why`) and `None`. This made NVDA, MSFT, TSM, META, KLAR all show identical WHY text ("Evidence on {trusted} is present, but {incomplete} are still incomplete — watchlist read only.") regardless of the available ticker-specific LLM analyst reasoning.
+
+## Fix
+
+### insufficient_data copy contract (v3)
+
+| Card field | Source | Contract |
+|---|---|---|
+| WHY (`primary_driver`) | safe original OR `conservative_why` fallback | Ticker-specific analyst text when safe (no forbidden bullish phrases); `conservative_why` when original is absent or unsafe |
+| ACTION (`action_reason`) | `conservative_action` | Always replaced — never ticker-specific under `insufficient_data` |
+| RISK (`risk_flag`) | original | Always preserved — ticker-specific risk unchanged |
+| ALT VIEW (`differentiation`) | safe original OR `None` | Preserved when safe (no forbidden bullish phrases); nulled when unsafe |
+| WHY THIS VIEW main text | `bottom_line` | "Interesting setup, but {incomplete} are still missing — not enough complete evidence for a confident position." |
+| Chips — Reliable | `trusted_signals` | Labeled "Reliable:" prefix |
+| Chips — Missing | `incomplete_signals` | Labeled "Missing:" prefix |
+
+### Forbidden bullish phrases (never rendered under insufficient_data)
+`accumulate` · `buy` · `entry opportunity` · `re-rating opportunity` · `high-conviction idea` · `add aggressively` · `strong buy` · `deploy`
+
+### Changes
+1. `reasoning_v2_plain_english.py`: added `_FORBIDDEN_BULLISH_PHRASES` frozenset and `is_safe_for_insufficient_data(text)` pure function.
+2. `recommendation_engine.py`: updated `insufficient_data` gate import and gate logic — ACTION always replaced; WHY/ALT VIEW preserved when safe, conservative fallback when absent/unsafe.
+
+## Files changed
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py` — added `_FORBIDDEN_BULLISH_PHRASES` + `is_safe_for_insufficient_data`
+- `v2/backend/app/services/recommendation_engine.py` — import `is_safe_for_insufficient_data`; updated gate logic for WHY/ALT VIEW preservation
+- `v2/backend/tests/test_intel_read_projection.py` — updated `_simulate_card_assembly_body_override`; 9 new tests for safe/unsafe preserve/replace behavior
+- `v2/backend/tests/test_reasoning_v2_plain_english.py` — updated import; 13 new tests for `is_safe_for_insufficient_data`
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` — 4 new tests in group 9 (ticker-specific WHY preservation)
+- `v2/progress_log.md` — this entry
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. Safe ticker-specific WHY is preserved — NVDA/MSFT/TSM show different WHY text.
+2. ACTION is always conservative under `insufficient_data`.
+3. RISK (`risk_flag`) preserved unchanged.
+4. Safe ALT VIEW preserved; unsafe ALT VIEW nulled.
+5. WHY THIS VIEW (intel_read) remains deterministic coverage explanation with Reliable/Missing chips.
+6. No generic identical WHY across cards when safe ticker-specific text exists.
+7. No forbidden bullish phrases rendered under `insufficient_data`.
+8. No raw metric keys in any output.
+9. Missing intel_read degrades gracefully.
+10. Business Read remains hidden.
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No Business Read re-enable.
+- No new data providers.
+
+---
+
+## Last change
 Intel card insufficient-data copy: plain-English usefulness pass (PR: "feat(intel-card): make insufficient-data card copy specific and non-redundant").
 
 ## Root cause

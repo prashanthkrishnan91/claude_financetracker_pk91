@@ -29,7 +29,10 @@ from uuid import uuid4
 
 import pytest
 
-from app.services.intelligence.reasoning_v2_plain_english import build_intel_read
+from app.services.intelligence.reasoning_v2_plain_english import (
+    build_intel_read,
+    is_safe_for_insufficient_data,
+)
 
 # ── Raw metric keys that must not appear in intel_read output ─────────────────
 
@@ -574,11 +577,21 @@ _FORBIDDEN_CARD_PHRASES = [
 
 
 def _simulate_card_assembly_body_override(reasoning: dict, intel_read: dict) -> None:
-    """Mirrors the body-copy override block in recommendation_engine._compute_insight_cards."""
+    """Mirrors the body-copy override block in recommendation_engine._compute_insight_cards.
+
+    Action always replaced. WHY preserved when safe; conservative_why when absent or unsafe.
+    ALT VIEW preserved when safe; nulled when unsafe.
+    """
     if intel_read.get("insufficient_data"):
         reasoning["action_reason"] = intel_read.get("conservative_action")
-        reasoning["primary_driver"] = intel_read.get("conservative_why")
-        reasoning["differentiation"] = None
+        if not reasoning.get("primary_driver") or not is_safe_for_insufficient_data(
+            reasoning.get("primary_driver")
+        ):
+            reasoning["primary_driver"] = intel_read.get("conservative_why")
+        if reasoning.get("differentiation") and not is_safe_for_insufficient_data(
+            reasoning.get("differentiation")
+        ):
+            reasoning["differentiation"] = None
 
 
 def test_card_action_reason_overridden_when_insufficient():
@@ -679,3 +692,224 @@ def test_card_body_not_overridden_when_not_insufficient():
 
     assert reasoning["action_reason"] == original_action
     assert reasoning["primary_driver"] == original_driver
+
+
+# ── Test 17: safe ticker-specific primary_driver preserved ────────────────────
+
+
+def test_safe_primary_driver_preserved_when_insufficient():
+    """Safe ticker-specific primary_driver survives the insufficient_data gate."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["momentum_score", "valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+    assert intel_read["insufficient_data"] is True
+
+    safe_driver = (
+        "AI infrastructure demand remains the main watchlist reason — "
+        "hyperscaler capex and H100-B200 ramp keep NVDA relevant."
+    )
+    reasoning = {
+        "action_reason": "Hold aggressively at current levels.",
+        "primary_driver": safe_driver,
+        "differentiation": "Monitoring export restriction risk.",
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    # Safe ticker-specific WHY is preserved unchanged
+    assert reasoning["primary_driver"] == safe_driver
+    # ACTION is always replaced
+    assert reasoning["action_reason"] == intel_read["conservative_action"]
+    assert reasoning["action_reason"] != "Hold aggressively at current levels."
+
+
+def test_unsafe_primary_driver_replaced_with_conservative_why():
+    """Unsafe primary_driver (contains forbidden phrase) falls back to conservative_why."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    unsafe_driver = "High-conviction idea — accumulate on any pullback."
+    reasoning = {
+        "action_reason": "Accumulate aggressively.",
+        "primary_driver": unsafe_driver,
+        "differentiation": None,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    # Unsafe WHY falls back to conservative_why
+    assert reasoning["primary_driver"] == intel_read["conservative_why"]
+    assert reasoning["primary_driver"] != unsafe_driver
+    lower_why = (reasoning["primary_driver"] or "").lower()
+    for phrase in _FORBIDDEN_CARD_PHRASES:
+        assert phrase not in lower_why, f"Forbidden phrase {phrase!r} leaked into primary_driver"
+
+
+def test_absent_primary_driver_replaced_with_conservative_why():
+    """None primary_driver (no analyst verdict) gets conservative_why injected."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    reasoning = {"action_reason": "Hold.", "primary_driver": None, "differentiation": None}
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    # None primary_driver gets conservative_why so the card has useful WHY text
+    assert reasoning["primary_driver"] == intel_read["conservative_why"]
+    assert reasoning["primary_driver"] is not None
+
+
+def test_safe_differentiation_preserved_when_insufficient():
+    """Safe ticker-specific differentiation is kept under insufficient_data."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    safe_diff = "Export restriction risk to China could materially cut data-center revenue."
+    reasoning = {
+        "action_reason": "Buy at these levels.",
+        "primary_driver": "AI infrastructure demand.",
+        "differentiation": safe_diff,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    # Safe differentiation is preserved
+    assert reasoning["differentiation"] == safe_diff
+
+
+def test_unsafe_differentiation_nulled_when_insufficient():
+    """Unsafe differentiation (contains forbidden phrase) is nulled."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    unsafe_diff = "If growth improves this re-rating opportunity becomes a strong buy."
+    reasoning = {
+        "action_reason": "Hold.",
+        "primary_driver": "AI infrastructure demand.",
+        "differentiation": unsafe_diff,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    assert reasoning["differentiation"] is None
+
+
+def test_action_reason_always_replaced_even_when_safe():
+    """ACTION is always replaced with conservative_action regardless of original content."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    safe_action = "Monitor this position on the watchlist."
+    reasoning = {
+        "action_reason": safe_action,
+        "primary_driver": "AI infrastructure demand keeps NVDA on watchlist.",
+        "differentiation": None,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    # ACTION replaced even though original was safe (conservative_action is always the source)
+    assert reasoning["action_reason"] == intel_read["conservative_action"]
+    assert reasoning["action_reason"] != safe_action
+
+
+def test_none_differentiation_stays_none_when_insufficient():
+    """None differentiation is not injected with anything under insufficient_data."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    reasoning = {
+        "action_reason": "Hold.",
+        "primary_driver": "AI demand monitoring.",
+        "differentiation": None,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+    assert reasoning["differentiation"] is None
+
+
+def test_no_forbidden_phrases_in_preserved_safe_driver():
+    """A safe primary_driver that survives the gate contains no forbidden phrases."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["momentum_score", "valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    safe_driver = (
+        "Azure AI consumption and Copilot expansion keep MSFT relevant to enterprise AI, "
+        "but incomplete growth and risk coverage keeps this below a conviction position."
+    )
+    reasoning = {
+        "action_reason": "Hold off until more data.",
+        "primary_driver": safe_driver,
+        "differentiation": None,
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    final_driver = reasoning["primary_driver"] or ""
+    for phrase in _FORBIDDEN_CARD_PHRASES:
+        assert phrase not in final_driver.lower(), (
+            f"Forbidden phrase {phrase!r} found in preserved primary_driver"
+        )

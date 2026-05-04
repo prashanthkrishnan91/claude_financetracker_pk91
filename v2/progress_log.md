@@ -1,3 +1,10 @@
+## 2026-05-04 — Fix Intel page-load WHY inconsistency + conviction over-downgrade (Level 2)
+
+- **Issue A (page-load vs Run Agents):** Added `_lacks_memo_fields` condition to `_compute_insight_cards` analyst_row selection. When the recommendation's linked `analyst_verdict` was written before Phase-7 memo fields (`primary_driver`, `conviction_level`) and has `used_fallback=False`, the freshest `latest_live_llm_by_ticker` row is now also preferred. Before: page load fell through to generic `conservative_why`; after Run Agents the fresh row was served. Now page load and Run Agents produce the same ticker-specific WHY.
+- **Issue B (all-HOLD over-downgrade):** Replaced blanket `HIGH → LOW` conviction downgrade with a conservative ladder based on `n_trusted = len(trusted_signals)`: HIGH + ≥3 trusted → MEDIUM; HIGH + <3 → LOW; MEDIUM + <2 → LOW; MEDIUM + ≥2 → preserved; LOW always preserved. BUY → HOLD remains unconditional. Cards remain differentiated by conviction level.
+- Added `_simulate_conviction_ladder` test helper. Added tests 18-22: conviction ladder cases (HIGH strong partial → MEDIUM, HIGH weak → LOW, MEDIUM very weak → LOW, MEDIUM adequate → preserved) and page-load analyst_row preference simulation.
+- No Score math, Deploy, SQL, LLM, allocation, or Business Read changes.
+
 ## 2026-05-04 — Restore ticker-specific Intel card WHY via sanitizer (Level 2)
 
 - Added `_FORBIDDEN_BULLISH_PHRASES` frozenset and `is_safe_for_insufficient_data(text)` pure deterministic function to `reasoning_v2_plain_english.py`.

@@ -1578,13 +1578,22 @@ class RecommendationService:
                 analyst_row = analyst_lookup.get((str(rec.get("agent_run_id")), ticker))
                 preferred_live_row = latest_live_llm_by_ticker.get(ticker)
                 _used_preferred = False
+                _current_av_raw = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+                _current_av_for_pref = _current_av_raw if isinstance(_current_av_raw, dict) else {}
+                # Also prefer the freshest live LLM row when the current verdict was written before
+                # Phase-7 memo fields (primary_driver, conviction_level) existed. This closes the
+                # page-load vs Run Agents inconsistency: stale rows without primary_driver now
+                # get upgraded to the freshest available analyst verdict on page load.
+                _lacks_memo_fields = not bool((_current_av_for_pref.get("primary_driver") or "").strip())
                 if preferred_live_row and (
                     analyst_row is None
-                    or bool((analyst_row.get("analyst_verdict") or {}).get("used_fallback", False))
+                    or bool(_current_av_for_pref.get("used_fallback", False))
+                    or _lacks_memo_fields
                 ):
                     analyst_row = preferred_live_row
                     _used_preferred = True
-                analyst_verdict = (analyst_row or {}).get("analyst_verdict") or None
+                _analyst_verdict_raw = (analyst_row or {}).get("analyst_verdict") or None
+                analyst_verdict = _analyst_verdict_raw if isinstance(_analyst_verdict_raw, dict) else None
                 # Determine reasoning_source for observability + frontend badge.
                 _av_gen = str((analyst_verdict or {}).get("generation_version") or "").lower()
                 _av_src = str((analyst_verdict or {}).get("analysis_source") or "").lower()
@@ -1679,17 +1688,26 @@ class RecommendationService:
 
                 # Posture consistency: when reasoning_v2 forces WATCH due to
                 # INSUFFICIENT_DATA, the card must not show BUY / HIGH CONVICTION.
-                # Downgrade BUY → HOLD and HIGH conviction → LOW so the card
-                # posture is consistent with the intel_read "Why this view?" section.
+                # Downgrade BUY → HOLD. Apply a conservative conviction ladder so
+                # cards remain differentiated rather than all flattening to LOW:
+                #   HIGH + ≥3 trusted signals → MEDIUM (meaningful partial evidence)
+                #   HIGH + <3 trusted signals → LOW  (too sparse for any conviction)
+                #   MEDIUM + <2 trusted signals → LOW (very weak coverage)
+                #   MEDIUM + ≥2 trusted signals → preserved
+                #   LOW → preserved
                 # Also replace body copy (ACTION/WHY/ALT VIEW) with conservative
                 # watchlist language so the card content matches the badge.
                 if intel_read_dict and intel_read_dict.get("insufficient_data"):
+                    _n_trusted = len(intel_read_dict.get("trusted_signals") or [])
                     if _card_action == "BUY":
                         _card_action = "HOLD"
                         _card_color = ACTION_COLORS.get("HOLD", "blue")
                     if (_card_analyst_action or "").upper() == "BUY":
                         _card_analyst_action = "HOLD"
-                    if (_card_conviction_level or "").upper() == "HIGH":
+                    _cl_upper = (_card_conviction_level or "").upper()
+                    if _cl_upper == "HIGH":
+                        _card_conviction_level = "MEDIUM" if _n_trusted >= 3 else "LOW"
+                    elif _cl_upper == "MEDIUM" and _n_trusted < 2:
                         _card_conviction_level = "LOW"
                     # ACTION always replaced with conservative watchlist language.
                     reasoning["action_reason"] = intel_read_dict.get("conservative_action")

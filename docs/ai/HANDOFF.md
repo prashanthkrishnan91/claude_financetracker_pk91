@@ -1,4 +1,68 @@
 ## Last change
+Fix Intel page-load vs Run Agents inconsistency + over-downgrade where all tickers become HOLD (PR: "fix(intel): fix page-load WHY inconsistency and differentiate conviction under insufficient-data").
+
+## Root cause
+
+### A. Page-load vs Run Agents WHY inconsistency
+`_compute_insight_cards` prefers `latest_live_llm_by_ticker` over the recommendation's linked `analyst_row` only when `analyst_row is None or used_fallback=True`. Recommendations written before Phase-7 memo fields (`primary_driver`, `conviction_level`) were introduced have `used_fallback=False` but no `primary_driver` — so the fresh row from the latest completed run was silently skipped. This meant page load produced `reasoning["primary_driver"]=None`, which the `insufficient_data` gate then replaced with generic `conservative_why`. After clicking Run Agents, a new run writes fresh analyst rows with `primary_driver`, so the fresh data was visible only within the same session — not on the next page load.
+
+Fix: added `_lacks_memo_fields` check — if the current `analyst_verdict` has no `primary_driver`, also prefer `latest_live_llm_by_ticker` (the freshest non-fallback `human_v2`/`compact_v1` row).
+
+### B. All-HOLD over-downgrade
+The `insufficient_data` gate blanket-downgraded `HIGH → LOW` conviction regardless of how many trusted signals existed. With all tickers having `insufficient_data=True` (growth/risk suppressed) and the same `conviction_level=LOW`, all 34 cards were functionally identical.
+
+Fix: replaced the single `HIGH → LOW` rule with a conservative conviction ladder based on `n_trusted = len(trusted_signals)`:
+- HIGH + ≥3 trusted signals → **MEDIUM** (meaningful partial evidence warrants some conviction)
+- HIGH + <3 trusted signals → **LOW** (too sparse for any conviction)
+- MEDIUM + <2 trusted signals → **LOW** (very weak coverage)
+- MEDIUM + ≥2 trusted signals → **preserved** (adequate partial evidence)
+- LOW → **preserved** always
+
+BUY → HOLD remains unconditional. HIGH conviction is always blocked. Differentiation comes from conviction level and ticker-specific WHY/RISK/ALT VIEW, not from action.
+
+## Page-load vs Run Agents consistency contract (v4)
+- Page load must produce the same `primary_driver` as Run Agents for the same ticker when a valid non-fallback `human_v2`/`compact_v1` analyst row exists in `agent_insights`.
+- `latest_live_llm_by_ticker` is the tiebreaker: used when `analyst_row is None`, `used_fallback=True`, **or** `primary_driver` is absent from the current verdict.
+- Ticker-specific WHY is preserved on page load when the freshest analyst verdict has a safe `primary_driver`.
+- Fallback to `conservative_why` only when no analyst row has `primary_driver` for this ticker.
+
+## Conservative posture ladder / insufficient-data policy (v2)
+- BUY is always blocked under `insufficient_data`. Action remains HOLD.
+- HIGH conviction is always blocked: downgraded to MEDIUM or LOW based on `n_trusted`.
+- MEDIUM conviction is preserved when ≥2 trusted signals exist; downgraded to LOW otherwise.
+- LOW conviction is always preserved.
+- Ticker-specific WHY/RISK/ALT VIEW preserved when safe (no forbidden bullish phrases).
+- ACTION always replaced with `conservative_action`.
+- Cards remain differentiated by conviction level even when all share action=HOLD.
+
+## Files changed
+- `v2/backend/app/services/recommendation_engine.py` — `_lacks_memo_fields` analyst_row preference condition; conviction ladder replacing blanket HIGH→LOW
+- `v2/backend/tests/test_intel_read_projection.py` — updated test 13 inline simulation; added `_simulate_conviction_ladder` helper; added tests 18-22 (conviction ladder cases + page-load preference simulation)
+- `v2/progress_log.md` — this entry
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. Page load uses freshest available `primary_driver` when analyst_verdict lacks it (Issue A).
+2. Not all 34 tickers share identical conviction_level=LOW under insufficient_data (Issue B).
+3. BUY/HIGH remain blocked; no card shows BUY under insufficient_data.
+4. Ticker-specific WHY/RISK/ALT VIEW preserved when safe.
+5. All 9 forbidden bullish phrases still blocked.
+6. Business Read remains hidden.
+7. No raw metric keys in output.
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No Business Read re-enable.
+- No new data providers.
+- No frontend component changes.
+
+---
+
+## Last change
 Restore ticker-specific Intel card WHY while preserving insufficient-data safety (PR: "feat(intel-card): restore ticker-specific WHY on insufficient-data cards via sanitizer").
 
 ## Root cause

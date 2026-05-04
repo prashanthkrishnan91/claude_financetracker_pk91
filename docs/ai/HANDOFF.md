@@ -1,4 +1,56 @@
 ## Last change
+Intel card consistency + page-load intel_read hydration fix (PR: "fix(intel-card): fix intel_read hydration on page load and BUY/WATCH posture contradiction").
+
+## Root cause
+Two separate issues caused Intel card contradictions after the reasoning_v2 UI PR:
+
+**1. Hydration gap (page load)**
+`_build_intel_read_for_card` only read `_reasoning_v2` from the card's own `agent_run_id` run.
+Active recommendations can bind to old runs that predate `_reasoning_v2`. On page load those runs
+lacked `_reasoning_v2`, so `intel_read` was null. After clicking Run Agents, new recommendations
+bound to a fresh run with `_reasoning_v2`, so intel_read populated correctly.
+Fix: the existing `latest_for_thesis` query (already fetching allocation for latest 5 completed
+runs) now also tracks `latest_reasoning_v2_run_id`. `_build_intel_read_for_card` gains a
+`fallback_run_id` parameter and uses this latest run when the card's primary run lacks `_reasoning_v2`.
+
+**2. BUY/HIGH CONVICTION vs WATCH contradiction**
+Card `action`/`conviction_level` come from the legacy LLM recommendations path (BUY, HIGH).
+`intel_read` comes from the deterministic `_reasoning_v2` builder (WATCH, INSUFFICIENT_DATA).
+These two signal paths could contradict per-card, producing "Why this view?" saying
+"stays on watch instead of becoming a high-conviction idea" on a card showing BUY/HIGH CONVICTION.
+Fix: `build_intel_read` now returns an `insufficient_data: bool` backend hint (not rendered by
+frontend `WhyThisView`). In card assembly, when `intel_read.insufficient_data=True`, the card's
+`action` is downgraded from BUY → HOLD and `conviction_level` from HIGH → LOW before constructing
+the `InsightCard`. This enforces one source of truth: the deterministic INSUFFICIENT_DATA WATCH
+signal wins over the stale LLM BUY label.
+
+## Files changed
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py` — add `insufficient_data: bool` to `build_intel_read` output
+- `v2/backend/app/services/recommendation_engine.py` — `_build_intel_read_for_card` gains `fallback_run_id`; thesis contract block extended to also track `latest_reasoning_v2_run_id`; card assembly applies BUY→HOLD downgrade when `intel_read.insufficient_data`
+- `v2/backend/tests/test_reasoning_v2_plain_english.py` — 5 new tests for `insufficient_data` flag
+- `v2/backend/tests/test_intel_read_projection.py` — updated local `_build_intel_read_for_card` copy to include fallback; 9 new tests for fallback behavior, ticker-absent no-fallback, BUY→HOLD downgrade, and `insufficient_data` flag
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. Page load: if latest run has `_reasoning_v2`, cards now include intel_read (not null).
+2. No card shows BUY / HIGH CONVICTION while intel_read says WATCH/INSUFFICIENT_DATA.
+3. INSUFFICIENT_DATA WATCH cards show HOLD / LOW CONVICTION consistent with intel_read.
+4. Constructive (ACCUMULATE) cards with `insufficient_data=False` are not downgraded.
+5. No raw metric keys rendered (unchanged invariant).
+6. Business Read remains hidden (unchanged invariant).
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No frontend component changes.
+- No app-wide redesign.
+
+---
+
+## Last change
 Intel Reasoning v2 UI: surface reasoning_v2 coverage as "Why this view?" on AgentInsightCard (PR: "feat(intel-ui): surface reasoning_v2 coverage as plain-English Why this view section").
 
 ## intel_read contract (reasoning_v2 plain-English projection)

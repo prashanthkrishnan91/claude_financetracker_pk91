@@ -11,14 +11,6 @@ const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }
   REVIEW: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
 };
 
-// Intel posture styles (v3): advisor-facing posture buckets decoupled from broker labels.
-const POSTURE_STYLES: Record<string, { bg: string; text: string; border: string }> = {
-  "Add Candidate": { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
-  "Trim Candidate": { bg: "bg-yellow-500/10", text: "text-yellow-400", border: "border-yellow-500/30" },
-  "Risk Watch": { bg: "bg-red-500/10", text: "text-red-400", border: "border-red-500/30" },
-  "Review": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
-  "Watchlist": { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
-};
 
 const CONVICTION_STYLES: Record<string, string> = {
   HIGH: "bg-green-500/15 text-green-300 border border-green-500/30",
@@ -45,10 +37,11 @@ export function convictionBadgeLabel(level: "HIGH" | "MEDIUM" | "LOW"): string {
   return CONVICTION_LABELS[level];
 }
 
-function normalizeAction(action?: string | null): string {
+function normalizeAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SELL" {
   const raw = (action || "").toUpperCase();
-  if (raw === "REDUCE") return "TRIM";
-  if (["BUY", "HOLD", "TRIM", "SELL", "REVIEW"].includes(raw)) return raw;
+  if (raw === "BUY") return "BUY";
+  if (raw === "SELL") return "SELL";
+  if (raw === "TRIM" || raw === "REDUCE") return "TRIM";
   return "HOLD";
 }
 
@@ -79,10 +72,6 @@ function mainThesis(card: InsightCardData): string {
 
 
 
-function actionBadgeLabel(action: string, intelRead?: IntelRead | null): string {
-  if (action === "HOLD" && intelRead?.insufficient_data) return "WATCHLIST";
-  return action;
-}
 
 function reasoningSourceLabel(source?: string | null): string | null {
   if (!source) return null;
@@ -96,9 +85,7 @@ function reasoningSourceLabel(source?: string | null): string | null {
 
 export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onClick?: () => void }) {
   const action = normalizeAction(card.analyst_action || card.action);
-  // Use Intel posture styles when available; fall back to action styles.
-  const postureLabel = card.intel_posture_label || null;
-  const styles = (postureLabel && POSTURE_STYLES[postureLabel]) || ACTION_STYLES[action] || ACTION_STYLES.HOLD;
+  const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
   const convictionLevel = _resolveConvictionLevel(card);
   const structuredSchema = isStructuredSchema(card);
 
@@ -124,7 +111,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         </div>
         <div className="flex flex-col items-end gap-1 text-[10px]">
           <span className={cn("px-2 py-0.5 rounded border font-bold uppercase leading-tight", styles.bg, styles.text, styles.border)}>
-            {postureLabel || actionBadgeLabel(action, card.intel_read)}
+            {action}
           </span>
           <span className={cn("px-2 py-0.5 rounded font-semibold uppercase", CONVICTION_STYLES[convictionLevel])}>
             {convictionBadgeLabel(convictionLevel)}

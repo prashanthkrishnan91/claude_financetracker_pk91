@@ -1,26 +1,35 @@
 
 ## Last change
-Align Intel summary/filter display contract with posture badges + evidence framing (PR: "fix(intel-ui): unify posture filters with card badges and clarify evidence section label").
+Simplify Intel UI to single action model — BUY/HOLD/TRIM/SELL replacing posture bucket UI (PR: "fix(intel): simplify Intel display contract — BUY/HOLD/TRIM/SELL everywhere").
 
 ## Root cause
-Frontend summary cards were still carrying legacy shorthand labels ("Add", "Trim") and the evidence block heading came from backend copy (often "Why this view?"). This made the top filter model and card-level language feel like two recommendation systems in parallel even though counts already use `intel_filter_bucket`.
+Two competing recommendation systems in the Intel UI: Portfolio Command Center (PortfolioSynthesisPanel) already used BUY/HOLD/TRIM/SELL, but the filter tabs and card badges used posture buckets (Add Candidate, Watchlist, Review, Risk Watch, Trim Candidate) introduced in earlier PRs. Multiple patch attempts failed to resolve the inconsistency. Decision: abandon the posture bucket UI contract as the primary visible system; return to one simple action model everywhere.
 
 ## Fix
-- Intel filter cards now use the finalized posture labels directly (`Add Candidate`, `Trim Candidate`) so top summaries and card badges share identical bucket names.
-- Agent card evidence section heading is now consistently `Evidence check` (UI-controlled), matching actual content scope (coverage + missing data), while keeping Reliable/Missing chips unchanged.
-- Added focused regression tests for: posture bucket counting (not HOLD), bucket distribution, badge precedence (no conflicting primary status), no raw metric keys, and Business Read hidden contract.
+- `page.tsx`: Replaced `INTEL_FILTERS` posture buckets with `ALL/BUY/HOLD/TRIM/SELL`. Added `normalizeDisplayAction` helper. Filter counts and filtering now use `normalizeDisplayAction(r.analyst_action || r.action)` — no longer reads `intel_filter_bucket`.
+- `AgentInsightCard.tsx`: Removed `POSTURE_STYLES`, removed `intel_posture_label` from card badge logic. Badge always shows normalized action (BUY/HOLD/TRIM/SELL). `normalizeAction` now maps REVIEW → HOLD for full alignment. Removed `actionBadgeLabel` (no "WATCHLIST" relabeling).
+- `AgentInsightCardThesisVisibility.test.tsx`: Replaced posture-contract section 10 with new section testing BUY/HOLD/TRIM/SELL unified display contract. Added section 11 for Evidence check label contract.
 
 ## Explicit non-changes
-- No backend scoring/semantics changes.
+- No backend changes. `intel_posture_label` and `intel_filter_bucket` fields remain in the data model for backend compatibility — just not consumed by the visible UI.
 - No Deploy/allocation changes.
 - No SQL.
 - No Business Read re-enable.
-- No raw metric key rendering changes outside existing guardrails.
+- No new posture/category system.
+- `PortfolioSynthesisPanel` already used BUY/HOLD/TRIM/SELL — no changes needed there.
+
+## Intel display contract (active)
+- Visible filter buckets: ALL / BUY / HOLD / TRIM / SELL
+- Card badge: normalized action (BUY/HOLD/TRIM/SELL), never posture label
+- Evidence check section: secondary context only (Reliable/Missing chips + posture_reason text)
+- WHY/RISK/ACTION/ALT VIEW: ticker-specific, remain unchanged
+- Business Read: hidden
+- Raw metric keys: not rendered
 
 ## Files changed
 - `v2/frontend/src/app/dashboard/recommendations/page.tsx`
 - `v2/frontend/src/components/cards/AgentInsightCard.tsx`
-- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` (assertions aligned to contract)
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx`
 - `docs/ai/HANDOFF.md`
 - `v2/progress_log.md`
 

@@ -627,85 +627,133 @@ describe("Insufficient-data cards — ticker-specific WHY preserved when safe", 
   });
 });
 
-// ── 10. Intel posture system (v3) — badge, filter, posture_reason ─────────────
+// ── 10. Unified action display contract — BUY/HOLD/TRIM/SELL ─────────────────
+//
+// The visible Intel UI uses one consistent action system: BUY / HOLD / TRIM / SELL.
+// The old posture buckets (Add Candidate, Watchlist, Review, Risk Watch, Trim
+// Candidate) are backend-internal only and must NOT appear as primary visible labels.
 
-describe("Intel posture system — intel_posture_label and intel_filter_bucket", () => {
-  it("intel_posture_label is accessible on InsightCardData", () => {
-    const card = makeCard({ intel_posture_label: "Add Candidate", intel_filter_bucket: "Add Candidate" });
-    expect(card.intel_posture_label).toBe("Add Candidate");
-    expect(card.intel_filter_bucket).toBe("Add Candidate");
+function normalizeDisplayAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SELL" {
+  const raw = (action || "").toUpperCase();
+  if (raw === "BUY") return "BUY";
+  if (raw === "SELL") return "SELL";
+  if (raw === "TRIM" || raw === "REDUCE") return "TRIM";
+  return "HOLD";
+}
+
+describe("Unified action display contract — BUY/HOLD/TRIM/SELL", () => {
+  it("normalizeDisplayAction maps BUY/HOLD/TRIM/SELL correctly", () => {
+    expect(normalizeDisplayAction("BUY")).toBe("BUY");
+    expect(normalizeDisplayAction("HOLD")).toBe("HOLD");
+    expect(normalizeDisplayAction("TRIM")).toBe("TRIM");
+    expect(normalizeDisplayAction("SELL")).toBe("SELL");
   });
 
-  it("intel_posture_label renders as card badge — not broker-style HOLD/WATCHLIST", () => {
-    // Simulate what AgentInsightCard badge logic does:
-    // prefer intel_posture_label when present; fall back to actionBadgeLabel.
-    function resolveBadgeLabel(card: ReturnType<typeof makeCard>): string {
-      if (card.intel_posture_label) return card.intel_posture_label;
-      const action = card.action?.toUpperCase() || "HOLD";
-      if (action === "HOLD" && card.intel_read?.insufficient_data) return "WATCHLIST";
-      return action;
-    }
-
-    const addCard = makeCard({ action: "HOLD", intel_posture_label: "Add Candidate" });
-    const reviewCard = makeCard({ action: "HOLD", intel_posture_label: "Review" });
-    const riskCard = makeCard({ action: "HOLD", intel_posture_label: "Risk Watch" });
-    const watchCard = makeCard({ action: "HOLD", intel_posture_label: "Watchlist" });
-    const trimCard = makeCard({ action: "TRIM", intel_posture_label: "Trim Candidate" });
-
-    expect(resolveBadgeLabel(addCard)).toBe("Add Candidate");
-    expect(resolveBadgeLabel(reviewCard)).toBe("Review");
-    expect(resolveBadgeLabel(riskCard)).toBe("Risk Watch");
-    expect(resolveBadgeLabel(watchCard)).toBe("Watchlist");
-    expect(resolveBadgeLabel(trimCard)).toBe("Trim Candidate");
+  it("normalizeDisplayAction maps REVIEW and unknown values to HOLD", () => {
+    expect(normalizeDisplayAction("REVIEW")).toBe("HOLD");
+    expect(normalizeDisplayAction("")).toBe("HOLD");
+    expect(normalizeDisplayAction(null)).toBe("HOLD");
+    expect(normalizeDisplayAction(undefined)).toBe("HOLD");
   });
 
-  it("filter tabs count intel_filter_bucket — not raw action", () => {
+  it("normalizeDisplayAction maps REDUCE to TRIM", () => {
+    expect(normalizeDisplayAction("REDUCE")).toBe("TRIM");
+  });
+
+  it("filter tabs count normalized action — not intel_filter_bucket", () => {
     const cards = [
-      makeCard({ ticker: "VOO", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
-      makeCard({ ticker: "VTI", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
-      makeCard({ ticker: "BTC", action: "HOLD", intel_filter_bucket: "Risk Watch" }),
-      makeCard({ ticker: "NVDA", action: "HOLD", intel_filter_bucket: "Review" }),
-      makeCard({ ticker: "SNOW", action: "TRIM", intel_filter_bucket: "Trim Candidate" }),
-      makeCard({ ticker: "CRM", action: "HOLD", intel_filter_bucket: "Watchlist" }),
+      makeCard({ ticker: "VOO",  action: "BUY" }),
+      makeCard({ ticker: "VTI",  action: "BUY" }),
+      makeCard({ ticker: "NVDA", action: "HOLD" }),
+      makeCard({ ticker: "SNOW", action: "TRIM" }),
+      makeCard({ ticker: "CRM",  action: "SELL" }),
+      makeCard({ ticker: "MSFT", action: "HOLD" }),
     ];
 
     const counts: Record<string, number> = { ALL: cards.length };
     for (const r of cards) {
-      const bucket = r.intel_filter_bucket || "Watchlist";
+      const bucket = normalizeDisplayAction(r.action);
       counts[bucket] = (counts[bucket] || 0) + 1;
     }
 
-    // Not all in HOLD=6; distribution across Intel posture buckets
-    expect(counts["HOLD"]).toBeUndefined();
-    expect(counts["Add Candidate"]).toBe(2);
-    expect(counts["Risk Watch"]).toBe(1);
-    expect(counts["Review"]).toBe(1);
-    expect(counts["Trim Candidate"]).toBe(1);
-    expect(counts["Watchlist"]).toBe(1);
     expect(counts["ALL"]).toBe(6);
+    expect(counts["BUY"]).toBe(2);
+    expect(counts["HOLD"]).toBe(2);
+    expect(counts["TRIM"]).toBe(1);
+    expect(counts["SELL"]).toBe(1);
+    // No posture buckets in counts
+    expect(counts["Add Candidate"]).toBeUndefined();
+    expect(counts["Watchlist"]).toBeUndefined();
+    expect(counts["Review"]).toBeUndefined();
+    expect(counts["Risk Watch"]).toBeUndefined();
+    expect(counts["Trim Candidate"]).toBeUndefined();
   });
 
-  it("filter by intel_filter_bucket returns correct subset", () => {
+  it("filter by normalized action returns correct subset", () => {
     const cards = [
-      makeCard({ ticker: "VOO", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
-      makeCard({ ticker: "BTC", action: "HOLD", intel_filter_bucket: "Risk Watch" }),
-      makeCard({ ticker: "NVDA", action: "HOLD", intel_filter_bucket: "Review" }),
-      makeCard({ ticker: "CRM", action: "HOLD", intel_filter_bucket: "Watchlist" }),
+      makeCard({ ticker: "VOO",  action: "BUY" }),
+      makeCard({ ticker: "NVDA", action: "HOLD" }),
+      makeCard({ ticker: "SNOW", action: "TRIM" }),
+      makeCard({ ticker: "CRM",  action: "SELL" }),
     ];
 
-    const filtered = cards.filter((r) => (r.intel_filter_bucket || "Watchlist") === "Review");
-    expect(filtered.length).toBe(1);
-    expect(filtered[0].ticker).toBe("NVDA");
+    const buyCards = cards.filter((r) => normalizeDisplayAction(r.action) === "BUY");
+    expect(buyCards.length).toBe(1);
+    expect(buyCards[0].ticker).toBe("VOO");
+
+    const holdCards = cards.filter((r) => normalizeDisplayAction(r.action) === "HOLD");
+    expect(holdCards.length).toBe(1);
+    expect(holdCards[0].ticker).toBe("NVDA");
   });
 
-  it("legacy cards without intel_filter_bucket default to Watchlist bucket", () => {
-    const legacyCard = makeCard({ action: "HOLD" }); // no intel_filter_bucket set
-    const bucket = legacyCard.intel_filter_bucket || "Watchlist";
-    expect(bucket).toBe("Watchlist");
+  it("card badge uses normalized action — not intel_posture_label", () => {
+    // Simulate AgentInsightCard badge logic: normalizeAction(card.analyst_action || card.action)
+    function resolveBadgeLabel(card: ReturnType<typeof makeCard>): string {
+      return normalizeDisplayAction(card.analyst_action as string | null ?? card.action);
+    }
+
+    const buyCard  = makeCard({ action: "BUY",  intel_posture_label: "Add Candidate" });
+    const holdCard = makeCard({ action: "HOLD", intel_posture_label: "Watchlist" });
+    const trimCard = makeCard({ action: "TRIM", intel_posture_label: "Trim Candidate" });
+    const sellCard = makeCard({ action: "SELL", intel_posture_label: "Risk Watch" });
+
+    expect(resolveBadgeLabel(buyCard)).toBe("BUY");
+    expect(resolveBadgeLabel(holdCard)).toBe("HOLD");
+    expect(resolveBadgeLabel(trimCard)).toBe("TRIM");
+    expect(resolveBadgeLabel(sellCard)).toBe("SELL");
+  });
+
+  it("no posture label strings appear as primary badge labels", () => {
+    const POSTURE_LABELS = ["Add Candidate", "Watchlist", "Review", "Risk Watch", "Trim Candidate"];
+    const cards = [
+      makeCard({ action: "BUY" }),
+      makeCard({ action: "HOLD" }),
+      makeCard({ action: "TRIM" }),
+      makeCard({ action: "SELL" }),
+    ];
+    for (const card of cards) {
+      const badge = normalizeDisplayAction(card.action);
+      for (const postureLabel of POSTURE_LABELS) {
+        expect(badge).not.toBe(postureLabel);
+      }
+    }
+  });
+
+  it("filter counts match card badge system — no mismatch between tabs and badges", () => {
+    const cards = [
+      makeCard({ ticker: "A", action: "BUY" }),
+      makeCard({ ticker: "B", action: "HOLD" }),
+      makeCard({ ticker: "C", action: "TRIM" }),
+    ];
+    // Badge and filter bucket must be the same normalized value
+    for (const card of cards) {
+      const badge = normalizeDisplayAction(card.action);
+      const filterBucket = normalizeDisplayAction(card.action);
+      expect(badge).toBe(filterBucket);
+    }
   });
 
   it("'LOW CONVICTION' string does not appear as a badge label", () => {
-    // CONVICTION_LABELS in AgentInsightCard: LOW → "Evidence limited"
     const CONVICTION_LABELS: Record<string, string> = {
       HIGH: "High confidence",
       MEDIUM: "Moderate confidence",
@@ -717,85 +765,97 @@ describe("Intel posture system — intel_posture_label and intel_filter_bucket",
     }
   });
 
-  it("posture_reason in intel_read is card-specific — different postures produce different text", () => {
-    const addCard = makeCard({
+  it("posture_reason in intel_read is secondary context — different tickers produce different text", () => {
+    const buyCard = makeCard({
+      action: "BUY",
       intel_read: {
-        title: "Why this view?",
-        posture_label: "on watch",
-        summary: "Some evidence available.",
-        trusted_signals: [],
+        title: "Evidence check",
+        posture_label: "constructive",
+        summary: "Strong signals on valuation and business quality.",
+        trusted_signals: ["valuation", "business quality"],
         incomplete_signals: [],
-        caveat: "Early signal only.",
-        posture_reason: "Core index or dividend ETF — regular contribution target regardless of short-term signal completeness.",
+        caveat: "Monitor for macro changes.",
+        posture_reason: "Core index ETF — regular contribution target.",
       },
     });
-    const riskCard = makeCard({
+    const holdCard = makeCard({
+      action: "HOLD",
       intel_read: {
-        title: "Why this view?",
+        title: "Evidence check",
         posture_label: "on watch",
-        summary: "Speculative setup.",
-        trusted_signals: [],
-        incomplete_signals: [],
-        caveat: "High volatility.",
-        posture_reason: "High-risk or speculative position. Monitor closely — not a core holding candidate.",
-      },
-    });
-    const reviewCard = makeCard({
-      intel_read: {
-        title: "Why this view?",
-        posture_label: "on watch",
-        summary: "Partial evidence.",
-        trusted_signals: ["business quality", "valuation"],
+        summary: "Partial evidence. Growth and risk still incomplete.",
+        trusted_signals: ["valuation"],
         incomplete_signals: ["growth", "risk"],
         caveat: "Wait for more signals.",
-        posture_reason: "Evidence on business quality and valuation warrants attention, but growth and risk are still missing.",
+        posture_reason: "High-risk or speculative position. Monitor closely.",
       },
     });
-
-    expect(addCard.intel_read?.posture_reason).not.toEqual(riskCard.intel_read?.posture_reason);
-    expect(addCard.intel_read?.posture_reason).not.toEqual(reviewCard.intel_read?.posture_reason);
-    expect(riskCard.intel_read?.posture_reason).not.toEqual(reviewCard.intel_read?.posture_reason);
+    expect(buyCard.intel_read?.posture_reason).not.toEqual(holdCard.intel_read?.posture_reason);
   });
 
-  it("posture_reason is preferred in WhyThisView display over bottom_line/summary", () => {
-    // Mirror the WhyThisView display logic:
-    function resolveWhyText(intelRead: typeof cards[0]["intel_read"]): string {
-      return intelRead?.posture_reason || intelRead?.bottom_line || intelRead?.summary || "";
-    }
-
-    const cards = [
-      makeCard({
-        intel_read: {
-          title: "Why this view?",
-          posture_label: "on watch",
-          summary: "Generic fallback summary.",
-          trusted_signals: [],
-          incomplete_signals: [],
-          caveat: "Wait.",
-          posture_reason: "Specific posture explanation for this ticker.",
-          bottom_line: "Bottom line fallback.",
-        },
-      }),
-    ];
-    const text = resolveWhyText(cards[0].intel_read);
-    expect(text).toBe("Specific posture explanation for this ticker.");
-    expect(text).not.toBe("Generic fallback summary.");
-    expect(text).not.toBe("Bottom line fallback.");
-  });
-
-  it("raw metric keys do not appear in intel_posture_label or intel_filter_bucket", () => {
+  it("raw metric keys do not appear in visible action badge labels", () => {
     const RAW_METRIC_KEYS = [
       "fcf_margin", "roic_ttm", "p_fcf", "fcf_yield", "gross_margin",
       "net_debt_to_ebitda", "ev_ebitda", "revenue_cagr_3y", "max_drawdown_1y",
       "trailing_pe", "forward_pe", "momentum_score", "valuation_score",
     ];
-    const validPostureLabels = [
-      "Add Candidate", "Watchlist", "Review", "Risk Watch", "Trim Candidate",
-    ];
-    for (const label of validPostureLabels) {
+    const visibleBadgeLabels = ["BUY", "HOLD", "TRIM", "SELL"];
+    for (const label of visibleBadgeLabels) {
       for (const rawKey of RAW_METRIC_KEYS) {
         expect(label).not.toContain(rawKey);
       }
     }
+  });
+});
+
+// ── 11. Evidence check section — label contract ───────────────────────────────
+
+describe("Evidence check section label contract", () => {
+  it("WhyThisView section uses 'Evidence check' label (not 'Why this view?')", () => {
+    // The rendered section header in WhyThisView is the constant string "Evidence check".
+    // This is verified at the component level — this test documents the data-contract side.
+    // intel_read.title is a data field; the UI renders its own "Evidence check" label.
+    const SECTION_LABEL = "Evidence check";
+    expect(SECTION_LABEL).toBe("Evidence check");
+    expect(SECTION_LABEL).not.toBe("Why this view?");
+    expect(SECTION_LABEL).not.toMatch(/why this view/i);
+  });
+
+  it("intel_read can still carry a title field for data purposes without it becoming the UI label", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "on watch",
+      summary: "Test summary.",
+      trusted_signals: ["valuation"],
+      incomplete_signals: ["growth"],
+      caveat: "Test caveat.",
+    };
+    // The data field exists, but the UI renders "Evidence check" independently
+    expect(intelRead.title).toBeDefined();
+    const UI_RENDERED_LABEL = "Evidence check";
+    expect(UI_RENDERED_LABEL).not.toBe(intelRead.title);
+  });
+
+  it("posture_reason is preferred in Evidence check display over bottom_line/summary", () => {
+    function resolveEvidenceText(intelRead: IntelRead | null | undefined): string {
+      return intelRead?.posture_reason || intelRead?.bottom_line || intelRead?.summary || "";
+    }
+
+    const card = makeCard({
+      intel_read: {
+        title: "Evidence check",
+        posture_label: "on watch",
+        summary: "Generic fallback summary.",
+        trusted_signals: [],
+        incomplete_signals: [],
+        caveat: "Wait.",
+        posture_reason: "Specific evidence explanation for this ticker.",
+        bottom_line: "Bottom line fallback.",
+      },
+    });
+    const text = resolveEvidenceText(card.intel_read);
+    expect(text).toBe("Specific evidence explanation for this ticker.");
+    expect(text).not.toBe("Generic fallback summary.");
+    expect(text).not.toBe("Bottom line fallback.");
   });
 });

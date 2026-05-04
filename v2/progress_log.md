@@ -1,3 +1,15 @@
+## 2026-05-04 — Intel posture system v3: end-to-end advisor posture contract (Level 2)
+
+- **Root cause:** All 34 tickers collapsed into HOLD=34/BUY=0 filter because filter tabs used `r.action` (broker-style), which is blocked to HOLD under `insufficient_data`. Card badge showed identical "WATCHLIST" for all insufficient_data cards regardless of risk profile.
+- **Backend:** Added `_derive_intel_posture()` deterministic function + `_INTEL_ADD_CANDIDATE_TICKERS` / `_INTEL_RISK_WATCH_TICKERS` sets in `recommendation_engine.py`. Derives 5 advisor posture buckets from safe structural signals: Add Candidate (ETFs, BUY+MEDIUM+ data), Trim Candidate (TRIM/SELL action), Risk Watch (crypto/speculative/bearish technical), Review (insufficient_data + MEDIUM conviction), Watchlist (everything else).
+- **Backend:** Added `build_posture_reason()` pure function to `reasoning_v2_plain_english.py`. Generates card-specific explanation of WHY the posture was assigned (e.g., names missing signals for Review, risk profile for Risk Watch). Injected into `intel_read_dict.posture_reason` in `_compute_insight_cards`.
+- **Backend model:** Added `intel_posture_label: Optional[str]` and `intel_filter_bucket: Optional[str]` to `InsightCard`.
+- **Frontend:** `INTEL_FILTERS` (Add/Watchlist/Review/Risk Watch/Trim) replaces `ACTION_FILTERS` (BUY/HOLD/SELL/TRIM/REVIEW) in `recommendations/page.tsx`. Filter counts use `r.intel_filter_bucket` not `r.action`.
+- **Frontend:** `AgentInsightCard.tsx` uses `intel_posture_label` for the card badge (with matching POSTURE_STYLES). Card border color matches posture. `WhyThisView` shows `posture_reason` as primary text (over `bottom_line`/`summary`).
+- **Frontend types:** `IntelRead.posture_reason`, `InsightCardData.intel_posture_label`, `InsightCardData.intel_filter_bucket` added to `api.ts`.
+- **Tests:** 13 new backend posture tests (23-35: differentiation, ETF/crypto/speculative, MEDIUM→Review, LOW→Watchlist, posture_reason card-specificity, no raw keys); 9 new frontend tests (posture badge, filter counts, fallback for legacy cards, LOW CONVICTION not rendered, posture_reason preferred in WhyThisView). 124 backend + 54 frontend pass; 3 pre-existing frontend failures unchanged.
+- No SQL, Deploy, allocation, score math, LLM, or Business Read changes.
+
 ## 2026-05-04 — Fix Intel page-load WHY inconsistency + conviction over-downgrade (Level 2)
 
 - **Issue A (page-load vs Run Agents):** Added `_lacks_memo_fields` condition to `_compute_insight_cards` analyst_row selection. When the recommendation's linked `analyst_verdict` was written before Phase-7 memo fields (`primary_driver`, `conviction_level`) and has `used_fallback=False`, the freshest `latest_live_llm_by_ticker` row is now also preferred. Before: page load fell through to generic `conservative_why`; after Run Agents the fresh row was served. Now page load and Run Agents produce the same ticker-specific WHY.

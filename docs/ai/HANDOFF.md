@@ -1,4 +1,76 @@
 ## Last change
+Build end-to-end Intel advisor posture contract — replace broker-style filter collapse with advisor posture buckets (PR: "feat(intel): add intel posture system — advisor posture buckets replacing broker HOLD collapse").
+
+## Root cause
+All 34 tickers had `action=HOLD` after the insufficient_data gate blocked BUY. The filter tabs were keyed to `r.action` (broker-style BUY/HOLD/SELL/TRIM/REVIEW), so HOLD=34/BUY=0 was the permanent display state. Card badges all showed "WATCHLIST" (HOLD + insufficient_data relabel) with no differentiation between ETFs, crypto, speculative positions, MEDIUM-conviction single stocks, or tickers with TRIM signals.
+
+## New Intel posture contract (v3)
+
+### Posture derivation (`_derive_intel_posture`)
+Deterministic function in `recommendation_engine.py`. Evaluated in priority order:
+1. TRIM/SELL action → **Trim Candidate**
+2. Core index / dividend ETFs (VOO, VTI, QQQ, SCHD, etc.) → **Add Candidate** (DCA target regardless of data coverage)
+3. Crypto / speculative tickers (BTC, XRP, RIVN, KLAR, BLSH, STUB) → **Risk Watch**
+4. Bearish technical signal (SELL/WEAK/BEARISH) → **Risk Watch**
+5. BUY action + sufficient data → **Add Candidate**
+6. MEDIUM+ conviction + sufficient data → **Add Candidate**
+7. Insufficient data + MEDIUM conviction → **Review** (partial evidence, worth watching)
+8. Everything else → **Watchlist**
+
+### New InsightCard fields
+- `intel_posture_label: Optional[str]` — advisor badge shown on card
+- `intel_filter_bucket: Optional[str]` — key for filter tab counting + filtering
+
+### posture_reason (card-specific "Why this view?")
+`build_posture_reason()` in `reasoning_v2_plain_english.py` generates a card-specific sentence explaining WHY this posture was assigned. Injected into `intel_read_dict["posture_reason"]` during card assembly. `WhyThisView` component shows `posture_reason` as primary text over `bottom_line`/`summary`.
+
+### Filter tabs
+`INTEL_FILTERS` replaces `ACTION_FILTERS` in `recommendations/page.tsx`:
+- All | Add Candidate | Watchlist | Review | Risk Watch | Trim Candidate
+Counts use `r.intel_filter_bucket` (not `r.action`). Legacy cards without the field default to Watchlist bucket.
+
+### Card badge
+`AgentInsightCard.tsx` uses `card.intel_posture_label` for the badge. `POSTURE_STYLES` map provides color coding (green=Add, blue=Watchlist, purple=Review, red=Risk Watch, yellow=Trim). Card border also reflects posture.
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No Business Read re-enable.
+- No new data providers.
+- No raw metric keys exposed.
+
+## Files changed
+- `v2/backend/app/models/recommendation.py` — added `intel_posture_label`, `intel_filter_bucket` to InsightCard
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py` — added `build_posture_reason()`, `_INTEL_RISK_WATCH_TICKERS` set
+- `v2/backend/app/services/recommendation_engine.py` — added `_derive_intel_posture()`, `_INTEL_ADD_CANDIDATE_TICKERS`, `_INTEL_RISK_WATCH_TICKERS`; wired posture computation + posture_reason injection into `_compute_insight_cards`; updated import
+- `v2/backend/tests/test_intel_read_projection.py` — local `_derive_intel_posture` copy for testing; 13 new posture tests (23-35)
+- `v2/frontend/src/lib/api.ts` — added `intel_posture_label`, `intel_filter_bucket` to InsightCardData; added `posture_reason` to IntelRead
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx` — added `POSTURE_STYLES`; badge uses `intel_posture_label`; `WhyThisView` prefers `posture_reason`
+- `v2/frontend/src/app/dashboard/recommendations/page.tsx` — replaced `ACTION_FILTERS` with `INTEL_FILTERS`; filter counts use `intel_filter_bucket`
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` — 9 new frontend posture tests (group 10)
+- `v2/progress_log.md` — this entry
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. ETF tickers (VOO, VTI, SCHD, etc.) → Add Candidate bucket, not HOLD/Watchlist.
+2. Crypto/speculative (BTC, XRP, RIVN, KLAR) → Risk Watch bucket.
+3. MEDIUM conviction insufficient-data tickers → Review bucket.
+4. LOW conviction insufficient-data tickers → Watchlist bucket.
+5. TRIM/SELL action → Trim Candidate bucket (highest priority).
+6. Filter tabs show Intel posture buckets, not BUY=0/HOLD=34 collapse.
+7. Card badge shows intel_posture_label (e.g., "Review"), not relabeled "WATCHLIST" for all.
+8. "Why this view?" posture_reason is card-specific — different postures produce different text.
+9. No raw metric keys in any output.
+10. Business Read remains hidden.
+11. BUY/HIGH still blocked under insufficient_data.
+12. No SQL migration required.
+
+---
+
+## Last change
 Fix Intel page-load vs Run Agents inconsistency + over-downgrade where all tickers become HOLD (PR: "fix(intel): fix page-load WHY inconsistency and differentiate conviction under insufficient-data").
 
 ## Root cause

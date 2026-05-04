@@ -222,6 +222,90 @@ def _build_bottom_line(
     return "Not enough evidence yet to form a view."
 
 
+_INTEL_RISK_WATCH_TICKERS: frozenset[str] = frozenset(
+    {"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"}
+)
+
+
+def build_posture_reason(
+    *,
+    posture_label: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+    ticker: str,
+    category: str,
+) -> str:
+    """Card-specific explanation of why this Intel posture was assigned.
+
+    Pure function — deterministic, no IO. Called after _derive_intel_posture
+    assigns the posture_label so it can reference it directly.
+    Used to populate intel_read.posture_reason for the WhyThisView section.
+    """
+    cat_low = (category or "").lower()
+    ticker_up = (ticker or "").upper()
+
+    if posture_label == "Add Candidate":
+        if "etf" in cat_low:
+            return (
+                "Core index or dividend ETF — regular contribution target "
+                "regardless of short-term signal completeness."
+            )
+        if trusted_signals:
+            trusted_str = _join_plain(trusted_signals)
+            return (
+                f"Evidence on {trusted_str} supports a constructive view. "
+                "Consider adding on weakness when position sizing allows."
+            )
+        return (
+            "Evidence coverage is sufficient to consider adding. "
+            "Watch price action and position sizing before adding."
+        )
+
+    if posture_label == "Trim Candidate":
+        return (
+            "Current signal points to reducing exposure here. "
+            "Review position size against targets and tax considerations."
+        )
+
+    if posture_label == "Risk Watch":
+        if ticker_up in _INTEL_RISK_WATCH_TICKERS:
+            return (
+                "High-risk or speculative position. "
+                "Monitor closely — not a core holding candidate until evidence strengthens."
+            )
+        return (
+            "Bearish or weak technical momentum. "
+            "Watch for stabilization before adding; current signal calls for caution."
+        )
+
+    if posture_label == "Review":
+        if trusted_signals and incomplete_signals:
+            trusted_str = _join_plain(trusted_signals)
+            incomplete_str = _join_plain(incomplete_signals)
+            are_str = "are" if len(incomplete_signals) > 1 else "is"
+            return (
+                f"Evidence on {trusted_str} warrants attention, "
+                f"but {incomplete_str} {are_str} still missing. "
+                "Reviewing before taking action — the setup is interesting but not yet complete."
+            )
+        if trusted_signals:
+            return (
+                "Some evidence available and worth tracking. "
+                "Reviewing before acting — waiting for more complete coverage."
+            )
+        return "Partial evidence available. Reviewing before taking action."
+
+    # Watchlist
+    if incomplete_signals:
+        incomplete_str = _join_plain(incomplete_signals)
+        are_str = "are" if len(incomplete_signals) > 1 else "is"
+        return (
+            f"Coverage still thin on {incomplete_str}. "
+            "Holding current position while waiting for evidence to build."
+        )
+    return "Monitoring for a clearer signal before acting."
+
+
 def _build_caveat(
     *,
     posture: str,

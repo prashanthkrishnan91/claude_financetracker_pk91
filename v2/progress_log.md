@@ -515,3 +515,9 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Preserved safety contract: INSUFFICIENT_DATA still forces WATCH and deterministic evidence remains empty.
 - Added focused reasoning_v2 builder regression tests for the live-style serialized shape and suppression diagnostics.
 - No Supabase SQL. No frontend/UI, Deploy, or LLM behavior changes.
+
+## 2026-05-04
+- Intel card rendering hardening: frontend now maps LOW conviction badge copy to "Evidence limited" (no literal "LOW CONVICTION"), collapses duplicate category/subcategory labels (e.g., Core · Core -> Core), and shows WATCHLIST action badge text for insufficient-data HOLD cards so top badge aligns with conservative watchlist action copy.
+- WHY THIS VIEW bottom_line wording for insufficient-data cards now references available/missing evidence directly (e.g., "Evidence is strongest on ... but ... still missing") instead of repeating the generic "Interesting setup..." sentence.
+- Added focused tests for new rendering contract helpers and bottom_line anti-generic behavior; backend suites pass.
+- No Deploy changes, no allocation math changes, no SQL/migrations.

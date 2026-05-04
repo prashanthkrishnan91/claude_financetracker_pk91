@@ -17,6 +17,25 @@ const CONVICTION_STYLES: Record<string, string> = {
   LOW: "bg-surface-elevated text-text-muted border border-border/60",
 };
 
+const CONVICTION_LABELS: Record<"HIGH" | "MEDIUM" | "LOW", string> = {
+  HIGH: "High confidence",
+  MEDIUM: "Moderate confidence",
+  LOW: "Evidence limited",
+};
+
+export function formatCategoryLine(category?: string | null, sector?: string | null): string {
+  const c = (category || "").trim();
+  const s = (sector || "").trim();
+  if (!c && !s) return "";
+  if (!c) return s;
+  if (!s) return c;
+  return c.toLowerCase() === s.toLowerCase() ? c : `${c} · ${s}`;
+}
+
+export function convictionBadgeLabel(level: "HIGH" | "MEDIUM" | "LOW"): string {
+  return CONVICTION_LABELS[level];
+}
+
 function normalizeAction(action?: string | null): string {
   const raw = (action || "").toUpperCase();
   if (raw === "REDUCE") return "TRIM";
@@ -47,6 +66,13 @@ function mainThesis(card: InsightCardData): string {
     || card.detail
     || ""
   );
+}
+
+
+
+function actionBadgeLabel(action: string, intelRead?: IntelRead | null): string {
+  if (action === "HOLD" && intelRead?.insufficient_data) return "WATCHLIST";
+  return action;
 }
 
 function reasoningSourceLabel(source?: string | null): string | null {
@@ -83,14 +109,14 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
       <div className="flex items-start justify-between gap-3">
         <div>
           <div className="font-mono font-bold text-text-primary text-base md:text-lg leading-tight">{card.ticker}</div>
-          <div className="text-[11px] text-text-muted">{card.category}{card.sector ? ` · ${card.sector}` : ""}</div>
+          <div className="text-[11px] text-text-muted">{formatCategoryLine(card.category, card.sector)}</div>
         </div>
         <div className="flex flex-col items-end gap-1 text-[10px]">
           <span className={cn("px-2 py-0.5 rounded border font-bold uppercase leading-tight", styles.bg, styles.text, styles.border)}>
-            {action}
+            {actionBadgeLabel(action, card.intel_read)}
           </span>
           <span className={cn("px-2 py-0.5 rounded font-semibold uppercase", CONVICTION_STYLES[convictionLevel])}>
-            {convictionLevel} conviction
+            {convictionBadgeLabel(convictionLevel)}
           </span>
           {card.current_price != null && (
             <span className="font-mono text-sm text-text-secondary normal-case">

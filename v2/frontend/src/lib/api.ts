@@ -381,6 +381,8 @@ export interface IntelRead {
   caveat: string;
   /** Shown in WHY THIS VIEW instead of summary for insufficient-data cards. */
   bottom_line?: string | null;
+  /** True when the card is in insufficient-data mode. */
+  insufficient_data?: boolean;
 }
 
 export interface ThesisPlainEnglish {

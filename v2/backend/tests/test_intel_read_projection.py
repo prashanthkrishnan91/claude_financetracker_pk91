@@ -20,6 +20,11 @@ Coverage:
 13. BUY/HIGH CONVICTION downgrade logic when intel_read.insufficient_data=True.
 14. No downgrade when intel_read.insufficient_data=False.
 15. insufficient_data flag present in build_intel_read output.
+18. Conviction ladder: HIGH + ≥3 trusted → MEDIUM (strong partial evidence).
+19. Conviction ladder: HIGH + <3 trusted → LOW (weak coverage).
+20. Conviction ladder: MEDIUM + <2 trusted → LOW (very weak coverage).
+21. Conviction ladder: MEDIUM + ≥2 trusted → preserved.
+22. Page-load prefers latest_live_llm when current analyst_verdict lacks primary_driver.
 """
 
 from __future__ import annotations
@@ -461,8 +466,32 @@ def test_intel_read_none_when_both_runs_lack_reasoning_v2():
 # ── Test 13: BUY/HIGH CONVICTION downgrade logic ──────────────────────────────
 
 
+def _simulate_conviction_ladder(
+    intel_read: dict,
+    card_action: str,
+    card_analyst_action: str,
+    card_conviction_level: str,
+) -> tuple[str, str, str]:
+    """Mirror the conviction-ladder block in recommendation_engine._compute_insight_cards.
+
+    Returns (card_action, card_analyst_action, card_conviction_level).
+    """
+    if intel_read.get("insufficient_data"):
+        n_trusted = len(intel_read.get("trusted_signals") or [])
+        if card_action == "BUY":
+            card_action = "HOLD"
+        if (card_analyst_action or "").upper() == "BUY":
+            card_analyst_action = "HOLD"
+        cl_upper = (card_conviction_level or "").upper()
+        if cl_upper == "HIGH":
+            card_conviction_level = "MEDIUM" if n_trusted >= 3 else "LOW"
+        elif cl_upper == "MEDIUM" and n_trusted < 2:
+            card_conviction_level = "LOW"
+    return card_action, card_analyst_action, card_conviction_level
+
+
 def test_card_buy_downgraded_to_hold_when_intel_read_insufficient():
-    """Simulate card assembly downgrade: BUY → HOLD when intel_read.insufficient_data=True."""
+    """BUY → HOLD + HIGH → LOW for weak partial evidence (1 trusted signal)."""
     intel_read = {
         "title": "Why this view?",
         "posture_label": "on watch",
@@ -472,21 +501,12 @@ def test_card_buy_downgraded_to_hold_when_intel_read_insufficient():
         "caveat": "Not enough data to be confident. Wait for more signals before acting.",
         "insufficient_data": True,
     }
-    card_action = "BUY"
-    card_analyst_action = "BUY"
-    card_conviction_level = "HIGH"
-
-    if intel_read.get("insufficient_data"):
-        if card_action == "BUY":
-            card_action = "HOLD"
-        if (card_analyst_action or "").upper() == "BUY":
-            card_analyst_action = "HOLD"
-        if (card_conviction_level or "").upper() == "HIGH":
-            card_conviction_level = "LOW"
-
-    assert card_action == "HOLD"
-    assert card_analyst_action == "HOLD"
-    assert card_conviction_level == "LOW"
+    action, analyst_action, conviction = _simulate_conviction_ladder(
+        intel_read, "BUY", "BUY", "HIGH"
+    )
+    assert action == "HOLD"
+    assert analyst_action == "HOLD"
+    assert conviction == "LOW"
 
 
 def test_card_non_buy_not_downgraded_when_intel_read_insufficient():
@@ -913,3 +933,168 @@ def test_no_forbidden_phrases_in_preserved_safe_driver():
         assert phrase not in final_driver.lower(), (
             f"Forbidden phrase {phrase!r} found in preserved primary_driver"
         )
+
+
+# ── Tests 18-21: conviction ladder ────────────────────────────────────────────
+
+
+def test_conviction_ladder_high_strong_partial_yields_medium():
+    """Test 18: HIGH conviction + ≥3 trusted signals → MEDIUM (strong partial evidence)."""
+    intel_read = {
+        "insufficient_data": True,
+        "trusted_signals": ["business quality", "valuation", "recent market behavior"],
+        "incomplete_signals": ["growth", "risk"],
+    }
+    action, analyst_action, conviction = _simulate_conviction_ladder(
+        intel_read, "BUY", "BUY", "HIGH"
+    )
+    assert action == "HOLD"
+    assert conviction == "MEDIUM", "3 trusted signals should yield MEDIUM, not LOW"
+
+
+def test_conviction_ladder_high_weak_partial_yields_low():
+    """Test 19: HIGH conviction + <3 trusted signals → LOW (insufficient partial evidence)."""
+    intel_read = {
+        "insufficient_data": True,
+        "trusted_signals": ["valuation"],
+        "incomplete_signals": ["business quality", "growth", "risk"],
+    }
+    action, analyst_action, conviction = _simulate_conviction_ladder(
+        intel_read, "BUY", "BUY", "HIGH"
+    )
+    assert action == "HOLD"
+    assert conviction == "LOW", "1 trusted signal should yield LOW"
+
+
+def test_conviction_ladder_medium_very_weak_yields_low():
+    """Test 20: MEDIUM conviction + <2 trusted signals → LOW (very weak coverage)."""
+    intel_read = {
+        "insufficient_data": True,
+        "trusted_signals": ["recent market behavior"],
+        "incomplete_signals": ["business quality", "valuation", "growth", "risk"],
+    }
+    _, _, conviction = _simulate_conviction_ladder(intel_read, "HOLD", "HOLD", "MEDIUM")
+    assert conviction == "LOW", "MEDIUM with only 1 trusted signal should downgrade to LOW"
+
+
+def test_conviction_ladder_medium_adequate_partial_preserved():
+    """Test 21: MEDIUM conviction + ≥2 trusted signals → preserved (adequate partial evidence)."""
+    intel_read = {
+        "insufficient_data": True,
+        "trusted_signals": ["business quality", "valuation"],
+        "incomplete_signals": ["growth", "risk"],
+    }
+    _, _, conviction = _simulate_conviction_ladder(intel_read, "HOLD", "HOLD", "MEDIUM")
+    assert conviction == "MEDIUM", "MEDIUM with 2 trusted signals should be preserved"
+
+
+def test_conviction_ladder_low_always_preserved():
+    """LOW conviction is always preserved under insufficient_data."""
+    intel_read = {
+        "insufficient_data": True,
+        "trusted_signals": [],
+        "incomplete_signals": ["business quality", "valuation", "growth", "risk", "recent market behavior"],
+    }
+    _, _, conviction = _simulate_conviction_ladder(intel_read, "HOLD", "HOLD", "LOW")
+    assert conviction == "LOW"
+
+
+def test_conviction_ladder_no_downgrade_when_sufficient():
+    """HIGH conviction is preserved when insufficient_data=False."""
+    intel_read = {
+        "insufficient_data": False,
+        "trusted_signals": ["business quality", "valuation", "growth"],
+        "incomplete_signals": [],
+    }
+    action, _, conviction = _simulate_conviction_ladder(intel_read, "BUY", "BUY", "HIGH")
+    assert action == "BUY"
+    assert conviction == "HIGH"
+
+
+# ── Test 22: page-load analyst_row preference ─────────────────────────────────
+
+
+def test_page_load_prefers_latest_live_llm_when_verdict_lacks_primary_driver():
+    """Test 22: On page load, stale analyst_verdict without primary_driver is upgraded.
+
+    Simulates the analyst_row selection logic in _compute_insight_cards:
+    when the current row's analyst_verdict has used_fallback=False but lacks
+    primary_driver (pre-Phase-7 row), the freshest live LLM row is preferred.
+    This closes the page-load vs Run Agents WHY inconsistency.
+    """
+    stale_verdict = {
+        "primary_driver": None,
+        "conviction_level": "HIGH",
+        "used_fallback": False,
+        "generation_version": "human_v2",
+        "analysis_source": "live_llm",
+    }
+    stale_row = {"analyst_verdict": stale_verdict}
+
+    fresh_verdict = {
+        "primary_driver": "AI chip demand forces hyperscalers to TSMC capacity.",
+        "conviction_level": "MEDIUM",
+        "used_fallback": False,
+        "generation_version": "human_v2",
+        "analysis_source": "live_llm",
+    }
+    fresh_row = {"analyst_verdict": fresh_verdict}
+
+    # Simulate analyst_row selection logic (mirrors recommendation_engine.py)
+    analyst_row = stale_row
+    preferred_live_row = fresh_row
+    _used_preferred = False
+
+    _current_av_for_pref = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+    _lacks_memo_fields = not bool((_current_av_for_pref.get("primary_driver") or "").strip())
+
+    if preferred_live_row and (
+        analyst_row is None
+        or bool(_current_av_for_pref.get("used_fallback", False))
+        or _lacks_memo_fields
+    ):
+        analyst_row = preferred_live_row
+        _used_preferred = True
+
+    assert _used_preferred is True, "Should prefer fresh row when stale lacks primary_driver"
+    assert analyst_row is fresh_row
+    assert analyst_row["analyst_verdict"]["primary_driver"] == "AI chip demand forces hyperscalers to TSMC capacity."
+
+
+def test_page_load_keeps_current_row_when_primary_driver_present():
+    """Current analyst_row is kept when it already has primary_driver (no unnecessary upgrade)."""
+    current_verdict = {
+        "primary_driver": "Hyperscaler AI capex cycle drives sustained GPU datacenter demand.",
+        "conviction_level": "MEDIUM",
+        "used_fallback": False,
+        "generation_version": "human_v2",
+        "analysis_source": "live_llm",
+    }
+    current_row = {"analyst_verdict": current_verdict}
+
+    newer_verdict = {
+        "primary_driver": "Some newer reasoning text.",
+        "conviction_level": "LOW",
+        "used_fallback": False,
+        "generation_version": "human_v2",
+        "analysis_source": "live_llm",
+    }
+    newer_row = {"analyst_verdict": newer_verdict}
+
+    analyst_row = current_row
+    preferred_live_row = newer_row
+    _used_preferred = False
+
+    _current_av_for_pref = (analyst_row.get("analyst_verdict") or {}) if analyst_row else {}
+    _lacks_memo_fields = not bool((_current_av_for_pref.get("primary_driver") or "").strip())
+
+    if preferred_live_row and (
+        analyst_row is None
+        or bool(_current_av_for_pref.get("used_fallback", False))
+        or _lacks_memo_fields
+    ):
+        analyst_row = preferred_live_row
+        _used_preferred = True
+
+    assert _used_preferred is False, "Should not replace row when primary_driver already present"
+    assert analyst_row is current_row

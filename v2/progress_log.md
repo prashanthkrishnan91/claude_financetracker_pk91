@@ -1,4 +1,13 @@
 
+## 2026-05-04 — Intel display simplification: BUY/HOLD/TRIM/SELL replaces posture bucket UI (Level 2)
+
+- **Decision:** Abandon posture bucket UI contract (Add Candidate / Watchlist / Review / Risk Watch / Trim Candidate) as the primary visible Intel system. Return to one consistent action model: ALL / BUY / HOLD / TRIM / SELL everywhere.
+- **Root cause:** Two competing systems — Portfolio Command Center (already BUY/HOLD/TRIM/SELL) vs. filter tabs + card badges (posture buckets). Multiple prior patch attempts failed to reconcile them.
+- **Frontend:** `INTEL_FILTERS` in `page.tsx` replaced; `normalizeDisplayAction` helper added; filter counts and filtering use normalized action. `AgentInsightCard.tsx` badge now shows action, not `intel_posture_label`. `normalizeAction` maps REVIEW → HOLD.
+- **Backend fields:** `intel_posture_label` / `intel_filter_bucket` remain in data model, unused by visible UI.
+- **Tests:** Section 10 rewritten for unified contract. Section 11 added for Evidence check label.
+- **No SQL, no backend changes, no Deploy changes.**
+
 ## Last change
 Align Intel summary/filter display contract with posture badges + evidence framing (PR: "fix(intel-ui): unify posture filters with card badges and clarify evidence section label").
 

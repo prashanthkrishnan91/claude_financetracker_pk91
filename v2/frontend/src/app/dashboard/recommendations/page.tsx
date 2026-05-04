@@ -23,17 +23,21 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
 import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/lib/api";
 
-// Intel posture filter buckets (v3): advisor-facing posture decoupled from
-// broker-style BUY/HOLD/SELL which collapses all tickers into HOLD under
-// insufficient_data. These buckets are derived deterministically from safe signals.
 const INTEL_FILTERS = [
-  { key: "ALL", label: "All", color: "bg-surface-elevated text-text-primary" },
-  { key: "Add Candidate", label: "Add Candidate", color: "bg-green-500/10 text-green-400 border-green-500/30" },
-  { key: "Watchlist", label: "Watchlist", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
-  { key: "Review", label: "Review", color: "bg-purple-500/10 text-purple-400 border-purple-500/30" },
-  { key: "Risk Watch", label: "Risk Watch", color: "bg-red-500/10 text-red-400 border-red-500/30" },
-  { key: "Trim Candidate", label: "Trim Candidate", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
+  { key: "ALL",  label: "All",  color: "bg-surface-elevated text-text-primary" },
+  { key: "BUY",  label: "Buy",  color: "bg-green-500/10 text-green-400 border-green-500/30" },
+  { key: "HOLD", label: "Hold", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
+  { key: "TRIM", label: "Trim", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
+  { key: "SELL", label: "Sell", color: "bg-red-500/10 text-red-400 border-red-500/30" },
 ] as const;
+
+function normalizeDisplayAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SELL" {
+  const raw = (action || "").toUpperCase();
+  if (raw === "BUY") return "BUY";
+  if (raw === "SELL") return "SELL";
+  if (raw === "TRIM" || raw === "REDUCE") return "TRIM";
+  return "HOLD";
+}
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY:    { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
@@ -118,19 +122,16 @@ export default function RecommendationsPage() {
     });
   }, [activeJobId, jobStatus, queryClient]);
 
-  // Intel posture filter uses intel_filter_bucket (v3); falls back to "Watchlist"
-  // for legacy cards that pre-date this field.
   const filtered =
     filter === "ALL"
       ? recs || []
-      : (recs || []).filter((r) => (r.intel_filter_bucket || "Watchlist") === filter);
+      : (recs || []).filter((r) => normalizeDisplayAction(r.analyst_action || r.action) === filter);
   const runtimeSynthesis = computePortfolioSynthesisFromCards(recs ?? []);
   const synthesis = runtimeSynthesis ?? (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null;
 
-  // Count per Intel posture bucket (not per raw action).
   const counts: Record<string, number> = { ALL: (recs || []).length };
   for (const r of recs || []) {
-    const bucket = r.intel_filter_bucket || "Watchlist";
+    const bucket = normalizeDisplayAction(r.analyst_action || r.action);
     counts[bucket] = (counts[bucket] || 0) + 1;
   }
 
@@ -254,7 +255,7 @@ export default function RecommendationsPage() {
               synthesis={synthesis}
             />
 
-            {/* Filter cards — Intel posture buckets */}
+            {/* Filter cards — action buckets */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
               {INTEL_FILTERS.map((f) => (
                 <button
@@ -315,11 +316,11 @@ export default function RecommendationsPage() {
                 />
               ) : (
                 <EmptyState
-                  title={filter === "ALL" ? "No analysis yet" : `No ${filter} tickers`}
+                  title={filter === "ALL" ? "No analysis yet" : `No ${INTEL_FILTERS.find((f) => f.key === filter)?.label ?? filter} tickers`}
                   description={
                     filter === "ALL"
                       ? "Run agents to generate AI-powered signals for your portfolio."
-                      : `No tickers in the ${filter} bucket right now.`
+                      : `No tickers in the ${INTEL_FILTERS.find((f) => f.key === filter)?.label ?? filter} bucket right now.`
                   }
                 />
               )

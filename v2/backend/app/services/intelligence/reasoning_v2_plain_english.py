@@ -13,6 +13,7 @@ Contract invariants:
 
 from __future__ import annotations
 
+import re
 from typing import Any, Optional
 
 # Evidence key → plain-English label (published_dimensions use _score suffix).
@@ -70,7 +71,18 @@ def is_safe_for_insufficient_data(text: str | None) -> bool:
     if not text:
         return True
     lower = text.lower()
-    return not any(phrase in lower for phrase in _FORBIDDEN_BULLISH_PHRASES)
+    phrase_patterns: tuple[re.Pattern[str], ...] = (
+        re.compile(r"\baccumulate\b"),
+        re.compile(r"\bbuy\b"),
+        re.compile(r"\bentry(?:\s+point|\s+opportunity)\b"),
+        re.compile(r"\bre-rating opportunity\b"),
+        re.compile(r"\bhigh-conviction idea\b"),
+        re.compile(r"\badd aggressively\b"),
+        re.compile(r"\badd\s+shares\b"),
+        re.compile(r"\bstrong buy\b"),
+        re.compile(r"\bdeploy(?:\s+capital)?\b"),
+    )
+    return not any(pattern.search(lower) for pattern in phrase_patterns)
 
 
 def _join_plain(items: list[str]) -> str:

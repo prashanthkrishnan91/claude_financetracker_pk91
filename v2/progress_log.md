@@ -1,3 +1,29 @@
+
+## Last change
+Align Intel summary/filter display contract with posture badges + evidence framing (PR: "fix(intel-ui): unify posture filters with card badges and clarify evidence section label").
+
+## Root cause
+Frontend summary cards were still carrying legacy shorthand labels ("Add", "Trim") and the evidence block heading came from backend copy (often "Why this view?"). This made the top filter model and card-level language feel like two recommendation systems in parallel even though counts already use `intel_filter_bucket`.
+
+## Fix
+- Intel filter cards now use the finalized posture labels directly (`Add Candidate`, `Trim Candidate`) so top summaries and card badges share identical bucket names.
+- Agent card evidence section heading is now consistently `Evidence check` (UI-controlled), matching actual content scope (coverage + missing data), while keeping Reliable/Missing chips unchanged.
+- Added focused regression tests for: posture bucket counting (not HOLD), bucket distribution, badge precedence (no conflicting primary status), no raw metric keys, and Business Read hidden contract.
+
+## Explicit non-changes
+- No backend scoring/semantics changes.
+- No Deploy/allocation changes.
+- No SQL.
+- No Business Read re-enable.
+- No raw metric key rendering changes outside existing guardrails.
+
+## Files changed
+- `v2/frontend/src/app/dashboard/recommendations/page.tsx`
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx`
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` (assertions aligned to contract)
+- `docs/ai/HANDOFF.md`
+- `v2/progress_log.md`
+
 ## 2026-05-04 — Intel posture system v3: end-to-end advisor posture contract (Level 2)
 
 - **Root cause:** All 34 tickers collapsed into HOLD=34/BUY=0 filter because filter tabs used `r.action` (broker-style), which is blocked to HOLD under `insufficient_data`. Card badge showed identical "WATCHLIST" for all insufficient_data cards regardless of risk profile.

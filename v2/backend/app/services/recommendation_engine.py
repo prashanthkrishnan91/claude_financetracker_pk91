@@ -169,7 +169,7 @@ def _build_intel_read_for_card(
     run_id: Any,
     run_lookup: dict[str, dict],
     fallback_run_id: Optional[str] = None,
-) -> Optional[dict]:
+) -> tuple[Optional[dict], bool]:
     """Resolve intel_read plain-English projection from _reasoning_v2 for one card.
 
     Reads allocation["_reasoning_v2"][ticker] from the card's own agent_run_id run.
@@ -177,7 +177,9 @@ def _build_intel_read_for_card(
     back to fallback_run_id (latest completed run with _reasoning_v2). Fallback is
     NOT used when the primary run has _reasoning_v2 but the ticker is simply absent
     (caller should treat that as genuinely missing data).
-    Returns None safely in all failure cases.
+    Returns (intel_read_or_None, is_from_primary_run) — is_from_primary_run=True
+    when the data came from the same run as the recommendation (not the fallback).
+    Returns (None, False) safely in all failure cases.
     """
     def _try_run(rid: Any) -> tuple[Optional[dict], bool]:
         """Returns (intel_read_or_None, had_reasoning_v2_map).
@@ -213,16 +215,16 @@ def _build_intel_read_for_card(
 
     result, had_r2_map = _try_run(run_id)
     if result is not None:
-        return result
+        return result, True  # from primary run
     # Fallback only when primary run had no _reasoning_v2 map at all.
     if had_r2_map:
-        return None
+        return None, True  # primary run owned the map; ticker just absent
     run_id_str = str(run_id or "")
     fb_str = str(fallback_run_id or "")
     if fb_str and fb_str != run_id_str:
         fallback_result, _ = _try_run(fallback_run_id)
-        return fallback_result
-    return None
+        return fallback_result, False  # from fallback run
+    return None, False
 
 
 # DRIP yield estimates (annual %, approximate 2026 values)
@@ -1010,6 +1012,13 @@ def _derive_intel_posture(
     if not insufficient and action == "BUY":
         return "Add Candidate"
 
+    # 5.5. BUY signal present but primary run's data is thin → Review
+    # Separates "agent assessed BUY but coverage is insufficient" from
+    # "no constructive signal at all". Prevents a genuine BUY assessment
+    # from collapsing to Watchlist under insufficient_data.
+    if insufficient and action == "BUY":
+        return "Review"
+
     # 6. MEDIUM+ conviction + sufficient data → Add Candidate
     if not insufficient and conviction in {"HIGH", "MEDIUM"}:
         return "Add Candidate"
@@ -1765,7 +1774,9 @@ class RecommendationService:
                 # Intel v2 reasoning_v2 UI: build plain-English intel_read from
                 # _reasoning_v2 coverage block. Falls back to the latest run with
                 # _reasoning_v2 when the card's own run lacks it. Safe when absent.
-                intel_read_dict = _build_intel_read_for_card(
+                # is_from_primary: True when data came from the recommendation's own
+                # run; False when the fallback (latest completed run) was used instead.
+                intel_read_dict, intel_read_from_primary = _build_intel_read_for_card(
                     ticker=ticker,
                     run_id=rec.get("agent_run_id"),
                     run_lookup=run_lookup,
@@ -1778,6 +1789,10 @@ class RecommendationService:
                 _card_analyst_action = analyst_fields["action"]
                 _card_conviction_level = reasoning.get("conviction_level")
                 _card_color = ACTION_COLORS.get(_card_action, "gray")
+                # Save pre-gate values for posture derivation (see below).
+                _pre_gate_action = _card_action
+                _pre_gate_analyst_action = _card_analyst_action
+                _pre_gate_conviction_level = _card_conviction_level
 
                 # Posture consistency: when reasoning_v2 forces WATCH due to
                 # INSUFFICIENT_DATA, the card must not show BUY / HIGH CONVICTION.
@@ -1818,16 +1833,22 @@ class RecommendationService:
                         reasoning["differentiation"] = None
 
                 # Intel posture system (v3): derive advisor-facing posture bucket
-                # AFTER the insufficient_data gate so action + conviction_level
-                # reflect the post-gate values used by the frontend.
+                # using PRE-GATE signals so the display safety gate (BUY→HOLD under
+                # insufficient_data) does not suppress the posture bucket.
+                #
+                # Key consistency fix: when intel_read comes from the FALLBACK run
+                # (not the recommendation's own run), its insufficient_data flag may
+                # reflect a different run's data quality and must not gate posture.
+                # Only the primary run's _reasoning_v2 is authoritative for posture.
+                _intel_read_for_posture = intel_read_dict if intel_read_from_primary else None
                 intel_posture_label = _derive_intel_posture(
                     ticker=ticker,
-                    action=_card_action,
-                    analyst_action=_card_analyst_action,
-                    conviction_level=_card_conviction_level,
+                    action=_pre_gate_action,
+                    analyst_action=_pre_gate_analyst_action,
+                    conviction_level=_pre_gate_conviction_level,
                     technical_signal=rec.get("technical_signal"),
                     category=pos.get("category"),
-                    intel_read_dict=intel_read_dict,
+                    intel_read_dict=_intel_read_for_posture,
                 )
                 # Inject posture_reason into intel_read_dict so the WhyThisView
                 # section explains WHY this posture was assigned (card-specific).

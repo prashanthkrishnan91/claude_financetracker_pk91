@@ -1,4 +1,58 @@
 ## Last change
+Fix Intel posture page-load vs post-run inconsistency — all 34 cards landing in Watchlist on initial page load but correctly distributed after Run Agents (PR: "fix(intel): fix page-load posture collapse — pre-gate signals + fallback provenance").
+
+## Root cause
+Two compounding bugs caused all 34 cards to show Watchlist on page load while showing Add=13/Watchlist=14/Risk Watch=7 after Run Agents:
+
+### A. Post-gate action fed into posture derivation
+`_compute_insight_cards` applied the display safety gate (BUY→HOLD under `insufficient_data`) before calling `_derive_intel_posture`. On page load, old recommendations have `action=BUY` but the fallback `_reasoning_v2` (from a prior degraded run) had `insufficient_data=True`, so the gate fired and set `_card_action="HOLD"`. `_derive_intel_posture(HOLD, LOW, insufficient=True)` → Rule 8: Watchlist. After Run Agents, the new primary run had `insufficient_data=False`, the gate did not fire, `_card_action` stayed "BUY", and Rule 5 fired: Add Candidate.
+
+Fix: saved pre-gate values (`_pre_gate_action`, `_pre_gate_analyst_action`, `_pre_gate_conviction_level`) and passed those to `_derive_intel_posture` instead of the post-gate values.
+
+### B. Fallback run's `insufficient_data` flag gating posture for a different run's data
+When `intel_read` came from the FALLBACK run (not the recommendation's own `agent_run_id`), its `insufficient_data=True` reflected a different run's data quality — not the card's actual agent assessment. This caused the posture derivation to treat a genuine BUY ticker as having thin data.
+
+Fix: `_build_intel_read_for_card` now returns `(intel_read_dict, is_from_primary_run: bool)`. When `is_from_primary=False`, `_intel_read_for_posture` is set to `None`, so `insufficient=False` and the pre-gate BUY fires Rule 5: Add Candidate.
+
+### C. Rule 5.5 — BUY + own run's insufficient_data → Review
+Edge case: when the card's OWN run says `insufficient_data=True` but the agent still assessed BUY, posture now returns "Review" (not "Watchlist"). Separates "agent sees upside but coverage thin" from "no constructive signal at all."
+
+## Scenario trace after fix
+| Scenario | is_from_primary | pre-gate action | insufficient | Posture |
+|---|---|---|---|---|
+| Page load: old BUY + fallback `insufficient_data=True` | False | BUY | False (ignored) | Add Candidate ✓ |
+| Page load: HOLD+LOW + no `_reasoning_v2` | False | HOLD | False | Watchlist ✓ |
+| Post-run: BUY + primary `insufficient_data=False` | True | BUY | False | Add Candidate ✓ |
+| Post-run: BUY + primary `insufficient_data=True` (Rule 5.5) | True | BUY | True | Review ✓ |
+| Risk Watch 7: bearish tech signal in DB | — | — | — | Risk Watch ✓ (Rule 4) |
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No Business Read re-enable.
+- No new intel modules.
+- No raw metric keys exposed.
+- No frontend changes.
+
+## Files changed
+- `v2/backend/app/services/recommendation_engine.py` — `_build_intel_read_for_card` returns `(dict, bool)` provenance tuple; `_compute_insight_cards` saves pre-gate signals, uses `_intel_read_for_posture = intel_read if is_from_primary else None`; `_derive_intel_posture` Rule 5.5 added
+- `v2/backend/tests/test_intel_read_projection.py` — added `_build_intel_read_for_card_with_provenance` helper; Rule 5.5 added to local `_derive_intel_posture`; 5 new regression tests (36–40)
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria
+1. Page-load BUY tickers → Add Candidate (fallback `insufficient_data` no longer gates posture).
+2. Page-load HOLD/LOW tickers → Watchlist (no spurious upgrade).
+3. Post-run BUY + sufficient primary data → Add Candidate (Rule 5).
+4. BUY + primary `insufficient_data=True` → Review (Rule 5.5, not Watchlist).
+5. Risk Watch 7 tickers unchanged (Rule 4 fires before any of the above).
+6. 61 backend tests pass.
+
+---
+
+## Last change
 Build end-to-end Intel advisor posture contract — replace broker-style filter collapse with advisor posture buckets (PR: "feat(intel): add intel posture system — advisor posture buckets replacing broker HOLD collapse").
 
 ## Root cause

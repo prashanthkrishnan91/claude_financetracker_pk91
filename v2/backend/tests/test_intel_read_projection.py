@@ -113,6 +113,54 @@ def _build_intel_read_for_card(
     return None
 
 
+def _build_intel_read_for_card_with_provenance(
+    *,
+    ticker: str,
+    run_id: Any,
+    run_lookup: dict[str, dict],
+    fallback_run_id: Optional[str] = None,
+) -> tuple[Optional[dict], bool]:
+    """Mirrors the NEW production signature: (intel_read, is_from_primary_run).
+
+    True when intel_read came from the recommendation's own agent_run_id run.
+    False when it came from the fallback (latest completed run with _reasoning_v2).
+    Used for regression tests of the page-load vs post-run posture consistency fix.
+    """
+    def _try_run(rid: Any) -> tuple[Optional[dict], bool]:
+        rid_s = str(rid or "")
+        if not rid_s:
+            return None, False
+        row = run_lookup.get(rid_s)
+        if not row:
+            return None, False
+        alloc = row.get("allocation")
+        if not isinstance(alloc, dict):
+            return None, False
+        rmap = alloc.get("_reasoning_v2")
+        if not isinstance(rmap, dict) or not rmap:
+            return None, False
+        ticker_up = str(ticker).strip().upper()
+        r2 = rmap.get(ticker_up) or rmap.get(ticker)
+        if not isinstance(r2, dict):
+            return None, True
+        try:
+            return build_intel_read(r2), True
+        except Exception:  # noqa: BLE001
+            return None, True
+
+    result, had_r2_map = _try_run(run_id)
+    if result is not None:
+        return result, True
+    if had_r2_map:
+        return None, True
+    run_id_str = str(run_id or "")
+    fb_str = str(fallback_run_id or "")
+    if fb_str and fb_str != run_id_str:
+        fallback_result, _ = _try_run(fallback_run_id)
+        return fallback_result, False
+    return None, False
+
+
 # ── Local copy of _derive_intel_posture for testing ──────────────────────────
 # Mirrors recommendation_engine._derive_intel_posture exactly so these tests
 # remain valid when that module cannot be imported (missing supabase).
@@ -168,6 +216,9 @@ def _derive_intel_posture(
         return "Risk Watch"
     if not insufficient and action == "BUY":
         return "Add Candidate"
+    # Rule 5.5: BUY signal but primary data is thin → Review (not Watchlist)
+    if insufficient and action == "BUY":
+        return "Review"
     if not insufficient and conviction in {"HIGH", "MEDIUM"}:
         return "Add Candidate"
     if insufficient and conviction == "MEDIUM":
@@ -1430,3 +1481,213 @@ def test_intel_posture_differentiation_etf_vs_medium_stock_vs_low_stock():
     assert results["CRM"] == "Watchlist"
     # All 5 are different
     assert len(set(results.values())) == 5
+
+
+# ── Tests 36–40: page-load vs post-run posture consistency regression ─────────
+# Root cause: on page-load the fallback _reasoning_v2 had insufficient_data=True
+# which gated the BUY action to HOLD before posture derivation, collapsing all
+# BUY tickers to Watchlist.  Fix: (a) use pre-gate action, (b) only let
+# intel_read gate posture when it comes from the recommendation's OWN run.
+
+
+# 36. BUY + fallback intel_read (is_from_primary=False) → "Add Candidate"
+#     This is the page-load scenario that was broken: fallback run's
+#     insufficient_data=True must NOT gate the posture for the card's action.
+def test_posture_buy_with_fallback_intel_read_is_add_candidate():
+    """Regression: BUY cards on page-load must not collapse to Watchlist due to
+    stale fallback intel_read.  When is_from_primary=False, treat intel_read_dict
+    as absent for posture purposes (insufficient=False), so Rule 5 fires."""
+    primary_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    r2_nvda = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk", "momentum"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = {
+        primary_run_id: {"id": primary_run_id, "allocation": {}},  # no _reasoning_v2
+        fallback_run_id: {
+            "id": fallback_run_id,
+            "allocation": {"_reasoning_v2": {"NVDA": r2_nvda}},
+        },
+    }
+    intel_read_dict, is_from_primary = _build_intel_read_for_card_with_provenance(
+        ticker="NVDA",
+        run_id=primary_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert intel_read_dict is not None
+    assert is_from_primary is False, "Fallback run should return is_from_primary=False"
+
+    # Simulate the posture derivation with the fix applied:
+    # when is_from_primary=False, pass None as intel_read_dict to _derive_intel_posture
+    intel_read_for_posture = intel_read_dict if is_from_primary else None
+    posture = _derive_intel_posture(
+        ticker="NVDA",
+        action="BUY",          # pre-gate action preserved
+        analyst_action="BUY",
+        conviction_level="HIGH",
+        technical_signal=None,
+        category="Core",
+        intel_read_dict=intel_read_for_posture,  # None → insufficient=False
+    )
+    assert posture == "Add Candidate", (
+        f"BUY card with fallback intel_read should be Add Candidate; got {posture!r}"
+    )
+
+
+# 37. BUY + primary intel_read with insufficient_data=True → Rule 5.5 → "Review"
+#     When the card's OWN run says data is thin but agent assessed BUY,
+#     posture must be Review, not Watchlist (Rule 5.5).
+def test_posture_buy_with_primary_insufficient_intel_read_is_review():
+    """Regression: Rule 5.5 — BUY with primary run's own insufficient_data → Review."""
+    run_id = str(uuid4())
+    r2_nvda = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2_nvda})
+    intel_read_dict, is_from_primary = _build_intel_read_for_card_with_provenance(
+        ticker="NVDA",
+        run_id=run_id,
+        run_lookup=run_lookup,
+    )
+    assert intel_read_dict is not None
+    assert is_from_primary is True
+    assert intel_read_dict["insufficient_data"] is True
+
+    # Primary run's insufficient_data IS authoritative → intel_read_for_posture = intel_read_dict
+    posture = _derive_intel_posture(
+        ticker="NVDA",
+        action="BUY",
+        analyst_action="BUY",
+        conviction_level="HIGH",
+        technical_signal=None,
+        category="Core",
+        intel_read_dict=intel_read_dict,
+    )
+    assert posture == "Review", (
+        f"BUY + primary insufficient_data should be Review via Rule 5.5; got {posture!r}"
+    )
+
+
+# 38. BUY + primary intel_read with insufficient_data=False → Rule 5 → "Add Candidate"
+#     Post-run scenario: fresh primary run with sufficient data → Add Candidate.
+def test_posture_buy_with_primary_sufficient_intel_read_is_add_candidate():
+    """Post-run scenario: BUY + primary run with sufficient data → Add Candidate."""
+    run_id = str(uuid4())
+    r2_nvda = _make_reasoning_v2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published=["quality_score", "valuation_score", "momentum_score"],
+        suppressed=["growth"],
+        blockers=[],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2_nvda})
+    intel_read_dict, is_from_primary = _build_intel_read_for_card_with_provenance(
+        ticker="NVDA",
+        run_id=run_id,
+        run_lookup=run_lookup,
+    )
+    assert intel_read_dict is not None
+    assert is_from_primary is True
+    assert intel_read_dict["insufficient_data"] is False
+
+    posture = _derive_intel_posture(
+        ticker="NVDA",
+        action="BUY",
+        analyst_action="BUY",
+        conviction_level="HIGH",
+        technical_signal=None,
+        category="Core",
+        intel_read_dict=intel_read_dict,
+    )
+    assert posture == "Add Candidate", (
+        f"BUY + primary sufficient data should be Add Candidate; got {posture!r}"
+    )
+
+
+# 39. HOLD/LOW + fallback intel_read (insufficient_data=True, ignored) → "Watchlist"
+#     Fallback intel_read suppression must NOT spuriously upgrade a genuine Watchlist
+#     card — the absence of the gate must not invent conviction.
+def test_posture_hold_low_with_fallback_intel_read_stays_watchlist():
+    """Regression: fallback intel_read suppression must not spuriously upgrade Watchlist cards."""
+    primary_run_id = str(uuid4())
+    fallback_run_id = str(uuid4())
+    r2_crm = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=[],
+        suppressed=["quality", "growth", "risk", "valuation", "momentum"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = {
+        primary_run_id: {"id": primary_run_id, "allocation": {}},
+        fallback_run_id: {
+            "id": fallback_run_id,
+            "allocation": {"_reasoning_v2": {"CRM": r2_crm}},
+        },
+    }
+    intel_read_dict, is_from_primary = _build_intel_read_for_card_with_provenance(
+        ticker="CRM",
+        run_id=primary_run_id,
+        run_lookup=run_lookup,
+        fallback_run_id=fallback_run_id,
+    )
+    assert is_from_primary is False
+
+    intel_read_for_posture = intel_read_dict if is_from_primary else None
+    posture = _derive_intel_posture(
+        ticker="CRM",
+        action="HOLD",
+        analyst_action="HOLD",
+        conviction_level="LOW",
+        technical_signal=None,
+        category="Core",
+        intel_read_dict=intel_read_for_posture,
+    )
+    assert posture == "Watchlist", (
+        f"HOLD/LOW card should stay Watchlist regardless of fallback intel_read; got {posture!r}"
+    )
+
+
+# 40. Provenance: primary run returns (dict, True); absent primary+fallback returns (dict, False).
+def test_build_intel_read_with_provenance_returns_correct_bool():
+    """_build_intel_read_for_card_with_provenance returns (dict, True) for primary,
+    (dict, False) when data came from the fallback run."""
+    primary_id = str(uuid4())
+    fallback_id = str(uuid4())
+    r2 = _make_reasoning_v2(posture="WATCH", data_status="INSUFFICIENT_DATA", blockers=["insufficient_data"])
+
+    # Case A: primary run has _reasoning_v2 → (dict, True)
+    run_lookup_a = _make_run_lookup(primary_id, reasoning_v2={"AAPL": r2})
+    result_a, is_primary_a = _build_intel_read_for_card_with_provenance(
+        ticker="AAPL", run_id=primary_id, run_lookup=run_lookup_a,
+    )
+    assert result_a is not None
+    assert is_primary_a is True
+
+    # Case B: primary run absent, fallback has _reasoning_v2 → (dict, False)
+    run_lookup_b = {
+        primary_id: {"id": primary_id, "allocation": {}},
+        fallback_id: {"id": fallback_id, "allocation": {"_reasoning_v2": {"AAPL": r2}}},
+    }
+    result_b, is_primary_b = _build_intel_read_for_card_with_provenance(
+        ticker="AAPL", run_id=primary_id, run_lookup=run_lookup_b, fallback_run_id=fallback_id,
+    )
+    assert result_b is not None
+    assert is_primary_b is False
+
+    # Case C: neither run has _reasoning_v2 → (None, False)
+    run_lookup_c = {primary_id: {"id": primary_id, "allocation": {}}}
+    result_c, is_primary_c = _build_intel_read_for_card_with_provenance(
+        ticker="AAPL", run_id=primary_id, run_lookup=run_lookup_c,
+    )
+    assert result_c is None
+    assert is_primary_c is False

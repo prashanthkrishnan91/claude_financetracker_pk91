@@ -793,3 +793,26 @@ def test_is_safe_does_not_block_non_forbidden_financial_terms():
     ]
     for text in allowed:
         assert is_safe_for_insufficient_data(text) is True, f"Falsely blocked: {text!r}"
+
+
+def test_is_safe_allows_buyback_and_repurchase_context():
+    assert is_safe_for_insufficient_data("Company expanded its share buyback program this quarter.") is True
+    assert is_safe_for_insufficient_data("Management approved a repurchase program extension.") is True
+    assert is_safe_for_insufficient_data("Share repurchase pace remains steady versus last year.") is True
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "This is a buy now setup.",
+        "A clear buy signal is forming.",
+        "Stock looks buy-ready after this pullback.",
+        "Consider add shares on weakness.",
+        "We can accumulate shares at these levels.",
+        "This becomes an entry point after earnings.",
+        "Could be an entry opportunity if volatility settles.",
+        "Time to deploy capital aggressively here.",
+    ],
+)
+def test_is_safe_blocks_action_directive_variants(text: str):
+    assert is_safe_for_insufficient_data(text) is False

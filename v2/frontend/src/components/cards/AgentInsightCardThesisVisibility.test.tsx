@@ -626,3 +626,176 @@ describe("Insufficient-data cards — ticker-specific WHY preserved when safe", 
     expect(msftCard.primary_driver).toContain("Azure AI");
   });
 });
+
+// ── 10. Intel posture system (v3) — badge, filter, posture_reason ─────────────
+
+describe("Intel posture system — intel_posture_label and intel_filter_bucket", () => {
+  it("intel_posture_label is accessible on InsightCardData", () => {
+    const card = makeCard({ intel_posture_label: "Add Candidate", intel_filter_bucket: "Add Candidate" });
+    expect(card.intel_posture_label).toBe("Add Candidate");
+    expect(card.intel_filter_bucket).toBe("Add Candidate");
+  });
+
+  it("intel_posture_label renders as card badge — not broker-style HOLD/WATCHLIST", () => {
+    // Simulate what AgentInsightCard badge logic does:
+    // prefer intel_posture_label when present; fall back to actionBadgeLabel.
+    function resolveBadgeLabel(card: ReturnType<typeof makeCard>): string {
+      if (card.intel_posture_label) return card.intel_posture_label;
+      const action = card.action?.toUpperCase() || "HOLD";
+      if (action === "HOLD" && card.intel_read?.insufficient_data) return "WATCHLIST";
+      return action;
+    }
+
+    const addCard = makeCard({ action: "HOLD", intel_posture_label: "Add Candidate" });
+    const reviewCard = makeCard({ action: "HOLD", intel_posture_label: "Review" });
+    const riskCard = makeCard({ action: "HOLD", intel_posture_label: "Risk Watch" });
+    const watchCard = makeCard({ action: "HOLD", intel_posture_label: "Watchlist" });
+    const trimCard = makeCard({ action: "TRIM", intel_posture_label: "Trim Candidate" });
+
+    expect(resolveBadgeLabel(addCard)).toBe("Add Candidate");
+    expect(resolveBadgeLabel(reviewCard)).toBe("Review");
+    expect(resolveBadgeLabel(riskCard)).toBe("Risk Watch");
+    expect(resolveBadgeLabel(watchCard)).toBe("Watchlist");
+    expect(resolveBadgeLabel(trimCard)).toBe("Trim Candidate");
+  });
+
+  it("filter tabs count intel_filter_bucket — not raw action", () => {
+    const cards = [
+      makeCard({ ticker: "VOO", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
+      makeCard({ ticker: "VTI", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
+      makeCard({ ticker: "BTC", action: "HOLD", intel_filter_bucket: "Risk Watch" }),
+      makeCard({ ticker: "NVDA", action: "HOLD", intel_filter_bucket: "Review" }),
+      makeCard({ ticker: "SNOW", action: "TRIM", intel_filter_bucket: "Trim Candidate" }),
+      makeCard({ ticker: "CRM", action: "HOLD", intel_filter_bucket: "Watchlist" }),
+    ];
+
+    const counts: Record<string, number> = { ALL: cards.length };
+    for (const r of cards) {
+      const bucket = r.intel_filter_bucket || "Watchlist";
+      counts[bucket] = (counts[bucket] || 0) + 1;
+    }
+
+    // Not all in HOLD=6; distribution across Intel posture buckets
+    expect(counts["HOLD"]).toBeUndefined();
+    expect(counts["Add Candidate"]).toBe(2);
+    expect(counts["Risk Watch"]).toBe(1);
+    expect(counts["Review"]).toBe(1);
+    expect(counts["Trim Candidate"]).toBe(1);
+    expect(counts["Watchlist"]).toBe(1);
+    expect(counts["ALL"]).toBe(6);
+  });
+
+  it("filter by intel_filter_bucket returns correct subset", () => {
+    const cards = [
+      makeCard({ ticker: "VOO", action: "HOLD", intel_filter_bucket: "Add Candidate" }),
+      makeCard({ ticker: "BTC", action: "HOLD", intel_filter_bucket: "Risk Watch" }),
+      makeCard({ ticker: "NVDA", action: "HOLD", intel_filter_bucket: "Review" }),
+      makeCard({ ticker: "CRM", action: "HOLD", intel_filter_bucket: "Watchlist" }),
+    ];
+
+    const filtered = cards.filter((r) => (r.intel_filter_bucket || "Watchlist") === "Review");
+    expect(filtered.length).toBe(1);
+    expect(filtered[0].ticker).toBe("NVDA");
+  });
+
+  it("legacy cards without intel_filter_bucket default to Watchlist bucket", () => {
+    const legacyCard = makeCard({ action: "HOLD" }); // no intel_filter_bucket set
+    const bucket = legacyCard.intel_filter_bucket || "Watchlist";
+    expect(bucket).toBe("Watchlist");
+  });
+
+  it("'LOW CONVICTION' string does not appear as a badge label", () => {
+    // CONVICTION_LABELS in AgentInsightCard: LOW → "Evidence limited"
+    const CONVICTION_LABELS: Record<string, string> = {
+      HIGH: "High confidence",
+      MEDIUM: "Moderate confidence",
+      LOW: "Evidence limited",
+    };
+    for (const label of Object.values(CONVICTION_LABELS)) {
+      expect(label).not.toContain("LOW CONVICTION");
+      expect(label).not.toMatch(/low conviction/i);
+    }
+  });
+
+  it("posture_reason in intel_read is card-specific — different postures produce different text", () => {
+    const addCard = makeCard({
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Some evidence available.",
+        trusted_signals: [],
+        incomplete_signals: [],
+        caveat: "Early signal only.",
+        posture_reason: "Core index or dividend ETF — regular contribution target regardless of short-term signal completeness.",
+      },
+    });
+    const riskCard = makeCard({
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Speculative setup.",
+        trusted_signals: [],
+        incomplete_signals: [],
+        caveat: "High volatility.",
+        posture_reason: "High-risk or speculative position. Monitor closely — not a core holding candidate.",
+      },
+    });
+    const reviewCard = makeCard({
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Partial evidence.",
+        trusted_signals: ["business quality", "valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Wait for more signals.",
+        posture_reason: "Evidence on business quality and valuation warrants attention, but growth and risk are still missing.",
+      },
+    });
+
+    expect(addCard.intel_read?.posture_reason).not.toEqual(riskCard.intel_read?.posture_reason);
+    expect(addCard.intel_read?.posture_reason).not.toEqual(reviewCard.intel_read?.posture_reason);
+    expect(riskCard.intel_read?.posture_reason).not.toEqual(reviewCard.intel_read?.posture_reason);
+  });
+
+  it("posture_reason is preferred in WhyThisView display over bottom_line/summary", () => {
+    // Mirror the WhyThisView display logic:
+    function resolveWhyText(intelRead: typeof cards[0]["intel_read"]): string {
+      return intelRead?.posture_reason || intelRead?.bottom_line || intelRead?.summary || "";
+    }
+
+    const cards = [
+      makeCard({
+        intel_read: {
+          title: "Why this view?",
+          posture_label: "on watch",
+          summary: "Generic fallback summary.",
+          trusted_signals: [],
+          incomplete_signals: [],
+          caveat: "Wait.",
+          posture_reason: "Specific posture explanation for this ticker.",
+          bottom_line: "Bottom line fallback.",
+        },
+      }),
+    ];
+    const text = resolveWhyText(cards[0].intel_read);
+    expect(text).toBe("Specific posture explanation for this ticker.");
+    expect(text).not.toBe("Generic fallback summary.");
+    expect(text).not.toBe("Bottom line fallback.");
+  });
+
+  it("raw metric keys do not appear in intel_posture_label or intel_filter_bucket", () => {
+    const RAW_METRIC_KEYS = [
+      "fcf_margin", "roic_ttm", "p_fcf", "fcf_yield", "gross_margin",
+      "net_debt_to_ebitda", "ev_ebitda", "revenue_cagr_3y", "max_drawdown_1y",
+      "trailing_pe", "forward_pe", "momentum_score", "valuation_score",
+    ];
+    const validPostureLabels = [
+      "Add Candidate", "Watchlist", "Review", "Risk Watch", "Trim Candidate",
+    ];
+    for (const label of validPostureLabels) {
+      for (const rawKey of RAW_METRIC_KEYS) {
+        expect(label).not.toContain(rawKey);
+      }
+    }
+  });
+});

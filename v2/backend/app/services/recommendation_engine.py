@@ -23,7 +23,11 @@ from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
 from .intelligence.thesis_plain_english import build_thesis_plain_english
-from .intelligence.reasoning_v2_plain_english import build_intel_read, is_safe_for_insufficient_data
+from .intelligence.reasoning_v2_plain_english import (
+    build_intel_read,
+    build_posture_reason,
+    is_safe_for_insufficient_data,
+)
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -929,6 +933,95 @@ def _normalize_action(action: str | None) -> str:
     return "HOLD"
 
 
+# ── Intel posture system (v3) ─────────────────────────────────────────────────
+# Deterministic advisor-facing posture buckets decoupled from broker-style
+# BUY/HOLD/SELL action, which collapses all tickers into HOLD under insufficient_data.
+
+# Core index ETFs and dividend/income ETFs: always DCA/contribution targets.
+_INTEL_ADD_CANDIDATE_TICKERS: frozenset[str] = frozenset({
+    "VOO", "VTI", "SPY", "QQQ", "SCHD", "VYM", "BND",
+    "VGT", "VHT", "VIS", "VTV", "VUG", "VXUS", "VEA", "VWO", "XLE",
+})
+
+# Speculative, crypto, and IPO tickers: always elevated-risk posture.
+_INTEL_RISK_WATCH_TICKERS: frozenset[str] = frozenset(
+    {"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"}
+)
+
+
+def _derive_intel_posture(
+    *,
+    ticker: str,
+    action: str,
+    analyst_action: Optional[str],
+    conviction_level: Optional[str],
+    technical_signal: Optional[str],
+    category: Optional[str],
+    intel_read_dict: Optional[dict],
+) -> str:
+    """Derive investor-facing Intel posture bucket from safe structural signals.
+
+    Deterministic — no IO, LLM calls, or raw metric keys.
+    Returns one of: "Add Candidate" | "Watchlist" | "Review" | "Risk Watch" | "Trim Candidate"
+
+    Rules (evaluated in priority order):
+    1. TRIM/SELL action → Trim Candidate
+    2. Core index / dividend ETFs → Add Candidate (DCA targets regardless of data coverage)
+    3. Crypto / speculative tickers → Risk Watch
+    4. Bearish technical signal → Risk Watch
+    5. BUY action + sufficient data → Add Candidate
+    6. MEDIUM+ conviction + sufficient data → Add Candidate
+    7. Insufficient data + MEDIUM conviction → Review (some evidence, not yet actionable)
+    8. Everything else → Watchlist
+    """
+    ticker_up = (ticker or "").upper()
+    cat_low = (category or "").lower()
+    tech = (technical_signal or "").upper()
+    conviction = (conviction_level or "LOW").upper()
+
+    insufficient = bool(intel_read_dict and intel_read_dict.get("insufficient_data"))
+
+    # 1. Trim/Sell signal → Trim Candidate
+    if action in {"TRIM", "SELL"}:
+        return "Trim Candidate"
+    if analyst_action and _normalize_action(analyst_action) in {"TRIM", "SELL"}:
+        return "Trim Candidate"
+
+    # 2. Core index ETFs / dividend ETFs → Add Candidate (DCA targets)
+    if ticker_up in _INTEL_ADD_CANDIDATE_TICKERS or (
+        "etf" in cat_low and ticker_up not in _INTEL_RISK_WATCH_TICKERS
+    ):
+        return "Add Candidate"
+
+    # 3. Crypto / speculative → Risk Watch
+    if (
+        ticker_up in _INTEL_RISK_WATCH_TICKERS
+        or "crypto" in cat_low
+        or "speculative" in cat_low
+        or "ipo" in cat_low
+    ):
+        return "Risk Watch"
+
+    # 4. Bearish technical signal → Risk Watch
+    if tech in {"SELL", "WEAK", "BEARISH"}:
+        return "Risk Watch"
+
+    # 5. BUY action + sufficient data → Add Candidate
+    if not insufficient and action == "BUY":
+        return "Add Candidate"
+
+    # 6. MEDIUM+ conviction + sufficient data → Add Candidate
+    if not insufficient and conviction in {"HIGH", "MEDIUM"}:
+        return "Add Candidate"
+
+    # 7. Insufficient data + MEDIUM conviction → Review
+    if insufficient and conviction == "MEDIUM":
+        return "Review"
+
+    # 8. Everything else → Watchlist
+    return "Watchlist"
+
+
 def _bucket_pct(count: int, total: int) -> float:
     return round((count / total) * 100.0, 1) if total else 0.0
 
@@ -1724,6 +1817,29 @@ class RecommendationService:
                     ):
                         reasoning["differentiation"] = None
 
+                # Intel posture system (v3): derive advisor-facing posture bucket
+                # AFTER the insufficient_data gate so action + conviction_level
+                # reflect the post-gate values used by the frontend.
+                intel_posture_label = _derive_intel_posture(
+                    ticker=ticker,
+                    action=_card_action,
+                    analyst_action=_card_analyst_action,
+                    conviction_level=_card_conviction_level,
+                    technical_signal=rec.get("technical_signal"),
+                    category=pos.get("category"),
+                    intel_read_dict=intel_read_dict,
+                )
+                # Inject posture_reason into intel_read_dict so the WhyThisView
+                # section explains WHY this posture was assigned (card-specific).
+                if intel_read_dict is not None:
+                    intel_read_dict["posture_reason"] = build_posture_reason(
+                        posture_label=intel_posture_label,
+                        trusted_signals=intel_read_dict.get("trusted_signals") or [],
+                        incomplete_signals=intel_read_dict.get("incomplete_signals") or [],
+                        ticker=ticker,
+                        category=pos.get("category") or "",
+                    )
+
                 card = InsightCard(
                     id=rec["id"],
                     ticker=ticker,
@@ -1784,6 +1900,8 @@ class RecommendationService:
                     thesis_v2=thesis_v2_dict,
                     thesis_plain_english=thesis_plain_english_dict,
                     intel_read=intel_read_dict,
+                    intel_posture_label=intel_posture_label,
+                    intel_filter_bucket=intel_posture_label,
                 )
                 logger.info(
                     "analyst_trace checkpoint=api_serializer ticker=%s payload=%s",

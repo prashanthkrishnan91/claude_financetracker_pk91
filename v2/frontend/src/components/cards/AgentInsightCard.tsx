@@ -11,6 +11,15 @@ const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }
   REVIEW: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
 };
 
+// Intel posture styles (v3): advisor-facing posture buckets decoupled from broker labels.
+const POSTURE_STYLES: Record<string, { bg: string; text: string; border: string }> = {
+  "Add Candidate": { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
+  "Trim Candidate": { bg: "bg-yellow-500/10", text: "text-yellow-400", border: "border-yellow-500/30" },
+  "Risk Watch": { bg: "bg-red-500/10", text: "text-red-400", border: "border-red-500/30" },
+  "Review": { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
+  "Watchlist": { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
+};
+
 const CONVICTION_STYLES: Record<string, string> = {
   HIGH: "bg-green-500/15 text-green-300 border border-green-500/30",
   MEDIUM: "bg-yellow-500/15 text-yellow-300 border border-yellow-500/30",
@@ -87,7 +96,9 @@ function reasoningSourceLabel(source?: string | null): string | null {
 
 export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onClick?: () => void }) {
   const action = normalizeAction(card.analyst_action || card.action);
-  const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
+  // Use Intel posture styles when available; fall back to action styles.
+  const postureLabel = card.intel_posture_label || null;
+  const styles = (postureLabel && POSTURE_STYLES[postureLabel]) || ACTION_STYLES[action] || ACTION_STYLES.HOLD;
   const convictionLevel = _resolveConvictionLevel(card);
   const structuredSchema = isStructuredSchema(card);
 
@@ -113,7 +124,7 @@ export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onC
         </div>
         <div className="flex flex-col items-end gap-1 text-[10px]">
           <span className={cn("px-2 py-0.5 rounded border font-bold uppercase leading-tight", styles.bg, styles.text, styles.border)}>
-            {actionBadgeLabel(action, card.intel_read)}
+            {postureLabel || actionBadgeLabel(action, card.intel_read)}
           </span>
           <span className={cn("px-2 py-0.5 rounded font-semibold uppercase", CONVICTION_STYLES[convictionLevel])}>
             {convictionBadgeLabel(convictionLevel)}
@@ -233,7 +244,9 @@ function Chip({ label, tone }: { label: string; tone: "good" | "bad" | "neutral"
 function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
   const hasTrusted = intelRead.trusted_signals.length > 0;
   const hasIncomplete = intelRead.incomplete_signals.length > 0;
-  const displaySummary = intelRead.bottom_line || intelRead.summary;
+  // posture_reason is the primary card-specific explanation of WHY this posture was assigned.
+  // Fall back to bottom_line (insufficient-data specific), then summary.
+  const displaySummary = intelRead.posture_reason || intelRead.bottom_line || intelRead.summary;
 
   return (
     <div className="rounded-md border border-border/30 bg-surface-elevated/20 px-2.5 py-2 space-y-1.5">

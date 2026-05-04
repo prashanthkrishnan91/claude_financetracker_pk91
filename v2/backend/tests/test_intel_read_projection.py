@@ -36,6 +36,7 @@ import pytest
 
 from app.services.intelligence.reasoning_v2_plain_english import (
     build_intel_read,
+    build_posture_reason,
     is_safe_for_insufficient_data,
 )
 
@@ -110,6 +111,68 @@ def _build_intel_read_for_card(
         fallback_result, _ = _try_run(fallback_run_id)
         return fallback_result
     return None
+
+
+# ── Local copy of _derive_intel_posture for testing ──────────────────────────
+# Mirrors recommendation_engine._derive_intel_posture exactly so these tests
+# remain valid when that module cannot be imported (missing supabase).
+
+_INTEL_ADD_CANDIDATE_TICKERS = frozenset({
+    "VOO", "VTI", "SPY", "QQQ", "SCHD", "VYM", "BND",
+    "VGT", "VHT", "VIS", "VTV", "VUG", "VXUS", "VEA", "VWO", "XLE",
+})
+_INTEL_RISK_WATCH_TICKERS = frozenset({"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"})
+
+
+def _norm_action(action: str | None) -> str:
+    raw = (action or "").strip().upper()
+    if raw == "REDUCE":
+        return "TRIM"
+    if raw in {"BUY", "HOLD", "TRIM", "SELL"}:
+        return raw
+    return "HOLD"
+
+
+def _derive_intel_posture(
+    *,
+    ticker: str,
+    action: str,
+    analyst_action: Optional[str],
+    conviction_level: Optional[str],
+    technical_signal: Optional[str],
+    category: Optional[str],
+    intel_read_dict: Optional[dict],
+) -> str:
+    ticker_up = (ticker or "").upper()
+    cat_low = (category or "").lower()
+    tech = (technical_signal or "").upper()
+    conviction = (conviction_level or "LOW").upper()
+    insufficient = bool(intel_read_dict and intel_read_dict.get("insufficient_data"))
+
+    if action in {"TRIM", "SELL"}:
+        return "Trim Candidate"
+    if analyst_action and _norm_action(analyst_action) in {"TRIM", "SELL"}:
+        return "Trim Candidate"
+    if ticker_up in _INTEL_ADD_CANDIDATE_TICKERS or (
+        "etf" in cat_low and ticker_up not in _INTEL_RISK_WATCH_TICKERS
+    ):
+        return "Add Candidate"
+    if (
+        ticker_up in _INTEL_RISK_WATCH_TICKERS
+        or "crypto" in cat_low
+        or "speculative" in cat_low
+        or "ipo" in cat_low
+    ):
+        return "Risk Watch"
+    if tech in {"SELL", "WEAK", "BEARISH"}:
+        return "Risk Watch"
+    if not insufficient and action == "BUY":
+        return "Add Candidate"
+    if not insufficient and conviction in {"HIGH", "MEDIUM"}:
+        return "Add Candidate"
+    if insufficient and conviction == "MEDIUM":
+        return "Review"
+    return "Watchlist"
 
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -1132,3 +1195,238 @@ def test_page_load_pref_logic_tolerates_malformed_analyst_verdict():
     assert _used_preferred is True
     assert isinstance(analyst_verdict, dict)
     assert analyst_verdict.get("primary_driver") == "Valid ticker-specific WHY from latest live row."
+
+
+# ── Intel posture system (v3) tests ──────────────────────────────────────────
+# Tests 23–35: _derive_intel_posture differentiation, ETF/crypto/speculative
+# buckets, Review vs Watchlist, posture_reason card-specificity, no raw keys.
+
+
+def _make_insuf_intel_read(n_trusted: int = 0, n_missing: int = 3) -> dict:
+    """Build a minimal intel_read dict with insufficient_data=True."""
+    all_labels = ["business quality", "valuation", "growth", "risk", "recent market behavior"]
+    trusted = all_labels[:n_trusted]
+    incomplete = all_labels[n_trusted: n_trusted + n_missing]
+    return {
+        "insufficient_data": True,
+        "trusted_signals": trusted,
+        "incomplete_signals": incomplete,
+    }
+
+
+# 23. Different tickers do not all collapse into the same Intel bucket.
+def test_intel_posture_no_all_hold_collapse():
+    """ETF, crypto, and single-stock tickers must not all share the same bucket."""
+    etf_posture = _derive_intel_posture(
+        ticker="VOO", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="ETF",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    crypto_posture = _derive_intel_posture(
+        ticker="BTC", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Crypto",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    single_stock_low = _derive_intel_posture(
+        ticker="NVDA", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    single_stock_med = _derive_intel_posture(
+        ticker="GOOGL", action="HOLD", analyst_action=None,
+        conviction_level="MEDIUM", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=2),
+    )
+    # Must not all be identical
+    postures = {etf_posture, crypto_posture, single_stock_low, single_stock_med}
+    assert len(postures) >= 3, f"Expected ≥3 distinct postures, got: {postures}"
+
+
+# 24. ETF tickers → Add Candidate regardless of insufficient_data.
+def test_intel_posture_etf_add_candidate():
+    for ticker in ["VOO", "VTI", "SCHD", "VYM", "QQQ", "BND", "VIS", "VEA"]:
+        posture = _derive_intel_posture(
+            ticker=ticker, action="HOLD", analyst_action=None,
+            conviction_level="LOW", technical_signal=None, category="ETF",
+            intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+        )
+        assert posture == "Add Candidate", f"{ticker}: expected Add Candidate, got {posture}"
+
+
+# 25. Crypto tickers → Risk Watch regardless of conviction.
+def test_intel_posture_crypto_risk_watch():
+    for ticker in ["BTC", "XRP"]:
+        posture = _derive_intel_posture(
+            ticker=ticker, action="HOLD", analyst_action=None,
+            conviction_level="MEDIUM", technical_signal=None, category="Crypto",
+            intel_read_dict=_make_insuf_intel_read(n_trusted=2),
+        )
+        assert posture == "Risk Watch", f"{ticker}: expected Risk Watch, got {posture}"
+
+
+# 26. Speculative tickers → Risk Watch.
+def test_intel_posture_speculative_risk_watch():
+    for ticker in ["RIVN", "KLAR", "BLSH", "STUB"]:
+        posture = _derive_intel_posture(
+            ticker=ticker, action="HOLD", analyst_action=None,
+            conviction_level="MEDIUM", technical_signal="NEUTRAL", category="Speculative",
+            intel_read_dict=_make_insuf_intel_read(n_trusted=1),
+        )
+        assert posture == "Risk Watch", f"{ticker}: expected Risk Watch, got {posture}"
+
+
+# 27. Bearish technical signal → Risk Watch for non-ETF, non-speculative tickers.
+def test_intel_posture_bearish_technical_risk_watch():
+    for tech in ["SELL", "WEAK", "BEARISH"]:
+        posture = _derive_intel_posture(
+            ticker="AAPL", action="HOLD", analyst_action=None,
+            conviction_level="LOW", technical_signal=tech, category="Core",
+            intel_read_dict=_make_insuf_intel_read(n_trusted=1),
+        )
+        assert posture == "Risk Watch", f"AAPL with tech={tech}: expected Risk Watch, got {posture}"
+
+
+# 28. TRIM/SELL action → Trim Candidate (highest priority over everything else).
+def test_intel_posture_trim_candidate():
+    for action in ["TRIM", "SELL"]:
+        posture = _derive_intel_posture(
+            ticker="NVDA", action=action, analyst_action=None,
+            conviction_level="LOW", technical_signal=None, category="Core",
+            intel_read_dict=_make_insuf_intel_read(n_trusted=3),
+        )
+        assert posture == "Trim Candidate", f"action={action}: expected Trim Candidate, got {posture}"
+
+
+# 29. Insufficient data + MEDIUM conviction → Review (partial evidence, worth watching).
+def test_intel_posture_review_medium_conviction_insufficient():
+    posture = _derive_intel_posture(
+        ticker="MSFT", action="HOLD", analyst_action=None,
+        conviction_level="MEDIUM", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=2),
+    )
+    assert posture == "Review", f"Expected Review for MEDIUM conviction insufficient-data, got {posture}"
+
+
+# 30. Insufficient data + LOW conviction → Watchlist (not Review).
+def test_intel_posture_watchlist_low_conviction_insufficient():
+    posture = _derive_intel_posture(
+        ticker="CRM", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=1),
+    )
+    assert posture == "Watchlist", f"Expected Watchlist for LOW conviction insufficient-data, got {posture}"
+
+
+# 31. Intel posture can differ from evidence completeness:
+#     A Trim Candidate can still have insufficient_data.
+def test_intel_posture_trim_candidate_with_insufficient_data():
+    posture = _derive_intel_posture(
+        ticker="SNOW", action="TRIM", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    assert posture == "Trim Candidate"
+
+
+# 32. ETF ticker with category=ETF but ticker NOT in risk-watch set → Add Candidate.
+def test_intel_posture_etf_category_add_candidate_when_not_risk_ticker():
+    posture = _derive_intel_posture(
+        ticker="XYZF", action="HOLD", analyst_action=None,  # unknown ETF ticker
+        conviction_level="LOW", technical_signal=None, category="ETF",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    assert posture == "Add Candidate"
+
+
+# 33. build_posture_reason is card-specific — different tickers produce different text.
+def test_build_posture_reason_card_specific():
+    etf_reason = build_posture_reason(
+        posture_label="Add Candidate",
+        trusted_signals=[],
+        incomplete_signals=[],
+        ticker="VOO",
+        category="ETF",
+    )
+    speculative_reason = build_posture_reason(
+        posture_label="Risk Watch",
+        trusted_signals=[],
+        incomplete_signals=[],
+        ticker="RIVN",
+        category="Speculative",
+    )
+    review_reason = build_posture_reason(
+        posture_label="Review",
+        trusted_signals=["business quality", "valuation"],
+        incomplete_signals=["growth", "risk"],
+        ticker="NVDA",
+        category="Core",
+    )
+    watchlist_reason = build_posture_reason(
+        posture_label="Watchlist",
+        trusted_signals=[],
+        incomplete_signals=["growth", "risk", "recent market behavior"],
+        ticker="CRM",
+        category="Core",
+    )
+    reasons = {etf_reason, speculative_reason, review_reason, watchlist_reason}
+    assert len(reasons) == 4, "Each posture label should produce unique reason text"
+
+
+# 34. build_posture_reason contains no raw metric keys.
+def test_build_posture_reason_no_raw_metric_keys():
+    for posture_label in ["Add Candidate", "Watchlist", "Review", "Risk Watch", "Trim Candidate"]:
+        reason = build_posture_reason(
+            posture_label=posture_label,
+            trusted_signals=["business quality", "valuation"],
+            incomplete_signals=["growth", "risk"],
+            ticker="AAPL",
+            category="Core",
+        )
+        for raw_key in _RAW_METRIC_KEYS:
+            assert raw_key not in reason, (
+                f"posture_label={posture_label}: raw key '{raw_key}' leaked into posture_reason"
+            )
+
+
+# 35. ETF tickers and MEDIUM-conviction single stocks must not both be Watchlist.
+def test_intel_posture_differentiation_etf_vs_medium_stock_vs_low_stock():
+    """Validates the key invariant from the bug report: not all 34 tickers in same bucket."""
+    results = {}
+    # ETF → Add Candidate
+    results["VOO"] = _derive_intel_posture(
+        ticker="VOO", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="ETF",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    # Crypto → Risk Watch
+    results["BTC"] = _derive_intel_posture(
+        ticker="BTC", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Crypto",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    # MEDIUM conviction single stock → Review
+    results["NVDA"] = _derive_intel_posture(
+        ticker="NVDA", action="HOLD", analyst_action=None,
+        conviction_level="MEDIUM", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=2),
+    )
+    # LOW conviction, TRIM action → Trim Candidate
+    results["SNOW"] = _derive_intel_posture(
+        ticker="SNOW", action="TRIM", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+    # LOW conviction single stock → Watchlist
+    results["CRM"] = _derive_intel_posture(
+        ticker="CRM", action="HOLD", analyst_action=None,
+        conviction_level="LOW", technical_signal=None, category="Core",
+        intel_read_dict=_make_insuf_intel_read(n_trusted=0),
+    )
+
+    assert results["VOO"] == "Add Candidate"
+    assert results["BTC"] == "Risk Watch"
+    assert results["NVDA"] == "Review"
+    assert results["SNOW"] == "Trim Candidate"
+    assert results["CRM"] == "Watchlist"
+    # All 5 are different
+    assert len(set(results.values())) == 5

@@ -370,6 +370,11 @@ export interface InsightCardData {
   // Intel v2 reasoning_v2 UI: compact "Why this view?" projection.
   // Populated when _reasoning_v2 exists. Contains no raw metric keys.
   intel_read?: IntelRead | null;
+  // Intel posture system (v3): advisor-facing posture decoupled from broker BUY/HOLD/SELL.
+  // intel_posture_label: badge shown on the card ("Add Candidate", "Watchlist", etc.)
+  // intel_filter_bucket: key used by filter tabs for counting + filtering.
+  intel_posture_label?: string | null;
+  intel_filter_bucket?: string | null;
 }
 
 export interface IntelRead {
@@ -383,6 +388,9 @@ export interface IntelRead {
   bottom_line?: string | null;
   /** True when the card is in insufficient-data mode. */
   insufficient_data?: boolean;
+  /** Card-specific explanation of WHY the Intel posture was assigned. Injected
+   *  after _derive_intel_posture runs; more specific than summary/bottom_line. */
+  posture_reason?: string | null;
 }
 
 export interface ThesisPlainEnglish {

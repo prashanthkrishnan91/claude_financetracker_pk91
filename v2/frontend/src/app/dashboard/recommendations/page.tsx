@@ -23,13 +23,16 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
 import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/lib/api";
 
-const ACTION_FILTERS = [
+// Intel posture filter buckets (v3): advisor-facing posture decoupled from
+// broker-style BUY/HOLD/SELL which collapses all tickers into HOLD under
+// insufficient_data. These buckets are derived deterministically from safe signals.
+const INTEL_FILTERS = [
   { key: "ALL", label: "All", color: "bg-surface-elevated text-text-primary" },
-  { key: "SELL", label: "Sell", color: "bg-red-500/10 text-red-400 border-red-500/30" },
-  { key: "BUY", label: "Buy", color: "bg-green-500/10 text-green-400 border-green-500/30" },
-  { key: "TRIM", label: "Trim", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
-  { key: "REVIEW", label: "Review", color: "bg-purple-500/10 text-purple-400 border-purple-500/30" },
-  { key: "HOLD", label: "Hold", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
+  { key: "Add Candidate", label: "Add", color: "bg-green-500/10 text-green-400 border-green-500/30" },
+  { key: "Watchlist", label: "Watchlist", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
+  { key: "Review", label: "Review", color: "bg-purple-500/10 text-purple-400 border-purple-500/30" },
+  { key: "Risk Watch", label: "Risk Watch", color: "bg-red-500/10 text-red-400 border-red-500/30" },
+  { key: "Trim Candidate", label: "Trim", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
 ] as const;
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
@@ -115,17 +118,20 @@ export default function RecommendationsPage() {
     });
   }, [activeJobId, jobStatus, queryClient]);
 
+  // Intel posture filter uses intel_filter_bucket (v3); falls back to "Watchlist"
+  // for legacy cards that pre-date this field.
   const filtered =
     filter === "ALL"
       ? recs || []
-      : (recs || []).filter((r) => r.action === filter);
+      : (recs || []).filter((r) => (r.intel_filter_bucket || "Watchlist") === filter);
   const runtimeSynthesis = computePortfolioSynthesisFromCards(recs ?? []);
   const synthesis = runtimeSynthesis ?? (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null;
 
-  // Count per action
+  // Count per Intel posture bucket (not per raw action).
   const counts: Record<string, number> = { ALL: (recs || []).length };
   for (const r of recs || []) {
-    counts[r.action] = (counts[r.action] || 0) + 1;
+    const bucket = r.intel_filter_bucket || "Watchlist";
+    counts[bucket] = (counts[bucket] || 0) + 1;
   }
 
   // Close modal on Escape
@@ -248,9 +254,9 @@ export default function RecommendationsPage() {
               synthesis={synthesis}
             />
 
-            {/* Filter cards */}
+            {/* Filter cards — Intel posture buckets */}
             <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2">
-              {ACTION_FILTERS.map((f) => (
+              {INTEL_FILTERS.map((f) => (
                 <button
                   key={f.key}
                   onClick={() => setFilter(f.key)}
@@ -309,11 +315,11 @@ export default function RecommendationsPage() {
                 />
               ) : (
                 <EmptyState
-                  title={filter === "ALL" ? "No analysis yet" : `No ${filter} signals`}
+                  title={filter === "ALL" ? "No analysis yet" : `No ${filter} tickers`}
                   description={
                     filter === "ALL"
                       ? "Run agents to generate AI-powered signals for your portfolio."
-                      : `No ${filter} recommendations right now.`
+                      : `No tickers in the ${filter} bucket right now.`
                   }
                 />
               )

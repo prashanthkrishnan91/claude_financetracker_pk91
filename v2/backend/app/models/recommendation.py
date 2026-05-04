@@ -117,6 +117,14 @@ class InsightCard(BaseModel):
     # coverage block. Populated when _reasoning_v2 exists in agent_runs.allocation.
     # Contains no raw metric keys. Frontend renders as "Why this view?" section.
     intel_read: Optional[dict] = None
+    # Intel posture system (v3) — deterministic advisor-facing posture bucket.
+    # Derived from safe structural signals (action, conviction, technical, category).
+    # Decoupled from internal BUY/HOLD/SELL broker action to avoid all-HOLD collapse.
+    # intel_posture_label: human-readable badge shown on the card.
+    # intel_filter_bucket: key used by frontend filter tabs for counting + filtering.
+    # Valid values: "Add Candidate" | "Watchlist" | "Review" | "Risk Watch" | "Trim Candidate"
+    intel_posture_label: Optional[str] = None
+    intel_filter_bucket: Optional[str] = None
 
 
 class AgentRunStatus(BaseModel):

@@ -557,3 +557,125 @@ def test_build_intel_read_insufficient_data_false_for_constructive():
     result = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
     assert result is not None
     assert result["insufficient_data"] is False
+
+
+# ── Test 16: body copy override in card assembly ──────────────────────────────
+
+_FORBIDDEN_CARD_PHRASES = [
+    "accumulate",
+    "buy",
+    "entry opportunity",
+    "re-rating opportunity",
+    "high-conviction idea",
+    "add aggressively",
+    "strong buy",
+    "deploy",
+]
+
+
+def _simulate_card_assembly_body_override(reasoning: dict, intel_read: dict) -> None:
+    """Mirrors the body-copy override block in recommendation_engine._compute_insight_cards."""
+    if intel_read.get("insufficient_data"):
+        reasoning["action_reason"] = intel_read.get("conservative_action")
+        reasoning["primary_driver"] = intel_read.get("conservative_why")
+        reasoning["differentiation"] = None
+
+
+def test_card_action_reason_overridden_when_insufficient():
+    """action_reason replaced with conservative_action when insufficient_data=True."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+    assert intel_read["insufficient_data"] is True
+
+    reasoning = {
+        "action_reason": "Accumulate on pullbacks — forward PE at 17x signals opportunity.",
+        "primary_driver": "High-conviction idea; institutional re-rating likely.",
+        "differentiation": "If growth accelerates, this becomes a strong buy.",
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    assert reasoning["action_reason"] == intel_read["conservative_action"]
+    assert reasoning["action_reason"] != "Accumulate on pullbacks — forward PE at 17x signals opportunity."
+    lower_action = (reasoning["action_reason"] or "").lower()
+    for phrase in _FORBIDDEN_CARD_PHRASES:
+        assert phrase not in lower_action, f"Forbidden phrase {phrase!r} still in action_reason"
+
+
+def test_card_primary_driver_overridden_when_insufficient():
+    """primary_driver replaced with conservative_why when insufficient_data=True."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published=["momentum_score", "valuation_score"],
+        suppressed=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+
+    reasoning = {
+        "action_reason": "Buy aggressively.",
+        "primary_driver": "High-conviction re-rating opportunity.",
+        "differentiation": "Bullish alt view.",
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    assert reasoning["primary_driver"] == intel_read["conservative_why"]
+    lower_why = (reasoning["primary_driver"] or "").lower()
+    for phrase in _FORBIDDEN_CARD_PHRASES:
+        assert phrase not in lower_why, f"Forbidden phrase {phrase!r} still in primary_driver"
+
+
+def test_card_differentiation_nulled_when_insufficient():
+    """differentiation is set to None when insufficient_data=True."""
+    intel_read = {
+        "insufficient_data": True,
+        "conservative_action": "Hold off on new buying until growth evidence improves.",
+        "conservative_why": "Watchlist read only.",
+    }
+    reasoning = {
+        "action_reason": "Accumulate.",
+        "primary_driver": "Good re-rating story.",
+        "differentiation": "If growth improves this becomes a strong buy.",
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+    assert reasoning["differentiation"] is None
+
+
+def test_card_body_not_overridden_when_not_insufficient():
+    """Body copy is not touched when insufficient_data=False."""
+    run_id = str(uuid4())
+    r2 = _make_reasoning_v2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published=["quality_score", "momentum_score"],
+        suppressed=["growth"],
+        blockers=[],
+    )
+    run_lookup = _make_run_lookup(run_id, reasoning_v2={"NVDA": r2})
+    intel_read = _build_intel_read_for_card(ticker="NVDA", run_id=run_id, run_lookup=run_lookup)
+    assert intel_read is not None
+    assert intel_read["insufficient_data"] is False
+
+    original_action = "Accumulate on continued earnings growth."
+    original_driver = "Business quality is solid and improving."
+    reasoning = {
+        "action_reason": original_action,
+        "primary_driver": original_driver,
+        "differentiation": "If momentum stalls, trim.",
+    }
+    _simulate_card_assembly_body_override(reasoning, intel_read)
+
+    assert reasoning["action_reason"] == original_action
+    assert reasoning["primary_driver"] == original_driver

@@ -97,13 +97,62 @@ def _build_summary(
         return (
             f"The system has enough evidence to comment on {trusted_str}, "
             f"but {incomplete_str} {are_str} still incomplete. "
-            "That is why this stays on watch instead of becoming a high-conviction idea."
+            "That is why this stays on watch — not complete enough for a strong view."
         )
 
     return (
         f"Some evidence on {trusted_str} is available, "
         f"but {incomplete_str} {are_str} still incomplete. "
         f"Treat this as a {posture_label} read, not a complete picture."
+    )
+
+
+def _build_conservative_action(
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    """Signal-specific watchlist ACTION copy for insufficient-data cards."""
+    if incomplete_signals:
+        incomplete_str = _join_plain(incomplete_signals)
+        return (
+            f"Wait for {incomplete_str} evidence to improve before adding. "
+            "Keep on watchlist."
+        )
+    if trusted_signals:
+        return "Watch for more complete evidence before adding to this position."
+    return "Watch for more complete evidence before adding."
+
+
+def _build_conservative_why(
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    """Signal-specific watchlist WHY copy for insufficient-data cards."""
+    if trusted_signals and incomplete_signals:
+        trusted_str = _join_plain(trusted_signals)
+        incomplete_str = _join_plain(incomplete_signals)
+        are_str = "are" if len(incomplete_signals) > 1 else "is"
+        return (
+            f"The system can comment on {trusted_str}, "
+            f"but {incomplete_str} {are_str} still incomplete. "
+            "That makes this a watchlist read, not a conviction position."
+        )
+    if trusted_signals:
+        trusted_str = _join_plain(trusted_signals)
+        return (
+            f"Some evidence on {trusted_str} is available, "
+            "but the overall picture is not complete enough for a conviction position."
+        )
+    if incomplete_signals:
+        incomplete_str = _join_plain(incomplete_signals)
+        are_str = "are" if len(incomplete_signals) > 1 else "is"
+        return (
+            f"{incomplete_str.capitalize()} {are_str} still incomplete. "
+            "Not enough evidence for a conviction position."
+        )
+    return (
+        "Not enough evidence on any dimension yet. "
+        "This is a watchlist position only."
     )
 
 
@@ -224,4 +273,12 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
         "incomplete_signals": incomplete_signals,
         "caveat": caveat,
         "insufficient_data": is_insufficient_data,
+        "conservative_action": (
+            _build_conservative_action(trusted_signals, incomplete_signals)
+            if is_insufficient_data else None
+        ),
+        "conservative_why": (
+            _build_conservative_why(trusted_signals, incomplete_signals)
+            if is_insufficient_data else None
+        ),
     }

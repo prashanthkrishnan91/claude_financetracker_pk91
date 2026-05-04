@@ -352,7 +352,11 @@ def test_output_schema_keys():
     )
     result = build_intel_read(r2)
     assert result is not None
-    required_keys = {"title", "posture_label", "summary", "trusted_signals", "incomplete_signals", "caveat", "insufficient_data"}
+    required_keys = {
+        "title", "posture_label", "summary", "trusted_signals",
+        "incomplete_signals", "caveat", "insufficient_data",
+        "conservative_action", "conservative_why",
+    }
     assert required_keys.issubset(result.keys())
     assert isinstance(result["trusted_signals"], list)
     assert isinstance(result["incomplete_signals"], list)
@@ -431,3 +435,143 @@ def test_insufficient_data_flag_false_for_agreement_conflict_watch():
     result = build_intel_read(r2)
     assert result is not None
     assert result["insufficient_data"] is False
+
+
+# ── Test 13: conservative_action and conservative_why fields ─────────────────
+
+
+_FORBIDDEN_PHRASES = [
+    "accumulate",
+    "buy",
+    "entry opportunity",
+    "re-rating opportunity",
+    "high-conviction idea",
+    "add aggressively",
+    "strong buy",
+    "deploy",
+]
+
+
+def _assert_no_forbidden(text: str | None, label: str) -> None:
+    if not text:
+        return
+    lower = text.lower()
+    for phrase in _FORBIDDEN_PHRASES:
+        assert phrase not in lower, f"Forbidden phrase {phrase!r} found in {label}: {text!r}"
+
+
+def test_conservative_action_present_when_insufficient_data():
+    """conservative_action is non-None when insufficient_data=True."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["conservative_action"] is not None
+    assert len(result["conservative_action"]) > 0
+
+
+def test_conservative_why_present_when_insufficient_data():
+    """conservative_why is non-None when insufficient_data=True."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["quality", "growth"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["conservative_why"] is not None
+    assert len(result["conservative_why"]) > 0
+
+
+def test_conservative_fields_none_when_not_insufficient():
+    """conservative_action and conservative_why are None when insufficient_data=False."""
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published_dimensions=["quality_score", "momentum_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=[],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is False
+    assert result["conservative_action"] is None
+    assert result["conservative_why"] is None
+
+
+def test_conservative_action_no_forbidden_phrases_with_incomplete_signals():
+    """conservative_action does not contain forbidden bullish phrases."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    _assert_no_forbidden(result["conservative_action"], "conservative_action")
+    _assert_no_forbidden(result["conservative_why"], "conservative_why")
+    assert "watchlist" in (result["conservative_action"] or "").lower() or "watch" in (result["conservative_action"] or "").lower()
+
+
+def test_conservative_action_no_forbidden_phrases_no_signals():
+    """conservative_action degrades gracefully with no signals and no forbidden phrases."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=[],
+        suppressed_dimensions=[],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    _assert_no_forbidden(result["conservative_action"], "conservative_action")
+    _assert_no_forbidden(result["conservative_why"], "conservative_why")
+    assert result["conservative_action"] is not None
+    assert result["conservative_why"] is not None
+
+
+def test_conservative_why_mentions_trusted_and_incomplete_signals():
+    """conservative_why names both trusted and incomplete plain-English signals."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    why = result["conservative_why"] or ""
+    assert "valuation" in why or "recent market behavior" in why
+    assert "business quality" in why or "growth" in why
+
+
+def test_no_forbidden_phrases_in_any_insufficient_data_output():
+    """No field in build_intel_read output contains forbidden bullish phrases when insufficient_data."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is True
+    _assert_no_forbidden(result["summary"], "summary")
+    _assert_no_forbidden(result["caveat"], "caveat")
+    _assert_no_forbidden(result["conservative_action"], "conservative_action")
+    _assert_no_forbidden(result["conservative_why"], "conservative_why")
+    for sig in result["trusted_signals"]:
+        _assert_no_forbidden(sig, "trusted_signal")
+    for sig in result["incomplete_signals"]:
+        _assert_no_forbidden(sig, "incomplete_signal")

@@ -263,3 +263,90 @@ describe("Business Read remains hidden / not reintroduced", () => {
     expect(joined).not.toContain("Investment case read");
   });
 });
+
+// ── 6. Insufficient-data cards — forbidden bullish phrases ────────────────────
+
+const FORBIDDEN_BULLISH_PHRASES = [
+  "accumulate",
+  "entry opportunity",
+  "re-rating opportunity",
+  "high-conviction idea",
+  "add aggressively",
+  "strong buy",
+];
+
+/**
+ * Simulate what AgentInsightCard renders for WHY / RISK / ACTION / ALT VIEW
+ * and the WhyThisView section for an insufficient-data card.
+ */
+function collectInsufficientDataCardText(card: InsightCardData): string {
+  const parts: string[] = [];
+  if (card.primary_driver) parts.push(card.primary_driver);
+  if (card.risk_flag) parts.push(card.risk_flag);
+  if (card.action_reason) parts.push(card.action_reason);
+  if (card.differentiation) parts.push(card.differentiation);
+  parts.push(...collectIntelReadLines(card.intel_read));
+  return parts.join(" ");
+}
+
+describe("Insufficient-data cards — no forbidden bullish copy", () => {
+  it("card with conservative action_reason has no forbidden phrases", () => {
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      action_reason:
+        "Hold off on new buying until growth and risk evidence improves. Keep on watchlist.",
+      primary_driver:
+        "The system can comment on valuation, but growth and risk are still incomplete. That makes this a watchlist read, not a conviction position.",
+      differentiation: undefined,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary:
+          "The system has enough evidence to comment on valuation, but growth and risk are still incomplete. That is why this stays on watch — not complete enough for a strong view.",
+        trusted_signals: ["valuation"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data to be confident. Wait for more signals before acting.",
+      },
+    });
+    const allText = collectInsufficientDataCardText(card).toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES) {
+      expect(allText).not.toContain(phrase);
+    }
+  });
+
+  it("card with no signals degrades to watchlist copy without forbidden phrases", () => {
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      action_reason: "Watch for more complete evidence before adding.",
+      primary_driver:
+        "Not enough evidence on any dimension yet. This is a watchlist position only.",
+      differentiation: undefined,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "Not enough evidence on any dimension yet. Staying on watch until signals strengthen.",
+        trusted_signals: [],
+        incomplete_signals: [],
+        caveat: "Not enough data to be confident. Wait for more signals before acting.",
+      },
+    });
+    const allText = collectInsufficientDataCardText(card).toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES) {
+      expect(allText).not.toContain(phrase);
+    }
+    expect(allText).toContain("watch");
+  });
+
+  it("conservative action_reason contains watchlist language", () => {
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      action_reason:
+        "Hold off on new buying until business quality, growth, and risk evidence improves. Keep on watchlist.",
+    });
+    expect(card.action_reason?.toLowerCase()).toContain("watchlist");
+    expect(card.action_reason?.toLowerCase()).not.toContain("accumulate");
+  });
+});

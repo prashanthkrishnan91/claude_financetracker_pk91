@@ -1681,6 +1681,8 @@ class RecommendationService:
                 # INSUFFICIENT_DATA, the card must not show BUY / HIGH CONVICTION.
                 # Downgrade BUY → HOLD and HIGH conviction → LOW so the card
                 # posture is consistent with the intel_read "Why this view?" section.
+                # Also replace body copy (ACTION/WHY/ALT VIEW) with conservative
+                # watchlist language so the card content matches the badge.
                 if intel_read_dict and intel_read_dict.get("insufficient_data"):
                     if _card_action == "BUY":
                         _card_action = "HOLD"
@@ -1689,6 +1691,9 @@ class RecommendationService:
                         _card_analyst_action = "HOLD"
                     if (_card_conviction_level or "").upper() == "HIGH":
                         _card_conviction_level = "LOW"
+                    reasoning["action_reason"] = intel_read_dict.get("conservative_action")
+                    reasoning["primary_driver"] = intel_read_dict.get("conservative_why")
+                    reasoning["differentiation"] = None
 
                 card = InsightCard(
                     id=rec["id"],

@@ -1,4 +1,58 @@
 ## Last change
+Intel card insufficient-data copy consistency (PR: "fix(intel-card): replace bullish body copy on insufficient-data cards with conservative watchlist language").
+
+## Root cause
+Previous PR fixed badge contradiction (BUY→HOLD, HIGH→LOW) but left the card body copy unchanged.
+The fields `action_reason` (ACTION), `primary_driver` (WHY), and `differentiation` (ALT VIEW) still
+carried legacy LLM text with bullish phrases ("Accumulate on pullbacks", "forward PE signals opportunity",
+"high-conviction idea") even when `intel_read.insufficient_data=True`. Additionally `_build_summary`
+used the phrase "high-conviction idea" in its WATCH+partial-coverage template.
+
+**Fix**:
+1. `build_intel_read` now emits two new backend-only fields (`conservative_action`, `conservative_why`)
+   that are signal-specific, plain-English watchlist copy (only populated when `insufficient_data=True`).
+2. Card assembly (`_compute_insight_cards`): when `insufficient_data=True`, also overrides
+   `reasoning["action_reason"]` with `conservative_action`, `reasoning["primary_driver"]` with
+   `conservative_why`, and nulls `reasoning["differentiation"]`.
+3. `_build_summary` WATCH+partial-coverage path no longer uses the phrase "high-conviction idea";
+   replaced with "not complete enough for a strong view".
+
+## Files changed
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py` — add `_build_conservative_action`,
+  `_build_conservative_why` helpers; add `conservative_action`/`conservative_why` to output dict;
+  fix forbidden phrase in `_build_summary`
+- `v2/backend/app/services/recommendation_engine.py` — extend `insufficient_data` gate to also
+  override `action_reason`, `primary_driver`, `differentiation` in `reasoning` dict
+- `v2/backend/tests/test_reasoning_v2_plain_english.py` — 8 new tests for new fields and forbidden phrases;
+  update schema-keys test for new required keys
+- `v2/backend/tests/test_intel_read_projection.py` — 4 new tests for body-copy override in card assembly
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` — 3 new tests for
+  forbidden bullish phrases on insufficient-data cards
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. No insufficient-data card displays bullish ACTION language.
+2. No HOLD/LOW insufficient-data card describes itself as a high-conviction idea.
+3. WHY/ACTION fields are also conservative when `intel_read.insufficient_data=True`.
+4. "Why this view?" summary names which signals are trusted vs incomplete (already signal-specific
+   from signal-list templates; conservative_why also names signals for WHY section).
+5. Missing intel_read degrades gracefully without bullish filler (conservative_* fields absent,
+   LLM fields still shown — but insufficient_data gate only fires when intel_read is present).
+6. Raw metric keys not leaked (no changes to leak-guard path; conservative copy uses only plain-English).
+7. Business Read remains hidden (unchanged).
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No frontend component rendering changes.
+- No app-wide redesign.
+
+---
+
+## Last change
 Intel card consistency + page-load intel_read hydration fix (PR: "fix(intel-card): fix intel_read hydration on page load and BUY/WATCH posture contradiction").
 
 ## Root cause

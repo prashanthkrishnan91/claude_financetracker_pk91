@@ -207,15 +207,17 @@ function Chip({ label, tone }: { label: string; tone: "good" | "bad" | "neutral"
 function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
   const hasTrusted = intelRead.trusted_signals.length > 0;
   const hasIncomplete = intelRead.incomplete_signals.length > 0;
+  const displaySummary = intelRead.bottom_line || intelRead.summary;
 
   return (
     <div className="rounded-md border border-border/30 bg-surface-elevated/20 px-2.5 py-2 space-y-1.5">
       <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">
         {intelRead.title}
       </p>
-      <p className="text-xs text-text-secondary leading-snug">{intelRead.summary}</p>
-      {(hasTrusted || hasIncomplete) && (
-        <div className="flex flex-wrap gap-1">
+      <p className="text-xs text-text-secondary leading-snug">{displaySummary}</p>
+      {hasTrusted && (
+        <div className="flex flex-wrap gap-1 items-center">
+          <span className="text-[10px] text-text-muted mr-0.5">Reliable:</span>
           {intelRead.trusted_signals.map((s) => (
             <span
               key={s}
@@ -224,6 +226,11 @@ function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
               {s}
             </span>
           ))}
+        </div>
+      )}
+      {hasIncomplete && (
+        <div className="flex flex-wrap gap-1 items-center">
+          <span className="text-[10px] text-text-muted mr-0.5">Missing:</span>
           {intelRead.incomplete_signals.map((s) => (
             <span
               key={s}

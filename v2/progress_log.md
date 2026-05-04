@@ -1,3 +1,13 @@
+## 2026-05-04 — Intel card insufficient-data copy: plain-English usefulness pass (Level 2)
+
+- Improved `_build_conservative_why` (WHY field): shortened from 3-sentence verbose block to 1 concise sentence ("Evidence on {trusted} is present, but {incomplete} are still incomplete — watchlist read only.") — distinct from `intel_read.summary` so WHY and WHY THIS VIEW are complementary.
+- Improved `_build_conservative_action` (ACTION field): changed from "Wait for X to improve. Keep on watchlist." to "Stay on watchlist. Recheck after X evidence improves or a new agent run fills those gaps."
+- Added `_build_bottom_line` + `bottom_line` output field: short conclusion sentence for WHY THIS VIEW ("Interesting setup, but {incomplete} are still missing — not enough complete evidence for a confident position."), only populated when `insufficient_data=True`.
+- Updated `IntelRead` frontend type: added optional `bottom_line` field.
+- Updated `WhyThisView` component: shows `bottom_line || summary` as main text; splits trusted/incomplete chip groups with "Reliable:" and "Missing:" labels.
+- No score math, threshold, SQL, LLM, Deploy, or Business Read changes.
+- Tests: 8 new backend tests + updated schema keys test; 2 new frontend test groups; all 68 backend + 41 frontend pass.
+
 ## 2026-05-03 — Intel reasoning_v2 UI: "Why this view?" section on AgentInsightCard
 
 - Added backend translator `reasoning_v2_plain_english.py`: pure deterministic `build_intel_read()` maps coverage block (published/suppressed dimensions + posture + blockers) → plain-English `{title, posture_label, summary, trusted_signals, incomplete_signals, caveat}`; no raw metric keys, no LLM, no IO.

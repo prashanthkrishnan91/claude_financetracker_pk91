@@ -115,45 +115,69 @@ def _build_conservative_action(
     if incomplete_signals:
         incomplete_str = _join_plain(incomplete_signals)
         return (
-            f"Wait for {incomplete_str} evidence to improve before adding. "
-            "Keep on watchlist."
+            f"Stay on watchlist. Recheck after {incomplete_str} evidence improves "
+            "or a new agent run fills those gaps."
         )
     if trusted_signals:
-        return "Watch for more complete evidence before adding to this position."
-    return "Watch for more complete evidence before adding."
+        return "Stay on watchlist. Watch for more complete evidence before adding."
+    return "Stay on watchlist. Wait for more complete evidence."
 
 
 def _build_conservative_why(
     trusted_signals: list[str],
     incomplete_signals: list[str],
 ) -> str:
-    """Signal-specific watchlist WHY copy for insufficient-data cards."""
+    """Concise 1-sentence WHY copy for insufficient-data cards.
+
+    Distinct from intel_read.summary and intel_read.bottom_line so WHY and
+    WHY THIS VIEW are complementary rather than redundant.
+    """
     if trusted_signals and incomplete_signals:
         trusted_str = _join_plain(trusted_signals)
         incomplete_str = _join_plain(incomplete_signals)
         are_str = "are" if len(incomplete_signals) > 1 else "is"
         return (
-            f"The system can comment on {trusted_str}, "
-            f"but {incomplete_str} {are_str} still incomplete. "
-            "That makes this a watchlist read, not a conviction position."
+            f"Evidence on {trusted_str} is present, "
+            f"but {incomplete_str} {are_str} still incomplete — "
+            "watchlist read only."
         )
     if trusted_signals:
         trusted_str = _join_plain(trusted_signals)
         return (
-            f"Some evidence on {trusted_str} is available, "
-            "but the overall picture is not complete enough for a conviction position."
+            f"Evidence on {trusted_str} is available, "
+            "but coverage is not complete enough for a conviction position."
         )
     if incomplete_signals:
         incomplete_str = _join_plain(incomplete_signals)
         are_str = "are" if len(incomplete_signals) > 1 else "is"
         return (
             f"{incomplete_str.capitalize()} {are_str} still incomplete. "
-            "Not enough evidence for a conviction position."
+            "Not enough evidence to form a view."
         )
-    return (
-        "Not enough evidence on any dimension yet. "
-        "This is a watchlist position only."
-    )
+    return "Not enough evidence on any dimension yet. This is a watchlist position only."
+
+
+def _build_bottom_line(
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    """Short conclusion shown in WHY THIS VIEW for insufficient-data cards.
+
+    Complements conservative_why (WHY): WHY states what is present vs. missing;
+    bottom_line states the conclusion and what to wait for.
+    """
+    if trusted_signals and incomplete_signals:
+        incomplete_str = _join_plain(incomplete_signals)
+        are_str = "are" if len(incomplete_signals) > 1 else "is"
+        return (
+            f"Interesting setup, but {incomplete_str} {are_str} still missing — "
+            "not enough complete evidence for a confident position."
+        )
+    if trusted_signals:
+        return "Some signals available, but not complete enough for a confident position."
+    if incomplete_signals:
+        return "Too many coverage gaps to form a confident view yet."
+    return "Not enough evidence yet to form a view."
 
 
 def _build_caveat(
@@ -279,6 +303,10 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
         ),
         "conservative_why": (
             _build_conservative_why(trusted_signals, incomplete_signals)
+            if is_insufficient_data else None
+        ),
+        "bottom_line": (
+            _build_bottom_line(trusted_signals, incomplete_signals)
             if is_insufficient_data else None
         ),
     }

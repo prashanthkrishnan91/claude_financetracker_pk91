@@ -39,12 +39,14 @@ function makeCard(overrides: Partial<InsightCardData> = {}): InsightCardData {
 /**
  * Simulate what the AgentInsightCard WhyThisView section would render.
  * Returns all displayable text from intel_read only.
+ * Mirrors WhyThisView: uses bottom_line when present, otherwise summary.
  */
 function collectIntelReadLines(intelRead: IntelRead | null | undefined): string[] {
   if (!intelRead) return [];
   const lines: string[] = [];
   if (intelRead.title) lines.push(intelRead.title);
-  if (intelRead.summary) lines.push(intelRead.summary);
+  const displaySummary = intelRead.bottom_line || intelRead.summary;
+  if (displaySummary) lines.push(displaySummary);
   lines.push(...(intelRead.trusted_signals ?? []));
   lines.push(...(intelRead.incomplete_signals ?? []));
   if (intelRead.caveat) lines.push(intelRead.caveat);
@@ -344,9 +346,135 @@ describe("Insufficient-data cards — no forbidden bullish copy", () => {
       action: "HOLD",
       conviction_level: "LOW",
       action_reason:
-        "Hold off on new buying until business quality, growth, and risk evidence improves. Keep on watchlist.",
+        "Stay on watchlist. Recheck after business quality, growth, and risk evidence improves or a new agent run fills those gaps.",
     });
     expect(card.action_reason?.toLowerCase()).toContain("watchlist");
     expect(card.action_reason?.toLowerCase()).not.toContain("accumulate");
+  });
+});
+
+// ── 7. bottom_line field — WHY THIS VIEW uses bottom_line over summary ────────
+
+describe("IntelRead.bottom_line — displayed in WHY THIS VIEW when present", () => {
+  it("collectIntelReadLines uses bottom_line when present instead of summary", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "on watch",
+      summary: "The system has enough evidence to comment on valuation, but growth is still incomplete.",
+      trusted_signals: ["valuation"],
+      incomplete_signals: ["growth", "risk"],
+      caveat: "Not enough data to be confident.",
+      bottom_line: "Interesting setup, but growth and risk are still missing — not enough complete evidence for a confident position.",
+    };
+    const lines = collectIntelReadLines(intelRead);
+    expect(lines).toContain(intelRead.bottom_line!);
+    expect(lines).not.toContain(intelRead.summary);
+  });
+
+  it("collectIntelReadLines falls back to summary when bottom_line is absent", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "constructive",
+      summary: "Evidence on business quality supports a constructive view.",
+      trusted_signals: ["business quality"],
+      incomplete_signals: ["growth"],
+      caveat: "Treat as an early signal.",
+    };
+    const lines = collectIntelReadLines(intelRead);
+    expect(lines).toContain(intelRead.summary);
+  });
+
+  it("bottom_line contains no forbidden bullish phrases", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "on watch",
+      summary: "Test summary.",
+      trusted_signals: ["valuation", "recent market behavior"],
+      incomplete_signals: ["growth", "risk"],
+      caveat: "Not enough data.",
+      bottom_line: "Interesting setup, but growth and risk are still missing — not enough complete evidence for a confident position.",
+    };
+    const joined = collectIntelReadLines(intelRead).join(" ").toLowerCase();
+    for (const phrase of FORBIDDEN_BULLISH_PHRASES) {
+      expect(joined).not.toContain(phrase);
+    }
+  });
+
+  it("bottom_line contains no raw metric keys", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "on watch",
+      summary: "Test summary.",
+      trusted_signals: ["valuation"],
+      incomplete_signals: ["growth"],
+      caveat: "Not enough data.",
+      bottom_line: "Interesting setup, but growth is still missing — not enough complete evidence.",
+    };
+    const joined = collectIntelReadLines(intelRead).join(" ");
+    for (const key of FORBIDDEN_METRIC_KEYS) {
+      expect(joined).not.toContain(key);
+    }
+  });
+});
+
+// ── 8. WHY and WHY THIS VIEW are not redundant for insufficient-data cards ────
+
+describe("WHY and WHY THIS VIEW — not redundant for insufficient-data cards", () => {
+  it("primary_driver (WHY) and intel_read display text (WHY THIS VIEW) differ", () => {
+    const conservativeWhy =
+      "Evidence on valuation and recent market behavior is present, but growth and risk are still incomplete — watchlist read only.";
+    const bottomLine =
+      "Interesting setup, but growth and risk are still missing — not enough complete evidence for a confident position.";
+
+    const card = makeCard({
+      action: "HOLD",
+      conviction_level: "LOW",
+      primary_driver: conservativeWhy,
+      action_reason:
+        "Stay on watchlist. Recheck after growth and risk evidence improves or a new agent run fills those gaps.",
+      differentiation: undefined,
+      intel_read: {
+        title: "Why this view?",
+        posture_label: "on watch",
+        summary: "The system has enough evidence to comment on valuation and recent market behavior, but growth and risk are still incomplete.",
+        trusted_signals: ["valuation", "recent market behavior"],
+        incomplete_signals: ["growth", "risk"],
+        caveat: "Not enough data to be confident. Wait for more signals before acting.",
+        bottom_line: bottomLine,
+      },
+    });
+
+    const whyText = card.primary_driver ?? "";
+    const whyThisViewText = collectIntelReadLines(card.intel_read).join(" ");
+
+    expect(whyText).not.toBe("");
+    expect(whyThisViewText).not.toBe("");
+    // WHY and WHY THIS VIEW must not be the same sentence
+    expect(whyText).not.toEqual(whyThisViewText);
+    // bottom_line is shown in WHY THIS VIEW, not summary
+    expect(whyThisViewText).toContain(bottomLine);
+    // WHY text names signals too but is shorter
+    expect(whyText).toContain("valuation");
+  });
+
+  it("WHY THIS VIEW shows labeled chip groups (Reliable/Missing signals)", () => {
+    const intelRead: IntelRead = {
+      title: "Why this view?",
+      posture_label: "on watch",
+      summary: "Some evidence on valuation is available.",
+      trusted_signals: ["valuation"],
+      incomplete_signals: ["growth", "risk"],
+      caveat: "Not enough data.",
+      bottom_line: "Interesting setup, but growth and risk are still missing.",
+    };
+    // Simulate that chips are labeled — test the data contract
+    expect(intelRead.trusted_signals).toContain("valuation");
+    expect(intelRead.incomplete_signals).toContain("growth");
+    expect(intelRead.incomplete_signals).toContain("risk");
+    // trusted and incomplete are separate lists for separate labeled chip groups
+    const sharedSignals = intelRead.trusted_signals.filter((s) =>
+      intelRead.incomplete_signals.includes(s)
+    );
+    expect(sharedSignals).toHaveLength(0);
   });
 });

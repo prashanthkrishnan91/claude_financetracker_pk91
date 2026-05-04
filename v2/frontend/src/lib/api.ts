@@ -379,6 +379,8 @@ export interface IntelRead {
   trusted_signals: string[];
   incomplete_signals: string[];
   caveat: string;
+  /** Shown in WHY THIS VIEW instead of summary for insufficient-data cards. */
+  bottom_line?: string | null;
 }
 
 export interface ThesisPlainEnglish {

@@ -1,4 +1,60 @@
 ## Last change
+Intel card insufficient-data copy: plain-English usefulness pass (PR: "feat(intel-card): make insufficient-data card copy specific and non-redundant").
+
+## Root cause
+After the conservative consistency PR, insufficient-data cards were safe but generic. `_build_conservative_why` (WHY) and `intel_read.summary` (WHY THIS VIEW) both produced nearly identical 3-sentence text about trusted/incomplete signals. `conservative_action` was passive ("Wait for X to improve. Keep on watchlist."). The frontend showed unlabeled chip groups with no label distinguishing trusted from incomplete.
+
+## Fix
+
+### insufficient_data copy contract (v2)
+
+| Card field | Source | Contract |
+|---|---|---|
+| WHY (`primary_driver`) | `conservative_why` | 1 concise sentence: "Evidence on {trusted} is present, but {incomplete} are still incomplete — watchlist read only." |
+| ACTION (`action_reason`) | `conservative_action` | "Stay on watchlist. Recheck after {incomplete} evidence improves or a new agent run fills those gaps." |
+| WHY THIS VIEW main text | `bottom_line` (new) | "Interesting setup, but {incomplete} are still missing — not enough complete evidence for a confident position." |
+| Chips — Reliable | `trusted_signals` | Labeled "Reliable:" prefix |
+| Chips — Missing | `incomplete_signals` | Labeled "Missing:" prefix |
+
+### Changes
+1. `_build_conservative_why`: shortened to 1-sentence analyst note; distinct from `intel_read.summary`.
+2. `_build_conservative_action`: changed to "Stay on watchlist. Recheck after..." pattern.
+3. Added `_build_bottom_line`: WHY THIS VIEW conclusion sentence (different from WHY); only for insufficient_data.
+4. `build_intel_read` now emits `bottom_line: str | None` (None when `insufficient_data=False`).
+5. Frontend `IntelRead` type: added optional `bottom_line` field.
+6. `WhyThisView`: shows `bottom_line || summary`; splits chip groups with "Reliable:" and "Missing:" labels.
+
+## Files changed
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py` — improved `_build_conservative_why`, `_build_conservative_action`; added `_build_bottom_line`; added `bottom_line` to output
+- `v2/frontend/src/lib/api.ts` — added `bottom_line?: string | null` to `IntelRead`
+- `v2/frontend/src/components/cards/AgentInsightCard.tsx` — updated `WhyThisView` to use `bottom_line || summary` + labeled chip groups
+- `v2/backend/tests/test_reasoning_v2_plain_english.py` — updated schema keys test; 8 new tests for `bottom_line`, non-redundancy, conciseness, and action copy
+- `v2/frontend/src/components/cards/AgentInsightCardThesisVisibility.test.tsx` — updated `collectIntelReadLines` for `bottom_line`; 2 new test groups
+- `v2/progress_log.md` — this entry
+- `docs/ai/HANDOFF.md` — this entry
+
+## Acceptance criteria met
+1. WHY and WHY THIS VIEW are not redundant — different sentences for same signals.
+2. `conservative_action` leads with watchlist language and names gaps specifically.
+3. `bottom_line` is WHY THIS VIEW conclusion; distinct from WHY.
+4. Chip groups have "Reliable:" and "Missing:" labels for scannability.
+5. No forbidden bullish phrases in any insufficient-data field.
+6. No raw metric keys in output.
+7. Business Read remains hidden.
+8. Missing intel_read degrades gracefully (no change to null-safe path).
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No score threshold changes.
+- No Supabase SQL/migrations.
+- No LLM calls or model behavior changes.
+- No Business Read re-enable.
+- No new data providers.
+
+---
+
+## Last change
 Intel card insufficient-data copy consistency (PR: "fix(intel-card): replace bullish body copy on insufficient-data cards with conservative watchlist language").
 
 ## Root cause

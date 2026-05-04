@@ -355,7 +355,7 @@ def test_output_schema_keys():
     required_keys = {
         "title", "posture_label", "summary", "trusted_signals",
         "incomplete_signals", "caveat", "insufficient_data",
-        "conservative_action", "conservative_why",
+        "conservative_action", "conservative_why", "bottom_line",
     }
     assert required_keys.issubset(result.keys())
     assert isinstance(result["trusted_signals"], list)
@@ -571,7 +571,131 @@ def test_no_forbidden_phrases_in_any_insufficient_data_output():
     _assert_no_forbidden(result["caveat"], "caveat")
     _assert_no_forbidden(result["conservative_action"], "conservative_action")
     _assert_no_forbidden(result["conservative_why"], "conservative_why")
+    _assert_no_forbidden(result.get("bottom_line"), "bottom_line")
     for sig in result["trusted_signals"]:
         _assert_no_forbidden(sig, "trusted_signal")
     for sig in result["incomplete_signals"]:
         _assert_no_forbidden(sig, "incomplete_signal")
+
+
+# ── Test 14: bottom_line field ────────────────────────────────────────────────
+
+
+def test_bottom_line_present_when_insufficient_data():
+    """bottom_line is non-None when insufficient_data=True."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is True
+    assert result["bottom_line"] is not None
+    assert len(result["bottom_line"]) > 0
+
+
+def test_bottom_line_none_when_not_insufficient():
+    """bottom_line is None when insufficient_data=False."""
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="PARTIAL",
+        published_dimensions=["quality_score", "momentum_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=[],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["insufficient_data"] is False
+    assert result["bottom_line"] is None
+
+
+def test_bottom_line_differs_from_conservative_why():
+    """bottom_line and conservative_why are not identical strings — WHY THIS VIEW and WHY are complementary."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["bottom_line"] != result["conservative_why"]
+
+
+def test_conservative_why_differs_from_summary():
+    """conservative_why (WHY) and summary (WHY THIS VIEW body) are not identical strings."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert result["conservative_why"] != result["summary"]
+
+
+def test_conservative_why_is_concise():
+    """conservative_why fits in a compact card row — must be under 220 chars."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    why = result["conservative_why"] or ""
+    assert len(why) < 220, f"conservative_why too long ({len(why)} chars): {why!r}"
+
+
+def test_conservative_action_starts_with_watchlist():
+    """conservative_action now starts with watchlist language."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    action = result["conservative_action"] or ""
+    assert "watchlist" in action.lower() or "watch" in action.lower()
+
+
+def test_bottom_line_mentions_missing_signals():
+    """bottom_line names incomplete signals so WHY THIS VIEW is specific."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    bottom_line = result["bottom_line"] or ""
+    assert "business quality" in bottom_line or "growth" in bottom_line
+
+
+def test_bottom_line_no_raw_metric_keys():
+    """bottom_line must not contain raw metric key names."""
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["quality", "growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    bottom_line = result.get("bottom_line") or ""
+    for raw_key in _RAW_METRIC_KEYS:
+        assert raw_key not in bottom_line, f"Raw key {raw_key!r} leaked into bottom_line"

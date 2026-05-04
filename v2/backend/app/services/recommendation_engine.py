@@ -23,7 +23,7 @@ from ..database import get_supabase_client
 from .http_retry import run_with_retry_sync
 from .reasoning_contract import CANONICAL_REASONING_KEYS, normalize_reasoning_payload
 from .intelligence.thesis_plain_english import build_thesis_plain_english
-from .intelligence.reasoning_v2_plain_english import build_intel_read
+from .intelligence.reasoning_v2_plain_english import build_intel_read, is_safe_for_insufficient_data
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -1691,9 +1691,20 @@ class RecommendationService:
                         _card_analyst_action = "HOLD"
                     if (_card_conviction_level or "").upper() == "HIGH":
                         _card_conviction_level = "LOW"
+                    # ACTION always replaced with conservative watchlist language.
                     reasoning["action_reason"] = intel_read_dict.get("conservative_action")
-                    reasoning["primary_driver"] = intel_read_dict.get("conservative_why")
-                    reasoning["differentiation"] = None
+                    # WHY: preserve ticker-specific primary_driver when safe (no forbidden
+                    # bullish phrases); fall back to conservative_why when absent or unsafe.
+                    if not reasoning.get("primary_driver") or not is_safe_for_insufficient_data(
+                        reasoning.get("primary_driver")
+                    ):
+                        reasoning["primary_driver"] = intel_read_dict.get("conservative_why")
+                    # ALT VIEW: preserve ticker-specific differentiation when safe; null when
+                    # it contains forbidden bullish phrases or is action-directive language.
+                    if reasoning.get("differentiation") and not is_safe_for_insufficient_data(
+                        reasoning.get("differentiation")
+                    ):
+                        reasoning["differentiation"] = None
 
                 card = InsightCard(
                     id=rec["id"],

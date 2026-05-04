@@ -19,7 +19,10 @@ from typing import Any
 
 import pytest
 
-from app.services.intelligence.reasoning_v2_plain_english import build_intel_read
+from app.services.intelligence.reasoning_v2_plain_english import (
+    build_intel_read,
+    is_safe_for_insufficient_data,
+)
 
 # ── Forbidden raw metric keys (must never appear in output) ──────────────────
 
@@ -699,3 +702,94 @@ def test_bottom_line_no_raw_metric_keys():
     bottom_line = result.get("bottom_line") or ""
     for raw_key in _RAW_METRIC_KEYS:
         assert raw_key not in bottom_line, f"Raw key {raw_key!r} leaked into bottom_line"
+
+
+# ── Test 15: is_safe_for_insufficient_data sanitizer ─────────────────────────
+
+
+_ALL_FORBIDDEN = [
+    "accumulate",
+    "buy",
+    "entry opportunity",
+    "re-rating opportunity",
+    "high-conviction idea",
+    "add aggressively",
+    "strong buy",
+    "deploy",
+]
+
+
+def test_is_safe_returns_true_for_none():
+    """None text is safe — no forbidden content."""
+    assert is_safe_for_insufficient_data(None) is True
+
+
+def test_is_safe_returns_true_for_empty_string():
+    """Empty string is safe."""
+    assert is_safe_for_insufficient_data("") is True
+
+
+def test_is_safe_returns_true_for_safe_evidence_text():
+    """Evidence-oriented watchlist copy that contains no forbidden phrases is safe."""
+    safe_texts = [
+        "AI infrastructure demand remains the main watchlist reason — hyperscaler capex keeps NVDA relevant.",
+        "Azure AI consumption and Copilot expansion keep MSFT worth monitoring.",
+        "Advanced-node foundry exposure makes TSM relevant to AI infrastructure demand.",
+        "Export restriction risk to China could cut data-center revenue outlook.",
+        "Evidence on valuation and recent market behavior is present, but growth is still incomplete.",
+        "Stay on watchlist. Recheck after growth and risk evidence improves.",
+        "Interesting setup, but growth and risk are still missing — not enough complete evidence.",
+    ]
+    for text in safe_texts:
+        assert is_safe_for_insufficient_data(text) is True, f"Safe text incorrectly flagged: {text!r}"
+
+
+@pytest.mark.parametrize("phrase", _ALL_FORBIDDEN)
+def test_is_safe_returns_false_for_each_forbidden_phrase(phrase: str):
+    """is_safe_for_insufficient_data returns False for each forbidden bullish phrase."""
+    text_with_phrase = f"This is an interesting setup — {phrase} on dips."
+    assert is_safe_for_insufficient_data(text_with_phrase) is False, (
+        f"Forbidden phrase {phrase!r} not detected"
+    )
+
+
+def test_is_safe_case_insensitive_uppercase():
+    """Forbidden phrase detection is case-insensitive for uppercase variants."""
+    assert is_safe_for_insufficient_data("ACCUMULATE on pullbacks.") is False
+    assert is_safe_for_insufficient_data("STRONG BUY signal detected.") is False
+    assert is_safe_for_insufficient_data("This is a BUY opportunity.") is False
+
+
+def test_is_safe_case_insensitive_mixed_case():
+    """Forbidden phrase detection is case-insensitive for mixed-case variants."""
+    assert is_safe_for_insufficient_data("Accumulate On Pullbacks.") is False
+    assert is_safe_for_insufficient_data("High-Conviction Idea for this quarter.") is False
+
+
+def test_is_safe_deterministic():
+    """is_safe_for_insufficient_data is deterministic — same input always same output."""
+    safe_text = "AI infrastructure demand keeps NVDA on watchlist."
+    unsafe_text = "Accumulate on pullbacks — entry opportunity at these levels."
+    for _ in range(5):
+        assert is_safe_for_insufficient_data(safe_text) is True
+        assert is_safe_for_insufficient_data(unsafe_text) is False
+
+
+def test_is_safe_substring_match():
+    """Forbidden phrase matched as substring within longer text."""
+    assert is_safe_for_insufficient_data("This is a high-conviction idea based on fundamentals.") is False
+    assert is_safe_for_insufficient_data("Looking at this re-rating opportunity carefully.") is False
+
+
+def test_is_safe_does_not_block_non_forbidden_financial_terms():
+    """Common financial terms that are not in forbidden list are allowed."""
+    allowed = [
+        "The position is on watchlist for monitoring.",
+        "Risk of export restrictions to China remains elevated.",
+        "Growth coverage is still incomplete — not enough evidence.",
+        "Trim this position if valuation extends further.",
+        "Neutral stance — hold the current position.",
+        "The data-center capex cycle may slow in 2026.",
+    ]
+    for text in allowed:
+        assert is_safe_for_insufficient_data(text) is True, f"Falsely blocked: {text!r}"

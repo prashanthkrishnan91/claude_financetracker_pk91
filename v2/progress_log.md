@@ -1,3 +1,12 @@
+## 2026-05-04 — Restore ticker-specific Intel card WHY via sanitizer (Level 2)
+
+- Added `_FORBIDDEN_BULLISH_PHRASES` frozenset and `is_safe_for_insufficient_data(text)` pure deterministic function to `reasoning_v2_plain_english.py`.
+- Updated `insufficient_data` gate in `recommendation_engine._compute_insight_cards`: ACTION always replaced with `conservative_action`; WHY (`primary_driver`) preserved when safe (no forbidden phrases), `conservative_why` injected when absent or unsafe; ALT VIEW (`differentiation`) preserved when safe, nulled when unsafe; RISK (`risk_flag`) unchanged.
+- Before: all insufficient-data cards showed identical WHY ("Evidence on {trusted} is present, but {incomplete} are still incomplete — watchlist read only.") regardless of ticker.
+- After: NVDA/MSFT/TSM/META show ticker-specific LLM WHY text when safe; fallback to `conservative_why` only when original contains forbidden bullish phrases or is absent.
+- No score math, threshold, SQL, LLM, Deploy, or Business Read changes.
+- Tests: 13 new backend sanitizer tests (58 pass), 9 new projection tests (90 pass + 2 pre-existing pydantic env failures), 4 new frontend tests (27 pass).
+
 ## 2026-05-04 — Intel card insufficient-data copy: plain-English usefulness pass (Level 2)
 
 - Improved `_build_conservative_why` (WHY field): shortened from 3-sentence verbose block to 1 concise sentence ("Evidence on {trusted} is present, but {incomplete} are still incomplete — watchlist read only.") — distinct from `intel_read.summary` so WHY and WHY THIS VIEW are complementary.

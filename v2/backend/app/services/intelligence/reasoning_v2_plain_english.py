@@ -43,6 +43,35 @@ _POSTURE_LABEL: dict[str, str] = {
 
 _VALID_POSTURES = frozenset(_POSTURE_LABEL)
 
+# Forbidden bullish phrases for the insufficient_data card copy sanitizer.
+# Any primary_driver or differentiation text containing these phrases must not
+# be rendered on an insufficient-data card — replace with conservative fallback.
+_FORBIDDEN_BULLISH_PHRASES: frozenset[str] = frozenset([
+    "accumulate",
+    "buy",
+    "entry opportunity",
+    "re-rating opportunity",
+    "high-conviction idea",
+    "add aggressively",
+    "strong buy",
+    "deploy",
+])
+
+
+def is_safe_for_insufficient_data(text: str | None) -> bool:
+    """Return True if text contains no forbidden bullish phrases.
+
+    Pure function — deterministic, no IO, no LLM.
+    Used by card assembly to decide whether to preserve ticker-specific copy
+    or fall back to conservative_why / null under insufficient_data.
+
+    None or empty string is treated as safe (no forbidden content).
+    """
+    if not text:
+        return True
+    lower = text.lower()
+    return not any(phrase in lower for phrase in _FORBIDDEN_BULLISH_PHRASES)
+
 
 def _join_plain(items: list[str]) -> str:
     """Join list into plain-English comma list with 'and'."""

@@ -816,3 +816,18 @@ def test_is_safe_allows_buyback_and_repurchase_context():
 )
 def test_is_safe_blocks_action_directive_variants(text: str):
     assert is_safe_for_insufficient_data(text) is False
+
+def test_bottom_line_avoids_generic_interesting_setup_phrase():
+    r2 = _make_r2(
+        posture="WATCH",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    bottom_line = (result.get("bottom_line") or "").lower()
+    assert "interesting setup" not in bottom_line
+    assert "valuation" in bottom_line
+    assert "growth" in bottom_line or "risk" in bottom_line

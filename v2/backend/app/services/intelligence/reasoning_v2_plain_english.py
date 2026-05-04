@@ -208,11 +208,12 @@ def _build_bottom_line(
     bottom_line states the conclusion and what to wait for.
     """
     if trusted_signals and incomplete_signals:
+        trusted_str = _join_plain(trusted_signals)
         incomplete_str = _join_plain(incomplete_signals)
         are_str = "are" if len(incomplete_signals) > 1 else "is"
         return (
-            f"Interesting setup, but {incomplete_str} {are_str} still missing — "
-            "not enough complete evidence for a confident position."
+            f"Evidence is strongest on {trusted_str}, but {incomplete_str} {are_str} "
+            "still missing — keep this on the watchlist for now."
         )
     if trusted_signals:
         return "Some signals available, but not complete enough for a confident position."

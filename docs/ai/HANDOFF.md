@@ -1517,3 +1517,31 @@ Intel v2: improve thesis_plain_english live card coverage diagnostics and wiring
 - No Deploy changes.
 - No Supabase SQL or migrations.
 - No frontend/UI changes.
+
+## Last change
+Intel cards Level-2 rendering/projection hardening (PR: "fix(intel-card): unflatten insufficient-data card display semantics and clean duplicate category rendering").
+
+## Root cause
+1. Frontend badge copy rendered raw enum-like conviction labels (`LOW conviction`) and normalized conservative insufficient-data actions to `HOLD`, making all cards look broker-identical even when ticker-specific WHY/RISK/ALT VIEW differed.
+2. Frontend subtitle line rendered `{category} · {sector}` without deduplication, so equal values showed twice (`Core · Core`, `ETF · ETF`).
+3. Backend insufficient-data `bottom_line` template used the same generic opening phrase across cards ("Interesting setup...") even when trusted/incomplete signal sets differed.
+
+## Fix
+- Frontend (`AgentInsightCard`):
+  - Conviction badge text now uses plain-English labels: `HIGH -> High confidence`, `MEDIUM -> Moderate confidence`, `LOW -> Evidence limited`.
+  - HOLD badge text becomes `WATCHLIST` when `intel_read.insufficient_data=True` to align top posture with conservative action language.
+  - Category line now deduplicates equal values and only shows both when distinct.
+- Backend (`reasoning_v2_plain_english`):
+  - `bottom_line` insufficient-data copy now references trusted + incomplete dimensions directly and removes the repeated generic "Interesting setup" opener.
+
+## Tests
+- Backend: `pytest -q backend/tests/test_reasoning_v2_plain_english.py backend/tests/test_intel_read_projection.py` (pass).
+- Frontend: added focused rendering-contract tests for conviction copy and category dedupe. Local run blocked in this environment because `jest` binary is unavailable.
+
+## Explicit non-changes
+- No Deploy changes.
+- No allocation math changes.
+- No Business Read re-enable.
+- No reasoning_v2 raw internals exposure.
+- No raw metric keys exposed.
+- No Supabase SQL/migrations.

@@ -251,7 +251,7 @@ function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
   return (
     <div className="rounded-md border border-border/30 bg-surface-elevated/20 px-2.5 py-2 space-y-1.5">
       <p className="text-[10px] uppercase tracking-wide font-semibold text-text-muted">
-        {intelRead.title}
+        Evidence check
       </p>
       <p className="text-xs text-text-secondary leading-snug">{displaySummary}</p>
       {hasTrusted && (

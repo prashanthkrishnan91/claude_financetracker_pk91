@@ -28,11 +28,11 @@ import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/l
 // insufficient_data. These buckets are derived deterministically from safe signals.
 const INTEL_FILTERS = [
   { key: "ALL", label: "All", color: "bg-surface-elevated text-text-primary" },
-  { key: "Add Candidate", label: "Add", color: "bg-green-500/10 text-green-400 border-green-500/30" },
+  { key: "Add Candidate", label: "Add Candidate", color: "bg-green-500/10 text-green-400 border-green-500/30" },
   { key: "Watchlist", label: "Watchlist", color: "bg-blue-500/10 text-blue-400 border-blue-500/30" },
   { key: "Review", label: "Review", color: "bg-purple-500/10 text-purple-400 border-purple-500/30" },
   { key: "Risk Watch", label: "Risk Watch", color: "bg-red-500/10 text-red-400 border-red-500/30" },
-  { key: "Trim Candidate", label: "Trim", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
+  { key: "Trim Candidate", label: "Trim Candidate", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
 ] as const;
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {

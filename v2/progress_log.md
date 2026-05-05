@@ -1,3 +1,11 @@
+## 2026-05-05 — Intel v3 PR 11: v3 truth diagnostics wiring fix / signal hydration audit (Level 2)
+
+- Root cause: `_v3_shadow_projection(card)` in `recommendation_engine.py` was stale — called `_v3_shadow_decide()` → non-truth-aware `build_decision_input_from_card()` and returned dicts without `truth_diagnostics`. All truth/guardrail summary functions looked for `truth_diagnostics` per card and found nothing → safe_axis_count=0, evidence_quality_status_counts={}, guardrail_evaluated_count=0 in production.
+- Fix: replaced `_v3_shadow_decide` + old `_v3_shadow_projection` body in `recommendation_engine.py` with a thin delegate to `project_shadow_from_card_signals()` (the truth-aware path added in PR 7 but never wired here).
+- Added `tests/test_v3_signal_hydration.py` — 25 production-shaped synthetic fixture tests covering truth_diagnostics hydration, evidence_quality_status_counts non-empty, 34-card HOLD batch regression, fail-soft, and visible action invariants.
+- No SQL, no API schema, no frontend, no Deploy, no provider, no LLM changes. No threshold tuning.
+- Tests: 400 passed (375 existing + 25 new).
+
 ## 2026-05-05 — Intel v3 PR 9: shadow-only evidence-quality BUY conviction guardrail (Level 2)
 
 - Added `backend/app/services/intelligence/v3/buy_conviction_guardrail.py` — pure function `apply_buy_conviction_guardrail()` that caps HIGH-conviction BUY to MEDIUM when evidence-quality truth is not PRESENT/HIGH-trust.

@@ -30,6 +30,7 @@ from .intelligence.reasoning_v2_plain_english import (
     is_safe_for_insufficient_data,
 )
 from .intelligence.v3.shadow_projection import (
+    project_shadow_from_card_signals,
     summarize_shadow_diagnostics,
     summarize_truth_aware_suppression,
     summarize_guardrail_impact_observability,
@@ -2534,19 +2535,17 @@ def _is_stale_active_run(row: dict[str, Any], *, max_age_seconds: int = STALE_RU
 # any visible behavior. Callable from tests or internal logging only.
 # Not wired to any API route or UI surface.
 
-def _v3_shadow_decide(card: InsightCard) -> Optional[Any]:
-    """Shadow-compute a v3 decision from an InsightCard for dark-launch validation.
+def _v3_shadow_projection(card: InsightCard) -> Optional[dict]:
+    """Build a truth-aware diagnostic dict from the v3 shadow decision for a given InsightCard.
 
-    Returns DecisionOutputV3 or None if the import fails (graceful degradation).
-    Does not modify card, raise exceptions, or change any visible behavior.
+    Delegates to project_shadow_from_card_signals() which wires truth-aware diagnostics
+    (PR 7), evidence-quality guardrail (PR 9), and all stable diagnostic keys.
+    Fail-soft: returns None on any failure. Never modifies card or raises.
     """
     try:
-        from .intelligence.v3.existing_signal_adapter import build_decision_input_from_card
-        from .intelligence.v3.decision_policy_v1 import decide as _v3_decide
-
-        inp = build_decision_input_from_card(
+        return project_shadow_from_card_signals(
             ticker=card.ticker,
-            action=card.action,
+            v2_visible_action=card.action,
             analyst_action=card.analyst_action,
             conviction_level=card.conviction_level,
             technical_signal=card.technical_signal,
@@ -2557,39 +2556,6 @@ def _v3_shadow_decide(card: InsightCard) -> Optional[Any]:
             intel_read=card.intel_read,
             thesis_v2=card.thesis_v2,
         )
-        return _v3_decide(inp)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("v3_shadow_decide skipped ticker=%s err=%s", card.ticker, exc)
-        return None
-
-
-def _v3_shadow_projection(card: InsightCard) -> Optional[dict]:
-    """Build a diagnostic dict from the v3 shadow decision for a given InsightCard.
-
-    Wraps _v3_shadow_decide and adds comparison fields against the v2 visible action.
-    Fail-soft: returns None on any failure. Never modifies card or raises.
-
-    Stable diagnostic keys (safe for log parsing and test assertions):
-      ticker, v2_visible_action, v3_shadow_action, v3_shadow_conviction,
-      hold_collapse_risk, v3_honest_hold, suppressed_axes, v3_schema_version.
-    """
-    try:
-        v3_out = _v3_shadow_decide(card)
-        if v3_out is None:
-            return None
-        suppressed_axes = list(v3_out.suppression_reasons.keys())
-        v2_action = (card.action or "HOLD").upper()
-        v3_action = v3_out.action.value
-        return {
-            "ticker": card.ticker,
-            "v2_visible_action": v2_action,
-            "v3_shadow_action": v3_action,
-            "v3_shadow_conviction": v3_out.conviction.value,
-            "hold_collapse_risk": v2_action == "HOLD" and v3_action != "HOLD",
-            "v3_honest_hold": v3_action == "HOLD" and bool(suppressed_axes),
-            "suppressed_axes": suppressed_axes,
-            "v3_schema_version": v3_out.schema_version,
-        }
     except Exception as exc:  # noqa: BLE001
         logger.debug("v3_shadow_projection skipped ticker=%s err=%s", card.ticker, exc)
         return None

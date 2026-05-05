@@ -1,4 +1,14 @@
 
+## 2026-05-05 — Intel v3 PR 1: minimal backend v3 decision kernel dark launch (Level 2)
+
+- Created `v2/backend/app/services/intelligence/v3/` package (backend-only, dark launch).
+- `decision_contracts.py`: ActionV3/ConvictionV3/AxisBand/PriceBand/FitBand/RiskBand enums + DecisionInputV3/DecisionOutputV3 dataclasses (schema v3.1).
+- `decision_policy_v1.py`: deterministic axis-priority policy — SELL→TRIM→BUY→HOLD. No composite score. Per-axis conviction caps.
+- `existing_signal_adapter.py`: builds DecisionInputV3 from existing InsightCard fields. Per-axis suppression only. No new providers.
+- `test_v3_decision_policy.py`: 20 table-driven tests covering all 9 acceptance criteria.
+- `recommendation_engine.py`: added `_v3_shadow_decide()` dark-launch helper (not wired to any route).
+- No Deploy, no SQL, no UI visible behavior change, no provider expansion.
+
 ## 2026-05-05 — Intel v3 PR 0: visible action contract lock + HOLD-collapse canary (Level 1)
 
 - Locked frontend Intel visible action contract to **ALL / BUY / HOLD / TRIM / SELL** with explicit contract comment in recommendations filters.

@@ -457,3 +457,329 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
             if is_insufficient_data else None
         ),
     }
+
+
+# ── Intel Card Narrative Contract v1 ─────────────────────────────────────────
+#
+# Single source of truth for Evidence Check copy.  All six card voices
+# (action badge, confidence badge, WHY, ACTION, RISK, Evidence Check) must
+# agree.  This contract produces the Evidence Check primary text
+# (evidence_summary → posture_reason) and secondary text (final_takeaway →
+# caveat) from the VISIBLE action, not from the reasoning_v2 posture.
+#
+# Forbidden phrases for BUY cards (must never appear in Evidence Check):
+_FORBIDDEN_FOR_BUY: tuple[str, ...] = (
+    "reviewing before taking action",
+    "not yet complete",
+    "early signal",
+    "not enough data",
+    "wait for more signals",
+    "stay on watchlist",
+    "watchlist read only",
+    "placeholder watch",
+    "on watchlist",
+)
+
+# Forbidden buy phrases for TRIM/SELL cards:
+_FORBIDDEN_FOR_TRIM_SELL: tuple[str, ...] = (
+    "accumulate",
+    "add candidate",
+    "entry opportunity",
+    "constructive view",
+    "supports a buy",
+    "measured buy",
+    "regular contribution",
+)
+
+
+def detect_intel_card_conflict(
+    *,
+    visible_action: str,
+    posture_reason: Optional[str],
+    caveat: Optional[str],
+) -> list[str]:
+    """Return conflict reason codes for action/copy mismatches.
+
+    Pure function — deterministic, no IO.
+    Returns empty list when no conflicts detected.
+    Used before the narrative contract is applied to count pre-fix conflicts.
+    """
+    action = (visible_action or "HOLD").upper()
+    flags: list[str] = []
+    texts = [t for t in [posture_reason, caveat] if t]
+
+    if action == "BUY":
+        for text in texts:
+            lower = text.lower()
+            for phrase in _FORBIDDEN_FOR_BUY:
+                if phrase in lower:
+                    flags.append(f"buy_hold_lang:{phrase[:30]}")
+                    break
+
+    elif action in {"TRIM", "SELL"}:
+        for text in texts:
+            lower = text.lower()
+            for phrase in _FORBIDDEN_FOR_TRIM_SELL:
+                if phrase in lower:
+                    flags.append(f"trim_sell_buy_lang:{phrase[:30]}")
+                    break
+
+    elif action == "HOLD":
+        for text in texts:
+            lower = text.lower()
+            if re.search(r"\b(add now|buy now|enter now)\b", lower):
+                flags.append("hold_immediate_buy_lang")
+                break
+
+    return flags
+
+
+def _nc_buy_evidence_summary(
+    *,
+    conviction: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+    is_etf: bool,
+) -> str:
+    trusted_str = _join_plain(trusted_signals) if trusted_signals else None
+    missing_str = _join_plain(incomplete_signals) if incomplete_signals else None
+    n_trusted = len(trusted_signals)
+    n_missing = len(incomplete_signals)
+    plural = "are" if n_missing > 1 else "is"
+
+    if is_etf:
+        if n_trusted == 0:
+            return (
+                "Regular contribution target. "
+                "Fund-level evidence is more limited than single-stock evidence — "
+                "confidence is capped, but consistent accumulation is appropriate."
+            )
+        if n_missing > 0:
+            return (
+                f"Regular contribution or measured accumulation target. "
+                f"Reliable evidence on {trusted_str}. "
+                "Fund-level coverage may be more limited than single-stock evidence, "
+                "which is expected for this asset type."
+            )
+        return (
+            f"Regular contribution or measured accumulation target. "
+            f"Evidence on {trusted_str} supports continued accumulation."
+        )
+
+    # No trusted signals — should be rare for BUY (gate collapses to HOLD at n==0)
+    if n_trusted == 0:
+        return (
+            "A buy signal is present, but evidence coverage is very limited. "
+            "Size modestly and monitor for stronger confirmation."
+        )
+
+    if conviction == "HIGH":
+        if n_missing > 0:
+            return (
+                f"Reliable evidence on {trusted_str} supports a constructive view. "
+                f"{missing_str.capitalize()} {plural} not yet available, "
+                "which keeps conviction moderate rather than high."
+            )
+        return f"Strong evidence on {trusted_str} supports a high-conviction buy at current sizing."
+
+    if conviction == "MEDIUM":
+        if n_missing > 0:
+            return (
+                f"Evidence on {trusted_str} supports a measured buy. "
+                f"{missing_str.capitalize()} {plural} still incomplete — "
+                "size gradually rather than treating this as a full conviction call."
+            )
+        return f"Evidence on {trusted_str} supports a measured buy at current positioning."
+
+    # LOW conviction BUY
+    if n_missing > 0:
+        return (
+            f"Evidence on {trusted_str} is available but {missing_str} {plural} still incomplete. "
+            "This is a limited-confidence buy — size modestly until coverage improves."
+        )
+    return (
+        f"Available evidence on {trusted_str} supports a buy at limited confidence. "
+        "Watch for stronger signals before sizing up."
+    )
+
+
+def _nc_buy_final_takeaway(
+    *,
+    conviction: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+    is_etf: bool,
+) -> str:
+    n_missing = len(incomplete_signals)
+    missing_str = _join_plain(incomplete_signals) if incomplete_signals else None
+
+    if is_etf:
+        return "Regular contribution target. Fund-level evidence limits are expected and do not indicate a hold."
+
+    if conviction == "HIGH" and n_missing == 0:
+        return "Evidence supports the buy posture. Keep sizing disciplined as new data arrives."
+
+    if n_missing > 0:
+        return (
+            f"Missing {missing_str} lowers conviction but does not override the buy signal. "
+            "Size gradually."
+        )
+    return "Evidence supports a measured buy. Keep sizing disciplined."
+
+
+def _nc_hold_evidence_summary(
+    *,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    trusted_str = _join_plain(trusted_signals) if trusted_signals else None
+    missing_str = _join_plain(incomplete_signals) if incomplete_signals else None
+    n_trusted = len(trusted_signals)
+    n_missing = len(incomplete_signals)
+    plural = "are" if n_missing > 1 else "is"
+
+    if n_trusted == 0:
+        if n_missing > 0:
+            return (
+                f"Not enough complete evidence on {missing_str} to act. "
+                "Monitoring before adding."
+            )
+        return "Not enough evidence to act on yet. Waiting for more complete coverage."
+
+    if n_missing > 0:
+        return (
+            f"Some evidence is available on {trusted_str}, "
+            f"but {missing_str} {plural} still incomplete. "
+            "Not enough conviction to add or reduce at this time."
+        )
+    return (
+        f"Evidence on {trusted_str} is available but balanced. "
+        "Current signals do not favor adding or reducing."
+    )
+
+
+def _nc_hold_final_takeaway(
+    *,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    n_trusted = len(trusted_signals)
+    n_missing = len(incomplete_signals)
+
+    if n_trusted == 0:
+        return "Wait for more complete signals before acting."
+    if n_missing > 0:
+        return "Hold current position while waiting for stronger or more complete signals."
+    return "Evidence is usable but balanced — hold current position."
+
+
+def _nc_trim_sell_evidence_summary(
+    *,
+    action: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+) -> str:
+    trusted_str = _join_plain(trusted_signals) if trusted_signals else None
+    n_trusted = len(trusted_signals)
+
+    if action == "SELL":
+        if n_trusted > 0:
+            return (
+                f"Evidence on {trusted_str} points to exiting or significantly reducing exposure. "
+                "Current signals do not support holding or adding."
+            )
+        return (
+            "Current signals favor exiting or significantly reducing exposure. "
+            "Review position against targets."
+        )
+
+    # TRIM
+    if n_trusted > 0:
+        return (
+            f"Evidence and positioning on {trusted_str} suggest reducing exposure here. "
+            "Current signals favor lightening the position rather than adding."
+        )
+    return (
+        "Current signals suggest reducing exposure. "
+        "Review position size against targets and tax considerations."
+    )
+
+
+def _nc_trim_sell_final_takeaway(*, action: str) -> str:
+    if action == "SELL":
+        return "Consider full or substantial reduction, taking tax implications into account."
+    return "Consider partial reduction; review against target allocation and tax implications."
+
+
+def build_intel_card_narrative_contract(
+    *,
+    visible_action: str,
+    conviction_label: str,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
+    ticker: str,
+    category: str,
+) -> dict[str, Any]:
+    """Build action-consistent Evidence Check narrative contract v1.
+
+    Single source of truth for Evidence Check copy. All voices agree with
+    the visible action badge. Forbidden HOLD/wait language never appears on
+    BUY cards; forbidden BUY language never appears on TRIM/SELL cards.
+
+    Pure function — deterministic, no IO, no LLM calls.
+
+    Returns dict with keys:
+      action, confidence_label, evidence_summary, reliable_labels,
+      missing_labels, final_takeaway, conflict_flags,
+      narrative_contract_version
+    """
+    action = (visible_action or "HOLD").upper().strip()
+    conviction = (conviction_label or "LOW").upper().strip()
+    if conviction not in {"HIGH", "MEDIUM", "LOW"}:
+        conviction = "LOW"
+    cat_low = (category or "").lower()
+    is_etf = "etf" in cat_low
+
+    if action == "BUY":
+        evidence_summary = _nc_buy_evidence_summary(
+            conviction=conviction,
+            trusted_signals=trusted_signals,
+            incomplete_signals=incomplete_signals,
+            is_etf=is_etf,
+        )
+        final_takeaway = _nc_buy_final_takeaway(
+            conviction=conviction,
+            trusted_signals=trusted_signals,
+            incomplete_signals=incomplete_signals,
+            is_etf=is_etf,
+        )
+    elif action == "HOLD":
+        evidence_summary = _nc_hold_evidence_summary(
+            trusted_signals=trusted_signals,
+            incomplete_signals=incomplete_signals,
+        )
+        final_takeaway = _nc_hold_final_takeaway(
+            trusted_signals=trusted_signals,
+            incomplete_signals=incomplete_signals,
+        )
+    elif action in {"TRIM", "SELL"}:
+        evidence_summary = _nc_trim_sell_evidence_summary(
+            action=action,
+            trusted_signals=trusted_signals,
+            incomplete_signals=incomplete_signals,
+        )
+        final_takeaway = _nc_trim_sell_final_takeaway(action=action)
+    else:
+        evidence_summary = "Evidence is available. Review before acting."
+        final_takeaway = "Stay cautious until the signal clarifies."
+
+    return {
+        "action": action,
+        "confidence_label": conviction,
+        "evidence_summary": evidence_summary,
+        "reliable_labels": list(trusted_signals),
+        "missing_labels": list(incomplete_signals),
+        "final_takeaway": final_takeaway,
+        "conflict_flags": [],
+        "narrative_contract_version": "v1",
+    }

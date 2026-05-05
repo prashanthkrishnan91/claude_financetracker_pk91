@@ -1,3 +1,57 @@
+## Last change
+Intel v3 PR 8: optional INFO-level truth-aware v3 shadow suppression summary observability.
+
+## Severity
+Level 1 — small backend observability/control follow-up.
+
+## Assumptions and success criteria
+- Reuse the existing PR 4 env-gated INFO shadow summary pattern, with default behavior unchanged.
+- Keep DEBUG summary behavior intact and emit only one portfolio-level summary per batch.
+- Add only aggregate truth-aware suppression diagnostics to INFO payload (no raw/sensitive card or user/account/provider data).
+- No visible recommendation/action/UI/API/Deploy/SQL/provider/LLM behavior changes.
+
+## Fix
+- Added `summarize_truth_aware_suppression()` in `v2/backend/app/services/intelligence/v3/shadow_projection.py`:
+  - Aggregates `safe_axis_count`, `unsafe_axis_count`, `suppressed_axis_reasons` (reason-code counts), and `dominant_truth_reason` across projected cards.
+  - Uses only aggregate values from per-card `truth_diagnostics` and remains pure/deterministic.
+- Updated `v2/backend/app/services/recommendation_engine.py`:
+  - Added `_build_v3_shadow_info_summary()` that merges PR 3/4 portfolio summary with PR 7 truth-aware suppression aggregates.
+  - Reused existing PR 4 env flag `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` and existing logger helper.
+  - Kept default disabled behavior; DEBUG log still emits as before, INFO emits only when env is explicitly truthy.
+- Updated `v2/backend/tests/test_recommendation_engine.py`:
+  - Extended INFO payload contract assertions with truth-aware aggregate keys.
+  - Added focused test for stable truth-aware aggregate counts and dominant reason selection.
+
+## Observability contract (PR 8)
+- Env control reused: `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED`.
+- Default unchanged: no extra INFO summary when flag is unset/false.
+- When enabled: exactly one INFO-level portfolio summary per recommendation card batch.
+- INFO payload remains aggregate-only and now includes:
+  - `unsafe_axis_count`
+  - `suppressed_axis_reasons`
+  - `safe_axis_count`
+  - `dominant_truth_reason`
+  - Existing PR 4/3 keys (`projected_cards`, `projection_failures`, `hold_collapse_risk_count`, `honest_hold_count`, etc.)
+- Excludes raw card payloads, raw metric keys, advanced metric names, user/account identifiers/values, holdings quantities, provider payloads, and LLM text.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No policy-gating added.
+
+## Test results
+- `pytest -q backend/tests/test_recommendation_engine.py backend/tests/test_v3_shadow_projection.py backend/tests/test_v3_truth_aware_adapter.py backend/tests/test_v3_data_truth.py backend/tests/test_v3_decision_policy.py`
+- Result: 315 passed.
+
+## Next intended step
+Observe production/Railway truth-suppression rates under env-enabled INFO logs for at least one full portfolio cycle, then evaluate whether policy-gating (e.g., stricter BUY evidence requirement) should be proposed in a separate PR.
+
+---
+
 
 ## Last change
 Intel v3 PR 7: truth-aware v3 shadow input adapter.

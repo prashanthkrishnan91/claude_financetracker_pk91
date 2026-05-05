@@ -1,5 +1,53 @@
 
 ## Last change
+Intel v3 PR 2: Safe backend v3 shadow projection/logging (PR: "feat(intel-v3-pr2): backend v3 shadow projection and HOLD-collapse diagnostics").
+
+## Root cause
+The v3 decision kernel (PR 1) was not wired to any runtime path — it existed as a callable helper (`_v3_shadow_decide`) but produced no observability during real card assembly. Without wiring, HOLD-collapse risk could not be measured against actual existing InsightCard data.
+
+## Fix
+- Added `v2/backend/app/services/intelligence/v3/shadow_projection.py` — pure function `project_shadow_from_card_signals()` that takes InsightCard signal fields, runs the v3 adapter + policy, and returns a diagnostic dict with stable keys. No IO, no supabase dependency.
+- Added `_v3_shadow_projection(card: InsightCard) → Optional[dict]` in `recommendation_engine.py` — wraps `_v3_shadow_decide()` and builds the diagnostic dict from `card.action` and the v3 output. Fail-soft (returns None on any error).
+- Wired `_v3_shadow_projection(card)` after `cards.append(card)` in `_compute_insight_cards`. Shadow result logged at DEBUG with stable key names. Never blocks card assembly, never modifies card, never raises.
+- Added `v2/backend/tests/test_v3_shadow_projection.py` — 28 table-driven tests across 8 test classes covering all acceptance criteria.
+
+## Shadow projection diagnostic contract (stable keys)
+```
+ticker              — ticker symbol
+v2_visible_action   — post-gate visible v2 action (BUY/HOLD/TRIM/SELL)
+v3_shadow_action    — v3 policy output action
+v3_shadow_conviction — v3 policy output conviction
+hold_collapse_risk  — True when v2==HOLD but v3 says BUY/TRIM/SELL
+v3_honest_hold      — True when v3==HOLD due to thin/suppressed evidence
+suppressed_axes     — per-axis suppression reasons list
+v3_schema_version   — schema version string
+```
+
+## Dark-launch safety notes
+- `_v3_shadow_projection` runs inside the existing try/except that wraps card assembly — any failure is caught, logged at DEBUG, and returns None.
+- Shadow result is logged at DEBUG only; not exposed to any API route, frontend, or Deploy path.
+- `card.action` (post-gate visible action) is passed as `v2_visible_action` — the v3 shadow may diverge from it using other signals (e.g., `analyst_action=BUY` when card gated to HOLD under `insufficient_data`). This divergence is the key HOLD-collapse diagnostic.
+- `project_shadow_from_card_signals` in the v3 module is importable without supabase — safe for tests.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No frontend changes.
+- No new providers (EDGAR/FRED/Finnhub/yfinance untouched).
+- No allocation math changes.
+- No LLM calls.
+- No API response schema changes.
+
+## Test results
+- 28 new tests in `test_v3_shadow_projection.py` — all pass.
+- 27 existing `test_v3_decision_policy.py` tests — all pass.
+- Total: 55 tests pass.
+
+## Next PR recommendation
+Wire a portfolio-level HOLD-collapse report using the shadow diagnostic across all assembled cards (count `hold_collapse_risk` cards, log portfolio-level summary). OR implement the v3 fit-band portfolio governor. Do not begin until this PR is merged.
+
+## Last change
 Intel v3 PR 1: Minimal backend v3 decision kernel — dark launch (PR: "feat(intel-v3-pr1): minimal backend v3 decision kernel dark launch").
 
 ## Root cause

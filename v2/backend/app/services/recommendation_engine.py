@@ -1949,6 +1949,19 @@ class RecommendationService:
                     )[:1500],
                 )
                 cards.append(card)
+                _shadow_diag = _v3_shadow_projection(card)
+                if _shadow_diag:
+                    logger.debug(
+                        "v3_shadow_projection ticker=%s v2=%s v3=%s conviction=%s"
+                        " hold_collapse_risk=%s v3_honest_hold=%s suppressed=%s",
+                        _shadow_diag["ticker"],
+                        _shadow_diag["v2_visible_action"],
+                        _shadow_diag["v3_shadow_action"],
+                        _shadow_diag["v3_shadow_conviction"],
+                        _shadow_diag["hold_collapse_risk"],
+                        _shadow_diag["v3_honest_hold"],
+                        _shadow_diag["suppressed_axes"],
+                    )
                 if not self._trace_logged:
                     self._trace_logged = True
                     logger.info(
@@ -2501,4 +2514,36 @@ def _v3_shadow_decide(card: InsightCard) -> Optional[Any]:
         return _v3_decide(inp)
     except Exception as exc:  # noqa: BLE001
         logger.debug("v3_shadow_decide skipped ticker=%s err=%s", card.ticker, exc)
+        return None
+
+
+def _v3_shadow_projection(card: InsightCard) -> Optional[dict]:
+    """Build a diagnostic dict from the v3 shadow decision for a given InsightCard.
+
+    Wraps _v3_shadow_decide and adds comparison fields against the v2 visible action.
+    Fail-soft: returns None on any failure. Never modifies card or raises.
+
+    Stable diagnostic keys (safe for log parsing and test assertions):
+      ticker, v2_visible_action, v3_shadow_action, v3_shadow_conviction,
+      hold_collapse_risk, v3_honest_hold, suppressed_axes, v3_schema_version.
+    """
+    try:
+        v3_out = _v3_shadow_decide(card)
+        if v3_out is None:
+            return None
+        suppressed_axes = list(v3_out.suppression_reasons.keys())
+        v2_action = (card.action or "HOLD").upper()
+        v3_action = v3_out.action.value
+        return {
+            "ticker": card.ticker,
+            "v2_visible_action": v2_action,
+            "v3_shadow_action": v3_action,
+            "v3_shadow_conviction": v3_out.conviction.value,
+            "hold_collapse_risk": v2_action == "HOLD" and v3_action != "HOLD",
+            "v3_honest_hold": v3_action == "HOLD" and bool(suppressed_axes),
+            "suppressed_axes": suppressed_axes,
+            "v3_schema_version": v3_out.schema_version,
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("v3_shadow_projection skipped ticker=%s err=%s", card.ticker, exc)
         return None

@@ -1,4 +1,13 @@
 
+## 2026-05-05 — Intel v3 PR 2: backend v3 shadow projection and HOLD-collapse diagnostics (Level 2)
+
+- Added `v2/backend/app/services/intelligence/v3/shadow_projection.py` — pure `project_shadow_from_card_signals()` returning a diagnostic dict with stable keys (`ticker`, `v2_visible_action`, `v3_shadow_action`, `v3_shadow_conviction`, `hold_collapse_risk`, `v3_honest_hold`, `suppressed_axes`, `v3_schema_version`).
+- Added `_v3_shadow_projection(card)` in `recommendation_engine.py` — wraps `_v3_shadow_decide()` and builds diagnostic dict. Fail-soft.
+- Wired shadow projection after `cards.append(card)` in `_compute_insight_cards`; result logged at DEBUG with stable keys. Never blocks card assembly.
+- Added `tests/test_v3_shadow_projection.py`: 28 table-driven tests (8 classes) covering shadow isolation, HOLD-collapse detection on buy signals, honest HOLD on missing data, fail-soft on partial data, valid action output, Deploy isolation, and representative fixture audit.
+- No SQL, no frontend changes, no Deploy changes, no provider expansion, no LLM calls.
+- 55 backend tests pass (28 new + 27 existing v3 policy tests).
+
 ## 2026-05-05 — Intel v3 PR 1: minimal backend v3 decision kernel dark launch (Level 2)
 
 - Created `v2/backend/app/services/intelligence/v3/` package (backend-only, dark launch).

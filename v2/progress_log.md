@@ -345,3 +345,5 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Kept per-card shadow diagnostics intact and fail-soft.
 - Added focused backend tests for summary aggregation/counting and failure handling.
 - No UI/API/Deploy/SQL/provider/LLM changes.
+
+- 2026-05-05: Intel v3 PR 10 merged scope prepared — added backend-only portfolio/batch guardrail-impact observability aggregation for PR 9, wired into existing env-gated v3 shadow INFO summary path (default off), and added focused tests; no visible/UI/API/Deploy/SQL/provider/LLM changes.

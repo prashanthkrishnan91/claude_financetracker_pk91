@@ -32,6 +32,7 @@ from .intelligence.reasoning_v2_plain_english import (
 from .intelligence.v3.shadow_projection import (
     summarize_shadow_diagnostics,
     summarize_truth_aware_suppression,
+    summarize_guardrail_impact_observability,
 )
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
@@ -87,6 +88,7 @@ def _build_v3_shadow_info_summary(
     """Build INFO-level summary payload with aggregate truth-aware diagnostics."""
     info_summary = dict(shadow_summary)
     info_summary.update(summarize_truth_aware_suppression(shadow_diagnostics))
+    info_summary.update(summarize_guardrail_impact_observability(shadow_diagnostics))
     return info_summary
 
 

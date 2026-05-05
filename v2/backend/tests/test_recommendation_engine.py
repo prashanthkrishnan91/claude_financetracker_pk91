@@ -158,6 +158,14 @@ class TestV3ShadowSummaryObservability:
         info_records = [r for r in caplog.records if r.levelno == logging.INFO and "v3_shadow_projection_portfolio_summary" in r.message]
         assert len(info_records) == 1
         safe_keys = {
+            "guardrail_evaluated_count",
+            "buy_high_conviction_pre_guardrail_count",
+            "buy_conviction_capped_count",
+            "buy_remained_buy_after_cap_count",
+            "guardrail_applied_reasons",
+            "evidence_quality_status_counts",
+            "evidence_quality_trust_counts",
+            "v3_shadow_conviction_counts",
             "schema_version",
             "total_cards",
             "projected_cards",
@@ -183,6 +191,7 @@ class TestV3ShadowSummaryObservability:
             {
                 "v2_visible_action": "HOLD",
                 "v3_shadow_action": "BUY",
+                "v3_shadow_conviction": "MEDIUM",
                 "hold_collapse_risk": True,
                 "v3_honest_hold": False,
                 "truth_diagnostics": {
@@ -194,6 +203,7 @@ class TestV3ShadowSummaryObservability:
             {
                 "v2_visible_action": "HOLD",
                 "v3_shadow_action": "HOLD",
+                "v3_shadow_conviction": "LOW",
                 "hold_collapse_risk": False,
                 "v3_honest_hold": True,
                 "truth_diagnostics": {

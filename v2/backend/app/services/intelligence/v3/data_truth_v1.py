@@ -160,7 +160,10 @@ def classify_evidence_signals(
         trusted = intel_read.get("trusted_signals") or []
         n_trusted = len(trusted) if isinstance(trusted, list) else 0
 
-        if insufficient or n_trusted == 0:
+        # Only WEAK when there are zero trusted signals. A card missing one axis
+        # (e.g. growth/risk) is not uniformly weak when quality/valuation/momentum
+        # are present — the missing axes are already tracked in incomplete_signals.
+        if n_trusted == 0:
             return _weak(
                 "evidence_quality",
                 source_kind="intel_read",

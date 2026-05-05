@@ -2468,3 +2468,37 @@ def _is_stale_active_run(row: dict[str, Any], *, max_age_seconds: int = STALE_RU
         return False
     latest = _latest_run_activity_ts(row)
     return not _within_last(latest, seconds=max_age_seconds)
+
+
+# ── Intel v3 dark-launch shadow compute ──────────────────────────────────────
+# Shadow-computes a v3 decision from an existing InsightCard without touching
+# any visible behavior. Callable from tests or internal logging only.
+# Not wired to any API route or UI surface.
+
+def _v3_shadow_decide(card: InsightCard) -> Optional[Any]:
+    """Shadow-compute a v3 decision from an InsightCard for dark-launch validation.
+
+    Returns DecisionOutputV3 or None if the import fails (graceful degradation).
+    Does not modify card, raise exceptions, or change any visible behavior.
+    """
+    try:
+        from .intelligence.v3.existing_signal_adapter import build_decision_input_from_card
+        from .intelligence.v3.decision_policy_v1 import decide as _v3_decide
+
+        inp = build_decision_input_from_card(
+            ticker=card.ticker,
+            action=card.action,
+            analyst_action=card.analyst_action,
+            conviction_level=card.conviction_level,
+            technical_signal=card.technical_signal,
+            risk_flag=card.risk_flag,
+            analyst_risks=card.analyst_risks,
+            category=card.category,
+            data_quality_label=card.data_quality_label,
+            intel_read=card.intel_read,
+            thesis_v2=card.thesis_v2,
+        )
+        return _v3_decide(inp)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("v3_shadow_decide skipped ticker=%s err=%s", card.ticker, exc)
+        return None

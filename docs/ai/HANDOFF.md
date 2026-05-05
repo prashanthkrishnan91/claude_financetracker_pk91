@@ -1,5 +1,30 @@
 
 ## Last change
+Intel v3 PR 1: Minimal backend v3 decision kernel — dark launch (PR: "feat(intel-v3-pr1): minimal backend v3 decision kernel dark launch").
+
+## Root cause
+Intel v2 posture derivation applies a global insufficient-data gate that collapses many tickers to HOLD/LOW even when per-axis suppression would be more precise. No deterministic BUY/HOLD/TRIM/SELL policy exists that is independent from the v2 posture path.
+
+## Fix
+- Created `v2/backend/app/services/intelligence/v3/` package (dark launch, backend-only).
+- `decision_contracts.py` — typed enums (ActionV3, ConvictionV3, AxisBand, PriceBand, FitBand, RiskBand) and dataclasses (DecisionInputV3, DecisionOutputV3). Schema version v3.1.
+- `decision_policy_v1.py` — deterministic policy in priority order: SELL → TRIM → BUY → HOLD. Uses five independent axes. No composite score. No LLM action labels. Conviction caps: THIN→LOW, price SUPPRESSED→MEDIUM max, risk HIGH/CRITICAL+BUY→LOW.
+- `existing_signal_adapter.py` — builds DecisionInputV3 from existing InsightCard fields (action, analyst_action, conviction_level, technical_signal, risk_flag, analyst_risks, category, data_quality_label, intel_read, thesis_v2). Per-axis suppression when signal missing. No new providers.
+- `v2/backend/tests/test_v3_decision_policy.py` — 20 table-driven tests covering all 9 acceptance criteria: BUY on strong evidence, HOLD+LOW on thin evidence, TRIM on overweight/breach, SELL on critical risk, price-suppressed capping, mixed-fixture differentiation, legacy label safety, no raw metric keys in rationale, no BUY when THIN.
+- `recommendation_engine.py` — added `_v3_shadow_decide(card)` helper at module end (dark launch). Not wired to any route or UI surface. Callable from internal logging or tests.
+
+## Explicit non-changes
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No visible frontend behavior change.
+- No new providers (EDGAR/FRED/Finnhub/yfinance untouched).
+- No allocation math changes.
+- No Data Truth, Snapshot Store, Opportunity Radar, or LLM Committee.
+
+## Next PR recommendation
+Wire a safe shadow projection from the existing `_compute_insight_cards` path (log v3 decision alongside v2 posture without surfacing it), OR implement a portfolio governor that uses v3 fit bands to validate rebalancing targets. Do not begin next PR until this PR is merged.
+
+## Last change
 Lock Intel v3 visible action contract and add frontend regression canaries (PR: "fix(intel-v3-pr0): lock visible action contract + hold-collapse canary").
 
 ## Root cause

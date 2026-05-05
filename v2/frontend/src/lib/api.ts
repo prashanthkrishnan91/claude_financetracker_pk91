@@ -389,8 +389,21 @@ export interface IntelRead {
   /** True when the card is in insufficient-data mode. */
   insufficient_data?: boolean;
   /** Card-specific explanation of WHY the Intel posture was assigned. Injected
-   *  after _derive_intel_posture runs; more specific than summary/bottom_line. */
+   *  after _derive_intel_posture runs; more specific than summary/bottom_line.
+   *  Overridden by narrative_contract.evidence_summary when contract is present. */
   posture_reason?: string | null;
+  /** Intel Card Narrative Contract v1. When present, evidence_summary and
+   *  final_takeaway are the action-consistent Evidence Check copy. */
+  narrative_contract?: {
+    action: string;
+    confidence_label: string;
+    evidence_summary: string;
+    reliable_labels: string[];
+    missing_labels: string[];
+    final_takeaway: string;
+    conflict_flags: string[];
+    narrative_contract_version: string;
+  } | null;
 }
 
 export interface ThesisPlainEnglish {

@@ -27,6 +27,8 @@ from .intelligence.thesis_plain_english import build_thesis_plain_english
 from .intelligence.reasoning_v2_plain_english import (
     build_intel_read,
     build_posture_reason,
+    build_intel_card_narrative_contract,
+    detect_intel_card_conflict,
     is_safe_for_insufficient_data,
 )
 from .intelligence.v3.shadow_projection import (
@@ -1043,16 +1045,11 @@ def _derive_intel_posture(
     if tech in {"SELL", "WEAK", "BEARISH"}:
         return "Risk Watch"
 
-    # 5. BUY action + sufficient data → Add Candidate
-    if not insufficient and action == "BUY":
+    # 5. BUY action → Add Candidate regardless of data completeness.
+    # Narrative contract ensures Evidence Check reflects confidence limits
+    # for thin-coverage BUY cards; the filter bucket stays Add Candidate.
+    if action == "BUY":
         return "Add Candidate"
-
-    # 5.5. BUY signal present but primary run's data is thin → Review
-    # Separates "agent assessed BUY but coverage is insufficient" from
-    # "no constructive signal at all". Prevents a genuine BUY assessment
-    # from collapsing to Watchlist under insufficient_data.
-    if insufficient and action == "BUY":
-        return "Review"
 
     # 6. MEDIUM+ conviction + sufficient data → Add Candidate
     if not insufficient and conviction in {"HIGH", "MEDIUM"}:
@@ -1703,6 +1700,14 @@ class RecommendationService:
         fallback_cards = reused_cached_cards = 0
         thesis_diag_counts: dict[str, int] = {}
         shadow_diagnostics: list[Optional[dict]] = []
+        # Narrative contract observability counters (reset per aggregate call).
+        _nc_conflict_count = 0
+        _nc_conflict_examples: list[dict] = []
+        _nc_action_counts: dict[str, int] = {}
+        _nc_buy_hold_lang_count = 0
+        _nc_hold_buy_lang_count = 0
+        _nc_trim_sell_buy_lang_count = 0
+        _nc_evidence_limited_buy_count = 0
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -1900,16 +1905,64 @@ class RecommendationService:
                     category=pos.get("category"),
                     intel_read_dict=_intel_read_for_posture,
                 )
-                # Inject posture_reason into intel_read_dict so the WhyThisView
-                # section explains WHY this posture was assigned (card-specific).
+                # Apply Intel Card Narrative Contract v1.
+                # Replaces fragmented posture_reason + caveat derivation with a
+                # single deterministic helper keyed on the VISIBLE action.
+                # This ensures Evidence Check never emits HOLD/wait language on
+                # BUY cards regardless of the reasoning_v2 posture or missing axes.
                 if intel_read_dict is not None:
-                    intel_read_dict["posture_reason"] = build_posture_reason(
+                    _nc_trusted = intel_read_dict.get("trusted_signals") or []
+                    _nc_incomplete = intel_read_dict.get("incomplete_signals") or []
+                    _nc_category = pos.get("category") or ""
+
+                    # Detect pre-fix conflicts (old posture_reason + current caveat).
+                    _old_posture_reason = build_posture_reason(
                         posture_label=intel_posture_label,
-                        trusted_signals=intel_read_dict.get("trusted_signals") or [],
-                        incomplete_signals=intel_read_dict.get("incomplete_signals") or [],
+                        trusted_signals=_nc_trusted,
+                        incomplete_signals=_nc_incomplete,
                         ticker=ticker,
-                        category=pos.get("category") or "",
+                        category=_nc_category,
                     )
+                    _old_caveat = intel_read_dict.get("caveat") or ""
+                    _nc_flags = detect_intel_card_conflict(
+                        visible_action=_card_action,
+                        posture_reason=_old_posture_reason,
+                        caveat=_old_caveat,
+                    )
+
+                    # Build action-consistent narrative contract.
+                    _nc = build_intel_card_narrative_contract(
+                        visible_action=_card_action,
+                        conviction_label=_card_conviction_level or "LOW",
+                        trusted_signals=_nc_trusted,
+                        incomplete_signals=_nc_incomplete,
+                        ticker=ticker,
+                        category=_nc_category,
+                    )
+
+                    # Override Evidence Check fields with contract values.
+                    intel_read_dict["posture_reason"] = _nc["evidence_summary"]
+                    intel_read_dict["caveat"] = _nc["final_takeaway"]
+                    intel_read_dict["narrative_contract"] = _nc
+
+                    # Accumulate observability counters.
+                    _nc_action_counts[_card_action] = _nc_action_counts.get(_card_action, 0) + 1
+                    if _nc_flags:
+                        _nc_conflict_count += 1
+                        if len(_nc_conflict_examples) < 3:
+                            _nc_conflict_examples.append({
+                                "ticker": ticker,
+                                "action": _card_action,
+                                "flags": _nc_flags[:2],
+                            })
+                        if _card_action == "BUY":
+                            _nc_buy_hold_lang_count += 1
+                        elif _card_action == "HOLD":
+                            _nc_hold_buy_lang_count += 1
+                        elif _card_action in {"TRIM", "SELL"}:
+                            _nc_trim_sell_buy_lang_count += 1
+                    if _card_action == "BUY" and (_card_conviction_level or "LOW").upper() == "LOW":
+                        _nc_evidence_limited_buy_count += 1
 
                 card = InsightCard(
                     id=rec["id"],
@@ -2030,6 +2083,31 @@ class RecommendationService:
                     type(exc).__name__,
                 )
                 continue
+
+        # Intel Card Narrative Contract v1 portfolio summary.
+        _nc_summary = {
+            "total_cards": len(cards),
+            "action_counts": _nc_action_counts,
+            "conflict_count": _nc_conflict_count,
+            "conflict_examples": _nc_conflict_examples,
+            "buy_cards_with_hold_language_count": _nc_buy_hold_lang_count,
+            "hold_cards_with_buy_language_count": _nc_hold_buy_lang_count,
+            "trim_sell_cards_with_buy_language_count": _nc_trim_sell_buy_lang_count,
+            "evidence_limited_buy_count": _nc_evidence_limited_buy_count,
+            "frontend_contract_version": "v1",
+        }
+        logger.info(
+            "intel_card_narrative_contract_summary user_id=%s summary=%s",
+            self.user_id,
+            json.dumps(_nc_summary, default=str),
+        )
+        if _nc_conflict_count > 0:
+            logger.warning(
+                "intel_card_narrative_contract_conflicts user_id=%s conflict_count=%d examples=%s",
+                self.user_id,
+                _nc_conflict_count,
+                json.dumps(_nc_conflict_examples, default=str),
+            )
 
         shadow_summary = summarize_shadow_diagnostics(
             shadow_diagnostics,

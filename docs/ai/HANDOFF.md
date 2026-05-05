@@ -1,21 +1,24 @@
-## 2026-05-05 — Intel v2 Sev 1 follow-up: Evidence Check action-consistency fix (PR 14)
+## 2026-05-05 — Intel Card Narrative Contract v1 (Level 3 / Sev 1)
 
-- Production evidence summary (Railway): `total_cards=34`, `projected_cards=34`, `projection_failures=0`, `v2_visible_action_counts={BUY:11,HOLD:23,TRIM:0,SELL:0}`, `v3_shadow_action_counts={BUY:9,HOLD:25,TRIM:0,SELL:0}`, `evidence_quality_status_counts={PRESENT:34}`, `evidence_quality_trust_counts={HIGH:18,MEDIUM:16}`, `hold_collapse_risk_count=0`, `safe_axis_count=170`, `unsafe_axis_count=0`.
-- Root cause: Evidence Check copy (`intel_read.caveat`) was generated from a binary insufficient-data gate (`insufficient_data=True`) and ignored trusted signal count + action posture. This produced global HOLD/wait language even when action was BUY and trusted signals were present.
-- Durable contract implemented in backend `build_intel_read` path:
-  - `n_trusted==0`: conservative wait/watch copy allowed.
-  - `n_trusted>=1`: missing axes remain caveats only (no global "not enough data / wait" text).
-  - BUY-like posture (`ACCUMULATE`) + trusted signals: measured-buy caveat with confidence limits.
-  - HOLD + trusted signals: partial-evidence caveat without implying zero usable evidence.
-  - TRIM/SELL family (`TRIM`/`AVOID`): action-consistent, risk-aware caveat.
-- Scope/guardrails: no all-HOLD re-fix, no evidence-quality remap tuning, no SQL, no LLM, no Deploy/policy expansion, no frontend redesign.
-- Validation checklist:
-  - BUY + insufficient_data + trusted>=3 + missing growth/risk: no global wait language; caveat remains confidence-oriented.
-  - BUY + trusted=1..2: action-consistent measured-buy caveat.
-  - HOLD + trusted=0: conservative wait copy retained.
-  - HOLD + trusted>=1: partial-evidence wording retained.
-  - TRIM/SELL family: risk-aware wording retained and not overwritten by BUY/HOLD language.
-  - Regression: missing growth/risk no longer globally forces HOLD-style caveat when trusted signals exist.
+- Production context: total_cards=34, v2_visible_action_counts={BUY:11,HOLD:23}, evidence_quality_status_counts={PRESENT:34}.
+- Root cause (two-part):
+  1. _derive_intel_posture rule 5.5 returned "Review" for BUY+insufficient → build_posture_reason("Review") → "Reviewing before taking action — the setup is interesting but not yet complete." as the PRIMARY Evidence Check text on BUY cards.
+  2. _build_caveat WATCH fallback → "Treat this as an early signal, not a complete picture." as secondary Evidence Check text on BUY cards when r2.action.posture=WATCH and n_trusted>=1.
+- Fix:
+  - _derive_intel_posture rule 5.5 removed; rule 5 simplified to: if action == "BUY": return "Add Candidate" (regardless of insufficient_data).
+  - build_intel_card_narrative_contract() added to reasoning_v2_plain_english.py: deterministic helper keyed on VISIBLE action. Returns evidence_summary (→ posture_reason) and final_takeaway (→ caveat). No HOLD/wait language can appear on BUY cards by construction.
+  - detect_intel_card_conflict() added: pure conflict detector; flags forbidden phrases per action.
+  - recommendation_engine.py card assembly: contract applied after gate code; intel_read_dict posture_reason and caveat overridden; narrative_contract stored; intel_card_narrative_contract_summary INFO log emitted per run.
+  - api.ts: narrative_contract optional field added to IntelRead.
+- Invariant: no rendered card has action/copy conflict.
+- Files changed: reasoning_v2_plain_english.py, recommendation_engine.py, api.ts, tests/test_v3_intel_card_narrative_contract.py (new, 67 tests).
+- Tests: 257 pass (67 new + 190 existing).
+- Supabase SQL: No.
+- Validation:
+  - Open Intel → BUY cards: Evidence Check must say measured-buy language, not "Reviewing before taking action" or "early signal".
+  - VGT/ETF BUY: must say "Regular contribution target".
+  - Railway log: intel_card_narrative_contract_summary conflict_count=0.
+  - Railway log: intel_card_narrative_contract_conflicts warning absent.
 
 ## Last change
 Intel v3 PR 13: Sev 1 all-HOLD Intel collapse fix.

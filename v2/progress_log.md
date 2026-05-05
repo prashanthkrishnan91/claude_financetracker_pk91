@@ -1,21 +1,17 @@
-## 2026-05-05 — Intel v2 Sev 1 follow-up: Evidence Check action-consistency fix (PR 14)
+## 2026-05-05 — Intel Card Narrative Contract v1: Full Evidence Check action-consistency fix (Level 3 / Sev 1)
 
-- Production evidence summary (Railway): `total_cards=34`, `projected_cards=34`, `projection_failures=0`, `v2_visible_action_counts={BUY:11,HOLD:23,TRIM:0,SELL:0}`, `v3_shadow_action_counts={BUY:9,HOLD:25,TRIM:0,SELL:0}`, `evidence_quality_status_counts={PRESENT:34}`, `evidence_quality_trust_counts={HIGH:18,MEDIUM:16}`, `hold_collapse_risk_count=0`, `safe_axis_count=170`, `unsafe_axis_count=0`.
-- Root cause: Evidence Check copy (`intel_read.caveat`) was generated from a binary insufficient-data gate (`insufficient_data=True`) and ignored trusted signal count + action posture. This produced global HOLD/wait language even when action was BUY and trusted signals were present.
-- Durable contract implemented in backend `build_intel_read` path:
-  - `n_trusted==0`: conservative wait/watch copy allowed.
-  - `n_trusted>=1`: missing axes remain caveats only (no global "not enough data / wait" text).
-  - BUY-like posture (`ACCUMULATE`) + trusted signals: measured-buy caveat with confidence limits.
-  - HOLD + trusted signals: partial-evidence caveat without implying zero usable evidence.
-  - TRIM/SELL family (`TRIM`/`AVOID`): action-consistent, risk-aware caveat.
-- Scope/guardrails: no all-HOLD re-fix, no evidence-quality remap tuning, no SQL, no LLM, no Deploy/policy expansion, no frontend redesign.
-- Validation checklist:
-  - BUY + insufficient_data + trusted>=3 + missing growth/risk: no global wait language; caveat remains confidence-oriented.
-  - BUY + trusted=1..2: action-consistent measured-buy caveat.
-  - HOLD + trusted=0: conservative wait copy retained.
-  - HOLD + trusted>=1: partial-evidence wording retained.
-  - TRIM/SELL family: risk-aware wording retained and not overwritten by BUY/HOLD language.
-  - Regression: missing growth/risk no longer globally forces HOLD-style caveat when trusted signals exist.
+- Root cause (two-part, both fixed):
+  1. `_derive_intel_posture` rule 5.5: `BUY + insufficient_data → "Review"` posture_label → `build_posture_reason("Review")` → "Reviewing before taking action — the setup is interesting but not yet complete." appeared as the PRIMARY Evidence Check text on BUY cards.
+  2. `_build_caveat` WATCH-posture fallback: `r2.action.posture=WATCH + n_trusted>=1` → "Treat this as an early signal, not a complete picture." appeared as secondary Evidence Check text on BUY cards.
+- Fix:
+  - Rule 5.5 removed: `BUY action → Add Candidate` regardless of `insufficient_data`. BUY cards now always route to "Add Candidate" posture bucket.
+  - Added `build_intel_card_narrative_contract()` in `reasoning_v2_plain_english.py`: single deterministic helper keyed on the VISIBLE action that produces action-consistent `evidence_summary` and `final_takeaway`. Replaces fragmented `build_posture_reason + _build_caveat` for the Evidence Check voice.
+  - Added `detect_intel_card_conflict()`: pure function that detects forbidden HOLD phrases on BUY cards and forbidden BUY phrases on TRIM/SELL cards. Used before contract is applied to count pre-fix conflicts.
+  - `recommendation_engine.py` card assembly: calls narrative contract after gate code, overrides `intel_read_dict["posture_reason"]` and `intel_read_dict["caveat"]` with contract values, stores `intel_read_dict["narrative_contract"]` for observability.
+  - Observability: emits `intel_card_narrative_contract_summary` INFO log per run; WARNING when conflict_count > 0.
+  - `api.ts`: added `narrative_contract` optional field to `IntelRead` interface.
+- Scope/guardrails: no all-HOLD re-fix, no evidence-quality remap, no SQL, no LLM, no Deploy, no frontend redesign.
+- Tests: 67 new tests in `test_v3_intel_card_narrative_contract.py` — all pass. 257 total tests pass.
 
 ## 2026-05-05 — Intel v3 PR 13: Sev 1 all-HOLD Intel collapse fix (Level 3)
 

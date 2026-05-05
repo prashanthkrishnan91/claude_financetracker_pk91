@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.intelligence.v3.shadow_projection import project_shadow_from_card_signals
+from app.services.intelligence.v3.shadow_projection import (
+    project_shadow_from_card_signals,
+    summarize_shadow_diagnostics,
+)
 
 _VALID_ACTIONS = {"BUY", "HOLD", "TRIM", "SELL"}
 
@@ -518,5 +521,143 @@ class TestShadowSummaryAggregation:
             total_cards=1,
         )
         assert summary["hold_collapse_risk_count"] == 0
-        assert summary["honest_hold_count"] == 1
-        assert summary["non_hold_shadow_from_v2_hold_count"] == 0
+
+
+class TestV3ShadowGoldenPortfolio:
+    """PR 5: synthetic held-portfolio validation suite for v3 shadow path."""
+
+    def _golden_portfolio(self) -> list[dict]:
+        return [
+            _card(  # strong buy-like signals but still visible HOLD
+                ticker="AAPL",
+                v2_visible_action="HOLD",
+                analyst_action="BUY",
+                conviction_level="HIGH",
+                technical_signal="BULLISH",
+                data_quality_label="HIGH",
+                category="Core",
+                intel_read=_good_intel_read(3),
+            ),
+            _card(  # true visible BUY remains untouched
+                ticker="MSFT",
+                v2_visible_action="BUY",
+                analyst_action="BUY",
+                conviction_level="HIGH",
+                technical_signal="BULLISH",
+                data_quality_label="HIGH",
+                category="Core",
+                intel_read=_good_intel_read(3),
+            ),
+            _card(  # trim-like overextended/fit pressure
+                ticker="META",
+                v2_visible_action="HOLD",
+                analyst_action="TRIM",
+                conviction_level="MEDIUM",
+                technical_signal="NEUTRAL",
+                data_quality_label="HIGH",
+                category="Growth",
+                intel_read=_good_intel_read(2),
+            ),
+            _card(  # sell-like protection/risk
+                ticker="RIVN",
+                v2_visible_action="HOLD",
+                analyst_action="SELL",
+                conviction_level="LOW",
+                technical_signal="BEARISH",
+                risk_flag="Critical covenant breach and severe liquidity risk",
+                analyst_risks=["Cash runway under 6 months", "Critical covenant breach"],
+                data_quality_label="MEDIUM",
+                category="Speculative",
+                intel_read=_good_intel_read(2),
+            ),
+            _card(  # true neutral hold
+                ticker="VOO",
+                v2_visible_action="HOLD",
+                analyst_action="HOLD",
+                conviction_level="MEDIUM",
+                technical_signal="NEUTRAL",
+                data_quality_label="HIGH",
+                category="ETF",
+                intel_read=_good_intel_read(3),
+            ),
+            _card(  # honest hold for insufficient data
+                ticker="SNOW",
+                v2_visible_action="HOLD",
+                analyst_action="BUY",
+                conviction_level="HIGH",
+                data_quality_label="HIGH",
+                category="Growth",
+                intel_read=_thin_intel_read(),
+            ),
+            _card(  # malformed / partial input must fail soft
+                ticker=None,  # type: ignore[arg-type]
+                v2_visible_action="HOLD",
+                analyst_action="BUY",
+                conviction_level="HIGH",
+                data_quality_label="HIGH",
+                category="Core",
+                intel_read=_good_intel_read(3),
+            ),
+        ]
+
+    def _run_projection(self) -> tuple[list[dict | None], dict]:
+        fixtures = self._golden_portfolio()
+        visible_actions = [f["v2_visible_action"] for f in fixtures]
+        results = [project_shadow_from_card_signals(**f) for f in fixtures]
+        summary = summarize_shadow_diagnostics(results, total_cards=len(fixtures))
+        assert visible_actions == [f["v2_visible_action"] for f in fixtures]
+        return results, summary
+
+    def test_golden_portfolio_has_action_diversity(self):
+        results, _ = self._run_projection()
+        shadow_actions = {r["v3_shadow_action"] for r in results if isinstance(r, dict)}
+        assert {"BUY", "HOLD", "TRIM", "SELL"}.issubset(shadow_actions)
+
+    def test_golden_portfolio_flags_hold_collapse_without_mutating_visible_actions(self):
+        fixtures = self._golden_portfolio()
+        before = [f["v2_visible_action"] for f in fixtures]
+        results = [project_shadow_from_card_signals(**f) for f in fixtures]
+        after = [f["v2_visible_action"] for f in fixtures]
+        assert before == after
+        assert any(r and r["hold_collapse_risk"] for r in results)
+
+    def test_golden_portfolio_separates_honest_holds_from_hold_collapse(self):
+        _, summary = self._run_projection()
+        assert summary["honest_hold_count"] >= 1
+        assert summary["hold_collapse_risk_count"] >= 1
+        assert summary["non_hold_shadow_from_v2_hold_count"] >= 1
+
+    def test_golden_portfolio_counts_projection_failures_safely(self):
+        _, summary = self._run_projection()
+        assert summary["total_cards"] == 7
+        assert summary["projected_cards"] == 6
+        assert summary["projection_failures"] == 1
+
+    def test_golden_portfolio_summary_schema_is_stable(self):
+        _, summary = self._run_projection()
+        assert set(summary.keys()) == {
+            "schema_version",
+            "total_cards",
+            "projected_cards",
+            "projection_failures",
+            "v2_visible_action_counts",
+            "v3_shadow_action_counts",
+            "hold_collapse_risk_count",
+            "honest_hold_count",
+            "non_hold_shadow_from_v2_hold_count",
+        }
+        assert summary["v2_visible_action_counts"] == {
+            "BUY": 1,
+            "HOLD": 5,
+            "TRIM": 0,
+            "SELL": 0,
+        }
+        assert summary["v3_shadow_action_counts"] == {
+            "BUY": 2,
+            "HOLD": 2,
+            "TRIM": 1,
+            "SELL": 1,
+        }
+        assert summary["hold_collapse_risk_count"] == 3
+        assert summary["honest_hold_count"] == 2
+        assert summary["non_hold_shadow_from_v2_hold_count"] == 3

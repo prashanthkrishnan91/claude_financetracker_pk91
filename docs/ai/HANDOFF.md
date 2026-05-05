@@ -1,5 +1,43 @@
 
 ## Last change
+Intel v3 PR 5: backend v3 shadow golden-portfolio validation suite (PR: "test(intel-v3-pr5): add synthetic golden-portfolio shadow validation suite").
+
+## Severity
+Level 1 — focused validation/test hardening.
+
+## Root cause
+PRs 2-4 established v3 shadow projection + portfolio summary behavior, but there was no single realistic held-portfolio regression suite proving action diversity, HOLD-collapse detectability, honest HOLD separation, deterministic counts, and fail-soft handling together.
+
+## Fix
+- Extended `v2/backend/tests/test_v3_shadow_projection.py` with `TestV3ShadowGoldenPortfolio` synthetic fixture suite.
+- Reused existing v3 helpers only:
+  - `project_shadow_from_card_signals(...)`
+  - `summarize_shadow_diagnostics(...)`
+- Added realistic synthetic held-card scenarios in one deterministic fixture set:
+  - strong BUY-like signals while visible action is HOLD,
+  - TRIM-like overextended risk,
+  - SELL-like protection/risk,
+  - true neutral HOLD,
+  - honest HOLD from insufficient data,
+  - malformed/partial card that fail-softs safely.
+- Added focused assertions that:
+  - v3 shadow produces action diversity (BUY/HOLD/TRIM/SELL),
+  - HOLD-collapse risk is detected without mutating visible v2 actions,
+  - honest insufficient-data HOLD is counted separately,
+  - projection failures are counted safely and deterministically,
+  - portfolio summary schema/counts remain stable.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No real user/account data used in fixtures.
+
+
+## Last change
 Intel v3 PR 4: production-visible backend shadow observability control (PR: "feat(intel-v3-pr4): optional info-level v3 shadow portfolio summary logging").
 
 ## Severity

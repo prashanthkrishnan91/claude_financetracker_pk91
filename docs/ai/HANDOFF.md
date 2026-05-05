@@ -1,4 +1,72 @@
 ## Last change
+Intel v3 PR 9: shadow-only evidence-quality BUY conviction guardrail.
+
+## Severity
+Level 2 — shadow-only v3 policy guardrail. Changes v3 shadow conviction semantics for BUY/HIGH when evidence quality is not PRESENT/HIGH-trust. Backend-only dark launch; no visible recommendations changed.
+
+## Assumptions and success criteria
+- "Strong enough" evidence = `DataTruthFinding.status == PRESENT` AND `trust_level == HIGH` for the evidence_quality axis.
+- This maps exactly to ≥3 trusted dimensions in intel_read OR `data_quality_label="HIGH"`.
+- Guardrail is shadow-only: applied post-decide in shadow_projection.py, not in the core decision_policy_v1.py kernel.
+- SELL/TRIM protective actions are never affected (guardrail fires only when action=BUY and conviction=HIGH).
+- BUY action is preserved at MEDIUM conviction when guardrail fires — not collapsed to HOLD.
+- All existing visible v2 actions/cards/API/Deploy remain completely unchanged.
+
+## Fix
+- Added `v2/backend/app/services/intelligence/v3/buy_conviction_guardrail.py`:
+  - `_evidence_is_high_trust(ev_summary)` — True only when evidence_quality finding is PRESENT/HIGH.
+  - `apply_buy_conviction_guardrail(action, conviction, evidence_quality_truth)` → `(ConvictionV3, diagnostics_dict)`.
+  - Guardrail fires when: action=BUY AND conviction=HIGH AND evidence not PRESENT/HIGH-trust.
+  - When fired: caps conviction from HIGH to MEDIUM.
+  - Stable diagnostic keys: `buy_high_conviction_guardrail_applied`, `buy_conviction_capped_reason`, `evidence_quality_truth_status`, `evidence_quality_trust_level`, `pre_guardrail_conviction`, `post_guardrail_conviction`.
+  - Pure function — no IO, DB, LLM, provider calls.
+- Modified `v2/backend/app/services/intelligence/v3/shadow_projection.py`:
+  - Imports `apply_buy_conviction_guardrail`.
+  - After `decide()`, extracts evidence_quality AxisTruthSummary from truth_summaries.
+  - Calls `apply_buy_conviction_guardrail()` and uses post-guardrail conviction as `v3_shadow_conviction`.
+  - Adds `buy_conviction_guardrail` sub-dict to `truth_diagnostics`.
+- Added `v2/backend/tests/test_v3_evidence_quality_guardrail.py` — 57 tests across 7 test classes.
+
+## Evidence-quality guardrail contract (PR 9)
+- Guardrail axis: `evidence_quality` (from `classify_evidence_signals()` finding).
+- "High-trust" = `DataTruthFinding.status == PRESENT AND trust_level == HIGH`.
+- PRESENT/HIGH maps to: intel_read with ≥3 trusted dimensions OR data_quality_label="HIGH".
+- All other states (PRESENT/MEDIUM, WEAK, MISSING, STALE, UNAVAILABLE, CONFLICTING, or no summary) are considered not high-trust → guardrail fires for HIGH-conviction BUY.
+- Guardrail cap: HIGH → MEDIUM (preserves BUY action at lower conviction).
+- Shadow diagnostics: `truth_diagnostics.buy_conviction_guardrail` sub-dict (stable, aggregate-safe keys).
+- SELL/TRIM are always independent of this guardrail.
+- v2 visible action never mutated.
+
+## Dark-launch safety notes
+- No visible v2 recommendation, action, card, or API behavior changed.
+- No API schema, frontend, Deploy, SQL, provider, or LLM changes.
+- v3 shadow conviction may change for cards where evidence is PRESENT/MEDIUM trust and upstream conviction was HIGH (active case: OK evidence + HIGH conviction → now BUY/MEDIUM in shadow).
+- All PR 2/3/4/5/6/7/8 stable diagnostic keys unchanged.
+- `buy_conviction_guardrail` sub-dict is additive to existing `truth_diagnostics`.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No real user/account data in fixtures.
+- No mutation of visible v2 card actions.
+- No frontend/API/Deploy/schema files changed.
+
+## Test results
+- 57 new tests in `test_v3_evidence_quality_guardrail.py` — all pass.
+- 219 existing v3 tests (decision_policy + shadow_projection + truth_aware_adapter + data_truth) — all pass.
+- Total: 276 tests pass.
+- Test command: `cd v2/backend && pytest tests/test_v3_evidence_quality_guardrail.py tests/test_v3_shadow_projection.py tests/test_v3_truth_aware_adapter.py tests/test_v3_data_truth.py tests/test_v3_decision_policy.py -q`
+
+## Next intended step
+Observe production shadow logs for guardrail firing rate across at least one full portfolio cycle. Expected: guardrail fires for PRESENT/MEDIUM evidence cards (1-2 trusted dims). Confirm zero visible behavior drift. Then consider: (a) extending guardrail to enforce per-axis evidence minimums for more conviction bands, or (b) Snapshot Store for evidence-quality trend tracking over time.
+
+---
+
+## Last change
 Intel v3 PR 8: optional INFO-level truth-aware v3 shadow suppression summary observability.
 
 ## Severity

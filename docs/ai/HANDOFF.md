@@ -1,5 +1,65 @@
 
 ## Last change
+Intel v3 PR 6: backend-only Data Truth Contract v1 for existing Intel/recommendation signals.
+
+## Severity
+Level 2 — foundational backend contract layer. Adds durable v3 data-truth foundation; backend-only, scoped.
+
+## Root cause
+The v3 decision kernel (PRs 1-5) classifies signals into axis bands but cannot yet distinguish missing data from stale data, weak/inferred data from sourced/current data, or conflicting signals from aligned signals. Without a truth layer, the policy risks treating absent evidence as equivalent to present evidence, or pretending weak data is strong.
+
+## Fix
+- Added `v2/backend/app/services/intelligence/v3/data_truth_contracts.py`:
+  - `DataTruthStatus` enum: PRESENT / MISSING / STALE / WEAK / CONFLICTING / UNAVAILABLE
+  - `SourceTrustLevel` enum: HIGH / MEDIUM / LOW / UNKNOWN
+  - `DataTruthFinding` dataclass: signal_name, status, trust_level, source_kind, freshness_label, reason_code, safe_for_decision
+  - `AxisTruthSummary` dataclass: axis_name, findings, present_count, missing_count, stale_count, weak_count, safe_for_decision, dominant_reason_code
+- Added `v2/backend/app/services/intelligence/v3/data_truth_v1.py` — pure evaluator:
+  - `classify_evidence_signals(data_quality_label, intel_read)` — intel_read takes precedence; insufficient_data=True → WEAK; 0 trusted dims → WEAK; ≥3 → PRESENT/HIGH
+  - `classify_action_signals(action, analyst_action)` — BUY↔SELL direct opposition → CONFLICTING; both valid → PRESENT/HIGH
+  - `classify_conviction_signal(conviction_level)` — LOW → WEAK; HIGH/MEDIUM → PRESENT
+  - `classify_technical_signal(technical_signal)` — known values → PRESENT/MEDIUM
+  - `classify_risk_signals(risk_flag, analyst_risks)` — no data → MISSING; any text → PRESENT
+  - `classify_with_staleness(signal_name, value, last_updated_hours_ago, stale_threshold_hours)` — future API for timestamp-aware staleness; STALE when age > threshold
+  - Explicit provider-unavailable sentinels (UNAVAILABLE / N/A / UNAVAIL etc.) → UNAVAILABLE
+- Added `v2/backend/app/services/intelligence/v3/existing_signal_truth_adapter.py`:
+  - `evaluate_card_signals_truth(...)` → list[AxisTruthSummary], one per signal group axis
+  - `build_truth_diagnostic_summary(summaries)` → compact dict with stable keys for shadow logging
+  - `_build_axis_summary(axis_name, findings)` — safe_for_decision logic: any safe finding + no CONFLICTING/UNAVAILABLE
+- Modified `v2/backend/app/services/intelligence/v3/shadow_projection.py`:
+  - Added optional `truth_diagnostics` key to the shadow projection dict (additive — existing stable keys unchanged)
+  - truth_diagnostics is None on failure (fail-soft wrapper)
+- Added `v2/backend/tests/test_v3_data_truth.py` — 85 new tests across 12 test classes.
+
+## Truth classification rules (v1)
+- None / empty → MISSING, safe_for_decision=False
+- Provider sentinel strings → UNAVAILABLE, safe_for_decision=False
+- intel_read.insufficient_data=True or 0 trusted dims → WEAK, safe_for_decision=True (LOW trust)
+- data_quality_label=LOW or conviction=LOW → WEAK, safe_for_decision=True (LOW trust)
+- BUY↔SELL direct action opposition → CONFLICTING, safe_for_decision=False
+- Otherwise valid present values → PRESENT, safe_for_decision=True
+- STALE: requires caller-supplied age data; safe_for_decision=False when age > threshold
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No real user/account data in fixtures.
+- No v3 action decision mutation (truth is diagnostic-only for this PR).
+- No frontend/API/Deploy/schema files changed.
+
+## Test results
+- 85 new tests in `test_v3_data_truth.py` — all pass.
+- 66 existing tests (decision_policy + shadow_projection) — all pass.
+- Total: 151 tests pass.
+
+## Next intended wiring step
+Wire `evaluate_card_signals_truth` output into `DecisionInputV3` so the v3 policy can inspect axis-level safe_for_decision before acting (e.g., suppress BUY on axes where all data is MISSING or WEAK). Keep as diagnostic until at least one PR validates zero behavior drift in shadow observability.
+
+## Last change
 Intel v3 PR 5: backend v3 shadow golden-portfolio validation suite (PR: "test(intel-v3-pr5): add synthetic golden-portfolio shadow validation suite").
 
 ## Severity

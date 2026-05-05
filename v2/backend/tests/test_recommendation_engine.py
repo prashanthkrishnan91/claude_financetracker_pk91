@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from app.services.recommendation_engine import (
@@ -17,7 +19,10 @@ from app.services.recommendation_engine import (
     _normalize_ticker_lookup_key,
     _resolve_thesis_scorecard_for_ticker,
     _build_thesis_fields_for_card,
+    _is_v3_shadow_summary_info_logs_enabled,
+    _log_v3_shadow_projection_portfolio_summary,
 )
+from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
 
 
 # ── _classify_action tests ──────────────────────────────────────────────────
@@ -114,6 +119,55 @@ class TestDripNote:
         assert "DRIP" in note
         assert "1.0000 free shares" in note
         assert "annual yield" not in note  # AMD yield is 0
+
+
+class TestV3ShadowSummaryObservability:
+    def test_info_logs_flag_defaults_disabled(self, monkeypatch):
+        monkeypatch.delenv("INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED", raising=False)
+        assert _is_v3_shadow_summary_info_logs_enabled() is False
+
+    @pytest.mark.parametrize("flag_value", ["1", "true", "TRUE", " yes ", "on"])
+    def test_info_logs_flag_truthy_values(self, monkeypatch, flag_value):
+        monkeypatch.setenv("INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED", flag_value)
+        assert _is_v3_shadow_summary_info_logs_enabled() is True
+
+    def test_portfolio_summary_logs_debug_only_by_default(self, caplog, monkeypatch):
+        monkeypatch.delenv("INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED", raising=False)
+        summary = summarize_shadow_diagnostics([], total_cards=0)
+        with caplog.at_level(logging.DEBUG, logger="app.services.recommendation_engine"):
+            _log_v3_shadow_projection_portfolio_summary(user_id="user-1", summary=summary)
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO and "v3_shadow_projection_portfolio_summary" in r.message]
+        debug_records = [r for r in caplog.records if r.levelno == logging.DEBUG and "v3_shadow_projection_portfolio_summary" in r.message]
+        assert len(info_records) == 0
+        assert len(debug_records) == 1
+
+    def test_portfolio_summary_logs_single_info_when_enabled_and_safe_payload(self, caplog, monkeypatch):
+        monkeypatch.setenv("INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED", "true")
+        diagnostics = [
+            {"v2_visible_action": "HOLD", "v3_shadow_action": "BUY", "hold_collapse_risk": True, "v3_honest_hold": False},
+            {"v2_visible_action": "BUY", "v3_shadow_action": "BUY", "hold_collapse_risk": False, "v3_honest_hold": False},
+        ]
+        summary = summarize_shadow_diagnostics(diagnostics, total_cards=2)
+        with caplog.at_level(logging.INFO, logger="app.services.recommendation_engine"):
+            _log_v3_shadow_projection_portfolio_summary(user_id="user-2", summary=summary)
+        info_records = [r for r in caplog.records if r.levelno == logging.INFO and "v3_shadow_projection_portfolio_summary" in r.message]
+        assert len(info_records) == 1
+        safe_keys = {
+            "schema_version",
+            "total_cards",
+            "projected_cards",
+            "projection_failures",
+            "v2_visible_action_counts",
+            "v3_shadow_action_counts",
+            "hold_collapse_risk_count",
+            "honest_hold_count",
+            "non_hold_shadow_from_v2_hold_count",
+        }
+        assert set(summary.keys()) == safe_keys
+        assert "ticker" not in summary
+        assert "user_id" not in summary
+        assert "account_value" not in summary
+        assert "raw_metrics" not in summary
 
 
 # ── RecResult dataclass tests ───────────────────────────────────────────────

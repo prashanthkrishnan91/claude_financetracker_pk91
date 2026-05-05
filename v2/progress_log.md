@@ -1,3 +1,11 @@
+## 2026-05-05 — Intel v3 PR 9: shadow-only evidence-quality BUY conviction guardrail (Level 2)
+
+- Added `backend/app/services/intelligence/v3/buy_conviction_guardrail.py` — pure function `apply_buy_conviction_guardrail()` that caps HIGH-conviction BUY to MEDIUM when evidence-quality truth is not PRESENT/HIGH-trust.
+- Wired guardrail into `backend/app/services/intelligence/v3/shadow_projection.py` post-decide; result: `v3_shadow_conviction` reflects post-guardrail value; `truth_diagnostics.buy_conviction_guardrail` sub-dict added.
+- SELL/TRIM protective decisions unaffected. BUY preserved at MEDIUM when guardrail fires. v2 visible actions never mutated.
+- Added 57-test suite `backend/tests/test_v3_evidence_quality_guardrail.py` (unit + integration + golden portfolio regression). 276 total v3 tests pass.
+- No SQL, no API schema, no frontend, no Deploy, no provider, no LLM changes.
+
 ## 2026-05-05 — Intel v3 PR 8: optional INFO-level truth-aware shadow suppression summary logs (Level 1)
 
 - Reused existing env gate `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` from PR 4; default behavior remains unchanged (DEBUG summary always, INFO summary only when enabled).

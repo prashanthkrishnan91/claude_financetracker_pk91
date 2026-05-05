@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Optional, Any
 
+from .buy_conviction_guardrail import apply_buy_conviction_guardrail
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
 from .existing_signal_truth_adapter import build_truth_diagnostic_summary
@@ -88,6 +89,18 @@ def project_shadow_from_card_signals(
         suppressed_axes = list(v3_out.suppression_reasons.keys())
         v3_action = v3_out.action.value
 
+        # PR 9: apply evidence-quality BUY conviction guardrail (shadow-only).
+        ev_truth_summary = next(
+            (s for s in truth_summaries if s.axis_name == "evidence_quality"),
+            None,
+        )
+        post_conviction, guardrail_diag = apply_buy_conviction_guardrail(
+            action=v3_out.action,
+            conviction=v3_out.conviction,
+            evidence_quality_truth=ev_truth_summary,
+        )
+        v3_shadow_conviction = post_conviction.value
+
         truth_diag: Optional[dict] = None
         try:
             truth_diag = build_truth_diagnostic_summary(truth_summaries)
@@ -100,6 +113,7 @@ def project_shadow_from_card_signals(
             truth_diag["unsafe_axis_count"] = unsafe_count
             truth_diag["suppressed_axis_reasons"] = dict(suppressed_by_truth)
             truth_diag["dominant_truth_reason"] = dominant
+            truth_diag["buy_conviction_guardrail"] = guardrail_diag
         except Exception:  # noqa: BLE001
             pass
 
@@ -107,7 +121,7 @@ def project_shadow_from_card_signals(
             "ticker": ticker,
             "v2_visible_action": v2_norm,
             "v3_shadow_action": v3_action,
-            "v3_shadow_conviction": v3_out.conviction.value,
+            "v3_shadow_conviction": v3_shadow_conviction,
             "hold_collapse_risk": v2_norm == "HOLD" and v3_action != "HOLD",
             "v3_honest_hold": v3_action == "HOLD" and bool(suppressed_axes),
             "suppressed_axes": suppressed_axes,

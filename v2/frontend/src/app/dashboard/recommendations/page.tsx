@@ -22,7 +22,9 @@ import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
 import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/lib/api";
+import { normalizeVisibleIntelAction } from "@/lib/visibleIntelActions";
 
+// LOCKED: Intel v3 visible filter contract is ALL/BUY/HOLD/TRIM/SELL only. New visible buckets require a spec change.
 const INTEL_FILTERS = [
   { key: "ALL",  label: "All",  color: "bg-surface-elevated text-text-primary" },
   { key: "BUY",  label: "Buy",  color: "bg-green-500/10 text-green-400 border-green-500/30" },
@@ -30,14 +32,6 @@ const INTEL_FILTERS = [
   { key: "TRIM", label: "Trim", color: "bg-yellow-500/10 text-yellow-400 border-yellow-500/30" },
   { key: "SELL", label: "Sell", color: "bg-red-500/10 text-red-400 border-red-500/30" },
 ] as const;
-
-function normalizeDisplayAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SELL" {
-  const raw = (action || "").toUpperCase();
-  if (raw === "BUY") return "BUY";
-  if (raw === "SELL") return "SELL";
-  if (raw === "TRIM" || raw === "REDUCE") return "TRIM";
-  return "HOLD";
-}
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY:    { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
@@ -125,13 +119,13 @@ export default function RecommendationsPage() {
   const filtered =
     filter === "ALL"
       ? recs || []
-      : (recs || []).filter((r) => normalizeDisplayAction(r.analyst_action || r.action) === filter);
+      : (recs || []).filter((r) => normalizeVisibleIntelAction(r.analyst_action || r.action) === filter);
   const runtimeSynthesis = computePortfolioSynthesisFromCards(recs ?? []);
   const synthesis = runtimeSynthesis ?? (jobStatus?.portfolio_synthesis ?? latestRun?.portfolio_synthesis) ?? null;
 
   const counts: Record<string, number> = { ALL: (recs || []).length };
   for (const r of recs || []) {
-    const bucket = normalizeDisplayAction(r.analyst_action || r.action);
+    const bucket = normalizeVisibleIntelAction(r.analyst_action || r.action);
     counts[bucket] = (counts[bucket] || 0) + 1;
   }
 

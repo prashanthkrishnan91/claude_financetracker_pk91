@@ -2,13 +2,13 @@
 
 import { cn, formatCurrency, formatPercent } from "@/lib/utils";
 import type { InsightCardData, IntelRead } from "@/lib/api";
+import { normalizeVisibleIntelAction } from "@/lib/visibleIntelActions";
 
 const ACTION_STYLES: Record<string, { bg: string; text: string; border: string }> = {
   BUY: { bg: "bg-green-500/10", text: "text-green-400", border: "border-green-500/30" },
   SELL: { bg: "bg-red-500/10", text: "text-red-400", border: "border-red-500/30" },
   TRIM: { bg: "bg-yellow-500/10", text: "text-yellow-400", border: "border-yellow-500/30" },
   HOLD: { bg: "bg-blue-500/10", text: "text-blue-400", border: "border-blue-500/30" },
-  REVIEW: { bg: "bg-purple-500/10", text: "text-purple-400", border: "border-purple-500/30" },
 };
 
 
@@ -35,14 +35,6 @@ export function formatCategoryLine(category?: string | null, sector?: string | n
 
 export function convictionBadgeLabel(level: "HIGH" | "MEDIUM" | "LOW"): string {
   return CONVICTION_LABELS[level];
-}
-
-function normalizeAction(action?: string | null): "BUY" | "HOLD" | "TRIM" | "SELL" {
-  const raw = (action || "").toUpperCase();
-  if (raw === "BUY") return "BUY";
-  if (raw === "SELL") return "SELL";
-  if (raw === "TRIM" || raw === "REDUCE") return "TRIM";
-  return "HOLD";
 }
 
 const STRUCTURED_SCHEMAS = new Set(["human_v2", "compact_v1"]);
@@ -84,7 +76,7 @@ function reasoningSourceLabel(source?: string | null): string | null {
 }
 
 export function AgentInsightCard({ card, onClick }: { card: InsightCardData; onClick?: () => void }) {
-  const action = normalizeAction(card.analyst_action || card.action);
+  const action = normalizeVisibleIntelAction(card.analyst_action || card.action);
   const styles = ACTION_STYLES[action] || ACTION_STYLES.HOLD;
   const convictionLevel = _resolveConvictionLevel(card);
   const structuredSchema = isStructuredSchema(card);

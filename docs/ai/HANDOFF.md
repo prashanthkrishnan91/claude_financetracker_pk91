@@ -1,4 +1,62 @@
 ## Last change
+Intel v3 PR 11: backend-only v3 truth diagnostics wiring fix / signal hydration audit.
+
+## Severity
+Level 2 — production shadow wiring / root-cause fix.
+
+## Production observation
+After enabling INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED=true, one production Railway cycle showed:
+- safe_axis_count=0, unsafe_axis_count=0
+- evidence_quality_status_counts={}, evidence_quality_trust_counts={}
+- guardrail_evaluated_count=0
+- dominant_truth_reason=none
+
+All despite 34 real cards having analyst_action, data_quality_label, intel_read, conviction_level and other truth-relevant fields.
+
+## Root cause
+`_v3_shadow_projection(card)` in `recommendation_engine.py` was a stale implementation added before PRs 7–10 landed. It called `_v3_shadow_decide()` → `build_decision_input_from_card()` (non-truth-aware) and returned a dict **without** `truth_diagnostics`. The truth-aware `project_shadow_from_card_signals()` in `shadow_projection.py` existed since PR 7 but was never wired to replace this function. `summarize_truth_aware_suppression()` and `summarize_guardrail_impact_observability()` both look for `truth_diagnostics` per card and found nothing → all counts were zero.
+
+## Fix
+- `v2/backend/app/services/recommendation_engine.py`:
+  - Added `project_shadow_from_card_signals` to the import from `shadow_projection`.
+  - Replaced `_v3_shadow_decide()` + old `_v3_shadow_projection()` body with a single thin `_v3_shadow_projection(card)` that delegates to `project_shadow_from_card_signals()` with InsightCard fields. All diagnostic keys are now populated including `truth_diagnostics` with `safe_axis_count`, `unsafe_axis_count`, `suppressed_axis_reasons`, and `buy_conviction_guardrail`.
+- `v2/backend/tests/test_v3_signal_hydration.py` (new):
+  - 25 tests with production-shaped synthetic fixtures covering:
+    1. `truth_diagnostics` key always present for real card shapes.
+    2. `evidence_quality_status_counts` nonempty when guardrail evaluated.
+    3. `safe_axis_count` + `unsafe_axis_count` = 5 axes (invariant).
+    4. Guardrail capping for BUY/HIGH + MEDIUM evidence trust.
+    5. 34-card all-HOLD batch regression (mirrors production cycle).
+    6. Visible action unchanged.
+    7. Fail-soft for None/partial fields.
+
+## Fixed contract
+After PR 11, one production cycle with INFO logs enabled should emit:
+- `safe_axis_count` > 0 for real cards with evidence fields.
+- `evidence_quality_status_counts` nonempty.
+- `guardrail_evaluated_count` = total projected cards (guardrail is always evaluated).
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No threshold tuning.
+- No visible policy-gating added.
+- No real user/account data in fixtures.
+
+## Test results
+- `pytest -q tests/test_v3_signal_hydration.py tests/test_v3_shadow_projection.py tests/test_v3_truth_aware_adapter.py tests/test_v3_guardrail_impact_observability.py tests/test_v3_evidence_quality_guardrail.py tests/test_recommendation_engine.py tests/test_v3_data_truth.py tests/test_v3_decision_policy.py`
+- Result: 400 passed.
+
+## Next intended step
+Enable INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED=true and run one production cycle to confirm safe_axis_count, evidence_quality_status_counts, and guardrail_evaluated_count are now populated. Then decide if threshold tuning or policy changes are warranted in a separate PR.
+
+---
+
+## Last change
 Intel v3 PR 10: backend-only guardrail impact observability for PR 9 evidence-quality BUY conviction guardrail.
 
 ## Severity

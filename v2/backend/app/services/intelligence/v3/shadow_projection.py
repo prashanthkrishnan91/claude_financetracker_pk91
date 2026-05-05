@@ -182,6 +182,69 @@ def summarize_shadow_diagnostics(
     }
 
 
+def summarize_guardrail_impact_observability(
+    diagnostics: list[Optional[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Aggregate PR 9 evidence-quality guardrail impact across a card batch."""
+    valid = [d for d in diagnostics if isinstance(d, dict)]
+
+    action_counts = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+    conviction_counts = {"LOW": 0, "MEDIUM": 0, "HIGH": 0}
+    guardrail_evaluated_count = 0
+    buy_high_conviction_pre_guardrail_count = 0
+    buy_conviction_capped_count = 0
+    buy_remained_buy_after_cap_count = 0
+    guardrail_applied_reasons: Counter[str] = Counter()
+    eq_status_counts: Counter[str] = Counter()
+    eq_trust_counts: Counter[str] = Counter()
+
+    for diag in valid:
+        v3_action = str(diag.get("v3_shadow_action") or "HOLD").upper()
+        if v3_action in action_counts:
+            action_counts[v3_action] += 1
+
+        v3_conviction = str(diag.get("v3_shadow_conviction") or "").upper()
+        if v3_conviction in conviction_counts:
+            conviction_counts[v3_conviction] += 1
+
+        truth_diag = diag.get("truth_diagnostics")
+        if not isinstance(truth_diag, dict):
+            continue
+        guardrail = truth_diag.get("buy_conviction_guardrail")
+        if not isinstance(guardrail, dict):
+            continue
+
+        guardrail_evaluated_count += 1
+        eq_status = str(guardrail.get("evidence_quality_truth_status") or "unknown")
+        eq_trust = str(guardrail.get("evidence_quality_trust_level") or "unknown")
+        eq_status_counts[eq_status] += 1
+        eq_trust_counts[eq_trust] += 1
+
+        pre = str(guardrail.get("pre_guardrail_conviction") or "").upper()
+        post = str(guardrail.get("post_guardrail_conviction") or "").upper()
+        applied = bool(guardrail.get("buy_high_conviction_guardrail_applied"))
+        if pre == "HIGH":
+            buy_high_conviction_pre_guardrail_count += 1
+        if applied:
+            buy_conviction_capped_count += 1
+            reason = str(guardrail.get("buy_conviction_capped_reason") or "unknown")
+            guardrail_applied_reasons[reason] += 1
+            if v3_action == "BUY" and post and post != pre:
+                buy_remained_buy_after_cap_count += 1
+
+    return {
+        "guardrail_evaluated_count": guardrail_evaluated_count,
+        "buy_high_conviction_pre_guardrail_count": buy_high_conviction_pre_guardrail_count,
+        "buy_conviction_capped_count": buy_conviction_capped_count,
+        "buy_remained_buy_after_cap_count": buy_remained_buy_after_cap_count,
+        "guardrail_applied_reasons": dict(guardrail_applied_reasons),
+        "evidence_quality_status_counts": dict(eq_status_counts),
+        "evidence_quality_trust_counts": dict(eq_trust_counts),
+        "v3_shadow_action_counts": action_counts,
+        "v3_shadow_conviction_counts": conviction_counts,
+    }
+
+
 def summarize_truth_aware_suppression(
     diagnostics: list[Optional[dict[str, Any]]],
 ) -> dict[str, Any]:

@@ -1,4 +1,58 @@
 ## Last change
+Intel v3 PR 10: backend-only guardrail impact observability for PR 9 evidence-quality BUY conviction guardrail.
+
+## Severity
+Level 1 — backend observability/control follow-up only.
+
+## Assumptions and success criteria
+- Reuse existing portfolio-level v3 shadow summary path (PR 3/4/8) and keep default INFO logging disabled.
+- Aggregate only stable, non-sensitive PR 9 guardrail diagnostics already produced per card.
+- Emit one batch summary only (no per-card INFO spam).
+- Preserve visible recommendations/actions/API behavior and keep guardrail shadow-only.
+
+## Fix
+- Extended `v2/backend/app/services/intelligence/v3/shadow_projection.py` with
+  `summarize_guardrail_impact_observability(diagnostics)` (pure deterministic helper):
+  - `guardrail_evaluated_count`
+  - `buy_high_conviction_pre_guardrail_count`
+  - `buy_conviction_capped_count`
+  - `buy_remained_buy_after_cap_count`
+  - `guardrail_applied_reasons`
+  - `evidence_quality_status_counts`
+  - `evidence_quality_trust_counts`
+  - `v3_shadow_action_counts`
+  - `v3_shadow_conviction_counts`
+- Updated `v2/backend/app/services/recommendation_engine.py`:
+  - `_build_v3_shadow_info_summary()` now merges PR 3 summary + PR 8 truth suppression + PR 10 guardrail impact aggregates.
+  - Reused existing env flag `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` (default unchanged: disabled).
+  - Logging path remains one structured portfolio summary per batch.
+- Added focused tests in `v2/backend/tests/test_v3_guardrail_impact_observability.py`.
+- Updated recommendation engine observability tests to assert stable key contract including guardrail-impact fields.
+
+## Guardrail-impact observability contract (PR 10)
+- Aggregate-only backend payload. No raw card payloads, metric keys, account values, holdings, user identifiers, provider payloads, or LLM text.
+- `projection_failures`, `hold_collapse_risk_count`, and `honest_hold_count` remain sourced from existing PR 3 summary.
+- Guardrail impact uses only `truth_diagnostics.buy_conviction_guardrail` fields from PR 9.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No visible policy-gating added.
+
+## Test results
+- `pytest -q tests/test_v3_guardrail_impact_observability.py tests/test_recommendation_engine.py tests/test_v3_evidence_quality_guardrail.py tests/test_v3_shadow_projection.py tests/test_v3_truth_aware_adapter.py tests/test_v3_data_truth.py tests/test_v3_decision_policy.py`
+- Result: 375 passed.
+
+## Next intended step
+Observe one full production cycle with INFO flag enabled to baseline cap rate and evidence-quality distribution, then decide if any non-observability policy changes are warranted in a separate PR.
+
+---
+
+## Last change
 Intel v3 PR 9: shadow-only evidence-quality BUY conviction guardrail.
 
 ## Severity

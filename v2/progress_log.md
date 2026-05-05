@@ -1,5 +1,14 @@
 ---
 
+## 2026-05-05 — Intel v3 PR 7: truth-aware v3 shadow input adapter (Level 2)
+
+- Added `build_truth_aware_decision_input()` to `existing_signal_adapter.py`: calls `evaluate_card_signals_truth()` first; axes with `safe_for_decision=False` (MISSING, UNAVAILABLE, CONFLICTING, STALE) have their input signals nulled before `build_decision_input_from_card()`; WEAK axes pass through (LOW trust, safe per PR 6).
+- Updated `shadow_projection.py`: uses new truth-aware function; `truth_diagnostics` extended with 5 additive keys (`truth_aware_adapter_enabled`, `safe_axis_count`, `unsafe_axis_count`, `suppressed_axis_reasons`, `dominant_truth_reason`); all PR 2/3 stable keys unchanged.
+- 68 new backend tests in `test_v3_truth_aware_adapter.py`; 219 total tests pass.
+- No SQL, no UI, no API schema, no Deploy, no provider expansion, no LLM calls, no real user data. v3 shadow action may change for conflicting/missing signal cards (intended dark-launch behavior).
+
+---
+
 ## 2026-05-05 — Intel v3 PR 6: backend-only Data Truth Contract v1 (Level 2)
 
 - Added `data_truth_contracts.py`: DataTruthStatus (PRESENT/MISSING/STALE/WEAK/CONFLICTING/UNAVAILABLE) and SourceTrustLevel (HIGH/MEDIUM/LOW/UNKNOWN) enums; DataTruthFinding and AxisTruthSummary dataclasses.

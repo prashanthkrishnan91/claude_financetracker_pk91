@@ -69,6 +69,7 @@ def evaluate_card_signals_truth(
     analyst_risks: Optional[list],
     data_quality_label: Optional[str],
     intel_read: Optional[dict],
+    analyst_used_fallback: Optional[bool] = None,
 ) -> list[AxisTruthSummary]:
     """Build axis truth summaries from existing InsightCard signal fields.
 
@@ -79,13 +80,16 @@ def evaluate_card_signals_truth(
       - technical_signal: technical_signal
       - risk_signal:      risk_flag + analyst_risks
 
+    analyst_used_fallback=True conservatively caps evidence quality trust at
+    MEDIUM even when signal count would qualify as HIGH.
+
     Parameters match existing InsightCard field names.
     No new providers, no external calls, no inferred metrics.
     """
     return [
         _build_axis_summary(
             "evidence_quality",
-            [classify_evidence_signals(data_quality_label, intel_read)],
+            [classify_evidence_signals(data_quality_label, intel_read, analyst_used_fallback=analyst_used_fallback)],
         ),
         _build_axis_summary(
             "action_signal",

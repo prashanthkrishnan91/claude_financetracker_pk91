@@ -1,4 +1,105 @@
 ## Last change
+Intel v3 PR 12: backend-only evidence-quality source mapping calibration.
+
+## Severity
+Level 2 — production Data Truth mapping / root-cause calibration.
+
+## Production observation (after PR 11)
+With INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED=true, production portfolio showed:
+- evidence_quality_status_counts: {"WEAK": 34}
+- evidence_quality_trust_counts: {"LOW": 34}
+- All 34 cards returned WEAK/LOW despite having rich intel_read with multiple trusted signals.
+- guardrail_evaluated_count: 34 (wiring from PR 11 confirmed working).
+- buy_high_conviction_pre_guardrail_count: 0 (no HIGH-conviction BUY — all HOLD).
+
+## Root cause
+`classify_evidence_signals()` in `data_truth_v1.py` read `intel_read.get("trusted_dimensions")`
+but the production intel_read dict (built by `build_intel_read()` in `reasoning_v2_plain_english.py`)
+uses key `"trusted_signals"`. Because `"trusted_dimensions"` was never found, n_trusted was
+always 0, and every card with intel_read returned WEAK/LOW regardless of actual signal richness.
+
+The same bug existed in `_derive_evidence_quality()` in `existing_signal_adapter.py`.
+
+Test helpers in 6 test files also used `"trusted_dimensions"`, so tests passed but tested
+the wrong production field shape — concealing the bug.
+
+## Fix
+1. `data_truth_v1.py` — `classify_evidence_signals()`:
+   - Fixed `intel_read.get("trusted_dimensions")` → `intel_read.get("trusted_signals")`.
+   - Added `analyst_used_fallback: Optional[bool] = None` parameter.
+   - When `analyst_used_fallback is True` and result would be PRESENT/HIGH (≥3 signals or
+     data_quality_label="HIGH"), caps trust to PRESENT/MEDIUM with reason_code
+     "field_present_fallback_capped". This conservatively prevents fallback LLM outputs
+     from defeating the evidence-quality guardrail.
+
+2. `existing_signal_truth_adapter.py` — `evaluate_card_signals_truth()`:
+   - Added `analyst_used_fallback: Optional[bool] = None` parameter.
+   - Passes through to `classify_evidence_signals()`.
+
+3. `existing_signal_adapter.py` — `_derive_evidence_quality()`:
+   - Fixed `intel_read.get("trusted_dimensions")` → `intel_read.get("trusted_signals")`.
+   - `build_truth_aware_decision_input()`: added `analyst_used_fallback` parameter, passes
+     to `evaluate_card_signals_truth()`.
+
+4. `shadow_projection.py` — `project_shadow_from_card_signals()`:
+   - Added `analyst_used_fallback: Optional[bool] = None` parameter.
+   - Passes to `build_truth_aware_decision_input()`.
+
+5. `recommendation_engine.py` — `_v3_shadow_projection()`:
+   - Passes `analyst_used_fallback=card.analyst_used_fallback` to `project_shadow_from_card_signals()`.
+
+6. Test fixtures — 6 test files updated:
+   - All `"trusted_dimensions"` in intel_read helpers changed to `"trusted_signals"`.
+   - Updated: `test_v3_data_truth.py`, `test_v3_truth_aware_adapter.py`,
+     `test_v3_signal_hydration.py`, `test_v3_evidence_quality_guardrail.py`,
+     `test_v3_shadow_projection.py`, `test_v3_decision_policy.py`.
+
+7. New `tests/test_v3_evidence_quality_source_mapping.py` — 37 production-shaped tests:
+   - Section 1: trusted_signals key correctness (including regression proving trusted_dimensions = WEAK).
+   - Section 2: analyst_used_fallback cap boundary conditions.
+   - Section 3: data_quality_label fallback path.
+   - Section 4: evaluate_card_signals_truth propagation.
+   - Section 5: project_shadow_from_card_signals production-shaped fixtures.
+   - Section 6: mixed 6-card synthetic portfolio — non-uniform evidence quality.
+   - Section 7: 34-card all-HOLD production regression — non-uniform after fix.
+
+## Evidence-quality mapping contract (PR 12)
+- PRESENT/HIGH: ≥3 trusted_signals in intel_read AND analyst_used_fallback is not True.
+  OR data_quality_label="HIGH" AND analyst_used_fallback is not True.
+- PRESENT/MEDIUM: 1-2 trusted_signals, OR ≥3 signals with analyst_used_fallback=True,
+  OR data_quality_label="HIGH" with analyst_used_fallback=True,
+  OR data_quality_label="MEDIUM".
+- WEAK/LOW: insufficient_data=True, OR 0 trusted_signals, OR data_quality_label="LOW".
+- MISSING: no intel_read and no data_quality_label, OR unrecognized label.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No threshold tuning of visible behavior.
+- No visible policy-gating added.
+- No real user/account data in fixtures.
+- PR 9 guardrail logic unchanged; mapping calibration means guardrail now activates for
+  PRESENT/MEDIUM cards where it previously never fired (because all were WEAK).
+
+## Test results
+341 v3 tests pass:
+- 37 new in `test_v3_evidence_quality_source_mapping.py`
+- 304 existing v3 tests (decision_policy + shadow_projection + truth_aware_adapter +
+  data_truth + signal_hydration + evidence_quality_guardrail + guardrail_impact_observability)
+
+## Next intended step
+Re-enable INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED=true and run one production cycle to
+confirm evidence_quality_status_counts now contains PRESENT entries (not uniformly WEAK).
+Observe guardrail_applied_reasons for the PRESENT/MEDIUM → HIGH-conviction cap rate.
+Only then consider whether threshold tuning or policy changes are warranted in PR 13+.
+
+---
+
+## Last change (PR 11)
 Intel v3 PR 11: backend-only v3 truth diagnostics wiring fix / signal hydration audit.
 
 ## Severity

@@ -2555,6 +2555,7 @@ def _v3_shadow_projection(card: InsightCard) -> Optional[dict]:
             data_quality_label=card.data_quality_label,
             intel_read=card.intel_read,
             thesis_v2=card.thesis_v2,
+            analyst_used_fallback=card.analyst_used_fallback,
         )
     except Exception as exc:  # noqa: BLE001
         logger.debug("v3_shadow_projection skipped ticker=%s err=%s", card.ticker, exc)

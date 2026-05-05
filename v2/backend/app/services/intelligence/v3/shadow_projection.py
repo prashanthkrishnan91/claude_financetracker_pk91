@@ -37,6 +37,7 @@ def project_shadow_from_card_signals(
     data_quality_label: Optional[str],
     intel_read: Optional[dict],
     thesis_v2: Optional[dict],
+    analyst_used_fallback: Optional[bool] = None,
 ) -> Optional[dict]:
     """Shadow-project a v3 decision from card signal fields.
 
@@ -84,6 +85,7 @@ def project_shadow_from_card_signals(
             data_quality_label=data_quality_label,
             intel_read=intel_read,
             thesis_v2=thesis_v2,
+            analyst_used_fallback=analyst_used_fallback,
         )
         v3_out = decide(inp)
         suppressed_axes = list(v3_out.suppression_reasons.keys())

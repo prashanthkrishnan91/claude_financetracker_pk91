@@ -1,3 +1,12 @@
+## 2026-05-05 — Intel v3 PR 12: evidence-quality source mapping calibration (Level 2)
+
+- Root cause: `classify_evidence_signals()` and `_derive_evidence_quality()` read `intel_read.get("trusted_dimensions")` but production intel_read (built by `build_intel_read()`) uses `"trusted_signals"`. n_trusted was always 0 → all 34 cards returned WEAK/LOW. Test helpers also used the wrong key, so tests passed but concealed the production mismatch.
+- Fix: Changed `trusted_dimensions` → `trusted_signals` in `data_truth_v1.py` and `existing_signal_adapter.py`. Added `analyst_used_fallback` parameter through the 5-level call chain (`classify_evidence_signals` → `evaluate_card_signals_truth` → `build_truth_aware_decision_input` → `project_shadow_from_card_signals` → `_v3_shadow_projection`). analyst_used_fallback=True conservatively caps PRESENT/HIGH → PRESENT/MEDIUM. Updated 6 test files' fixtures to use `trusted_signals`.
+- Added `tests/test_v3_evidence_quality_source_mapping.py` — 37 production-shaped tests covering: field-name fix verification, fallback cap boundaries, data_quality_label path, shadow projection shapes, mixed portfolio non-uniformity, 34-card regression.
+- Evidence-quality contract: PRESENT/HIGH requires ≥3 trusted_signals + non-fallback. PRESENT/MEDIUM for 1-2 signals or fallback + 3 signals or data_quality_label=MEDIUM. WEAK/LOW for insufficient/empty. MISSING for absent fields.
+- No SQL, no API schema, no frontend, no Deploy, no provider, no LLM changes. No visible threshold tuning.
+- Tests: 341 v3 tests passed (304 existing + 37 new).
+
 ## 2026-05-05 — Intel v3 PR 11: v3 truth diagnostics wiring fix / signal hydration audit (Level 2)
 
 - Root cause: `_v3_shadow_projection(card)` in `recommendation_engine.py` was stale — called `_v3_shadow_decide()` → non-truth-aware `build_decision_input_from_card()` and returned dicts without `truth_diagnostics`. All truth/guardrail summary functions looked for `truth_diagnostics` per card and found nothing → safe_axis_count=0, evidence_quality_status_counts={}, guardrail_evaluated_count=0 in production.

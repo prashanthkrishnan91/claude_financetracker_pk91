@@ -45,11 +45,11 @@ from app.services.intelligence.v3.shadow_projection import (
 
 def _good_intel_read(n_trusted: int = 3) -> dict:
     dims = ["business quality", "valuation", "growth", "momentum"][:n_trusted]
-    return {"insufficient_data": False, "trusted_dimensions": dims}
+    return {"insufficient_data": False, "trusted_signals": dims}
 
 
 def _thin_intel_read() -> dict:
-    return {"insufficient_data": True, "trusted_dimensions": []}
+    return {"insufficient_data": True, "trusted_signals": []}
 
 
 def _card_truth(
@@ -253,7 +253,7 @@ class TestWeakValues:
         assert f.reason_code == "intel_insufficient"
 
     def test_intel_read_zero_trusted_dims_is_weak(self):
-        f = classify_evidence_signals(None, {"insufficient_data": False, "trusted_dimensions": []})
+        f = classify_evidence_signals(None, {"insufficient_data": False, "trusted_signals": []})
         assert f.status == DataTruthStatus.WEAK
         assert f.safe_for_decision is True
 

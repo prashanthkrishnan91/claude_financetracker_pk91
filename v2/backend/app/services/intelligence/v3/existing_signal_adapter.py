@@ -53,10 +53,11 @@ def _derive_evidence_quality(
         )
         return AxisBand.SUPPRESSED
 
-    # intel_read carries trusted-dimension counts — prefer it when present.
+    # intel_read carries trusted-signal counts — prefer it when present.
     if intel_read is not None:
         insufficient = bool(intel_read.get("insufficient_data"))
-        trusted = intel_read.get("trusted_dimensions") or []
+        # Production intel_read uses "trusted_signals" (built by build_intel_read()).
+        trusted = intel_read.get("trusted_signals") or []
         n_trusted = len(trusted) if isinstance(trusted, list) else 0
 
         if insufficient or n_trusted == 0:
@@ -305,6 +306,7 @@ def build_truth_aware_decision_input(
     data_quality_label: Optional[str],
     intel_read: Optional[dict],
     thesis_v2: Optional[dict],
+    analyst_used_fallback: Optional[bool] = None,
 ) -> tuple:
     """Build DecisionInputV3 informed by the PR 6 Data Truth Contract.
 
@@ -332,6 +334,7 @@ def build_truth_aware_decision_input(
         analyst_risks=analyst_risks,
         data_quality_label=data_quality_label,
         intel_read=intel_read,
+        analyst_used_fallback=analyst_used_fallback,
     )
     truth_by_axis = {s.axis_name: s for s in truth_summaries}
     suppressed_by_truth: dict[str, str] = {}

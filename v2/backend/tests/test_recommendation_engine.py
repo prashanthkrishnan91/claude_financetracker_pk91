@@ -21,6 +21,7 @@ from app.services.recommendation_engine import (
     _build_thesis_fields_for_card,
     _is_v3_shadow_summary_info_logs_enabled,
     _log_v3_shadow_projection_portfolio_summary,
+    _build_v3_shadow_info_summary,
 )
 from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
 
@@ -147,7 +148,11 @@ class TestV3ShadowSummaryObservability:
             {"v2_visible_action": "HOLD", "v3_shadow_action": "BUY", "hold_collapse_risk": True, "v3_honest_hold": False},
             {"v2_visible_action": "BUY", "v3_shadow_action": "BUY", "hold_collapse_risk": False, "v3_honest_hold": False},
         ]
-        summary = summarize_shadow_diagnostics(diagnostics, total_cards=2)
+        shadow_summary = summarize_shadow_diagnostics(diagnostics, total_cards=2)
+        summary = _build_v3_shadow_info_summary(
+            shadow_summary=shadow_summary,
+            shadow_diagnostics=diagnostics,
+        )
         with caplog.at_level(logging.INFO, logger="app.services.recommendation_engine"):
             _log_v3_shadow_projection_portfolio_summary(user_id="user-2", summary=summary)
         info_records = [r for r in caplog.records if r.levelno == logging.INFO and "v3_shadow_projection_portfolio_summary" in r.message]
@@ -162,12 +167,51 @@ class TestV3ShadowSummaryObservability:
             "hold_collapse_risk_count",
             "honest_hold_count",
             "non_hold_shadow_from_v2_hold_count",
+            "safe_axis_count",
+            "unsafe_axis_count",
+            "suppressed_axis_reasons",
+            "dominant_truth_reason",
         }
         assert set(summary.keys()) == safe_keys
         assert "ticker" not in summary
         assert "user_id" not in summary
         assert "account_value" not in summary
         assert "raw_metrics" not in summary
+
+    def test_info_summary_truth_aggregate_keys_and_values(self):
+        diagnostics = [
+            {
+                "v2_visible_action": "HOLD",
+                "v3_shadow_action": "BUY",
+                "hold_collapse_risk": True,
+                "v3_honest_hold": False,
+                "truth_diagnostics": {
+                    "safe_axis_count": 3,
+                    "unsafe_axis_count": 2,
+                    "suppressed_axis_reasons": {"evidence_quality": "missing_data", "risk_signal": "unavailable_data"},
+                },
+            },
+            {
+                "v2_visible_action": "HOLD",
+                "v3_shadow_action": "HOLD",
+                "hold_collapse_risk": False,
+                "v3_honest_hold": True,
+                "truth_diagnostics": {
+                    "safe_axis_count": 4,
+                    "unsafe_axis_count": 1,
+                    "suppressed_axis_reasons": {"conviction": "missing_data"},
+                },
+            },
+        ]
+        shadow_summary = summarize_shadow_diagnostics(diagnostics, total_cards=2)
+        info_summary = _build_v3_shadow_info_summary(
+            shadow_summary=shadow_summary,
+            shadow_diagnostics=diagnostics,
+        )
+        assert info_summary["safe_axis_count"] == 7
+        assert info_summary["unsafe_axis_count"] == 3
+        assert info_summary["suppressed_axis_reasons"] == {"missing_data": 2, "unavailable_data": 1}
+        assert info_summary["dominant_truth_reason"] == "missing_data"
 
 
 # ── RecResult dataclass tests ───────────────────────────────────────────────

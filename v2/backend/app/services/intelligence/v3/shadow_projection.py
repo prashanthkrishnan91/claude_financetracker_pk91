@@ -166,3 +166,36 @@ def summarize_shadow_diagnostics(
         "honest_hold_count": honest_hold_count,
         "non_hold_shadow_from_v2_hold_count": non_hold_shadow_from_v2_hold_count,
     }
+
+
+def summarize_truth_aware_suppression(
+    diagnostics: list[Optional[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Aggregate truth-aware suppression diagnostics for portfolio-level logging.
+
+    Returns only non-sensitive aggregate fields intended for structured logs.
+    """
+    valid = [d for d in diagnostics if isinstance(d, dict)]
+    unsafe_axis_count = 0
+    safe_axis_count = 0
+    reason_counts: Counter[str] = Counter()
+
+    for diag in valid:
+        truth_diag = diag.get("truth_diagnostics")
+        if not isinstance(truth_diag, dict):
+            continue
+        safe_axis_count += int(truth_diag.get("safe_axis_count") or 0)
+        unsafe_axis_count += int(truth_diag.get("unsafe_axis_count") or 0)
+        suppressed_axis_reasons = truth_diag.get("suppressed_axis_reasons")
+        if isinstance(suppressed_axis_reasons, dict):
+            for value in suppressed_axis_reasons.values():
+                if value:
+                    reason_counts[str(value)] += 1
+
+    dominant_truth_reason = reason_counts.most_common(1)[0][0] if reason_counts else "none"
+    return {
+        "safe_axis_count": safe_axis_count,
+        "unsafe_axis_count": unsafe_axis_count,
+        "suppressed_axis_reasons": dict(reason_counts),
+        "dominant_truth_reason": dominant_truth_reason,
+    }

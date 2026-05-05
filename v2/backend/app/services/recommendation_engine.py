@@ -29,7 +29,10 @@ from .intelligence.reasoning_v2_plain_english import (
     build_posture_reason,
     is_safe_for_insufficient_data,
 )
-from .intelligence.v3.shadow_projection import summarize_shadow_diagnostics
+from .intelligence.v3.shadow_projection import (
+    summarize_shadow_diagnostics,
+    summarize_truth_aware_suppression,
+)
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -74,6 +77,17 @@ def _log_v3_shadow_projection_portfolio_summary(*, user_id: UUID | str, summary:
     logger.debug("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", user_id, summary)
     if _is_v3_shadow_summary_info_logs_enabled():
         logger.info("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", user_id, summary)
+
+
+def _build_v3_shadow_info_summary(
+    *,
+    shadow_summary: dict[str, Any],
+    shadow_diagnostics: list[Optional[dict[str, Any]]],
+) -> dict[str, Any]:
+    """Build INFO-level summary payload with aggregate truth-aware diagnostics."""
+    info_summary = dict(shadow_summary)
+    info_summary.update(summarize_truth_aware_suppression(shadow_diagnostics))
+    return info_summary
 
 
 def _normalize_ticker_lookup_key(ticker: Any) -> str:
@@ -2004,7 +2018,11 @@ class RecommendationService:
             shadow_diagnostics,
             total_cards=len(cards),
         )
-        _log_v3_shadow_projection_portfolio_summary(user_id=self.user_id, summary=shadow_summary)
+        info_summary = _build_v3_shadow_info_summary(
+            shadow_summary=shadow_summary,
+            shadow_diagnostics=shadow_diagnostics,
+        )
+        _log_v3_shadow_projection_portfolio_summary(user_id=self.user_id, summary=info_summary)
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0

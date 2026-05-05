@@ -1,3 +1,14 @@
+## 2026-05-05 — Intel v3 PR 8: optional INFO-level truth-aware shadow suppression summary logs (Level 1)
+
+- Reused existing env gate `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` from PR 4; default behavior remains unchanged (DEBUG summary always, INFO summary only when enabled).
+- Added `summarize_truth_aware_suppression()` in `backend/app/services/intelligence/v3/shadow_projection.py` to aggregate `safe_axis_count`, `unsafe_axis_count`, `suppressed_axis_reasons` (reason-code counts), and `dominant_truth_reason` across cards.
+- Added `_build_v3_shadow_info_summary()` in `backend/app/services/recommendation_engine.py` to merge PR 3/4 shadow summary keys with PR 7 truth-aware suppression aggregates and emit one INFO summary per batch through existing logging helper.
+- Extended `backend/tests/test_recommendation_engine.py` with payload contract checks and truth-aware aggregate assertions.
+- No UI/API/Deploy/SQL/provider/LLM/policy-gating changes; no sensitive/raw payloads added.
+- Tests: 315 passed (`test_recommendation_engine`, `test_v3_shadow_projection`, `test_v3_truth_aware_adapter`, `test_v3_data_truth`, `test_v3_decision_policy`).
+
+---
+
 ---
 
 ## 2026-05-05 — Intel v3 PR 7: truth-aware v3 shadow input adapter (Level 2)

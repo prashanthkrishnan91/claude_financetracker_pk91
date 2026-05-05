@@ -3,19 +3,22 @@
 Takes existing InsightCard signal fields and returns a diagnostic dict
 with stable keys for log parsing and test assertions.
 
+PR 7: uses build_truth_aware_decision_input() so v3 shadow decisions are
+informed by the PR 6 Data Truth Contract before axes are derived. Unsafe
+axes (MISSING/UNAVAILABLE/CONFLICTING/STALE) suppress only their own signals.
+New truth-aware keys are added to the truth_diagnostics sub-dict.
+
 Pure function — no IO, DB, LLM, or supabase dependency.
 Callable from tests and from the recommendation_engine wrapper.
 """
 from __future__ import annotations
 
+from collections import Counter
 from typing import Optional, Any
 
 from .decision_policy_v1 import decide
-from .existing_signal_adapter import build_decision_input_from_card
-from .existing_signal_truth_adapter import (
-    build_truth_diagnostic_summary,
-    evaluate_card_signals_truth,
-)
+from .existing_signal_adapter import build_truth_aware_decision_input
+from .existing_signal_truth_adapter import build_truth_diagnostic_summary
 
 _VALID_V2_ACTIONS: frozenset[str] = frozenset({"BUY", "HOLD", "TRIM", "SELL"})
 
@@ -41,7 +44,7 @@ def project_shadow_from_card_signals(
     The v3 shadow derives its own decision from all available signals — the
     divergence between v2 and v3 is the key dark-launch diagnostic.
 
-    Stable diagnostic keys:
+    Stable diagnostic keys (PR 2/3 — unchanged):
       ticker             — ticker symbol
       v2_visible_action  — normalized visible v2 action (BUY/HOLD/TRIM/SELL)
       v3_shadow_action   — v3 policy output action
@@ -51,6 +54,16 @@ def project_shadow_from_card_signals(
       suppressed_axes    — axes with suppression reasons in v3 input
       v3_schema_version  — schema version from DecisionOutputV3
 
+    truth_diagnostics sub-dict (PR 6 — extended in PR 7):
+      schema_version             — truth schema version
+      safe_axes / unsafe_axes    — PR 6 axis safety counts
+      axes                       — per-axis truth detail
+      truth_aware_adapter_enabled — always True when truth eval succeeds
+      safe_axis_count            — count of safe axes (alias for safe_axes)
+      unsafe_axis_count          — count of unsafe axes (alias for unsafe_axes)
+      suppressed_axis_reasons    — axis_name → reason_code for each suppressed axis
+      dominant_truth_reason      — most common suppression reason code, or "none"
+
     Returns None on any failure. Never raises.
     """
     try:
@@ -58,7 +71,7 @@ def project_shadow_from_card_signals(
         if v2_norm not in _VALID_V2_ACTIONS:
             v2_norm = "HOLD"
 
-        inp = build_decision_input_from_card(
+        inp, truth_summaries, suppressed_by_truth = build_truth_aware_decision_input(
             ticker=ticker,
             action=v2_visible_action,
             analyst_action=analyst_action,
@@ -77,17 +90,16 @@ def project_shadow_from_card_signals(
 
         truth_diag: Optional[dict] = None
         try:
-            truth_summaries = evaluate_card_signals_truth(
-                action=v2_visible_action,
-                analyst_action=analyst_action,
-                conviction_level=conviction_level,
-                technical_signal=technical_signal,
-                risk_flag=risk_flag,
-                analyst_risks=analyst_risks,
-                data_quality_label=data_quality_label,
-                intel_read=intel_read,
-            )
             truth_diag = build_truth_diagnostic_summary(truth_summaries)
+            safe_count = sum(1 for s in truth_summaries if s.safe_for_decision)
+            unsafe_count = len(truth_summaries) - safe_count
+            reason_vals = list(suppressed_by_truth.values())
+            dominant = Counter(reason_vals).most_common(1)[0][0] if reason_vals else "none"
+            truth_diag["truth_aware_adapter_enabled"] = True
+            truth_diag["safe_axis_count"] = safe_count
+            truth_diag["unsafe_axis_count"] = unsafe_count
+            truth_diag["suppressed_axis_reasons"] = dict(suppressed_by_truth)
+            truth_diag["dominant_truth_reason"] = dominant
         except Exception:  # noqa: BLE001
             pass
 

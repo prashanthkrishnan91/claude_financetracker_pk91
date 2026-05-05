@@ -1,5 +1,67 @@
 
 ## Last change
+Intel v3 PR 7: truth-aware v3 shadow input adapter.
+
+## Severity
+Level 2 — foundational backend integration. Wires PR 6 Data Truth Contract into v3 shadow decision path; backend-only dark launch.
+
+## Root cause
+The v3 decision kernel (PRs 1-5) built DecisionInputV3 from raw card/signal values without consulting the PR 6 Data Truth Contract. Weak, missing, stale, conflicting, or unavailable signals were treated as equally valid evidence. This risked HOLD-collapse suppression being too aggressive (treating MISSING as equivalent to PRESENT) or too passive (trusting conflicting signals).
+
+## Fix
+- Added `build_truth_aware_decision_input()` to `v2/backend/app/services/intelligence/v3/existing_signal_adapter.py`:
+  - Calls `evaluate_card_signals_truth()` first to classify all signal axes.
+  - Axes with `safe_for_decision=False` (MISSING, UNAVAILABLE, CONFLICTING, STALE) have their corresponding input signals nulled before `build_decision_input_from_card()` is called.
+  - Axes with WEAK findings remain safe (PR 6 contract: `safe_for_decision=True` with LOW trust).
+  - Axis→input mapping: evidence_quality → data_quality_label + intel_read; action_signal → action + analyst_action; conviction → conviction_level; technical_signal → technical_signal; risk_signal → risk_flag + analyst_risks.
+  - Returns (DecisionInputV3, truth_summaries, suppressed_by_truth).
+  - truth_suppressions annotated into DecisionInputV3.suppression_reasons as `truth_{axis}` keys.
+- Modified `v2/backend/app/services/intelligence/v3/shadow_projection.py`:
+  - `project_shadow_from_card_signals()` now uses `build_truth_aware_decision_input()` instead of `build_decision_input_from_card()` + separate `evaluate_card_signals_truth()`.
+  - `truth_diagnostics` sub-dict extended with 5 new keys (additive — all PR 2/3 stable keys unchanged):
+    - `truth_aware_adapter_enabled` — True when truth eval succeeds
+    - `safe_axis_count` — count of safe axes
+    - `unsafe_axis_count` — count of unsafe axes
+    - `suppressed_axis_reasons` — axis_name → dominant_reason_code for each suppressed axis
+    - `dominant_truth_reason` — most common suppression reason code, or "none"
+- Added `v2/backend/tests/test_v3_truth_aware_adapter.py` — 68 new tests across 15 test classes.
+
+## Truth-aware suppression rules (PR 7)
+- `AxisTruthSummary.safe_for_decision=False` → null the axis inputs (suppresses only that axis).
+- WEAK (safe_for_decision=True, LOW trust) → pass through unchanged.
+- Suppression is per-axis; other axes remain independent and can still produce TRIM/SELL/BUY.
+- Axis suppression annotated in suppression_reasons so honest-hold detection works.
+- The outer fail-soft wrapper in project_shadow_from_card_signals is preserved; any exception → None.
+
+## Dark-launch safety notes
+- All PR 2/3/4/5/6 stable diagnostic keys unchanged.
+- No visible v2 recommendation, action, or card behavior changed.
+- No API schema, frontend, Deploy, SQL, provider, or LLM changes.
+- v3 shadow action may change for cards with CONFLICTING/UNAVAILABLE/MISSING signals (correct and intended).
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No real user/account data in fixtures.
+- No mutation of visible v2 card actions.
+- No frontend/API/Deploy/schema files changed.
+
+## Test results
+- 68 new tests in `test_v3_truth_aware_adapter.py` — all pass.
+- 85 existing `test_v3_data_truth.py` tests — all pass.
+- 66 existing decision_policy + shadow_projection tests — all pass.
+- Total: 219 tests pass.
+
+## Next intended wiring step
+Promote truth-aware shadow diagnostics to optional INFO-level logging (env-gated, following PR 4 pattern) so production shadow observability exposes the per-portfolio truth suppression summary. Keep dark-launch until at least one full production portfolio confirms zero behavior drift. Then consider policy-gating: only allow BUY when evidence_quality axis is PRESENT/HIGH (not just safe), to raise the bar for high-conviction buys.
+
+---
+
+## Last change
 Intel v3 PR 6: backend-only Data Truth Contract v1 for existing Intel/recommendation signals.
 
 ## Severity

@@ -4,10 +4,16 @@ Uses only data already present in the v2 backend today.
 Does not add new providers, external calls, or invented metrics.
 Missing signals suppress only the relevant axis and record a reason.
 
+PR 7: build_truth_aware_decision_input() wires the PR 6 Data Truth Contract
+into this adapter so unsafe axes (MISSING/UNAVAILABLE/CONFLICTING/STALE) null
+only their own input signals before DecisionInputV3 is built. WEAK axes remain
+safe per the PR 6 contract (safe_for_decision=True with LOW trust).
+
 Pure function — no IO, DB, or LLM calls.
 """
 from __future__ import annotations
 
+from collections import Counter
 from typing import Any, Optional
 
 from .decision_contracts import (
@@ -284,3 +290,105 @@ def build_decision_input_from_card(
         suppression_reasons=suppression_reasons,
         source_signal_summary=source_signal_summary,
     )
+
+
+def build_truth_aware_decision_input(
+    *,
+    ticker: str,
+    action: Optional[str],
+    analyst_action: Optional[str],
+    conviction_level: Optional[str],
+    technical_signal: Optional[str],
+    risk_flag: Optional[str],
+    analyst_risks: Optional[list],
+    category: Optional[str],
+    data_quality_label: Optional[str],
+    intel_read: Optional[dict],
+    thesis_v2: Optional[dict],
+) -> tuple:
+    """Build DecisionInputV3 informed by the PR 6 Data Truth Contract.
+
+    Evaluates each signal axis with evaluate_card_signals_truth() before
+    building DecisionInputV3. Axes the truth contract marks unsafe
+    (safe_for_decision=False) have their input signals nulled so only the
+    affected axis is suppressed. Axes with WEAK findings (safe_for_decision=True,
+    LOW trust) are NOT suppressed — they pass through with reduced trust.
+
+    Returns:
+        (DecisionInputV3, truth_summaries: list[AxisTruthSummary], suppressed_by_truth: dict[str, str])
+        suppressed_by_truth maps axis_name → dominant_reason_code for each
+        axis that was suppressed due to truth unsafety.
+
+    Pure function — no IO, DB, LLM, or provider calls. Never raises.
+    """
+    from .existing_signal_truth_adapter import evaluate_card_signals_truth
+
+    truth_summaries = evaluate_card_signals_truth(
+        action=action,
+        analyst_action=analyst_action,
+        conviction_level=conviction_level,
+        technical_signal=technical_signal,
+        risk_flag=risk_flag,
+        analyst_risks=analyst_risks,
+        data_quality_label=data_quality_label,
+        intel_read=intel_read,
+    )
+    truth_by_axis = {s.axis_name: s for s in truth_summaries}
+    suppressed_by_truth: dict[str, str] = {}
+
+    # Start with original signal values; null out each axis that is unsafe.
+    safe_action = action
+    safe_analyst_action = analyst_action
+    safe_conviction = conviction_level
+    safe_technical = technical_signal
+    safe_risk_flag = risk_flag
+    safe_analyst_risks = analyst_risks
+    safe_data_quality = data_quality_label
+    safe_intel_read = intel_read
+
+    ev_axis = truth_by_axis.get("evidence_quality")
+    if ev_axis is not None and not ev_axis.safe_for_decision:
+        safe_data_quality = None
+        safe_intel_read = None
+        suppressed_by_truth["evidence_quality"] = ev_axis.dominant_reason_code
+
+    act_axis = truth_by_axis.get("action_signal")
+    if act_axis is not None and not act_axis.safe_for_decision:
+        safe_action = None
+        safe_analyst_action = None
+        suppressed_by_truth["action_signal"] = act_axis.dominant_reason_code
+
+    conv_axis = truth_by_axis.get("conviction")
+    if conv_axis is not None and not conv_axis.safe_for_decision:
+        safe_conviction = None
+        suppressed_by_truth["conviction"] = conv_axis.dominant_reason_code
+
+    tech_axis = truth_by_axis.get("technical_signal")
+    if tech_axis is not None and not tech_axis.safe_for_decision:
+        safe_technical = None
+        suppressed_by_truth["technical_signal"] = tech_axis.dominant_reason_code
+
+    risk_axis = truth_by_axis.get("risk_signal")
+    if risk_axis is not None and not risk_axis.safe_for_decision:
+        safe_risk_flag = None
+        safe_analyst_risks = None
+        suppressed_by_truth["risk_signal"] = risk_axis.dominant_reason_code
+
+    inp = build_decision_input_from_card(
+        ticker=ticker,
+        action=safe_action,
+        analyst_action=safe_analyst_action,
+        conviction_level=safe_conviction,
+        technical_signal=safe_technical,
+        risk_flag=safe_risk_flag,
+        analyst_risks=safe_analyst_risks,
+        category=category,
+        data_quality_label=safe_data_quality,
+        intel_read=safe_intel_read,
+        thesis_v2=thesis_v2,
+    )
+
+    for axis, reason_code in suppressed_by_truth.items():
+        inp.suppression_reasons[f"truth_{axis}"] = f"truth_suppressed:{reason_code}"
+
+    return inp, truth_summaries, suppressed_by_truth

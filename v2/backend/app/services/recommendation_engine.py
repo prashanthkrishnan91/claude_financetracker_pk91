@@ -1830,43 +1830,57 @@ class RecommendationService:
                 _pre_gate_analyst_action = _card_analyst_action
                 _pre_gate_conviction_level = _card_conviction_level
 
-                # Posture consistency: when reasoning_v2 forces WATCH due to
-                # INSUFFICIENT_DATA, the card must not show BUY / HIGH CONVICTION.
-                # Downgrade BUY → HOLD. Apply a conservative conviction ladder so
-                # cards remain differentiated rather than all flattening to LOW:
-                #   HIGH + ≥3 trusted signals → MEDIUM (meaningful partial evidence)
-                #   HIGH + <3 trusted signals → LOW  (too sparse for any conviction)
-                #   MEDIUM + <2 trusted signals → LOW (very weak coverage)
-                #   MEDIUM + ≥2 trusted signals → preserved
-                #   LOW → preserved
-                # Also replace body copy (ACTION/WHY/ALT VIEW) with conservative
-                # watchlist language so the card content matches the badge.
+                # Evidence-axis gate: applies only when reasoning_v2 marks a card
+                # as INSUFFICIENT_DATA. Uses trusted-signal count rather than the
+                # binary flag so that missing ONE axis (e.g. growth or risk) does
+                # not globally collapse the card to HOLD when other independent
+                # axes (quality, valuation, momentum) are present and strong.
+                #
+                # n_trusted == 0 (no evidence at all):
+                #   Force BUY → HOLD, floor conviction at LOW, use conservative copy.
+                # n_trusted >= 1 (partial evidence, some axes present):
+                #   Preserve action; apply conviction ladder only:
+                #     HIGH + ≥3 trusted → MEDIUM  (partial coverage, reduced conviction)
+                #     HIGH + 1-2 trusted → LOW    (thin coverage)
+                #     MEDIUM + <2 trusted → LOW   (very sparse)
+                #     MEDIUM + ≥2 trusted → preserved
+                #     LOW → preserved
+                #   Keep analyst copy; only sanitize forbidden bullish phrases.
                 if intel_read_dict and intel_read_dict.get("insufficient_data"):
                     _n_trusted = len(intel_read_dict.get("trusted_signals") or [])
-                    if _card_action == "BUY":
-                        _card_action = "HOLD"
-                        _card_color = ACTION_COLORS.get("HOLD", "blue")
-                    if (_card_analyst_action or "").upper() == "BUY":
-                        _card_analyst_action = "HOLD"
-                    _cl_upper = (_card_conviction_level or "").upper()
-                    if _cl_upper == "HIGH":
-                        _card_conviction_level = "MEDIUM" if _n_trusted >= 3 else "LOW"
-                    elif _cl_upper == "MEDIUM" and _n_trusted < 2:
-                        _card_conviction_level = "LOW"
-                    # ACTION always replaced with conservative watchlist language.
-                    reasoning["action_reason"] = intel_read_dict.get("conservative_action")
-                    # WHY: preserve ticker-specific primary_driver when safe (no forbidden
-                    # bullish phrases); fall back to conservative_why when absent or unsafe.
-                    if not reasoning.get("primary_driver") or not is_safe_for_insufficient_data(
-                        reasoning.get("primary_driver")
-                    ):
-                        reasoning["primary_driver"] = intel_read_dict.get("conservative_why")
-                    # ALT VIEW: preserve ticker-specific differentiation when safe; null when
-                    # it contains forbidden bullish phrases or is action-directive language.
-                    if reasoning.get("differentiation") and not is_safe_for_insufficient_data(
-                        reasoning.get("differentiation")
-                    ):
-                        reasoning["differentiation"] = None
+                    _no_evidence = (_n_trusted == 0)
+
+                    if _no_evidence:
+                        # Zero trusted signals: global HOLD collapse for truly empty cards.
+                        if _card_action == "BUY":
+                            _card_action = "HOLD"
+                            _card_color = ACTION_COLORS.get("HOLD", "blue")
+                        if (_card_analyst_action or "").upper() == "BUY":
+                            _card_analyst_action = "HOLD"
+                        _cl_upper = (_card_conviction_level or "").upper()
+                        if _cl_upper in {"HIGH", "MEDIUM"}:
+                            _card_conviction_level = "LOW"
+                        reasoning["action_reason"] = intel_read_dict.get("conservative_action")
+                        if not reasoning.get("primary_driver") or not is_safe_for_insufficient_data(
+                            reasoning.get("primary_driver")
+                        ):
+                            reasoning["primary_driver"] = intel_read_dict.get("conservative_why")
+                        if reasoning.get("differentiation") and not is_safe_for_insufficient_data(
+                            reasoning.get("differentiation")
+                        ):
+                            reasoning["differentiation"] = None
+                    else:
+                        # 1+ trusted signals: preserve action, downgrade conviction only.
+                        _cl_upper = (_card_conviction_level or "").upper()
+                        if _cl_upper == "HIGH":
+                            _card_conviction_level = "MEDIUM" if _n_trusted >= 3 else "LOW"
+                        elif _cl_upper == "MEDIUM" and _n_trusted < 2:
+                            _card_conviction_level = "LOW"
+                        # Sanitize forbidden bullish phrases in ALT VIEW only.
+                        if reasoning.get("differentiation") and not is_safe_for_insufficient_data(
+                            reasoning.get("differentiation")
+                        ):
+                            reasoning["differentiation"] = None
 
                 # Intel posture system (v3): derive advisor-facing posture bucket
                 # using PRE-GATE signals so the display safety gate (BUY→HOLD under

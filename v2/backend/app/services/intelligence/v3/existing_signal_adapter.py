@@ -60,9 +60,12 @@ def _derive_evidence_quality(
         trusted = intel_read.get("trusted_signals") or []
         n_trusted = len(trusted) if isinstance(trusted, list) else 0
 
-        if insufficient or n_trusted == 0:
+        # Only THIN when there are zero trusted signals — missing one axis
+        # (e.g. growth/risk) must not collapse evidence quality when other
+        # independent axes (quality, valuation, momentum) are present.
+        if n_trusted == 0:
             suppression_reasons["evidence_quality"] = (
-                f"Insufficient data — {n_trusted} trusted dimension(s)."
+                f"No trusted evidence — {n_trusted} trusted dimension(s)."
             )
             return AxisBand.THIN
         if n_trusted >= 3:

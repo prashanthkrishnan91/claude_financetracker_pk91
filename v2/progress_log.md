@@ -1,3 +1,14 @@
+## 2026-05-05 — Intel v3 PR 13: Sev 1 all-HOLD Intel collapse fix (Level 3)
+
+- Root cause: `intel_read.insufficient_data=True` (set when scorecard.status=INSUFFICIENT_DATA due to missing growth/risk axes) was used as a binary global HOLD gate in three places. This collapsed ALL 34 cards to HOLD even when quality/valuation/momentum axes were published and analyst verdict said BUY. The `insufficient` flag dominated over the trusted_signals count in `classify_evidence_signals()` and `_derive_evidence_quality()`, and the card assembly gate forced BUY→HOLD for any card with insufficient_data=True regardless of trusted signal count. This is why PR 12 key fix (trusted_dimensions→trusted_signals) did not fix production: the `insufficient` flag still overrode the trusted count.
+- Fix (Option B — v2 gate fix; v3 shadow not yet visible): Changed all three `if insufficient or n_trusted == 0:` gates to `if n_trusted == 0:`. Missing one axis no longer collapses the entire card — only zero trusted signals triggers HOLD.
+  - `recommendation_engine.py` visible gate: n_trusted==0 → global collapse; n_trusted>=1 → preserve action, downgrade conviction only.
+  - `existing_signal_adapter._derive_evidence_quality`: n_trusted==0 → THIN; n_trusted>=1 → OK/STRONG.
+  - `data_truth_v1.classify_evidence_signals`: n_trusted==0 → WEAK; n_trusted>=1 → PRESENT/MEDIUM or PRESENT/HIGH.
+- Added `tests/test_v3_intel_collapse_fix.py` — 30 production-shaped tests covering: partial-coverage PRESENT in data_truth, OK/STRONG in adapter, shadow BUY emergence, 34-card portfolio no longer all WEAK, mixed portfolio action diversity regression, TRIM/SELL risk protection invariants, conviction ladder.
+- No SQL, no API schema changes, no frontend redesign, no Deploy, no provider, no LLM. No new env flags needed for the fix (existing v2 gate is now correct).
+- Tests: 372 v3 tests pass (342 existing + 30 new).
+
 ## 2026-05-05 — Intel v3 PR 12: evidence-quality source mapping calibration (Level 2)
 
 - Root cause: `classify_evidence_signals()` and `_derive_evidence_quality()` read `intel_read.get("trusted_dimensions")` but production intel_read (built by `build_intel_read()`) uses `"trusted_signals"`. n_trusted was always 0 → all 34 cards returned WEAK/LOW. Test helpers also used the wrong key, so tests passed but concealed the production mismatch.

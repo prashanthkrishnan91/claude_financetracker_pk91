@@ -1,4 +1,70 @@
 ## Last change
+Intel v3 PR 13: Sev 1 all-HOLD Intel collapse fix.
+
+## Severity
+Level 3 — production-visible product correctness failure. Every Intel card showed HOLD despite rich evidence signals.
+
+## Production failure (before this PR)
+- v2_visible_action_counts: BUY 0 / HOLD 34 / TRIM 0 / SELL 0
+- evidence_quality_status_counts: {"WEAK": 34}
+- Cards showed "Stay on watchlist… Missing: growth, risk" for every card including those with rich quality/valuation/momentum evidence.
+
+## Root cause
+`intel_read.insufficient_data=True` was used as a binary global HOLD gate in **three places**. The `scorecard.status=INSUFFICIENT_DATA` (triggered when growth/risk axes are missing from the thesis engine scorecard) propagated into `intel_read.insufficient_data=True`. All three gates checked `if insufficient or n_trusted == 0:` — so even cards with 2-3 published dimensions (quality, valuation, momentum) triggered the HOLD gate, because `insufficient=True` dominated over `n_trusted > 0`.
+
+This is why PR 12 key fix (trusted_dimensions → trusted_signals) did not fix production: the `insufficient` flag overrode the trusted_signals count regardless.
+
+Three collapse points:
+1. **Card assembly gate** (`recommendation_engine.py` lines 1833–1869): forced BUY→HOLD for any card with `insufficient_data=True`, even with 2-3 trusted signals.
+2. **V3 adapter** (`existing_signal_adapter._derive_evidence_quality`): returned `AxisBand.THIN` for `insufficient=True` regardless of trusted count → v3 `decide()` produced HOLD.
+3. **Data truth** (`data_truth_v1.classify_evidence_signals`): returned WEAK for `insufficient=True` regardless of trusted count → `evidence_quality_status_counts: {"WEAK": 34}`.
+
+## Fix (Option B — v2 gate fix; v3 shadow stays shadow-only)
+Changed all three gates from `if insufficient or n_trusted == 0:` to `if n_trusted == 0:`. Missing axes suppress only themselves; zero trusted signals is the only global HOLD trigger.
+
+**Files changed:**
+- `v2/backend/app/services/recommendation_engine.py`: visible gate — n_trusted==0 → global collapse; n_trusted>=1 → preserve action, downgrade conviction only (no copy replacement).
+- `v2/backend/app/services/intelligence/v3/existing_signal_adapter.py`: `_derive_evidence_quality` — n_trusted==0 → THIN; n_trusted>=1 → OK/STRONG.
+- `v2/backend/app/services/intelligence/v3/data_truth_v1.py`: `classify_evidence_signals` — n_trusted==0 → WEAK; n_trusted>=1 → PRESENT/MEDIUM or PRESENT/HIGH.
+- `v2/backend/tests/test_v3_evidence_quality_source_mapping.py`: updated one test that was asserting the old (incorrect) behavior.
+- `v2/backend/tests/test_v3_intel_collapse_fix.py` (new): 30 production-shaped tests.
+
+## Expected production change
+With the fix deployed:
+- Cards with quality/valuation/momentum published (n_trusted≥3) + analyst BUY → BUY action visible.
+- Cards with partial evidence (n_trusted=1-2) + analyst BUY → BUY action preserved, conviction MEDIUM/LOW.
+- Cards with zero trusted signals → HOLD (unchanged, correct).
+- evidence_quality_status_counts will contain PRESENT entries (not all WEAK).
+- v3 shadow action diversity will emerge matching v2 visible diversity.
+
+## No env flag needed
+The v2 gate is now correct by default. No Railway env flag change required.
+
+## Explicit non-changes
+- No visible action labels changed beyond BUY/HOLD/TRIM/SELL.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No frontend redesign.
+- No raw metric keys in UI.
+- No legacy/posture action labels.
+- No real user/account data in fixtures.
+- V3 shadow stays shadow-only (not yet visible).
+
+## Test results
+372 v3 tests pass (342 existing + 30 new in test_v3_intel_collapse_fix.py).
+
+## Next intended step
+Deploy to Railway (no env flag needed — fix is active by default). Confirm with one production cycle:
+- visible filter distribution shows non-zero BUY/TRIM/SELL counts
+- evidence_quality_status_counts has PRESENT entries
+- no legacy/posture labels visible
+- no Deploy behavior change
+
+---
+
+## Last change (PR 12)
 Intel v3 PR 12: backend-only evidence-quality source mapping calibration.
 
 ## Severity

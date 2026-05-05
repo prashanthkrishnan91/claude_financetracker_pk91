@@ -121,10 +121,22 @@ class TestTrustedSignalsKeyName:
         )
         assert f.status == DataTruthStatus.WEAK
 
-    def test_insufficient_data_true_yields_weak(self):
+    def test_insufficient_data_true_with_trusted_signal_yields_present(self):
+        # PR 13 fix: insufficient_data=True with 1+ trusted signals is PRESENT/MEDIUM,
+        # not WEAK. Missing one axis (growth/risk) must not collapse evidence quality
+        # when other axes (quality, valuation) are present and scored.
         f = classify_evidence_signals(
             None,
             {"insufficient_data": True, "trusted_signals": ["valuation"]},
+        )
+        assert f.status == DataTruthStatus.PRESENT
+        assert f.trust_level == SourceTrustLevel.MEDIUM
+
+    def test_insufficient_data_true_zero_trusted_still_weak(self):
+        # When insufficient_data=True AND zero trusted signals: WEAK (truly no evidence).
+        f = classify_evidence_signals(
+            None,
+            {"insufficient_data": True, "trusted_signals": []},
         )
         assert f.status == DataTruthStatus.WEAK
 

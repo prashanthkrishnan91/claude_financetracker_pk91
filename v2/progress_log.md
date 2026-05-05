@@ -1,4 +1,13 @@
 
+## 2026-05-05 — Intel v3 PR 0: visible action contract lock + HOLD-collapse canary (Level 1)
+
+- Locked frontend Intel visible action contract to **ALL / BUY / HOLD / TRIM / SELL** with explicit contract comment in recommendations filters.
+- Added shared frontend helper `visibleIntelActions.ts` to normalize any legacy/unknown action labels to safe visible set (**BUY/HOLD/TRIM/SELL**); unknown and legacy posture labels normalize to **HOLD**.
+- Updated `AgentInsightCard` badge action mapping to use the shared normalizer so legacy posture labels cannot be rendered as visible action badges.
+- Added focused regression tests (`visibleIntelActions.test.ts`) covering forbidden legacy posture labels and a synthetic HOLD-collapse canary that fails if a non-degenerate meaningful-signal set collapses to all HOLD + LOW.
+- No backend, Deploy, SQL, or schema changes.
+
+
 ## 2026-05-04 — Intel display simplification: BUY/HOLD/TRIM/SELL replaces posture bucket UI (Level 2)
 
 - **Decision:** Abandon posture bucket UI contract (Add Candidate / Watchlist / Review / Risk Watch / Trim Candidate) as the primary visible Intel system. Return to one consistent action model: ALL / BUY / HOLD / TRIM / SELL everywhere.

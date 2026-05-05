@@ -1,5 +1,24 @@
 
 ## Last change
+Lock Intel v3 visible action contract and add frontend regression canaries (PR: "fix(intel-v3-pr0): lock visible action contract + hold-collapse canary").
+
+## Root cause
+Intel UI regressions repeatedly reintroduced legacy posture labels and a prior failure mode where meaningful recommendation mixes collapsed into all HOLD/LOW in visible output. The display contract needed an explicit lock plus synthetic regression guards.
+
+## Fix
+- `recommendations/page.tsx`: locked visible tabs to `ALL/BUY/HOLD/TRIM/SELL`, added contract comment, and centralized filter normalization through a shared helper.
+- `AgentInsightCard.tsx`: badge action now always uses shared visible-action normalization; unknown/legacy labels normalize to HOLD (no UI crash, no legacy label exposure).
+- Added `visibleIntelActions.ts` helper to enforce the only visible held actions (`BUY/HOLD/TRIM/SELL`) and default unknown labels to HOLD safely.
+- Added focused frontend tests (`visibleIntelActions.test.ts`) that fail if forbidden posture labels appear or if a synthetic non-degenerate recommendation mix collapses into all HOLD/LOW.
+
+## Explicit non-changes
+- No backend logic changes.
+- No Deploy changes.
+- No SQL/schema changes.
+- No v3 architecture/module scaffolding.
+
+
+## Last change
 Simplify Intel UI to single action model — BUY/HOLD/TRIM/SELL replacing posture bucket UI (PR: "fix(intel): simplify Intel display contract — BUY/HOLD/TRIM/SELL everywhere").
 
 ## Root cause

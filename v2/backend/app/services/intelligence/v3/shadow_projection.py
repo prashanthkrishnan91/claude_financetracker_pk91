@@ -12,6 +12,10 @@ from typing import Optional, Any
 
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_decision_input_from_card
+from .existing_signal_truth_adapter import (
+    build_truth_diagnostic_summary,
+    evaluate_card_signals_truth,
+)
 
 _VALID_V2_ACTIONS: frozenset[str] = frozenset({"BUY", "HOLD", "TRIM", "SELL"})
 
@@ -71,6 +75,22 @@ def project_shadow_from_card_signals(
         suppressed_axes = list(v3_out.suppression_reasons.keys())
         v3_action = v3_out.action.value
 
+        truth_diag: Optional[dict] = None
+        try:
+            truth_summaries = evaluate_card_signals_truth(
+                action=v2_visible_action,
+                analyst_action=analyst_action,
+                conviction_level=conviction_level,
+                technical_signal=technical_signal,
+                risk_flag=risk_flag,
+                analyst_risks=analyst_risks,
+                data_quality_label=data_quality_label,
+                intel_read=intel_read,
+            )
+            truth_diag = build_truth_diagnostic_summary(truth_summaries)
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "ticker": ticker,
             "v2_visible_action": v2_norm,
@@ -80,6 +100,7 @@ def project_shadow_from_card_signals(
             "v3_honest_hold": v3_action == "HOLD" and bool(suppressed_axes),
             "suppressed_axes": suppressed_axes,
             "v3_schema_version": v3_out.schema_version,
+            "truth_diagnostics": truth_diag,
         }
     except Exception:  # noqa: BLE001
         return None

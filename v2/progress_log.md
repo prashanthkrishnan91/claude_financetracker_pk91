@@ -1,5 +1,16 @@
 ---
 
+## 2026-05-05 — Intel v3 PR 6: backend-only Data Truth Contract v1 (Level 2)
+
+- Added `data_truth_contracts.py`: DataTruthStatus (PRESENT/MISSING/STALE/WEAK/CONFLICTING/UNAVAILABLE) and SourceTrustLevel (HIGH/MEDIUM/LOW/UNKNOWN) enums; DataTruthFinding and AxisTruthSummary dataclasses.
+- Added `data_truth_v1.py`: pure classifiers for evidence, action (with BUY↔SELL conflict detection), conviction, technical, and risk signal groups; `classify_with_staleness` for future timestamp-aware freshness.
+- Added `existing_signal_truth_adapter.py`: `evaluate_card_signals_truth` builds one AxisTruthSummary per axis from existing card fields; `build_truth_diagnostic_summary` produces stable compact dict for shadow logging.
+- Shadow projection (`shadow_projection.py`): additive `truth_diagnostics` key attached to per-card diagnostic dict; existing stable keys unchanged.
+- 85 new backend tests in `test_v3_data_truth.py`; 151 total tests pass.
+- No SQL, no UI, no API schema, no Deploy, no provider expansion, no LLM calls, no real user data.
+
+---
+
 ## 2026-05-05 — Intel v3 PR 5: backend shadow golden-portfolio validation suite (Level 1)
 
 - Added `TestV3ShadowGoldenPortfolio` to `backend/tests/test_v3_shadow_projection.py` using synthetic held-portfolio fixtures only.

@@ -1,3 +1,59 @@
+## 2026-05-05 — Finance Intel Reliability Reset (Level 3 / Sev 1)
+
+### Severity
+Level 3 / Sev 1 — production correctness + cost-control failure.
+
+### Root causes fixed
+1. **Thesis sufficiency (Workstream B)**: `_overall_status()` used global thresholds (`_INSUFFICIENT_MAJOR_COUNT=2`, `_MAJOR_MIN_QUALITY=0.50`) that marked all 34 yfinance-backed tickers as INSUFFICIENT_DATA. ETFs have quality=0/7=0 and growth=0/5=0 by design (no company fundamentals). Fix: asset-type-aware `_MAJOR_SCORES_BY_TYPE`, `_INSUFFICIENT_COUNT_BY_TYPE`, `_MAJOR_MIN_QUALITY_BY_TYPE` per asset type (stock/etf/crypto/commodity). Now correctly returns PARTIAL for moderate yfinance-backed stocks and ETFs with momentum/valuation data.
+
+2. **Narrative fail-closed (Workstream C)**: INSUFFICIENT_DATA fallback verdicts inject `action_reason = "Hold — no allocation until signal improves."` This reached BUY cards because the narrative contract only overrode `posture_reason` / `caveat`, not analyst text fields (`action_reason`, `primary_driver`, `differentiation`). Fix: `sanitize_analyst_fields_for_action()` and `detect_analyst_field_conflicts()` added to `reasoning_v2_plain_english.py`. After-sanitize pass applied in card assembly loop. `conflict_count_after_sanitize` must be 0 in production.
+
+3. **LLM TTL reuse (Workstream D)**: `_run_per_ticker_analyst()` always called `analyze_portfolio()` for ALL 34 tickers on every Run Agents press. Fix: `_load_fresh_cached_verdicts()` loads non-fallback verdicts < 6 hours old from DB and skips LLM for those tickers. `force_recompute=True` flag (via `AgentRunCreate.force`) bypasses cache for full refresh.
+
+4. **Intel response certification summary (Workstream E)**: No response-boundary observability log existed. Fix: `intel_response_certification_summary` emitted at end of `get_insight_cards()` with all required fields. Emitted as WARNING when `conflict_count_after_sanitize > 0`, INFO otherwise.
+
+### Before/after thesis status
+- Before: `thesis_v2 complete — tickers=34 ready=0 partial=0 insufficient=34`
+- After: ETFs → PARTIAL/READY; stocks with partial yfinance → PARTIAL; crypto/commodity → PARTIAL/READY
+
+### LLM calls before/after
+- Before: 34 LLM calls on every Run Agents press
+- After: 0 LLM calls for tickers with fresh (< 6h) non-fallback verdicts; force=True does full 34
+
+### Conflict counts before/after
+- Before: no after-sanitize check; HOLD language could reach BUY cards silently
+- After: `conflict_count_after_sanitize = 0` enforced by sanitize pass; WARNING logged if > 0
+
+### Files changed
+- `v2/backend/app/services/intelligence/thesis_engine.py`: asset-type-aware thresholds + `score_thesis(asset_type=)` + `_overall_status(asset_type=)`
+- `v2/backend/app/services/agents/orchestrator.py`: `_classify_asset_type()`, `_load_fresh_cached_verdicts()`, `force_recompute` flag, TTL-based verdict reuse in `_run_per_ticker_analyst()`
+- `v2/backend/app/services/agents/job_runner.py`: `force_recompute` param passed through
+- `v2/backend/app/models/recommendation.py`: `AgentRunCreate.force: bool = False`
+- `v2/backend/app/routers/recommendations.py`: passes `payload.force` to `run_agent_pipeline()`
+- `v2/backend/app/services/intelligence/reasoning_v2_plain_english.py`: `detect_analyst_field_conflicts()`, `sanitize_analyst_fields_for_action()`, conflict pattern constants
+- `v2/backend/app/services/recommendation_engine.py`: after-sanitize pass in card assembly; `intel_response_certification_summary` log
+- `v2/backend/tests/test_finance_intel_reliability.py` (new): 53 tests across 10 groups
+- `v2/backend/tests/test_thesis_plain_english.py`: updated one assertion to accept PARTIAL (was asserting old INSUFFICIENT_DATA behavior)
+
+### Tests
+- 53 new tests pass (10 groups)
+- 1532 total passing, 15 pre-existing failures (unchanged)
+- No new regressions
+
+### Supabase SQL: No
+
+### Validation (Railway)
+- Railway logs: `intel_response_certification_summary` must show `conflict_count_after_sanitize=0`
+- Railway logs: `thesis_v2 complete` must show `partial>0` and `insufficient<34`
+- Railway logs: `analyst_stage.summary skipped_fresh_verdicts>0` after second Run Agents press within 6h
+- Railway logs: `analyst_stage.summary skipped_fresh_verdicts=0` after force=True press
+
+### Remaining risk
+- `_classify_asset_type()` uses hardcoded ticker lists for ETF/crypto; tickers not in those lists fall back to position category. May misclassify new ETFs not in `_ETF_TICKERS`.
+- `_load_fresh_cached_verdicts()` is synchronous (called in `asyncio.to_thread`); high DB latency could slow pipeline.
+
+---
+
 ## 2026-05-05 — Intel Card Narrative Contract v1 (Level 3 / Sev 1)
 
 - Production context: total_cards=34, v2_visible_action_counts={BUY:11,HOLD:23}, evidence_quality_status_counts={PRESENT:34}.

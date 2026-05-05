@@ -783,3 +783,143 @@ def build_intel_card_narrative_contract(
         "conflict_flags": [],
         "narrative_contract_version": "v1",
     }
+
+
+# ── After-sanitize conflict detection (Workstream C) ─────────────────────────
+#
+# Checks ALL visible text fields — including analyst fields that the narrative
+# contract does not override — for action/copy mismatches.  Run AFTER the
+# contract is applied so any remaining conflicts are real output conflicts.
+
+# Patterns that indicate HOLD/wait language on BUY cards.
+_BUY_HOLD_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bhold\b"),
+    re.compile(r"\bwait\b"),
+    re.compile(r"\bwatchlist\b"),
+    re.compile(r"\bearly signal\b"),
+    re.compile(r"\bno allocation\b"),
+    re.compile(r"\bnot yet complete\b"),
+    re.compile(r"\bstay on watch\b"),
+    re.compile(r"\bincomplete picture\b"),
+    re.compile(r"\bnot a complete picture\b"),
+)
+
+# Patterns that indicate BUY/accumulate language on HOLD cards.
+_HOLD_BUY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\badd now\b"),
+    re.compile(r"\bbuy now\b"),
+    re.compile(r"\benter now\b"),
+    re.compile(r"\baccumulate aggressively\b"),
+)
+
+# BUY/accumulate language forbidden on TRIM/SELL cards.
+_TRIM_BUY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\badd candidate\b"),
+    re.compile(r"\bentry opportunity\b"),
+    re.compile(r"\bconstructive view\b"),
+    re.compile(r"\bmeasured buy\b"),
+    re.compile(r"\bregular contribution target\b"),
+    re.compile(r"\baccumulate\b"),
+)
+
+# Analyst fields that carry action-specific copy to the card.
+_ANALYST_TEXT_FIELDS = (
+    "action_reason",
+    "primary_driver",
+    "differentiation",
+    "risk_flag",
+    "summary",
+    "reasoning_summary",
+)
+
+# HOLD/wait copy that INSUFFICIENT_DATA fallback verdicts inject.
+_FALLBACK_HOLD_PHRASES: frozenset[str] = frozenset({
+    "hold — no allocation until signal improves.",
+    "no allocation until signal improves",
+    "hold until signal improves",
+})
+
+
+def detect_analyst_field_conflicts(
+    *,
+    visible_action: str,
+    card_fields: dict[str, Any],
+) -> list[str]:
+    """Detect action/copy mismatches in ALL visible card text fields.
+
+    Called AFTER the narrative contract is applied (after-sanitize pass).
+    Checks analyst reasoning fields that the contract does not override.
+
+    Pure function — deterministic, no IO.
+    Returns a list of conflict reason codes; empty list means no conflicts.
+    """
+    action = (visible_action or "HOLD").upper()
+    flags: list[str] = []
+
+    for field in _ANALYST_TEXT_FIELDS:
+        text = str(card_fields.get(field) or "").lower()
+        if not text:
+            continue
+
+        if action == "BUY":
+            for pattern in _BUY_HOLD_PATTERNS:
+                if pattern.search(text):
+                    flags.append(f"buy_hold_lang:{field}:{pattern.pattern[:25]}")
+                    break
+
+        elif action == "HOLD":
+            for pattern in _HOLD_BUY_PATTERNS:
+                if pattern.search(text):
+                    flags.append(f"hold_buy_lang:{field}")
+                    break
+
+        elif action in {"TRIM", "SELL"}:
+            for pattern in _TRIM_BUY_PATTERNS:
+                if pattern.search(text):
+                    flags.append(f"trim_buy_lang:{field}")
+                    break
+
+    return flags
+
+
+def sanitize_analyst_fields_for_action(
+    *,
+    visible_action: str,
+    card_fields: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a copy of card_fields with conflicting analyst text replaced.
+
+    Fail-closed: for BUY cards, any action_reason containing HOLD/wait
+    language (from INSUFFICIENT_DATA fallback verdicts) is replaced with
+    measured-buy copy.  For TRIM/SELL, any buy language is replaced.
+
+    Pure function — deterministic, no IO, no LLM.
+    Returns the sanitized dict; callers replace fields in the card.
+    """
+    action = (visible_action or "HOLD").upper()
+    out = dict(card_fields)
+
+    if action == "BUY":
+        action_reason = str(out.get("action_reason") or "").lower()
+        # Replace INSUFFICIENT_DATA fallback "Hold — no allocation" with
+        # action-consistent measured-buy copy.
+        is_fallback_hold = any(phrase in action_reason for phrase in _FALLBACK_HOLD_PHRASES)
+        has_hold_pattern = any(p.search(action_reason) for p in _BUY_HOLD_PATTERNS)
+        if is_fallback_hold or has_hold_pattern:
+            out["action_reason"] = "Size modestly and monitor for confirmation before adding more."
+        # Sanitize primary_driver if it contains hard hold language.
+        primary_driver = str(out.get("primary_driver") or "").lower()
+        if any(phrase in primary_driver for phrase in _FALLBACK_HOLD_PHRASES):
+            out["primary_driver"] = out.get("action_reason", "")
+        # Wipe differentiation if it contains forbidden phrases.
+        differentiation = str(out.get("differentiation") or "").lower()
+        if any(p.search(differentiation) for p in _BUY_HOLD_PATTERNS):
+            out["differentiation"] = None
+
+    elif action in {"TRIM", "SELL"}:
+        action_reason = str(out.get("action_reason") or "").lower()
+        has_buy_pattern = any(p.search(action_reason) for p in _TRIM_BUY_PATTERNS)
+        if has_buy_pattern:
+            out["action_reason"] = "Reduce exposure here; current signals favor lightening the position."
+
+    return out

@@ -29,6 +29,8 @@ from .intelligence.reasoning_v2_plain_english import (
     build_posture_reason,
     build_intel_card_narrative_contract,
     detect_intel_card_conflict,
+    detect_analyst_field_conflicts,
+    sanitize_analyst_fields_for_action,
     is_safe_for_insufficient_data,
 )
 from .intelligence.v3.shadow_projection import (
@@ -1701,13 +1703,26 @@ class RecommendationService:
         thesis_diag_counts: dict[str, int] = {}
         shadow_diagnostics: list[Optional[dict]] = []
         # Narrative contract observability counters (reset per aggregate call).
-        _nc_conflict_count = 0
+        # pre_* = conflicts detected BEFORE contract applied (pre-fix baseline)
+        # after_* = conflicts remaining AFTER contract + analyst field sanitize
+        _nc_conflict_count = 0          # pre-contract conflicts (legacy counter)
         _nc_conflict_examples: list[dict] = []
         _nc_action_counts: dict[str, int] = {}
         _nc_buy_hold_lang_count = 0
         _nc_hold_buy_lang_count = 0
         _nc_trim_sell_buy_lang_count = 0
         _nc_evidence_limited_buy_count = 0
+        # After-sanitize counters (Workstream C) — track real output conflicts.
+        _nc_after_conflict_count = 0
+        _nc_after_buy_hold_lang_count = 0
+        _nc_after_hold_buy_lang_count = 0
+        _nc_after_trim_buy_lang_count = 0
+        _nc_narrative_contract_present_count = 0
+        _nc_reused_cached_verdicts = 0
+        _nc_skipped_fresh_verdicts = 0
+        _nc_attempted_llm_calls = 0
+        _nc_successful_llm_calls = 0
+        _nc_duplicate_provider_call_count = 0
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -1944,8 +1959,9 @@ class RecommendationService:
                     intel_read_dict["posture_reason"] = _nc["evidence_summary"]
                     intel_read_dict["caveat"] = _nc["final_takeaway"]
                     intel_read_dict["narrative_contract"] = _nc
+                    _nc_narrative_contract_present_count += 1
 
-                    # Accumulate observability counters.
+                    # Pre-contract conflict counter (legacy — measures OLD conflicts).
                     _nc_action_counts[_card_action] = _nc_action_counts.get(_card_action, 0) + 1
                     if _nc_flags:
                         _nc_conflict_count += 1
@@ -1963,6 +1979,51 @@ class RecommendationService:
                             _nc_trim_sell_buy_lang_count += 1
                     if _card_action == "BUY" and (_card_conviction_level or "LOW").upper() == "LOW":
                         _nc_evidence_limited_buy_count += 1
+
+                    # ── After-sanitize pass (Workstream C) ──────────────────
+                    # Sanitize analyst text fields that the contract does not
+                    # override (action_reason, primary_driver, differentiation).
+                    # Fail-closed: if any conflict remains after contract, replace
+                    # the offending field rather than shipping contradictory copy.
+                    _sanitized_fields = sanitize_analyst_fields_for_action(
+                        visible_action=_card_action,
+                        card_fields={
+                            "action_reason": reasoning.get("action_reason"),
+                            "primary_driver": reasoning.get("primary_driver"),
+                            "differentiation": reasoning.get("differentiation"),
+                            "summary": reasoning.get("summary"),
+                            "reasoning_summary": reasoning.get("reasoning_summary"),
+                            "risk_flag": reasoning.get("risk_flag"),
+                        },
+                    )
+                    # Apply sanitized values back into reasoning dict.
+                    for field, value in _sanitized_fields.items():
+                        reasoning[field] = value
+
+                    # Measure after-sanitize conflicts on the final output.
+                    _after_flags = detect_analyst_field_conflicts(
+                        visible_action=_card_action,
+                        card_fields={
+                            "action_reason": reasoning.get("action_reason"),
+                            "primary_driver": reasoning.get("primary_driver"),
+                            "differentiation": reasoning.get("differentiation"),
+                            "summary": reasoning.get("summary"),
+                            "reasoning_summary": reasoning.get("reasoning_summary"),
+                            "risk_flag": reasoning.get("risk_flag"),
+                        },
+                    )
+                    if _after_flags:
+                        _nc_after_conflict_count += 1
+                        if _card_action == "BUY":
+                            _nc_after_buy_hold_lang_count += 1
+                        elif _card_action == "HOLD":
+                            _nc_after_hold_buy_lang_count += 1
+                        elif _card_action in {"TRIM", "SELL"}:
+                            _nc_after_trim_buy_lang_count += 1
+                        logger.warning(
+                            "intel_after_sanitize_conflict ticker=%s action=%s flags=%s",
+                            ticker, _card_action, _after_flags[:3],
+                        )
 
                 card = InsightCard(
                     id=rec["id"],
@@ -2084,7 +2145,7 @@ class RecommendationService:
                 )
                 continue
 
-        # Intel Card Narrative Contract v1 portfolio summary.
+        # ── Pre-contract conflict summary (legacy, still emitted for backward compat)
         _nc_summary = {
             "total_cards": len(cards),
             "action_counts": _nc_action_counts,
@@ -2122,6 +2183,9 @@ class RecommendationService:
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0
         llm_enriched_cards = discarded_llm_calls = 0
+        reused_cached_verdicts = 0
+        skipped_fresh_verdicts = 0
+        latest_run_id: Optional[str] = None
         for row in run_lookup.values():
             cm = row.get("cost_metrics") or {}
             attempted_llm_calls += int(cm.get("attempted_llm_calls") or cm.get("actual_llm_calls") or cm.get("total_calls") or 0)
@@ -2129,6 +2193,53 @@ class RecommendationService:
             failed_llm_calls += int(cm.get("failed_llm_calls") or 0)
             llm_enriched_cards += int(cm.get("llm_enriched_cards") or 0)
             discarded_llm_calls += int(cm.get("discarded_llm_calls") or 0)
+            reused_cached_verdicts += int(cm.get("reused_cached_cards") or 0)
+            skipped_fresh_verdicts += int(cm.get("skipped_fresh_verdicts") or 0)
+            if latest_run_id is None:
+                latest_run_id = row.get("id")
+
+        # Thesis status distribution across assembled cards.
+        thesis_status_counts: dict[str, int] = {}
+        for card in cards:
+            if card.thesis_v2 and isinstance(card.thesis_v2, dict):
+                ts = str(card.thesis_v2.get("status") or "unknown")
+                thesis_status_counts[ts] = thesis_status_counts.get(ts, 0) + 1
+
+        # ── Intel Response Certification Summary (Workstream E) ──────────────
+        # Emitted at the exact response boundary after all sanitization is done.
+        # conflict_count_after_sanitize MUST be 0 for a healthy release.
+        _cert_summary: dict[str, Any] = {
+            "total_cards": len(cards),
+            "action_counts": _nc_action_counts,
+            "thesis_status_counts": thesis_status_counts,
+            "narrative_contract_present_count": _nc_narrative_contract_present_count,
+            "conflict_count_after_sanitize": _nc_after_conflict_count,
+            "buy_cards_with_hold_language_count_after_sanitize": _nc_after_buy_hold_lang_count,
+            "hold_cards_with_buy_language_count_after_sanitize": _nc_after_hold_buy_lang_count,
+            "trim_sell_cards_with_buy_language_count_after_sanitize": _nc_after_trim_buy_lang_count,
+            "attempted_llm_calls": attempted_llm_calls,
+            "successful_llm_calls": successful_llm_calls,
+            "reused_cached_verdicts": reused_cached_verdicts,
+            "skipped_fresh_verdicts": skipped_fresh_verdicts,
+            "duplicate_provider_call_count": _nc_duplicate_provider_call_count,
+            "elapsed_ms": elapsed_ms,
+            "run_id": latest_run_id,
+            "response_path": "page_load",
+            "schema_version": "v2",
+        }
+        if _nc_after_conflict_count > 0:
+            logger.warning(
+                "intel_response_certification_summary user_id=%s summary=%s",
+                self.user_id,
+                json.dumps(_cert_summary, default=str),
+            )
+        else:
+            logger.info(
+                "intel_response_certification_summary user_id=%s summary=%s",
+                self.user_id,
+                json.dumps(_cert_summary, default=str),
+            )
+
         logger.info(
             "recommendations.aggregate.done user_id=%s recs=%d cards=%d positions=%d insights=%d normalized=%d degraded=%d skipped=%d elapsed_ms=%d attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d llm_enriched_cards=%d discarded_llm_calls=%d fallback_cards=%d reused_cached_cards=%d thesis_diag=%s",
             self.user_id,

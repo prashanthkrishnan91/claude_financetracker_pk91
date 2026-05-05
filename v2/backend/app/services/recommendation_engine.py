@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import asyncio
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -57,6 +58,22 @@ ACTION_COLORS = {
     "HOLD": "blue",
     "REVIEW": "purple",
 }
+
+_V3_SHADOW_SUMMARY_INFO_LOGS_ENV = "INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED"
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _is_v3_shadow_summary_info_logs_enabled() -> bool:
+    """Return True when explicit env flag enables INFO-level v3 shadow summary logs."""
+    raw_value = os.getenv(_V3_SHADOW_SUMMARY_INFO_LOGS_ENV, "")
+    return raw_value.strip().lower() in _TRUTHY_ENV_VALUES
+
+
+def _log_v3_shadow_projection_portfolio_summary(*, user_id: UUID | str, summary: dict[str, Any]) -> None:
+    """Emit v3 shadow portfolio summary at DEBUG and optionally INFO."""
+    logger.debug("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", user_id, summary)
+    if _is_v3_shadow_summary_info_logs_enabled():
+        logger.info("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", user_id, summary)
 
 
 def _normalize_ticker_lookup_key(ticker: Any) -> str:
@@ -1987,7 +2004,7 @@ class RecommendationService:
             shadow_diagnostics,
             total_cards=len(cards),
         )
-        logger.debug("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", self.user_id, shadow_summary)
+        _log_v3_shadow_projection_portfolio_summary(user_id=self.user_id, summary=shadow_summary)
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0

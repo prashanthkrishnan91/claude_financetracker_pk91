@@ -1,5 +1,50 @@
 
 ## Last change
+Intel v3 PR 4: production-visible backend shadow observability control (PR: "feat(intel-v3-pr4): optional info-level v3 shadow portfolio summary logging").
+
+## Severity
+Level 1 — small backend observability/control follow-up.
+
+## Root cause
+PR 3 emitted the portfolio-level v3 shadow summary at DEBUG only. In production environments where DEBUG is suppressed, the summary was hard to validate live even though the payload is safe aggregate diagnostics.
+
+## Fix
+- Added backend-only env-gated info logging control in `recommendation_engine.py`:
+  - `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` (default disabled)
+  - `_is_v3_shadow_summary_info_logs_enabled()` for deterministic env parsing
+  - `_log_v3_shadow_projection_portfolio_summary(...)` helper that always logs DEBUG and conditionally logs INFO
+- Kept summary schema identical for DEBUG and INFO: uses existing `summarize_shadow_diagnostics(...)` aggregate output only.
+- Wired existing PR 3 summary emission through the new helper so one summary is emitted per card assembly batch, not per card.
+- Added focused tests in `test_recommendation_engine.py` for:
+  - default disabled behavior (no INFO summary),
+  - enabled behavior (single INFO summary),
+  - stable/safe aggregate key contract in payload.
+
+## Observability contract (PR 4)
+- DEBUG summary remains unchanged and always emitted.
+- INFO summary is emitted only when `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` is truthy (`1/true/yes/on`, case-insensitive).
+- INFO summary contains aggregate non-sensitive keys only:
+  - `schema_version`
+  - `total_cards`
+  - `projected_cards`
+  - `projection_failures`
+  - `v2_visible_action_counts`
+  - `v3_shadow_action_counts`
+  - `hold_collapse_risk_count`
+  - `honest_hold_count`
+  - `non_hold_shadow_from_v2_hold_count`
+- No raw card payloads, raw metric keys, account values, user identifiers, provider payloads, or LLM internals are added to INFO payload.
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API schema change.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+- No recommendation/action mutation.
+
+## Last change
 Intel v3 PR 2: Safe backend v3 shadow projection/logging (PR: "feat(intel-v3-pr2): backend v3 shadow projection and HOLD-collapse diagnostics").
 
 ## Root cause

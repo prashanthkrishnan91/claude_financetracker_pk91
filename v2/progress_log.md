@@ -1,4 +1,14 @@
 
+## 2026-05-05 — Intel v3 PR 4: optional INFO-level shadow summary observability (Level 1)
+
+- Added backend-only env flag `INTEL_V3_SHADOW_SUMMARY_INFO_LOGS_ENABLED` (default disabled) for optional INFO emission of existing portfolio-level v3 shadow summary.
+- Added helper functions in `recommendation_engine.py`:
+  - `_is_v3_shadow_summary_info_logs_enabled()` (truthy: `1/true/yes/on`)
+  - `_log_v3_shadow_projection_portfolio_summary(...)` (DEBUG always + optional INFO)
+- Kept shadow summary schema unchanged via existing `summarize_shadow_diagnostics(...)`.
+- Added focused tests in `test_recommendation_engine.py` covering default disabled, enabled single INFO emission, and safe aggregate key payload contract.
+- No visible behavior, API, Deploy, SQL, provider, or LLM changes.
+
 ## 2026-05-05 — Intel v3 PR 2: backend v3 shadow projection and HOLD-collapse diagnostics (Level 2)
 
 - Added `v2/backend/app/services/intelligence/v3/shadow_projection.py` — pure `project_shadow_from_card_signals()` returning a diagnostic dict with stable keys (`ticker`, `v2_visible_action`, `v3_shadow_action`, `v3_shadow_conviction`, `hold_collapse_risk`, `v3_honest_hold`, `suppressed_axes`, `v3_schema_version`).

@@ -94,7 +94,8 @@ def test_insufficient_data_watch_partial_coverage():
     assert "watch" in result["summary"].lower()
     assert "incomplete" in result["summary"].lower() or "still" in result["summary"].lower()
     assert "caveat" in result
-    assert "Not enough data" in result["caveat"]
+    assert "Not enough data" not in result["caveat"]
+    assert "early signal" in result["caveat"].lower()
     assert result["title"] == "Why this view?"
 
 
@@ -134,7 +135,7 @@ def test_quality_newly_publishable_partial():
     assert "risk" in result["incomplete_signals"]
     # Summary should describe the partial coverage honestly
     assert "caveat" in result
-    assert "early signal" in result["caveat"] or "complete" in result["caveat"]
+    assert "measured buy" in result["caveat"].lower() or "early signal" in result["caveat"].lower()
 
 
 def test_quality_publishable_non_watch_summary():
@@ -831,3 +832,78 @@ def test_bottom_line_avoids_generic_interesting_setup_phrase():
     assert "interesting setup" not in bottom_line
     assert "valuation" in bottom_line
     assert "growth" in bottom_line or "risk" in bottom_line
+
+
+def test_buy_with_trusted_signals_avoids_global_wait_language():
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["quality_score", "valuation_score", "momentum_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    caveat = result["caveat"].lower()
+    assert "not enough data to be confident" not in caveat
+    assert "wait for more signals" not in caveat
+    assert "measured buy" in caveat
+    assert set(result["incomplete_signals"]) == {"growth", "risk"}
+
+
+@pytest.mark.parametrize("published_dimensions", [["valuation_score"], ["valuation_score", "momentum_score"]])
+def test_buy_with_one_or_two_trusted_signals_stays_action_consistent(published_dimensions: list[str]):
+    r2 = _make_r2(
+        posture="ACCUMULATE",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=published_dimensions,
+        suppressed_dimensions=["growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert "measured buy" in result["caveat"].lower()
+
+
+def test_hold_with_zero_trusted_signals_keeps_wait_copy():
+    r2 = _make_r2(
+        posture="HOLD",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=[],
+        suppressed_dimensions=["quality", "valuation", "growth", "risk", "momentum"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    assert "wait for more signals" in result["caveat"].lower()
+
+
+def test_hold_with_trusted_signals_does_not_imply_zero_evidence():
+    r2 = _make_r2(
+        posture="HOLD",
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    caveat = result["caveat"].lower()
+    assert "wait for more signals" not in caveat
+    assert "usable evidence" in caveat
+
+
+@pytest.mark.parametrize("posture", ["TRIM", "AVOID"])
+def test_trim_sell_family_copy_stays_risk_aware(posture: str):
+    r2 = _make_r2(
+        posture=posture,
+        data_status="INSUFFICIENT_DATA",
+        published_dimensions=["valuation_score", "momentum_score"],
+        suppressed_dimensions=["growth", "risk"],
+        blockers=["insufficient_data"],
+    )
+    result = build_intel_read(r2)
+    assert result is not None
+    caveat = result["caveat"].lower()
+    assert "cautious stance" in caveat
+    assert "wait for more signals" not in caveat

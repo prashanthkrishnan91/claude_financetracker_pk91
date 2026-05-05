@@ -1,3 +1,22 @@
+## 2026-05-05 — Intel v2 Sev 1 follow-up: Evidence Check action-consistency fix (PR 14)
+
+- Production evidence summary (Railway): `total_cards=34`, `projected_cards=34`, `projection_failures=0`, `v2_visible_action_counts={BUY:11,HOLD:23,TRIM:0,SELL:0}`, `v3_shadow_action_counts={BUY:9,HOLD:25,TRIM:0,SELL:0}`, `evidence_quality_status_counts={PRESENT:34}`, `evidence_quality_trust_counts={HIGH:18,MEDIUM:16}`, `hold_collapse_risk_count=0`, `safe_axis_count=170`, `unsafe_axis_count=0`.
+- Root cause: Evidence Check copy (`intel_read.caveat`) was generated from a binary insufficient-data gate (`insufficient_data=True`) and ignored trusted signal count + action posture. This produced global HOLD/wait language even when action was BUY and trusted signals were present.
+- Durable contract implemented in backend `build_intel_read` path:
+  - `n_trusted==0`: conservative wait/watch copy allowed.
+  - `n_trusted>=1`: missing axes remain caveats only (no global "not enough data / wait" text).
+  - BUY-like posture (`ACCUMULATE`) + trusted signals: measured-buy caveat with confidence limits.
+  - HOLD + trusted signals: partial-evidence caveat without implying zero usable evidence.
+  - TRIM/SELL family (`TRIM`/`AVOID`): action-consistent, risk-aware caveat.
+- Scope/guardrails: no all-HOLD re-fix, no evidence-quality remap tuning, no SQL, no LLM, no Deploy/policy expansion, no frontend redesign.
+- Validation checklist:
+  - BUY + insufficient_data + trusted>=3 + missing growth/risk: no global wait language; caveat remains confidence-oriented.
+  - BUY + trusted=1..2: action-consistent measured-buy caveat.
+  - HOLD + trusted=0: conservative wait copy retained.
+  - HOLD + trusted>=1: partial-evidence wording retained.
+  - TRIM/SELL family: risk-aware wording retained and not overwritten by BUY/HOLD language.
+  - Regression: missing growth/risk no longer globally forces HOLD-style caveat when trusted signals exist.
+
 ## Last change
 Intel v3 PR 13: Sev 1 all-HOLD Intel collapse fix.
 

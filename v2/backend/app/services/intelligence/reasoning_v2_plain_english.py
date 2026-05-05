@@ -311,14 +311,34 @@ def _build_caveat(
     posture: str,
     data_status: str,
     blockers: list[str],
-    has_trusted: bool,
+    trusted_signals: list[str],
+    incomplete_signals: list[str],
 ) -> str:
-    if "insufficient_data" in blockers or data_status == "INSUFFICIENT_DATA":
+    n_trusted = len(trusted_signals)
+    insufficient = "insufficient_data" in blockers or data_status == "INSUFFICIENT_DATA"
+
+    if insufficient and n_trusted == 0:
         return "Not enough data to be confident. Wait for more signals before acting."
+
     if "agreement_conflict" in blockers:
         return "There is a conflict between market signals and analyst view. Stay cautious."
-    if not has_trusted:
+
+    if n_trusted == 0:
         return "No complete dimension evidence yet. This is a placeholder watch only."
+
+    if posture == "ACCUMULATE":
+        if incomplete_signals:
+            return "Evidence supports a measured buy, while missing areas keep confidence moderate."
+        return "Evidence supports the buy posture. Keep sizing disciplined as new data arrives."
+
+    if posture == "HOLD":
+        if incomplete_signals:
+            return "There is usable evidence, but gaps keep this as a hold for now."
+        return "Evidence is usable but balanced, so holding is appropriate for now."
+
+    if posture in {"TRIM", "AVOID"}:
+        return "Evidence and risk context support a cautious stance; reduce or avoid adding exposure."
+
     return "Treat this as an early signal, not a complete picture."
 
 
@@ -405,7 +425,8 @@ def build_intel_read(r2: Any) -> Optional[dict[str, Any]]:
         posture=posture,
         data_status=data_status,
         blockers=blockers,
-        has_trusted=bool(trusted_signals),
+        trusted_signals=trusted_signals,
+        incomplete_signals=incomplete_signals,
     )
 
     # Backend hint: True when data is insufficient and WATCH is forced.

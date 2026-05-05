@@ -1798,3 +1798,40 @@ Intel cards Level-2 rendering/projection hardening (PR: "fix(intel-card): unflat
 - No reasoning_v2 raw internals exposure.
 - No raw metric keys exposed.
 - No Supabase SQL/migrations.
+
+## Last change
+Intel v3 PR 3: backend-only portfolio-level v3 shadow diagnostic summary (PR: "feat(intel-v3-pr3): add portfolio-level v3 shadow summary logging").
+
+## Root cause
+PR 2 added per-card v3 shadow diagnostics, but there was no single portfolio-level summary after card assembly. This made it hard to quickly quantify HOLD-collapse exposure and honest-hold coverage across the full recommendation batch.
+
+## Fix
+- Added `summarize_shadow_diagnostics()` in `v2/backend/app/services/intelligence/v3/shadow_projection.py` (pure, deterministic helper) to aggregate per-card projection outputs.
+- Wired aggregation in `recommendation_engine._compute_insight_cards()`:
+  - collect each `_v3_shadow_projection(card)` result (including `None` for fail-soft projection failures),
+  - emit one backend debug log after the cards loop with a stable structured summary.
+- Summary keys:
+  - `schema_version`
+  - `total_cards`
+  - `projected_cards`
+  - `projection_failures`
+  - `v2_visible_action_counts`
+  - `v3_shadow_action_counts`
+  - `hold_collapse_risk_count`
+  - `honest_hold_count`
+  - `non_hold_shadow_from_v2_hold_count`
+
+## Explicit non-changes
+- No visible UI behavior change.
+- No API response schema changes.
+- No Deploy changes.
+- No SQL / Supabase migrations.
+- No provider expansion.
+- No LLM calls.
+
+## Tests
+- Extended `v2/backend/tests/test_v3_shadow_projection.py` with focused PR 3 aggregation tests:
+  - empty diagnostics safety,
+  - mixed action aggregation + projection failures,
+  - v2 HOLD + v3 BUY/TRIM/SELL collapse counting,
+  - honest HOLD counted separately from collapse risk.

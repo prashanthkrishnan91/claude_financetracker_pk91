@@ -28,6 +28,7 @@ from .intelligence.reasoning_v2_plain_english import (
     build_posture_reason,
     is_safe_for_insufficient_data,
 )
+from .intelligence.v3.shadow_projection import summarize_shadow_diagnostics
 from .agent_run_status import (
     ACTIVE_RUN_STATUSES,
     assert_db_status,
@@ -1667,6 +1668,7 @@ class RecommendationService:
         normalized_count = degraded_count = skipped_count = 0
         fallback_cards = reused_cached_cards = 0
         thesis_diag_counts: dict[str, int] = {}
+        shadow_diagnostics: list[Optional[dict]] = []
         for rec in recs:
             try:
                 ticker = rec.get("ticker") or "UNKNOWN"
@@ -1950,6 +1952,7 @@ class RecommendationService:
                 )
                 cards.append(card)
                 _shadow_diag = _v3_shadow_projection(card)
+                shadow_diagnostics.append(_shadow_diag)
                 if _shadow_diag:
                     logger.debug(
                         "v3_shadow_projection ticker=%s v2=%s v3=%s conviction=%s"
@@ -1979,6 +1982,12 @@ class RecommendationService:
                     type(exc).__name__,
                 )
                 continue
+
+        shadow_summary = summarize_shadow_diagnostics(
+            shadow_diagnostics,
+            total_cards=len(cards),
+        )
+        logger.debug("v3_shadow_projection_portfolio_summary user_id=%s summary=%s", self.user_id, shadow_summary)
 
         elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
         attempted_llm_calls = successful_llm_calls = failed_llm_calls = 0

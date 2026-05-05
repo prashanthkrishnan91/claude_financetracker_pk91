@@ -466,3 +466,57 @@ class TestHoldCollapseAudit:
             if r is not None:
                 missing = _REQUIRED_KEYS - set(r.keys())
                 assert not missing, f"Diagnostic missing keys: {missing}"
+
+
+class TestShadowSummaryAggregation:
+    """Portfolio-level aggregation for v3 shadow diagnostics (PR 3)."""
+
+    def test_empty_diagnostics_safe(self):
+        from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
+
+        summary = summarize_shadow_diagnostics([], total_cards=0)
+        assert summary["total_cards"] == 0
+        assert summary["projected_cards"] == 0
+        assert summary["projection_failures"] == 0
+        assert summary["v2_visible_action_counts"] == {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+        assert summary["v3_shadow_action_counts"] == {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+
+    def test_mixed_actions_counts_and_projection_failures(self):
+        from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
+
+        diagnostics = [
+            {"v2_visible_action": "HOLD", "v3_shadow_action": "BUY", "hold_collapse_risk": True, "v3_honest_hold": False},
+            {"v2_visible_action": "BUY", "v3_shadow_action": "HOLD", "hold_collapse_risk": False, "v3_honest_hold": True},
+            {"v2_visible_action": "TRIM", "v3_shadow_action": "TRIM", "hold_collapse_risk": False, "v3_honest_hold": False},
+            None,
+        ]
+        summary = summarize_shadow_diagnostics(diagnostics, total_cards=4)
+        assert summary["projected_cards"] == 3
+        assert summary["projection_failures"] == 1
+        assert summary["v2_visible_action_counts"] == {"BUY": 1, "HOLD": 1, "TRIM": 1, "SELL": 0}
+        assert summary["v3_shadow_action_counts"] == {"BUY": 1, "HOLD": 1, "TRIM": 1, "SELL": 0}
+        assert summary["hold_collapse_risk_count"] == 1
+        assert summary["honest_hold_count"] == 1
+        assert summary["non_hold_shadow_from_v2_hold_count"] == 1
+
+    @pytest.mark.parametrize("shadow_action", ["BUY", "TRIM", "SELL"])
+    def test_v2_hold_non_hold_shadow_increments_collapse_counter(self, shadow_action):
+        from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
+
+        summary = summarize_shadow_diagnostics(
+            [{"v2_visible_action": "HOLD", "v3_shadow_action": shadow_action, "hold_collapse_risk": True, "v3_honest_hold": False}],
+            total_cards=1,
+        )
+        assert summary["hold_collapse_risk_count"] == 1
+        assert summary["non_hold_shadow_from_v2_hold_count"] == 1
+
+    def test_honest_hold_is_counted_separately_from_hold_collapse(self):
+        from app.services.intelligence.v3.shadow_projection import summarize_shadow_diagnostics
+
+        summary = summarize_shadow_diagnostics(
+            [{"v2_visible_action": "HOLD", "v3_shadow_action": "HOLD", "hold_collapse_risk": False, "v3_honest_hold": True}],
+            total_cards=1,
+        )
+        assert summary["hold_collapse_risk_count"] == 0
+        assert summary["honest_hold_count"] == 1
+        assert summary["non_hold_shadow_from_v2_hold_count"] == 0

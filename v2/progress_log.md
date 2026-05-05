@@ -596,3 +596,9 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - WHY THIS VIEW bottom_line wording for insufficient-data cards now references available/missing evidence directly (e.g., "Evidence is strongest on ... but ... still missing") instead of repeating the generic "Interesting setup..." sentence.
 - Added focused tests for new rendering contract helpers and bottom_line anti-generic behavior; backend suites pass.
 - No Deploy changes, no allocation math changes, no SQL/migrations.
+
+## 2026-05-05 — Intel v3 PR 3 (backend shadow summary)
+- Added backend-only portfolio-level v3 shadow diagnostic summary aggregation/logging after card assembly.
+- Kept per-card shadow diagnostics intact and fail-soft.
+- Added focused backend tests for summary aggregation/counting and failure handling.
+- No UI/API/Deploy/SQL/provider/LLM changes.

@@ -8,7 +8,7 @@ Callable from tests and from the recommendation_engine wrapper.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, Any
 
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_decision_input_from_card
@@ -83,3 +83,53 @@ def project_shadow_from_card_signals(
         }
     except Exception:  # noqa: BLE001
         return None
+
+
+def summarize_shadow_diagnostics(
+    diagnostics: list[Optional[dict[str, Any]]],
+    *,
+    total_cards: int,
+    schema_version: str = "v3.shadow.summary.v1",
+) -> dict[str, Any]:
+    """Build a portfolio-level shadow summary from per-card diagnostics.
+
+    Deterministic aggregation only; never raises. Failed/None entries are
+    counted as projection_failures.
+    """
+    safe_total = max(int(total_cards or 0), 0)
+    valid = [d for d in diagnostics if isinstance(d, dict)]
+
+    v2_counts = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+    v3_counts = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+    hold_collapse_risk_count = 0
+    honest_hold_count = 0
+    non_hold_shadow_from_v2_hold_count = 0
+
+    for diag in valid:
+        v2_action = str(diag.get("v2_visible_action") or "HOLD").upper()
+        v3_action = str(diag.get("v3_shadow_action") or "HOLD").upper()
+        if v2_action in v2_counts:
+            v2_counts[v2_action] += 1
+        if v3_action in v3_counts:
+            v3_counts[v3_action] += 1
+        if bool(diag.get("hold_collapse_risk")):
+            hold_collapse_risk_count += 1
+        if bool(diag.get("v3_honest_hold")):
+            honest_hold_count += 1
+        if v2_action == "HOLD" and v3_action in {"BUY", "TRIM", "SELL"}:
+            non_hold_shadow_from_v2_hold_count += 1
+
+    projected_cards = len(valid)
+    projection_failures = max(safe_total - projected_cards, 0)
+
+    return {
+        "schema_version": schema_version,
+        "total_cards": safe_total,
+        "projected_cards": projected_cards,
+        "projection_failures": projection_failures,
+        "v2_visible_action_counts": v2_counts,
+        "v3_shadow_action_counts": v3_counts,
+        "hold_collapse_risk_count": hold_collapse_risk_count,
+        "honest_hold_count": honest_hold_count,
+        "non_hold_shadow_from_v2_hold_count": non_hold_shadow_from_v2_hold_count,
+    }

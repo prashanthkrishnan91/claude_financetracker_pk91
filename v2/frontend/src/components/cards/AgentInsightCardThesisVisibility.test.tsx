@@ -39,13 +39,18 @@ function makeCard(overrides: Partial<InsightCardData> = {}): InsightCardData {
 /**
  * Simulate what the AgentInsightCard WhyThisView section would render.
  * Returns all displayable text from intel_read only.
- * Mirrors WhyThisView: uses bottom_line when present, otherwise summary.
+ * Mirrors WhyThisView: narrative_contract.evidence_summary > posture_reason
+ * > bottom_line > summary.
  */
 function collectIntelReadLines(intelRead: IntelRead | null | undefined): string[] {
   if (!intelRead) return [];
   const lines: string[] = [];
   if (intelRead.title) lines.push(intelRead.title);
-  const displaySummary = intelRead.bottom_line || intelRead.summary;
+  const displaySummary =
+    intelRead.narrative_contract?.evidence_summary ||
+    intelRead.posture_reason ||
+    intelRead.bottom_line ||
+    intelRead.summary;
   if (displaySummary) lines.push(displaySummary);
   lines.push(...(intelRead.trusted_signals ?? []));
   lines.push(...(intelRead.incomplete_signals ?? []));
@@ -838,7 +843,13 @@ describe("Evidence check section label contract", () => {
 
   it("posture_reason is preferred in Evidence check display over bottom_line/summary", () => {
     function resolveEvidenceText(intelRead: IntelRead | null | undefined): string {
-      return intelRead?.posture_reason || intelRead?.bottom_line || intelRead?.summary || "";
+      return (
+        intelRead?.narrative_contract?.evidence_summary
+        || intelRead?.posture_reason
+        || intelRead?.bottom_line
+        || intelRead?.summary
+        || ""
+      );
     }
 
     const card = makeCard({
@@ -857,5 +868,43 @@ describe("Evidence check section label contract", () => {
     expect(text).toBe("Specific evidence explanation for this ticker.");
     expect(text).not.toBe("Generic fallback summary.");
     expect(text).not.toBe("Bottom line fallback.");
+  });
+
+  it("narrative_contract evidence_summary is preferred over stale posture_reason", () => {
+    function resolveEvidenceText(intelRead: IntelRead | null | undefined): string {
+      return (
+        intelRead?.narrative_contract?.evidence_summary
+        || intelRead?.posture_reason
+        || intelRead?.bottom_line
+        || intelRead?.summary
+        || ""
+      );
+    }
+
+    const card = makeCard({
+      intel_read: {
+        title: "Evidence check",
+        posture_label: "constructive",
+        summary: "Summary fallback.",
+        trusted_signals: ["business quality"],
+        incomplete_signals: ["growth"],
+        caveat: "Treat this as an early signal, not a complete picture.",
+        posture_reason: "Reviewing before taking action — stale text.",
+        bottom_line: "Bottom line fallback.",
+        narrative_contract: {
+          action: "BUY",
+          confidence_label: "MEDIUM",
+          evidence_summary: "Reliable evidence supports a measured buy while missing growth caps confidence.",
+          reliable_labels: ["business quality"],
+          missing_labels: ["growth"],
+          final_takeaway: "Size gradually and re-check missing signals.",
+          conflict_flags: [],
+          narrative_contract_version: "v1",
+        },
+      },
+    });
+    const text = resolveEvidenceText(card.intel_read).toLowerCase();
+    expect(text).toContain("measured buy");
+    expect(text).not.toContain("reviewing before taking action");
   });
 });

@@ -223,9 +223,13 @@ function Chip({ label, tone }: { label: string; tone: "good" | "bad" | "neutral"
 function WhyThisView({ intelRead }: { intelRead: IntelRead }) {
   const hasTrusted = intelRead.trusted_signals.length > 0;
   const hasIncomplete = intelRead.incomplete_signals.length > 0;
-  // posture_reason is the primary card-specific explanation of WHY this posture was assigned.
-  // Fall back to bottom_line (insufficient-data specific), then summary.
-  const displaySummary = intelRead.posture_reason || intelRead.bottom_line || intelRead.summary;
+  // Narrative contract is authoritative when present. Fall back to posture_reason,
+  // then bottom_line (insufficient-data specific), then summary.
+  const displaySummary =
+    intelRead.narrative_contract?.evidence_summary
+    || intelRead.posture_reason
+    || intelRead.bottom_line
+    || intelRead.summary;
 
   return (
     <div className="rounded-md border border-border/30 bg-surface-elevated/20 px-2.5 py-2 space-y-1.5">

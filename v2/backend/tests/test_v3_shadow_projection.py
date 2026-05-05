@@ -55,13 +55,13 @@ def _card(
 
 def _good_intel_read(n_trusted: int = 3) -> dict:
     dims = ["business quality", "valuation", "growth", "momentum"][:n_trusted]
-    return {"insufficient_data": False, "trusted_dimensions": dims, "suppressed_dimensions": []}
+    return {"insufficient_data": False, "trusted_signals": dims, "suppressed_dimensions": []}
 
 
 def _thin_intel_read() -> dict:
     return {
         "insufficient_data": True,
-        "trusted_dimensions": [],
+        "trusted_signals": [],
         "suppressed_dimensions": ["valuation", "growth"],
     }
 
@@ -160,7 +160,7 @@ class TestHoldCollapseRiskBuy:
             analyst_risks=[],
             category="Core",
             data_quality_label="HIGH",
-            intel_read={"insufficient_data": False, "trusted_dimensions": ["business quality", "valuation", "growth"]},
+            intel_read={"insufficient_data": False, "trusted_signals": ["business quality", "valuation", "growth"]},
             thesis_v2=None,
         )
         assert diag is not None
@@ -365,17 +365,17 @@ class TestValidActionOutput:
     @pytest.mark.parametrize("fixture", [
         _card(ticker="AAPL", v2_visible_action="BUY", analyst_action="BUY",
               conviction_level="HIGH", data_quality_label="HIGH",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b", "c"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b", "c"]}),
         _card(ticker="META", v2_visible_action="TRIM", analyst_action="TRIM",
               conviction_level="MEDIUM", data_quality_label="HIGH",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b"]}),
         _card(ticker="BTC", v2_visible_action="SELL", analyst_action="SELL",
               conviction_level="LOW", category="Crypto", data_quality_label="MEDIUM"),
         _card(ticker="STUB", v2_visible_action="HOLD", analyst_action=None,
               data_quality_label=None, intel_read=None),
         _card(ticker="XYZ", v2_visible_action="HOLD", analyst_action="WATCHLIST",
               data_quality_label="HIGH",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b"]}),
     ])
     def test_v3_action_is_always_valid(self, fixture):
         diag = project_shadow_from_card_signals(**fixture)
@@ -414,15 +414,15 @@ class TestHoldCollapseAudit:
         _card(ticker="AAPL", v2_visible_action="HOLD", analyst_action="BUY",
               conviction_level="HIGH", technical_signal="BULLISH", category="Core",
               data_quality_label="HIGH",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b", "c"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b", "c"]}),
         # TRIM signal → should collapse HOLD.
         _card(ticker="META", v2_visible_action="HOLD", analyst_action="TRIM",
               conviction_level="MEDIUM", category="Growth", data_quality_label="HIGH",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b"]}),
         # Thin evidence → honest HOLD (no collapse).
         _card(ticker="NVDA", v2_visible_action="HOLD", analyst_action="BUY",
               conviction_level="HIGH", category="Tech", data_quality_label="LOW",
-              intel_read={"insufficient_data": True, "trusted_dimensions": []}),
+              intel_read={"insufficient_data": True, "trusted_signals": []}),
         # No signals → honest HOLD (no collapse).
         _card(ticker="KLAR", v2_visible_action="HOLD", analyst_action=None,
               data_quality_label=None, intel_read=None, category="Speculative"),
@@ -431,7 +431,7 @@ class TestHoldCollapseAudit:
               conviction_level="LOW", technical_signal="BEARISH", category="Crypto",
               risk_flag="Severe insolvency risk", analyst_risks=["Critical default risk"],
               data_quality_label="MEDIUM",
-              intel_read={"insufficient_data": False, "trusted_dimensions": ["a", "b"]}),
+              intel_read={"insufficient_data": False, "trusted_signals": ["a", "b"]}),
     ]
 
     def test_at_least_one_hold_collapse_in_mix(self):

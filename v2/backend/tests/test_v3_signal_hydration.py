@@ -26,13 +26,13 @@ from app.services.intelligence.v3.shadow_projection import (
 # ── Production-shaped synthetic fixture helpers ───────────────────────────────
 
 def _good_intel_read(n_trusted: int = 3) -> dict:
-    """Synthetic intel_read with n trusted dimensions (mirrors production field shape)."""
+    """Synthetic intel_read with n trusted signals (mirrors production field shape)."""
     dims = ["business quality", "valuation", "growth", "momentum"][:n_trusted]
-    return {"insufficient_data": False, "trusted_dimensions": dims, "suppressed_dimensions": []}
+    return {"insufficient_data": False, "trusted_signals": dims, "suppressed_dimensions": []}
 
 
 def _thin_intel_read() -> dict:
-    return {"insufficient_data": True, "trusted_dimensions": [], "suppressed_dimensions": ["valuation"]}
+    return {"insufficient_data": True, "trusted_signals": [], "suppressed_dimensions": ["valuation"]}
 
 
 def _prod_card(

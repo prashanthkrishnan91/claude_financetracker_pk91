@@ -139,17 +139,25 @@ def _conflicting(
 def classify_evidence_signals(
     data_quality_label: Optional[str],
     intel_read: Optional[dict],
+    *,
+    analyst_used_fallback: Optional[bool] = None,
 ) -> DataTruthFinding:
     """Classify the evidence quality signal group.
 
     intel_read takes precedence over data_quality_label when both present.
+
+    analyst_used_fallback=True caps trust at MEDIUM even when signal count
+    or label would otherwise qualify as HIGH. HIGH trust requires non-fallback
+    structured evidence so that shadow guardrail is not defeated by fallback LLM
+    outputs that happen to have sufficient trusted-signal counts.
     """
     if intel_read is None and data_quality_label is None:
         return _missing("evidence_quality", source_kind="intel_read_and_data_quality_label")
 
     if intel_read is not None:
         insufficient = bool(intel_read.get("insufficient_data"))
-        trusted = intel_read.get("trusted_dimensions") or []
+        # Production intel_read uses "trusted_signals" (built by build_intel_read()).
+        trusted = intel_read.get("trusted_signals") or []
         n_trusted = len(trusted) if isinstance(trusted, list) else 0
 
         if insufficient or n_trusted == 0:
@@ -159,6 +167,14 @@ def classify_evidence_signals(
                 reason_code="intel_insufficient",
             )
         if n_trusted >= 3:
+            if analyst_used_fallback is True:
+                # Fallback output: evidence count is sufficient but trust is not HIGH.
+                return _present(
+                    "evidence_quality",
+                    trust_level=SourceTrustLevel.MEDIUM,
+                    source_kind="intel_read",
+                    reason_code="field_present_fallback_capped",
+                )
             return _present(
                 "evidence_quality",
                 trust_level=SourceTrustLevel.HIGH,
@@ -175,6 +191,13 @@ def classify_evidence_signals(
     if _is_unavailable_sentinel(data_quality_label):
         return _unavailable("evidence_quality", source_kind="data_quality_label")
     if label == "HIGH":
+        if analyst_used_fallback is True:
+            return _present(
+                "evidence_quality",
+                trust_level=SourceTrustLevel.MEDIUM,
+                source_kind="data_quality_label",
+                reason_code="field_present_fallback_capped",
+            )
         return _present("evidence_quality", trust_level=SourceTrustLevel.HIGH, source_kind="data_quality_label")
     if label == "MEDIUM":
         return _present("evidence_quality", trust_level=SourceTrustLevel.MEDIUM, source_kind="data_quality_label")

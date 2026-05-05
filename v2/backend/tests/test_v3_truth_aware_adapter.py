@@ -50,11 +50,11 @@ _SENTINEL = object()  # marks "use default" vs explicit None in _ta()
 
 def _good_intel_read(n: int = 3) -> dict:
     dims = ["business quality", "valuation", "growth", "momentum"][:n]
-    return {"insufficient_data": False, "trusted_dimensions": dims}
+    return {"insufficient_data": False, "trusted_signals": dims}
 
 
 def _thin_intel_read() -> dict:
-    return {"insufficient_data": True, "trusted_dimensions": []}
+    return {"insufficient_data": True, "trusted_signals": []}
 
 
 def _ta(

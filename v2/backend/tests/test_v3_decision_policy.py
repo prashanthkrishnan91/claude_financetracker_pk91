@@ -464,7 +464,7 @@ class TestAdapter:
             data_quality_label="HIGH",
             intel_read={
                 "insufficient_data": False,
-                "trusted_dimensions": ["business quality", "valuation", "growth"],
+                "trusted_signals": ["business quality", "valuation", "growth"],
                 "suppressed_dimensions": [],
             },
             thesis_v2=None,
@@ -506,7 +506,7 @@ class TestAdapter:
             data_quality_label="HIGH",
             intel_read={
                 "insufficient_data": True,
-                "trusted_dimensions": [],
+                "trusted_signals": [],
                 "suppressed_dimensions": ["valuation", "growth"],
             },
             thesis_v2=None,
@@ -549,7 +549,7 @@ class TestAdapter:
             data_quality_label="HIGH",
             intel_read={
                 "insufficient_data": False,
-                "trusted_dimensions": ["business quality", "risk"],
+                "trusted_signals": ["business quality", "risk"],
                 "suppressed_dimensions": [],
             },
             thesis_v2=None,

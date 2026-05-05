@@ -89,7 +89,7 @@ def _strong_buy_card_signals() -> dict:
         category="tech",
         data_quality_label=None,
         intel_read={
-            "trusted_dimensions": ["earnings", "revenue", "margins"],
+            "trusted_signals": ["earnings", "revenue", "margins"],
             "insufficient_data": False,
         },
         thesis_v2=None,
@@ -97,7 +97,7 @@ def _strong_buy_card_signals() -> dict:
 
 
 def _medium_evidence_buy_signals() -> dict:
-    """Card signals producing BUY where evidence is PRESENT/MEDIUM (1-2 trusted dims).
+    """Card signals producing BUY where evidence is PRESENT/MEDIUM (1-2 trusted signals).
 
     Should yield BUY with HIGH upstream conviction, but guardrail caps to MEDIUM.
     """
@@ -112,7 +112,7 @@ def _medium_evidence_buy_signals() -> dict:
         category="tech",
         data_quality_label=None,
         intel_read={
-            "trusted_dimensions": ["earnings", "revenue"],  # 2 dims → OK, MEDIUM trust
+            "trusted_signals": ["earnings", "revenue"],  # 2 signals → MEDIUM trust
             "insufficient_data": False,
         },
         thesis_v2=None,
@@ -374,7 +374,7 @@ class TestGuardrailWithClassifyEvidence:
     def test_three_trusted_dims_not_fired(self):
         finding = classify_evidence_signals(
             data_quality_label=None,
-            intel_read={"trusted_dimensions": ["a", "b", "c"], "insufficient_data": False},
+            intel_read={"trusted_signals": ["a", "b", "c"], "insufficient_data": False},
         )
         ev = AxisTruthSummary(
             axis_name="evidence_quality",
@@ -393,7 +393,7 @@ class TestGuardrailWithClassifyEvidence:
     def test_two_trusted_dims_fired(self):
         finding = classify_evidence_signals(
             data_quality_label=None,
-            intel_read={"trusted_dimensions": ["a", "b"], "insufficient_data": False},
+            intel_read={"trusted_signals": ["a", "b"], "insufficient_data": False},
         )
         ev = AxisTruthSummary(
             axis_name="evidence_quality",
@@ -473,7 +473,7 @@ class TestGuardrailWithClassifyEvidence:
     def test_insufficient_intel_read_fired(self):
         finding = classify_evidence_signals(
             data_quality_label=None,
-            intel_read={"trusted_dimensions": [], "insufficient_data": True},
+            intel_read={"trusted_signals": [], "insufficient_data": True},
         )
         ev = AxisTruthSummary(
             axis_name="evidence_quality",
@@ -662,10 +662,10 @@ _GOLDEN_PORTFOLIO = [
         analyst_risks=None,
         category="tech",
         data_quality_label=None,
-        intel_read={"trusted_dimensions": ["d1", "d2", "d3"], "insufficient_data": False},
+        intel_read={"trusted_signals": ["d1", "d2", "d3"], "insufficient_data": False},
         thesis_v2=None,
     ),
-    # Medium-evidence BUY: 2 trusted dims, BUY signal — guardrail caps HIGH→MEDIUM.
+    # Medium-evidence BUY: 2 trusted signals, BUY signal — guardrail caps HIGH→MEDIUM.
     dict(
         ticker="MED_EV_BUY",
         v2_visible_action="HOLD",
@@ -676,7 +676,7 @@ _GOLDEN_PORTFOLIO = [
         analyst_risks=None,
         category="tech",
         data_quality_label=None,
-        intel_read={"trusted_dimensions": ["d1", "d2"], "insufficient_data": False},
+        intel_read={"trusted_signals": ["d1", "d2"], "insufficient_data": False},
         thesis_v2=None,
     ),
     # TRIM: overweight / TRIM analyst signal, missing evidence.

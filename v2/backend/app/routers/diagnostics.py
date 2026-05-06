@@ -9,7 +9,9 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
+from uuid import UUID
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 
 from ..config import get_settings
@@ -35,6 +37,32 @@ def _ensure_cert_enabled(secret_header: str | None) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
     if not secret_header or not hmac.compare_digest(secret_header, settings.finance_runtime_cert_secret):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+
+async def _get_runtime_cert_user(
+    request: Request,
+    cert_secret: str | None = Header(default=None, alias="X-Finance-Runtime-Cert-Secret"),
+) -> AuthenticatedUser:
+    _ensure_cert_enabled(cert_secret)
+    settings = get_settings()
+
+    auth_header = request.headers.get("authorization")
+    if auth_header:
+        return await get_current_user(request)
+
+    if not settings.finance_runtime_cert_user_id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Runtime certification user is not configured")
+
+    try:
+        cert_user_id = UUID(settings.finance_runtime_cert_user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Runtime certification user is not configured") from exc
+
+    return AuthenticatedUser(
+        user_id=cert_user_id,
+        email=settings.finance_runtime_cert_user_email or "runtime-cert@local",
+        role="owner",
+    )
 
 
 def _count_language_conflicts(cards: list[Any]) -> dict[str, int]:
@@ -97,10 +125,8 @@ def _status_for_mode(mode: str, total_cards: int, thesis: dict[str, int], counte
 async def certify_finance_runtime(
     payload: FinanceRuntimeCertRequest,
     background_tasks: BackgroundTasks,
-    user: AuthenticatedUser = Depends(get_current_user),
-    cert_secret: str | None = Header(default=None, alias="X-Finance-Runtime-Cert-Secret"),
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
 ):
-    _ensure_cert_enabled(cert_secret)
     started = datetime.now(timezone.utc)
     service = RecommendationService(user_id=user.id)
 

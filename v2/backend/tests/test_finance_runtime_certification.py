@@ -9,48 +9,48 @@ from fastapi import BackgroundTasks, HTTPException
 
 @pytest.mark.asyncio
 async def test_cert_disabled_returns_404(monkeypatch):
-    from app.routers.diagnostics import certify_finance_runtime, FinanceRuntimeCertRequest
+    from app.routers.diagnostics import _get_runtime_cert_user
 
     monkeypatch.setattr(
         "app.routers.diagnostics.get_settings",
         lambda: SimpleNamespace(finance_runtime_cert_enabled=False, finance_runtime_cert_secret=None),
     )
     with pytest.raises(HTTPException) as exc:
-        await certify_finance_runtime(
-            payload=FinanceRuntimeCertRequest(mode="read_only_cards"),
-            background_tasks=BackgroundTasks(),
-            user=SimpleNamespace(id=uuid4()),
-            cert_secret=None,
-        )
+        await _get_runtime_cert_user(request=SimpleNamespace(headers={}), cert_secret=None)
     assert exc.value.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_cert_enabled_rejects_wrong_secret(monkeypatch):
-    from app.routers.diagnostics import certify_finance_runtime, FinanceRuntimeCertRequest
+    from app.routers.diagnostics import _get_runtime_cert_user
 
     monkeypatch.setattr(
         "app.routers.diagnostics.get_settings",
-        lambda: SimpleNamespace(finance_runtime_cert_enabled=True, finance_runtime_cert_secret="topsecret"),
+        lambda: SimpleNamespace(
+            finance_runtime_cert_enabled=True,
+            finance_runtime_cert_secret="topsecret",
+            finance_runtime_cert_user_id=str(uuid4()),
+            finance_runtime_cert_user_email="cert@example.com",
+        ),
     )
     with pytest.raises(HTTPException) as exc:
-        await certify_finance_runtime(
-            payload=FinanceRuntimeCertRequest(mode="read_only_cards"),
-            background_tasks=BackgroundTasks(),
-            user=SimpleNamespace(id=uuid4()),
-            cert_secret="wrong",
-        )
+        await _get_runtime_cert_user(request=SimpleNamespace(headers={}), cert_secret="wrong")
     assert exc.value.status_code == 403
 
 
 @pytest.mark.asyncio
 async def test_read_only_cards_emits_summary(monkeypatch):
     from app.models.recommendation import InsightCard
-    from app.routers.diagnostics import certify_finance_runtime, FinanceRuntimeCertRequest
+    from app.routers.diagnostics import FinanceRuntimeCertRequest, certify_finance_runtime
 
     monkeypatch.setattr(
         "app.routers.diagnostics.get_settings",
-        lambda: SimpleNamespace(finance_runtime_cert_enabled=True, finance_runtime_cert_secret="topsecret"),
+        lambda: SimpleNamespace(
+            finance_runtime_cert_enabled=True,
+            finance_runtime_cert_secret="topsecret",
+            finance_runtime_cert_user_id=str(uuid4()),
+            finance_runtime_cert_user_email="cert@example.com",
+        ),
     )
 
     class _Svc:
@@ -67,7 +67,6 @@ async def test_read_only_cards_emits_summary(monkeypatch):
         payload=FinanceRuntimeCertRequest(mode="read_only_cards"),
         background_tasks=BackgroundTasks(),
         user=SimpleNamespace(id=uuid4()),
-        cert_secret="topsecret",
     )
     assert out["total_cards"] == 1
     assert out["response_path"] == "page_load"
@@ -75,11 +74,16 @@ async def test_read_only_cards_emits_summary(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_force_and_nonforced_pass_force_flag(monkeypatch):
-    from app.routers.diagnostics import certify_finance_runtime, FinanceRuntimeCertRequest
+    from app.routers.diagnostics import FinanceRuntimeCertRequest, certify_finance_runtime
 
     monkeypatch.setattr(
         "app.routers.diagnostics.get_settings",
-        lambda: SimpleNamespace(finance_runtime_cert_enabled=True, finance_runtime_cert_secret="topsecret"),
+        lambda: SimpleNamespace(
+            finance_runtime_cert_enabled=True,
+            finance_runtime_cert_secret="topsecret",
+            finance_runtime_cert_user_id=str(uuid4()),
+            finance_runtime_cert_user_email="cert@example.com",
+        ),
     )
 
     class _Svc:
@@ -88,21 +92,17 @@ async def test_force_and_nonforced_pass_force_flag(monkeypatch):
 
     monkeypatch.setattr("app.routers.diagnostics.RecommendationService", lambda user_id: _Svc())
 
-    bg_force = BackgroundTasks()
     out_force = await certify_finance_runtime(
         payload=FinanceRuntimeCertRequest(mode="force_run_agents"),
-        background_tasks=bg_force,
+        background_tasks=BackgroundTasks(),
         user=SimpleNamespace(id=uuid4()),
-        cert_secret="topsecret",
     )
     assert out_force["force_recompute"] is True
 
-    bg_nonforce = BackgroundTasks()
     out_nonforce = await certify_finance_runtime(
         payload=FinanceRuntimeCertRequest(mode="nonforced_run_agents"),
-        background_tasks=bg_nonforce,
+        background_tasks=BackgroundTasks(),
         user=SimpleNamespace(id=uuid4()),
-        cert_secret="topsecret",
     )
     assert out_nonforce["force_recompute"] is False
 
@@ -124,3 +124,25 @@ def test_cert_status_logic_read_only_fail_on_conflict():
     )
     assert status == "FAIL"
     assert "narrative_conflicts_detected" in reasons
+
+
+@pytest.mark.asyncio
+async def test_cert_secret_requires_configured_cert_user(monkeypatch):
+    from app.routers.diagnostics import _get_runtime_cert_user
+
+    monkeypatch.setattr(
+        "app.routers.diagnostics.get_settings",
+        lambda: SimpleNamespace(
+            finance_runtime_cert_enabled=True,
+            finance_runtime_cert_secret="topsecret",
+            finance_runtime_cert_user_id=None,
+            finance_runtime_cert_user_email=None,
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc:
+        await _get_runtime_cert_user(
+            request=SimpleNamespace(headers={}),
+            cert_secret="topsecret",
+        )
+    assert exc.value.status_code == 403

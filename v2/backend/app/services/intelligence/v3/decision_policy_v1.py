@@ -284,8 +284,11 @@ def _build_rationale(
                     else ""
                 )
 
+                asset_ctx = "equity position"
+                if "fund" in hint or "etf" in hint:
+                    asset_ctx = "fund exposure"
                 rationale = (
-                    f"{ticker}: {ev_desc} converge at {price_desc}."
+                    f"{ticker}: {asset_ctx} has {ev_desc} with {price_desc}."
                     f"{fit_note}{risk_note_inline}"
                 )
 

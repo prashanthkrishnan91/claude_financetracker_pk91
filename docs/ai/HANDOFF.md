@@ -2808,3 +2808,5 @@ PR 2 added per-card v3 shadow diagnostics, but there was no single portfolio-lev
   - `read_only_cards`: PASS when `total_cards>0` and all post-sanitize conflict counters are `0`.
   - `force_run_agents`: async kickoff (`force=true`) + pollable run id. Immediate response can be `INCONCLUSIVE`; final PASS requires thesis ready/partial coverage and zero post-sanitize conflicts after card assembly.
   - `nonforced_run_agents`: async kickoff (`force=false`) + pollable run id. PASS requires observable cache behavior (`skipped_fresh_verdicts>0` or explicit safe rejection reasons), and not all rejected for `missing_fingerprint` after a forced run.
+
+- 2026-05-06: Fixed Intel v3 legacy coupling by replacing run_v3 RecommendationService.get_insight_cards() dependency with read-only persisted evidence adapter. Added intel_v3_evidence_source_summary log and updated soft violation accounting to include generic_copy, duplicate_reason, repeated_skeleton, ticker_prefix_only_reason, weak_buy_rationale.

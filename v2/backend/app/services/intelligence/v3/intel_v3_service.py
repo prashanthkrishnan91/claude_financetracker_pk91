@@ -31,11 +31,12 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 from ....database import get_supabase_client
+from ...recommendation_engine import RecommendationService  # compatibility import; not used in v3 run path
 # Transitional input adapter: get_insight_cards() is used as a raw-signal bridge
 # only during POST /run. GET /snapshot never calls this path (zero LLM, zero legacy).
-from ...recommendation_engine import RecommendationService
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
+from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
@@ -123,9 +124,18 @@ class IntelV3Service:
         started_at = datetime.now(timezone.utc)
 
         try:
-            # Step 1: get existing signals via InsightCards.
-            rec_service = RecommendationService(user_id=self.user_id)
-            cards = await rec_service.get_insight_cards()
+            # Step 1: load persisted signals via read-only adapter (no legacy aggregation).
+            evidence_adapter = ReadOnlyEvidenceAdapter(user_id=self.user_id)
+            cards, evidence_stats = await evidence_adapter.load_cards()
+            logger.info(
+                "intel_v3_evidence_source_summary user_id=%s run_id=%s source_mode=read_only_persisted "
+                "persisted_recommendation_count=%d persisted_agent_insight_count=%d missing_evidence_count=%d "
+                "generated_legacy_recommendations=false attempted_llm_calls=0",
+                self.user_id, run_id,
+                evidence_stats.get("persisted_recommendation_count", 0),
+                evidence_stats.get("persisted_agent_insight_count", 0),
+                evidence_stats.get("missing_evidence_count", 0),
+            )
 
             # Step 2: get portfolio positions for governor weights.
             weight_map = await self._get_weight_map()
@@ -232,7 +242,13 @@ class IntelV3Service:
             _results = cert["per_card_results"]
             spam_tickers = cert["spam_tickers"]
             hard_violation_count = cert["hard_violations"]
-            soft_violation_count = sum(1 for r in _results if not r.is_valid) - hard_violation_count
+            soft_violation_count = (
+                cert["generic_copy_count"]
+                + cert["duplicate_reason_count"]
+                + cert["repeated_skeleton_count"]
+                + cert["ticker_prefix_only_reason_count"]
+                + cert["weak_buy_rationale_count"]
+            )
 
             if hard_violation_count > 0:
                 # Hard violations: invalid action labels, banned posture labels,

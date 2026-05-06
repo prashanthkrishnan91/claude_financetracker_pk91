@@ -66,6 +66,7 @@ class Settings(BaseSettings):
     price_cache_ttl: int = 300           # 5 minutes
     holdings_cache_ttl: int = 86400      # 24 hours
     price_history_cache_ttl: int = 3600  # 1 hour
+    analyst_verdict_reuse_ttl_seconds: int = 21600  # 6 hours (override for tests/ops)
 
 
 @lru_cache

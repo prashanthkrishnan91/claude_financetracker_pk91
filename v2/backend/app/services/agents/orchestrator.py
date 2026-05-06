@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
+from ...config import get_settings
 from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
@@ -266,9 +267,8 @@ class AgentPipelineResult:
 class AgentOrchestrator:
     """Drives a single agent run end-to-end with exactly one LLM call."""
 
-    # Freshness window for LLM verdict reuse: verdicts younger than this are
-    # considered fresh and will not be regenerated unless force_recompute=True.
-    _VERDICT_TTL_SECONDS: int = 6 * 3600  # 6 hours
+    # Freshness window for LLM verdict reuse (env-configurable).
+    _VERDICT_TTL_SECONDS: int = 21600
 
     def __init__(
         self,
@@ -308,7 +308,65 @@ class AgentOrchestrator:
             "reused_cached_cards": 0,
             "skipped_fresh_verdicts": 0,
             "skipped_llm_reason": None,
+            "force_recompute": bool(force_recompute),
+            "ttl_seconds": self._verdict_ttl_seconds(),
+            "cache_reuse_candidate_count": 0,
+            "cache_reuse_accepted_count": 0,
+            "cache_reuse_rejected_count": 0,
+            "cache_reuse_rejection_reasons": {},
         }
+
+    def _verdict_ttl_seconds(self) -> int:
+        try:
+            ttl = int(get_settings().analyst_verdict_reuse_ttl_seconds)
+        except Exception:
+            ttl = int(self._VERDICT_TTL_SECONDS)
+        return max(0, ttl)
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _inputs_equivalent_for_cache_reuse(self, ticker: str, raw_verdict: dict[str, Any]) -> tuple[bool, str | None]:
+        snap = (getattr(self, "_snapshots", {}) or {}).get(ticker)
+        feat = (getattr(self, "_features", {}) or {}).get(ticker)
+        if not isinstance(snap, dict) or not isinstance(feat, dict):
+            return False, "missing_fingerprint"
+        fp = raw_verdict.get("input_fingerprint")
+        if not isinstance(fp, dict):
+            return False, "missing_fingerprint"
+        if str(fp.get("ticker") or "").upper() != ticker:
+            return False, "input_changed"
+        for field in ("trend_regime", "volatility_regime", "data_quality_score", "thesis_status", "thesis_version", "generation_version"):
+            old_v = fp.get(field)
+            if old_v is None:
+                continue
+            new_v = feat.get(field)
+            if field == "generation_version":
+                new_v = getattr(self, "_analyst_generation_version", None) or new_v
+            if new_v is None:
+                continue
+            if str(old_v) != str(new_v):
+                return False, "thesis_status_changed" if field == "thesis_status" else "input_changed"
+        old_missing = set(fp.get("missing_fields") or [])
+        new_missing = set(feat.get("missing_fields") or [])
+        if old_missing != new_missing:
+            return False, "input_changed"
+        for field, tol in (("price", 0.02), ("return_5d", 0.01), ("return_30d", 0.02), ("momentum_score", 0.05), ("relative_strength_30d", 0.05), ("pe", 0.05), ("forward_pe", 0.05), ("profit_margin", 0.02), ("revenue_growth", 0.02), ("dividend_yield", 0.01)):
+            old_n = self._safe_float(fp.get(field))
+            if old_n is None:
+                continue
+            new_n = self._safe_float(snap.get(field, feat.get(field)))
+            if new_n is None:
+                return False, "input_changed"
+            if abs(old_n - new_n) > tol:
+                return False, "input_changed"
+        return True, None
 
     def _db(self, op_name: str, fn):
         return run_with_retry_sync(fn, op_name=op_name)
@@ -1384,10 +1442,12 @@ class AgentOrchestrator:
 
         if not tickers:
             return {}
+        ttl_seconds = self._verdict_ttl_seconds()
         cutoff = (
-            datetime.now(timezone.utc) - timedelta(seconds=self._VERDICT_TTL_SECONDS)
+            datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
         ).isoformat()
         fresh: dict[str, AnalystVerdict] = {}
+        rejected_reasons: dict[str, int] = {}
         try:
             rows = (
                 self._db(
@@ -1413,6 +1473,7 @@ class AgentOrchestrator:
             seen.add(ticker)
             raw_verdict = row.get("analyst_verdict")
             if not isinstance(raw_verdict, dict):
+                rejected_reasons["missing_fingerprint"] = rejected_reasons.get("missing_fingerprint", 0) + 1
                 continue
             # Reconstruct AnalystVerdict from persisted JSON.
             try:
@@ -1420,6 +1481,12 @@ class AgentOrchestrator:
                 used_fallback = bool(raw_verdict.get("used_fallback", False))
                 if used_fallback or action == "INSUFFICIENT_DATA":
                     # Never reuse fallback verdicts — they represent a failure state.
+                    rejected_reasons["fallback"] = rejected_reasons.get("fallback", 0) + 1
+                    continue
+                valid, reason = self._inputs_equivalent_for_cache_reuse(ticker, raw_verdict)
+                if not valid:
+                    key = str(reason or "input_changed")
+                    rejected_reasons[key] = rejected_reasons.get(key, 0) + 1
                     continue
                 v = AnalystVerdict(
                     ticker=ticker,
@@ -1451,9 +1518,17 @@ class AgentOrchestrator:
                 logger.debug("fresh_verdict_parse_skip ticker=%s err=%s", ticker, parse_exc)
 
         logger.info(
-            "fresh_verdict_load tickers_requested=%d fresh_found=%d cutoff=%s",
-            len(tickers), len(fresh), cutoff,
+            "fresh_verdict_load tickers_requested=%d fresh_found=%d cutoff=%s ttl_seconds=%d rejected=%s",
+            len(tickers), len(fresh), cutoff, ttl_seconds, rejected_reasons,
         )
+        stats = getattr(self, "_analyst_stage_stats", None)
+        if isinstance(stats, dict):
+            stats["cache_reuse_candidate_count"] = int(stats.get("cache_reuse_candidate_count", 0)) + len(rows)
+            stats["cache_reuse_accepted_count"] = int(stats.get("cache_reuse_accepted_count", 0)) + len(fresh)
+            stats["cache_reuse_rejected_count"] = int(stats.get("cache_reuse_rejected_count", 0)) + max(0, len(rows) - len(fresh))
+            rr = stats.setdefault("cache_reuse_rejection_reasons", {})
+            for k, v in rejected_reasons.items():
+                rr[k] = int(rr.get(k, 0)) + int(v)
         return fresh
 
     async def _run_per_ticker_analyst(self) -> dict[str, "AnalystVerdict"]:
@@ -1767,7 +1842,30 @@ class AgentOrchestrator:
                         insight.ticker,
                     )
                     verdict = insufficient_data_verdict(insight.ticker, error="forbidden_language_at_persist")
-                row["analyst_verdict"] = verdict.to_dict()
+                verdict_payload = verdict.to_dict()
+                snap = (getattr(self, "_snapshots", {}) or {}).get(insight.ticker, {}) or {}
+                feat = (getattr(self, "_features", {}) or {}).get(insight.ticker, {}) or {}
+                verdict_payload["input_fingerprint"] = {
+                    "ticker": insight.ticker,
+                    "price": snap.get("price"),
+                    "return_5d": feat.get("return_5d"),
+                    "return_30d": feat.get("return_30d"),
+                    "trend_regime": feat.get("trend_regime"),
+                    "momentum_score": feat.get("momentum_score"),
+                    "relative_strength_30d": feat.get("relative_strength_30d"),
+                    "volatility_regime": feat.get("volatility_regime"),
+                    "data_quality_score": feat.get("data_quality_score"),
+                    "missing_fields": feat.get("missing_fields"),
+                    "pe": snap.get("pe"),
+                    "forward_pe": snap.get("forward_pe"),
+                    "profit_margin": snap.get("profit_margin"),
+                    "revenue_growth": snap.get("revenue_growth"),
+                    "dividend_yield": snap.get("dividend_yield"),
+                    "thesis_status": feat.get("thesis_status"),
+                    "thesis_version": feat.get("thesis_version"),
+                    "generation_version": verdict.generation_version,
+                }
+                row["analyst_verdict"] = verdict_payload
                 row["analyst_confidence"] = round(verdict.confidence, 2)
                 logger.info(
                     "analyst_trace checkpoint=pre_db_write ticker=%s reasoning_source=%s reasoning_schema_version=%s row=%s",

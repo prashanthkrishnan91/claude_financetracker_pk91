@@ -526,6 +526,28 @@ class TestLLMReuse:
         orch._VERDICT_TTL_SECONDS = 6 * 3600
 
         fresh_row = self._make_fresh_verdict_row("MSFT")
+        fresh_row["analyst_verdict"]["input_fingerprint"] = {
+            "ticker": "MSFT",
+            "price": 100.0,
+            "return_5d": 0.01,
+            "return_30d": 0.03,
+            "trend_regime": "uptrend",
+            "momentum_score": 0.7,
+            "relative_strength_30d": 0.6,
+            "volatility_regime": "medium",
+            "data_quality_score": 0.9,
+            "missing_fields": [],
+            "pe": 25.0,
+            "forward_pe": 22.0,
+            "profit_margin": 0.2,
+            "revenue_growth": 0.1,
+            "dividend_yield": 0.01,
+            "thesis_status": "READY",
+            "thesis_version": "v2",
+            "generation_version": "compact_v1",
+        }
+        orch._snapshots = {"MSFT": {"price": 100.0, "pe": 25.0, "forward_pe": 22.0, "profit_margin": 0.2, "revenue_growth": 0.1, "dividend_yield": 0.01}}
+        orch._features = {"MSFT": {"return_5d": 0.01, "return_30d": 0.03, "trend_regime": "uptrend", "momentum_score": 0.7, "relative_strength_30d": 0.6, "volatility_regime": "medium", "data_quality_score": 0.9, "missing_fields": [], "thesis_status": "READY", "thesis_version": "v2"}}
 
         mock_db_result = MagicMock()
         mock_db_result.data = [fresh_row]
@@ -544,6 +566,25 @@ class TestLLMReuse:
         assert "MSFT" in result
         assert result["MSFT"].action == "BUY"
         assert result["MSFT"].used_fallback is False
+
+    def test_changed_inputs_invalidate_fresh_cache(self):
+        from app.services.agents.orchestrator import AgentOrchestrator
+        from unittest.mock import MagicMock
+        import uuid
+        orch = AgentOrchestrator.__new__(AgentOrchestrator)
+        orch.user_id = uuid.uuid4()
+        orch.force_recompute = False
+        orch._VERDICT_TTL_SECONDS = 6 * 3600
+        row = self._make_fresh_verdict_row("MSFT")
+        row["analyst_verdict"]["input_fingerprint"] = {"ticker": "MSFT", "price": 100.0, "momentum_score": 0.20, "missing_fields": [], "thesis_status": "READY"}
+        orch._snapshots = {"MSFT": {"price": 140.0}}
+        orch._features = {"MSFT": {"momentum_score": 0.75, "missing_fields": [], "thesis_status": "READY"}}
+        mock_db_result = MagicMock(); mock_db_result.data = [row]
+        orch._db = lambda _k, fn: fn()
+        mock_table = MagicMock()
+        mock_table.table.return_value.select.return_value.eq.return_value.in_.return_value.gte.return_value.order.return_value.execute.return_value = mock_db_result
+        orch.db = mock_table
+        assert "MSFT" not in orch._load_fresh_cached_verdicts(["MSFT"])
 
     def test_fallback_verdict_not_reused(self):
         """Fallback verdicts (used_fallback=True) must never be reused."""
@@ -782,8 +823,11 @@ class TestPartialRetry:
                 "what_to_do_now": "",
                 "generation_version": "human_v2",
                 "analysis_source": "live_llm",
+                "input_fingerprint": {"ticker": "MSFT", "price": 100.0, "momentum_score": 0.5, "missing_fields": []},
             },
         }
+        orch._snapshots = {"MSFT": {"price": 100.0}}
+        orch._features = {"MSFT": {"momentum_score": 0.5, "missing_fields": []}}
 
         mock_db_result = MagicMock()
         mock_db_result.data = [fresh_row]  # Only MSFT is fresh
@@ -832,9 +876,12 @@ class TestPartialRetry:
                 "differentiation": "", "why_this_matters": "", "what_could_go_wrong": "",
                 "what_to_do_now": "", "generation_version": "human_v2",
                 "analysis_source": "live_llm",
+                "input_fingerprint": {"ticker": t, "price": 100.0, "momentum_score": 0.5, "missing_fields": []},
             }}
             for t in ["AAPL", "MSFT", "GOOGL"]
         ]
+        orch._snapshots = {t: {"price": 100.0} for t in ["AAPL", "MSFT", "GOOGL"]}
+        orch._features = {t: {"momentum_score": 0.5, "missing_fields": []} for t in ["AAPL", "MSFT", "GOOGL"]}
 
         mock_db_result = MagicMock()
         mock_db_result.data = rows

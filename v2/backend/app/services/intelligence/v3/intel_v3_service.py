@@ -279,10 +279,14 @@ class IntelV3Service:
                     f"Generic copy detected on {len(spam_tickers)} card(s)."
                 )
             if prefix_only_count > 0:
+                prefix_examples = cert.get("examples", {}).get("ticker_prefix_only")
+                skeleton_examples = cert.get("examples", {}).get("repeated_skeleton")
                 logger.warning(
                     "intel_v3_run_soft_violation_skeleton user_id=%s run_id=%s "
-                    "ticker_prefix_only_reason_count=%d repeated_skeleton_count=%d",
+                    "ticker_prefix_only_reason_count=%d repeated_skeleton_count=%d "
+                    "ticker_prefix_only_examples=%s repeated_skeleton_examples=%s",
                     self.user_id, run_id, prefix_only_count, skeleton_count,
+                    prefix_examples, skeleton_examples,
                 )
                 snapshot_payload["warnings"].append(
                     f"Ticker-prefix-only rationale detected on {prefix_only_count} card(s). "
@@ -367,13 +371,43 @@ class IntelV3Service:
     async def _get_weight_map(self) -> dict[str, float]:
         """Fetch current positions and build ticker→weight_pct map."""
         try:
-            result = await asyncio.to_thread(
-                lambda: self.client.table("positions")
-                .select("ticker,current_value")
+            # Preferred source: latest persisted portfolio snapshot market values.
+            # This avoids querying non-existent columns on positions.
+            snap_result = await asyncio.to_thread(
+                lambda: self.client.table("portfolio_snapshots")
+                .select("positions_data,snapshot_at")
                 .eq("user_id", str(self.user_id))
+                .order("snapshot_at", desc=True)
+                .limit(1)
                 .execute()
             )
-            positions = result.data or []
+            positions: list[dict[str, Any]] = []
+            if snap_result.data:
+                latest = snap_result.data[0] or {}
+                raw_positions = latest.get("positions_data") or []
+                if isinstance(raw_positions, list):
+                    for row in raw_positions:
+                        if not isinstance(row, dict):
+                            continue
+                        ticker = row.get("ticker")
+                        market_value = row.get("market_value")
+                        if ticker and market_value is not None:
+                            positions.append({"ticker": ticker, "market_value": market_value})
+
+            # Fallback source: positions holdings, derive value from shares*avg_cost.
+            if not positions:
+                result = await asyncio.to_thread(
+                    lambda: self.client.table("positions")
+                    .select("ticker,shares,avg_cost")
+                    .eq("user_id", str(self.user_id))
+                    .execute()
+                )
+                for row in (result.data or []):
+                    ticker = row.get("ticker")
+                    shares = float(row.get("shares") or 0.0)
+                    avg_cost = float(row.get("avg_cost") or 0.0)
+                    if ticker:
+                        positions.append({"ticker": ticker, "market_value": shares * avg_cost})
             return build_weight_map(positions)
         except Exception as exc:
             logger.warning(

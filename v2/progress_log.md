@@ -1,3 +1,10 @@
+
+## 2026-05-06 — Runtime certification server-to-server auth hardening
+
+- Added diagnostics-only server-to-server auth path for `POST /api/v1/diagnostics/finance-intel/certify`: still env-gated (`FINANCE_RUNTIME_CERT_ENABLED`) and secret-gated (`X-Finance-Runtime-Cert-Secret`), now supports non-Bearer callers via configured cert identity (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).
+- Returns safe 403 when cert user env is missing/invalid; normal JWT auth still required everywhere else.
+- Added focused tests for disabled, bad secret, missing cert user, read-only summary, and force/nonforce propagation.
+
 ## 2026-05-05 — Intel Card Narrative Contract v1: Full Evidence Check action-consistency fix (Level 3 / Sev 1)
 
 - Root cause (two-part, both fixed):

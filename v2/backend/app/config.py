@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     # ── Runtime certification harness (ops-only) ─────────────────────────────
     finance_runtime_cert_enabled: bool = False
     finance_runtime_cert_secret: Optional[str] = None
+    finance_runtime_cert_user_id: Optional[str] = None
+    finance_runtime_cert_user_email: Optional[str] = None
 
 
 @lru_cache

@@ -1,3 +1,10 @@
+
+## 2026-05-06 Update — Runtime certification endpoint callable from GitHub Actions
+
+- `POST /api/v1/diagnostics/finance-intel/certify` can now be called server-to-server with only `X-Finance-Runtime-Cert-Secret` **when** cert user env is configured (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).
+- Endpoint remains hidden behind `FINANCE_RUNTIME_CERT_ENABLED=true`; if secret or cert user config is missing, it fails closed with 403.
+- Existing Bearer-token path still works and is unchanged for user-driven diagnostics.
+
 ## 2026-05-05 — Finance Intel Reliability Reset (Level 3 / Sev 1)
 
 ### Severity

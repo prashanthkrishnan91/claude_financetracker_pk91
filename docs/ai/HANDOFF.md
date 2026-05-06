@@ -2519,3 +2519,26 @@ PR 2 added per-card v3 shadow diagnostics, but there was no single portfolio-lev
   - mixed action aggregation + projection failures,
   - v2 HOLD + v3 BUY/TRIM/SELL collapse counting,
   - honest HOLD counted separately from collapse risk.
+
+## Finance Intel Runtime Certification Harness (v2 backend only)
+- Endpoint: `POST /api/v1/diagnostics/finance-intel/certify`
+- Modes: `read_only_cards`, `force_run_agents`, `nonforced_run_agents`
+- Env gates:
+  - `FINANCE_RUNTIME_CERT_ENABLED=false` (default)
+  - `FINANCE_RUNTIME_CERT_SECRET` (required when enabled)
+  - Header required: `X-Finance-Runtime-Cert-Secret`
+- Security behavior:
+  - Disabled => `404`
+  - Missing/invalid secret => `403`
+- ai-runtime-evidence request shape:
+```json
+{
+  "mode": "read_only_cards",
+  "deposit_amount": 900,
+  "sale_proceeds": 0
+}
+```
+- PASS/FAIL rules:
+  - `read_only_cards`: PASS when `total_cards>0` and all post-sanitize conflict counters are `0`.
+  - `force_run_agents`: async kickoff (`force=true`) + pollable run id. Immediate response can be `INCONCLUSIVE`; final PASS requires thesis ready/partial coverage and zero post-sanitize conflicts after card assembly.
+  - `nonforced_run_agents`: async kickoff (`force=false`) + pollable run id. PASS requires observable cache behavior (`skipped_fresh_verdicts>0` or explicit safe rejection reasons), and not all rejected for `missing_fingerprint` after a forced run.

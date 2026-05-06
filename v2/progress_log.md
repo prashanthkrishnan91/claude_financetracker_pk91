@@ -390,3 +390,17 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - No UI/API/Deploy/SQL/provider/LLM changes.
 
 - 2026-05-05: Intel v3 PR 10 merged scope prepared — added backend-only portfolio/batch guardrail-impact observability aggregation for PR 9, wired into existing env-gated v3 shadow INFO summary path (default off), and added focused tests; no visible/UI/API/Deploy/SQL/provider/LLM changes.
+
+### 2026-05-06 — Runtime certification harness (infra unblocker post-PR209)
+- Added backend-only diagnostics endpoint: `POST /api/v1/diagnostics/finance-intel/certify`.
+- Env-gated protection added:
+  - `FINANCE_RUNTIME_CERT_ENABLED` (default false)
+  - `FINANCE_RUNTIME_CERT_SECRET` (required if enabled)
+  - request header `X-Finance-Runtime-Cert-Secret`
+  - disabled => 404, invalid/missing secret => 403.
+- Added modes:
+  - `read_only_cards` (page-load card assembly path, no new LLM calls)
+  - `force_run_agents` (queues existing refresh pipeline with `force=true`)
+  - `nonforced_run_agents` (queues existing refresh pipeline with `force=false`)
+- Added certification response/log payload `finance_intel_runtime_certification` including pass/fail/inconclusive status + failure reasons.
+- Added unit tests for gating, secret validation, read-only summary output, force/nonforce propagation, and status logic.

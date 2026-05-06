@@ -250,10 +250,10 @@ class TestNoRawMetricKeysOrPostureLabels:
 # ── Section 4: Page-load path does NOT invoke LLM ────────────────────────────
 
 class TestPageLoadIsolationFromLLM:
-    """GET /snapshot must never call RecommendationService or any LLM path."""
+    """GET /snapshot must never call ReadOnlyEvidenceAdapter or any LLM path."""
 
     def test_get_latest_snapshot_does_not_call_recommendation_service(self):
-        """Confirm get_latest_snapshot does not call RecommendationService."""
+        """Confirm get_latest_snapshot does not call ReadOnlyEvidenceAdapter."""
         import asyncio
         from app.services.intelligence.v3.intel_v3_service import IntelV3Service
 
@@ -271,9 +271,9 @@ class TestPageLoadIsolationFromLLM:
         service.client = mock_client
 
         with patch(
-            "app.services.intelligence.v3.intel_v3_service.RecommendationService"
+            "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter"
         ) as mock_rec:
-            asyncio.get_event_loop().run_until_complete(service.get_latest_snapshot())
+            asyncio.run(service.get_latest_snapshot())
             mock_rec.assert_not_called()
 
     def test_get_latest_snapshot_page_load_no_llm_calls_in_contract(self):
@@ -301,7 +301,7 @@ class TestPageLoadIsolationFromLLM:
         service.user_id = uuid.UUID("00000000-0000-0000-0000-000000000002")
         service.client = mock_client
 
-        result = asyncio.get_event_loop().run_until_complete(service.get_latest_snapshot())
+        result = asyncio.run(service.get_latest_snapshot())
         assert result == expected_payload
 
 
@@ -349,13 +349,13 @@ class TestRunThenSnapshot:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=cards)),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=(cards, {"persisted_recommendation_count": len(cards), "persisted_agent_insight_count": len(cards), "active_position_count": len(cards), "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch.object(service, "_persist_snapshot", side_effect=fake_persist),
         ):
-            snapshot = asyncio.get_event_loop().run_until_complete(service.run_v3())
+            snapshot = asyncio.run(service.run_v3())
 
         # run_v3 returned the snapshot.
         assert "snapshot_id" in snapshot
@@ -378,13 +378,13 @@ class TestRunThenSnapshot:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=cards)),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=(cards, {"persisted_recommendation_count": len(cards), "persisted_agent_insight_count": len(cards), "active_position_count": len(cards), "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch.object(service, "_persist_snapshot", new_callable=AsyncMock),
         ):
-            snapshot = asyncio.get_event_loop().run_until_complete(service.run_v3())
+            snapshot = asyncio.run(service.run_v3())
 
         # Verify no generic copy.
         held_cards = snapshot["current_holdings"]

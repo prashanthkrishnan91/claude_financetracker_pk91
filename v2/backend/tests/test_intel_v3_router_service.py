@@ -10,8 +10,8 @@ Proves the service/router path rather than just pure helpers:
   - action_counts match current_holdings actions.
   - All cards share the same snapshot_id and run_id.
   - No visible action outside BUY/HOLD/TRIM/SELL.
-  - Page-load snapshot read does not call RecommendationService.get_insight_cards.
-  - v3 run path is the only path that calls get_insight_cards (not page load).
+  - Page-load snapshot read does not call ReadOnlyEvidenceAdapter.load_cards.
+  - v3 run path is the only path that calls read-only persisted adapter (not page load).
   - all-INSUFFICIENT_DATA + BUY-count contradiction cannot be persisted.
 """
 from __future__ import annotations
@@ -107,11 +107,11 @@ class TestAppImport:
         assert IntelV3Service is not None
         assert callable(is_intel_v3_enabled)
 
-    def test_recommendation_service_import_path(self):
-        """The transitional adapter RecommendationService must resolve correctly."""
-        from app.services.intelligence.v3.intel_v3_service import RecommendationService
-        from app.services.recommendation_engine import RecommendationService as DirectRS
-        assert RecommendationService is DirectRS
+    def test_read_only_adapter_import_path(self):
+        """The transitional adapter ReadOnlyEvidenceAdapter must resolve correctly."""
+        from app.services.intelligence.v3.intel_v3_service import ReadOnlyEvidenceAdapter
+        from app.services.intelligence.v3.read_only_evidence_adapter import ReadOnlyEvidenceAdapter as DirectAdapter
+        assert ReadOnlyEvidenceAdapter is DirectAdapter
 
 
 # ── Gate B: Feature flag behavior ────────────────────────────────────────────
@@ -301,8 +301,8 @@ class TestValidatorFailClosed:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=[mock_card])),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=([mock_card], {"persisted_recommendation_count": 1, "persisted_agent_insight_count": 1, "active_position_count": 1, "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch(
@@ -312,7 +312,7 @@ class TestValidatorFailClosed:
             patch.object(service, "_persist_snapshot", new_callable=AsyncMock) as mock_persist,
         ):
             with pytest.raises(ValueError, match="hard validation violation"):
-                asyncio.get_event_loop().run_until_complete(service.run_v3())
+                asyncio.run(service.run_v3())
             # _persist_snapshot must NOT have been called.
             mock_persist.assert_not_called()
 
@@ -333,7 +333,7 @@ class TestValidatorFailClosed:
 
 class TestPageLoadIsolation:
     def test_get_latest_snapshot_does_not_call_recommendation_service(self):
-        """get_latest_snapshot must NEVER call RecommendationService.get_insight_cards."""
+        """get_latest_snapshot must NEVER call ReadOnlyEvidenceAdapter.load_cards."""
         from app.services.intelligence.v3.intel_v3_service import IntelV3Service
 
         mock_client = MagicMock()
@@ -350,10 +350,10 @@ class TestPageLoadIsolation:
         service.client = mock_client
 
         with patch(
-            "app.services.intelligence.v3.intel_v3_service.RecommendationService"
+            "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter"
         ) as mock_rec_service:
-            asyncio.get_event_loop().run_until_complete(service.get_latest_snapshot())
-            # RecommendationService must not have been instantiated or called.
+            asyncio.run(service.get_latest_snapshot())
+            # ReadOnlyEvidenceAdapter must not have been instantiated or called.
             mock_rec_service.assert_not_called()
 
     def test_get_latest_snapshot_returns_none_when_no_rows(self):
@@ -373,7 +373,7 @@ class TestPageLoadIsolation:
         service.user_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         service.client = mock_client
 
-        result = asyncio.get_event_loop().run_until_complete(service.get_latest_snapshot())
+        result = asyncio.run(service.get_latest_snapshot())
         assert result is None
 
     def test_get_latest_snapshot_returns_payload_when_row_exists(self):
@@ -395,7 +395,7 @@ class TestPageLoadIsolation:
         service.user_id = uuid.UUID("00000000-0000-0000-0000-000000000001")
         service.client = mock_client
 
-        result = asyncio.get_event_loop().run_until_complete(service.get_latest_snapshot())
+        result = asyncio.run(service.get_latest_snapshot())
         assert result == expected
 
 
@@ -442,13 +442,13 @@ class TestRunPath:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=cards)),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=(cards, {"persisted_recommendation_count": len(cards), "persisted_agent_insight_count": len(cards), "active_position_count": len(cards), "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch.object(service, "_persist_snapshot", new_callable=AsyncMock),
         ):
-            result = asyncio.get_event_loop().run_until_complete(service.run_v3())
+            result = asyncio.run(service.run_v3())
 
         assert "snapshot_id" in result
         assert "run_id" in result
@@ -471,13 +471,13 @@ class TestRunPath:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=cards)),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=(cards, {"persisted_recommendation_count": len(cards), "persisted_agent_insight_count": len(cards), "active_position_count": len(cards), "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch.object(service, "_persist_snapshot", new_callable=AsyncMock),
         ):
-            result = asyncio.get_event_loop().run_until_complete(service.run_v3())
+            result = asyncio.run(service.run_v3())
 
         # action_counts must be derived from cards, not from input card actions.
         holdings = result["current_holdings"]
@@ -497,13 +497,13 @@ class TestRunPath:
 
         with (
             patch(
-                "app.services.intelligence.v3.intel_v3_service.RecommendationService",
-                return_value=MagicMock(get_insight_cards=AsyncMock(return_value=cards)),
+                "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter",
+                return_value=MagicMock(load_cards=AsyncMock(return_value=(cards, {"persisted_recommendation_count": len(cards), "persisted_agent_insight_count": len(cards), "active_position_count": len(cards), "missing_recommendation_count": 0, "missing_evidence_count": 0, "stale_or_missing_source_count": 0}))),
             ),
             patch.object(service, "_get_weight_map", new_callable=AsyncMock, return_value={}),
             patch.object(service, "_persist_snapshot", new_callable=AsyncMock),
         ):
-            result = asyncio.get_event_loop().run_until_complete(service.run_v3())
+            result = asyncio.run(service.run_v3())
 
         snap_ids = {c["source_snapshot_id"] for c in result["current_holdings"]}
         run_ids = {c["source_run_id"] for c in result["current_holdings"]}

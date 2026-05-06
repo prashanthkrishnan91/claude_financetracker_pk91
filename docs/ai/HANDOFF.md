@@ -1,4 +1,87 @@
 
+## 2026-05-06 — Intel v3 Evidence-Aware Rationale + Certification Hardening (Level 2)
+
+### What failed in production (after PR #217)
+PR #217 fixed `generic_copy_count=29` by prepending ticker symbols to a shared template
+(`_build_rationale()` was called once per ticker). This defeated only exact-duplicate detection.
+Production cards still read: "MSFT: strong evidence and fairly priced. Portfolio has room to add.
+Manageable risk." — identical except for the ticker prefix.
+
+### Root cause (in PR #217's fix)
+`_build_rationale()` did not use any per-ticker evidence fields (`primary_driver`, `risk_flag`,
+`action_reason`, `analyst_drivers`). These fields exist on `InsightCard` from the analyst
+verdict but were never threaded into `DecisionInputV3`. The ticker-prefix trick made
+`generic_copy_count=0` by creating exact-string uniqueness, but the underlying sentence
+skeleton was identical across all BUY cards with matching axis bands.
+
+### Certification gap
+`detect_generic_copy_spam()` only checks for exact duplicate strings. Ticker-prefixed boilerplate
+(same template + different ticker prefix) was not caught by any existing check.
+
+### Fix (this PR)
+1. **`DecisionInputV3`**: Added optional evidence fields — `primary_driver`, `risk_flag_text`,
+   `action_reason`, `analyst_drivers`, `asset_type_hint`.
+2. **`existing_signal_adapter.py`**: Threaded evidence fields through both
+   `build_decision_input_from_card()` and `build_truth_aware_decision_input()`.
+3. **`decision_policy_v1.py`**: Replaced shallow template `_build_rationale()` with
+   evidence-aware rationale assembler. Prioritizes `primary_driver` → `analyst_drivers[0]`
+   → `action_reason` → expressive axis-band fallback. ETF/crypto/stock handling.
+   HOLD rationale distinguishes: thin evidence / elevated risk / on-target / price stretched.
+   Added `_clean_evidence_text()` to sanitize LLM-generated text (removes raw metric keys,
+   price targets, truncates at sentence boundary).
+4. **`source_validator_lite.py`**: Added 4 new functions:
+   - `detect_ticker_prefix_only_spam()` — detects cards where only ticker differs
+   - `detect_repeated_skeleton_spam()` — normalizes text (removes tickers, numbers, punct), detects repeated skeletons
+   - `detect_weak_buy_rationale()` — BUY cards matching known boilerplate patterns
+   - `certify_snapshot_cards()` — full certification returning all required fields
+   `validate_snapshot_cards()` now delegates to `certify_snapshot_cards()` (backward compat preserved).
+5. **`intel_v3_service.py`**: Passes `primary_driver`, `action_reason`, `analyst_drivers`
+   from card to adapter. Uses `certify_snapshot_cards()`. Logs new certification fields.
+6. **`test_v3_evidence_rationale.py`**: 34 new tests that would have failed PR #217.
+
+### Certification fields (updated)
+- `generic_copy_count` — exact duplicates (unchanged)
+- `duplicate_reason_count` — exact duplicates count
+- `repeated_skeleton_count` — NEW: shared sentence skeleton count
+- `ticker_prefix_only_reason_count` — NEW: cards where only ticker differs
+- `weak_buy_rationale_count` — NEW: BUY cards with boilerplate template
+- `action_conflict_count` — based on existing conflict_count
+- `raw_metric_key_count` — unchanged
+- `posture_label_count` — unchanged
+
+### How to validate in production after merge
+1. Deploy backend + frontend.
+2. Load Intel page — Railway logs: `intel_v3_snapshot_response_summary result=no_snapshot` (or `result=found`).
+3. Click "Run Intel v3" — Railway logs must show:
+   - `intel_v3_snapshot_certification_summary ... repeated_skeleton_count=0 ticker_prefix_only_reason_count=0 weak_buy_rationale_count=0`
+   - `hard_violations=0 generic_copy_count=0`
+4. Open 3–5 BUY cards: each must have a distinct, ticker-specific reason.
+   - No two cards should read like the same sentence with different tickers.
+   - Cards with `primary_driver` (from analyst LLM run): shows driver text.
+   - Cards without evidence (analyst fallback): expressive axis-band fallback, no boilerplate.
+5. Open 3 HOLD cards: each should explain WHY (thin evidence / risk / on-target / price).
+6. Verify no "Portfolio has room to add. Manageable risk." boilerplate anywhere.
+
+### Tests
+- Backend: 34 new tests in `test_v3_evidence_rationale.py`
+- All 572 existing v3 backend tests still pass
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/decision_contracts.py` — 5 new evidence fields on DecisionInputV3
+- `v2/backend/app/services/intelligence/v3/existing_signal_adapter.py` — thread evidence through adapter
+- `v2/backend/app/services/intelligence/v3/decision_policy_v1.py` — evidence-aware rationale builder
+- `v2/backend/app/services/intelligence/v3/source_validator_lite.py` — skeleton spam detection + certify_snapshot_cards
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — pass evidence + log new cert fields
+- `v2/backend/tests/test_v3_evidence_rationale.py` — NEW: 34 backend tests
+
+### Supabase SQL: No
+No new migrations. Evidence fields are transient inputs to the decision kernel; they are not stored separately.
+
+### Frontend changes: None
+The `why_text` field already exists on snapshot cards and is rendered as-is. No frontend changes needed.
+
+---
+
 ## 2026-05-06 — Intel v3 Visible-Path Certification Fix (Level 2)
 
 ### What failed in production validation

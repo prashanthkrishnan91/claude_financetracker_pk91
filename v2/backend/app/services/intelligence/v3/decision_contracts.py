@@ -85,6 +85,15 @@ class DecisionInputV3:
     # Audit trail of source signals (no raw metric keys).
     source_signal_summary: dict = field(default_factory=dict)
 
+    # Per-ticker evidence text from analyst verdict (optional).
+    # Used by _build_rationale() to produce visible, ticker-specific reason text.
+    # Absent when LLM has not run for this ticker or analyst used fallback path.
+    primary_driver: Optional[str] = None       # single most important plain-English reason
+    risk_flag_text: Optional[str] = None       # biggest single risk that could break thesis
+    action_reason: Optional[str] = None        # plain-English explanation of why BUY/HOLD
+    analyst_drivers: Optional[list] = field(default_factory=list)
+    asset_type_hint: Optional[str] = None      # 'etf' | 'crypto' | 'stock' (default stock)
+
 
 @dataclass
 class DecisionOutputV3:

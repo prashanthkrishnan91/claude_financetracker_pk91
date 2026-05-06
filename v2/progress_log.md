@@ -1,4 +1,22 @@
 
+## 2026-05-06 — Intel v3 Evidence-Aware Rationale + Certification Hardening (Level 2)
+
+- PR #217 passed plumbing certification but failed intelligence quality: ticker-prefix boilerplate slipped through exact-duplicate detection. Production cards read: "MSFT: strong evidence and fairly priced. Portfolio has room to add. Manageable risk." — same sentence for every BUY ticker.
+- Root cause: `_build_rationale()` never used `primary_driver`, `risk_flag`, `action_reason`, `analyst_drivers` from the InsightCard. These evidence fields existed but were not threaded into DecisionInputV3.
+- This PR introduces evidence-aware v3 visible rationale: BUY cards use `primary_driver` when available; HOLD cards explain the specific reason (thin evidence / risk / on-target / price stretched).
+- Strengthened certification: `certify_snapshot_cards()` now reports `repeated_skeleton_count`, `ticker_prefix_only_reason_count`, `weak_buy_rationale_count` in addition to existing fields.
+- New functions: `detect_ticker_prefix_only_spam()`, `detect_repeated_skeleton_spam()`, `detect_weak_buy_rationale()`.
+- `_clean_evidence_text()` sanitizes LLM-generated driver text before embedding in rationale (removes raw metric keys, price targets, truncates).
+- 34 new backend tests in `test_v3_evidence_rationale.py`; 572 existing v3 tests still pass.
+- No Supabase SQL. No frontend changes. No new providers. No LLM calls.
+
+Production validation checklist after deploy:
+  1. `repeated_skeleton_count=0` in Railway cert log
+  2. `ticker_prefix_only_reason_count=0` in Railway cert log
+  3. `weak_buy_rationale_count=0` in Railway cert log
+  4. BUY card texts are distinct and evidence-grounded
+  5. HOLD card texts explain WHY not adding
+
 ## 2026-05-06 — Intel v3 Visible-Path Certification Fix (Level 2)
 
 - Fixed `generic_copy_count=29` root cause: `_build_rationale()` in `decision_policy_v1.py` now includes ticker in every rationale string → all 34 cards produce unique `why_text` → `generic_copy_count=0`.

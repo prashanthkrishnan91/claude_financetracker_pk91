@@ -232,6 +232,13 @@ def build_decision_input_from_card(
     data_quality_label: Optional[str],
     intel_read: Optional[dict],
     thesis_v2: Optional[dict],
+    # Per-ticker evidence text — passed through to rationale builder.
+    # These are optional and do not affect structural axis derivation.
+    primary_driver: Optional[str] = None,
+    risk_flag_text: Optional[str] = None,
+    action_reason: Optional[str] = None,
+    analyst_drivers: Optional[list] = None,
+    asset_type_hint: Optional[str] = None,
 ) -> DecisionInputV3:
     """Build a DecisionInputV3 from existing InsightCard + intel_read signals.
 
@@ -253,6 +260,8 @@ def build_decision_input_from_card(
     source_signal_summary["data_quality_label"] = data_quality_label
     source_signal_summary["has_intel_read"] = intel_read is not None
     source_signal_summary["has_thesis_v2"] = thesis_v2 is not None
+    source_signal_summary["has_primary_driver"] = bool(primary_driver)
+    source_signal_summary["has_action_reason"] = bool(action_reason)
 
     evidence_quality = _derive_evidence_quality(
         data_quality_label=data_quality_label,
@@ -293,6 +302,11 @@ def build_decision_input_from_card(
         upstream_conviction=conviction_level,
         suppression_reasons=suppression_reasons,
         source_signal_summary=source_signal_summary,
+        primary_driver=primary_driver,
+        risk_flag_text=risk_flag_text if risk_flag_text is not None else risk_flag,
+        action_reason=action_reason,
+        analyst_drivers=analyst_drivers or [],
+        asset_type_hint=asset_type_hint or category,
     )
 
 
@@ -310,6 +324,11 @@ def build_truth_aware_decision_input(
     intel_read: Optional[dict],
     thesis_v2: Optional[dict],
     analyst_used_fallback: Optional[bool] = None,
+    primary_driver: Optional[str] = None,
+    risk_flag_text: Optional[str] = None,
+    action_reason: Optional[str] = None,
+    analyst_drivers: Optional[list] = None,
+    asset_type_hint: Optional[str] = None,
 ) -> tuple:
     """Build DecisionInputV3 informed by the PR 6 Data Truth Contract.
 
@@ -392,6 +411,11 @@ def build_truth_aware_decision_input(
         data_quality_label=safe_data_quality,
         intel_read=safe_intel_read,
         thesis_v2=thesis_v2,
+        primary_driver=primary_driver,
+        risk_flag_text=risk_flag_text,
+        action_reason=action_reason,
+        analyst_drivers=analyst_drivers,
+        asset_type_hint=asset_type_hint,
     )
 
     for axis, reason_code in suppressed_by_truth.items():

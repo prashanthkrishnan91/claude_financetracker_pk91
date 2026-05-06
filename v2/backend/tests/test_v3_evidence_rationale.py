@@ -158,6 +158,25 @@ def _inp_crypto_hold(ticker: str) -> DecisionInputV3:
     )
 
 
+def _inp_speculative_hold(
+    ticker: str,
+    *,
+    asset_type_hint: str,
+    primary_driver: str = "",
+) -> DecisionInputV3:
+    return DecisionInputV3(
+        ticker=ticker,
+        evidence_quality=AxisBand.SUPPRESSED,
+        price_context=PriceBand.SUPPRESSED,
+        portfolio_fit=FitBand.BLOCKED,
+        risk_band=RiskBand.UNKNOWN,
+        raw_action="HOLD",
+        upstream_conviction="LOW",
+        asset_type_hint=asset_type_hint,
+        primary_driver=primary_driver or None,
+    )
+
+
 def _make_card_from_inp(inp: DecisionInputV3, name: str = "", category: str = "stock") -> dict:
     """Run inp through decide() and build a snapshot card."""
     decision = decide(inp)
@@ -622,6 +641,13 @@ class TestCertificationFieldCompleteness:
                 "Examples should be populated when nonzero counts exist."
             )
 
+    def test_examples_capture_up_to_five_tickers(self):
+        cards = _make_cards_no_evidence(_BUY_TICKERS[:8])
+        cert = certify_snapshot_cards(cards, spam_threshold=3)
+        examples = cert["examples"].get("ticker_prefix_only", [])
+        assert isinstance(examples, list)
+        assert 1 <= len(examples) <= 5
+
     def test_clean_full_snapshot_has_zero_hard_violations(self):
         """34-card clean snapshot must produce zero hard violations in certification."""
         all_cards = []
@@ -660,6 +686,38 @@ class TestCertificationFieldCompleteness:
             f"Evidence-aware cards should have 0 weak BUY rationale. cert={cert}"
         )
         assert cert["hard_violations"] == 0
+
+
+class TestSpeculativeFallbackDeDuplication:
+    def test_five_speculative_hold_cards_have_zero_prefix_and_skeleton_counts(self):
+        cards = [
+            _make_card_from_inp(_inp_speculative_hold("BTC", asset_type_hint="crypto"), name="Bitcoin", category="crypto"),
+            _make_card_from_inp(_inp_speculative_hold("ETH", asset_type_hint="crypto"), name="Ethereum", category="crypto"),
+            _make_card_from_inp(_inp_speculative_hold("ARKK", asset_type_hint="etf"), name="ARK Innovation ETF", category="etf"),
+            _make_card_from_inp(_inp_speculative_hold("PLTR", asset_type_hint="stock", primary_driver="government contract concentration"), name="Palantir", category="stock"),
+            _make_card_from_inp(_inp_speculative_hold("RIVN", asset_type_hint="stock", primary_driver="cash-burn risk"), name="Rivian", category="stock"),
+        ]
+        cert = certify_snapshot_cards(cards, spam_threshold=3)
+        assert cert["ticker_prefix_only_reason_count"] == 0, cert
+        assert cert["repeated_skeleton_count"] == 0, cert
+
+    def test_mixed_asset_fallback_cards_do_not_share_one_skeleton(self):
+        cards = [
+            _make_card_from_inp(_inp_speculative_hold("BTC", asset_type_hint="crypto"), name="Bitcoin", category="crypto"),
+            _make_card_from_inp(_inp_speculative_hold("ARKK", asset_type_hint="etf"), name="ARK Innovation ETF", category="etf"),
+            _make_card_from_inp(_inp_speculative_hold("PLTR", asset_type_hint="stock", primary_driver="customer concentration"), name="Palantir", category="stock"),
+        ]
+        spam_tickers, repeated = detect_repeated_skeleton_spam(cards, min_cards_for_spam=3)
+        assert repeated == 0, f"Expected zero repeated skeletons, got {repeated} for {spam_tickers}"
+        assert not spam_tickers
+
+    def test_btc_fallback_not_old_single_sentence_template(self):
+        card = _make_card_from_inp(_inp_speculative_hold("BTC", asset_type_hint="crypto"), name="Bitcoin", category="crypto")
+        assert card["action"] == "HOLD"
+        assert (
+            "speculative or high-risk category — maintaining current exposure without adding"
+            not in card["why_text"].lower()
+        ), card["why_text"]
 
 
 # ── Section 9: Schema version and ticker presence ─────────────────────────────

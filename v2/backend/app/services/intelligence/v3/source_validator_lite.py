@@ -428,24 +428,29 @@ def certify_snapshot_cards(
     weak_buy_tickers = detect_weak_buy_rationale(cards)
     weak_buy_rationale_count = len(weak_buy_tickers)
 
+    def _collect_examples(tickers: list[str], limit: int = 5) -> list[dict]:
+        out: list[dict] = []
+        for t in tickers[:limit]:
+            ex = next((c for c in cards if c.get("ticker") == t), None)
+            if ex:
+                out.append(
+                    {
+                        "ticker": ex.get("ticker"),
+                        "why_text": ex.get("why_text", "")[:120],
+                    }
+                )
+        return out
+
     # Build examples dict for nonzero counts.
     examples: dict = {}
     if exact_spam_tickers:
-        ex = next((c for c in cards if c.get("ticker") in exact_spam_tickers[:1]), None)
-        if ex:
-            examples["generic_copy"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+        examples["generic_copy"] = _collect_examples(exact_spam_tickers)
     if ticker_prefix_spam:
-        ex = next((c for c in cards if c.get("ticker") in ticker_prefix_spam[:1]), None)
-        if ex:
-            examples["ticker_prefix_only"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+        examples["ticker_prefix_only"] = _collect_examples(ticker_prefix_spam)
     if skeleton_spam:
-        ex = next((c for c in cards if c.get("ticker") in skeleton_spam[:1]), None)
-        if ex:
-            examples["repeated_skeleton"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+        examples["repeated_skeleton"] = _collect_examples(skeleton_spam)
     if weak_buy_tickers:
-        ex = next((c for c in cards if c.get("ticker") == weak_buy_tickers[0]), None)
-        if ex:
-            examples["weak_buy"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+        examples["weak_buy"] = _collect_examples(weak_buy_tickers)
 
     return {
         "per_card_results":                per_card_results,

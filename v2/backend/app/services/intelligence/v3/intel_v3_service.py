@@ -38,7 +38,7 @@ from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
-from .source_validator_lite import validate_snapshot_cards
+from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
@@ -164,6 +164,14 @@ class IntelV3Service:
                     except Exception:
                         analyst_risks = []
 
+                analyst_drivers = getattr(card, "analyst_drivers", None)
+                if isinstance(analyst_drivers, str):
+                    import json
+                    try:
+                        analyst_drivers = json.loads(analyst_drivers)
+                    except Exception:
+                        analyst_drivers = []
+
                 suppression_reasons: dict = {}
 
                 inp, _truth_sums, _suppressed = build_truth_aware_decision_input(
@@ -179,6 +187,12 @@ class IntelV3Service:
                     intel_read=intel_read,
                     thesis_v2=thesis_v2,
                     analyst_used_fallback=getattr(card, "analyst_used_fallback", None),
+                    # Per-ticker evidence text for visible rationale.
+                    primary_driver=getattr(card, "primary_driver", None),
+                    risk_flag_text=getattr(card, "risk_flag", None),
+                    action_reason=getattr(card, "action_reason", None),
+                    analyst_drivers=analyst_drivers,
+                    asset_type_hint=category,
                 )
 
                 # Override portfolio_fit with actual weight data if available.
@@ -211,9 +225,13 @@ class IntelV3Service:
                 is_stale=False,
             )
 
-            # Step 4b: validate cards — fail-closed on hard violations.
+            # Step 4b: certify cards — fail-closed on hard violations.
             held_cards = snapshot_payload.get("current_holdings", [])
-            _results, spam_tickers, hard_violation_count = validate_snapshot_cards(held_cards)
+            cert = certify_snapshot_cards(held_cards)
+
+            _results = cert["per_card_results"]
+            spam_tickers = cert["spam_tickers"]
+            hard_violation_count = cert["hard_violations"]
             soft_violation_count = sum(1 for r in _results if not r.is_valid) - hard_violation_count
 
             if hard_violation_count > 0:
@@ -230,8 +248,12 @@ class IntelV3Service:
                     f"violation(s) detected. Snapshot not persisted."
                 )
 
+            # Soft violations: spam/skeleton warnings — persist with warning.
+            skeleton_count = cert["repeated_skeleton_count"]
+            prefix_only_count = cert["ticker_prefix_only_reason_count"]
+            weak_buy_count = cert["weak_buy_rationale_count"]
+
             if spam_tickers:
-                # Soft violation: generic copy spam — persist with warning.
                 logger.warning(
                     "intel_v3_run_soft_violation user_id=%s run_id=%s "
                     "spam_tickers=%s",
@@ -239,6 +261,16 @@ class IntelV3Service:
                 )
                 snapshot_payload["warnings"].append(
                     f"Generic copy detected on {len(spam_tickers)} card(s)."
+                )
+            if prefix_only_count > 0:
+                logger.warning(
+                    "intel_v3_run_soft_violation_skeleton user_id=%s run_id=%s "
+                    "ticker_prefix_only_reason_count=%d repeated_skeleton_count=%d",
+                    self.user_id, run_id, prefix_only_count, skeleton_count,
+                )
+                snapshot_payload["warnings"].append(
+                    f"Ticker-prefix-only rationale detected on {prefix_only_count} card(s). "
+                    "Evidence-aware rationale requires primary_driver fields from analyst."
                 )
 
             # Step 5: persist snapshot — only reached when hard_violation_count == 0.
@@ -249,23 +281,15 @@ class IntelV3Service:
             total_cards = len(held_cards)
             snapshot_id = snapshot_payload.get("snapshot_id")
 
-            # Count raw metric key violations and posture label violations per card.
-            raw_metric_key_count = sum(
-                1 for r in _results for v in r.violations if v.rule == "no_raw_metric_keys"
-            )
-            posture_label_count = sum(
-                1 for r in _results for v in r.violations if v.rule == "no_banned_posture_labels"
-            )
-            conflict_count = sum(
-                1 for r in _results for v in r.violations if v.rule == "no_action_contradictions"
-            )
+            raw_metric_key_count = cert["raw_metric_key_count"]
+            posture_label_count = cert["posture_label_count"]
+            conflict_count = cert["action_conflict_count"]
 
-            # Count unique vs duplicate why_text across cards.
-            why_texts = [c.get("why_text", "") for c in held_cards if c.get("why_text")]
             from collections import Counter as _Counter
+            why_texts = [c.get("why_text", "") for c in held_cards if c.get("why_text")]
             why_counts = _Counter(why_texts)
             unique_reason_count = sum(1 for cnt in why_counts.values() if cnt == 1)
-            duplicate_reason_count = sum(cnt for text, cnt in why_counts.items() if cnt > 1)
+            duplicate_reason_count = cert["duplicate_reason_count"]
 
             logger.info(
                 "intel_v3_snapshot_created user_id=%s run_id=%s "
@@ -288,9 +312,11 @@ class IntelV3Service:
                 "user_id=%s snapshot_id=%s run_id=%s "
                 "total_cards=%d action_counts=%s "
                 "hard_violations=0 soft_violations=%d "
-                "generic_copy_count=%d spam_tickers=%s "
-                "raw_metric_key_count=%d posture_label_count=%d conflict_count=%d "
-                "unique_reason_count=%d duplicate_reason_count=%d "
+                "generic_copy_count=%d duplicate_reason_count=%d "
+                "repeated_skeleton_count=%d ticker_prefix_only_reason_count=%d "
+                "weak_buy_rationale_count=%d "
+                "action_conflict_count=%d raw_metric_key_count=%d posture_label_count=%d "
+                "unique_reason_count=%d "
                 "page_load_llm_calls=0 source_path=intel_v3_snapshot "
                 "schema_version=%s",
                 self.user_id,
@@ -300,12 +326,14 @@ class IntelV3Service:
                 action_counts,
                 soft_violation_count,
                 len(spam_tickers),
-                spam_tickers,
+                duplicate_reason_count,
+                skeleton_count,
+                prefix_only_count,
+                weak_buy_count,
+                conflict_count,
                 raw_metric_key_count,
                 posture_label_count,
-                conflict_count,
                 unique_reason_count,
-                duplicate_reason_count,
                 snapshot_payload.get("schema_version", "v3.1"),
             )
 

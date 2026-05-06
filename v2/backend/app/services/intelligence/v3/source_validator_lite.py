@@ -252,6 +252,217 @@ def detect_generic_copy_spam(
     return [ticker for ticker, text in texts if text in spam_texts]
 
 
+def _strip_ticker_prefix(text: str, ticker: str) -> str:
+    """Remove leading ticker prefix (e.g. 'MSFT: ' or 'MSFT, ') and normalize."""
+    pat = re.compile(
+        r"^\s*" + re.escape(ticker.strip()) + r"\s*[:;,\-]?\s*",
+        re.IGNORECASE,
+    )
+    stripped = pat.sub("", text).strip()
+    return " ".join(stripped.lower().split())
+
+
+def detect_ticker_prefix_only_spam(
+    cards: list[dict],
+    text_field: str = "why_text",
+    min_cards_for_spam: int = 3,
+) -> tuple[list[str], int]:
+    """Detect cards where the only differentiator is a leading ticker symbol.
+
+    Strips the ticker prefix from each card's text, then checks whether the
+    remaining skeleton is shared by ≥ min_cards_for_spam other cards.
+
+    Returns:
+        (spam_tickers, repeated_skeleton_count)
+        spam_tickers: tickers whose skeleton is shared with ≥ min_cards threshold
+        repeated_skeleton_count: number of distinct skeletons that are repeated
+    """
+    from collections import Counter
+
+    pairs = []
+    for card in cards:
+        ticker = card.get("ticker", "")
+        text = card.get(text_field, "") or ""
+        skeleton = _strip_ticker_prefix(text, ticker)
+        pairs.append((ticker, skeleton))
+
+    skeleton_counts = Counter(sk for _, sk in pairs if sk)
+    repeated_skeletons = {sk for sk, cnt in skeleton_counts.items() if cnt >= min_cards_for_spam}
+    spam_tickers = [t for t, sk in pairs if sk in repeated_skeletons]
+    return spam_tickers, len(repeated_skeletons)
+
+
+def _normalize_skeleton(text: str, all_tickers: frozenset) -> str:
+    """Aggressively normalize text to a skeleton for repeated-template detection.
+
+    Removes all ticker symbols, numbers, and punctuation; lowercases and
+    collapses whitespace. Used to detect templates reused across different tickers
+    even when the exact text differs.
+    """
+    norm = text.lower()
+    for t in all_tickers:
+        norm = re.sub(r"\b" + re.escape(t.lower()) + r"\b", " ", norm)
+    norm = re.sub(r"\d+\.?\d*", " ", norm)
+    norm = re.sub(r"[^\w\s]", " ", norm)
+    norm = " ".join(norm.split())
+    return norm
+
+
+def detect_repeated_skeleton_spam(
+    cards: list[dict],
+    text_field: str = "why_text",
+    min_cards_for_spam: int = 3,
+) -> tuple[list[str], int]:
+    """Detect cards that share the same sentence skeleton across different tickers.
+
+    After removing all ticker symbols, numbers, and punctuation from each card's
+    text, cards that share the same normalized form are treated as repeated templates.
+
+    Returns:
+        (spam_tickers, repeated_skeleton_count)
+    """
+    from collections import Counter
+
+    all_tickers = frozenset(
+        c.get("ticker", "").strip().lower() for c in cards if c.get("ticker")
+    )
+    pairs = []
+    for card in cards:
+        text = card.get(text_field, "") or ""
+        norm = _normalize_skeleton(text, all_tickers)
+        pairs.append((card.get("ticker", ""), norm))
+
+    skel_counts = Counter(s for _, s in pairs if s)
+    repeated = {s for s, cnt in skel_counts.items() if cnt >= min_cards_for_spam}
+    spam_tickers = [t for t, s in pairs if s in repeated]
+    return spam_tickers, len(repeated)
+
+
+# Patterns that indicate boilerplate BUY rationale (from the pre-v3.2 template).
+_BOILERPLATE_BUY_PATTERNS: list[re.Pattern] = [
+    re.compile(r"(strong|adequate|available)\s+evidence\s+and\s+(fairly|attractively)\s+priced", re.IGNORECASE),
+    re.compile(r"portfolio\s+has\s+room\s+to\s+add", re.IGNORECASE),
+    re.compile(r"manageable\s+risk\b", re.IGNORECASE),
+    re.compile(r"signals\s+support\s+adding", re.IGNORECASE),
+    re.compile(r"meets\s+the\s+evidence\s+quality\s+and\s+attractiveness\s+bar", re.IGNORECASE),
+]
+
+
+def detect_weak_buy_rationale(
+    cards: list[dict],
+    text_field: str = "why_text",
+) -> list[str]:
+    """Detect BUY cards whose rationale matches known boilerplate templates.
+
+    Returns list of tickers with weak BUY rationale.
+    """
+    weak = []
+    for card in cards:
+        if (card.get("action") or "").upper() != "BUY":
+            continue
+        text = card.get(text_field, "") or ""
+        if any(p.search(text) for p in _BOILERPLATE_BUY_PATTERNS):
+            weak.append(card.get("ticker", ""))
+    return weak
+
+
+def certify_snapshot_cards(
+    cards: list[dict],
+    *,
+    spam_threshold: int = 3,
+) -> dict:
+    """Full certification of snapshot cards — returns enriched certification dict.
+
+    Includes all required certification fields:
+      generic_copy_count, duplicate_reason_count, repeated_skeleton_count,
+      ticker_prefix_only_reason_count, weak_buy_rationale_count,
+      action_conflict_count, raw_metric_key_count, posture_label_count,
+      hard_violations, examples for each nonzero count.
+
+    Also returns per_card_results and spam_tickers for backward compat.
+    """
+    from collections import Counter as _Counter
+
+    # Per-card structural validation.
+    per_card_results: list[ValidationResult] = []
+    for card in cards:
+        r = validate_card(
+            ticker=card.get("ticker", "UNKNOWN"),
+            action=card.get("action", "HOLD"),
+            conviction=card.get("conviction", "LOW"),
+            why_text=card.get("why_text"),
+            risk_text=card.get("risk_text"),
+            action_text=card.get("action_text"),
+            evidence_text=card.get("evidence_text"),
+            fit_text=card.get("fit_text"),
+            what_would_change_view=card.get("what_would_change_view"),
+        )
+        per_card_results.append(r)
+
+    total_hard = sum(r.hard_violation_count for r in per_card_results)
+
+    raw_metric_key_count = sum(
+        1 for r in per_card_results for v in r.violations if v.rule == "no_raw_metric_keys"
+    )
+    posture_label_count = sum(
+        1 for r in per_card_results for v in r.violations if v.rule == "no_banned_posture_labels"
+    )
+    action_conflict_count = sum(
+        1 for r in per_card_results for v in r.violations if v.rule == "no_action_contradictions"
+    )
+
+    # Exact-duplicate check (existing semantic).
+    exact_spam_tickers = detect_generic_copy_spam(cards, min_cards_for_spam=spam_threshold)
+    why_texts = [c.get("why_text", "") for c in cards if c.get("why_text")]
+    why_counts = _Counter(why_texts)
+    duplicate_reason_count = sum(cnt for cnt in why_counts.values() if cnt > 1)
+
+    # Skeleton-based checks (new — catches ticker-prefix boilerplate).
+    ticker_prefix_spam, repeated_skeleton_count = detect_ticker_prefix_only_spam(
+        cards, min_cards_for_spam=spam_threshold
+    )
+    skeleton_spam, _ = detect_repeated_skeleton_spam(cards, min_cards_for_spam=spam_threshold)
+    ticker_prefix_only_reason_count = len(ticker_prefix_spam)
+
+    # Weak BUY rationale (boilerplate pattern match).
+    weak_buy_tickers = detect_weak_buy_rationale(cards)
+    weak_buy_rationale_count = len(weak_buy_tickers)
+
+    # Build examples dict for nonzero counts.
+    examples: dict = {}
+    if exact_spam_tickers:
+        ex = next((c for c in cards if c.get("ticker") in exact_spam_tickers[:1]), None)
+        if ex:
+            examples["generic_copy"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+    if ticker_prefix_spam:
+        ex = next((c for c in cards if c.get("ticker") in ticker_prefix_spam[:1]), None)
+        if ex:
+            examples["ticker_prefix_only"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+    if skeleton_spam:
+        ex = next((c for c in cards if c.get("ticker") in skeleton_spam[:1]), None)
+        if ex:
+            examples["repeated_skeleton"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+    if weak_buy_tickers:
+        ex = next((c for c in cards if c.get("ticker") == weak_buy_tickers[0]), None)
+        if ex:
+            examples["weak_buy"] = {"ticker": ex.get("ticker"), "why_text": ex.get("why_text", "")[:120]}
+
+    return {
+        "per_card_results":                per_card_results,
+        "spam_tickers":                    exact_spam_tickers,
+        "hard_violations":                 total_hard,
+        "generic_copy_count":              len(exact_spam_tickers),
+        "duplicate_reason_count":          duplicate_reason_count,
+        "repeated_skeleton_count":         repeated_skeleton_count,
+        "ticker_prefix_only_reason_count": ticker_prefix_only_reason_count,
+        "weak_buy_rationale_count":        weak_buy_rationale_count,
+        "action_conflict_count":           action_conflict_count,
+        "raw_metric_key_count":            raw_metric_key_count,
+        "posture_label_count":             posture_label_count,
+        "examples":                        examples,
+    }
+
+
 def validate_snapshot_cards(
     cards: list[dict],
     *,
@@ -264,21 +475,5 @@ def validate_snapshot_cards(
         where spam_tickers are tickers with generic repeated copy (soft violation)
         and total_hard_violation_count is the sum of hard violations across all cards.
     """
-    results = []
-    for card in cards:
-        result = validate_card(
-            ticker=card.get("ticker", "UNKNOWN"),
-            action=card.get("action", "HOLD"),
-            conviction=card.get("conviction", "LOW"),
-            why_text=card.get("why_text"),
-            risk_text=card.get("risk_text"),
-            action_text=card.get("action_text"),
-            evidence_text=card.get("evidence_text"),
-            fit_text=card.get("fit_text"),
-            what_would_change_view=card.get("what_would_change_view"),
-        )
-        results.append(result)
-
-    spam_tickers = detect_generic_copy_spam(cards, min_cards_for_spam=spam_threshold)
-    total_hard = sum(r.hard_violation_count for r in results)
-    return results, spam_tickers, total_hard
+    cert = certify_snapshot_cards(cards, spam_threshold=spam_threshold)
+    return cert["per_card_results"], cert["spam_tickers"], cert["hard_violations"]

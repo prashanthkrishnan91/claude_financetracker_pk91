@@ -24,6 +24,9 @@ Pure function — no IO, LLM, DB.
 """
 from __future__ import annotations
 
+import re
+from typing import Optional
+
 from .decision_contracts import (
     ActionV3,
     AxisBand,
@@ -34,6 +37,49 @@ from .decision_contracts import (
     PriceBand,
     RiskBand,
 )
+
+# Raw metric key names that must never appear in visible rationale text.
+_FORBIDDEN_KEYS: frozenset[str] = frozenset({
+    "fcf_margin", "roic_ttm", "ev_ebitda", "gross_margin_ttm", "revenue_growth_yoy",
+    "peg_ratio", "p_fcf", "ebit_margin", "net_margin_ttm", "debt_to_equity",
+    "current_ratio", "quick_ratio", "free_cash_flow_yield", "altman_z",
+    "earnings_growth_fwd", "book_value_per_share", "enterprise_value",
+})
+
+_PRICE_TARGET_PAT = re.compile(
+    r"\$\s*\d+(?:\.\d+)?|price\s+target\s+of\s*\$?\d+", re.IGNORECASE
+)
+
+
+def _clean_evidence_text(raw: Optional[str], max_chars: int = 115) -> Optional[str]:
+    """Sanitize and truncate LLM-generated evidence text for safe visible use.
+
+    Returns None if the text is empty, not a string, contains raw metric keys,
+    or price targets. Truncates at a sentence boundary when text exceeds max_chars.
+    """
+    if not raw or not isinstance(raw, str):
+        return None
+    text = raw.strip()
+    if not text:
+        return None
+    text_lower = text.lower()
+
+    # Safety net: discard entirely if raw metric keys or price targets slip through.
+    for key in _FORBIDDEN_KEYS:
+        if key in text_lower:
+            return None
+    if _PRICE_TARGET_PAT.search(text):
+        return None
+
+    if len(text) > max_chars:
+        truncated = text[:max_chars]
+        last_stop = max(truncated.rfind("."), truncated.rfind("!"), truncated.rfind("?"))
+        if last_stop > max_chars // 2:
+            text = truncated[: last_stop + 1]
+        else:
+            text = truncated.rstrip() + "…"
+
+    return text or None
 
 _SCHEMA_VERSION = "v3.1"
 
@@ -111,79 +157,259 @@ def _build_rationale(
     risk_band: RiskBand,
     blockers: list,
     suppression_reasons: dict,
+    primary_driver: Optional[str] = None,
+    risk_flag_text: Optional[str] = None,
+    action_reason: Optional[str] = None,
+    analyst_drivers: Optional[list] = None,
+    asset_type_hint: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Build (rationale, why_now, why_not_now) plain-English strings.
 
-    Ticker is included in every rationale to ensure card-level uniqueness.
-    Must not contain raw metric key names (fcf_margin, roic_ttm, ev_ebitda, etc.).
+    Evidence-aware: uses per-ticker analyst evidence when available.
+    Falls back to expressive axis-band language when evidence is absent.
+    Must not contain raw metric key names or posture labels.
     """
     blocker_text = "; ".join(blockers) if blockers else ""
     suppressed_axes = [k for k in suppression_reasons if not k.startswith("truth_")]
 
+    hint = (asset_type_hint or "stock").lower()
+    is_etf = "etf" in hint
+    is_crypto = "crypto" in hint or ticker.upper() in {
+        "BTC", "ETH", "XRP", "SOL", "BNB", "ADA", "DOGE"
+    }
+
+    # Best available driver text (cleaned, safe for display).
+    driver = _clean_evidence_text(primary_driver)
+    if not driver and analyst_drivers:
+        for d in analyst_drivers:
+            driver = _clean_evidence_text(d if isinstance(d, str) else None)
+            if driver:
+                break
+    if not driver:
+        driver = _clean_evidence_text(action_reason)
+
+    risk_note = _clean_evidence_text(risk_flag_text, max_chars=90)
+
+    # ── SELL ──────────────────────────────────────────────────────────────────
     if action == ActionV3.SELL:
-        rationale = (
-            f"{ticker}: evidence points to material risk or a broken investment case. "
-            "Reducing or exiting this position aligns with risk management."
-        )
-        why_now = f"{ticker} risk signals are elevated; existing signal indicates reduction is warranted."
+        if risk_note:
+            rationale = (
+                f"{ticker}: risk signals are elevated — {risk_note} "
+                "Reducing aligns with risk management."
+            )
+        else:
+            rationale = (
+                f"{ticker}: risk signals indicate a materially weakened investment case. "
+                "Reducing or exiting this position aligns with risk management."
+            )
+        why_now = f"{ticker} risk signals warrant reduction; existing signal confirms exit direction."
         why_not_now = (
             f"Reassess {ticker} if risk signals materially improve."
             if not blocker_text
             else f"Reassess {ticker} if risk resolves. {blocker_text}"
         )
 
+    # ── TRIM ──────────────────────────────────────────────────────────────────
     elif action == ActionV3.TRIM:
         rationale = (
-            f"{ticker}: portfolio exposure appears elevated relative to target weight. "
-            "Trim to rebalance toward plan allocation."
+            f"{ticker}: portfolio exposure has grown above target weight. "
+            "Trim to rebalance toward the plan allocation."
         )
-        why_now = f"{ticker} position fit indicates overexposure; trimming maintains portfolio discipline."
+        why_now = f"{ticker} position fit signals overexposure; trimming maintains portfolio discipline."
         why_not_now = f"Hold full {ticker} position if fit rebalances or risk conditions improve."
 
+    # ── BUY ───────────────────────────────────────────────────────────────────
     elif action == ActionV3.BUY:
-        price_phrase = {
-            PriceBand.CHEAP: "attractively priced",
-            PriceBand.FAIR: "fairly priced",
-            PriceBand.SUPPRESSED: "price context not yet confirmed",
-        }.get(price_context, "priced within range")
-        ev_phrase = {
-            AxisBand.STRONG: "strong evidence",
-            AxisBand.OK: "adequate evidence",
-        }.get(evidence_quality, "available evidence")
-        fit_phrase = {
-            FitBand.UNDERWEIGHT: "Portfolio has room to add.",
-            FitBand.ON_TARGET: "Position weight is on target.",
-            FitBand.UNKNOWN: "Portfolio fit not yet assessed.",
-        }.get(portfolio_fit, "Portfolio fit allows adding.")
-        rationale = (
-            f"{ticker}: {ev_phrase} and {price_phrase}. "
-            f"{fit_phrase} Manageable risk."
-        )
-        why_now = (
-            f"{ticker} meets the evidence quality and attractiveness bar for adding to this position."
-        )
-        why_not_now = (
-            f"Watch {ticker} for deterioration in: {', '.join(suppressed_axes)}."
-            if suppressed_axes
-            else f"Watch {ticker} for evidence weakening or risk escalation before adding further."
-        )
-
-    else:  # HOLD
-        if blockers:
-            rationale = f"{ticker}: holding while addressing — {blocker_text}."
-            why_now = f"No clear trigger to add or reduce {ticker} at this time."
-            why_not_now = f"Address {ticker} blockers before acting: {blocker_text}."
-        elif suppressed_axes:
+        if is_etf:
+            fit_note = {
+                FitBand.UNDERWEIGHT: " Position has room to grow toward target.",
+                FitBand.ON_TARGET: " Contribution pace is appropriate.",
+                FitBand.UNKNOWN: "",
+            }.get(portfolio_fit, "")
             rationale = (
-                f"{ticker}: holding while evidence builds. "
-                f"Missing context on: {', '.join(suppressed_axes)}."
+                f"{ticker}: adds to core diversified exposure."
+                f"{fit_note}"
             )
-            why_now = f"Insufficient signal to act on {ticker} in either direction."
-            why_not_now = f"Await improved {ticker} evidence before committing further capital."
+            why_now = f"Adding to {ticker} extends core portfolio coverage with disciplined allocation."
+            why_not_now = f"Pause {ticker} contributions if portfolio weight reaches target or risk rises."
+
+        elif is_crypto:
+            if driver:
+                rationale = f"{ticker}: {driver}"
+                if not rationale.endswith("."):
+                    rationale += "."
+                rationale += " Speculative category — size position with care."
+            else:
+                rationale = (
+                    f"{ticker}: price and momentum signals support adding, "
+                    "but speculative category limits conviction."
+                )
+            why_now = f"Signal supports adding {ticker}; maintain speculative position limits."
+            why_not_now = f"Reduce {ticker} if risk escalates or momentum reverses sharply."
+
         else:
-            rationale = f"{ticker}: current signals support maintaining this position."
-            why_now = f"No compelling reason to add or reduce {ticker} at this time."
-            why_not_now = f"Watch {ticker} for evidence changes or risk escalation."
+            # Stock: use evidence when available, otherwise expressive axis-band fallback.
+            if driver:
+                risk_cav = ""
+                if risk_note and risk_band in {RiskBand.MEDIUM, RiskBand.HIGH}:
+                    risk_cav = f" Risk: {risk_note}"
+                    if not risk_cav.endswith("."):
+                        risk_cav += "."
+                rationale = f"{ticker}: {driver}"
+                if not rationale.endswith("."):
+                    rationale += "."
+                rationale += risk_cav
+            else:
+                # Fallback: describe the specific combination of axis bands.
+                ev_desc = {
+                    AxisBand.STRONG: "strong, multi-signal evidence",
+                    AxisBand.OK: "adequate evidence",
+                }.get(evidence_quality, "available evidence signals")
+
+                price_desc = {
+                    PriceBand.CHEAP: "an attractive entry point",
+                    PriceBand.FAIR: "a fair current valuation",
+                    PriceBand.SUPPRESSED: "a price context still resolving",
+                }.get(price_context, "a price within range")
+
+                fit_note = {
+                    FitBand.UNDERWEIGHT: " Position has capacity to grow.",
+                    FitBand.ON_TARGET: " Position weight is already near target.",
+                    FitBand.UNKNOWN: "",
+                }.get(portfolio_fit, "")
+
+                risk_note_inline = (
+                    " Risk signals are present but manageable."
+                    if risk_band == RiskBand.MEDIUM
+                    else ""
+                )
+
+                rationale = (
+                    f"{ticker}: {ev_desc} converge at {price_desc}."
+                    f"{fit_note}{risk_note_inline}"
+                )
+
+            why_now = (
+                f"{ticker} clears the evidence, attractiveness, and risk bar for adding to this position."
+            )
+            why_not_now = (
+                f"Watch {ticker} for deterioration in: {', '.join(suppressed_axes)}."
+                if suppressed_axes
+                else (
+                    f"Watch {ticker} for evidence weakening or risk escalation before adding further."
+                    if not risk_note
+                    else f"{ticker} watch: {risk_note}"
+                )
+            )
+
+    # ── HOLD ──────────────────────────────────────────────────────────────────
+    else:
+        # Determine primary hold reason from blockers and suppressed axes.
+        has_thin_evidence = (
+            "Insufficient evidence to act." in blockers
+            or evidence_quality in {AxisBand.THIN, AxisBand.SUPPRESSED}
+        )
+        has_elevated_risk = "Risk too elevated for a BUY recommendation." in blockers
+        has_blocked_fit = "Portfolio fit blocked — speculative or high-risk category." in blockers
+        has_weak_attractiveness = "Attractiveness signal absent or weak." in blockers
+        price_is_stretched = price_context in {PriceBand.FULL, PriceBand.EXPENSIVE}
+        price_is_unknown = price_context == PriceBand.SUPPRESSED
+
+        # Use action_reason if it clearly explains the hold without boilerplate.
+        hold_reason = _clean_evidence_text(action_reason, max_chars=110)
+
+        if hold_reason and not has_blocked_fit:
+            rationale = f"{ticker}: {hold_reason}"
+            if not rationale.endswith("."):
+                rationale += "."
+            why_now = f"No action trigger for {ticker} at this time."
+            why_not_now = (
+                f"{ticker}: watch for evidence improvement or risk change before acting."
+            )
+
+        elif has_blocked_fit:
+            rationale = (
+                f"{ticker}: speculative or high-risk category — "
+                "maintaining current exposure without adding."
+            )
+            why_now = f"{ticker} category limits adding beyond current position."
+            why_not_now = f"Add {ticker} only if category risk profile materially improves."
+
+        elif has_thin_evidence:
+            rationale = (
+                f"{ticker}: holding until evidence improves — "
+                "data coverage is currently insufficient to act."
+            )
+            why_now = f"Signal for {ticker} is too thin to add or reduce with confidence."
+            why_not_now = (
+                f"Await more complete {ticker} signal before committing capital."
+            )
+
+        elif has_elevated_risk:
+            if risk_note:
+                risk_detail = risk_note if risk_note.endswith(".") else risk_note + "."
+                rationale = (
+                    f"{ticker}: not adding due to elevated risk — {risk_detail} "
+                    "Holding current exposure."
+                )
+            else:
+                rationale = (
+                    f"{ticker}: not adding due to elevated risk signals. "
+                    "Holding current exposure."
+                )
+            why_now = f"Risk levels for {ticker} are too high to add at this time."
+            why_not_now = f"Add {ticker} when risk signals ease or price improves materially."
+
+        elif price_is_stretched:
+            rationale = (
+                f"{ticker}: not adding at current valuation — "
+                "price is extended relative to the evidence base."
+            )
+            why_now = f"Valuation for {ticker} is stretched; no new capital priority now."
+            why_not_now = f"Add {ticker} if price pulls back to a better entry range."
+
+        elif price_is_unknown:
+            rationale = (
+                f"{ticker}: holding until a clearer entry price develops — "
+                "price context is unconfirmed."
+            )
+            why_now = f"Price signal for {ticker} is unresolved; no add until context clarifies."
+            why_not_now = f"Watch {ticker} for price confirmation before committing further capital."
+
+        elif has_weak_attractiveness:
+            rationale = (
+                f"{ticker}: no clear catalyst to add right now — "
+                "attractiveness signals are neutral."
+            )
+            why_now = f"No compelling signal to act on {ticker} in either direction."
+            why_not_now = (
+                f"Watch {ticker} for a positive catalyst or improved attractiveness signal."
+            )
+
+        elif is_etf and portfolio_fit == FitBand.ON_TARGET:
+            rationale = (
+                f"{ticker}: position is at target weight — "
+                "maintain regular contribution pace without new urgency."
+            )
+            why_now = f"{ticker} is on plan. Regular contribution schedule applies."
+            why_not_now = f"Increase {ticker} if portfolio rebalances below target weight."
+
+        elif portfolio_fit == FitBand.ON_TARGET:
+            rationale = (
+                f"{ticker}: position is appropriately sized — "
+                "no additional capital priority at this time."
+            )
+            why_now = f"{ticker} position size is on target. No new capital required."
+            why_not_now = (
+                f"Add {ticker} if position drifts below target weight or evidence strengthens."
+            )
+
+        else:
+            rationale = (
+                f"{ticker}: signals do not yet clear the threshold to add or reduce."
+            )
+            why_now = f"No clear trigger to add or reduce {ticker} at this time."
+            why_not_now = f"Watch {ticker} for evidence or risk changes before acting."
 
     return rationale, why_now, why_not_now
 
@@ -274,6 +500,11 @@ def decide(inp: DecisionInputV3) -> DecisionOutputV3:
         risk_band=inp.risk_band,
         blockers=blockers,
         suppression_reasons=suppression_reasons,
+        primary_driver=inp.primary_driver,
+        risk_flag_text=inp.risk_flag_text,
+        action_reason=inp.action_reason,
+        analyst_drivers=inp.analyst_drivers,
+        asset_type_hint=inp.asset_type_hint,
     )
 
     return DecisionOutputV3(

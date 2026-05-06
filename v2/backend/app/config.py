@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     price_history_cache_ttl: int = 3600  # 1 hour
     analyst_verdict_reuse_ttl_seconds: int = 21600  # 6 hours (override for tests/ops)
 
+    # ── Runtime certification harness (ops-only) ─────────────────────────────
+    finance_runtime_cert_enabled: bool = False
+    finance_runtime_cert_secret: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:

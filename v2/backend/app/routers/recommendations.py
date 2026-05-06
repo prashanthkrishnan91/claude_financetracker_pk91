@@ -98,6 +98,7 @@ async def refresh_recommendations(
             job_id,
             payload.deposit_amount if payload.deposit_amount is not None else 900.0,
             payload.sale_proceeds or 0.0,
+            payload.force,
         )
         return AgentRunQueued(
             job_id=job_id,

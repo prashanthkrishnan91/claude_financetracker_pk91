@@ -62,9 +62,37 @@ MIN_SUBSCORE_QUALITY = 0.40
 MIN_CONVICTION_QUALITY = 0.50
 
 # Status is INSUFFICIENT_DATA when this many *major* subscores are weak.
+# Stock defaults: require 3-of-4 major scores weak (not 2) AND lower weakness
+# threshold to 0.25 so that yfinance-backed tickers with partial coverage
+# (e.g. 1-2/7 quality inputs) are PARTIAL rather than INSUFFICIENT_DATA.
 _MAJOR_SCORES = {"quality", "valuation", "growth", "risk"}
 _INSUFFICIENT_MAJOR_COUNT = 2      # at least 2 of the 4 major scores are weak
 _MAJOR_MIN_QUALITY = 0.50          # "weak" = data_quality < this threshold
+
+# Asset-type-aware overrides for _overall_status().
+# ETFs lack company fundamentals (quality/growth); crypto lacks almost all
+# company metrics. These overrides let the status reflect what IS available
+# for each asset type rather than penalising missing inapplicable inputs.
+_MAJOR_SCORES_BY_TYPE: dict[str, frozenset[str]] = {
+    "stock":     frozenset({"quality", "valuation", "growth", "risk"}),
+    "etf":       frozenset({"momentum", "valuation"}),
+    "crypto":    frozenset({"momentum"}),
+    "commodity": frozenset({"momentum"}),
+}
+# Number of weak major scores required to trigger INSUFFICIENT_DATA.
+_INSUFFICIENT_COUNT_BY_TYPE: dict[str, int] = {
+    "stock":     3,   # raised from 2 — partial yfinance coverage is normal
+    "etf":       2,   # need BOTH momentum AND valuation to be weak
+    "crypto":    1,   # single major score
+    "commodity": 1,
+}
+# "Weak" threshold per asset type.
+_MAJOR_MIN_QUALITY_BY_TYPE: dict[str, float] = {
+    "stock":     0.25,  # lowered from 0.50 — yfinance rarely fills >50 % inputs
+    "etf":       0.25,
+    "crypto":    0.20,
+    "commodity": 0.20,
+}
 
 
 # ── Conviction band thresholds ────────────────────────────────────────────────
@@ -393,15 +421,24 @@ def _conviction_band(
 def _overall_status(
     subscores: dict[str, SubScore],
     blended_quality: float,
+    asset_type: str = "stock",
 ) -> ScoreStatus:
-    """Derive overall scorecard status from subscore coverage."""
+    """Derive overall scorecard status from subscore coverage.
+
+    Asset-type-aware: ETFs and crypto/commodities do not have company
+    fundamentals, so quality/growth are not required major axes for them.
+    """
+    effective_major = _MAJOR_SCORES_BY_TYPE.get(asset_type, _MAJOR_SCORES_BY_TYPE["stock"])
+    insufficient_count = _INSUFFICIENT_COUNT_BY_TYPE.get(asset_type, _INSUFFICIENT_COUNT_BY_TYPE["stock"])
+    min_quality = _MAJOR_MIN_QUALITY_BY_TYPE.get(asset_type, _MAJOR_MIN_QUALITY_BY_TYPE["stock"])
+
     major_insufficient = sum(
         1
-        for name in _MAJOR_SCORES
-        if subscores[name].data_quality < _MAJOR_MIN_QUALITY
+        for name in effective_major
+        if subscores.get(name) is not None and subscores[name].data_quality < min_quality
     )
     if (
-        major_insufficient >= _INSUFFICIENT_MAJOR_COUNT
+        major_insufficient >= insufficient_count
         or blended_quality < MIN_CONVICTION_QUALITY
     ):
         return ScoreStatus.INSUFFICIENT_DATA
@@ -416,6 +453,8 @@ def _overall_status(
 def score_thesis(
     ticker: str,
     inputs: dict[str, Optional[float]],
+    *,
+    asset_type: str = "stock",
 ) -> ScoreCard:
     """Deterministic thesis score engine — Intel v2 foundation.
 
@@ -450,7 +489,7 @@ def score_thesis(
 
     conviction_score, blended_quality = _blend_conviction(subscores)
     band   = _conviction_band(conviction_score, blended_quality)
-    status = _overall_status(subscores, blended_quality)
+    status = _overall_status(subscores, blended_quality, asset_type=asset_type)
 
     all_used    = sorted({u for ss in subscores.values() for u in ss.inputs_used})
     all_missing = sorted({m for ss in subscores.values() for m in ss.inputs_missing})

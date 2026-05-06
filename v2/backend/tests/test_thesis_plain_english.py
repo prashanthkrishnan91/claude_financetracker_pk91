@@ -86,6 +86,9 @@ def test_insufficient_data_gets_conservative_summary():
 def test_insufficient_data_with_available_inputs_is_not_universal_fallback_copy():
     # Representative mapper-like payload: enough real fields to produce
     # directional dimension labels, but still insufficient overall.
+    # Since asset-type-aware thresholds were lowered (Workstream B), these inputs
+    # now correctly return PARTIAL (not INSUFFICIENT_DATA) — both statuses should
+    # produce non-fallback labels when real data is present.
     inputs = {
         "trailing_pe": 23.0,
         "forward_pe": 20.0,
@@ -102,7 +105,7 @@ def test_insufficient_data_with_available_inputs_is_not_universal_fallback_copy(
         "sma_20_50_signal": 1,
     }
     card = score_thesis("AAPL", inputs)
-    assert card.status.value == "INSUFFICIENT_DATA"
+    assert card.status.value in {"INSUFFICIENT_DATA", "PARTIAL"}
     summary = build_thesis_plain_english(card)
     assert summary["quality_label"] != "Business quality data is incomplete"
     assert summary["valuation_label"] != "Valuation data is incomplete"

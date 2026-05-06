@@ -75,6 +75,7 @@ def build_orchestrator(
     user_id: UUID,
     deposit_amount: float,
     sale_proceeds: float,
+    force_recompute: bool = False,
 ) -> AgentOrchestrator:
     keys = _user_keys(user_id)
     return AgentOrchestrator(
@@ -85,6 +86,7 @@ def build_orchestrator(
         anthropic_api_key=keys.get("anthropic", ""),
         finnhub_key=keys.get("finnhub", ""),
         polygon_key=keys.get("polygon", ""),
+        force_recompute=force_recompute,
     )
 
 
@@ -93,6 +95,7 @@ async def run_agent_pipeline(
     run_id: str,
     deposit_amount: float,
     sale_proceeds: float,
+    force_recompute: bool = False,
 ) -> None:
     """Entry point for FastAPI BackgroundTasks — always marks the run terminal.
 
@@ -102,9 +105,9 @@ async def run_agent_pipeline(
     poller eventually sees ``status`` in ``(completed, failed)`` and never
     leaves a run stuck in ``running``.
     """
-    logger.info("Agent run started — id=%s user=%s", run_id, user_id)
+    logger.info("Agent run started — id=%s user=%s force=%s", run_id, user_id, force_recompute)
     try:
-        orch = build_orchestrator(user_id, deposit_amount, sale_proceeds)
+        orch = build_orchestrator(user_id, deposit_amount, sale_proceeds, force_recompute=force_recompute)
     except Exception as exc:
         logger.exception("Failed to build orchestrator for run %s", run_id)
         await _force_fail_run(run_id, str(exc), user_id=user_id)

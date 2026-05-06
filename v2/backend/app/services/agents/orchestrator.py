@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
 
+from ...config import get_settings
 from ...database import get_supabase_client
 from ..ai.context_builder import build_portfolio_context, build_context_from_inputs
 from ..ai import io_layer
@@ -266,6 +267,9 @@ class AgentPipelineResult:
 class AgentOrchestrator:
     """Drives a single agent run end-to-end with exactly one LLM call."""
 
+    # Freshness window for LLM verdict reuse (env-configurable).
+    _VERDICT_TTL_SECONDS: int = 21600
+
     def __init__(
         self,
         user_id: UUID,
@@ -275,6 +279,7 @@ class AgentOrchestrator:
         anthropic_api_key: str = "",
         finnhub_key: str = "",
         polygon_key: str = "",
+        force_recompute: bool = False,
     ):
         self.user_id = user_id
         self.deposit_amount = deposit_amount
@@ -284,6 +289,8 @@ class AgentOrchestrator:
         self._polygon_key = polygon_key
         self._llm = LLMClient(api_key=anthropic_api_key)
         self.db = get_supabase_client()
+        # When True, skip TTL-based verdict reuse and rerun all per-ticker LLM calls.
+        self.force_recompute = force_recompute
         # Hard guarantee: exactly one LLM call per orchestrator run.
         self._llm_call_count = 0
         # Reliability flags — read by run() for logging and run-record metadata.
@@ -299,8 +306,67 @@ class AgentOrchestrator:
             "discarded_llm_calls": 0,
             "fallback_cards": 0,
             "reused_cached_cards": 0,
+            "skipped_fresh_verdicts": 0,
             "skipped_llm_reason": None,
+            "force_recompute": bool(force_recompute),
+            "ttl_seconds": self._verdict_ttl_seconds(),
+            "cache_reuse_candidate_count": 0,
+            "cache_reuse_accepted_count": 0,
+            "cache_reuse_rejected_count": 0,
+            "cache_reuse_rejection_reasons": {},
         }
+
+    def _verdict_ttl_seconds(self) -> int:
+        try:
+            ttl = int(get_settings().analyst_verdict_reuse_ttl_seconds)
+        except Exception:
+            ttl = int(self._VERDICT_TTL_SECONDS)
+        return max(0, ttl)
+
+    @staticmethod
+    def _safe_float(value: Any) -> float | None:
+        try:
+            if value is None:
+                return None
+            return float(value)
+        except Exception:
+            return None
+
+    def _inputs_equivalent_for_cache_reuse(self, ticker: str, raw_verdict: dict[str, Any]) -> tuple[bool, str | None]:
+        snap = (getattr(self, "_snapshots", {}) or {}).get(ticker)
+        feat = (getattr(self, "_features", {}) or {}).get(ticker)
+        if not isinstance(snap, dict) or not isinstance(feat, dict):
+            return False, "missing_fingerprint"
+        fp = raw_verdict.get("input_fingerprint")
+        if not isinstance(fp, dict):
+            return False, "missing_fingerprint"
+        if str(fp.get("ticker") or "").upper() != ticker:
+            return False, "input_changed"
+        for field in ("trend_regime", "volatility_regime", "data_quality_score", "thesis_status", "thesis_version", "generation_version"):
+            old_v = fp.get(field)
+            if old_v is None:
+                continue
+            new_v = feat.get(field)
+            if field == "generation_version":
+                new_v = getattr(self, "_analyst_generation_version", None) or new_v
+            if new_v is None:
+                continue
+            if str(old_v) != str(new_v):
+                return False, "thesis_status_changed" if field == "thesis_status" else "input_changed"
+        old_missing = set(fp.get("missing_fields") or [])
+        new_missing = set(feat.get("missing_fields") or [])
+        if old_missing != new_missing:
+            return False, "input_changed"
+        for field, tol in (("price", 0.02), ("return_5d", 0.01), ("return_30d", 0.02), ("momentum_score", 0.05), ("relative_strength_30d", 0.05), ("pe", 0.05), ("forward_pe", 0.05), ("profit_margin", 0.02), ("revenue_growth", 0.02), ("dividend_yield", 0.01)):
+            old_n = self._safe_float(fp.get(field))
+            if old_n is None:
+                continue
+            new_n = self._safe_float(snap.get(field, feat.get(field)))
+            if new_n is None:
+                return False, "input_changed"
+            if abs(old_n - new_n) > tol:
+                return False, "input_changed"
+        return True, None
 
     def _db(self, op_name: str, fn):
         return run_with_retry_sync(fn, op_name=op_name)
@@ -1165,6 +1231,62 @@ class AgentOrchestrator:
 
         return features
 
+    # ── Asset-type classification ─────────────────────────────────────────────
+
+    # Known ETF tickers — fallback when snapshot/position metadata is absent.
+    _ETF_TICKERS: frozenset[str] = frozenset({
+        "VOO", "VTI", "SPY", "QQQ", "VGT", "VIG", "VYM", "SCHD", "JEPI",
+        "JEPQ", "DIVO", "VXUS", "VEA", "VWO", "BND", "AGG", "TLT", "GLD",
+        "IAU", "SLV", "DBC", "USO", "IWM", "EFA", "ARKG", "ARKK",
+    })
+    _CRYPTO_TICKERS: frozenset[str] = frozenset({
+        "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "MATIC",
+        "BTC-USD", "ETH-USD", "XRP-USD",
+    })
+
+    @staticmethod
+    def _classify_asset_type(
+        ticker: str,
+        snapshot: Optional[Any] = None,
+        position: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Classify ticker into stock | etf | crypto | commodity.
+
+        Priority: snapshot metadata > position metadata > ticker lookup.
+        Returns "stock" as safe default so novel tickers get full scoring.
+        """
+        # Normalise ticker (handle BTC-USD style)
+        t = (ticker or "").upper().split("-")[0]
+
+        # Check snapshot fields (most authoritative — sourced from provider)
+        if snapshot is not None:
+            category = str(getattr(snapshot, "category", "") or "").lower()
+            sector = str(getattr(snapshot, "sector", "") or "").lower()
+            if "crypto" in category or "crypto" in sector:
+                return "crypto"
+            if "etf" in category or "fund" in category or "bond" in category:
+                return "etf"
+            if "commodity" in category or "gold" in category or "oil" in category:
+                return "commodity"
+
+        # Check position fields (from user portfolio row)
+        if position is not None:
+            pos_category = str(position.get("category") or "").lower()
+            pos_asset_class = str(position.get("asset_class") or "").lower()
+            if "crypto" in pos_category or "crypto" in pos_asset_class:
+                return "crypto"
+            if "etf" in pos_category or "fund" in pos_category or "etf" in pos_asset_class:
+                return "etf"
+            if "commodity" in pos_category or "commodity" in pos_asset_class:
+                return "commodity"
+
+        # Ticker lookup fallback
+        if t in AgentOrchestrator._CRYPTO_TICKERS:
+            return "crypto"
+        if t in AgentOrchestrator._ETF_TICKERS:
+            return "etf"
+        return "stock"
+
     # ── Thesis scoring stage (Phase 2.5 — Intel v2 PR-2) ────────────────────
 
     def _compute_thesis_scorecards(
@@ -1176,21 +1298,27 @@ class AgentOrchestrator:
         Uses features from Phase 2 (``self._features``) plus the raw
         fundamentals bundle.  Pure — no IO, no LLM.  Never raises; on
         per-ticker failure the ticker is skipped and a warning is logged.
+        Asset-type classification gates which major axes determine sufficiency
+        so ETFs/crypto are not penalised for missing company fundamentals.
         """
         features = getattr(self, "_features", {}) or {}
         fundamentals_map = (bundle or {}).get("fundamentals") or {}
+        snapshots = getattr(self, "_snapshots", {}) or {}
         scorecards: dict[str, ScoreCard] = {}
 
         for ticker, fs in features.items():
             try:
                 raw_funds = fundamentals_map.get(ticker) or {}
+                snap = snapshots.get(ticker)
+                asset_type = self._classify_asset_type(ticker, snapshot=snap)
                 inputs = map_to_thesis_inputs(raw_funds, fs)
-                card = score_thesis(ticker, inputs)
+                card = score_thesis(ticker, inputs, asset_type=asset_type)
                 scorecards[ticker] = card
                 logger.info(
-                    "thesis_v2 ticker=%s status=%s conviction_band=%s "
+                    "thesis_v2 ticker=%s asset_type=%s status=%s conviction_band=%s "
                     "blended_quality=%.3f inputs_used=%d inputs_missing=%d",
                     ticker,
+                    asset_type,
                     card.status.value,
                     card.conviction_band.value,
                     card.blended_data_quality,
@@ -1298,6 +1426,111 @@ class AgentOrchestrator:
 
     # ── Per-ticker analyst stage (Phase 3) ──────────────────────────────────
 
+    def _load_fresh_cached_verdicts(
+        self,
+        tickers: list[str],
+    ) -> dict[str, "AnalystVerdict"]:
+        """Load fresh non-fallback verdicts from agent_insights (best-effort).
+
+        Returns a map of ticker → AnalystVerdict for tickers that have a
+        recent (<_VERDICT_TTL_SECONDS) non-fallback verdict persisted in DB.
+        Never raises — any DB / parsing error returns an empty dict so the
+        caller falls back to a fresh LLM call.
+        """
+        from ..intelligence.per_ticker_analyst import AnalystVerdict
+        from datetime import datetime, timezone, timedelta
+
+        if not tickers:
+            return {}
+        ttl_seconds = self._verdict_ttl_seconds()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(seconds=ttl_seconds)
+        ).isoformat()
+        fresh: dict[str, AnalystVerdict] = {}
+        rejected_reasons: dict[str, int] = {}
+        try:
+            rows = (
+                self._db(
+                    "agent_insights.fresh_verdicts",
+                    lambda: self.db.table("agent_insights")
+                    .select("ticker, analyst_verdict, created_at")
+                    .eq("user_id", str(self.user_id))
+                    .in_("ticker", tickers)
+                    .gte("created_at", cutoff)
+                    .order("created_at", desc=True)
+                    .execute(),
+                )
+            ).data or []
+        except Exception as exc:
+            logger.warning("fresh_verdict_load failed (continuing without reuse): %s", exc)
+            return {}
+
+        seen: set[str] = set()
+        for row in rows:
+            ticker = (row.get("ticker") or "").upper()
+            if ticker in seen or ticker not in tickers:
+                continue
+            seen.add(ticker)
+            raw_verdict = row.get("analyst_verdict")
+            if not isinstance(raw_verdict, dict):
+                rejected_reasons["missing_fingerprint"] = rejected_reasons.get("missing_fingerprint", 0) + 1
+                continue
+            # Reconstruct AnalystVerdict from persisted JSON.
+            try:
+                action = str(raw_verdict.get("action") or "INSUFFICIENT_DATA").upper()
+                used_fallback = bool(raw_verdict.get("used_fallback", False))
+                if used_fallback or action == "INSUFFICIENT_DATA":
+                    # Never reuse fallback verdicts — they represent a failure state.
+                    rejected_reasons["fallback"] = rejected_reasons.get("fallback", 0) + 1
+                    continue
+                valid, reason = self._inputs_equivalent_for_cache_reuse(ticker, raw_verdict)
+                if not valid:
+                    key = str(reason or "input_changed")
+                    rejected_reasons[key] = rejected_reasons.get(key, 0) + 1
+                    continue
+                v = AnalystVerdict(
+                    ticker=ticker,
+                    action=action,
+                    conviction=float(raw_verdict.get("conviction") or 0.0),
+                    key_drivers=list(raw_verdict.get("key_drivers") or []),
+                    risks=list(raw_verdict.get("risks") or []),
+                    confidence=float(raw_verdict.get("confidence") or 0.0),
+                    summary=str(raw_verdict.get("summary") or ""),
+                    thesis=str(raw_verdict.get("thesis") or ""),
+                    reasoning=str(raw_verdict.get("reasoning") or ""),
+                    sentiment=raw_verdict.get("sentiment"),
+                    citations=list(raw_verdict.get("citations") or []),
+                    conviction_level=str(raw_verdict.get("conviction_level") or "LOW"),
+                    primary_driver=str(raw_verdict.get("primary_driver") or ""),
+                    risk_flag=str(raw_verdict.get("risk_flag") or ""),
+                    action_reason=str(raw_verdict.get("action_reason") or ""),
+                    differentiation=str(raw_verdict.get("differentiation") or ""),
+                    why_this_matters=str(raw_verdict.get("why_this_matters") or ""),
+                    what_could_go_wrong=str(raw_verdict.get("what_could_go_wrong") or ""),
+                    what_to_do_now=str(raw_verdict.get("what_to_do_now") or ""),
+                    used_fallback=False,
+                    llm_attempted=True,
+                    analysis_source="cached_verdict",
+                    generation_version=str(raw_verdict.get("generation_version") or "compact_v1"),
+                )
+                fresh[ticker] = v
+            except Exception as parse_exc:
+                logger.debug("fresh_verdict_parse_skip ticker=%s err=%s", ticker, parse_exc)
+
+        logger.info(
+            "fresh_verdict_load tickers_requested=%d fresh_found=%d cutoff=%s ttl_seconds=%d rejected=%s",
+            len(tickers), len(fresh), cutoff, ttl_seconds, rejected_reasons,
+        )
+        stats = getattr(self, "_analyst_stage_stats", None)
+        if isinstance(stats, dict):
+            stats["cache_reuse_candidate_count"] = int(stats.get("cache_reuse_candidate_count", 0)) + len(rows)
+            stats["cache_reuse_accepted_count"] = int(stats.get("cache_reuse_accepted_count", 0)) + len(fresh)
+            stats["cache_reuse_rejected_count"] = int(stats.get("cache_reuse_rejected_count", 0)) + max(0, len(rows) - len(fresh))
+            rr = stats.setdefault("cache_reuse_rejection_reasons", {})
+            for k, v in rejected_reasons.items():
+                rr[k] = int(rr.get(k, 0)) + int(v)
+        return fresh
+
     async def _run_per_ticker_analyst(self) -> dict[str, "AnalystVerdict"]:
         """Run the per-ticker analyst over the Phase 2 FeatureSets.
 
@@ -1350,28 +1583,54 @@ class AgentOrchestrator:
                 for t in snapshots.keys()
             }
 
+        # ── TTL-based verdict reuse (Workstream D) ───────────────────────────
+        # Load fresh non-fallback verdicts from DB; skip LLM for those tickers
+        # unless force_recompute=True. This prevents burning 34 LLM calls on
+        # every Run Agents press when recent verdicts are still valid.
+        all_tickers = list(snapshots.keys())
+        cached_verdicts: dict[str, "AnalystVerdict"] = {}
+        if not self.force_recompute:
+            cached_verdicts = await asyncio.to_thread(
+                self._load_fresh_cached_verdicts, all_tickers
+            )
+
+        tickers_needing_llm = [t for t in all_tickers if t not in cached_verdicts]
+        skipped_fresh = len(cached_verdicts)
+        self._analyst_stage_stats["skipped_fresh_verdicts"] += skipped_fresh
+        self._analyst_stage_stats["reused_cached_cards"] += skipped_fresh
+
         logger.info(
-            "analyst_stage.prompt_built tickers=%d mode=%s",
-            len(snapshots),
+            "analyst_stage.prompt_built tickers=%d mode=%s fresh_reused=%d force=%s",
+            len(tickers_needing_llm),
             decision.mode.value if decision else "unknown",
+            skipped_fresh,
+            self.force_recompute,
         )
-        logger.info(
-            "analyst_stage.llm_request.start tickers=%d model=%s",
-            len(snapshots),
-            self._llm.model,
-        )
-        verdicts = await analyze_portfolio(
-            snapshots=snapshots,
-            features=features,
-            llm=self._llm,
-        )
-        attempted_calls = sum(1 for v in verdicts.values() if getattr(v, "llm_attempted", False))
+
+        new_verdicts: dict[str, "AnalystVerdict"] = {}
+        if tickers_needing_llm:
+            snap_subset = {t: snapshots[t] for t in tickers_needing_llm}
+            feat_subset = {t: features[t] for t in tickers_needing_llm if t in features}
+            logger.info(
+                "analyst_stage.llm_request.start tickers=%d model=%s",
+                len(snap_subset),
+                self._llm.model,
+            )
+            new_verdicts = await analyze_portfolio(
+                snapshots=snap_subset,
+                features=feat_subset,
+                llm=self._llm,
+            )
+
+        verdicts = {**cached_verdicts, **new_verdicts}
+
+        attempted_calls = sum(1 for v in new_verdicts.values() if getattr(v, "llm_attempted", False))
         successful_calls = sum(
-            1 for v in verdicts.values()
+            1 for v in new_verdicts.values()
             if getattr(v, "llm_attempted", False) and not v.used_fallback
         )
         failed_calls = sum(
-            1 for v in verdicts.values()
+            1 for v in new_verdicts.values()
             if getattr(v, "llm_attempted", False) and v.used_fallback
         )
         self._analyst_stage_stats["attempted_llm_calls"] += attempted_calls
@@ -1380,27 +1639,29 @@ class AgentOrchestrator:
         self._analyst_stage_stats["discarded_llm_calls"] += failed_calls
         self._analyst_stage_stats["llm_enriched_cards"] += successful_calls
         self._analyst_stage_stats["fallback_cards"] += sum(
-            1 for v in verdicts.values() if v.used_fallback
+            1 for v in new_verdicts.values() if v.used_fallback
         )
-        logger.info(
-            "analyst_stage.llm_request.success tickers=%d successful=%d fallback=%d",
-            len(verdicts),
-            self._analyst_stage_stats["successful_llm_calls"],
-            self._analyst_stage_stats["fallback_cards"],
-        )
+        if tickers_needing_llm:
+            logger.info(
+                "analyst_stage.llm_request.success tickers=%d successful=%d fallback=%d",
+                len(new_verdicts),
+                successful_calls,
+                self._analyst_stage_stats["fallback_cards"],
+            )
 
         action_counts: dict[str, int] = {}
         fallback_count = 0
         degraded_cards = 0
         freshly_generated_cards = 0
-        reused_nonfallback_cards = 0
+        reused_nonfallback_cards = skipped_fresh
         reused_fallback_cards = 0
         for ticker, v in verdicts.items():
             action_counts[v.action] = action_counts.get(v.action, 0) + 1
+            is_cached = ticker in cached_verdicts
             if v.used_fallback:
                 fallback_count += 1
                 degraded_cards += 1
-            else:
+            elif not is_cached:
                 freshly_generated_cards += 1
             logger.info(
                 "analyst ticker=%s action=%s conviction=%.2f confidence=%.2f "
@@ -1413,13 +1674,13 @@ class AgentOrchestrator:
                 "cached_card_was_fallback=%s forced_refresh=%s llm_attempted=%s "
                 "llm_succeeded=%s persisted_fresh_card=%s",
                 ticker,
-                "miss_no_valid_cache",
+                "hit_fresh_cache" if is_cached else "miss_no_valid_cache",
+                is_cached,
                 False,
-                False,
-                bool(v.used_fallback),
+                self.force_recompute,
                 bool(getattr(v, "llm_attempted", False)),
                 bool(getattr(v, "llm_attempted", False) and not v.used_fallback),
-                bool(not v.used_fallback),
+                bool(not v.used_fallback and not is_cached),
             )
 
         failure_rate = fallback_count / max(1, len(verdicts))
@@ -1429,12 +1690,15 @@ class AgentOrchestrator:
         )
         logger.info(
             "analyst_stage.summary eligible_tickers=%d reused_nonfallback_cards=%d "
-            "reused_fallback_cards=%d freshly_generated_cards=%d degraded_cards=%d",
+            "reused_fallback_cards=%d freshly_generated_cards=%d degraded_cards=%d "
+            "skipped_fresh_verdicts=%d force_recompute=%s",
             len(snapshots),
             reused_nonfallback_cards,
             reused_fallback_cards,
             freshly_generated_cards,
             degraded_cards,
+            skipped_fresh,
+            self.force_recompute,
         )
         return verdicts
 
@@ -1578,7 +1842,30 @@ class AgentOrchestrator:
                         insight.ticker,
                     )
                     verdict = insufficient_data_verdict(insight.ticker, error="forbidden_language_at_persist")
-                row["analyst_verdict"] = verdict.to_dict()
+                verdict_payload = verdict.to_dict()
+                snap = (getattr(self, "_snapshots", {}) or {}).get(insight.ticker, {}) or {}
+                feat = (getattr(self, "_features", {}) or {}).get(insight.ticker, {}) or {}
+                verdict_payload["input_fingerprint"] = {
+                    "ticker": insight.ticker,
+                    "price": snap.get("price"),
+                    "return_5d": feat.get("return_5d"),
+                    "return_30d": feat.get("return_30d"),
+                    "trend_regime": feat.get("trend_regime"),
+                    "momentum_score": feat.get("momentum_score"),
+                    "relative_strength_30d": feat.get("relative_strength_30d"),
+                    "volatility_regime": feat.get("volatility_regime"),
+                    "data_quality_score": feat.get("data_quality_score"),
+                    "missing_fields": feat.get("missing_fields"),
+                    "pe": snap.get("pe"),
+                    "forward_pe": snap.get("forward_pe"),
+                    "profit_margin": snap.get("profit_margin"),
+                    "revenue_growth": snap.get("revenue_growth"),
+                    "dividend_yield": snap.get("dividend_yield"),
+                    "thesis_status": feat.get("thesis_status"),
+                    "thesis_version": feat.get("thesis_version"),
+                    "generation_version": verdict.generation_version,
+                }
+                row["analyst_verdict"] = verdict_payload
                 row["analyst_confidence"] = round(verdict.confidence, 2)
                 logger.info(
                     "analyst_trace checkpoint=pre_db_write ticker=%s reasoning_source=%s reasoning_schema_version=%s row=%s",

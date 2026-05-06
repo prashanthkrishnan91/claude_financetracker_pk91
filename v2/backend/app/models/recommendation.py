@@ -164,6 +164,7 @@ class AgentRunCreate(BaseModel):
     """Payload for POST /recommendations/refresh — kicks off a pipeline run."""
     deposit_amount: Optional[float] = None   # defaults to user.deposit_amount
     sale_proceeds: Optional[float] = 0.0
+    force: bool = False  # when True, skip TTL-based verdict reuse and regenerate all LLM calls
 
 
 class AgentRunQueued(BaseModel):

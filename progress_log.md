@@ -13,3 +13,8 @@
   2. Confirm certification summary has `repeated_skeleton_count=0`, `ticker_prefix_only_reason_count=0`, `weak_buy_rationale_count=0`, `generic_copy_count=0`.
   3. Confirm `hard_violations=0`, `action_conflict_count=0`, `raw_metric_key_count=0`, `posture_label_count=0`.
   4. Confirm no `recommendations.aggregate.start` and no legacy `schema_version="v2"` page-load certification during v3 run window.
+
+## 2026-05-06 Post-PR-221 fallback rationale certification fix
+- PR #220 decoupled Intel v3 from legacy recommendation aggregation.
+- PR #221 fixed weight-map sourcing (`positions.current_value` failure removed).
+- This PR removes remaining high-risk/speculative HOLD fallback skeleton reuse by making fallback rationale asset-aware (crypto vs ETF/fund vs speculative equity) while keeping certification strict.

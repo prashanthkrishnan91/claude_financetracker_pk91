@@ -331,10 +331,32 @@ def _build_rationale(
             )
 
         elif has_blocked_fit:
-            rationale = (
-                f"{ticker}: speculative or high-risk category — "
-                "maintaining current exposure without adding."
-            )
+            # Differentiate HOLD fallback language by asset class and context so
+            # rationale remains plain-English but not a repeated skeleton.
+            asset_kind = (asset_type_hint or "").strip().lower()
+            name_text = ticker.strip()
+            driver_text = _clean_evidence_text(primary_driver or action_reason, max_chars=90)
+
+            if "crypto" in asset_kind:
+                rationale = (
+                    f"{ticker}: {name_text} remains a higher-volatility holding in the portfolio mix. "
+                    "We are holding the current size and not adding until risk and entry conditions improve."
+                )
+            elif "etf" in asset_kind or "fund" in asset_kind:
+                rationale = (
+                    f"{ticker}: this fund exposure already provides the intended portfolio sleeve. "
+                    "Given the risk profile, keep weight steady rather than allocating additional capital now."
+                )
+            else:
+                uncertainty = (
+                    f" Current inputs are led by {driver_text.lower()}, but evidence breadth is still limited."
+                    if driver_text
+                    else " Evidence depth is still limited for increasing the position."
+                )
+                rationale = (
+                    f"{ticker}: {name_text} sits in a higher-risk bucket, so we are maintaining exposure instead of buying more."
+                    f"{uncertainty}"
+                )
             why_now = f"{ticker} category limits adding beyond current position."
             why_not_now = f"Add {ticker} only if category risk profile materially improves."
 

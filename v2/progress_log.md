@@ -468,3 +468,8 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
 - Updated diagnostics certify response poll paths to diagnostics routes for both force and nonforced modes.
 - Recommendations polling endpoint auth remains unchanged.
 - Added focused runtime certification tests for cert polling auth behavior, 403/404 guards, poll path correctness, and unchanged recommendations auth boundary.
+
+## 2026-05-06 — Post-PR-221 fallback rationale de-duplication
+- Noted prior sequence: PR #220 decoupled legacy path; PR #221 fixed weight-map source.
+- Fixed remaining deterministic high-risk/speculative HOLD fallback sentence reuse that triggered `ticker_prefix_only_reason_count` and `repeated_skeleton_count`.
+- Added certification example expansion to log up to 5 safe examples (ticker + first 120 chars of why_text).

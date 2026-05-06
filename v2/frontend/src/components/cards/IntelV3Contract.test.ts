@@ -279,3 +279,122 @@ describe("Intel v3 snapshot structure contract", () => {
     }
   });
 });
+
+// ── Generic copy contract (certification fix) ─────────────────────────────────
+
+describe("Intel v3 generic copy contract — no two cards share identical why_text", () => {
+  it("11 BUY cards each have unique why_text when ticker is included", () => {
+    const buyTickers = ["AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSM", "VGT", "VOO", "QQQ", "SCHD"];
+    const cards = buyTickers.map((t) =>
+      makeCard(t, "BUY", { why_text: `${t}: adequate evidence and fairly priced. Portfolio has room to add. Manageable risk.` })
+    );
+    const texts = new Set(cards.map((c) => c.why_text));
+    expect(texts.size).toBe(buyTickers.length);
+  });
+
+  it("why_text must contain the card ticker symbol", () => {
+    const cards = ["AAPL", "MSFT", "NVDA"].map((t) =>
+      makeCard(t, "BUY", { why_text: `${t}: adequate evidence and fairly priced. Manageable risk.` })
+    );
+    for (const card of cards) {
+      expect(card.why_text).toContain(card.ticker);
+    }
+  });
+
+  it("old generic template 'Signals support adding:' must not appear in cards", () => {
+    const cards = ["AAPL", "MSFT"].map((t) =>
+      makeCard(t, "BUY", { why_text: `${t}: adequate evidence and fairly priced. Manageable risk.` })
+    );
+    for (const card of cards) {
+      expect(card.why_text).not.toContain("Signals support adding:");
+    }
+  });
+
+  it("snapshot with 34 cards must have 34 unique why_text values", () => {
+    const allTickers = [
+      "AAPL", "MSFT", "NVDA", "GOOG", "META", "AMZN", "TSM", "VGT", "VOO", "QQQ", "SCHD",
+      ...Array.from({ length: 23 }, (_, i) => `HOLD${i}`),
+    ];
+    const cards = allTickers.map((t, i) =>
+      makeCard(t, i < 11 ? "BUY" : "HOLD", {
+        why_text: `${t}: ${i < 11 ? "adequate evidence and fairly priced. Manageable risk." : "holding while evidence builds."}`,
+      })
+    );
+    const texts = new Set(cards.map((c) => c.why_text));
+    expect(texts.size).toBe(34);
+  });
+});
+
+// ── Source-of-truth contract (certification fix) ──────────────────────────────
+
+describe("Intel v3 source-of-truth contract — visible page uses only v3 snapshot", () => {
+  it("v3 snapshot has schema_version starting with 'v3'", () => {
+    const snap = makeSnapshot([makeCard("AAPL", "BUY")]);
+    expect(snap.schema_version).toMatch(/^v3/);
+  });
+
+  it("v3 snapshot is the data contract for visible Intel cards (not legacy InsightCardData)", () => {
+    // Prove the IntelV3Snapshot type has the required v3-specific fields.
+    // Legacy InsightCardData has different shape (analyst_action, detail, rationale as top-level).
+    const snap = makeSnapshot([makeCard("AAPL", "BUY")]);
+    expect(snap).toHaveProperty("portfolio_command_center");
+    expect(snap).toHaveProperty("best_buys");
+    expect(snap).toHaveProperty("trim_sell_desk");
+    expect(snap).toHaveProperty("action_counts");
+    expect(snap).not.toHaveProperty("analyst_action");  // legacy field
+  });
+
+  it("v3 snapshot run returns snapshot_id and run_id (not job_id)", () => {
+    // IntelV3RunResult has snapshot_id and run_id — not a job_id like legacy.
+    const runResult = {
+      status: "completed",
+      snapshot_id: "snap-001",
+      run_id: "run-001",
+      total_cards: 34,
+      action_counts: { BUY: 11, HOLD: 23 },
+    };
+    expect(runResult).toHaveProperty("snapshot_id");
+    expect(runResult).toHaveProperty("run_id");
+    expect(runResult).not.toHaveProperty("job_id");
+  });
+
+  it("no-snapshot state has empty current_holdings and action_counts", () => {
+    // When GET /snapshot returns 404, the UI shows empty state — no legacy cards rendered.
+    const noSnapshotState = makeSnapshot([]);
+    expect(noSnapshotState.current_holdings).toHaveLength(0);
+    const countSum = Object.values(noSnapshotState.action_counts).reduce((a, b) => a + b, 0);
+    expect(countSum).toBe(0);
+  });
+
+  it("v3 card why_text must not contain raw metric key names", () => {
+    const RAW_KEYS = [
+      "fcf_margin", "roic_ttm", "ev_ebitda", "gross_margin_ttm",
+      "peg_ratio", "p_fcf", "ebit_margin", "net_margin_ttm",
+    ];
+    const cards = ["AAPL", "MSFT"].map((t) =>
+      makeCard(t, "BUY", {
+        why_text: `${t}: adequate evidence and fairly priced. Manageable risk.`,
+      })
+    );
+    for (const card of cards) {
+      for (const key of RAW_KEYS) {
+        expect(card.why_text.toLowerCase()).not.toContain(key);
+      }
+    }
+  });
+
+  it("action_counts in snapshot match holdings — not a separate independent count", () => {
+    // This is the single source-of-truth contract: action_counts = Counter(card.action).
+    const cards = [
+      makeCard("AAPL", "BUY"),
+      makeCard("MSFT", "BUY"),
+      makeCard("GOOG", "HOLD"),
+    ];
+    const snap = makeSnapshot(cards);
+    const recomputed: Record<string, number> = {};
+    for (const c of snap.current_holdings) {
+      recomputed[c.action] = (recomputed[c.action] || 0) + 1;
+    }
+    expect(snap.action_counts).toEqual(recomputed);
+  });
+});

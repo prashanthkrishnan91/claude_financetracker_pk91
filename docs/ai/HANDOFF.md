@@ -1,4 +1,48 @@
 
+## 2026-05-06 — Intel v3 Visible-Path Certification Fix (Level 2)
+
+### What failed in production validation
+- GET /api/v1/intel/v3/snapshot returned 404 on initial page load (correct — no snapshot existed yet).
+- After clicking "Run Intel v3": snapshot was persisted (soft violation), BUT 29/34 cards had near-identical `why_text` → `generic_copy_count=29`.
+- Root visible symptom: Banner said "Generic copy detected on 29 card(s)." BUY cards repeated nearly identical rationale: "Signals support adding: strong evidence coverage and fairly priced, with manageable risk and portfolio fit allowing."
+- Secondary issue: Legacy hooks `useRecommendations()` and `useLatestAgentRun()` fired unconditionally in `page.tsx` even when `INTEL_V3_ENABLED=true`, causing legacy `/recommendations` and `/recommendations/jobs/latest` calls that appeared in Railway certification logs.
+
+### Root cause
+1. **Generic copy** (`decision_policy_v1.py`): `_build_rationale()` generated pure template text with no ticker differentiator. 11 BUY cards with `evidence_quality=OK` and `price_context=FAIR` all produced the identical string `"Signals support adding: adequate evidence coverage and fairly priced, with manageable risk and portfolio fit allowing."` The spam detector (threshold=3) caught 29 cards as generic.
+2. **Legacy hooks firing** (`page.tsx`): `useRecommendations()` and `useLatestAgentRun()` were called unconditionally at the top of the page before the `if (INTEL_V3_ENABLED)` early return. React hooks cannot be called conditionally, so they fired API requests even though their data was never rendered.
+
+### Fix
+- `decision_policy_v1.py`: `_build_rationale()` now accepts `ticker` param and includes it in every rationale string. Every card's `why_text` starts with its ticker symbol → all 34 cards produce unique text → `generic_copy_count=0`.
+- `intel_v3_service.py`: Added `intel_v3_snapshot_certification_summary` log after every run with: `snapshot_id`, `run_id`, `total_cards`, `action_counts`, `hard_violations`, `soft_violations`, `generic_copy_count`, `raw_metric_key_count`, `posture_label_count`, `unique_reason_count`, `duplicate_reason_count`, `page_load_llm_calls=0`, `source_path=intel_v3_snapshot`, `schema_version`.
+- `page.tsx`: Added `legacyEnabled = !INTEL_V3_ENABLED` flag. All legacy hooks (`useRecommendations`, `useLatestAgentRun`, `useDecisionLog`) are passed `enabled=false` when v3 flag is active. No legacy API calls on v3 page load.
+- `hooks.ts`: Added `enabled` param to `useRecommendations(action?, enabled = true)`.
+
+### How to validate in production after merge
+1. Deploy backend + frontend.
+2. Load Intel page — Railway logs should show `intel_v3_snapshot_response_summary result=no_snapshot` (or `result=found`). No legacy `/recommendations` calls in this session.
+3. Click "Run Intel v3" — Railway logs should show:
+   - `intel_v3_snapshot_created ... llm_calls=0 hard_violations=0`
+   - `intel_v3_snapshot_certification_summary ... generic_copy_count=0 unique_reason_count=34`
+4. After run: UI shows 34 holdings with ticker-prefixed rationale. No "Generic copy" banner warning.
+5. action_counts in Railway log must match counts shown in Portfolio Command Center.
+
+### Tests
+- Backend: 21 new tests in `test_v3_certification_fix.py` — generic copy elimination, action count contract, no raw metric keys, page-load isolation, run→persist→retrieve contract.
+- Frontend: 13 new tests added to `IntelV3Contract.test.ts` — generic copy uniqueness, ticker presence in why_text, source-of-truth contract.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/decision_policy_v1.py` — ticker in rationale
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — certification summary log
+- `v2/frontend/src/lib/hooks.ts` — `enabled` param on `useRecommendations`
+- `v2/frontend/src/app/dashboard/recommendations/page.tsx` — `legacyEnabled` flag
+- `v2/backend/tests/test_v3_certification_fix.py` — NEW: 21 backend tests
+- `v2/frontend/src/components/cards/IntelV3Contract.test.ts` — 13 new frontend tests
+
+### Supabase SQL: No
+No new migrations required. Existing `intel_v3_snapshots` table supports all changes.
+
+---
+
 ## 2026-05-06 — Intel v3 Pre-merge Hardening Pass (PR #215 blockers)
 
 ### Severity

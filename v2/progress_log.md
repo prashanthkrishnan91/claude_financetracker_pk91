@@ -1,4 +1,13 @@
 
+## 2026-05-06 — Intel v3 Visible-Path Certification Fix (Level 2)
+
+- Fixed `generic_copy_count=29` root cause: `_build_rationale()` in `decision_policy_v1.py` now includes ticker in every rationale string → all 34 cards produce unique `why_text` → `generic_copy_count=0`.
+- Added `intel_v3_snapshot_certification_summary` log to `intel_v3_service.py` with full certification fields readable from Railway after one production run.
+- Fixed legacy hooks firing during v3 page load: added `legacyEnabled = !INTEL_V3_ENABLED` in `page.tsx`; `useRecommendations`, `useLatestAgentRun`, `useDecisionLog` all receive `enabled=false` when v3 flag is active.
+- Added `enabled` param to `useRecommendations` hook in `hooks.ts`.
+- 21 new backend tests (`test_v3_certification_fix.py`) + 13 new frontend tests (`IntelV3Contract.test.ts`).
+- No new Supabase SQL. No new providers. No LLM calls.
+
 ## 2026-05-06 — Intel v3 Pre-merge Hardening Pass (PR #215 blockers)
 
 - Fixed 8 pre-merge blockers: import path, migration file, fail-closed validator, service/router tests, legacy bridge comment, frontend tests, docs accuracy.

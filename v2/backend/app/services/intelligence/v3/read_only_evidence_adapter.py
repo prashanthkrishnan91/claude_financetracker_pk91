@@ -67,6 +67,7 @@ class ReadOnlyEvidenceAdapter:
 
         cards=[]
         missing=0
+        stale_or_missing_source_count=0
         for rec in recs:
             t = rec.get("ticker") or "UNKNOWN"
             pos = positions.get(t, {})
@@ -81,6 +82,8 @@ class ReadOnlyEvidenceAdapter:
             thesis_v2 = None
             if not primary_driver:
                 missing += 1
+            if not ai:
+                stale_or_missing_source_count += 1
             cards.append(SimpleNamespace(
                 ticker=t,
                 name=pos.get("name") or t,
@@ -101,8 +104,13 @@ class ReadOnlyEvidenceAdapter:
             ))
 
         stats = {
+            "active_position_count": len(positions),
             "persisted_recommendation_count": len(recs),
             "persisted_agent_insight_count": len(ai_lookup),
+            "missing_recommendation_count": max(0, len(positions) - len(recs)),
             "missing_evidence_count": missing,
+            "stale_or_missing_source_count": stale_or_missing_source_count,
+            "generated_legacy_recommendations": False,
+            "attempted_llm_calls": 0,
         }
         return cards, stats

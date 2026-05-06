@@ -31,9 +31,6 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 from ....database import get_supabase_client
-from ...recommendation_engine import RecommendationService  # compatibility import; not used in v3 run path
-# Transitional input adapter: get_insight_cards() is used as a raw-signal bridge
-# only during POST /run. GET /snapshot never calls this path (zero LLM, zero legacy).
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
@@ -129,12 +126,15 @@ class IntelV3Service:
             cards, evidence_stats = await evidence_adapter.load_cards()
             logger.info(
                 "intel_v3_evidence_source_summary user_id=%s run_id=%s source_mode=read_only_persisted "
-                "persisted_recommendation_count=%d persisted_agent_insight_count=%d missing_evidence_count=%d "
+                "active_position_count=%d persisted_recommendation_count=%d persisted_agent_insight_count=%d missing_recommendation_count=%d missing_evidence_count=%d stale_or_missing_source_count=%d "
                 "generated_legacy_recommendations=false attempted_llm_calls=0",
                 self.user_id, run_id,
+                evidence_stats.get("active_position_count", 0),
                 evidence_stats.get("persisted_recommendation_count", 0),
                 evidence_stats.get("persisted_agent_insight_count", 0),
+                evidence_stats.get("missing_recommendation_count", 0),
                 evidence_stats.get("missing_evidence_count", 0),
+                evidence_stats.get("stale_or_missing_source_count", 0),
             )
 
             # Step 2: get portfolio positions for governor weights.

@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from ..config import get_settings
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
 from ..services.recommendation_engine import RecommendationService
 
@@ -191,7 +192,7 @@ async def certify_finance_runtime(
             "response_path": "agent_refresh",
             "schema_version": "v2",
             "force_recompute": force,
-            "poll": {"job_status": f"/api/v1/recommendations/jobs/{job_id}", "insights": f"/api/v1/recommendations/jobs/{job_id}/insights"},
+            "poll": {"job_status": f"/api/v1/diagnostics/finance-intel/jobs/{job_id}", "insights": f"/api/v1/diagnostics/finance-intel/jobs/{job_id}/insights"},
         }
 
     elapsed_ms = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
@@ -219,3 +220,46 @@ async def certify_finance_runtime(
     cert["failure_reasons"] = failure_reasons
     logger.info("finance_intel_runtime_certification user_id=%s payload=%s", user.id, json.dumps(cert, default=str))
     return cert
+
+
+@router.get("/jobs/{job_id}", response_model=AgentRunStatus)
+async def get_cert_job_status(
+    job_id: UUID,
+    cert_user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Poll cert job status using diagnostics-only auth."""
+    from fastapi import HTTPException
+
+    service = RecommendationService(user_id=cert_user.id)
+    try:
+        return await service.get_job_status(job_id)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Failed to fetch diagnostics cert job status %s: %s — returning safe default", job_id, exc
+        )
+        return AgentRunStatus(
+            id=str(job_id),
+            status="unknown",
+            current_agent="Status unavailable",
+            progress_pct=0,
+            tickers=[],
+            deposit_amount=0.0,
+            sale_proceeds=0.0,
+            allocation={},
+            summary="Job status temporarily unavailable — please retry.",
+            error_message=None,
+            started_at=None,
+            finished_at=None,
+        )
+
+
+@router.get("/jobs/{job_id}/insights", response_model=list[AgentInsight])
+async def get_cert_job_insights(
+    job_id: UUID,
+    cert_user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Read cert job insights using diagnostics-only auth."""
+    service = RecommendationService(user_id=cert_user.id)
+    return await service.get_agent_insights(run_id=job_id)

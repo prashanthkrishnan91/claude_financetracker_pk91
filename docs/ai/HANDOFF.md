@@ -5,6 +5,16 @@
 - Endpoint remains hidden behind `FINANCE_RUNTIME_CERT_ENABLED=true`; if secret or cert user config is missing, it fails closed with 403.
 - Existing Bearer-token path still works and is unchanged for user-driven diagnostics.
 
+## 2026-05-06 Update — Runtime certification polling route fix (PR #212 follow-up)
+
+- Root cause: `/api/v1/diagnostics/finance-intel/certify` returned `poll.*` URLs under `/api/v1/recommendations/jobs/...`, which require normal Bearer auth and blocked GitHub Actions cert polling that only has `X-Finance-Runtime-Cert-Secret`.
+- Added diagnostics-only polling routes:
+  - `GET /api/v1/diagnostics/finance-intel/jobs/{job_id}`
+  - `GET /api/v1/diagnostics/finance-intel/jobs/{job_id}/insights`
+- Both routes use `_get_runtime_cert_user` (env-gated + cert-secret-gated + cert-user-bound) and call `RecommendationService(user_id=cert_user.id)` methods.
+- Updated certify response `poll.job_status` / `poll.insights` to diagnostics paths.
+- Normal recommendations polling auth is unchanged and still requires frontend auth.
+
 ## 2026-05-05 — Finance Intel Reliability Reset (Level 3 / Sev 1)
 
 ### Severity

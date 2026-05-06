@@ -411,3 +411,12 @@ https://claude.ai/code/session_01PpLvPsnx3T9uMW7igCZnBr
   - `nonforced_run_agents` (queues existing refresh pipeline with `force=false`)
 - Added certification response/log payload `finance_intel_runtime_certification` including pass/fail/inconclusive status + failure reasons.
 - Added unit tests for gating, secret validation, read-only summary output, force/nonforce propagation, and status logic.
+## 2026-05-06 — Runtime certification diagnostics polling unblock (Level 2)
+
+- Root cause: diagnostics certify API returned poll URLs for `/api/v1/recommendations/jobs/{job_id}`, but those endpoints require normal Bearer auth. GitHub certification flow only sends `X-Finance-Runtime-Cert-Secret`, so polling failed.
+- Added diagnostics-only polling endpoints:
+  - `GET /api/v1/diagnostics/finance-intel/jobs/{job_id}` → `RecommendationService(user_id=cert_user.id).get_job_status(job_id)`
+  - `GET /api/v1/diagnostics/finance-intel/jobs/{job_id}/insights` → `RecommendationService(user_id=cert_user.id).get_agent_insights(run_id=job_id)`
+- Updated diagnostics certify response poll paths to diagnostics routes for both force and nonforced modes.
+- Recommendations polling endpoint auth remains unchanged.
+- Added focused runtime certification tests for cert polling auth behavior, 403/404 guards, poll path correctness, and unchanged recommendations auth boundary.

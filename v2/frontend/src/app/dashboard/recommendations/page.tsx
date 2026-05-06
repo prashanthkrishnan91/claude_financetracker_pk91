@@ -67,14 +67,17 @@ export default function RecommendationsPage() {
   const [finalizingJob, setFinalizingJob] = useState(false);
   const queryClient = useQueryClient();
 
-  const { data: recs, isLoading, error } = useRecommendations();
+  // When the v3 visible flag is enabled, legacy recommendation hooks must be disabled.
+  // They are still called (React hook rules), but enabled=false prevents any fetch.
+  const legacyEnabled = !INTEL_V3_ENABLED;
+  const { data: recs, isLoading, error } = useRecommendations(undefined, legacyEnabled);
   const refreshRecs = useRefreshRecommendations();
   const resolveRec = useResolveRecommendation();
-  const { data: decisions } = useDecisionLog(20, decisionLogOpen);
+  const { data: decisions } = useDecisionLog(20, decisionLogOpen && legacyEnabled);
   // Only one poll owner at a time:
   // - while a specific job is active, useAgentJob owns polling
   // - otherwise, useLatestAgentRun can restore any in-flight run on mount
-  const { data: latestRun } = useLatestAgentRun(!activeJobId && !finalizingJob);
+  const { data: latestRun } = useLatestAgentRun(!activeJobId && !finalizingJob && legacyEnabled);
   const { data: jobStatus } = useAgentJob(activeJobId);
   const { data: strategyPerf, isLoading: perfLoading } = useStrategyPerformance();
   const finalizedJobRef = useRef<string | null>(null);

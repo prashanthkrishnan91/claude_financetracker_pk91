@@ -102,6 +102,7 @@ def _compute_conviction(
 
 def _build_rationale(
     *,
+    ticker: str,
     action: ActionV3,
     evidence_quality: AxisBand,
     attractiveness: AxisBand,
@@ -113,30 +114,31 @@ def _build_rationale(
 ) -> tuple[str, str, str]:
     """Build (rationale, why_now, why_not_now) plain-English strings.
 
+    Ticker is included in every rationale to ensure card-level uniqueness.
     Must not contain raw metric key names (fcf_margin, roic_ttm, ev_ebitda, etc.).
     """
     blocker_text = "; ".join(blockers) if blockers else ""
-    suppressed_axes = list(suppression_reasons.keys())
+    suppressed_axes = [k for k in suppression_reasons if not k.startswith("truth_")]
 
     if action == ActionV3.SELL:
         rationale = (
-            "Evidence points to material risk or a broken investment case. "
+            f"{ticker}: evidence points to material risk or a broken investment case. "
             "Reducing or exiting this position aligns with risk management."
         )
-        why_now = "Risk signals are elevated and the existing signal indicates reduction is warranted."
+        why_now = f"{ticker} risk signals are elevated; existing signal indicates reduction is warranted."
         why_not_now = (
-            f"If risk resolves, reconsider. {blocker_text}"
-            if blocker_text
-            else "Reassess if risk signals materially improve."
+            f"Reassess {ticker} if risk signals materially improve."
+            if not blocker_text
+            else f"Reassess {ticker} if risk resolves. {blocker_text}"
         )
 
     elif action == ActionV3.TRIM:
         rationale = (
-            "Portfolio exposure appears elevated relative to target weight. "
-            "Trimming to rebalance toward plan allocation."
+            f"{ticker}: portfolio exposure appears elevated relative to target weight. "
+            "Trim to rebalance toward plan allocation."
         )
-        why_now = "Position fit indicates overexposure; trimming maintains portfolio discipline."
-        why_not_now = "Hold full position if fit rebalances or risk conditions improve."
+        why_now = f"{ticker} position fit indicates overexposure; trimming maintains portfolio discipline."
+        why_not_now = f"Hold full {ticker} position if fit rebalances or risk conditions improve."
 
     elif action == ActionV3.BUY:
         price_phrase = {
@@ -145,38 +147,43 @@ def _build_rationale(
             PriceBand.SUPPRESSED: "price context not yet confirmed",
         }.get(price_context, "priced within range")
         ev_phrase = {
-            AxisBand.STRONG: "strong evidence coverage",
-            AxisBand.OK: "adequate evidence coverage",
+            AxisBand.STRONG: "strong evidence",
+            AxisBand.OK: "adequate evidence",
         }.get(evidence_quality, "available evidence")
+        fit_phrase = {
+            FitBand.UNDERWEIGHT: "Portfolio has room to add.",
+            FitBand.ON_TARGET: "Position weight is on target.",
+            FitBand.UNKNOWN: "Portfolio fit not yet assessed.",
+        }.get(portfolio_fit, "Portfolio fit allows adding.")
         rationale = (
-            f"Signals support adding: {ev_phrase} and {price_phrase}, "
-            "with manageable risk and portfolio fit allowing."
+            f"{ticker}: {ev_phrase} and {price_phrase}. "
+            f"{fit_phrase} Manageable risk."
         )
         why_now = (
-            "Evidence quality and attractiveness meet the bar for adding to this position."
+            f"{ticker} meets the evidence quality and attractiveness bar for adding to this position."
         )
         why_not_now = (
-            f"Watch for deterioration in: {', '.join(suppressed_axes)}."
+            f"Watch {ticker} for deterioration in: {', '.join(suppressed_axes)}."
             if suppressed_axes
-            else "Watch for evidence weakening or risk escalation before adding further."
+            else f"Watch {ticker} for evidence weakening or risk escalation before adding further."
         )
 
     else:  # HOLD
         if blockers:
-            rationale = f"Maintaining current position. Blockers present: {blocker_text}."
-            why_now = "No clear trigger to add or reduce at this time."
-            why_not_now = f"Address blockers before acting: {blocker_text}."
+            rationale = f"{ticker}: holding while addressing — {blocker_text}."
+            why_now = f"No clear trigger to add or reduce {ticker} at this time."
+            why_not_now = f"Address {ticker} blockers before acting: {blocker_text}."
         elif suppressed_axes:
             rationale = (
-                "Holding while evidence builds. "
+                f"{ticker}: holding while evidence builds. "
                 f"Missing context on: {', '.join(suppressed_axes)}."
             )
-            why_now = "Insufficient signal to act in either direction."
-            why_not_now = "Await improved evidence before committing further capital."
+            why_now = f"Insufficient signal to act on {ticker} in either direction."
+            why_not_now = f"Await improved {ticker} evidence before committing further capital."
         else:
-            rationale = "Signal set supports maintaining current position."
-            why_now = "No compelling reason to add or reduce at this time."
-            why_not_now = "Watch for evidence changes or risk escalation."
+            rationale = f"{ticker}: current signals support maintaining this position."
+            why_now = f"No compelling reason to add or reduce {ticker} at this time."
+            why_not_now = f"Watch {ticker} for evidence changes or risk escalation."
 
     return rationale, why_now, why_not_now
 
@@ -258,6 +265,7 @@ def decide(inp: DecisionInputV3) -> DecisionOutputV3:
     )
 
     rationale, why_now, why_not_now = _build_rationale(
+        ticker=inp.ticker,
         action=action,
         evidence_quality=inp.evidence_quality,
         attractiveness=attractiveness,

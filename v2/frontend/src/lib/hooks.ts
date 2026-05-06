@@ -105,10 +105,11 @@ export function invalidateRecommendationAggregateQueries(qc: QueryClient) {
   qc.invalidateQueries({ queryKey: ["recommendations", "job"] });
 }
 
-export function useRecommendations(action?: string) {
+export function useRecommendations(action?: string, enabled = true) {
   return useQuery({
     queryKey: ["recommendations", action],
     queryFn: () => api.recommendations.list(action),
+    enabled,
     staleTime: 20_000,
     refetchOnWindowFocus: false,
   });

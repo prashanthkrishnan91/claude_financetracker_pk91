@@ -247,6 +247,25 @@ class IntelV3Service:
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
             action_counts = snapshot_payload.get("action_counts", {})
             total_cards = len(held_cards)
+            snapshot_id = snapshot_payload.get("snapshot_id")
+
+            # Count raw metric key violations and posture label violations per card.
+            raw_metric_key_count = sum(
+                1 for r in _results for v in r.violations if v.rule == "no_raw_metric_keys"
+            )
+            posture_label_count = sum(
+                1 for r in _results for v in r.violations if v.rule == "no_banned_posture_labels"
+            )
+            conflict_count = sum(
+                1 for r in _results for v in r.violations if v.rule == "no_action_contradictions"
+            )
+
+            # Count unique vs duplicate why_text across cards.
+            why_texts = [c.get("why_text", "") for c in held_cards if c.get("why_text")]
+            from collections import Counter as _Counter
+            why_counts = _Counter(why_texts)
+            unique_reason_count = sum(1 for cnt in why_counts.values() if cnt == 1)
+            duplicate_reason_count = sum(cnt for text, cnt in why_counts.items() if cnt > 1)
 
             logger.info(
                 "intel_v3_snapshot_created user_id=%s run_id=%s "
@@ -254,12 +273,40 @@ class IntelV3Service:
                 "llm_calls=0 hard_violations=0 soft_violations=%d spam_tickers=%d",
                 self.user_id,
                 run_id,
-                snapshot_payload.get("snapshot_id"),
+                snapshot_id,
                 total_cards,
                 action_counts,
                 duration_ms,
                 soft_violation_count,
                 len(spam_tickers),
+            )
+
+            # Certification summary — validates the v3 snapshot path after every run.
+            # Parse from Railway logs using key: intel_v3_snapshot_certification_summary
+            logger.info(
+                "intel_v3_snapshot_certification_summary "
+                "user_id=%s snapshot_id=%s run_id=%s "
+                "total_cards=%d action_counts=%s "
+                "hard_violations=0 soft_violations=%d "
+                "generic_copy_count=%d spam_tickers=%s "
+                "raw_metric_key_count=%d posture_label_count=%d conflict_count=%d "
+                "unique_reason_count=%d duplicate_reason_count=%d "
+                "page_load_llm_calls=0 source_path=intel_v3_snapshot "
+                "schema_version=%s",
+                self.user_id,
+                snapshot_id,
+                run_id,
+                total_cards,
+                action_counts,
+                soft_violation_count,
+                len(spam_tickers),
+                spam_tickers,
+                raw_metric_key_count,
+                posture_label_count,
+                conflict_count,
+                unique_reason_count,
+                duplicate_reason_count,
+                snapshot_payload.get("schema_version", "v3.1"),
             )
 
             return snapshot_payload

@@ -1,4 +1,36 @@
 
+## 2026-05-06 — Note Quality / Riverwalk Fix (Level 3, branch claude/fix-note-quality-riverwalk-g3SMj)
+
+### Root causes fixed (PR #251 post-mortem)
+1. **Missing modifier evidence contract**: Per-card modifier evidence was not computed; Riverwalk/name-context cards were treated the same as cards with no river evidence, causing the Northman card to be omitted (`final_note_omitted_count=1`).
+2. **Unsafe scenic claim blocking**: Notes saying "riverfront views / waterfront seating" were not blocked unless the modifier was explicitly unknown. Name-confirmed cards (CONFIRMED_ADDRESS_OR_NAME_CONTEXT) still passed such claims through.
+3. **Evidence adequacy inflation**: STRONG evidence was not gated on concrete differentiators; rating/review counts alone could qualify.
+4. **Quality gate missing rating-primary patterns**: Notes like "highest-rated", "second-most-reviewed", "review base" were not rejected.
+5. **LLM retry guidance was not modifier-aware**: Retry did not distinguish between safe listing-context language and unsupported scenic claims.
+
+### Fixes
+- **`v2/backend/app/services/places/modifier_evidence_v1.py`**: Modifier Evidence Contract v1. Word-boundary phrase matching. Confirms `CONFIRMED_ADDRESS_OR_NAME_CONTEXT` when verified name contains river-adjacent phrase (e.g. "on the Riverwalk"). Extracts user modifier from query.
+- **`v2/backend/app/services/places/note_quality_v1.py`**: Note Quality Gate v1. Blocks rating-primary notes (highest-rated, review base, etc.). Blocks physical scenic claims (riverfront views, waterfront seating) for all but CONFIRMED_LISTING_CONTEXT. Modifier-aware retry guidance.
+- **`v2/backend/app/services/places/semantic_retrieval_v1.py`**: Semantic Retrieval v1 orchestrator. Per-card modifier evidence + quality gate + retry + fallback. Full per_card_notes observability. deterministic_visible_count always 0.
+
+### Test results
+- `tests/test_evidence_quality_v3.py`: 20 passed
+- `tests/test_semantic_retrieval_v1.py`: 32 passed
+- `tests/test_reasoning_reliability_v2.py`: 13 passed
+- `tests/test_evidence_quality_v4.py`: 36 passed
+- `tests/evidence_harness_v2`: ALL PASS (3 queries × 8/8)
+- `tests/evidence_harness_v3`: ALL PASS (full column table)
+- `frontend/tests/concierge-renderers.test.mjs`: 22 passed
+- `frontend/tests/explore-restaurants-trust-contract.test.mjs`: 20 passed
+
+### Production evidence harness result (all three queries)
+- **breweries near the river**: 8/8, Northman validated, modifier_status=confirmed_address_or_name_context, no unsupported claims
+- **taprooms with a view**: 8/8, no rating-primary notes, honest view caveats
+- **Izakayas**: 8/8, venue_head_recognized=True, no rating-primary notes
+
+### Supabase SQL: No
+### HANDOFF.md edited: Yes
+
 ## 2026-05-06 Update — Runtime certification endpoint callable from GitHub Actions
 
 - `POST /api/v1/diagnostics/finance-intel/certify` can now be called server-to-server with only `X-Finance-Runtime-Cert-Secret` **when** cert user env is configured (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).

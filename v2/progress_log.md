@@ -1,4 +1,13 @@
 
+## 2026-05-06 — Note Quality / Riverwalk Fix (Level 3 / branch: claude/fix-note-quality-riverwalk-g3SMj)
+
+- Added Modifier Evidence Contract v1: per-card modifier status for river/view modifiers. Northman ("on the Riverwalk" in verified name) now correctly receives `confirmed_address_or_name_context` via word-boundary phrase matching.
+- Added Note Quality Gate v1: rejects rating-primary notes (highest-rated, review base, second-most-reviewed etc.) and blocks physical scenic claims (riverfront views, waterfront seating) unless provider details confirm them.
+- Added Semantic Retrieval v1 orchestrator: per-card LLM note generation with retry + fallback + quality gate. deterministic_visible_count always 0.
+- Added 101 pytest tests across 4 files + 2 evidence harnesses + 42 frontend node:test tests.
+- Evidence harness v3 confirms all 3 production queries: 8/8 accepted, Northman validated, no omissions, no rating-primary notes.
+- Supabase SQL: No. Pre-existing test failures (supabase/pyo3 deps) are environment-level, not introduced by this change.
+
 ## 2026-05-06 — Runtime certification server-to-server auth hardening
 
 - Added diagnostics-only server-to-server auth path for `POST /api/v1/diagnostics/finance-intel/certify`: still env-gated (`FINANCE_RUNTIME_CERT_ENABLED`) and secret-gated (`X-Finance-Runtime-Cert-Secret`), now supports non-Bearer callers via configured cert identity (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).

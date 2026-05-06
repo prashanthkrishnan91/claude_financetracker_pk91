@@ -1,4 +1,94 @@
 
+## 2026-05-06 — Intel v3 Snapshot Spine + Premium Cockpit UI (Level 3 Rebuild)
+
+### Severity
+Level 3 — production correctness + architecture rebuild.
+
+### Root causes addressed
+1. **HOLD-collapse**: All 34 cards returned `action=HOLD, conviction=LOW` on every run. v3 kernel now uses independent axes (evidence quality → attractiveness → price context → portfolio fit → risk) with priority order, preventing degenerate collapse.
+2. **action_counts divergence**: Legacy path computed counts from a different source than card actions. v3 snapshot derives `action_counts` from `Counter(c["action"] for c in held_cards)` — single source of truth.
+3. **Run ID divergence**: Legacy blended cards from multiple run IDs. v3 snapshot assigns one `snapshot_id` and `run_id` to all cards in a snapshot. No cross-run blending.
+4. **Page-load LLM calls**: Legacy path could trigger LLM calls on page load. v3 snapshot read is zero LLM calls — reads persisted snapshot only.
+
+### Architecture
+- **K0**: Visible action contract locked to BUY/HOLD/TRIM/SELL (no posture labels, radar labels, raw metric keys).
+- **K1**: Deterministic v3 decision kernel (`intel_v3_decision_policy.py`) — visible path, not shadow.
+- **K2**: Portfolio governor lite (`portfolio_governor_lite.py`) — weight-based FitBand computation.
+- **K3**: Snapshot store (`intel_v3_snapshots` Supabase table) + service (`intel_v3_service.py`).
+- **K4**: Premium cockpit UI (`IntelV3Cockpit`, `IntelV3Card`, `IntelV3Drawer`).
+- **K5**: Source/evidence validator lite (`source_validator_lite.py`) — blocks raw metric keys, posture labels, fake price targets, action contradictions.
+- **Feature flag**: `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` (backend) + `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` (frontend). Binary gate — never blends v2 and v3 output.
+
+### New endpoints
+- `GET /api/v1/intel/v3/snapshot` — reads latest active snapshot, zero LLM calls.
+- `POST /api/v1/intel/v3/run` — runs v3 kernel, persists new snapshot.
+- `GET /api/v1/intel/v3/runs/{run_id}` — run status lookup.
+
+### Files changed (backend)
+- `v2/backend/app/services/intelligence/v3/intel_v3_decision_policy.py` — v3 kernel (pre-existing, promoted to visible)
+- `v2/backend/app/services/intelligence/v3/portfolio_governor_lite.py` — NEW: K2 weight-based FitBand
+- `v2/backend/app/services/intelligence/v3/source_validator_lite.py` — NEW: K5 card validation
+- `v2/backend/app/services/intelligence/v3/snapshot_builder.py` — NEW: K3 snapshot assembly
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — NEW: orchestrator service
+- `v2/backend/app/routers/intel_v3.py` — NEW: 3 endpoints
+- `v2/backend/app/main.py` — registered intel_v3 router
+- `v2/backend/tests/test_intel_v3_decision_policy.py` — NEW: 18 regression tests (Gate 1)
+- `v2/backend/tests/test_intel_v3_snapshot.py` — NEW: 36 tests (Gates 4d+)
+
+### Files changed (frontend)
+- `v2/frontend/src/lib/api.ts` — NEW: `api.intelV3` methods + v3 TypeScript types
+- `v2/frontend/src/lib/hooks.ts` — NEW: `useIntelV3Snapshot`, `useRunIntelV3`, `useIntelV3RunStatus`
+- `v2/frontend/src/components/cards/IntelV3Card.tsx` — NEW: v3 held-position card
+- `v2/frontend/src/components/cards/IntelV3Drawer.tsx` — NEW: v3 detail drawer
+- `v2/frontend/src/components/cards/IntelV3Cockpit.tsx` — NEW: premium cockpit container
+- `v2/frontend/src/app/dashboard/recommendations/page.tsx` — flag gate: `INTEL_V3_ENABLED` renders `<IntelV3Cockpit />` only; legacy path unchanged below
+
+### Supabase SQL: Yes
+Migration `016_intel_v3_snapshots` applied:
+```sql
+CREATE TABLE intel_v3_snapshots (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  run_id uuid,
+  schema_version text DEFAULT 'v3.1',
+  payload jsonb NOT NULL,
+  source_hash text,
+  is_active boolean DEFAULT true,
+  created_at timestamptz DEFAULT now()
+);
+-- Indexes on (user_id, is_active, created_at DESC) and (run_id)
+-- RLS enabled, owner policy
+```
+
+### Rollback path
+1. Set `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=false` (or unset) + `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=false` — page reverts to legacy path with zero code changes.
+2. The `intel_v3_snapshots` table is additive; no existing tables modified.
+3. Legacy recommendation engine untouched.
+
+### Tests
+- 54 v3 tests pass (18 decision policy + 36 snapshot/integration)
+- Legacy recommendation tests unaffected (pre-existing env errors unrelated to this PR)
+
+### Manual validation steps (Railway)
+1. Set `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true` in Railway env.
+2. Set `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true` in Vercel env.
+3. Open Intel page — should show "No Intel v3 snapshot yet" empty state (no LLM calls on load).
+4. Click "Run Intel v3" — should complete and show cockpit with cards.
+5. Verify filter tabs are exactly ALL / Buy / Hold / Trim / Sell — no other labels.
+6. Verify action_counts in cockpit header match card counts in each section.
+7. Verify no raw metric keys (fcf_margin, roic_ttm, etc.) appear in any card text.
+8. Click any card — drawer should open with rationale, why_now, risk, portfolio_fit, evidence.
+9. Set flag back to false — page should revert to legacy path.
+
+### Known risks
+- `build_truth_aware_decision_input()` in service reads `InsightCard.evidence_quality_status` — requires existing recommendation cards to exist. If user has no recommendations, v3 run will produce 0 cards.
+- Radar section deferred (shows placeholder panel).
+- Committee view deferred (shows "Analysis pending" in drawer).
+
+### HANDOFF.md edited: Yes
+
+---
+
 ## 2026-05-06 Update — Runtime certification endpoint callable from GitHub Actions
 
 - `POST /api/v1/diagnostics/finance-intel/certify` can now be called server-to-server with only `X-Finance-Runtime-Cert-Secret` **when** cert user env is configured (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).

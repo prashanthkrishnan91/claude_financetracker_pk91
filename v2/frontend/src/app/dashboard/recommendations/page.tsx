@@ -23,6 +23,14 @@ import { EmptyState } from "@/components/ui/EmptyState";
 import { Spinner } from "@/components/ui/Spinner";
 import type { InsightCardData, DecisionLogEntry, StrategyPerformance } from "@/lib/api";
 import { normalizeVisibleIntelAction } from "@/lib/visibleIntelActions";
+// v3 cockpit — rendered when NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true
+import { IntelV3Cockpit } from "@/components/cards/IntelV3Cockpit";
+
+// Feature flag: when true the page renders v3 snapshot only, not legacy cards.
+// Set NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true in .env.local to enable.
+// NEVER silently blend v2 and v3 output — the flag is binary.
+const INTEL_V3_ENABLED =
+  process.env.NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED === "true";
 
 // LOCKED: Intel v3 visible filter contract is ALL/BUY/HOLD/TRIM/SELL only. New visible buckets require a spec change.
 const INTEL_FILTERS = [
@@ -161,6 +169,22 @@ export default function RecommendationsPage() {
     },
     [selectedCard, resolveRec]
   );
+
+  // v3 path: when flag is enabled, render ONLY the v3 cockpit — never blend with legacy.
+  if (INTEL_V3_ENABLED) {
+    return (
+      <>
+        <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border px-4 py-3">
+          <div className="max-w-7xl mx-auto flex items-center justify-between">
+            <h1 className="text-xl font-display text-text-primary">Intel</h1>
+          </div>
+        </header>
+        <main className="max-w-7xl mx-auto px-4 py-6">
+          <IntelV3Cockpit />
+        </main>
+      </>
+    );
+  }
 
   return (
     <>

@@ -1,4 +1,15 @@
 
+## 2026-05-06 — Intel v3 Snapshot Spine + Premium Cockpit UI (Level 3 Rebuild)
+
+- Built the v3 held-position intelligence spine end-to-end: decision kernel (K1) → portfolio governor lite (K2) → snapshot store (K3) → premium cockpit UI (K4) → source validator lite (K5).
+- Fixed production failure classes: HOLD-collapse (independent axis decision policy), action_counts divergence (derived from card actions only), run ID divergence (one snapshot_id per run), page-load LLM calls (snapshot read is zero LLM calls).
+- New Supabase table: `intel_v3_snapshots` (additive, RLS-gated).
+- New endpoints: `GET /api/v1/intel/v3/snapshot`, `POST /api/v1/intel/v3/run`, `GET /api/v1/intel/v3/runs/{run_id}`.
+- New frontend components: `IntelV3Cockpit`, `IntelV3Card`, `IntelV3Drawer` — read ONLY from v3 snapshot, never from legacy cards.
+- Feature flag: `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` / `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` — binary gate, no blending.
+- 54 new regression tests (18 decision policy + 36 snapshot/integration) — all pass.
+- Legacy path untouched: flag=false reverts page to legacy with no code changes.
+
 ## 2026-05-06 — Runtime certification server-to-server auth hardening
 
 - Added diagnostics-only server-to-server auth path for `POST /api/v1/diagnostics/finance-intel/certify`: still env-gated (`FINANCE_RUNTIME_CERT_ENABLED`) and secret-gated (`X-Finance-Runtime-Cert-Secret`), now supports non-Bearer callers via configured cert identity (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).

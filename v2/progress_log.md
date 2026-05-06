@@ -1,4 +1,15 @@
 
+## 2026-05-06 — Phase 0.5: Intel v3 Regression Guardrails (Level 1)
+
+- Phase 0 certified (PRs #220–#222). This PR adds regression guardrails only — no visible behavior changes.
+- New file: `test_intel_v3_phase0_5_regression_guardrail.py` (30 tests).
+- Adds reusable `assert_snapshot_certification_clean()` helper: any future snapshot test can call it to catch all Phase 0 contract regressions in one place.
+- Static source guards: verify `intel_v3_service.py` and `read_only_evidence_adapter.py` do not reference `get_insight_cards`, `_compute_insight_cards`, `recommendation_engine`, or any LLM import.
+- Log-format contract: `source_path=intel_v3_snapshot`, `generated_legacy_recommendations=false`, `attempted_llm_calls=0`, `page_load_llm_calls=0` verified present in service source.
+- Evidence stats key contract: `certify_snapshot_cards()` returns all required keys as ints.
+- 138 existing v3 tests still pass. No SQL. No frontend changes. No provider/LLM changes.
+- Next strategic phase: Finance Agent Skill Pack Audit — planning only, not implementation.
+
 ## 2026-05-06 — Intel v3 Evidence-Aware Rationale + Certification Hardening (Level 2)
 
 - PR #217 passed plumbing certification but failed intelligence quality: ticker-prefix boilerplate slipped through exact-duplicate detection. Production cards read: "MSFT: strong evidence and fairly priced. Portfolio has room to add. Manageable risk." — same sentence for every BUY ticker.

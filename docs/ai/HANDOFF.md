@@ -1,4 +1,46 @@
 
+## 2026-05-06 — Phase 0.5: Intel v3 Regression Guardrails (Level 1)
+
+### Status
+Phase 0 certified (PRs #220–#222). This PR adds regression guardrails only — no visible behavior changes.
+
+### What this PR adds
+Single new test file: `v2/backend/tests/test_intel_v3_phase0_5_regression_guardrail.py` — 30 tests.
+
+**A. Reusable certification helper** — `assert_snapshot_certification_clean(snapshot)`:
+- Callable from any future test that builds a snapshot.
+- Asserts: schema_version=="v3.1" exactly, legacy_path_used==False, action_counts sum==total_cards,
+  all actions in {BUY/HOLD/TRIM/SELL}, snapshot_id/run_id coherent across cards,
+  hard_violations==0, raw_metric_key_count==0, posture_label_count==0, action_conflict_count==0.
+- Tests confirm the helper FAILS for each specific violation type.
+
+**B. Static source guards (anti-legacy-path)**:
+- `intel_v3_service.py` does not contain `get_insight_cards`, `_compute_insight_cards`, or `recommendation_engine`.
+- `read_only_evidence_adapter.py` does not contain `recommendation_engine`, `get_insight_cards`, `anthropic`, or `openai`.
+
+**C. Log-format contract**:
+- `intel_v3_snapshot_certification_summary`, `intel_v3_evidence_source_summary` keys present in service source.
+- `source_path=intel_v3_snapshot`, `generated_legacy_recommendations=false`, `attempted_llm_calls=0`, `page_load_llm_calls=0` hardcoded strings present.
+
+**D. Evidence stats key contract**:
+- `certify_snapshot_cards()` returns all 12 required keys (hard_violations, generic_copy_count, etc.) as ints.
+
+**E. Schema version exact match**: `schema_version` must be exactly "v3.1", not a prefix.
+
+**F. E2E kernel→snapshot certification**: Full `decide() + build_snapshot()` pipeline passes the helper.
+
+### Next strategic phase
+Finance Agent Skill Pack Audit — planning only, not implementation.
+
+### Files changed
+- `v2/backend/tests/test_intel_v3_phase0_5_regression_guardrail.py` — NEW: 30 guardrail tests
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+
+---
+
 ## 2026-05-06 — Intel v3 Evidence-Aware Rationale + Certification Hardening (Level 2)
 
 ### What failed in production (after PR #217)

@@ -238,6 +238,16 @@ export const api = {
     getStrategyPerformance: () =>
       fetchApi<StrategyPerformance[]>("/api/v1/analytics/strategy-performance"),
   },
+
+  // Intel v3 snapshot path. Only active when NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true.
+  intelV3: {
+    getSnapshot: () =>
+      fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
+    runV3: () =>
+      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST" }),
+    getRunStatus: (runId: string) =>
+      fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
+  },
 };
 
 /** Form data upload (no JSON content-type) */
@@ -1082,4 +1092,94 @@ export interface DepositPlanResult {
   adaptive?: AdaptiveBlock | null;
   deployment_v2?: DeploymentDecisionV2 | null;
   debug?: Record<string, unknown>;
+}
+
+// ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────
+
+/** Actions valid for held positions. Radar labels (WATCH/AVOID) must not appear here. */
+export type IntelV3Action = "BUY" | "HOLD" | "TRIM" | "SELL";
+export type IntelV3Conviction = "LOW" | "MEDIUM" | "HIGH";
+export type IntelV3EvidenceBand = "THIN" | "PARTIAL" | "STRONG";
+
+export interface IntelV3HeldCard {
+  ticker: string;
+  name: string;
+  asset_type: string;
+  action: IntelV3Action;
+  conviction: IntelV3Conviction;
+  evidence_band: IntelV3EvidenceBand;
+  portfolio_fit: string;
+  risk_level: string;
+  thesis_state: string;
+  why_text: string;
+  risk_text: string;
+  action_text: string;
+  what_would_change_view: string;
+  fit_text: string;
+  evidence_text: string;
+  flags: string[];
+  source_snapshot_id: string;
+  source_run_id: string;
+  updated_at: string;
+  detail_drawer_payload: {
+    rationale: string;
+    why_now: string;
+    why_not_now: string;
+    evidence_band: IntelV3EvidenceBand;
+    evidence_quality: string;
+    attractiveness: string;
+    price_context: string;
+    portfolio_fit_raw: string;
+    risk_band: string;
+    blockers: string[];
+    suppression_reasons: Record<string, string>;
+    schema_version: string;
+    committee: { status: "deferred" | "ready"; reason?: string };
+  };
+}
+
+export interface IntelV3Snapshot {
+  schema_version: string;
+  snapshot_id: string;
+  run_id: string;
+  generated_at: string;
+  is_stale: boolean;
+  source_health: { status: string };
+  portfolio_command_center: {
+    total_holdings: number;
+    buy_count: number;
+    hold_count: number;
+    trim_count: number;
+    sell_count: number;
+    high_conviction: number;
+    thin_evidence: number;
+    source_health: { status: string };
+  };
+  action_counts: Record<IntelV3Action, number>;
+  evidence_band_counts: Record<IntelV3EvidenceBand, number>;
+  conviction_counts: Record<IntelV3Conviction, number>;
+  best_buys: IntelV3HeldCard[];
+  trim_sell_desk: IntelV3HeldCard[];
+  current_holdings: IntelV3HeldCard[];
+  opportunity_radar_preview: { status: "deferred" | "dark_launch"; reason?: string };
+  what_changed: string[];
+  warnings: string[];
+  legacy_path_used: false;
+}
+
+export interface IntelV3RunResult {
+  status: "completed" | "running" | "failed";
+  snapshot_id?: string;
+  run_id?: string;
+  total_cards?: number;
+  action_counts?: Record<IntelV3Action, number>;
+}
+
+export interface IntelV3RunStatus {
+  run_id: string;
+  status: "completed" | "running" | "failed";
+  snapshot_id?: string;
+  action_counts?: Record<IntelV3Action, number>;
+  total_cards?: number;
+  generated_at?: string;
 }

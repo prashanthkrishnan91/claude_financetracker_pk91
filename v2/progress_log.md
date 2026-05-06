@@ -1,4 +1,25 @@
 
+## 2026-05-06 — Intel v3 Pre-merge Hardening Pass (PR #215 blockers)
+
+- Fixed 8 pre-merge blockers: import path, migration file, fail-closed validator, service/router tests, legacy bridge comment, frontend tests, docs accuracy.
+- `intel_v3_service.py`: fixed `from ..recommendation_engine` → `from ...recommendation_engine`. Added fail-closed: raises ValueError + skips persist when hard violations exist.
+- `source_validator_lite.py`: `HARD_VIOLATION_RULES` frozenset, `hard_violation_count` property, 3-tuple return from `validate_snapshot_cards`.
+- `v2/database/016_intel_v3_snapshots.sql`: migration file now in repo.
+- `test_intel_v3_router_service.py`: 24 new tests — app import, flag behavior, snapshot contract, fail-closed, page-load isolation, run path.
+- `IntelV3Contract.test.ts`: 18 new frontend contract tests.
+- Total: 78 backend + 18 frontend v3 tests pass.
+
+## 2026-05-06 — Intel v3 Snapshot Spine + Premium Cockpit UI (Level 3 Rebuild)
+
+- Built the v3 held-position intelligence spine end-to-end: decision kernel (K1) → portfolio governor lite (K2) → snapshot store (K3) → premium cockpit UI (K4) → source validator lite (K5).
+- Fixed production failure classes: HOLD-collapse (independent axis decision policy), action_counts divergence (derived from card actions only), run ID divergence (one snapshot_id per run), page-load LLM calls (snapshot read is zero LLM calls).
+- New Supabase table: `intel_v3_snapshots` (additive, RLS-gated).
+- New endpoints: `GET /api/v1/intel/v3/snapshot`, `POST /api/v1/intel/v3/run`, `GET /api/v1/intel/v3/runs/{run_id}`.
+- New frontend components: `IntelV3Cockpit`, `IntelV3Card`, `IntelV3Drawer` — read ONLY from v3 snapshot, never from legacy cards.
+- Feature flag: `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` / `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` — binary gate, no blending.
+- 54 new regression tests (18 decision policy + 36 snapshot/integration) — all pass.
+- Legacy path untouched: flag=false reverts page to legacy with no code changes.
+
 ## 2026-05-06 — Runtime certification server-to-server auth hardening
 
 - Added diagnostics-only server-to-server auth path for `POST /api/v1/diagnostics/finance-intel/certify`: still env-gated (`FINANCE_RUNTIME_CERT_ENABLED`) and secret-gated (`X-Finance-Runtime-Cert-Secret`), now supports non-Bearer callers via configured cert identity (`FINANCE_RUNTIME_CERT_USER_ID`, optional `FINANCE_RUNTIME_CERT_USER_EMAIL`).

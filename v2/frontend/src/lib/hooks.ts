@@ -2,7 +2,7 @@
 
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { ActualDecisionItem } from "./api";
+import type { ActualDecisionItem, IntelV3Snapshot, IntelV3RunResult } from "./api";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
@@ -438,5 +438,44 @@ export function useDecisionPerformanceInsights(enabled = true) {
     enabled,
     staleTime: 30_000,
     refetchOnWindowFocus: false,
+  });
+}
+
+// ── Intel v3 snapshot ────────────────────────────────────────────────────────
+
+/** Read the latest Intel v3 snapshot. Zero LLM calls on this path. */
+export function useIntelV3Snapshot(enabled = true) {
+  return useQuery<IntelV3Snapshot>({
+    queryKey: ["intel_v3", "snapshot"],
+    queryFn: api.intelV3.getSnapshot,
+    enabled,
+    staleTime: 60_000,
+    retry: (failureCount, error: unknown) => {
+      // Do not retry on 404 (no snapshot yet).
+      if (error instanceof Error && error.message.includes("404")) return false;
+      return failureCount < 2;
+    },
+  });
+}
+
+/** Trigger an Intel v3 run. Refetches snapshot after completion. */
+export function useRunIntelV3() {
+  const qc = useQueryClient();
+  return useMutation<IntelV3RunResult>({
+    mutationFn: api.intelV3.runV3,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
+    },
+  });
+}
+
+/** Poll a v3 run status by run_id. */
+export function useIntelV3RunStatus(runId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["intel_v3", "run", runId],
+    queryFn: () => api.intelV3.getRunStatus(runId!),
+    enabled: enabled && !!runId,
+    refetchInterval: 2_000,
+    staleTime: 0,
   });
 }

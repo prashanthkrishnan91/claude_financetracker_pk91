@@ -2810,3 +2810,13 @@ PR 2 added per-card v3 shadow diagnostics, but there was no single portfolio-lev
   - `nonforced_run_agents`: async kickoff (`force=false`) + pollable run id. PASS requires observable cache behavior (`skipped_fresh_verdicts>0` or explicit safe rejection reasons), and not all rejected for `missing_fingerprint` after a forced run.
 
 - 2026-05-06: Fixed Intel v3 legacy coupling by replacing run_v3 RecommendationService.get_insight_cards() dependency with read-only persisted evidence adapter. Added intel_v3_evidence_source_summary log and updated soft violation accounting to include generic_copy, duplicate_reason, repeated_skeleton, ticker_prefix_only_reason, weak_buy_rationale.
+
+
+## 2026-05-06 Post-PR-220 certification follow-up
+- PR #220 successfully decoupled Intel v3 run path from legacy recommendation aggregation (read-only persisted evidence path confirmed in production).
+- Remaining production blockers identified: `intel_v3.weight_map_failed` due to `positions.current_value` lookup against a non-existent column, plus non-zero rationale skeleton counters (`ticker_prefix_only_reason_count`, `repeated_skeleton_count`).
+- Validation checklist for next production run:
+  1. Confirm no `intel_v3.weight_map_failed` log lines.
+  2. Confirm certification summary has `repeated_skeleton_count=0`, `ticker_prefix_only_reason_count=0`, `weak_buy_rationale_count=0`, `generic_copy_count=0`.
+  3. Confirm `hard_violations=0`, `action_conflict_count=0`, `raw_metric_key_count=0`, `posture_label_count=0`.
+  4. Confirm no `recommendations.aggregate.start` and no legacy `schema_version="v2"` page-load certification during v3 run window.

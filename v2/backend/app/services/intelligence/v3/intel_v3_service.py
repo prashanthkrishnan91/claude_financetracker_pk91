@@ -256,6 +256,9 @@ class IntelV3Service:
             posture_label_count = sum(
                 1 for r in _results for v in r.violations if v.rule == "no_banned_posture_labels"
             )
+            conflict_count = sum(
+                1 for r in _results for v in r.violations if v.rule == "no_action_contradictions"
+            )
 
             # Count unique vs duplicate why_text across cards.
             why_texts = [c.get("why_text", "") for c in held_cards if c.get("why_text")]
@@ -286,7 +289,7 @@ class IntelV3Service:
                 "total_cards=%d action_counts=%s "
                 "hard_violations=0 soft_violations=%d "
                 "generic_copy_count=%d spam_tickers=%s "
-                "raw_metric_key_count=%d posture_label_count=%d "
+                "raw_metric_key_count=%d posture_label_count=%d conflict_count=%d "
                 "unique_reason_count=%d duplicate_reason_count=%d "
                 "page_load_llm_calls=0 source_path=intel_v3_snapshot "
                 "schema_version=%s",
@@ -300,6 +303,7 @@ class IntelV3Service:
                 spam_tickers,
                 raw_metric_key_count,
                 posture_label_count,
+                conflict_count,
                 unique_reason_count,
                 duplicate_reason_count,
                 snapshot_payload.get("schema_version", "v3.1"),

@@ -1,4 +1,14 @@
 
+## 2026-05-06 — Intel v3 Pre-merge Hardening Pass (PR #215 blockers)
+
+- Fixed 8 pre-merge blockers: import path, migration file, fail-closed validator, service/router tests, legacy bridge comment, frontend tests, docs accuracy.
+- `intel_v3_service.py`: fixed `from ..recommendation_engine` → `from ...recommendation_engine`. Added fail-closed: raises ValueError + skips persist when hard violations exist.
+- `source_validator_lite.py`: `HARD_VIOLATION_RULES` frozenset, `hard_violation_count` property, 3-tuple return from `validate_snapshot_cards`.
+- `v2/database/016_intel_v3_snapshots.sql`: migration file now in repo.
+- `test_intel_v3_router_service.py`: 24 new tests — app import, flag behavior, snapshot contract, fail-closed, page-load isolation, run path.
+- `IntelV3Contract.test.ts`: 18 new frontend contract tests.
+- Total: 78 backend + 18 frontend v3 tests pass.
+
 ## 2026-05-06 — Intel v3 Snapshot Spine + Premium Cockpit UI (Level 3 Rebuild)
 
 - Built the v3 held-position intelligence spine end-to-end: decision kernel (K1) → portfolio governor lite (K2) → snapshot store (K3) → premium cockpit UI (K4) → source validator lite (K5).

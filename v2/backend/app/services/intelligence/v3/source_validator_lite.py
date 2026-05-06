@@ -67,6 +67,19 @@ class ValidationViolation:
     message: str
 
 
+# Rules that constitute a hard violation — snapshot must NOT be persisted.
+# Soft violations (generic copy spam) may be persisted with a warning.
+HARD_VIOLATION_RULES: frozenset[str] = frozenset({
+    "valid_action_labels_only",
+    "no_banned_posture_labels",
+    "no_radar_labels_in_held_cards",
+    "no_action_contradictions",
+    "no_raw_metric_keys",
+    "no_fake_price_targets",
+    "valid_conviction_only",
+})
+
+
 @dataclass
 class ValidationResult:
     is_valid: bool
@@ -75,6 +88,10 @@ class ValidationResult:
     @property
     def violation_count(self) -> int:
         return len(self.violations)
+
+    @property
+    def hard_violation_count(self) -> int:
+        return sum(1 for v in self.violations if v.rule in HARD_VIOLATION_RULES)
 
     @property
     def rules_violated(self) -> list[str]:
@@ -239,12 +256,13 @@ def validate_snapshot_cards(
     cards: list[dict],
     *,
     spam_threshold: int = 3,
-) -> tuple[list[ValidationResult], list[str]]:
+) -> tuple[list[ValidationResult], list[str], int]:
     """Validate all cards in a snapshot and detect generic copy spam.
 
     Returns:
-        (per_card_results, spam_tickers) where spam_tickers are tickers
-        detected as having generic repeated copy.
+        (per_card_results, spam_tickers, total_hard_violation_count)
+        where spam_tickers are tickers with generic repeated copy (soft violation)
+        and total_hard_violation_count is the sum of hard violations across all cards.
     """
     results = []
     for card in cards:
@@ -262,4 +280,5 @@ def validate_snapshot_cards(
         results.append(result)
 
     spam_tickers = detect_generic_copy_spam(cards, min_cards_for_spam=spam_threshold)
-    return results, spam_tickers
+    total_hard = sum(r.hard_violation_count for r in results)
+    return results, spam_tickers, total_hard

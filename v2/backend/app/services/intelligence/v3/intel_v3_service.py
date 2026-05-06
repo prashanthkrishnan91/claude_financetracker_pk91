@@ -31,7 +31,9 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 from ....database import get_supabase_client
-from ..recommendation_engine import RecommendationService
+# Transitional input adapter: get_insight_cards() is used as a raw-signal bridge
+# only during POST /run. GET /snapshot never calls this path (zero LLM, zero legacy).
+from ...recommendation_engine import RecommendationService
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
@@ -209,22 +211,37 @@ class IntelV3Service:
                 is_stale=False,
             )
 
-            # Step 4b: validate cards.
+            # Step 4b: validate cards — fail-closed on hard violations.
             held_cards = snapshot_payload.get("current_holdings", [])
-            _results, spam_tickers = validate_snapshot_cards(held_cards)
-            violation_count = sum(1 for r in _results if not r.is_valid)
-            if violation_count > 0:
-                logger.warning(
-                    "intel_v3_snapshot_created user_id=%s run_id=%s "
-                    "validator_violations=%d spam_tickers=%s",
-                    self.user_id, run_id, violation_count, spam_tickers,
-                )
-                if spam_tickers:
-                    snapshot_payload["warnings"].append(
-                        f"Generic copy detected on {len(spam_tickers)} card(s)."
-                    )
+            _results, spam_tickers, hard_violation_count = validate_snapshot_cards(held_cards)
+            soft_violation_count = sum(1 for r in _results if not r.is_valid) - hard_violation_count
 
-            # Step 5: persist snapshot.
+            if hard_violation_count > 0:
+                # Hard violations: invalid action labels, banned posture labels,
+                # action contradictions, raw metric keys, fake price targets.
+                # Do NOT persist — raise so the caller can return the error cleanly.
+                logger.error(
+                    "intel_v3_run_aborted_hard_violations user_id=%s run_id=%s "
+                    "hard_violations=%d",
+                    self.user_id, run_id, hard_violation_count,
+                )
+                raise ValueError(
+                    f"Intel v3 run aborted: {hard_violation_count} hard validation "
+                    f"violation(s) detected. Snapshot not persisted."
+                )
+
+            if spam_tickers:
+                # Soft violation: generic copy spam — persist with warning.
+                logger.warning(
+                    "intel_v3_run_soft_violation user_id=%s run_id=%s "
+                    "spam_tickers=%s",
+                    self.user_id, run_id, spam_tickers,
+                )
+                snapshot_payload["warnings"].append(
+                    f"Generic copy detected on {len(spam_tickers)} card(s)."
+                )
+
+            # Step 5: persist snapshot — only reached when hard_violation_count == 0.
             await self._persist_snapshot(run_id=run_id, payload=snapshot_payload)
 
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
@@ -234,14 +251,15 @@ class IntelV3Service:
             logger.info(
                 "intel_v3_snapshot_created user_id=%s run_id=%s "
                 "snapshot_id=%s total_cards=%d action_counts=%s duration_ms=%d "
-                "llm_calls=0 validator_violations=%d",
+                "llm_calls=0 hard_violations=0 soft_violations=%d spam_tickers=%d",
                 self.user_id,
                 run_id,
                 snapshot_payload.get("snapshot_id"),
                 total_cards,
                 action_counts,
                 duration_ms,
-                violation_count,
+                soft_violation_count,
+                len(spam_tickers),
             )
 
             return snapshot_payload

@@ -356,7 +356,7 @@ class TestSourceValidatorLite:
                 "why_text": "Review candidate.",
             },
         ]
-        results, _ = validate_snapshot_cards(cards)
+        results, _, _ = validate_snapshot_cards(cards)
         assert results[0].is_valid  # AAPL
         assert results[1].is_valid  # MSFT
         assert not results[2].is_valid  # BAD — REVIEW is not a valid v3 action
@@ -509,7 +509,7 @@ class TestKernelToSnapshotE2E:
         assert list(run_ids)[0] == "e2e-run-001"
 
         # Validate no posture labels, no raw keys.
-        results, spam_tickers = validate_snapshot_cards(snapshot["current_holdings"])
+        results, spam_tickers, _ = validate_snapshot_cards(snapshot["current_holdings"])
         assert all(r.is_valid for r in results), [
             str(r.violations) for r in results if not r.is_valid
         ]

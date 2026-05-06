@@ -1,4 +1,36 @@
 
+## 2026-05-06 — Intel v3 Pre-merge Hardening Pass (PR #215 blockers)
+
+### Severity
+Level 3 pre-merge blocker fix — 8 blockers resolved.
+
+### Blockers resolved
+
+1. **Import path fix**: `intel_v3_service.py` used `from ..recommendation_engine` (went to `intelligence/`). Fixed to `from ...recommendation_engine` (correct `services/` level). Added comment marking it as transitional input adapter.
+2. **Migration file added**: `v2/database/016_intel_v3_snapshots.sql` now in repo with table, indexes, RLS, owner policy.
+3. **Fail-closed validator**: `validate_snapshot_cards()` now returns 3-tuple `(results, spam_tickers, hard_violation_count)`. `run_v3()` raises `ValueError` and does NOT call `_persist_snapshot` when `hard_violation_count > 0`. Soft violations (copy spam) persist with warning only. `HARD_VIOLATION_RULES` frozenset documents which rules are hard.
+4. **Service/router tests** (`test_intel_v3_router_service.py`): 24 tests covering app import, router registration, feature flag behavior, snapshot contract, validator fail-closed, page-load isolation, run path. All pass.
+5. **Legacy bridge clarification**: `get_insight_cards()` usage commented as "transitional input adapter" — GET /snapshot never calls it.
+6. **Frontend tests** (`IntelV3Contract.test.ts`): 18 tests covering action contract, action_counts derivation, snapshot+run ID isolation, no banned posture labels, no raw metric keys, empty state, drawer payload, snapshot structure.
+7. **Docs accuracy**: Migration file is now in the PR; HANDOFF/progress_log updated.
+8. **3-tuple fix**: Existing tests unpacking 2-tuple from `validate_snapshot_cards` updated to 3-tuple.
+
+### Files changed (hardening)
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — import fix + fail-closed validator + legacy adapter comment
+- `v2/backend/app/services/intelligence/v3/source_validator_lite.py` — `HARD_VIOLATION_RULES` + `hard_violation_count` property + 3-tuple return
+- `v2/backend/tests/test_intel_v3_snapshot.py` — 3-tuple unpack fix (2 lines)
+- `v2/backend/tests/test_intel_v3_router_service.py` — NEW: 24 service/router tests
+- `v2/database/016_intel_v3_snapshots.sql` — NEW: migration file
+- `v2/frontend/src/components/cards/IntelV3Contract.test.ts` — NEW: 18 frontend tests
+- `docs/ai/HANDOFF.md`, `v2/progress_log.md` — updated
+
+### Tests
+- 78 backend v3 tests pass (18 + 36 + 24)
+- 18 frontend v3 contract tests pass
+- Legacy path unchanged
+
+---
+
 ## 2026-05-06 — Intel v3 Snapshot Spine + Premium Cockpit UI (Level 3 Rebuild)
 
 ### Severity

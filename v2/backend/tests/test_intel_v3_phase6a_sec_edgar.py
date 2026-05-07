@@ -216,18 +216,26 @@ def _make_submissions_response(form_types: list[str], filing_dates: list[str]) -
 
 
 class FakeHttpGetFn:
-    """Fake callable that returns pre-configured JSON responses for URLs."""
+    """Fake callable that returns pre-configured JSON responses for URLs.
+
+    Phase 7A: companyfacts URL is now also handled. Default response is an
+    empty facts payload (parse_status="no_facts"), preserving Phase 6A behavior.
+    Pass companyfacts=<dict> to supply custom companyfacts data in tests.
+    """
 
     def __init__(
         self,
         ticker_map: Optional[dict] = None,
         submissions: Optional[dict] = None,
+        companyfacts: Optional[dict] = None,
         raise_on_url: Optional[str] = None,
         raise_exc: Optional[Exception] = None,
         calls_log: Optional[list] = None,
     ) -> None:
         self._ticker_map = ticker_map or {}
         self._submissions = submissions or {}
+        # Default empty companyfacts: parser returns "no_facts" — Phase 6A behavior preserved.
+        self._companyfacts = companyfacts if companyfacts is not None else {"facts": {"us-gaap": {}}}
         self._raise_on_url = raise_on_url
         self._raise_exc = raise_exc
         self._calls: list[str] = calls_log if calls_log is not None else []
@@ -241,6 +249,8 @@ class FakeHttpGetFn:
             return _FakeResponse(self._ticker_map)
         if "submissions" in url:
             return _FakeResponse(self._submissions)
+        if "companyfacts" in url:
+            return _FakeResponse(self._companyfacts)
         raise RuntimeError(f"Unexpected URL in test: {url}")
 
     @property
@@ -565,15 +575,16 @@ class TestCriterion5RequestCap:
         config = SecEdgarProviderConfig(user_agent="Test/1.0 x@x.com")
         assert config.max_requests_per_ticker == 3
 
-    def test_normal_flow_uses_exactly_two_requests(self) -> None:
+    def test_normal_flow_uses_three_requests(self) -> None:
+        # Phase 7A: normal flow uses 3 requests (tickers + submissions + companyfacts).
         calls: list[str] = []
         ticker_map = _make_ticker_map_response("MSFT", 789019)
         submissions = _make_submissions_response(["10-K"], [_recent_date_iso(30)])
         fake = FakeHttpGetFn(ticker_map=ticker_map, submissions=submissions, calls_log=calls)
         config = _make_sec_config()
         result = fetch_for_ticker("MSFT", config, http_get_fn=fake)
-        assert result.request_count == 2
-        assert len(calls) == 2
+        assert result.request_count == 3
+        assert len(calls) == 3
 
 
 # ── Criterion 6: SEC success creates SourceRecords ───────────────────────────
@@ -1409,7 +1420,7 @@ class TestFreshnessAndConfidenceClassification:
             "confidence_or_trust_level": adapted.confidence_or_trust_level,
             "freshness_status": adapted.freshness_status,
             "safe_for_decision": False,
-            "payload": {"worker_phase": "phase6a_sec_grounded"},
+            "payload": {"worker_phase": "phase7a_sec_grounded"},
         }
         sources = [{
             "id": src_id,

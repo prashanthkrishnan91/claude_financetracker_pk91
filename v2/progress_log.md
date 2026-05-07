@@ -1,4 +1,17 @@
 
+## 2026-05-07 — Phase 7A: SEC CompanyFacts Financial Evidence v1 (Level 2)
+
+- Phase 7A upgrades SEC-backed Earnings Reviewer artifacts from filing-metadata-only evidence to source-linked XBRL financial metric observations from the official SEC CompanyFacts API. Still no artifact consumption. Still no visible decision change. safe_for_decision remains false.
+- **New module**: `sec_companyfacts_parser.py` — bounded XBRL parser. 13-tag us-gaap allowlist (revenue, net income, EPS, assets, liabilities, equity, operating cash flow, capex). Only 10-K/10-Q forms accepted. Only source-linked accessions accepted. Max 2 periods per tag. Fail-closed. `compute_metric_digest()` produces deterministic SHA-256 digest of observation set (order-independent).
+- **Extended**: `sec_edgar_provider.py` — adds request 3: companyfacts/CIK{cik}.json. Fetched only when request budget allows (max_requests_per_ticker=3 default). Companyfacts failure is fail-closed and does not downgrade submissions success. Raw JSON never persisted — only parsed MetricObservation list attached to SecEdgarProviderResult.
+- **Extended**: `earnings_sec_adapter.py` — builds `metric_observation` FactRecords from companyfacts observations, each with `source_index` linked to filing SourceRecord by accession_number match. No unlinked facts. `_compute_source_fingerprint` now includes metric digest. Safe payload shape: `{claim, taxonomy, tag, label, value, unit, form, filed, accession_number}` + optional fiscal_year/fiscal_period. No forbidden keys.
+- **Updated**: `earnings_reviewer.py` — model_version bumped to `"sec_edgar_phase7a_v1"`, worker_phase to `"phase7a_sec_grounded"`. Phase 6A artifacts remain in DB with old replay keys.
+- **Extended**: `artifact_observability.py` — 2 new Phase 7A fields: `artifacts_with_metric_observations_count`, `metric_observation_fact_count`. Aggregate only, no payloads returned.
+- New tests: `test_intel_v3_phase7a_companyfacts.py` — 67 tests, 24 acceptance criteria. All 550/550 non-fastapi phase tests passing (Phase 7A: 67/67, Phase 6A: 86/86, Phase 6B service: 53/53, Phase 5: 125/125, Phase 4 service: 58/58, Phase 3: 85/85, Phase 3.5: 57/57, Phase 3.7: 16/16).
+- No SQL migration. No new tables. No decide() change. No frontend change. No LLM. No agents. No new paid providers (SEC EDGAR public JSON only). safe_for_decision DB constraint unchanged. No artifact consumption. eligible_for_decision_consumption=False always.
+- Metrics are backend-only evidence observations, not UI copy and not recommendation authority.
+- Next: production validation — enable SEC flags + observability, run validate/observe endpoints for AAPL/MSFT/NVDA; confirm metric_observation_fact_count > 0 and eligible_for_decision_consumption_count = 0 before planning Phase 7B observability or Phase 8 consumption planning.
+
 ## 2026-05-07 — Phase 6B: Controlled SEC Production Validation + Readiness Observability (Level 2)
 
 - Phase 6B extends the Phase 4 artifact observability service and endpoint to add production-safe readiness aggregates that prove SEC-backed artifacts satisfy the Phase 5 contract while remaining excluded from visible decisions.

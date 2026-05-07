@@ -1,4 +1,4 @@
-"""Phase 3 / Phase 6A — Earnings Reviewer dark-run worker.
+"""Phase 3 / Phase 7A — Earnings Reviewer dark-run worker.
 
 Phase 3 behavior (sec_config=None):
   - Produces a narrow "catalyst_window" research artifact from holding_context only.
@@ -6,11 +6,14 @@ Phase 3 behavior (sec_config=None):
   - source_refs_fingerprint="no_external_source_phase3".
   - Unchanged from Phase 3 — all Phase 3 tests still pass.
 
-Phase 6A behavior (sec_config provided):
-  - Calls the SEC EDGAR provider to fetch recent 10-K/10-Q/8-K filing metadata.
-  - On success: produces source-linked FactRecords, MEDIUM/LOW confidence,
-    FRESH/STALE freshness, and a fingerprint derived from accession numbers.
-  - On any failure: fails closed → UNKNOWN/UNKNOWN/no-source artifact with limitation recorded.
+Phase 7A behavior (sec_config provided):
+  - Calls the SEC EDGAR provider to fetch recent 10-K/10-Q/8-K filing metadata
+    and optional CompanyFacts XBRL metric observations (request 3 if budget allows).
+  - On success: produces source-linked filing FactRecords + metric_observation FactRecords,
+    MEDIUM/LOW confidence, FRESH/STALE freshness, and a fingerprint derived from
+    accession numbers + metric observations digest.
+  - On companyfacts failure: filing metadata evidence preserved, limitation recorded.
+  - On any other failure: fails closed → UNKNOWN/UNKNOWN/no-source artifact.
   - source_refs_fingerprint differs from Phase 3 key in all cases.
 
 What this worker NEVER does (both phases):
@@ -51,7 +54,7 @@ _WORKER_NAME = "earnings_reviewer_v1"
 # Model versions identify which execution path produced the artifact.
 # Different model_version → different replay_idempotency_key → separate DB row.
 _MODEL_VERSION_DARK_RUN = "none_phase3_dark_run"    # Phase 3 scaffold (no provider)
-_MODEL_VERSION_SEC = "sec_edgar_phase6a_v1"         # Phase 6A SEC-grounded path
+_MODEL_VERSION_SEC = "sec_edgar_phase7a_v1"         # Phase 7A SEC + CompanyFacts path
 
 # Fields the worker intends to review when a real provider is available.
 _INTENDED_REVIEW_FIELDS = [
@@ -246,7 +249,7 @@ def _run_sec_grounded(
         "skill_pack": _SKILL_PACK,
         "ticker": ticker,
         "model_version": _MODEL_VERSION_SEC,
-        "phase": "phase6a_sec_grounded",
+        "phase": "phase7a_sec_grounded",
     }
     if worker_input.holding_context:
         fingerprint_data["context_keys"] = sorted(worker_input.holding_context.keys())
@@ -271,7 +274,7 @@ def _run_sec_grounded(
     # Artifact payload — no forbidden keys.
     payload: dict[str, Any] = {
         "review_status": adapted.review_status,
-        "worker_phase": "phase6a_sec_grounded",
+        "worker_phase": "phase7a_sec_grounded",
         "reviewed_ticker": ticker,
         "sec_fetch_status": sec_result.fetch_status,
         "sec_filing_count": len(adapted.sources),
@@ -308,7 +311,7 @@ def _run_sec_grounded(
 
     audit_events: list[AuditEventRecord] = [
         AuditEventRecord(
-            tool_call="earnings_reviewer_sec_run",
+            tool_call="earnings_reviewer_phase7a_sec_run",
             status="completed",
             model_id=None,
             model_version=_MODEL_VERSION_SEC,

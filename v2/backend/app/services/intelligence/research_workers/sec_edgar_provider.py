@@ -1,8 +1,11 @@
-"""Phase 6A — Synchronous SEC EDGAR public JSON API provider for research workers.
+"""Phase 6A / Phase 7A — Synchronous SEC EDGAR public JSON API provider for research workers.
 
-Fetches recent filing metadata for one ticker using official SEC EDGAR JSON APIs:
-  1. https://www.sec.gov/files/company_tickers.json  — ticker→CIK mapping (request 1)
-  2. https://data.sec.gov/submissions/CIK{cik}.json  — recent filings metadata (request 2)
+Fetches recent filing metadata and optional CompanyFacts XBRL data for one ticker:
+  1. https://www.sec.gov/files/company_tickers.json        — ticker→CIK mapping (request 1)
+  2. https://data.sec.gov/submissions/CIK{cik}.json        — recent filings metadata (request 2)
+  3. https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json — XBRL metric facts (request 3)
+     Phase 7A: fetched only when request_count < max_requests_per_ticker after request 2.
+     Fail-closed — submissions success is preserved if companyfacts fails.
 
 Hard constraints enforced by this module:
   - Requires a declared User-Agent (SEC_EDGAR_USER_AGENT from settings).
@@ -12,6 +15,7 @@ Hard constraints enforced by this module:
   - Fail-closed on any error, timeout, rate-limit, or malformed response.
     No exceptions escape — always returns SecEdgarProviderResult.
   - Never fabricates data — returns only what the SEC API provides.
+  - Raw companyfacts JSON is never persisted — only parsed MetricObservations are carried.
   - Deterministic and testable: inject http_get_fn to avoid real HTTP calls in tests.
   - Never runs outside explicit worker invocation (not on page load).
 
@@ -27,8 +31,14 @@ from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
+from .sec_companyfacts_parser import (
+    CompanyFactsParseResult,
+    parse_companyfacts,
+)
+
 _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 _SUBMISSIONS_URL_TEMPLATE = "https://data.sec.gov/submissions/CIK{cik}.json"
+_COMPANYFACTS_URL_TEMPLATE = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 _DEFAULT_TIMEOUT_SECONDS: float = 10.0
 _DEFAULT_MAX_REQUESTS: int = 3
 _DEFAULT_MAX_FILINGS: int = 5
@@ -71,6 +81,10 @@ class SecEdgarProviderResult:
       rate_limited  — HTTP 429 received
       malformed     — response was not valid JSON or had unexpected structure
       error         — any other exception
+
+    Phase 7A addition:
+      companyfacts_parse_result — parsed MetricObservations from request 3, or None if
+      companyfacts was not fetched or failed. Raw JSON is never stored here.
     """
 
     ticker: str
@@ -80,6 +94,8 @@ class SecEdgarProviderResult:
     error_message: Optional[str] = None
     fetched_at: str = ""
     request_count: int = 0
+    # Phase 7A: parsed metric observations from companyfacts (never raw JSON).
+    companyfacts_parse_result: Optional[CompanyFactsParseResult] = None
 
     @property
     def is_success(self) -> bool:
@@ -272,6 +288,40 @@ def fetch_for_ticker(
             return _fail_closed(ticker_upper, "malformed",
                                 f"Malformed submissions JSON: {exc}", request_count)
 
+        # ── Request 3 (Phase 7A): CompanyFacts XBRL metrics ──────────────────
+        # Only attempted if request budget allows. Fail-closed: any error here
+        # does not downgrade the submissions success already achieved.
+        # Raw companyfacts JSON is never persisted — only parsed observations.
+        companyfacts_parse_result: Optional[CompanyFactsParseResult] = None
+        if request_count < config.max_requests_per_ticker:
+            cf_url = _COMPANYFACTS_URL_TEMPLATE.format(cik=cik_padded)
+            request_count += 1  # count attempt before the call; preserved even on timeout/error
+            try:
+                resp3 = _get(cf_url)
+                resp3.raise_for_status()
+                cf_raw = resp3.json() or {}
+                # Build the set of accession numbers with SourceRecords for linkage.
+                source_accessions = frozenset(
+                    f.accession_number for f in filings
+                )
+                companyfacts_parse_result = parse_companyfacts(cf_raw, source_accessions)
+                logger.debug(
+                    "sec_companyfacts_fetched ticker=%s parse_status=%s observations=%d",
+                    ticker_upper,
+                    companyfacts_parse_result.parse_status,
+                    companyfacts_parse_result.observation_count,
+                )
+            except Exception as cf_exc:  # noqa: BLE001
+                # Companyfacts failure does not downgrade the filings success.
+                logger.warning(
+                    "sec_companyfacts_fetch_failed ticker=%s error=%s — continuing with filings only",
+                    ticker_upper, cf_exc,
+                )
+                companyfacts_parse_result = CompanyFactsParseResult(
+                    parse_status="error",
+                    error_message=f"companyfacts_fetch_error: {cf_exc}",
+                )
+
         return SecEdgarProviderResult(
             ticker=ticker_upper,
             cik=cik_padded,
@@ -279,6 +329,7 @@ def fetch_for_ticker(
             fetch_status="success",
             fetched_at=fetched_at,
             request_count=request_count,
+            companyfacts_parse_result=companyfacts_parse_result,
         )
 
     except Exception as exc:  # noqa: BLE001

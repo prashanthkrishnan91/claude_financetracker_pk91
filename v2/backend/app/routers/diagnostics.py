@@ -457,4 +457,7 @@ async def observe_research_artifacts(
         "artifacts_without_source_linked_facts_count": obs.artifacts_without_source_linked_facts_count,
         "phase5_ready_but_decision_blocked_count": obs.phase5_ready_but_decision_blocked_count,
         "readiness_visible_snapshot_unchanged": obs.readiness_visible_snapshot_unchanged,
+        # Phase 7A: metric observation counters.
+        "artifacts_with_metric_observations_count": obs.artifacts_with_metric_observations_count,
+        "metric_observation_fact_count": obs.metric_observation_fact_count,
     }

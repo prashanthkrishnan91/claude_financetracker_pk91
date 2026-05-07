@@ -1,4 +1,4 @@
-"""Phase 6A — Adapter: converts SecEdgarProviderResult into WorkerOutput components.
+"""Phase 6A / Phase 7A — Adapter: converts SecEdgarProviderResult into WorkerOutput components.
 
 This module is a pure function with no DB calls, no external calls, and no side effects.
 It bridges the SEC EDGAR provider result into the source/fact/confidence/freshness
@@ -15,12 +15,16 @@ Confidence classification (documented constant):
   LOW    — only 8-K filings (material events only, no periodic financial report).
   UNKNOWN — no source-backed evidence (fetch failed, no filings, or no user agent).
 
-Phase 6A scope:
-  - Filing metadata only. No transcript. No EPS estimates. No analyst guidance.
-  - No claim that SEC facts equal analyst expectations.
+Phase 7A additions:
+  - CompanyFacts metric_observation FactRecords sourced from the companyfacts parse result.
+  - Every metric_observation FactRecord has source_index set (linked to a filing SourceRecord).
+  - Facts without a matching source accession are skipped (no unlinked facts).
+  - Source fingerprint includes a deterministic digest of metric observations.
+  - Confidence/freshness remain MEDIUM/LOW/UNKNOWN (no HIGH) and FRESH/STALE/UNKNOWN.
+  - If companyfacts failed or yielded no observations, Phase 6A filing metadata behavior
+    is preserved with a limitation recorded.
   - safe_for_decision remains False in all cases (enforced by writer + DB constraint).
-  - Artifacts with MEDIUM/FRESH or LOW/FRESH status can pass Phase 5 readiness
-    conditions 4+5 but are NOT eligible for decision consumption (eligible_for_decision_consumption=False always).
+  - eligible_for_decision_consumption remains always False.
 """
 from __future__ import annotations
 
@@ -35,6 +39,7 @@ logger = logging.getLogger(__name__)
 
 from .contracts import FactRecord, SourceRecord
 from .sec_edgar_provider import SecEdgarProviderResult
+from .sec_companyfacts_parser import compute_metric_digest
 
 # ── Classification constants (documented) ────────────────────────────────────
 
@@ -84,12 +89,14 @@ def _parse_date(date_str: Optional[str]) -> Optional[date]:
         return None
 
 
-def _compute_source_fingerprint(cik: str, filings: list) -> str:
-    """Deterministic SHA-256 fingerprint of CIK + all source-backed filing records.
+def _compute_source_fingerprint(cik: str, filings: list, metric_digest: str = "") -> str:
+    """Deterministic SHA-256 fingerprint of CIK + source-backed filings + metric digest.
 
     Includes every filing used to create a SourceRecord (10-K, 10-Q, 8-K).
-    Any change in the set of source-backed filings — new accession number, new
-    filing date, or a new 8-K — changes this fingerprint →
+    Phase 7A: also includes metric_digest so fingerprint changes when
+    companyfacts observations change materially.
+
+    Any change to filings or metric observations → new fingerprint →
     new replay_idempotency_key → new artifact row.
     """
     filing_entries = sorted(
@@ -103,7 +110,10 @@ def _compute_source_fingerprint(cik: str, filings: list) -> str:
         ],
         key=lambda x: (x["accession_number"], x["form_type"], x["filing_date"]),
     )
-    raw = json.dumps({"cik": cik, "filings": filing_entries}, sort_keys=True)
+    raw = json.dumps(
+        {"cik": cik, "filings": filing_entries, "metric_digest": metric_digest},
+        sort_keys=True,
+    )
     digest = hashlib.sha256(raw.encode()).hexdigest()[:24]
     return f"sec_edgar_{digest}"
 
@@ -195,6 +205,47 @@ def adapt_sec_result(
             source_index=src_idx,
         ))
 
+    # ── Phase 7A: metric_observation facts from CompanyFacts XBRL ────────────
+    # Build accession_number → source_index mapping from the sources list above.
+    # Only metric observations whose accn matches a SourceRecord are included.
+    # Observations without a source link are silently skipped per spec.
+    metric_observation_count = 0
+    cf_parse_result = getattr(sec_result, "companyfacts_parse_result", None)
+    if cf_parse_result is not None and cf_parse_result.is_success:
+        accn_to_src_idx: dict[str, int] = {
+            src.section_reference: idx
+            for idx, src in enumerate(sources)
+            if src.section_reference
+        }
+        for obs in cf_parse_result.observations:
+            src_idx = accn_to_src_idx.get(obs.accession_number)
+            if src_idx is None:
+                continue  # no matching source — skip per spec
+            metric_payload: dict = {
+                "claim": "sec_companyfact_observed",
+                "taxonomy": obs.taxonomy,
+                "tag": obs.tag,
+                "label": obs.label,
+                "value": obs.value,
+                "unit": obs.unit,
+                "form": obs.form,
+                "filed": obs.filed,
+                "accession_number": obs.accession_number,
+            }
+            if obs.fiscal_year is not None:
+                metric_payload["fiscal_year"] = obs.fiscal_year
+            if obs.fiscal_period is not None:
+                metric_payload["fiscal_period"] = obs.fiscal_period
+            facts.append(FactRecord(
+                fact_kind="metric_observation",
+                structured_payload=metric_payload,
+                axis_hint="evidence",
+                period=obs.fiscal_period,
+                as_of=obs.filed,
+                source_index=src_idx,
+            ))
+            metric_observation_count += 1
+
     # ── Confidence classification ─────────────────────────────────────────────
     # MEDIUM: has at least one 10-K or 10-Q (official periodic financial report).
     # LOW:    only 8-K filings (material event notices, not periodic financials).
@@ -241,23 +292,43 @@ def adapt_sec_result(
         freshness = "UNKNOWN"
 
     # ── Source fingerprint for idempotency ────────────────────────────────────
-    # Differs when the set of 10-K/10-Q accession numbers changes.
+    # Includes metric digest so fingerprint changes when observations change.
+    # Phase 7A: metric_digest="" when no observations — still differs from Phase 6A
+    # because metric_digest key is now always present in the hash input.
+    metric_obs_list = (
+        cf_parse_result.observations
+        if cf_parse_result is not None and cf_parse_result.is_success
+        else []
+    )
+    metric_digest = compute_metric_digest(metric_obs_list)
     source_refs_fingerprint = _compute_source_fingerprint(
         cik=sec_result.cik or "",
         filings=sec_result.filings,
+        metric_digest=metric_digest,
     )
 
     # ── Limitations — always honest ───────────────────────────────────────────
     limitations = [
         "No earnings transcript provider configured.",
         "No earnings calendar or analyst EPS estimate provider configured.",
-        "No analyst guidance data available. SEC filing metadata only.",
-        "SEC filing metadata does not imply analyst expectations or earnings surprises.",
+        "No analyst guidance data available. SEC filing metadata and XBRL metrics only.",
+        "SEC filing data does not imply analyst expectations or earnings surprises.",
         (
             f"SEC EDGAR evidence: {len(sources)} filing(s) retrieved for "
             f"{sec_result.ticker} (CIK {sec_result.cik})."
         ),
     ]
+    if metric_observation_count > 0:
+        limitations.append(
+            f"Phase 7A: {metric_observation_count} XBRL metric observation(s) extracted "
+            f"(filing-source-linked, backend-only, not recommendation authority)."
+        )
+    else:
+        cf_status = cf_parse_result.parse_status if cf_parse_result is not None else "not_fetched"
+        limitations.append(
+            f"Phase 7A: no XBRL metric observations extracted "
+            f"(companyfacts_status={cf_status}). Filing metadata evidence only."
+        )
 
     return SecEarningsAdapterResult(
         sources=sources,

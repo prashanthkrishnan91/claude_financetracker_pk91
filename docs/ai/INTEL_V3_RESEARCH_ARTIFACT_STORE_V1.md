@@ -1,6 +1,6 @@
 # Intel v3 — Research Artifact Store v1 (Phase 2 Spec + Draft SQL Proposal)
 
-Status: Phase 2 planning / schema design only. No production migration is applied. No runtime backend or frontend code is changed. No worker, provider, LLM, or UI is touched.
+Status: Phase 2.1 — migration promoted to `v2/database/017_research_artifact_store_v1.sql`. NOT YET APPLIED to production Supabase. Manual apply required after merge with explicit approval. No runtime backend or frontend code is changed. No worker, provider, LLM, or UI is touched.
 
 Date: 2026-05-07
 Owner: Intel v3 architecture
@@ -32,7 +32,7 @@ This is a planning + draft-SQL PR only. No table is created in production. No ba
 
 ## 2. Non-Goals
 
-- Applying the migration to production. The draft SQL lives at `docs/ai/sql_drafts/research_artifact_store_v1.sql`, not in `v2/database/`. Promoting it requires an explicit follow-on PR with budget and review.
+- Applying the migration to production. The promoted migration lives at `v2/database/017_research_artifact_store_v1.sql` (Phase 2.1). Supabase apply requires explicit approval after merge. The Phase 2 draft at `docs/ai/sql_drafts/research_artifact_store_v1.sql` is retained as historical record.
 - Implementing any reader (`ReadOnlyEvidenceAdapter` extension) or writer code path.
 - Implementing any worker, finance agent, skill pack, or LLM call.
 - Adding any provider integration or vendor commitment.
@@ -286,16 +286,30 @@ Index `idx_research_artifacts_user_freshness` supports the scheduled sweep effic
 
 ## 11. Migration / Runbook Notes
 
-This PR does NOT apply a migration. The draft SQL is at `docs/ai/sql_drafts/research_artifact_store_v1.sql` and is clearly marked DRAFT ONLY in its file header.
+Phase 2.1: The draft SQL has been promoted to `v2/database/017_research_artifact_store_v1.sql`. The Phase 2 draft at `docs/ai/sql_drafts/research_artifact_store_v1.sql` is retained as historical record.
 
-Promotion path (when approved in a future PR — NOT this PR):
+**Production Supabase apply (after merge + explicit approval):**
 
-1. Re-review the draft against this spec doc and the Phase 1 spec.
-2. Move the file to `v2/database/017_research_artifact_store_v1.sql` (next migration number).
-3. Apply via Supabase SQL Editor in a maintenance window. The migration is purely additive — no existing table is modified and no column is dropped.
-4. Verify the four new tables exist and RLS is enabled (`SELECT relname, relrowsecurity FROM pg_class WHERE relname IN ('research_artifacts', 'research_artifact_sources', 'research_artifact_facts', 'worker_audit_events');`).
-5. Verify the forbidden-keys trigger rejects a synthetic insert with `payload = '{"final_action": "BUY"}'::jsonb`.
-6. Verify zero impact on the existing visible certification. Run `intel_v3_snapshot_certification_summary` once and confirm fields are unchanged.
+1. Open Supabase SQL Editor.
+2. Run `v2/database/017_research_artifact_store_v1.sql` in full.
+3. Verify the four new tables exist and RLS is enabled:
+   ```sql
+   SELECT relname, relrowsecurity FROM pg_class
+   WHERE relname IN ('research_artifacts','research_artifact_sources',
+                     'research_artifact_facts','worker_audit_events');
+   ```
+4. Test top-level forbidden-key rejection (expect ERROR):
+   ```sql
+   INSERT INTO research_artifacts (user_id, artifact_type, skill_pack, scope_kind,
+     ticker, generated_by_worker, input_fingerprint, replay_idempotency_key,
+     worker_run_id, payload)
+   VALUES (auth.uid(), 'filing_risk', 'test_pack', 'ticker', 'AAPL',
+     'test_worker', 'fp1', 'key1', gen_random_uuid(),
+     '{"final_action": "BUY"}'::jsonb);
+   ```
+5. Test nested forbidden-key rejection (expect ERROR from recursive trigger):
+   Same insert but with `payload = '{"recommendation": {"final_action": "BUY"}}'::jsonb`.
+6. Verify zero impact on the existing visible certification. Open Intel v3 UI and confirm snapshot cards still load normally.
 
 Rollback (only if applied and an issue is found):
 

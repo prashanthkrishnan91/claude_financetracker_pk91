@@ -1,4 +1,17 @@
 
+## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Migration Promotion (Level 2, SQL File Only, Not Applied)
+
+- Phase 0, Phase 0.5, Phase 1, and Phase 2 are closed. This PR promotes the Phase 2 draft SQL (`docs/ai/sql_drafts/research_artifact_store_v1.sql`) into a real production migration: `v2/database/017_research_artifact_store_v1.sql`. No production Supabase SQL is applied — manual apply required after merge with explicit approval.
+- Migration is additive only. Four new tables: `research_artifacts`, `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events`. All `IF NOT EXISTS`/`DO $$` guarded.
+- Phase 2.1 promotion changes vs. draft: (1) `worker_audit_events` user_id consistency trigger added (was missing for non-null artifact_id rows); (2) JSONPath column alias renamed from ambiguous `t(value)` to `kv(obj)`; (3) PG 14+ compatibility and case-insensitivity documented in comments.
+- Forbidden-key enforcement: column-level JSONB CHECK (top-level, exact-lowercase) + recursive BEFORE trigger via `jsonb_path_query(... 'lax $.**.keyvalue()')` (case-insensitive, all depths).
+- RLS: owner-only policies on all four tables. service_role bypasses by Supabase default (Phase 3 worker path). Grants: `authenticated` and `service_role`.
+- Rollback block: commented out, drop-children-first order, inside migration file.
+- Architecture rule reinforced: workers write artifacts/audit only; `decide()` in `decision_policy_v1.py` remains the sole Buy/Hold/Trim/Sell authority; `safe_for_decision` defaults FALSE; no page-load LLM calls; no legacy recommendation_engine re-coupling.
+- Validation: `git diff` shows zero changes under `v2/backend/`, `v2/frontend/`, or any runtime code. No `decide()` / `IntelV3Service` / certification detector changes.
+- Supabase SQL: Yes — migration file added, NOT APPLIED (manual apply required after merge).
+- Next: Phase 3 single narrow worker dark-run scaffold (Earnings Reviewer), after Supabase apply confirmed.
+
 ## 2026-05-07 — Phase 2: Research Artifact Store v1 — Planning + Draft SQL (Level 2, Docs/Draft Only)
 
 - Phase 0 (PRs #220–#222), Phase 0.5 (PR #223), and Phase 1 (PR #224) are closed and certified. This PR is planning + draft-SQL only — no runtime code, no production migration, no providers, no LLM, no UI, no `decide()` change.

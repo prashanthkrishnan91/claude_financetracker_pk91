@@ -1,4 +1,14 @@
 
+## 2026-05-07 — Phase 6B: Controlled SEC Production Validation + Readiness Observability (Level 2)
+
+- Phase 6B extends the Phase 4 artifact observability service and endpoint to add production-safe readiness aggregates that prove SEC-backed artifacts satisfy the Phase 5 contract while remaining excluded from visible decisions.
+- **Extended**: `artifact_observability.py` — imports `evaluate_artifact_truth_readiness`, adds 11 new Phase 6B fields to `ArtifactObservabilitySummary`, adds Phase 6B evaluation block: fetches full source/fact details per artifact (internal only — never returned), calls `evaluate_artifact_truth_readiness()` per artifact, aggregates counters only. Fail-closed: query failures append to errors[] without raising.
+- **Extended**: `diagnostics.py` observe endpoint returns all 11 new Phase 6B readiness aggregate fields. Backward-compatible — no request schema change.
+- Phase 6B readiness proves: Phase 3/4 scaffold artifacts (UNKNOWN/UNKNOWN) remain ineligible; Phase 6A SEC-backed artifacts (MEDIUM/FRESH + source-linked facts) become `eligible_for_truth_adapter=True`; `eligible_for_decision_consumption=False` always; `safe_for_decision` unchanged.
+- New tests: `test_intel_v3_phase6b_readiness_observability.py` — 54 tests, 23 acceptance criteria. All 515/515 phase tests passing (Phase 6B: 54/54, Phase 6A: 78/78, Phase 5: 125/125, Phase 4 service: 58/58, Phase 4 endpoint: 31/31, Phase 3: 85/85, Phase 3.5: 57/57, Phase 3.7: 16/16).
+- No SQL migration. No new tables. No decide() change. No frontend change. No LLM. No agents. No new providers. safe_for_decision DB constraint unchanged. No artifact consumption.
+- Next: production validation — enable SEC flags + observability flag, run validate then observe endpoints for AAPL/MSFT/NVDA; confirm eligible_for_truth_adapter_count > 0 and eligible_for_decision_consumption_count = 0 before planning Phase 7 consumption.
+
 ## 2026-05-07 — Phase 6A: SEC EDGAR Evidence Population + Grounding Upgrade (Level 2)
 
 - Phase 6A upgrades the Earnings Reviewer dark-run worker to produce provider-backed, source-linked, freshness-classified, confidence-classified research artifacts using SEC EDGAR public JSON APIs. Safe_for_decision remains false. No decision consumption. No visible Intel v3 changes.

@@ -246,7 +246,7 @@ class TestReadyTickerCounting:
         )
         assert result.by_ticker["MSFT"]["future_adapter_readiness"] == "READY_DRY_RUN_ONLY"
 
-    def test_ready_ticker_has_research_artifacts(self):
+    def test_ready_ticker_has_sec_research_artifacts(self):
         aid = _aid()
         snapshot_by_ticker = _run_phase8b(
             artifact_rows=[_make_artifact(aid, ticker="AAPL")],
@@ -256,7 +256,7 @@ class TestReadyTickerCounting:
             portfolio_positions=[{"ticker": "AAPL", "category": "Core"}],
             snapshot_by_ticker=snapshot_by_ticker,
         )
-        assert result.by_ticker["AAPL"]["has_research_artifacts"] is True
+        assert result.by_ticker["AAPL"]["has_sec_research_artifacts"] is True
 
     def test_ready_counts_in_readiness_counts(self):
         aid = _aid()
@@ -350,7 +350,8 @@ class TestBlockedWithArtifactsNoSourceLinked:
         assert result.tickers_blocked_for_future_adapter_count == 1
         assert result.by_ticker["BLK1"]["future_adapter_readiness"] == "BLOCKED_DRY_RUN_ONLY"
 
-    def test_artifact_empty_facts_counted_as_blocked(self):
+    def test_artifact_empty_facts_no_sec_research_artifacts(self):
+        """Artifact with empty facts has no SEC metric evidence — has_sec_research_artifacts False."""
         aid = _aid()
         snapshot_by_ticker = _run_phase8b(
             artifact_rows=[_make_artifact(aid, ticker="EMPTYBLK")],
@@ -361,11 +362,12 @@ class TestBlockedWithArtifactsNoSourceLinked:
             snapshot_by_ticker=snapshot_by_ticker,
         )
         assert result.tickers_blocked_for_future_adapter_count == 1
-        assert result.by_ticker["EMPTYBLK"]["has_research_artifacts"] is True
+        # No source-linked SEC metric facts → has_sec_research_artifacts must be False.
+        assert result.by_ticker["EMPTYBLK"]["has_sec_research_artifacts"] is False
         assert result.by_ticker["EMPTYBLK"]["has_source_linked_metric_evidence"] is False
 
-    def test_blocked_with_artifact_not_in_without_coverage_list(self):
-        """Tickers with artifacts (but blocked) are NOT in tickers_without_sec_metric_coverage."""
+    def test_blocked_generic_artifact_in_without_coverage_list(self):
+        """Generic artifact (no SEC metric facts) IS in tickers_without_sec_metric_coverage."""
         aid = _aid()
         snapshot_by_ticker = _run_phase8b(
             artifact_rows=[_make_artifact(aid, ticker="HASART")],
@@ -375,10 +377,10 @@ class TestBlockedWithArtifactsNoSourceLinked:
             portfolio_positions=[{"ticker": "HASART", "category": "Core"}],
             snapshot_by_ticker=snapshot_by_ticker,
         )
-        # Has artifact (even empty), so NOT in the missing coverage list.
-        assert "HASART" not in result.tickers_without_sec_metric_coverage
-        assert result.tickers_with_research_artifacts_count == 1
-        assert result.tickers_without_research_artifacts_count == 0
+        # No SEC metric facts → treated as missing SEC coverage, regardless of artifact.
+        assert "HASART" in result.tickers_without_sec_metric_coverage
+        assert result.tickers_without_sec_research_artifacts_count == 1
+        assert result.tickers_with_sec_research_artifacts_count == 0
 
 
 # =============================================================================
@@ -398,8 +400,8 @@ class TestNoArtifactTickers:
             portfolio_positions=[{"ticker": "NOART", "category": "Core"}],
             snapshot_by_ticker={},
         )
-        assert result.tickers_without_research_artifacts_count == 1
-        assert result.tickers_with_research_artifacts_count == 0
+        assert result.tickers_without_sec_research_artifacts_count == 1
+        assert result.tickers_with_sec_research_artifacts_count == 0
 
     def test_ticker_without_artifacts_readiness_blocked(self):
         result = _coverage(
@@ -414,7 +416,7 @@ class TestNoArtifactTickers:
             snapshot_by_ticker={},
         )
         assert result.by_ticker["NOART"]["source_linked_metric_fact_count"] == 0
-        assert result.by_ticker["NOART"]["has_research_artifacts"] is False
+        assert result.by_ticker["NOART"]["has_sec_research_artifacts"] is False
         assert result.by_ticker["NOART"]["has_source_linked_metric_evidence"] is False
 
     def test_ticker_without_artifacts_all_buckets_missing(self):
@@ -456,6 +458,48 @@ class TestMissingSecResearchArtifactCode:
             snapshot_by_ticker={},
         )
         assert "NOCO" in result.tickers_without_sec_metric_coverage
+
+    def test_generic_artifact_no_sec_facts_has_missing_code(self):
+        """Ticker with generic artifact (no SEC CompanyFacts metric facts) gets missing_sec_research_artifact."""
+        aid = _aid()
+        snapshot_by_ticker = _run_phase8b(
+            artifact_rows=[_make_artifact(aid, ticker="GENART")],
+            facts_by_artifact={aid: []},  # artifact exists but zero SEC metric facts
+        )
+        result = _coverage(
+            portfolio_positions=[{"ticker": "GENART", "category": "Core"}],
+            snapshot_by_ticker=snapshot_by_ticker,
+        )
+        assert "missing_sec_research_artifact" in result.by_ticker["GENART"]["blocking_reason_codes"]
+
+    def test_generic_artifact_no_sec_facts_in_without_coverage_list(self):
+        """Ticker with generic artifact but no SEC metric facts is in tickers_without_sec_metric_coverage."""
+        aid = _aid()
+        snapshot_by_ticker = _run_phase8b(
+            artifact_rows=[_make_artifact(aid, ticker="GENART")],
+            facts_by_artifact={aid: []},
+        )
+        result = _coverage(
+            portfolio_positions=[{"ticker": "GENART", "category": "Core"}],
+            snapshot_by_ticker=snapshot_by_ticker,
+        )
+        assert "GENART" in result.tickers_without_sec_metric_coverage
+        assert result.tickers_without_sec_research_artifacts_count == 1
+
+    def test_ticker_with_sec_facts_counted_as_covered(self):
+        """Ticker with source-linked SEC CompanyFacts metric facts is counted as covered."""
+        aid = _aid()
+        snapshot_by_ticker = _run_phase8b(
+            artifact_rows=[_make_artifact(aid, ticker="COVERED")],
+            facts_by_artifact={aid: _full_facts(aid)},
+        )
+        result = _coverage(
+            portfolio_positions=[{"ticker": "COVERED", "category": "Core"}],
+            snapshot_by_ticker=snapshot_by_ticker,
+        )
+        assert result.by_ticker["COVERED"]["has_sec_research_artifacts"] is True
+        assert "COVERED" not in result.tickers_without_sec_metric_coverage
+        assert result.tickers_with_sec_research_artifacts_count == 1
 
     def test_mixed_portfolio_without_coverage_list_correct(self):
         aid = _aid()
@@ -576,7 +620,7 @@ class TestDeterministicCounts:
         assert r1.tickers_ready_for_future_adapter_count == r2.tickers_ready_for_future_adapter_count
         assert r1.tickers_partial_for_future_adapter_count == r2.tickers_partial_for_future_adapter_count
         assert r1.tickers_blocked_for_future_adapter_count == r2.tickers_blocked_for_future_adapter_count
-        assert r1.tickers_without_research_artifacts_count == r2.tickers_without_research_artifacts_count
+        assert r1.tickers_without_sec_research_artifacts_count == r2.tickers_without_sec_research_artifacts_count
 
     def test_counts_sum_to_portfolio_ticker_count(self):
         positions, snap = self._build_mixed()
@@ -592,7 +636,7 @@ class TestDeterministicCounts:
         positions, snap = self._build_mixed()
         r = _coverage(positions, snap)
         assert (
-            r.tickers_with_research_artifacts_count + r.tickers_without_research_artifacts_count
+            r.tickers_with_sec_research_artifacts_count + r.tickers_without_sec_research_artifacts_count
             == r.portfolio_ticker_count
         )
 
@@ -602,8 +646,8 @@ class TestDeterministicCounts:
         assert r.tickers_ready_for_future_adapter_count == 1
         assert r.tickers_partial_for_future_adapter_count == 1
         assert r.tickers_blocked_for_future_adapter_count == 1  # NOART_D
-        assert r.tickers_with_research_artifacts_count == 2
-        assert r.tickers_without_research_artifacts_count == 1
+        assert r.tickers_with_sec_research_artifacts_count == 2
+        assert r.tickers_without_sec_research_artifacts_count == 1
         assert r.portfolio_ticker_count == 3
 
 
@@ -729,8 +773,8 @@ class TestNoRawDataExposed:
         )
         for field_name in [
             "portfolio_ticker_count",
-            "tickers_with_research_artifacts_count",
-            "tickers_without_research_artifacts_count",
+            "tickers_with_sec_research_artifacts_count",
+            "tickers_without_sec_research_artifacts_count",
             "tickers_ready_for_future_adapter_count",
             "tickers_partial_for_future_adapter_count",
             "tickers_blocked_for_future_adapter_count",
@@ -949,8 +993,8 @@ class TestDisabledFlagPath:
         assert result.visible_snapshot_unchanged is True
         assert result.portfolio_ticker_count == 0
         assert result.portfolio_tickers_evaluated == []
-        assert result.tickers_with_research_artifacts_count == 0
-        assert result.tickers_without_research_artifacts_count == 0
+        assert result.tickers_with_sec_research_artifacts_count == 0
+        assert result.tickers_without_sec_research_artifacts_count == 0
         assert result.tickers_ready_for_future_adapter_count == 0
         assert result.tickers_partial_for_future_adapter_count == 0
         assert result.tickers_blocked_for_future_adapter_count == 0
@@ -1038,7 +1082,7 @@ class TestComputePortfolioSecMetricCoverage:
             db_client=db,
             settings=_StubSettings(),
         )
-        assert result.tickers_without_research_artifacts_count == 1
+        assert result.tickers_without_sec_research_artifacts_count == 1
         assert "AAPL" in result.tickers_without_sec_metric_coverage
         assert "missing_sec_research_artifact" in result.by_ticker["AAPL"]["blocking_reason_codes"]
 

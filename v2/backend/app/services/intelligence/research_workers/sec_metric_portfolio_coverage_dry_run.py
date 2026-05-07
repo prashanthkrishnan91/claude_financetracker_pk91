@@ -77,8 +77,12 @@ class PortfolioSecCoverageDryRunResult:
     visible_snapshot_unchanged: bool              # always True
     portfolio_ticker_count: int
     portfolio_tickers_evaluated: list[str]        # sorted, deduplicated
-    tickers_with_research_artifacts_count: int
-    tickers_without_research_artifacts_count: int
+    # SEC-specific coverage counts.
+    # A ticker counts as having SEC research artifacts only if it has at least one
+    # source-linked sec_companyfact_observed metric fact (fact_count > 0 in Phase 8B).
+    # Tickers with only generic artifacts (no SEC metric facts) are counted as without.
+    tickers_with_sec_research_artifacts_count: int
+    tickers_without_sec_research_artifacts_count: int
     tickers_with_source_linked_metric_evidence_count: int
     tickers_ready_for_future_adapter_count: int
     tickers_partial_for_future_adapter_count: int
@@ -97,8 +101,8 @@ def _disabled_result(reason: str) -> PortfolioSecCoverageDryRunResult:
         visible_snapshot_unchanged=True,
         portfolio_ticker_count=0,
         portfolio_tickers_evaluated=[],
-        tickers_with_research_artifacts_count=0,
-        tickers_without_research_artifacts_count=0,
+        tickers_with_sec_research_artifacts_count=0,
+        tickers_without_sec_research_artifacts_count=0,
         tickers_with_source_linked_metric_evidence_count=0,
         tickers_ready_for_future_adapter_count=0,
         tickers_partial_for_future_adapter_count=0,
@@ -141,8 +145,8 @@ def build_portfolio_sec_coverage_dry_run(
             visible_snapshot_unchanged=True,
             portfolio_ticker_count=0,
             portfolio_tickers_evaluated=[],
-            tickers_with_research_artifacts_count=0,
-            tickers_without_research_artifacts_count=0,
+            tickers_with_sec_research_artifacts_count=0,
+            tickers_without_sec_research_artifacts_count=0,
             tickers_with_source_linked_metric_evidence_count=0,
             tickers_ready_for_future_adapter_count=0,
             tickers_partial_for_future_adapter_count=0,
@@ -169,8 +173,8 @@ def _build(
 
     sorted_tickers = sorted(seen.keys())
 
-    tickers_with_research_artifacts_count = 0
-    tickers_without_research_artifacts_count = 0
+    tickers_with_sec_research_artifacts_count = 0
+    tickers_without_sec_research_artifacts_count = 0
     tickers_with_source_linked_metric_evidence_count = 0
     tickers_ready_for_future_adapter_count = 0
     tickers_partial_for_future_adapter_count = 0
@@ -181,32 +185,45 @@ def _build(
     for ticker in sorted_tickers:
         category = seen[ticker]
         phase8b_data = snapshot_by_ticker.get(ticker)
-        has_research_artifacts = phase8b_data is not None
 
-        if has_research_artifacts:
-            tickers_with_research_artifacts_count += 1
+        # SEC coverage is defined by source-linked SEC CompanyFacts metric evidence,
+        # not merely by the presence of any research artifact row.
+        # A ticker with only generic artifacts (no sec_companyfact_observed metric facts)
+        # has fact_count == 0 in Phase 8B and is treated as lacking SEC coverage.
+        if phase8b_data is not None:
             fact_count = int(phase8b_data.get("source_linked_metric_fact_count") or 0)
-            has_evidence = fact_count > 0
-            if has_evidence:
-                tickers_with_source_linked_metric_evidence_count += 1
             readiness: str = str(
                 phase8b_data.get("future_adapter_readiness") or "BLOCKED_DRY_RUN_ONLY"
             )
             present_buckets: list[str] = list(phase8b_data.get("present_buckets") or [])
             missing_buckets: list[str] = list(phase8b_data.get("missing_buckets") or [])
-            # Inherit Phase 8B blocking codes (includes missing_bucket_* per ticker).
             base_blocking: list[str] = list(
                 phase8b_data.get("blocking_reason_codes") or list(_ALWAYS_BLOCKING)
             )
         else:
-            tickers_without_research_artifacts_count += 1
-            tickers_without_sec_metric_coverage.append(ticker)
             fact_count = 0
-            has_evidence = False
             readiness = "BLOCKED_DRY_RUN_ONLY"
             present_buckets = []
             missing_buckets = sorted(EXPECTED_BUCKETS)
-            base_blocking = list(_ALWAYS_BLOCKING) + ["missing_sec_research_artifact"]
+            base_blocking = list(_ALWAYS_BLOCKING)
+
+        # SEC research artifact coverage: only true when Phase 8B shows at least one
+        # source-linked SEC CompanyFacts metric fact.
+        has_sec_research_artifacts = fact_count > 0
+        has_evidence = has_sec_research_artifacts
+
+        if has_sec_research_artifacts:
+            tickers_with_sec_research_artifacts_count += 1
+            tickers_with_source_linked_metric_evidence_count += 1
+        else:
+            # No SEC metric evidence: either no artifact at all, or artifact exists but
+            # has no source-linked sec_companyfact_observed metric facts.
+            tickers_without_sec_research_artifacts_count += 1
+            tickers_without_sec_metric_coverage.append(ticker)
+            # Add missing_sec_research_artifact if not already in base_blocking
+            # (it may already be present if Phase 8B produced it; ensure it's there).
+            if "missing_sec_research_artifact" not in base_blocking:
+                base_blocking = list(base_blocking) + ["missing_sec_research_artifact"]
 
         if readiness == "READY_DRY_RUN_ONLY":
             tickers_ready_for_future_adapter_count += 1
@@ -222,7 +239,7 @@ def _build(
         blocking_codes = sorted(blocking_set)
 
         by_ticker_out[ticker] = {
-            "has_research_artifacts": has_research_artifacts,
+            "has_sec_research_artifacts": has_sec_research_artifacts,
             "has_source_linked_metric_evidence": has_evidence,
             "source_linked_metric_fact_count": fact_count,
             "future_adapter_readiness": readiness,
@@ -243,8 +260,8 @@ def _build(
         visible_snapshot_unchanged=True,
         portfolio_ticker_count=len(sorted_tickers),
         portfolio_tickers_evaluated=sorted_tickers,
-        tickers_with_research_artifacts_count=tickers_with_research_artifacts_count,
-        tickers_without_research_artifacts_count=tickers_without_research_artifacts_count,
+        tickers_with_sec_research_artifacts_count=tickers_with_sec_research_artifacts_count,
+        tickers_without_sec_research_artifacts_count=tickers_without_sec_research_artifacts_count,
         tickers_with_source_linked_metric_evidence_count=tickers_with_source_linked_metric_evidence_count,
         tickers_ready_for_future_adapter_count=tickers_ready_for_future_adapter_count,
         tickers_partial_for_future_adapter_count=tickers_partial_for_future_adapter_count,

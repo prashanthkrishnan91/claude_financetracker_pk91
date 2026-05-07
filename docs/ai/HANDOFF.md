@@ -1,4 +1,45 @@
 
+## 2026-05-07 — Phase 2: Research Artifact Store v1 — Planning + Draft SQL (Level 2, Docs/Draft Only)
+
+### Status
+Phase 0 (PRs #220–#222), Phase 0.5 (PR #223), and Phase 1 (PR #224) are closed and certified. This PR is planning + draft-SQL only — no runtime code, no production migration, no providers, no LLM, no UI, no `decide()` change.
+
+### What this PR adds
+- New spec doc: `docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md`. 16 sections covering: problem statement, non-goals, architecture fit with Phase 1 binding contracts, schema overview (4 tables), artifact lifecycle, trust model, future deterministic-consumption read path, freshness/staleness, idempotency/replay, security/RLS, migration/runbook, open questions, validation checklist, Phase 2.1/Phase 3 next steps, self-audit map, restated out-of-scope.
+- New draft SQL: `docs/ai/sql_drafts/research_artifact_store_v1.sql`. DRAFT ONLY header. Defines 4 additive tables (`research_artifacts`, `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events`), forbidden-key column CHECK + recursive BEFORE trigger, RLS owner-only policies, indexes, comments, draft rollback section (commented out).
+- New convention doc: `docs/ai/sql_drafts/README.md`. Explains the draft-only directory: drafts live outside `v2/database/` so the standard apply path cannot pick them up by accident; promotion requires an explicit follow-on PR.
+- HANDOFF.md updated (this entry).
+- `v2/progress_log.md` updated with concise Phase 2 entry.
+
+### Schema design (in one paragraph)
+Four tables, normalized but compact. The addendum's `sourced_claim` / `metric_observation` / `risk_item` / `catalyst_item` / `thesis_pillar` collapse into a single typed `research_artifact_facts` table with a `fact_kind` discriminator. Forbidden visible-decision fields (`final_action`, `buy/sell/trim/hold`, `final_conviction`, `final_allocation`, `deploy_amount`, `deploy_dollar`, `deploy_shares`) are rejected at write time via a column-level JSONB CHECK on `payload` / `structured_payload` PLUS a recursive BEFORE INSERT/UPDATE trigger that walks every nested key. Idempotency: `UNIQUE (replay_idempotency_key) WHERE is_active = TRUE`. Trust model: artifact `confidence_or_trust_level` is artifact trust, not decision conviction (Phase 1 §8 risk #12); `safe_for_decision` defaults `false` and is only ever flipped by a future truth adapter, never by a worker. RLS: owner-only via `auth.uid() = user_id`, matching `intel_v3_snapshots` convention.
+
+### Architecture rule reinforced
+Agents/workers may write only sourced research artifacts and audit events. They may not touch `intel_v3_snapshots`, `recommendations`, `agent_runs`, `agent_insights`, or the deterministic decision pipeline. `decide()` in `decision_policy_v1.py` remains the sole authority for visible Buy/Hold/Trim/Sell. No page-load LLM calls. No legacy `recommendation_engine` re-coupling.
+
+### Files changed
+- `docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md` — NEW (Phase 2 spec).
+- `docs/ai/sql_drafts/research_artifact_store_v1.sql` — NEW (DRAFT ONLY SQL proposal).
+- `docs/ai/sql_drafts/README.md` — NEW (draft-only directory convention).
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise Phase 2 entry.
+
+### Validation
+- Docs / draft SQL only. `git diff` shows no changes under `v2/backend/`, `v2/frontend/`, or `v2/database/`. No production migration is added; the SQL is intentionally placed in `docs/ai/sql_drafts/` and carries a `DRAFT ONLY — DO NOT APPLY TO PRODUCTION UNTIL APPROVED` header.
+- No provider/LLM/agent/worker code. No UI. No `decide()` / `IntelV3Service` / `ReadOnlyEvidenceAdapter` / `existing_signal_*adapter*` / `source_validator_lite.py` / certification detectors changed.
+- Phase 0/0.5/1 certified state preserved: `intel_v3_snapshots` schema, `intel_v3_snapshot_certification_summary`, `intel_v3_evidence_source_summary`, regression guardrails — all untouched.
+- Forbidden-field deny-list encoded in SQL: column-level CHECK + recursive trigger.
+
+### Supabase SQL: Yes — DRAFT ONLY (not applied)
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+
+### Next recommended PR
+Phase 2.1 — review of the draft SQL against this spec, resolve §12 open questions where they affect schema (idempotency collapse semantics; per-`(user_id, ticker, artifact_type)` cardinality cap), then promote `docs/ai/sql_drafts/research_artifact_store_v1.sql` → `v2/database/017_research_artifact_store_v1.sql` and apply via Supabase. Or, if Phase 2.1 is deferred, Phase 3 single-worker dark-run scaffold per Phase 1 §6 / §9.2 (Earnings Reviewer recommended).
+
+---
+
 ## 2026-05-07 — Phase 1: Finance Agent Skill Pack Audit (Spec Only, Level 1)
 
 ### Status

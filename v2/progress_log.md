@@ -1,4 +1,13 @@
 
+## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Trigger Hotfix (Level 1, SQL Docs Only)
+
+- Migration 017_research_artifact_store_v1.sql applied in Supabase. Schema checks A/B/C/D passed. Trigger validation failed: `ERROR: jsonpath item method .keyvalue() can only be applied to an object`. Recursive CTE fallback also rejected by Postgres (`ERROR: 42P19`).
+- Successful hotfix: replaced `jsonb_path_query(... 'lax $.**.keyvalue()')` with PL/pgSQL recursive JSONB walker (`research_artifact_find_forbidden_jsonb_key`). Walker branches on `jsonb_typeof()` — object → `jsonb_each`, array → `jsonb_array_elements`, scalar → return NULL. Case-insensitive forbidden-key detection preserved.
+- Sanity check passed: valid payload `{"summary":"valid artifact"}` returns NULL; nested `{"recommendation":{"FINAL_ACTION":"BUY"}}` returns `FINAL_ACTION`.
+- Repository migration file updated to match applied hotfix. No new Supabase SQL applied by this PR.
+- User must rerun full validation block in Supabase after applying hotfix functions.
+- No backend/frontend/decide() changes.
+
 ## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Migration Promotion (Level 2, SQL File Only, Not Applied)
 
 - Phase 0, Phase 0.5, Phase 1, and Phase 2 are closed. This PR promotes the Phase 2 draft SQL (`docs/ai/sql_drafts/research_artifact_store_v1.sql`) into a real production migration: `v2/database/017_research_artifact_store_v1.sql`. No production Supabase SQL is applied — manual apply required after merge with explicit approval.

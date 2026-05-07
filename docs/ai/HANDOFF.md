@@ -1,4 +1,44 @@
 
+## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Trigger Hotfix (Level 1, SQL Docs Only, No New Apply)
+
+### Status
+Migration 017_research_artifact_store_v1.sql was merged and manually applied in Supabase. Schema checks A/B/C/D passed (four tables exist, RLS enabled, grants confirmed). Trigger validation then failed with:
+
+    ERROR: 2203C: jsonpath item method .keyvalue() can only be applied to an object
+
+A recursive CTE fallback also failed:
+
+    ERROR: 42P19: recursive reference to query "walk" must not appear within its non-recursive term
+
+The successful Supabase hotfix replaced the JSONPath scanner with a PL/pgSQL recursive JSONB walker. Sanity check passed:
+- `valid_payload_result = null` (no forbidden key found)
+- `forbidden_payload_result = FINAL_ACTION` (nested forbidden key correctly returned)
+
+This PR updates the repository migration file and docs to match the applied hotfix. No new Supabase SQL is applied by this PR — user must rerun the full validation block after applying the hotfix functions in Supabase.
+
+### What changed
+- `v2/database/017_research_artifact_store_v1.sql`: Added helper function `public.research_artifact_find_forbidden_jsonb_key(JSONB)` implementing a PL/pgSQL recursive walker; updated `public.research_artifact_reject_forbidden_keys()` to call it instead of `jsonb_path_query(... 'lax $.**.keyvalue()')`. Updated comments throughout to explain the replacement reason. Rollback block updated with the new helper function.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — hotfix summary entry.
+
+### Root cause
+`jsonb_path_query(... 'lax $.**.keyvalue()')` errors on scalar-valued descendants in Supabase/Postgres even in `lax` mode. The PL/pgSQL walker branches explicitly on `jsonb_typeof()` — `object` → `jsonb_each`, `array` → `jsonb_array_elements`, scalar → return NULL — and is immune to this.
+
+### Validation expected after user reruns Supabase validation block
+- Valid scalar payload `{"summary":"valid artifact"}` → returns NULL (no error)
+- Nested `{"recommendation":{"FINAL_ACTION":"BUY"}}` → trigger raises check_violation
+- All four schema checks (A/B/C/D) still pass
+- `safe_for_decision = TRUE` insert still raises check_violation
+- Cross-artifact source_id citation insert still raises check_violation
+
+### Supabase SQL: No new SQL applied by this PR (hotfix already applied manually; user reruns validation)
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+### HANDOFF.md edited: Yes
+
+---
+
 ## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Migration Promotion (Level 2, SQL File Only, Not Applied)
 
 ### Status

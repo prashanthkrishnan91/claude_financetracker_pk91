@@ -1,4 +1,44 @@
 
+## 2026-05-07 — Phase 7A hardening pass: observe endpoint + request_count fix (Level 1)
+
+### Status
+Two merge-blocking fixes applied to Phase 7A. All invariants preserved. Tests: 555 passed (6 pre-existing fastapi env failures unchanged).
+
+### What changed
+1. **`v2/backend/app/routers/diagnostics.py`**: observe endpoint now returns Phase 7A metric counters:
+   - `artifacts_with_metric_observations_count`
+   - `metric_observation_fact_count`
+   These were added to `artifact_observability.py` in Phase 7A but missing from the endpoint response, which would have blocked Phase 7B production validation.
+
+2. **`v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py`**: `request_count` for CompanyFacts request 3 is now incremented **before** the HTTP call (`_get(cf_url)`), not only after successful JSON parsing. This ensures timeout/network errors are counted accurately. Fail-closed behavior preserved — submissions success is not downgraded by companyfacts failure.
+
+3. **Tests added** (5 new tests, net):
+   - `TestCriterion1RequestCap::test_companyfacts_timeout_request_count_is_3` — timeout still counts as request 3
+   - `TestCriterion1RequestCap::test_companyfacts_error_request_count_is_3` — error still counts as request 3
+   - `TestCriterion1RequestCap::test_cap_2_companyfacts_not_attempted_request_count_2` — cap=2 means no attempt
+   - `TestEndpointNewFields::test_endpoint_includes_phase7a_metric_counter_fields` — static source check
+   - `TestEndpointNewFields::test_endpoint_metric_fields_not_raw_payloads` — no structured_payload in response
+
+### Files changed
+- `v2/backend/app/routers/diagnostics.py` — metric counters added to observe response
+- `v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py` — request_count increment moved before _get()
+- `v2/backend/tests/test_intel_v3_phase7a_companyfacts.py` — 3 new Criterion 1 tests
+- `v2/backend/tests/test_intel_v3_phase6b_readiness_observability.py` — 2 new endpoint field tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 7A companyfacts: **70/70** ✓ (+3)
+- Phase 6A SEC EDGAR: **86/86** ✓
+- Phase 6B readiness observability (service): **55/55** ✓ (+2, 6 fastapi env failures pre-existing)
+- Phase 5 truth adapter readiness: **125/125** ✓
+- Phase 4 artifact observability: **58/58** ✓
+- Phase 3 research workers: **85/85** ✓
+- Phase 3.5 validation harness: **57/57** ✓
+- Phase 3.7 idempotency: **16/16** ✓
+- Total: **555 passed** (6 pre-existing fastapi env failures unchanged)
+
+---
+
 ## 2026-05-07 — Phase 7A: SEC CompanyFacts Financial Evidence v1 (Level 2)
 
 ### Status
@@ -45,8 +85,9 @@ Evidence enrichment only. Not truth adapter consumption. Not visible decision in
   - Per-artifact loop counts facts with `fact_kind="metric_observation"`. Aggregate only — no payloads returned.
   - INFO log extended with Phase 7A counters.
 
-- **New test file**: `v2/backend/tests/test_intel_v3_phase7a_companyfacts.py` — 67 tests, 24 acceptance criteria.
+- **New test file**: `v2/backend/tests/test_intel_v3_phase7a_companyfacts.py` — 70 tests (67 from Phase 7A + 3 from hardening pass), 24 acceptance criteria.
 - **Updated test file**: `v2/backend/tests/test_intel_v3_phase6a_sec_edgar.py` — updated `FakeHttpGetFn` to handle companyfacts URL (default: empty facts payload); updated request count expectation (2→3); updated worker_phase assertion (phase6a→phase7a).
+- **Updated test file**: `v2/backend/tests/test_intel_v3_phase6b_readiness_observability.py` — 2 new endpoint field tests for Phase 7A metric counters (hardening pass).
 
 ### Architecture Invariants (all preserved)
 - `decide()` — NOT imported, NOT called in any new module.

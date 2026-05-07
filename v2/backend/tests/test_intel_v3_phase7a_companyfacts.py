@@ -305,6 +305,52 @@ class TestCriterion1RequestCap:
         assert len(cf_calls) == 1
         assert "CIK0000320193" in cf_calls[0], f"Expected padded CIK in URL, got: {cf_calls[0]}"
 
+    def test_companyfacts_timeout_request_count_is_3(self) -> None:
+        """Timeout on companyfacts still counts as an attempted request (request_count=3)."""
+        ticker_map = _make_ticker_map("AAPL", 320193)
+        submissions = _make_submissions(["10-Q"], [_recent(30)], ["0000320193-25-000001"])
+        fake = FakeHttpGetFn(
+            ticker_map=ticker_map,
+            submissions=submissions,
+            raise_on_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+            raise_exc=TimeoutError("companyfacts timeout"),
+        )
+        result = fetch_for_ticker("AAPL", _make_sec_config(max_requests=3), http_get_fn=fake)
+        assert result.is_success
+        assert result.request_count == 3, (
+            "Attempted companyfacts request must be counted even on timeout"
+        )
+        assert result.companyfacts_parse_result is not None
+        assert result.companyfacts_parse_result.parse_status == "error"
+
+    def test_companyfacts_error_request_count_is_3(self) -> None:
+        """Generic error on companyfacts still counts as an attempted request (request_count=3)."""
+        ticker_map = _make_ticker_map("AAPL", 320193)
+        submissions = _make_submissions(["10-Q"], [_recent(30)], ["0000320193-25-000001"])
+        fake = FakeHttpGetFn(
+            ticker_map=ticker_map,
+            submissions=submissions,
+            raise_on_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
+            raise_exc=RuntimeError("companyfacts unavailable"),
+        )
+        result = fetch_for_ticker("AAPL", _make_sec_config(max_requests=3), http_get_fn=fake)
+        assert result.is_success
+        assert result.request_count == 3, (
+            "Attempted companyfacts request must be counted even on error"
+        )
+        assert result.companyfacts_parse_result is not None
+        assert result.companyfacts_parse_result.parse_status == "error"
+
+    def test_cap_2_companyfacts_not_attempted_request_count_2(self) -> None:
+        """max_requests=2 means companyfacts is not attempted; request_count stays at 2."""
+        ticker_map = _make_ticker_map("MSFT", 789019)
+        submissions = _make_submissions(["10-K"], [_recent(60)])
+        fake = FakeHttpGetFn(ticker_map=ticker_map, submissions=submissions)
+        result = fetch_for_ticker("MSFT", _make_sec_config(max_requests=2), http_get_fn=fake)
+        assert result.is_success
+        assert result.request_count == 2
+        assert result.companyfacts_parse_result is None
+
 
 # ── Criterion 2: SEC flag off → Phase 3 behavior ─────────────────────────────
 

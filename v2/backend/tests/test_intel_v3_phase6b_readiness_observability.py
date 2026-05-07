@@ -818,6 +818,31 @@ class TestEndpointNewFields:
         ]:
             assert field_name in src, f"Missing field in endpoint response: {field_name}"
 
+    def test_endpoint_includes_phase7a_metric_counter_fields(self):
+        """Endpoint response includes Phase 7A metric observation aggregate counters."""
+        import os
+        diagnostics_path = os.path.join(
+            os.path.dirname(__file__), "..", "app", "routers", "diagnostics.py"
+        )
+        src = open(diagnostics_path).read()
+        for field_name in [
+            "artifacts_with_metric_observations_count",
+            "metric_observation_fact_count",
+        ]:
+            assert field_name in src, f"Missing Phase 7A metric counter in endpoint response: {field_name}"
+
+    def test_endpoint_metric_fields_not_raw_payloads(self):
+        """Phase 7A counter fields are aggregate counts — endpoint source must not return raw payloads."""
+        import os
+        diagnostics_path = os.path.join(
+            os.path.dirname(__file__), "..", "app", "routers", "diagnostics.py"
+        )
+        src = open(diagnostics_path).read()
+        for forbidden in ["structured_payload", "source_url", "quote_or_excerpt"]:
+            assert forbidden not in src, (
+                f"Endpoint must not return raw artifact field: {forbidden}"
+            )
+
 
 # ── AC 19: No frontend/page-load path references endpoint ────────────────────
 

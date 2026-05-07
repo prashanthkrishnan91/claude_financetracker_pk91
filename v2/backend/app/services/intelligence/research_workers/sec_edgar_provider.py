@@ -295,11 +295,11 @@ def fetch_for_ticker(
         companyfacts_parse_result: Optional[CompanyFactsParseResult] = None
         if request_count < config.max_requests_per_ticker:
             cf_url = _COMPANYFACTS_URL_TEMPLATE.format(cik=cik_padded)
+            request_count += 1  # count attempt before the call; preserved even on timeout/error
             try:
                 resp3 = _get(cf_url)
                 resp3.raise_for_status()
                 cf_raw = resp3.json() or {}
-                request_count += 1
                 # Build the set of accession numbers with SourceRecords for linkage.
                 source_accessions = frozenset(
                     f.accession_number for f in filings

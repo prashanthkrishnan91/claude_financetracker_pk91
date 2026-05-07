@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     # When True, logs one structured INFO line per observability call (aggregates only).
     intel_v3_research_artifact_observability_info_logs_enabled: bool = False
 
+    # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
+    # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
+    # to produce provider-backed, source-linked, freshness-classified artifacts.
+    # Requires both Phase 3 flags above to also be True.
+    # Dark-run only — safe_for_decision remains False. No artifact consumption.
+    intel_v3_earnings_reviewer_sec_enabled: bool = False
+    # User-Agent string sent to SEC EDGAR per SEC terms of service.
+    # Format: "MyApp/1.0 contact@example.com"
+    # If empty/unset, SEC fetches are skipped even when the flag above is True.
+    sec_edgar_user_agent: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:

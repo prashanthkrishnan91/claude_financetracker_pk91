@@ -1,4 +1,4 @@
-"""Phase 3 research worker runner — env-gated dark-run entrypoint.
+"""Phase 3 / Phase 6A research worker runner — env-gated dark-run entrypoint.
 
 Usage:
     from app.services.intelligence.research_workers.runner import (
@@ -9,18 +9,26 @@ Usage:
     )
 
 Contract:
-  - Returns None immediately if either kill switch is off (safe to call unconditionally).
-  - Never runs on page load — this is an explicit callable, never a side-effect of a
-    request handler unless an operator explicitly invokes the route/task.
+  - Returns None immediately if any required kill switch is off (safe to call unconditionally).
+  - Never runs on page load — this is an explicit callable only.
   - Never imports or calls decide().
   - Never writes to intel_v3_snapshots.
   - All DB errors are caught; returns None on failure without propagating.
+
+Phase 6A SEC gate (in addition to Phase 3 flags):
+  - settings.intel_v3_earnings_reviewer_sec_enabled controls whether SEC EDGAR
+    evidence population is attempted.
+  - settings.sec_edgar_user_agent must be non-empty; if missing, SEC fetch is
+    skipped (fail-closed: earnings_reviewer.run() called with sec_config=None →
+    Phase 3 behavior, limitation recorded by provider/adapter).
+  - If SEC flag is on and user_agent is set, SecEdgarProviderConfig is built and
+    passed to earnings_reviewer.run(). The worker handles all SEC failures internally.
 """
 from __future__ import annotations
 
 import logging
 import uuid
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +46,25 @@ def run_earnings_reviewer_dark(
     parent_intel_run_id: Optional[str] = None,
     holding_context: Optional[dict[str, Any]] = None,
     settings: Optional[Settings] = None,
+    _http_get_fn: Optional[Callable[[str], Any]] = None,
 ) -> Optional[str]:
-    """Run the Earnings Reviewer dark-run scaffold for one ticker.
+    """Run the Earnings Reviewer dark-run worker for one ticker.
 
     Returns the artifact_id (str) if written, None if disabled or on error.
     Safe to call at any time — disabled flags make it a fast no-op.
 
-    Kill-switch hierarchy (both must be True to run):
+    Kill-switch hierarchy (all must be True to run):
       1. settings.intel_v3_research_workers_enabled  (global kill switch)
       2. settings.intel_v3_earnings_reviewer_enabled (per-worker kill switch)
+
+    Optional Phase 6A SEC path (enabled independently):
+      3. settings.intel_v3_earnings_reviewer_sec_enabled  (SEC evidence flag)
+      4. settings.sec_edgar_user_agent non-empty           (required for SEC calls)
+
+    Args:
+        _http_get_fn: Injectable GET callable for tests. Passed to earnings_reviewer.run()
+                      which passes it to sec_edgar_provider.fetch_for_ticker(). Only used
+                      when the SEC path is active.
     """
     if settings is None:
         settings = get_settings()
@@ -65,6 +83,29 @@ def run_earnings_reviewer_dark(
         )
         return None
 
+    # Build SEC config if the evidence population flag is enabled.
+    sec_config = None
+    if settings.intel_v3_earnings_reviewer_sec_enabled:
+        user_agent = settings.sec_edgar_user_agent or ""
+        if not user_agent.strip():
+            logger.warning(
+                "research_worker_sec_skip reason=no_user_agent ticker=%s "
+                "intel_v3_earnings_reviewer_sec_enabled=True but sec_edgar_user_agent "
+                "is empty — falling back to dark-run scaffold",
+                ticker,
+            )
+            # sec_config remains None → Phase 3 behavior.
+            # The SEC provider would also gate on empty user_agent, so passing it
+            # would produce a fail-closed artifact. Falling back to Phase 3 is
+            # equivalent and avoids an unnecessary SEC artifact row.
+        else:
+            from .sec_edgar_provider import SecEdgarProviderConfig
+            sec_config = SecEdgarProviderConfig(user_agent=user_agent)
+            logger.debug(
+                "research_worker_sec_enabled ticker=%s user_agent_set=True",
+                ticker,
+            )
+
     worker_run_id = str(uuid.uuid4())
     worker_input = WorkerInput(
         user_id=user_id,
@@ -75,12 +116,18 @@ def run_earnings_reviewer_dark(
     )
 
     logger.info(
-        "research_worker_start worker=earnings_reviewer ticker=%s worker_run_id=%s",
+        "research_worker_start worker=earnings_reviewer ticker=%s worker_run_id=%s "
+        "sec_enabled=%s",
         ticker,
         worker_run_id,
+        sec_config is not None,
     )
 
-    output = earnings_reviewer.run(worker_input)
+    output = earnings_reviewer.run(
+        worker_input,
+        sec_config=sec_config,
+        _http_get_fn=_http_get_fn,
+    )
 
     writer = ArtifactStoreWriter(supabase_client=db_client, user_id=user_id)
     artifact_id = writer.write(output)
@@ -88,10 +135,12 @@ def run_earnings_reviewer_dark(
     if artifact_id:
         logger.info(
             "research_worker_complete worker=earnings_reviewer ticker=%s "
-            "artifact_id=%s replay_key=%s",
+            "artifact_id=%s replay_key=%s confidence=%s freshness=%s",
             ticker,
             artifact_id,
             output.replay_idempotency_key,
+            output.confidence_or_trust_level,
+            output.freshness_status,
         )
     else:
         logger.warning(

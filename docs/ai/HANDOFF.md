@@ -1,4 +1,108 @@
 
+## 2026-05-07 — Phase 6A: SEC EDGAR Evidence Population + Grounding Upgrade (Level 2)
+
+### Status
+Phase 6A is complete and certified. Phases 0–5 remain unchanged and all passing.
+
+### What this PR adds
+- **New module**: `v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py`
+  - Synchronous SEC EDGAR public JSON API provider. Two-request flow: (1) `company_tickers.json` → ticker-to-CIK mapping, (2) `submissions/CIK{cik}.json` → recent filing metadata.
+  - Dataclasses: `SecFilingRecord`, `SecEdgarProviderConfig`, `SecEdgarProviderResult`.
+  - fetch_status values: `success`, `no_user_agent`, `no_cik`, `timeout`, `rate_limited`, `malformed`, `error`.
+  - Defaults: `timeout=10s`, `max_requests=3`, `max_filings=5`. Only 10-K/10-Q/8-K forms returned.
+  - Injectable `http_get_fn` for full testability without real HTTP calls. Fail-closed on every error path.
+  - `user_agent` required per SEC terms of service. Missing agent → `no_user_agent` status, no HTTP call made.
+
+- **New module**: `v2/backend/app/services/intelligence/research_workers/earnings_sec_adapter.py`
+  - Pure adapter: `SecEdgarProviderResult` → `SecEarningsAdapterResult` (sources, facts, confidence, freshness, fingerprint).
+  - Confidence: MEDIUM (≥1 10-K/10-Q), LOW (8-K only), UNKNOWN (no source-backed evidence).
+  - Freshness: FRESH (most recent 10-K/10-Q ≤ 180 days), STALE (> 180 days), UNKNOWN (no parseable date).
+  - `expires_at` set only for FRESH artifacts: `most_recent_periodic_date + 180 days`.
+  - Source fingerprint: `"sec_edgar_" + sha256(cik + sorted 10-K/10-Q accessions)[:24]` — changes on new filings.
+  - Fail-closed: any non-success result → UNKNOWN/UNKNOWN/empty sources.
+
+- **Updated**: `v2/backend/app/services/intelligence/research_workers/earnings_reviewer.py`
+  - Dispatcher pattern: `run(worker_input, sec_config=None, _http_get_fn=None)` → `_run_phase3_dark()` or `_run_sec_grounded()`.
+  - Phase 3 path (`sec_config=None`): unchanged — source_refs_fingerprint=`"no_external_source_phase3"`, model_version=`"none_phase3_dark_run"`. All Phase 3 tests still pass.
+  - Phase 6A path (`sec_config` provided): calls `fetch_for_ticker` → `adapt_sec_result` → WorkerOutput with SEC-grounded sources/facts.
+  - Two model_version constants ensure Phase 3 and Phase 6A artifacts always produce different replay_idempotency_key values → separate DB rows.
+  - Forbidden payload keys absent in both phases: `final_action`, `buy`, `sell`, `trim`, `hold`, `recommendation`, `target_price`, `allocation`, etc.
+  - `safe_for_decision` never set. `decide()` never imported. `intel_v3_snapshots` never written.
+
+- **Updated**: `v2/backend/app/services/intelligence/research_workers/runner.py`
+  - New `_http_get_fn` parameter for test injection (propagated to `earnings_reviewer.run()`).
+  - SEC config construction: if `intel_v3_earnings_reviewer_sec_enabled=True` AND `sec_edgar_user_agent` non-empty → builds `SecEdgarProviderConfig`. If user_agent empty → falls back to Phase 3 behavior (sec_config=None), warning logged.
+  - Log fields extended: `sec_enabled`, `confidence`, `freshness`.
+
+- **Updated**: `v2/backend/app/config.py`
+  - `intel_v3_earnings_reviewer_sec_enabled: bool = False` — off by default.
+  - `sec_edgar_user_agent: Optional[str] = None` — populated from `SEC_EDGAR_USER_AGENT` env var.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase6a_sec_edgar.py` — 78 tests covering all 20 acceptance criteria.
+
+### Phase 6A Artifact Status
+- MEDIUM/FRESH: structurally eligible (`eligible_for_truth_adapter=True` per Phase 5 contract).
+- `eligible_for_decision_consumption` always False — invariant maintained.
+- `safe_for_decision` remains False — DB-level CHECK constraint unchanged.
+- Production Phase 3 artifacts unchanged (confidence=UNKNOWN, freshness=UNKNOWN, sources=0 — excluded by Phase 5 readiness contract).
+
+### Mandatory Self-Audit Table
+
+| Criterion | File / Function | Test | Limitation/Risk |
+|---|---|---|---|
+| C1: SEC flag off → Phase 3 behavior | runner.py / `run_earnings_reviewer_dark` | `TestCriterion1SecFlagOff` (4 tests) | None |
+| C2: SEC flag on, no user_agent → fail-closed | runner.py, sec_edgar_provider.py | `TestCriterion2SecFlagOnNoAgent` (4 tests) | None |
+| C3: SEC errors → UNKNOWN/no-source | sec_edgar_provider.py, earnings_sec_adapter.py | `TestCriterion3SecErrorFailClosed` (6 tests) | None |
+| C4: User-Agent required by provider | sec_edgar_provider.py | `TestCriterion4UserAgentUsed` (3 tests) | None |
+| C5: Max requests cap respected | sec_edgar_provider.py | `TestCriterion5RequestCap` (3 tests) | None |
+| C6: SourceRecords created per filing | earnings_sec_adapter.py | `TestCriterion6SourceRecords` (5 tests) | Filing metadata only, no transcript |
+| C7: Facts have source_index set | earnings_sec_adapter.py | `TestCriterion7FactsWithSourceIndex` (5 tests) | None |
+| C8: Writer resolves source_index→DB id | artifact_store_writer.py (unchanged) | `TestCriterion8WriterResolvesSourceIndex` (2 tests) | None |
+| C9: Phase 5 readiness conditions met | earnings_reviewer.py + artifact_truth_readiness.py | `TestCriterion9Phase5Readiness` (4 tests) | No consumption; Phase 5 prerequisite gate still applies |
+| C10: eligible_for_decision always False | artifact_truth_readiness.py (unchanged) | `TestCriterion10EligibleForDecisionAlwaysFalse` (1 test) | None |
+| C11: safe_for_decision always False | artifact_store_writer.py (unchanged) | `TestCriterion11SafeForDecisionFalse` (2 tests) | None |
+| C12: Phase 3 artifacts excluded by readiness | artifact_truth_readiness.py (unchanged) | `TestCriterion12Phase3ArtifactsExcluded` (2 tests) | None |
+| C13/14: Forbidden payload keys absent | earnings_reviewer.py | `TestCriteria13_14ForbiddenPayloadKeys` (10 tests) | None |
+| C15: No forbidden imports (decide, etc.) | sec_edgar_provider.py, earnings_sec_adapter.py, earnings_reviewer.py | `TestCriterion15NoForbiddenImports` (5 tests) | None |
+| C16: No intel_v3_snapshots writes | runner.py + writer (unchanged) | `TestCriterion16NoSnapshotWrites` (2 tests) | None |
+| C17/18: Static source guards | sec_edgar_provider.py, earnings_sec_adapter.py | `TestCriteria17_18StaticSourceGuards` (3 tests) | None |
+| C19: Phase 3/3.5/3.7/4 harness unchanged | validation_harness.py, artifact_observability.py (unchanged) | `TestCriterion19ValidationHarnessUnchanged` (3 tests) | None |
+| C20: Idempotency — new filings → new artifact | earnings_sec_adapter.py, contracts.py | `TestCriterion20Idempotency` (4 tests) | None |
+
+### Phase 6A Architecture Invariants
+- `decide()` in `decision_policy_v1.py` — NOT imported, NOT called.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service` — unchanged. No frontend path changes.
+- No LLM, no agents, no multi-agent framework.
+- No paid or vendor provider — SEC EDGAR public JSON API only.
+- No SQL migration. No new tables. No schema changes.
+- `safe_for_decision` DB constraint — unchanged (false always).
+- SEC EDGAR is rate-limited (10 req/sec general) — max_requests_per_ticker=3, one ticker per worker call.
+
+### Files changed
+- `v2/backend/app/config.py` — 2 new settings
+- `v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py` — NEW
+- `v2/backend/app/services/intelligence/research_workers/earnings_sec_adapter.py` — NEW
+- `v2/backend/app/services/intelligence/research_workers/earnings_reviewer.py` — Phase 6A dispatch path added
+- `v2/backend/app/services/intelligence/research_workers/runner.py` — SEC config construction + _http_get_fn injection
+- `v2/backend/tests/test_intel_v3_phase6a_sec_edgar.py` — NEW (78 tests, 20 criteria)
+- `docs/ai/HANDOFF.md` — this entry
+- `v2/progress_log.md` — Phase 6A entry
+
+### Test results
+- Phase 6A SEC EDGAR: 78/78 ✓
+- Phase 5 truth adapter readiness: 125/125 ✓
+- Phase 3 research workers: 85/85 ✓
+- Phase 3.5 validation harness: 57/57 ✓
+- Phase 3.7 idempotency: 16/16 ✓
+- Phase 4 artifact observability: 58/58 ✓
+- Combined (service-layer, all phases): 422/422 ✓
+
+### Next recommended phase
+Phase 6B or Production Validation — enable `INTEL_V3_EARNINGS_REVIEWER_SEC_ENABLED=true` and `SEC_EDGAR_USER_AGENT="FinanceTracker/1.0 contact@example.com"` in a staging environment, run the Phase 3.6 validation endpoint for AAPL/MSFT/NVDA, confirm MEDIUM/FRESH artifacts are produced, and verify they pass Phase 5 readiness (eligible_for_truth_adapter=True). Only after production artifact quality is confirmed should Phase 7 (deterministic truth adapter consumption) be planned.
+
+---
+
 ## 2026-05-07 — Phase 5 Hardening: Contract Strengthening Pass (Level 2)
 
 ### Status

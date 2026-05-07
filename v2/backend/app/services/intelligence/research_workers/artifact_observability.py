@@ -390,16 +390,20 @@ def summarize_recent_research_artifacts(
                         facts=artifact_facts,
                     )
                     readiness_evaluated_count += 1
-                    # Phase 5 invariants: fail_closed and db_promotion_blocked always True.
-                    fail_closed_count += 1
-                    safe_for_decision_db_promotion_blocked_count += 1
-                    # eligible_for_decision_consumption always False — count stays 0.
+
+                    # Derive all counters from the actual result — never assume invariants.
+                    if result.eligible_for_decision_consumption:
+                        eligible_for_decision_consumption_count += 1
+                    if result.safe_for_decision_db_promotion_blocked:
+                        safe_for_decision_db_promotion_blocked_count += 1
+                    if result.fail_closed:
+                        fail_closed_count += 1
 
                     if result.eligible_for_truth_adapter:
                         eligible_for_truth_adapter_count += 1
-                        # Eligible for truth adapter but NOT for decision consumption
-                        # (eligible_for_decision_consumption is always False).
-                        phase5_ready_but_decision_blocked_count += 1
+                        # Ready for truth adapter but blocked from decision consumption.
+                        if not result.eligible_for_decision_consumption:
+                            phase5_ready_but_decision_blocked_count += 1
                     else:
                         ineligible_for_truth_adapter_count += 1
 

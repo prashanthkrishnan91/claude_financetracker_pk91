@@ -1017,3 +1017,110 @@ class TestPhase6BInvariants:
         assert result.readiness_evaluated_count == 0
         assert result.eligible_for_truth_adapter_count == 0
         assert result.eligible_for_decision_consumption_count == 0
+
+
+# ── Derived counter validation (counters come from result, not hardcoded) ────
+
+class TestDerivedCountersNotHardcoded:
+    """Verify counters are derived from ArtifactReadinessResult, not hardcoded.
+
+    These tests monkeypatch evaluate_artifact_truth_readiness to return
+    non-standard field values and assert the observability layer reacts correctly.
+    Phase 5 always returns eligible_for_decision_consumption=False/fail_closed=True,
+    but the observability layer must prove it reads — not assumes — those fields.
+    """
+
+    _PATCH_TARGET = (
+        "app.services.intelligence.research_workers"
+        ".artifact_observability.evaluate_artifact_truth_readiness"
+    )
+
+    def _fake_result(self, **overrides):
+        from app.services.intelligence.research_workers.artifact_truth_readiness import (
+            ArtifactReadinessResult,
+        )
+        defaults = dict(
+            eligible_for_truth_adapter=False,
+            eligible_for_decision_consumption=False,
+            fail_closed=True,
+            artifact_id=None,
+            ticker="AAPL",
+            artifact_type="catalyst_window",
+            skill_pack="earnings_reviewer",
+            reason_codes=[],
+            source_count=0,
+            fact_count=0,
+            confidence_or_trust_level="MEDIUM",
+            freshness_status="FRESH",
+            forbidden_payload_violation=False,
+            safe_for_decision_db_promotion_blocked=True,
+        )
+        defaults.update(overrides)
+        return ArtifactReadinessResult(**defaults)
+
+    def test_eligible_for_decision_consumption_increments_when_result_true(self):
+        """eligible_for_decision_consumption_count must increment if result field is True."""
+        from unittest.mock import patch
+        fn, _ = _import_service()
+        art = _make_artifact(confidence="MEDIUM", freshness="FRESH")
+        db = _FakeDB(artifact_rows=[art], source_rows=[], fact_rows=[])
+        fake = self._fake_result(
+            eligible_for_truth_adapter=True,
+            eligible_for_decision_consumption=True,
+        )
+        with patch(self._PATCH_TARGET, return_value=fake):
+            result = fn("u1", db, settings=_enabled_settings())
+        assert result.eligible_for_decision_consumption_count == 1
+
+    def test_fail_closed_count_does_not_increment_when_result_false(self):
+        """fail_closed_count must not increment if result.fail_closed is False."""
+        from unittest.mock import patch
+        fn, _ = _import_service()
+        art = _make_artifact()
+        db = _FakeDB(artifact_rows=[art], source_rows=[], fact_rows=[])
+        fake = self._fake_result(fail_closed=False)
+        with patch(self._PATCH_TARGET, return_value=fake):
+            result = fn("u1", db, settings=_enabled_settings())
+        assert result.fail_closed_count == 0
+
+    def test_db_promotion_blocked_does_not_increment_when_result_false(self):
+        """safe_for_decision_db_promotion_blocked_count must not increment if field is False."""
+        from unittest.mock import patch
+        fn, _ = _import_service()
+        art = _make_artifact()
+        db = _FakeDB(artifact_rows=[art], source_rows=[], fact_rows=[])
+        fake = self._fake_result(safe_for_decision_db_promotion_blocked=False)
+        with patch(self._PATCH_TARGET, return_value=fake):
+            result = fn("u1", db, settings=_enabled_settings())
+        assert result.safe_for_decision_db_promotion_blocked_count == 0
+
+    def test_phase5_ready_blocked_does_not_increment_when_consumption_true(self):
+        """phase5_ready_but_decision_blocked_count must NOT increment when
+        eligible_for_truth_adapter=True AND eligible_for_decision_consumption=True."""
+        from unittest.mock import patch
+        fn, _ = _import_service()
+        art = _make_artifact(confidence="MEDIUM", freshness="FRESH")
+        db = _FakeDB(artifact_rows=[art], source_rows=[], fact_rows=[])
+        fake = self._fake_result(
+            eligible_for_truth_adapter=True,
+            eligible_for_decision_consumption=True,
+        )
+        with patch(self._PATCH_TARGET, return_value=fake):
+            result = fn("u1", db, settings=_enabled_settings())
+        assert result.phase5_ready_but_decision_blocked_count == 0
+
+    def test_normal_path_zero_consumption_and_full_blocked_count(self):
+        """Normal path: eligible_for_decision_consumption_count=0,
+        phase5_ready_but_decision_blocked_count equals eligible_for_truth_adapter_count."""
+        fn, _ = _import_service()
+        artifacts, sources, facts = [], [], []
+        for _ in range(3):
+            aid = str(uuid.uuid4())
+            sid = str(uuid.uuid4())
+            artifacts.append(_make_artifact(aid=aid, confidence="MEDIUM", freshness="FRESH"))
+            sources.append(_make_source(src_id=sid, artifact_id=aid))
+            facts.append(_make_fact(artifact_id=aid, source_id=sid))
+        db = _FakeDB(artifact_rows=artifacts, source_rows=sources, fact_rows=facts)
+        result = fn("u1", db, settings=_enabled_settings())
+        assert result.eligible_for_decision_consumption_count == 0
+        assert result.phase5_ready_but_decision_blocked_count == result.eligible_for_truth_adapter_count == 3

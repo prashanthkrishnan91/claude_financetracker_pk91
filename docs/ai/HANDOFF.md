@@ -1,4 +1,56 @@
 
+## 2026-05-07 — Phase 3: Earnings Reviewer Dark-Run Scaffold (Level 2)
+
+### Status
+Phase 0, 0.5, 1, 2, and 2.1 are closed and certified. Phase 2.1 migration (017_research_artifact_store_v1.sql) was applied in Supabase with PL/pgSQL hotfix. This PR adds the first executable research-worker path: a dark-run Earnings Reviewer scaffold that writes only to the four research artifact tables.
+
+### What this PR adds
+- New module: `v2/backend/app/services/intelligence/research_workers/`
+  - `contracts.py` — WorkerInput, WorkerOutput, SourceRecord, FactRecord, AuditEventRecord dataclasses; `FORBIDDEN_PAYLOAD_KEYS` constant; `validate_payload()` and `_has_forbidden_key()` mirror the DB trigger logic in Python.
+  - `earnings_reviewer.py` — Earnings Reviewer worker. Takes one WorkerInput, produces a `catalyst_window` artifact. Phase 3 dark-run: no external provider. Records intended review fields, found fields (from holding_context if present), and missing fields. `confidence_or_trust_level='UNKNOWN'`, `freshness_status='UNKNOWN'`. Never calls `decide()`. Payload is validated against forbidden-key list at construction.
+  - `artifact_store_writer.py` — DB writer. Inserts one `research_artifacts` row (upsert for idempotency), linked `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events`. `safe_for_decision=False` hard-coded. Handles DB errors safely — returns None, logs error, never raises into caller. Records failure audit event on error.
+  - `runner.py` — Env-gated callable. Checks `intel_v3_research_workers_enabled` (global) and `intel_v3_earnings_reviewer_enabled` (per-worker) before doing anything. Fast no-op if either flag is off. No page-load execution.
+  - `__init__.py` — exports `run_earnings_reviewer_dark`.
+- New config flags in `v2/backend/app/config.py`:
+  - `intel_v3_research_workers_enabled: bool = False` (global kill switch)
+  - `intel_v3_earnings_reviewer_enabled: bool = False` (per-worker kill switch)
+- New test file: `v2/backend/tests/test_intel_v3_phase3_research_workers.py` — covers all 10 acceptance criteria using a FakeSupabaseClient (no production DB access required).
+
+### Architecture invariants preserved
+- `decide()` in `decision_policy_v1.py` is unchanged. Not imported by any worker module.
+- `IntelV3Service`, `ReadOnlyEvidenceAdapter`, `source_validator_lite.py`, and all certification detectors are unchanged.
+- `safe_for_decision` is always False — DB-level CHECK constraint still enforces this; worker code also hard-codes it.
+- No page-load LLM calls. Workers are off-path callables only.
+- No legacy `recommendation_engine` re-coupling.
+- No new external provider. No new SQL migration.
+- No frontend changes.
+- No visible Intel v3 decision, card copy, or action count changes.
+
+### Kill-switch / rollback
+Both `INTEL_V3_RESEARCH_WORKERS_ENABLED` and `INTEL_V3_EARNINGS_REVIEWER_ENABLED` default to `false`. Disabling either flag makes the worker a fast no-op with no side effects. The four research artifact tables remain (additive) but receive no new rows when flags are off.
+
+### Files changed
+- `v2/backend/app/config.py` — two new flags (safe defaults False).
+- `v2/backend/app/services/intelligence/research_workers/__init__.py` — NEW.
+- `v2/backend/app/services/intelligence/research_workers/contracts.py` — NEW.
+- `v2/backend/app/services/intelligence/research_workers/artifact_store_writer.py` — NEW.
+- `v2/backend/app/services/intelligence/research_workers/earnings_reviewer.py` — NEW.
+- `v2/backend/app/services/intelligence/research_workers/runner.py` — NEW.
+- `v2/backend/tests/test_intel_v3_phase3_research_workers.py` — NEW.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — Phase 3 entry.
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+### safe_for_decision constraint: Unchanged (DB-level CHECK forces FALSE)
+
+### Next recommended phase
+Phase 4 — validate dark-run artifact writes and audit event quality in staging, then implement shadow-diagnostics adapter that reads research_artifacts and emits log-only counters in `intel_v3_snapshot_certification_summary` without affecting visible decisions.
+
+---
+
 ## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Trigger Hotfix (Level 1, SQL Docs Only, No New Apply)
 
 ### Status

@@ -19,6 +19,7 @@ from ..database import get_supabase_client
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
+from ..services.intelligence.research_workers.artifact_observability import summarize_recent_research_artifacts
 from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.recommendation_engine import RecommendationService
 
@@ -27,6 +28,13 @@ router = APIRouter(prefix="/diagnostics/finance-intel", tags=["diagnostics"])
 
 # Phase 3.6 — endpoint-layer ticker cap (stricter than harness default of 5).
 MAX_VALIDATE_TICKERS_PER_REQUEST: int = 3
+
+# Phase 4 — observability endpoint caps.
+MAX_OBSERVE_TICKERS_PER_REQUEST: int = 10
+MAX_OBSERVE_LOOKBACK_DAYS: int = 365
+MIN_OBSERVE_LOOKBACK_DAYS: int = 1
+MAX_OBSERVE_ROWS: int = 1000
+MIN_OBSERVE_ROWS: int = 1
 
 
 class FinanceRuntimeCertRequest(BaseModel):
@@ -38,6 +46,13 @@ class FinanceRuntimeCertRequest(BaseModel):
 class ResearchWorkersValidateRequest(BaseModel):
     """Phase 3.6 — operator request body for dark-run validation."""
     tickers: list[str] = []
+
+
+class ResearchArtifactsObserveRequest(BaseModel):
+    """Phase 4 — operator request body for read-only artifact observability."""
+    tickers: list[str] = []
+    lookback_days: int = 30
+    max_rows: int = 250
 
 
 def _ensure_cert_enabled(secret_header: str | None) -> None:
@@ -342,4 +357,87 @@ async def validate_research_workers_dark_run(
         "visible_snapshot_unchanged": summary.visible_snapshot_unchanged,
         "errors": summary.errors,
         "tables_touched": summary.tables_touched,
+    }
+
+
+@router.post("/research-artifacts/observe")
+async def observe_research_artifacts(
+    payload: ResearchArtifactsObserveRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Phase 4 — operator-only read-only artifact observability endpoint.
+
+    Returns aggregate counters over recent research artifacts for the
+    runtime-cert user. No artifact payloads, source URLs, quotes, facts,
+    or raw DB rows are returned.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=true
+
+    Worker/validation flags (Phase 3/3.5) are NOT required — observability
+    is independent and controlled solely by its own flag.
+
+    Guardrails applied at this layer:
+      - tickers capped to MAX_OBSERVE_TICKERS_PER_REQUEST (10)
+      - lookback_days clamped to [1, 365]
+      - max_rows clamped to [1, 1000]
+      - tickers normalized uppercase and deduplicated
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER returns artifact payloads, facts payloads, raw DB rows, or user secrets.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to intel_v3_snapshots or any artifact table.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_research_artifact_observability_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED is not enabled",
+        )
+
+    # ── Guardrail: clamp inputs ───────────────────────────────────────────────
+    tickers_input = payload.tickers[:MAX_OBSERVE_TICKERS_PER_REQUEST]
+    lookback_days = max(MIN_OBSERVE_LOOKBACK_DAYS, min(MAX_OBSERVE_LOOKBACK_DAYS, payload.lookback_days))
+    max_rows = max(MIN_OBSERVE_ROWS, min(MAX_OBSERVE_ROWS, payload.max_rows))
+
+    db_client = get_supabase_client()
+
+    obs = summarize_recent_research_artifacts(
+        user_id=str(user.id),
+        db_client=db_client,
+        tickers=tickers_input,
+        lookback_days=lookback_days,
+        max_rows=max_rows,
+        settings=settings,
+    )
+
+    # Return only the compact safe aggregate summary — never raw payloads or rows.
+    return {
+        "observability_enabled": obs.observability_enabled,
+        "requested_tickers": obs.requested_tickers,
+        "normalized_tickers": obs.normalized_tickers,
+        "lookback_days": obs.lookback_days,
+        "max_rows": obs.max_rows,
+        "artifact_count": obs.artifact_count,
+        "by_ticker": obs.by_ticker,
+        "by_artifact_type": obs.by_artifact_type,
+        "by_skill_pack": obs.by_skill_pack,
+        "by_confidence_or_trust_level": obs.by_confidence_or_trust_level,
+        "by_freshness_status": obs.by_freshness_status,
+        "safe_for_decision_false_count": obs.safe_for_decision_false_count,
+        "unexpected_safe_for_decision_true_count": obs.unexpected_safe_for_decision_true_count,
+        "forbidden_payload_violation_count": obs.forbidden_payload_violation_count,
+        "active_count": obs.active_count,
+        "inactive_count": obs.inactive_count,
+        "invalidated_count": obs.invalidated_count,
+        "expired_count": obs.expired_count,
+        "artifacts_with_sources_count": obs.artifacts_with_sources_count,
+        "artifacts_without_sources_count": obs.artifacts_without_sources_count,
+        "artifacts_with_facts_count": obs.artifacts_with_facts_count,
+        "artifacts_without_facts_count": obs.artifacts_without_facts_count,
+        "missing_evidence_count": obs.missing_evidence_count,
+        "visible_snapshot_unchanged": obs.visible_snapshot_unchanged,
+        "errors": obs.errors,
     }

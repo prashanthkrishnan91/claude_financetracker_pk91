@@ -1,4 +1,122 @@
 
+## 2026-05-07 — Phase 4: Shadow-Only Research Artifact Observability (Level 2)
+
+### Status
+Phases 0 through 3.7 are closed and certified. Phase 4 adds a read-only artifact observability lane — shadow-only diagnostics, no visible decision drift, no agents/LLM. Artifacts remain `safe_for_decision=false`.
+
+### What this PR adds
+- New service: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`
+  - `ArtifactObservabilitySummary` dataclass — compact read-only aggregate summary.
+  - `summarize_recent_research_artifacts(user_id, db_client, tickers, lookback_days, max_rows, settings)` — reads `research_artifacts`, `research_artifact_sources`, `research_artifact_facts`. Read-only (no writes). Returns aggregate counters only — no raw payloads, source URLs, quotes, excerpts, or raw DB rows.
+  - Reuses `_has_forbidden_key()` from `contracts.py` for forbidden-key counting.
+  - Guard: returns no-op disabled summary if `intel_v3_research_artifact_observability_enabled=False`.
+  - Structured INFO log (aggregate only) when `intel_v3_research_artifact_observability_info_logs_enabled=True`.
+  - `invalidated_count` always 0 — no separate invalidated DB status field in schema (documented limitation).
+  - All DB query failures contained in `errors[]`; never raises.
+- New endpoint in `v2/backend/app/routers/diagnostics.py`:
+  `POST /api/v1/diagnostics/finance-intel/research-artifacts/observe`
+  - Reuses existing `_get_runtime_cert_user` dependency (same runtime cert secret pattern).
+  - Requires `finance_runtime_cert_enabled=true` + correct `X-Finance-Runtime-Cert-Secret`.
+  - Returns HTTP 403 if `intel_v3_research_artifact_observability_enabled=False`.
+  - Phase 3/3.5 worker/validation flags are NOT required — observability is independent.
+  - Caps: tickers≤10, lookback_days∈[1,365], max_rows∈[1,1000]. Normalizes uppercase, deduplicates.
+  - Returns only compact safe aggregate summary — never raw payloads, facts, source URLs, or secrets.
+  - Never callable from frontend page load.
+- New Pydantic request model `ResearchArtifactsObserveRequest` (tickers, lookback_days, max_rows).
+- Five new constants: `MAX_OBSERVE_TICKERS_PER_REQUEST=10`, `MAX_OBSERVE_LOOKBACK_DAYS=365`, `MIN_OBSERVE_LOOKBACK_DAYS=1`, `MAX_OBSERVE_ROWS=1000`, `MIN_OBSERVE_ROWS=1`.
+- Two new config flags in `v2/backend/app/config.py`:
+  - `intel_v3_research_artifact_observability_enabled: bool = False`
+  - `intel_v3_research_artifact_observability_info_logs_enabled: bool = False`
+- Updated `v2/backend/app/services/intelligence/research_workers/__init__.py` — exports `ArtifactObservabilitySummary` and `summarize_recent_research_artifacts`.
+- New test file: `v2/backend/tests/test_intel_v3_phase4_artifact_observability.py` — 58 tests, 16 acceptance criteria.
+- New test file: `v2/backend/tests/test_intel_v3_phase4_artifact_observability_endpoint.py` — 30 tests, 15 acceptance criteria.
+
+### Phase 4 Production Runbook
+
+#### Required env flags
+```
+finance_runtime_cert_enabled=true
+finance_runtime_cert_secret=<operator-secret>
+finance_runtime_cert_user_id=<uuid-of-operator-user>
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=true
+# Optional: enable aggregate INFO log per call
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_INFO_LOGS_ENABLED=true
+```
+
+Worker/validation flags (INTEL_V3_RESEARCH_WORKERS_ENABLED etc.) do NOT need to be on for observability.
+
+#### Invoke
+```bash
+curl -s -X POST \
+  https://<backend-url>/api/v1/diagnostics/finance-intel/research-artifacts/observe \
+  -H "X-Finance-Runtime-Cert-Secret: <operator-secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"tickers": ["AAPL", "MSFT", "NVDA"], "lookback_days": 30, "max_rows": 250}' | jq .
+```
+
+#### Expected safe result (after Phase 3.6/3.7 validation writes)
+```json
+{
+  "observability_enabled": true,
+  "artifact_count": 3,
+  "safe_for_decision_false_count": 3,
+  "unexpected_safe_for_decision_true_count": 0,
+  "forbidden_payload_violation_count": 0,
+  "by_ticker": {"AAPL": 1, "MSFT": 1, "NVDA": 1},
+  "by_artifact_type": {"catalyst_window": 3},
+  "by_skill_pack": {"earnings_reviewer": 3},
+  "by_confidence_or_trust_level": {"UNKNOWN": 3},
+  "by_freshness_status": {"UNKNOWN": 3},
+  "active_count": 3,
+  "visible_snapshot_unchanged": true,
+  "errors": []
+}
+```
+
+#### Rollback
+Set `INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=false`. No DB rows modified; no artifacts deleted; no snapshot impact.
+
+### Architecture invariants preserved
+- `decide()` in `decision_policy_v1.py` is unchanged. Not imported by artifact_observability.py.
+- No artifact is fed into the visible decision path.
+- `safe_for_decision` remains False — DB-level CHECK constraint unchanged.
+- `visible_snapshot_unchanged = true` is structural (observability never touches `intel_v3_snapshots`).
+- No new SQL migration. No new external provider. No new LLM calls. No frontend changes.
+- No artifact-to-decision integration. No agents. No multi-agent framework.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/artifact_observability.py` — NEW
+- `v2/backend/app/services/intelligence/research_workers/__init__.py` — exports updated
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + model + constants + import
+- `v2/backend/app/config.py` — two new Phase 4 flags
+- `v2/backend/tests/test_intel_v3_phase4_artifact_observability.py` — NEW (58 tests)
+- `v2/backend/tests/test_intel_v3_phase4_artifact_observability_endpoint.py` — NEW (30 tests)
+- `docs/ai/HANDOFF.md` — this entry
+- `v2/progress_log.md` — Phase 4 entry
+
+### Test results
+- Phase 4 service: 58/58 ✓
+- Phase 4 endpoint: 30/30 ✓
+- Phase 3.7: 16/16 ✓
+- Phase 3.6: 35/35 ✓
+- Phase 3.5: 57/57 ✓
+- Phase 3: 85/85 ✓
+- Phase 0/0.5 guardrails: 48/48 ✓
+- Combined: 329/329 ✓
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+### safe_for_decision constraint: Unchanged (DB-level CHECK forces FALSE)
+### New LLM calls: None
+### New providers: None
+### Agents added: None
+### Page-load execution: None
+### Artifact-to-decision integration: None
+
+---
+
 ## 2026-05-07 — Phase 3.7: Fix Real Supabase Artifact Writer Idempotency (Level 1)
 
 ### Status

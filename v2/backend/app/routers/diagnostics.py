@@ -465,4 +465,18 @@ async def observe_research_artifacts(
         "by_metric_observation_unit": obs.by_metric_observation_unit,
         "by_metric_observation_form": obs.by_metric_observation_form,
         "artifacts_with_companyfacts_metric_observations_count": obs.artifacts_with_companyfacts_metric_observations_count,
+        # Phase 8A: SEC metric truth adapter dry-run — aggregate-only, no raw values.
+        # dry_run_safe_for_decision is always False; visible_snapshot_unchanged always True.
+        "sec_metric_truth_adapter_dry_run_enabled": obs.sec_metric_truth_adapter_dry_run_enabled,
+        "sec_metric_truth_adapter_dry_run_safe_for_decision": obs.sec_metric_truth_adapter_dry_run_safe_for_decision,
+        "sec_metric_truth_adapter_artifacts_evaluated_count": obs.sec_metric_truth_adapter_artifacts_evaluated_count,
+        "sec_metric_truth_adapter_source_linked_metric_fact_count": obs.sec_metric_truth_adapter_source_linked_metric_fact_count,
+        "sec_metric_truth_adapter_unmapped_metric_fact_count": obs.sec_metric_truth_adapter_unmapped_metric_fact_count,
+        "sec_metric_truth_adapter_by_ticker": obs.sec_metric_truth_adapter_by_ticker,
+        "sec_metric_truth_adapter_by_bucket": obs.sec_metric_truth_adapter_by_bucket,
+        "sec_metric_truth_adapter_by_tag": obs.sec_metric_truth_adapter_by_tag,
+        "sec_metric_truth_adapter_by_unit": obs.sec_metric_truth_adapter_by_unit,
+        "sec_metric_truth_adapter_by_form": obs.sec_metric_truth_adapter_by_form,
+        "sec_metric_truth_adapter_missing_buckets_by_ticker": obs.sec_metric_truth_adapter_missing_buckets_by_ticker,
+        "sec_metric_truth_adapter_visible_snapshot_unchanged": obs.sec_metric_truth_adapter_visible_snapshot_unchanged,
     }

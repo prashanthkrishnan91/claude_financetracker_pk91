@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 from app.config import Settings, get_settings
 from .artifact_truth_readiness import evaluate_artifact_truth_readiness
 from .contracts import _has_forbidden_key
+from .sec_metric_truth_adapter_dry_run import run_sec_metric_truth_adapter_dry_run
 
 
 @dataclass
@@ -88,6 +89,21 @@ class ArtifactObservabilitySummary:
     by_metric_observation_unit: dict[str, int] = field(default_factory=dict)
     by_metric_observation_form: dict[str, int] = field(default_factory=dict)
     artifacts_with_companyfacts_metric_observations_count: int = 0
+    # Phase 8A: SEC metric truth adapter dry-run (all default off/0/{} — backward-compatible).
+    # Aggregate-only: no raw values, no structured_payload, no source URLs.
+    # dry_run_safe_for_decision is always False; visible_snapshot_unchanged always True.
+    sec_metric_truth_adapter_dry_run_enabled: bool = False
+    sec_metric_truth_adapter_dry_run_safe_for_decision: bool = False
+    sec_metric_truth_adapter_artifacts_evaluated_count: int = 0
+    sec_metric_truth_adapter_source_linked_metric_fact_count: int = 0
+    sec_metric_truth_adapter_unmapped_metric_fact_count: int = 0
+    sec_metric_truth_adapter_by_ticker: dict[str, int] = field(default_factory=dict)
+    sec_metric_truth_adapter_by_bucket: dict[str, int] = field(default_factory=dict)
+    sec_metric_truth_adapter_by_tag: dict[str, int] = field(default_factory=dict)
+    sec_metric_truth_adapter_by_unit: dict[str, int] = field(default_factory=dict)
+    sec_metric_truth_adapter_by_form: dict[str, int] = field(default_factory=dict)
+    sec_metric_truth_adapter_missing_buckets_by_ticker: dict[str, list] = field(default_factory=dict)
+    sec_metric_truth_adapter_visible_snapshot_unchanged: bool = True
 
 
 def _disabled_summary(
@@ -454,6 +470,21 @@ def summarize_recent_research_artifacts(
                 except Exception as exc:  # noqa: BLE001
                     errors.append(f"readiness_eval_error artifact_id={aid} error={exc}")
 
+    # ── Phase 8A: SEC metric truth adapter dry-run ────────────────────────────
+    # Aggregate-only mapping of source-linked companyfacts metric observations
+    # into internal evidence buckets. Reuses already-fetched fact data from the
+    # Phase 6B/7C query above — no additional DB calls.
+    # Kill switch: settings.intel_v3_sec_metric_truth_adapter_dry_run_enabled.
+    dry_run_result = None
+    if settings.intel_v3_sec_metric_truth_adapter_dry_run_enabled and artifact_rows:
+        try:
+            dry_run_result = run_sec_metric_truth_adapter_dry_run(
+                artifact_rows=artifact_rows,
+                facts_by_artifact=readiness_facts_by_artifact,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"sec_metric_dry_run_error error={exc}")
+
     summary = ArtifactObservabilitySummary(
         observability_enabled=True,
         requested_tickers=requested_tickers,
@@ -499,6 +530,37 @@ def summarize_recent_research_artifacts(
         by_metric_observation_unit=by_metric_observation_unit,
         by_metric_observation_form=by_metric_observation_form,
         artifacts_with_companyfacts_metric_observations_count=artifacts_with_companyfacts_metric_observations_count,
+        # Phase 8A: SEC metric truth adapter dry-run fields.
+        sec_metric_truth_adapter_dry_run_enabled=dry_run_result is not None,
+        sec_metric_truth_adapter_dry_run_safe_for_decision=False,
+        sec_metric_truth_adapter_artifacts_evaluated_count=(
+            dry_run_result.artifacts_evaluated_count if dry_run_result else 0
+        ),
+        sec_metric_truth_adapter_source_linked_metric_fact_count=(
+            dry_run_result.source_linked_metric_fact_count if dry_run_result else 0
+        ),
+        sec_metric_truth_adapter_unmapped_metric_fact_count=(
+            dry_run_result.unmapped_metric_fact_count if dry_run_result else 0
+        ),
+        sec_metric_truth_adapter_by_ticker=(
+            dry_run_result.by_ticker if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_by_bucket=(
+            dry_run_result.by_bucket if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_by_tag=(
+            dry_run_result.by_tag if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_by_unit=(
+            dry_run_result.by_unit if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_by_form=(
+            dry_run_result.by_form if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_missing_buckets_by_ticker=(
+            dry_run_result.missing_buckets_by_ticker if dry_run_result else {}
+        ),
+        sec_metric_truth_adapter_visible_snapshot_unchanged=True,
     )
 
     if settings.intel_v3_research_artifact_observability_info_logs_enabled:
@@ -513,7 +575,9 @@ def summarize_recent_research_artifacts(
             "safe_for_decision_db_promotion_blocked=%d fail_closed=%d "
             "artifacts_with_metric_obs=%d metric_obs_facts=%d "
             "artifacts_with_companyfacts_obs=%d "
-            "metric_obs_tags=%d metric_obs_units=%d metric_obs_forms=%d",
+            "metric_obs_tags=%d metric_obs_units=%d metric_obs_forms=%d "
+            "dry_run_enabled=%s dry_run_source_linked_facts=%d "
+            "dry_run_unmapped=%d dry_run_buckets=%d",
             summary.artifact_count,
             summary.active_count,
             summary.inactive_count,
@@ -537,6 +601,10 @@ def summarize_recent_research_artifacts(
             len(summary.by_metric_observation_tag),
             len(summary.by_metric_observation_unit),
             len(summary.by_metric_observation_form),
+            summary.sec_metric_truth_adapter_dry_run_enabled,
+            summary.sec_metric_truth_adapter_source_linked_metric_fact_count,
+            summary.sec_metric_truth_adapter_unmapped_metric_fact_count,
+            len(summary.sec_metric_truth_adapter_by_bucket),
         )
 
     return summary

@@ -20,6 +20,10 @@ from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
 from ..services.intelligence.research_workers.artifact_observability import summarize_recent_research_artifacts
+from ..services.intelligence.research_workers.sec_metric_coverage_expansion import (
+    MAX_TICKERS_PER_EXPANSION,
+    compute_coverage_expansion,
+)
 from ..services.intelligence.research_workers.sec_metric_portfolio_coverage_dry_run import compute_portfolio_sec_metric_coverage
 from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.recommendation_engine import RecommendationService
@@ -54,6 +58,14 @@ class ResearchArtifactsObserveRequest(BaseModel):
     tickers: list[str] = []
     lookback_days: int = 30
     max_rows: int = 250
+
+
+class SecMetricCoverageExpansionRequest(BaseModel):
+    """Phase 8E — operator request body for SEC coverage expansion."""
+    max_tickers: int = MAX_TICKERS_PER_EXPANSION
+    include_tickers: list[str] = []
+    exclude_tickers: list[str] = []
+    dry_run: bool = False
 
 
 def _ensure_cert_enabled(secret_header: str | None) -> None:
@@ -549,4 +561,79 @@ async def get_portfolio_sec_metric_coverage(
         "readiness_counts": coverage.readiness_counts,
         "by_ticker": coverage.by_ticker,
         "errors": coverage.errors,
+    }
+
+
+@router.post("/sec-metric-evidence/expand-coverage")
+async def expand_sec_metric_evidence_coverage(
+    payload: SecMetricCoverageExpansionRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Phase 8E — operator-only SEC metric evidence coverage expansion.
+
+    Selects eligible SEC-company portfolio tickers missing SEC metric evidence
+    and (when dry_run=false) runs the existing Phase 3/7A artifact writer for
+    each selected ticker. ETF/Crypto/already-covered tickers are skipped.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_SEC_METRIC_PORTFOLIO_COVERAGE_EXPANSION_ENABLED=true
+
+    Additional flags required for writes (dry_run=false):
+      INTEL_V3_RESEARCH_WORKERS_ENABLED=true
+      INTEL_V3_EARNINGS_REVIEWER_ENABLED=true
+
+    max_tickers is capped defensively to MAX_TICKERS_PER_EXPANSION (10).
+    include_tickers restricts candidates to those tickers only.
+    exclude_tickers removes tickers from the candidate set.
+    dry_run=true computes candidates but writes nothing.
+    dry_run=false calls the existing SEC writer/validation path.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER returns raw metric values, structured_payload, source URLs, raw DB rows.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to intel_v3_snapshots.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_sec_metric_portfolio_coverage_expansion_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_SEC_METRIC_PORTFOLIO_COVERAGE_EXPANSION_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    result = compute_coverage_expansion(
+        user_id=str(user.id),
+        db_client=db_client,
+        max_tickers=payload.max_tickers,
+        include_tickers=payload.include_tickers,
+        exclude_tickers=payload.exclude_tickers,
+        dry_run=payload.dry_run,
+        settings=settings,
+    )
+
+    # Return only aggregate-safe fields — no raw payloads, no source URLs, no raw rows.
+    return {
+        "coverage_expansion_enabled": result.coverage_expansion_enabled,
+        "dry_run": result.dry_run,
+        "safe_for_decision": result.safe_for_decision,
+        "visible_snapshot_unchanged": result.visible_snapshot_unchanged,
+        "portfolio_ticker_count": result.portfolio_ticker_count,
+        "candidate_count": result.candidate_count,
+        "selected_tickers": result.selected_tickers,
+        "skipped_tickers_by_reason": result.skipped_tickers_by_reason,
+        "attempted_count": result.attempted_count,
+        "written_count": result.written_count,
+        "skipped_count": result.skipped_count,
+        "failed_count": result.failed_count,
+        "artifact_ids": result.artifact_ids,
+        "safe_for_decision_false_count": result.safe_for_decision_false_count,
+        "unexpected_safe_for_decision_true_count": result.unexpected_safe_for_decision_true_count,
+        "forbidden_payload_violation_count": result.forbidden_payload_violation_count,
+        "before_coverage_summary": result.before_coverage_summary,
+        "after_coverage_summary": result.after_coverage_summary,
+        "errors": result.errors,
     }

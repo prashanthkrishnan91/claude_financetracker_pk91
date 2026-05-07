@@ -129,6 +129,16 @@ class Settings(BaseSettings):
     # Dry-run only — safe_for_decision remains False. No visible snapshot change.
     intel_v3_sec_metric_portfolio_coverage_dry_run_enabled: bool = False
 
+    # ── Intel v3 Phase 8E — SEC Metric Portfolio Coverage Expansion (off by default) ──
+    # When True, enables the protected portfolio-coverage expansion endpoint that
+    # attempts to create SEC CompanyFacts metric_observation research artifacts for
+    # missing SEC-company portfolio tickers (skips ETF/Crypto/already-covered tickers).
+    # Pre-consumption only — artifacts written but safe_for_decision stays False.
+    # No visible snapshot change. No decision consumption.
+    # Also requires intel_v3_research_workers_enabled and
+    # intel_v3_earnings_reviewer_enabled for writes to succeed.
+    intel_v3_sec_metric_portfolio_coverage_expansion_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

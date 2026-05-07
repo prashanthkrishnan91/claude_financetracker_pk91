@@ -1,4 +1,47 @@
 
+## 2026-05-07 — Phase 1: Finance Agent Skill Pack Audit (Spec Only, Level 1)
+
+### Status
+Phase 0 closed (PRs #220–#222) and Phase 0.5 closed (PR #223). This PR adds the Phase 1 architecture spec only — no runtime code, no SQL, no provider, no LLM, no UI.
+
+### What this PR adds
+- New doc: `docs/ai/INTEL_V3_FINANCE_AGENT_SKILL_PACK_AUDIT.md`.
+  - §1 Executive decision boundary: deterministic Intel v3 policy is the sole authority for visible Buy/Hold/Trim/Sell. Agents/LLMs/workers may produce sourced research artifacts only.
+  - §2 Current-state repo audit: pins the v3 snapshot path, run/snapshot separation, `ReadOnlyEvidenceAdapter` role, certification/guardrail tests, schema/version contracts, decoupled legacy paths, and reusable seams.
+  - §3 Skill pack audit: 11 skill packs (filing/transcript, earnings & catalyst, valuation context, fundamental quality, capital allocation, risk red-team, analyst revisions, news normalization, ETF/fund/crypto, portfolio exposure, hidden-gems scout) — each declared as audit-only with allowed/forbidden outputs, deterministic consumption rules, freshness, failure modes, required tests, cost/rate limits, and target phase.
+  - §4 Research Artifact Contract v1 in prose. Hard rule: forbidden fields `final_action`, `buy/hold/trim/sell`, `final_conviction`, `final_allocation`, `deploy_amount` (and synonyms) cannot exist on any artifact.
+  - §5 Worker boundary contract (may / may not).
+  - §6 Phased roadmap (Phase 1 → Phase 6 + later Deploy integration) with objectives, allowed/forbidden, test gates, production validation gates, rollback/kill-switch, size hints.
+  - §7 Acceptance criteria for all future implementation PRs.
+  - §8 Risk register (12 named risks + mitigations).
+  - §9 Four short prompt templates for later phases (artifact store, single-worker dark-run, shadow ingestion, merge gate).
+  - §10 Explicit out-of-scope list for this PR.
+- HANDOFF.md updated (this entry).
+- `v2/progress_log.md` updated with concise entry.
+
+### Architecture rule reinforced
+Agents are research artifact workers only. Deterministic Intel v3 policy (`decide()` in `decision_policy_v1.py`) remains the sole authority for the visible Buy/Hold/Trim/Sell action.
+
+### Files changed
+- `docs/ai/INTEL_V3_FINANCE_AGENT_SKILL_PACK_AUDIT.md` — NEW (Phase 1 spec).
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise Phase 1 entry.
+
+### Validation
+- Docs only. `git diff` shows no `v2/backend/`, `v2/frontend/`, `v2/database/`, or other runtime file changes.
+- No SQL/migrations. No provider changes. No LLM changes. No certification detector changes. No UI/copy changes.
+- Phase 0/0.5 certified state preserved: `intel_v3_snapshots`, `intel_v3_snapshot_certification_summary`, `intel_v3_evidence_source_summary`, regression guardrails — all untouched.
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+
+### Next recommended PR
+Phase 2 — Research Artifact Store v1 planning + draft SQL proposal (no migration applied). See §9.1 of the new spec for the template.
+
+---
+
 ## 2026-05-06 — Phase 0.5: Intel v3 Regression Guardrails (Level 1)
 
 ### Status

@@ -411,18 +411,106 @@ class TestBlockedDryRunOnly:
             artifact_rows=[_make_artifact(aid, ticker="ZZZZ")],
             facts_by_artifact={aid: [fact]},
         )
-        # ZZZZ shouldn't even appear in by_ticker (no source-linked facts).
-        assert "ZZZZ" not in result.by_ticker
+        # ZZZZ is in artifact_rows → appears as BLOCKED.
+        assert "ZZZZ" in result.by_ticker
+        assert result.by_ticker["ZZZZ"]["future_adapter_readiness"] == "BLOCKED_DRY_RUN_ONLY"
 
-    def test_ticker_absent_from_by_ticker_when_zero_source_linked(self):
-        """Tickers with zero source-linked facts don't appear in by_ticker at all."""
+    def test_ticker_with_no_facts_appears_as_blocked(self):
+        """Ticker in artifact_rows but with no facts → BLOCKED_DRY_RUN_ONLY."""
         aid = str(uuid.uuid4())
         result = _adapter_and_snapshot(
             artifact_rows=[_make_artifact(aid, ticker="EMPTY")],
             facts_by_artifact={aid: []},
         )
-        assert "EMPTY" not in result.by_ticker
-        assert result.tickers_evaluated_count == 0
+        assert "EMPTY" in result.by_ticker
+        assert result.by_ticker["EMPTY"]["future_adapter_readiness"] == "BLOCKED_DRY_RUN_ONLY"
+        assert result.tickers_evaluated_count == 1
+
+    def test_blocked_ticker_has_zero_source_linked_fact_count(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.by_ticker["BLOCKED"]["source_linked_metric_fact_count"] == 0
+
+    def test_blocked_ticker_has_empty_present_buckets(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.by_ticker["BLOCKED"]["present_buckets"] == []
+
+    def test_blocked_ticker_has_all_expected_buckets_missing(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert set(result.by_ticker["BLOCKED"]["missing_buckets"]) == EXPECTED_BUCKETS
+        assert result.by_ticker["BLOCKED"]["missing_buckets"] == sorted(EXPECTED_BUCKETS)
+
+    def test_blocked_ticker_has_empty_present_groups(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.by_ticker["BLOCKED"]["present_bucket_groups"] == []
+
+    def test_blocked_ticker_has_all_groups_missing(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert set(result.by_ticker["BLOCKED"]["missing_bucket_groups"]) == set(BUCKET_GROUPS.keys())
+
+    def test_blocked_ticker_has_empty_forms_and_units(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.by_ticker["BLOCKED"]["forms"] == {}
+        assert result.by_ticker["BLOCKED"]["units"] == {}
+
+    def test_blocked_ticker_has_always_blocking_codes(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        codes = result.by_ticker["BLOCKED"]["blocking_reason_codes"]
+        assert "decision_consumption_disabled" in codes
+        assert "safe_for_decision_db_lock" in codes
+
+    def test_blocked_ticker_has_missing_bucket_codes_for_all_buckets(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        codes = result.by_ticker["BLOCKED"]["blocking_reason_codes"]
+        for b in EXPECTED_BUCKETS:
+            assert f"missing_bucket_{b}" in codes
+
+    def test_blocked_ticker_not_counted_in_source_linked_evidence(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.tickers_with_any_source_linked_evidence_count == 0
+
+    def test_blocked_ticker_counted_in_evaluated_count(self):
+        aid = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[_make_artifact(aid, ticker="BLOCKED")],
+            facts_by_artifact={aid: []},
+        )
+        assert result.tickers_evaluated_count == 1
 
     def test_empty_input_gives_zero_tickers(self):
         result = _adapter_and_snapshot(
@@ -431,6 +519,26 @@ class TestBlockedDryRunOnly:
         )
         assert result.tickers_evaluated_count == 0
         assert result.by_ticker == {}
+
+    def test_mixed_blocked_and_partial_tickers(self):
+        """Blocked ticker (no facts) alongside a partial ticker (some facts)."""
+        aid_blocked = str(uuid.uuid4())
+        aid_partial = str(uuid.uuid4())
+        result = _adapter_and_snapshot(
+            artifact_rows=[
+                _make_artifact(aid_blocked, ticker="BLOCKED"),
+                _make_artifact(aid_partial, ticker="NVDA"),
+            ],
+            facts_by_artifact={
+                aid_blocked: [],
+                aid_partial: [_make_metric_fact(aid_partial, tag="Assets")],
+            },
+        )
+        assert result.by_ticker["BLOCKED"]["future_adapter_readiness"] == "BLOCKED_DRY_RUN_ONLY"
+        assert result.by_ticker["NVDA"]["future_adapter_readiness"] == "PARTIAL_DRY_RUN_ONLY"
+        assert result.tickers_evaluated_count == 2
+        assert result.tickers_with_any_source_linked_evidence_count == 1
+        assert result.tickers_blocked_from_decision_count == 2
 
 
 # =============================================================================

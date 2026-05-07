@@ -155,10 +155,13 @@ def _run(
     # ── Build per-ticker forms/units by re-iterating in-memory facts ──────────
     ticker_forms: dict[str, dict[str, int]] = {}
     ticker_units: dict[str, dict[str, int]] = {}
+    # Collect all unique tickers from artifact_rows (superset of by_ticker).
+    all_tickers_set: set[str] = set()
 
     for artifact_row in artifact_rows:
         aid = str(artifact_row.get("id", ""))
         ticker = str(artifact_row.get("ticker") or "UNKNOWN")
+        all_tickers_set.add(ticker)
         artifact_facts = facts_by_artifact.get(aid, [])
 
         for fact in artifact_facts:
@@ -181,9 +184,9 @@ def _run(
             ticker_units[ticker][unit] = ticker_units[ticker].get(unit, 0) + 1
 
     # ── Derive per-ticker present/missing buckets from Phase 8A output ────────
-    # by_ticker tells us which tickers have any source-linked facts.
-    # missing_buckets_by_ticker tells us which expected buckets are absent.
-    all_tickers = sorted(adapter_result.by_ticker.keys())
+    # Use all unique tickers from artifact_rows so that tickers with no
+    # source-linked mapped facts still appear as BLOCKED_DRY_RUN_ONLY.
+    all_tickers = sorted(all_tickers_set)
 
     tickers_with_any_source_linked_evidence_count = 0
     tickers_ready_for_future_adapter_count = 0
@@ -191,28 +194,34 @@ def _run(
 
     for ticker in all_tickers:
         fact_count = adapter_result.by_ticker.get(ticker, 0)
-        missing_b = sorted(adapter_result.missing_buckets_by_ticker.get(ticker, []))
-        present_b = sorted(EXPECTED_BUCKETS - set(missing_b))
 
-        present_set = set(present_b)
-
-        # ── Bucket group presence ─────────────────────────────────────────────
-        present_groups: list[str] = []
-        missing_groups: list[str] = []
-        for group_name, group_buckets in sorted(BUCKET_GROUPS.items()):
-            if any(b in present_set for b in group_buckets):
-                present_groups.append(group_name)
-            else:
-                missing_groups.append(group_name)
-
-        # ── Readiness ─────────────────────────────────────────────────────────
-        readiness: FutureAdapterReadiness
         if fact_count == 0:
-            readiness = "BLOCKED_DRY_RUN_ONLY"
-        elif _is_ready(present_set):
-            readiness = "READY_DRY_RUN_ONLY"
+            # Ticker present in artifact_rows but has no source-linked mapped facts.
+            # All buckets and groups are missing.
+            present_b: list[str] = []
+            missing_b = sorted(EXPECTED_BUCKETS)
+            present_groups: list[str] = []
+            missing_groups: list[str] = sorted(BUCKET_GROUPS.keys())
+            readiness: FutureAdapterReadiness = "BLOCKED_DRY_RUN_ONLY"
         else:
-            readiness = "PARTIAL_DRY_RUN_ONLY"
+            missing_b = sorted(adapter_result.missing_buckets_by_ticker.get(ticker, []))
+            present_b = sorted(EXPECTED_BUCKETS - set(missing_b))
+            present_set = set(present_b)
+
+            # ── Bucket group presence ─────────────────────────────────────────
+            present_groups = []
+            missing_groups = []
+            for group_name, group_buckets in sorted(BUCKET_GROUPS.items()):
+                if any(b in present_set for b in group_buckets):
+                    present_groups.append(group_name)
+                else:
+                    missing_groups.append(group_name)
+
+            # ── Readiness ─────────────────────────────────────────────────────
+            if _is_ready(present_set):
+                readiness = "READY_DRY_RUN_ONLY"
+            else:
+                readiness = "PARTIAL_DRY_RUN_ONLY"
 
         # ── Blocking reason codes ─────────────────────────────────────────────
         blocking: list[str] = list(_ALWAYS_BLOCKING)

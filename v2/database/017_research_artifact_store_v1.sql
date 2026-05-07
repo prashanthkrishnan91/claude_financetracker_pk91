@@ -23,9 +23,12 @@
 --   flip it to TRUE, never a worker.
 --
 -- Phase 2.1 promotion validation (resolved before promotion):
---   1. Recursive JSON forbidden-key scan via `jsonb_path_query(... 'lax $.**.keyvalue()')`
---      confirmed valid on PostgreSQL 14+ (Supabase default). See trigger comments below.
---   2. Column alias renamed from ambiguous t(value) to kv(obj) for clarity.
+--   1. Recursive JSON forbidden-key scan originally used jsonb_path_query(..'lax $.**.keyvalue()').
+--      HOTFIX applied after migration applied: replaced with PL/pgSQL recursive JSONB walker
+--      (research_artifact_find_forbidden_jsonb_key) because keyvalue() fails on scalar
+--      descendants (ERROR: jsonpath item method .keyvalue() can only be applied to an object).
+--      Sanity check passed: valid payload returns NULL; nested FINAL_ACTION returns FINAL_ACTION.
+--   2. Column alias renamed from ambiguous t(value) to kv(obj) for clarity (superseded by hotfix).
 --   3. Forbidden-key comparison uses lower(found_key) = ANY(...) — case-insensitive.
 --   4. Child user_id consistency: research_artifact_sources (own trigger) and
 --      research_artifact_facts (inside shared trigger) are both covered.
@@ -94,7 +97,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 --   (b) column-level CHECK on `payload` JSONB top-level keys (fast fail for the
 --       common exact-lowercase case),
 --   (c) BEFORE INSERT/UPDATE trigger (§5 below) that recursively scans all
---       nested keys case-insensitively via JSONPath keyvalue().
+--       nested keys case-insensitively via PL/pgSQL JSONB walker (hotfix).
 
 CREATE TABLE IF NOT EXISTS public.research_artifacts (
     id                                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -215,7 +218,7 @@ COMMENT ON COLUMN public.research_artifacts.safe_for_decision IS
 COMMENT ON COLUMN public.research_artifacts.deterministic_inputs_allowed IS
     'Explicit axis allow-list (e.g. {evidence_axis_band, risk_axis_band}). Advisory; binding only in Phase 5 when per-axis flags are enabled.';
 COMMENT ON COLUMN public.research_artifacts.payload IS
-    'Typed payload. Forbidden visible-decision keys rejected by column CHECK (top-level, exact) and recursive BEFORE trigger (all depths, case-insensitive).';
+    'Typed payload. Forbidden visible-decision keys rejected by column CHECK (top-level, exact) and recursive BEFORE trigger via PL/pgSQL JSONB walker (all depths, case-insensitive). JSONPath keyvalue() was replaced — see §5 hotfix note.';
 
 -- Idempotency: one active artifact per replay_idempotency_key.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_research_artifacts_replay_active
@@ -426,25 +429,28 @@ CREATE INDEX IF NOT EXISTS idx_worker_audit_events_artifact
 -- This trigger walks the entire payload / structured_payload tree recursively and
 -- rejects any forbidden visible-decision key at any nesting depth.
 --
--- JSONPath mechanics (PostgreSQL 14+):
---   jsonb_path_query(target, 'lax $.**.keyvalue()')
---   — `lax` mode: non-object nodes encountered during recursive descent are
---     silently skipped (no error). Safe for mixed object/array/scalar payloads.
---   — `**` recursive descent: visits every node at any depth.
---   — `keyvalue()`: for each object node, emits one JSONB row per key in the form
---     {"key":"<name>","value":<val>,"id":<path_id>}. Arrays and scalars are skipped.
---   — Column alias `kv(obj)`: each emitted row is the full keyvalue JSONB object.
---   — `kv.obj ->> 'key'`: extracts the string key name from that object.
+-- HOTFIX NOTE: The original implementation used jsonb_path_query(..'lax $.**.keyvalue()').
+-- That failed in Supabase/Postgres with:
+--   ERROR: jsonpath item method .keyvalue() can only be applied to an object
+-- This occurs when lax mode exposes scalar descendants during recursive descent.
+-- A recursive CTE fallback was also attempted but PostgreSQL rejected the shape:
+--   ERROR: recursive reference to query "walk" must not appear within its non-recursive term
+-- The successful fix is the PL/pgSQL recursive JSONB walker below
+-- (research_artifact_find_forbidden_jsonb_key), which explicitly branches on
+-- jsonb_typeof() and handles object/array/scalar nodes without any JSONPath dependency.
 --
 -- Case-insensitivity:
---   `lower(found_key) = ANY (forbidden_keys)` — forbidden_keys are all lowercase.
+--   lower(found_key) = ANY (forbidden_keys) — forbidden_keys are all lowercase.
 --   Catches 'Final_Action', 'FINAL_ACTION', 'buy', 'BUY', etc.
 --
 -- Also enforces child user_id consistency inside the same function body
 -- (research_artifact_facts only). research_artifact_sources has its own function.
 
-CREATE OR REPLACE FUNCTION public.research_artifact_reject_forbidden_keys()
-RETURNS TRIGGER
+-- Helper: recursively walks a JSONB value and returns the first forbidden key
+-- found at any nesting depth (case-insensitive), or NULL if none found.
+-- Replaces JSONPath keyvalue() which fails on scalar descendants in Supabase/Postgres.
+CREATE OR REPLACE FUNCTION public.research_artifact_find_forbidden_jsonb_key(target_payload JSONB)
+RETURNS TEXT
 LANGUAGE plpgsql
 AS $func$
 DECLARE
@@ -457,8 +463,41 @@ DECLARE
         'deploy_shares',
         'buy', 'sell', 'trim', 'hold'
     ];
+    k      TEXT;
+    v      JSONB;
+    elem   JSONB;
+    result TEXT;
+BEGIN
+    IF jsonb_typeof(target_payload) = 'object' THEN
+        FOR k, v IN SELECT * FROM jsonb_each(target_payload) LOOP
+            IF lower(k) = ANY (forbidden_keys) THEN
+                RETURN k;
+            END IF;
+            result := public.research_artifact_find_forbidden_jsonb_key(v);
+            IF result IS NOT NULL THEN
+                RETURN result;
+            END IF;
+        END LOOP;
+    ELSIF jsonb_typeof(target_payload) = 'array' THEN
+        FOR elem IN SELECT * FROM jsonb_array_elements(target_payload) LOOP
+            result := public.research_artifact_find_forbidden_jsonb_key(elem);
+            IF result IS NOT NULL THEN
+                RETURN result;
+            END IF;
+        END LOOP;
+    END IF;
+    -- scalar (string, number, boolean, null) — nothing to scan
+    RETURN NULL;
+END;
+$func$;
+
+CREATE OR REPLACE FUNCTION public.research_artifact_reject_forbidden_keys()
+RETURNS TRIGGER
+LANGUAGE plpgsql
+AS $func$
+DECLARE
     target_payload JSONB;
-    found_key TEXT;
+    found_key      TEXT;
 BEGIN
     IF TG_TABLE_NAME = 'research_artifacts' THEN
         target_payload := NEW.payload;
@@ -468,25 +507,18 @@ BEGIN
         RETURN NEW;
     END IF;
 
-    -- Recursively walk every key in every object node inside the JSONB tree.
-    -- lax mode silently skips non-object nodes (arrays, scalars).
-    -- kv.obj is a JSONB keyvalue object: {"key":"...", "value":..., "id":...}.
-    FOR found_key IN
-        SELECT DISTINCT kv.obj ->> 'key'
-        FROM jsonb_path_query(
-                 COALESCE(target_payload, '{}'::jsonb),
-                 'lax $.**.keyvalue()'
-             ) AS kv(obj)
-    LOOP
-        IF found_key IS NOT NULL AND lower(found_key) = ANY (forbidden_keys) THEN
-            RAISE EXCEPTION
-                'Forbidden visible-decision key "%" found in % payload at any nesting depth. '
-                'Agents/workers must not store final Buy/Hold/Trim/Sell authority. '
-                'See docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md §10 and Phase 1 spec §4.',
-                found_key, TG_TABLE_NAME
-                USING ERRCODE = 'check_violation';
-        END IF;
-    END LOOP;
+    -- PL/pgSQL recursive JSONB walker replaces JSONPath keyvalue() (see §5 hotfix note).
+    found_key := public.research_artifact_find_forbidden_jsonb_key(
+        COALESCE(target_payload, '{}'::jsonb)
+    );
+    IF found_key IS NOT NULL THEN
+        RAISE EXCEPTION
+            'Forbidden visible-decision key "%" found in % payload at any nesting depth. '
+            'Agents/workers must not store final Buy/Hold/Trim/Sell authority. '
+            'See docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md §10 and Phase 1 spec §4.',
+            found_key, TG_TABLE_NAME
+            USING ERRCODE = 'check_violation';
+    END IF;
 
     -- Defense-in-depth for research_artifact_facts rows.
     IF TG_TABLE_NAME = 'research_artifact_facts' THEN
@@ -720,6 +752,7 @@ GRANT ALL ON public.worker_audit_events       TO authenticated, service_role;
 -- DROP FUNCTION IF EXISTS public.research_artifact_audit_events_user_consistency();
 -- DROP FUNCTION IF EXISTS public.research_artifact_sources_user_consistency();
 -- DROP FUNCTION IF EXISTS public.research_artifact_reject_forbidden_keys();
+-- DROP FUNCTION IF EXISTS public.research_artifact_find_forbidden_jsonb_key(JSONB);
 -- DROP FUNCTION IF EXISTS public.research_artifacts_set_updated_at();
 -- DROP TABLE   IF EXISTS public.worker_audit_events;
 -- DROP TABLE   IF EXISTS public.research_artifact_facts;

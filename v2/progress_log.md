@@ -1,4 +1,14 @@
 
+## 2026-05-07 — Phase 3.5: Dark-Run Validation + Observability Harness (Level 2)
+
+- Phase 3.5 adds a backend-only callable validation harness for the Phase 3 Earnings Reviewer dark-run worker. Dark-run only — does not affect visible decisions.
+- New module: `v2/backend/app/services/intelligence/research_workers/validation_harness.py`. `run_validation()` function: three-flag guard (validation + global + per-worker flags all must be True), normalizes/deduplicates/caps tickers (max 5), inspection phase checks payloads for forbidden keys, write phase calls existing `run_earnings_reviewer_dark()`, returns compact `ValidationSummary`.
+- `ValidationSummary` fields: `attempted_count`, `written_count`, `skipped_count`, `failed_count`, `artifact_ids`, `safe_for_decision_false_count`, `unexpected_safe_for_decision_true_count`, `forbidden_payload_violation_count`, `tables_touched`, `visible_snapshot_unchanged`, `errors`. `worker_run_ids` is always [] (documented limitation — runner returns only artifact_id).
+- Two new config flags (both default False): `INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED`, `INTEL_V3_RESEARCH_WORKER_VALIDATION_INFO_LOGS_ENABLED`.
+- Tests: `test_intel_v3_phase3_5_validation_harness.py` — 55 tests, 15 acceptance criteria, FakeSupabaseClient only. Phase 3 tests: 85/85 pass. Phase 3.5: 55/55 pass. Combined: 140/140 pass.
+- No `decide()` change. No `IntelV3Service` change. No visible UI change. No SQL migration. No new provider. No new LLM calls. No page-load execution. `safe_for_decision` remains False. Artifacts not fed into decisions.
+- Next: production/staging validation of dark-run artifact writes, then Phase 4 shadow-diagnostics adapter.
+
 ## 2026-05-07 — Phase 3: Earnings Reviewer Dark-Run Scaffold (Level 2)
 
 - Phase 0, 0.5, 1, 2, and 2.1 closed and certified. Phase 2.1 migration applied in Supabase with PL/pgSQL hotfix.

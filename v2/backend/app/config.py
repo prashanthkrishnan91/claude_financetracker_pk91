@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     # Per-worker flag: Earnings Reviewer scaffold.
     intel_v3_earnings_reviewer_enabled: bool = False
 
+    # ── Intel v3 Validation Harness (Phase 3.5) — off by default ─────────────
+    # Must be True AND both Phase 3 flags above must be True for any validation run.
+    intel_v3_research_worker_validation_enabled: bool = False
+    # When True, logs structured INFO per validation run (aggregate only, no payloads).
+    intel_v3_research_worker_validation_info_logs_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

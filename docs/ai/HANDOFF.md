@@ -1,4 +1,89 @@
 
+## 2026-05-07 — Phase 3.5: Dark-Run Validation + Observability Harness (Level 2)
+
+### Status
+Phases 0, 0.5, 1, 2, 2.1, and 3 are closed and certified. Phase 3 merged the first executable Earnings Reviewer dark-run scaffold (PR #228). This PR adds the Phase 3.5 operational validation harness — a backend-only callable service that explicitly runs the Phase 3 worker for a capped ticker list, writes artifacts through the existing Phase 3 writer, and returns a compact ValidationSummary. Dark-run only; no visible decision change.
+
+### What this PR adds
+- New module: `v2/backend/app/services/intelligence/research_workers/validation_harness.py`
+  - `ValidationSummary` dataclass — compact result with: `requested_tickers`, `normalized_tickers`, `attempted_count`, `written_count`, `skipped_count`, `failed_count`, `artifact_ids`, `worker_run_ids` (empty — documented limitation), `safe_for_decision_false_count`, `unexpected_safe_for_decision_true_count`, `forbidden_payload_violation_count`, `tables_touched`, `visible_snapshot_unchanged`, `errors`.
+  - `run_validation()` — explicit callable. Three-flag guard (validation + global + per-worker). Normalizes/deduplicates/caps tickers (max 5). Inspection phase calls `earnings_reviewer.run()` to detect forbidden-key violations before write. Write phase calls existing `run_earnings_reviewer_dark()`. Structured INFO logs only when info-logs flag is on. All failures contained — no exception escapes to caller.
+  - `MAX_TICKERS_PER_RUN = 5` constant.
+- Two new config flags in `v2/backend/app/config.py`:
+  - `intel_v3_research_worker_validation_enabled: bool = False` (Phase 3.5 gate; must be True in addition to both Phase 3 flags)
+  - `intel_v3_research_worker_validation_info_logs_enabled: bool = False` (aggregate structured INFO only)
+- Updated `v2/backend/app/services/intelligence/research_workers/__init__.py` — exports `run_validation` and `ValidationSummary`.
+- New test file: `v2/backend/tests/test_intel_v3_phase3_5_validation_harness.py` — 55 tests covering all 15 acceptance criteria with FakeSupabaseClient (no production DB).
+
+### Architecture invariants preserved
+- `decide()` in `decision_policy_v1.py` is unchanged. Not imported by validation_harness.py.
+- `IntelV3Service`, `ReadOnlyEvidenceAdapter`, `source_validator_lite.py`, all certification detectors — unchanged.
+- `safe_for_decision` remains False. DB-level CHECK constraint enforces this; writer hard-codes it; harness tracks `safe_for_decision_false_count` and `unexpected_safe_for_decision_true_count`.
+- No page-load execution. No automatic execution from snapshot reads.
+- No new SQL migration. No new external provider. No new LLM calls.
+- No frontend changes. No visible Intel v3 decision, card copy, or action count changes.
+- Artifacts are not fed into decide(). No artifact-to-decision integration.
+
+### Kill-switch / rollback
+All three flags default False. Disabling any one makes `run_validation()` return a no-op disabled summary with zero DB writes. Phase 3 workers remain independently controlled by their own flags.
+
+### Three-flag guard
+```
+INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=false  (Phase 3.5 gate)
+INTEL_V3_RESEARCH_WORKERS_ENABLED=false            (Phase 3 global — unchanged)
+INTEL_V3_EARNINGS_REVIEWER_ENABLED=false           (Phase 3 per-worker — unchanged)
+```
+All three must be True for any write to occur.
+
+### Limitation: worker_run_ids
+`ValidationSummary.worker_run_ids` is always an empty list. The existing `run_earnings_reviewer_dark()` runner interface returns only `artifact_id`. Recovering `worker_run_id` would require changing Phase 3 runner interface. Documented as a known limitation; `artifact_ids` and counts provide sufficient observability for Phase 3.5.
+
+### How to invoke
+```python
+from app.services.intelligence.research_workers import run_validation
+
+summary = run_validation(
+    tickers=["AAPL", "MSFT", "GOOG"],
+    user_id="<user-uuid>",
+    db_client=supabase_client,
+    settings=settings,
+)
+print(summary)
+```
+Set env flags before invoking:
+```
+INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=true
+INTEL_V3_RESEARCH_WORKERS_ENABLED=true
+INTEL_V3_EARNINGS_REVIEWER_ENABLED=true
+```
+
+### Files changed
+- `v2/backend/app/config.py` — two new flags (safe defaults False).
+- `v2/backend/app/services/intelligence/research_workers/validation_harness.py` — NEW.
+- `v2/backend/app/services/intelligence/research_workers/__init__.py` — export run_validation and ValidationSummary.
+- `v2/backend/tests/test_intel_v3_phase3_5_validation_harness.py` — NEW.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — Phase 3.5 entry.
+
+### Test results
+- Phase 3 existing: 85/85 passed.
+- Phase 3.5 new: 55/55 passed.
+- Combined: 140/140 passed.
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+### safe_for_decision constraint: Unchanged (DB-level CHECK forces FALSE)
+### New LLM calls: None
+### New providers: None
+### Page-load execution: None
+
+### Next recommended phase
+Production/staging validation of dark-run artifact writes: enable the three flags in a staging environment, invoke `run_validation()` for a small set of known tickers, verify `written_count` and `safe_for_decision_false_count` match, verify `forbidden_payload_violation_count == 0`, verify `visible_snapshot_unchanged == True`. After staging confirmation, Phase 4 — shadow-diagnostics adapter that reads research_artifacts and emits log-only counters in `intel_v3_snapshot_certification_summary` without affecting visible decisions.
+
+---
+
 ## 2026-05-07 — Phase 3: Earnings Reviewer Dark-Run Scaffold (Level 2)
 
 ### Status

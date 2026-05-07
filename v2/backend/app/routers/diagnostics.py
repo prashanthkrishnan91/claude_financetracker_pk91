@@ -15,19 +15,29 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, 
 from pydantic import BaseModel
 
 from ..config import get_settings
+from ..database import get_supabase_client
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
+from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/diagnostics/finance-intel", tags=["diagnostics"])
+
+# Phase 3.6 — endpoint-layer ticker cap (stricter than harness default of 5).
+MAX_VALIDATE_TICKERS_PER_REQUEST: int = 3
 
 
 class FinanceRuntimeCertRequest(BaseModel):
     mode: Literal["read_only_cards", "force_run_agents", "nonforced_run_agents"]
     deposit_amount: float | None = None
     sale_proceeds: float = 0.0
+
+
+class ResearchWorkersValidateRequest(BaseModel):
+    """Phase 3.6 — operator request body for dark-run validation."""
+    tickers: list[str] = []
 
 
 def _ensure_cert_enabled(secret_header: str | None) -> None:
@@ -263,3 +273,73 @@ async def get_cert_job_insights(
     """Read cert job insights using diagnostics-only auth."""
     service = RecommendationService(user_id=cert_user.id)
     return await service.get_agent_insights(run_id=job_id)
+
+
+@router.post("/research-workers/validate")
+async def validate_research_workers_dark_run(
+    payload: ResearchWorkersValidateRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Phase 3.6 — operator-only dark-run validation endpoint.
+
+    Invokes the Phase 3.5 validation harness against real Supabase for a
+    capped set of tickers and returns a compact safe summary.
+
+    Required env flags (all must be True):
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=true
+      INTEL_V3_RESEARCH_WORKERS_ENABLED=true
+      INTEL_V3_EARNINGS_REVIEWER_ENABLED=true
+
+    Tickers capped to MAX_VALIDATE_TICKERS_PER_REQUEST (3) at this layer.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER returns artifact payloads, facts payloads, raw DB rows, or user secrets.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to intel_v3_snapshots.
+    """
+    settings = get_settings()
+
+    # ── Phase 3/3.5 flag gates — explicit rejection (not silent disabled summary) ─
+    if not settings.intel_v3_research_worker_validation_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED is not enabled",
+        )
+    if not settings.intel_v3_research_workers_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_RESEARCH_WORKERS_ENABLED is not enabled",
+        )
+    if not settings.intel_v3_earnings_reviewer_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_EARNINGS_REVIEWER_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    summary = run_validation(
+        tickers=payload.tickers,
+        user_id=str(user.id),
+        db_client=db_client,
+        settings=settings,
+        max_tickers=MAX_VALIDATE_TICKERS_PER_REQUEST,
+    )
+
+    # Return only the compact safe summary — no payloads, no raw rows, no secrets.
+    return {
+        "requested_tickers": summary.requested_tickers,
+        "normalized_tickers": summary.normalized_tickers,
+        "attempted_count": summary.attempted_count,
+        "written_count": summary.written_count,
+        "skipped_count": summary.skipped_count,
+        "failed_count": summary.failed_count,
+        "artifact_ids": summary.artifact_ids,
+        "safe_for_decision_false_count": summary.safe_for_decision_false_count,
+        "unexpected_safe_for_decision_true_count": summary.unexpected_safe_for_decision_true_count,
+        "forbidden_payload_violation_count": summary.forbidden_payload_violation_count,
+        "visible_snapshot_unchanged": summary.visible_snapshot_unchanged,
+        "errors": summary.errors,
+        "tables_touched": summary.tables_touched,
+    }

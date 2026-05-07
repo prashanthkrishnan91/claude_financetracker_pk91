@@ -1,4 +1,130 @@
 
+## 2026-05-07 — Phase 3.6: Controlled Real-DB Dark-Run Validation Invocation Path (Level 2)
+
+### Status
+Phases 0, 0.5, 1, 2, 2.1, 3, and 3.5 are closed and certified. This PR adds the Phase 3.6 operator-accessible invocation path: a protected backend-only endpoint that calls the Phase 3.5 validation harness against real Supabase for a capped ticker set. Dark-run only; no visible decision change.
+
+### What this PR adds
+- New endpoint in `v2/backend/app/routers/diagnostics.py`:
+  `POST /api/v1/diagnostics/finance-intel/research-workers/validate`
+  - Reuses the existing `_get_runtime_cert_user` dependency (runtime cert secret pattern).
+  - Requires `finance_runtime_cert_enabled=true` + correct `X-Finance-Runtime-Cert-Secret`.
+  - Explicitly checks all three Phase 3/3.5 flags; returns `HTTP 403` if any is off.
+  - Caps tickers to `MAX_VALIDATE_TICKERS_PER_REQUEST = 3` at the endpoint layer.
+  - Calls `run_validation()` from Phase 3.5 harness with `max_tickers=3`.
+  - Returns only the compact safe summary; never returns artifact payloads, raw DB rows, or secrets.
+  - Never callable from frontend page load (requires secret header + 4 env flags).
+- New Pydantic request model `ResearchWorkersValidateRequest` (tickers: list[str]).
+- New constant `MAX_VALIDATE_TICKERS_PER_REQUEST = 3`.
+- New test file: `v2/backend/tests/test_intel_v3_phase3_6_validation_endpoint.py` — 35 tests, 15 acceptance criteria.
+
+### Phase 3.6 Runbook
+
+#### Required env flags
+```
+finance_runtime_cert_enabled=true
+finance_runtime_cert_secret=<operator-secret>
+finance_runtime_cert_user_id=<uuid-of-operator-user>
+INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=true
+INTEL_V3_RESEARCH_WORKERS_ENABLED=true
+INTEL_V3_EARNINGS_REVIEWER_ENABLED=true
+# Optional: enable aggregate INFO logs during validation only
+INTEL_V3_RESEARCH_WORKER_VALIDATION_INFO_LOGS_ENABLED=true
+```
+
+#### Invoke
+```bash
+curl -s -X POST \
+  https://<backend-url>/api/v1/diagnostics/finance-intel/research-workers/validate \
+  -H "X-Finance-Runtime-Cert-Secret: <operator-secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"tickers": ["AAPL", "MSFT", "NVDA"]}' | jq .
+```
+
+#### Expected safe result
+```json
+{
+  "attempted_count": 3,
+  "written_count": 3,
+  "safe_for_decision_false_count": 3,
+  "unexpected_safe_for_decision_true_count": 0,
+  "forbidden_payload_violation_count": 0,
+  "visible_snapshot_unchanged": true,
+  "errors": []
+}
+```
+- `attempted_count` ≤ 3 (capped at endpoint layer)
+- `written_count` equals `attempted_count` unless idempotency skip or failure
+- `safe_for_decision_false_count` equals `written_count`
+- `unexpected_safe_for_decision_true_count = 0`
+- `forbidden_payload_violation_count = 0`
+- `visible_snapshot_unchanged = true`
+
+#### Manual Supabase verification (after running)
+```sql
+-- Count recent artifacts for the tickers
+SELECT ticker, artifact_type, skill_pack, safe_for_decision, created_at
+FROM research_artifacts
+WHERE ticker IN ('AAPL', 'MSFT', 'NVDA')
+  AND user_id = '<operator-user-id>'
+ORDER BY created_at DESC
+LIMIT 10;
+
+-- Confirm safe_for_decision=false for all
+SELECT COUNT(*) as total, SUM(CASE WHEN safe_for_decision THEN 1 ELSE 0 END) as bad_count
+FROM research_artifacts
+WHERE ticker IN ('AAPL', 'MSFT', 'NVDA') AND user_id = '<operator-user-id>';
+-- Expected: bad_count = 0
+
+-- Confirm artifact_type and skill_pack
+SELECT DISTINCT artifact_type, skill_pack FROM research_artifacts
+WHERE ticker IN ('AAPL', 'MSFT', 'NVDA') AND user_id = '<operator-user-id>';
+-- Expected: artifact_type='catalyst_window', skill_pack='earnings_reviewer'
+
+-- Confirm worker audit events exist
+SELECT tool_call, status, created_at FROM worker_audit_events
+WHERE user_id = '<operator-user-id>'
+ORDER BY created_at DESC LIMIT 6;
+```
+
+#### Rollback
+1. Set `INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=false`
+2. Set `INTEL_V3_RESEARCH_WORKERS_ENABLED=false`
+3. Set `INTEL_V3_EARNINGS_REVIEWER_ENABLED=false`
+4. Set `INTEL_V3_RESEARCH_WORKER_VALIDATION_INFO_LOGS_ENABLED=false`
+5. Do NOT delete rows — artifacts are dark-run and `safe_for_decision=false`. No visible impact.
+
+### Architecture invariants preserved
+- `decide()` in `decision_policy_v1.py` is unchanged. Not imported by endpoint.
+- Endpoint uses `_get_runtime_cert_user` dependency — impossible to call from page load or UI.
+- `safe_for_decision` remains False — DB-level CHECK constraint is untouched.
+- `visible_snapshot_unchanged = true` is structural (harness never touches `intel_v3_snapshots`).
+- No new SQL migration. No new external provider. No new LLM calls. No frontend changes.
+- No artifact-to-decision integration.
+
+### Files changed
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + model + constant + imports.
+- `v2/backend/tests/test_intel_v3_phase3_6_validation_endpoint.py` — NEW (35 tests).
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — Phase 3.6 entry.
+
+### Test results
+- Phase 3 existing: 85/85 passed.
+- Phase 3.5 existing: 57/57 passed.
+- Phase 3.6 new: 35/35 passed.
+- Combined: 177/177 passed.
+
+### Supabase SQL: No
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+### safe_for_decision constraint: Unchanged (DB-level CHECK forces FALSE)
+### New LLM calls: None
+### New providers: None
+### Page-load execution: None
+
+---
+
 ## 2026-05-07 — Phase 3.5: Dark-Run Validation + Observability Harness (Level 2)
 
 ### Status

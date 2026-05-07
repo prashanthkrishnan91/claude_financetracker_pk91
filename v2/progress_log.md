@@ -1,4 +1,16 @@
 
+## 2026-05-07 — Phase 3.6: Controlled Real-DB Dark-Run Validation Invocation Path (Level 2)
+
+- Phase 3.6 adds the first safe operator-accessible path to invoke the Phase 3.5 validation harness against real Supabase, plus a clear runbook. Dark-run only — does not affect visible decisions.
+- New endpoint: `POST /api/v1/diagnostics/finance-intel/research-workers/validate` in `v2/backend/app/routers/diagnostics.py`. Reuses existing `_get_runtime_cert_user` dependency (runtime cert secret pattern). Requires `finance_runtime_cert_enabled=true` + correct `X-Finance-Runtime-Cert-Secret` header, plus all three Phase 3/3.5 flags. Returns `HTTP 403` if any required flag is off (explicit rejection, not silent no-op).
+- Ticker cap: `MAX_VALIDATE_TICKERS_PER_REQUEST = 3` at the endpoint layer (stricter than harness default of 5). Passes `max_tickers=3` to `run_validation()`.
+- Response: compact safe summary only — `requested_tickers`, `normalized_tickers`, `attempted_count`, `written_count`, `skipped_count`, `failed_count`, `artifact_ids`, `safe_for_decision_false_count`, `unexpected_safe_for_decision_true_count`, `forbidden_payload_violation_count`, `visible_snapshot_unchanged`, `errors`, `tables_touched`. Never returns payloads, raw rows, or secrets.
+- DB failure safety: harness errors return 200 with summary (not 500) — `failed_count`/`errors` reflect failures.
+- Tests: `test_intel_v3_phase3_6_validation_endpoint.py` — 35 tests, 15 acceptance criteria. Phase 3: 85/85. Phase 3.5: 57/57. Phase 3.6: 35/35. Combined: 177/177.
+- Runbook: see `docs/ai/HANDOFF.md` — required env flags, recommended tickers (AAPL/MSFT/NVDA), expected safe result, manual Supabase verification queries, rollback steps.
+- No `decide()` change. No `IntelV3Service` change. No visible UI change. No SQL migration. No new provider. No new LLM calls. No page-load execution. `safe_for_decision` remains False. No artifact-to-decision integration.
+- Next: run Phase 3.6 validation against real Supabase with flags enabled; confirm safe_for_decision_false_count=written_count, unexpected_safe_true=0, then Phase 4 shadow-diagnostics adapter.
+
 ## 2026-05-07 — Phase 3.5: Dark-Run Validation + Observability Harness (Level 2)
 
 - Phase 3.5 adds a backend-only callable validation harness for the Phase 3 Earnings Reviewer dark-run worker. Dark-run only — does not affect visible decisions.

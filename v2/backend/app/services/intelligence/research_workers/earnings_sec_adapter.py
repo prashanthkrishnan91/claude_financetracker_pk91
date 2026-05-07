@@ -5,9 +5,10 @@ It bridges the SEC EDGAR provider result into the source/fact/confidence/freshne
 fields required by the research artifact contracts.
 
 Freshness window (documented constant):
-  FRESH  — most recent 10-K or 10-Q filing date within _FRESH_WINDOW_DAYS (180) days.
-  STALE  — source-backed but most recent 10-K/10-Q older than _FRESH_WINDOW_DAYS.
-  UNKNOWN — no reliable filing date for periodic filings, or fetch failed.
+  FRESH  — most recent source-backed filing date within _FRESH_WINDOW_DAYS (180) days.
+           Includes 8-K event notices (material events are a form of recency evidence).
+  STALE  — source-backed but most recent filing date older than _FRESH_WINDOW_DAYS.
+  UNKNOWN — no parseable filing date across any source-backed filings, or fetch failed.
 
 Confidence classification (documented constant):
   MEDIUM — at least one 10-K or 10-Q filing present (official periodic financial report).
@@ -18,8 +19,8 @@ Phase 6A scope:
   - Filing metadata only. No transcript. No EPS estimates. No analyst guidance.
   - No claim that SEC facts equal analyst expectations.
   - safe_for_decision remains False in all cases (enforced by writer + DB constraint).
-  - Artifacts with MEDIUM/FRESH status are structurally eligible for Phase 5 readiness
-    but NOT eligible for decision consumption (eligible_for_decision_consumption=False always).
+  - Artifacts with MEDIUM/FRESH or LOW/FRESH status can pass Phase 5 readiness
+    conditions 4+5 but are NOT eligible for decision consumption (eligible_for_decision_consumption=False always).
 """
 from __future__ import annotations
 
@@ -84,17 +85,25 @@ def _parse_date(date_str: Optional[str]) -> Optional[date]:
 
 
 def _compute_source_fingerprint(cik: str, filings: list) -> str:
-    """Deterministic SHA-256 fingerprint of CIK + sorted periodic accession numbers.
+    """Deterministic SHA-256 fingerprint of CIK + all source-backed filing records.
 
-    If the set of 10-K/10-Q accession numbers changes (new filing published),
-    this fingerprint changes → new replay_idempotency_key → new artifact row.
+    Includes every filing used to create a SourceRecord (10-K, 10-Q, 8-K).
+    Any change in the set of source-backed filings — new accession number, new
+    filing date, or a new 8-K — changes this fingerprint →
+    new replay_idempotency_key → new artifact row.
     """
-    periodic_accessions = sorted(
-        f.accession_number
-        for f in filings
-        if f.form_type in _PERIODIC_FILING_FORMS
+    filing_entries = sorted(
+        [
+            {
+                "form_type": f.form_type,
+                "accession_number": f.accession_number,
+                "filing_date": f.filing_date,
+            }
+            for f in filings
+        ],
+        key=lambda x: (x["accession_number"], x["form_type"], x["filing_date"]),
     )
-    raw = json.dumps({"cik": cik, "accessions": periodic_accessions}, sort_keys=True)
+    raw = json.dumps({"cik": cik, "filings": filing_entries}, sort_keys=True)
     digest = hashlib.sha256(raw.encode()).hexdigest()[:24]
     return f"sec_edgar_{digest}"
 
@@ -193,41 +202,42 @@ def adapt_sec_result(
     confidence = "MEDIUM" if has_periodic else "LOW"
 
     # ── Freshness classification ──────────────────────────────────────────────
-    # Based on the most recent 10-K or 10-Q filing date only.
-    # 8-K dates are not used for freshness (they are event notices, not reports).
-    most_recent_periodic_date: Optional[date] = None
+    # Use the most recent filing_date across ALL source-backed filings.
+    # 8-K event notices are included — if the most recent SEC activity is an 8-K,
+    # it still anchors freshness (material events are a form of recency evidence).
+    # UNKNOWN only if no parseable filing date exists across any source-backed filing.
+    most_recent_source_date: Optional[date] = None
     for f in sec_result.filings:
-        if f.form_type in _PERIODIC_FILING_FORMS:
-            d = _parse_date(f.filing_date)
-            if d is not None and (
-                most_recent_periodic_date is None or d > most_recent_periodic_date
-            ):
-                most_recent_periodic_date = d
+        d = _parse_date(f.filing_date)
+        if d is not None and (
+            most_recent_source_date is None or d > most_recent_source_date
+        ):
+            most_recent_source_date = d
 
     source_window_start: Optional[str] = None
     source_window_end: Optional[str] = None
     expires_at: Optional[str] = None
     freshness: str
 
-    if most_recent_periodic_date is not None:
-        days_old = (ref_date - most_recent_periodic_date).days
+    if most_recent_source_date is not None:
+        days_old = (ref_date - most_recent_source_date).days
         if days_old <= _FRESH_WINDOW_DAYS:
             freshness = "FRESH"
-            # Artifact expires when the filing would become stale.
+            # Artifact expires when the most recent filing would become stale.
             expires_at = (
-                most_recent_periodic_date + timedelta(days=_FRESH_WINDOW_DAYS)
+                most_recent_source_date + timedelta(days=_FRESH_WINDOW_DAYS)
             ).isoformat()
         else:
             freshness = "STALE"
-            # No explicit expiry for STALE; STALE freshness status already signals outdated.
+            # No explicit expiry for STALE; freshness status already signals outdated.
             expires_at = None
-        source_window_end = most_recent_periodic_date.isoformat()
-        # Window start: 1 fiscal year before the most recent periodic filing.
+        source_window_end = most_recent_source_date.isoformat()
+        # Window start: 1 fiscal year before the most recent source-backed filing.
         source_window_start = (
-            most_recent_periodic_date - timedelta(days=365)
+            most_recent_source_date - timedelta(days=365)
         ).isoformat()
     else:
-        # No parseable periodic filing date — can't classify freshness.
+        # No parseable filing date across any source-backed filing.
         freshness = "UNKNOWN"
 
     # ── Source fingerprint for idempotency ────────────────────────────────────

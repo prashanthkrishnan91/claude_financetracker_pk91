@@ -1166,6 +1166,82 @@ class TestCriterion20Idempotency:
         assert out1.replay_idempotency_key == out2.replay_idempotency_key, \
             "Same SEC data + same ticker → same replay key (idempotency)"
 
+    def test_8k_accession_change_changes_fingerprint(self) -> None:
+        """A new 8-K accession number must produce a different source fingerprint."""
+        from app.services.intelligence.research_workers.earnings_sec_adapter import (
+            _compute_source_fingerprint,
+        )
+        filings_v1 = [SecFilingRecord(
+            form_type="8-K", filing_date="2025-04-01",
+            accession_number="0000320193-25-000001", report_date=None,
+            filing_url="https://example.com/",
+        )]
+        filings_v2 = [SecFilingRecord(
+            form_type="8-K", filing_date="2025-04-01",
+            accession_number="0000320193-25-000002", report_date=None,
+            filing_url="https://example.com/",
+        )]
+        fp1 = _compute_source_fingerprint("0000320193", filings_v1)
+        fp2 = _compute_source_fingerprint("0000320193", filings_v2)
+        assert fp1 != fp2, "Different 8-K accession must produce different fingerprint"
+
+    def test_8k_filing_date_change_changes_fingerprint(self) -> None:
+        """A changed 8-K filing_date must produce a different source fingerprint."""
+        from app.services.intelligence.research_workers.earnings_sec_adapter import (
+            _compute_source_fingerprint,
+        )
+        filings_v1 = [SecFilingRecord(
+            form_type="8-K", filing_date="2025-04-01",
+            accession_number="0000320193-25-000001", report_date=None,
+            filing_url="https://example.com/",
+        )]
+        filings_v2 = [SecFilingRecord(
+            form_type="8-K", filing_date="2025-04-15",
+            accession_number="0000320193-25-000001", report_date=None,
+            filing_url="https://example.com/",
+        )]
+        fp1 = _compute_source_fingerprint("0000320193", filings_v1)
+        fp2 = _compute_source_fingerprint("0000320193", filings_v2)
+        assert fp1 != fp2, "Changed 8-K filing_date must produce different fingerprint"
+
+    def test_filing_order_does_not_affect_fingerprint(self) -> None:
+        """Same filings in different order must produce same fingerprint (stable sort)."""
+        from app.services.intelligence.research_workers.earnings_sec_adapter import (
+            _compute_source_fingerprint,
+        )
+        filing_a = SecFilingRecord(
+            form_type="10-K", filing_date="2025-01-30",
+            accession_number="0000320193-25-000001", report_date="2024-12-31",
+            filing_url="https://example.com/a",
+        )
+        filing_b = SecFilingRecord(
+            form_type="8-K", filing_date="2025-03-01",
+            accession_number="0000320193-25-000002", report_date=None,
+            filing_url="https://example.com/b",
+        )
+        fp1 = _compute_source_fingerprint("0000320193", [filing_a, filing_b])
+        fp2 = _compute_source_fingerprint("0000320193", [filing_b, filing_a])
+        assert fp1 == fp2, "Filing order must not affect fingerprint (deterministic sort)"
+
+    def test_10q_accession_change_changes_fingerprint(self) -> None:
+        """A new 10-Q accession number must produce a different source fingerprint."""
+        from app.services.intelligence.research_workers.earnings_sec_adapter import (
+            _compute_source_fingerprint,
+        )
+        filings_v1 = [SecFilingRecord(
+            form_type="10-Q", filing_date="2025-05-01",
+            accession_number="0000320193-25-000001", report_date="2025-03-31",
+            filing_url="https://example.com/",
+        )]
+        filings_v2 = [SecFilingRecord(
+            form_type="10-Q", filing_date="2025-05-01",
+            accession_number="0000320193-25-000099", report_date="2025-03-31",
+            filing_url="https://example.com/",
+        )]
+        fp1 = _compute_source_fingerprint("0000320193", filings_v1)
+        fp2 = _compute_source_fingerprint("0000320193", filings_v2)
+        assert fp1 != fp2, "Different 10-Q accession must produce different fingerprint"
+
 
 # ── Bonus: Freshness + confidence classification ──────────────────────────────
 
@@ -1205,7 +1281,12 @@ class TestFreshnessAndConfidenceClassification:
         assert adapted.confidence_or_trust_level == "MEDIUM"
         assert adapted.freshness_status == "STALE"
 
-    def test_only_8k_produces_low_confidence_unknown_freshness(self) -> None:
+    def test_only_8k_produces_low_confidence_fresh_freshness(self) -> None:
+        """8-K-only result with a recent date: LOW confidence, FRESH freshness.
+
+        Freshness now uses the latest filing_date across all source-backed filings,
+        including 8-K event notices, so a recent 8-K produces FRESH not UNKNOWN.
+        """
         result = SecEdgarProviderResult(
             ticker="AAPL",
             cik="0000320193",
@@ -1220,7 +1301,7 @@ class TestFreshnessAndConfidenceClassification:
         )
         adapted = adapt_sec_result(result, reference_date=date.today())
         assert adapted.confidence_or_trust_level == "LOW"
-        assert adapted.freshness_status == "UNKNOWN"
+        assert adapted.freshness_status == "FRESH"
 
     def test_freshness_window_boundary_fresh(self) -> None:
         boundary_date = date.today() - timedelta(days=_FRESH_WINDOW_DAYS)
@@ -1255,6 +1336,98 @@ class TestFreshnessAndConfidenceClassification:
         )
         adapted = adapt_sec_result(result, reference_date=date.today())
         assert adapted.freshness_status == "STALE"
+
+    def test_recent_8k_only_produces_low_confidence_fresh(self) -> None:
+        """8-K-only with a recent date: LOW confidence, FRESH freshness.
+
+        Freshness uses the latest filing_date across all source-backed filings.
+        """
+        result = SecEdgarProviderResult(
+            ticker="AAPL", cik="0000320193",
+            filings=[SecFilingRecord(
+                form_type="8-K", filing_date=_recent_date_iso(10),
+                accession_number="0000320193-25-000001", report_date=None,
+                filing_url="https://example.com/",
+            )],
+            fetch_status="success",
+        )
+        adapted = adapt_sec_result(result, reference_date=date.today())
+        assert adapted.confidence_or_trust_level == "LOW"
+        assert adapted.freshness_status == "FRESH"
+
+    def test_stale_8k_only_produces_low_confidence_stale(self) -> None:
+        """8-K-only with an old filing date: LOW confidence, STALE freshness."""
+        result = SecEdgarProviderResult(
+            ticker="AAPL", cik="0000320193",
+            filings=[SecFilingRecord(
+                form_type="8-K", filing_date=_stale_date_iso(200),
+                accession_number="0000320193-24-000001", report_date=None,
+                filing_url="https://example.com/",
+            )],
+            fetch_status="success",
+        )
+        adapted = adapt_sec_result(result, reference_date=date.today())
+        assert adapted.confidence_or_trust_level == "LOW"
+        assert adapted.freshness_status == "STALE"
+
+    def test_malformed_filing_date_produces_unknown_freshness(self) -> None:
+        """All source-backed filings have unparseable dates → freshness UNKNOWN."""
+        result = SecEdgarProviderResult(
+            ticker="AAPL", cik="0000320193",
+            filings=[SecFilingRecord(
+                form_type="8-K", filing_date="not-a-date",
+                accession_number="0000320193-25-000001", report_date=None,
+                filing_url="https://example.com/",
+            )],
+            fetch_status="success",
+        )
+        adapted = adapt_sec_result(result, reference_date=date.today())
+        assert adapted.freshness_status == "UNKNOWN"
+        assert adapted.confidence_or_trust_level == "LOW"
+
+    def test_malformed_filing_date_fails_phase5_readiness(self) -> None:
+        """UNKNOWN freshness → artifact does not pass Phase 5 truth adapter readiness."""
+        result = SecEdgarProviderResult(
+            ticker="AAPL", cik="0000320193",
+            filings=[SecFilingRecord(
+                form_type="8-K", filing_date="bad-date",
+                accession_number="0000320193-25-000001", report_date=None,
+                filing_url="https://example.com/",
+            )],
+            fetch_status="success",
+        )
+        adapted = adapt_sec_result(result, reference_date=date.today())
+        # Build a minimal in-memory artifact dict as Phase 5 readiness expects.
+        src_id = str(uuid.uuid4())
+        artifact = {
+            "id": str(uuid.uuid4()),
+            "is_active": True,
+            "invalidated_at": None,
+            "expires_at": None,
+            "artifact_type": "catalyst_window",
+            "skill_pack": "earnings_reviewer",
+            "confidence_or_trust_level": adapted.confidence_or_trust_level,
+            "freshness_status": adapted.freshness_status,
+            "safe_for_decision": False,
+            "payload": {"worker_phase": "phase6a_sec_grounded"},
+        }
+        sources = [{
+            "id": src_id,
+            "source_kind": "sec_filing",
+            "provider_name": "sec_edgar",
+            "source_url": "https://example.com/",
+            "source_id": None,
+            "source_hash": None,
+            "section_reference": "0000320193-25-000001",
+        }]
+        facts = [{
+            "fact_kind": "sourced_claim",
+            "structured_payload": {"claim": "sec_filing_found", "form_type": "8-K"},
+            "source_id": src_id,
+        }]
+        readiness = evaluate_artifact_truth_readiness(artifact, sources, facts)
+        assert not readiness.eligible_for_truth_adapter, \
+            f"UNKNOWN freshness must fail readiness; got reason_codes={readiness.reason_codes}"
 
     def test_limitations_contain_no_misleading_claims(self) -> None:
         sec_result = _make_fresh_sec_result("AAPL")

@@ -1,4 +1,17 @@
 
+## 2026-05-07 — Phase 6A: SEC EDGAR Evidence Population + Grounding Upgrade (Level 2)
+
+- Phase 6A upgrades the Earnings Reviewer dark-run worker to produce provider-backed, source-linked, freshness-classified, confidence-classified research artifacts using SEC EDGAR public JSON APIs. Safe_for_decision remains false. No decision consumption. No visible Intel v3 changes.
+- **New module**: `sec_edgar_provider.py` — synchronous SEC EDGAR provider. Two-request flow: `company_tickers.json` (CIK lookup) + `submissions/CIK{cik}.json` (filing metadata). user_agent required per SEC TOS; missing → no HTTP call (`no_user_agent` status). Fail-closed on timeout, rate-limit, malformed JSON, or any error. Injectable `http_get_fn` for full testability.
+- **New module**: `earnings_sec_adapter.py` — pure adapter: `SecEdgarProviderResult` → sources/facts/confidence/freshness/fingerprint. MEDIUM confidence (≥1 10-K/10-Q), LOW (8-K only), UNKNOWN (no source). FRESH (≤180 days), STALE (>180 days), UNKNOWN (no date). Source fingerprint changes when filing set changes → new replay_idempotency_key → new artifact row.
+- **Updated**: `earnings_reviewer.py` — dispatcher: `run(sec_config=None)` → Phase 3 (`_run_phase3_dark`) or Phase 6A (`_run_sec_grounded`). Two model_version constants ensure Phase 3 and Phase 6A artifacts never share replay keys.
+- **Updated**: `runner.py` — builds `SecEdgarProviderConfig` if SEC flag enabled AND user_agent set; falls back to Phase 3 if user_agent empty. Added `_http_get_fn` injection parameter.
+- **Updated**: `config.py` — `intel_v3_earnings_reviewer_sec_enabled=False`, `sec_edgar_user_agent=None` (both off by default).
+- MEDIUM/FRESH artifacts structurally satisfy Phase 5 readiness contract (`eligible_for_truth_adapter=True`) but `eligible_for_decision_consumption` remains always False.
+- New tests: `test_intel_v3_phase6a_sec_edgar.py` — 78 tests, 20 acceptance criteria. All 422/422 phase tests passing (Phase 6A: 78/78, Phase 5: 125/125, Phase 4: 58/58, Phase 3.7: 16/16, Phase 3.5: 57/57, Phase 3: 85/85).
+- No SQL migration. No new tables. No decide() change. No frontend change. No LLM. No agents. No paid provider (SEC EDGAR public JSON only). safe_for_decision DB constraint unchanged.
+- Next: staging validation — enable `INTEL_V3_EARNINGS_REVIEWER_SEC_ENABLED=true` + `SEC_EDGAR_USER_AGENT` for AAPL/MSFT/NVDA; confirm MEDIUM/FRESH artifacts and Phase 5 readiness pass before planning Phase 7 consumption.
+
 ## 2026-05-07 — Phase 5 Hardening: Contract Strengthening Pass (Level 2)
 
 - Three contract gaps closed before merge. Same constraints: no consumption, no visible decisions, no SQL, no decide() change.

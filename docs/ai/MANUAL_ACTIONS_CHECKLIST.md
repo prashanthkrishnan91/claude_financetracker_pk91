@@ -1,0 +1,41 @@
+# Manual Actions Checklist — Finance Tracker
+
+Every PR summary must answer these explicitly.
+
+## Required yes/no fields
+
+- Supabase SQL required: Yes/No
+- Supabase sanity check required: Yes/No
+- Railway env vars required: Yes/No
+- Vercel env vars required: Yes/No
+- Railway redeploy required: Yes/No
+- Vercel redeploy required: Yes/No
+- Runtime certification endpoint required: Yes/No
+- New provider/API key required: Yes/No
+- UI validation required: Yes/No and why
+- Rollback path: feature flag / revert / env off / repair SQL / not applicable
+
+## When manual action is required
+
+- SQL migration, schema, RLS, trigger/function, auth, or persistence contract changed.
+- Env var or feature flag changed.
+- Runtime certification flag/secret behavior changed.
+- Snapshot visibility depends on Railway/Vercel env flags.
+- Provider, worker, or LLM call requires production keys.
+- Frontend public env variables changed and require Vercel redeploy.
+
+## When manual action is not required
+
+- Docs-only changes.
+- Tests-only changes.
+- Internal refactor with unchanged runtime contract.
+- Backend-only code where existing deployment pipeline handles rollout and no env/SQL changes exist.
+
+## PR summary requirement
+
+If SQL is required, include:
+
+- migration file/path
+- manual SQL action
+- sanity query/check
+- rollback/repair note if applicable

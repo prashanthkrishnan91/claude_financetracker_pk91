@@ -1,4 +1,97 @@
 
+## 2026-05-07 — Phase 7A: SEC CompanyFacts Financial Evidence v1 (Level 2)
+
+### Status
+Phase 7A is complete and certified. Phases 0–6B remain unchanged. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift. eligible_for_decision_consumption remains always False.
+
+### What this phase adds
+Evidence enrichment only. Not truth adapter consumption. Not visible decision integration. Not a UI change.
+
+- **New module**: `v2/backend/app/services/intelligence/research_workers/sec_companyfacts_parser.py`
+  - Parses SEC CompanyFacts API JSON (us-gaap taxonomy only).
+  - `_METRIC_TAG_ALLOWLIST` (13 tags): Revenues, SalesRevenueNet, RevenueFromContractWithCustomerExcludingAssessedTax, NetIncomeLoss, OperatingIncomeLoss, EarningsPerShareBasic, EarningsPerShareDiluted, CashAndCashEquivalentsAtCarryingValue, Assets, Liabilities, StockholdersEquity, NetCashProvidedByUsedInOperatingActivities, PaymentsToAcquirePropertyPlantAndEquipment.
+  - Accepts USD unit for money tags, USD/shares for EPS tags. Rejects wrong units.
+  - Only includes facts from 10-K/10-Q forms (not 8-K).
+  - Only includes facts whose accession number is in `source_accessions` (source-linked). No unlinked facts.
+  - Bounded: `_MAX_PERIODS_PER_TAG=2` most recent periods per tag, sorted by filed date descending.
+  - `compute_metric_digest(observations)`: deterministic SHA-256 digest; same facts in any order → same digest; any value/accession/filed/fiscal_period change → different digest.
+  - `parse_companyfacts()`: fail-closed — returns `CompanyFactsParseResult` always, never raises.
+  - No forbidden keys, no decision-authority fields, no ratios, no inferred direction, no LLM.
+
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py`
+  - Imports `sec_companyfacts_parser`.
+  - `SecEdgarProviderResult` gains optional `companyfacts_parse_result: Optional[CompanyFactsParseResult] = None`.
+  - Phase 7A request 3: after submissions (request 2), if `request_count < max_requests_per_ticker`, fetches `companyfacts/CIK{cik}.json`, builds `source_accessions` frozenset from parsed filings, calls `parse_companyfacts()`. Result attached to `SecEdgarProviderResult.companyfacts_parse_result`.
+  - Companyfacts failure is fail-closed: does NOT downgrade submissions success. Logging only. `companyfacts_parse_result.parse_status="error"` if fetch fails.
+  - Raw companyfacts JSON is never stored or returned — only parsed `MetricObservation` list.
+
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/earnings_sec_adapter.py`
+  - Imports `compute_metric_digest` from `sec_companyfacts_parser`.
+  - After building filing SourceRecords, builds `accn_to_src_idx` mapping.
+  - For each `MetricObservation` from `companyfacts_parse_result.observations`: finds source_index by accession_number match; if found creates `FactRecord(fact_kind="metric_observation", axis_hint="evidence", source_index=src_idx, structured_payload=safe_payload)`. Unmatched observations skipped (no unlinked facts).
+  - `safe_payload` shape: `{"claim":"sec_companyfact_observed","taxonomy","tag","label","value","unit","form","filed","accession_number"}` + optional `fiscal_year`, `fiscal_period`. No forbidden keys.
+  - `_compute_source_fingerprint` extended with `metric_digest` parameter (default ""). Fingerprint now includes `"metric_digest"` key — changes when observations change materially.
+  - Limitations always include companyfacts status line.
+
+- **Updated**: `v2/backend/app/services/intelligence/research_workers/earnings_reviewer.py`
+  - `_MODEL_VERSION_SEC` changed from `"sec_edgar_phase6a_v1"` → `"sec_edgar_phase7a_v1"`.
+  - `worker_phase` in artifact payload changed from `"phase6a_sec_grounded"` → `"phase7a_sec_grounded"`.
+  - Audit event `tool_call` changed to `"earnings_reviewer_phase7a_sec_run"`.
+  - Phase 6A artifacts remain in DB with old replay key. Phase 7A produces new rows.
+
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`
+  - `ArtifactObservabilitySummary` gains 2 new Phase 7A fields (backward-compatible defaults):
+    `artifacts_with_metric_observations_count` (int=0), `metric_observation_fact_count` (int=0).
+  - Per-artifact loop counts facts with `fact_kind="metric_observation"`. Aggregate only — no payloads returned.
+  - INFO log extended with Phase 7A counters.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase7a_companyfacts.py` — 67 tests, 24 acceptance criteria.
+- **Updated test file**: `v2/backend/tests/test_intel_v3_phase6a_sec_edgar.py` — updated `FakeHttpGetFn` to handle companyfacts URL (default: empty facts payload); updated request count expectation (2→3); updated worker_phase assertion (phase6a→phase7a).
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new module.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- `safe_for_decision` — remains DB-hard-locked False.
+- `eligible_for_decision_consumption` — always False (invariant unchanged).
+- No LLM, no agents, no new paid providers (SEC EDGAR public API only).
+- No SQL migration. No new tables. No schema changes.
+- No visible Intel v3 action/copy/snapshot change. No frontend change.
+- Metrics are backend-only evidence observations, not UI copy and not recommendation authority.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_companyfacts_parser.py` — NEW
+- `v2/backend/app/services/intelligence/research_workers/sec_edgar_provider.py` — Phase 7A request 3
+- `v2/backend/app/services/intelligence/research_workers/earnings_sec_adapter.py` — metric_observation facts
+- `v2/backend/app/services/intelligence/research_workers/earnings_reviewer.py` — model version bump
+- `v2/backend/app/services/intelligence/research_workers/artifact_observability.py` — Phase 7A counters
+- `v2/backend/tests/test_intel_v3_phase7a_companyfacts.py` — NEW (67 tests, 24 criteria)
+- `v2/backend/tests/test_intel_v3_phase6a_sec_edgar.py` — updated for Phase 7A compatibility
+- `docs/ai/HANDOFF.md` — this entry
+- `v2/progress_log.md` — Phase 7A entry
+
+### Test results
+- Phase 7A companyfacts: **67/67** ✓
+- Phase 6A SEC EDGAR: **86/86** ✓ (updated for Phase 7A request count)
+- Phase 6B readiness observability (service): **53/53** ✓ (6 fastapi env failures pre-existing, unchanged)
+- Phase 5 truth adapter readiness: **125/125** ✓
+- Phase 4 artifact observability: **58/58** ✓
+- Phase 3 research workers: **85/85** ✓
+- Phase 3.5 validation harness: **57/57** ✓
+- Phase 3.7 idempotency: **16/16** ✓
+- Total: **550 passed** (6 pre-existing fastapi env failures unchanged)
+
+### Next recommended step
+Production validation: enable SEC flags, run validate + observe endpoints for AAPL/MSFT/NVDA; confirm:
+- `metric_observation_fact_count > 0` and `artifacts_with_metric_observations_count > 0` in observability
+- `eligible_for_truth_adapter_count > 0` and `eligible_for_decision_consumption_count = 0`
+- `safe_for_decision_false_count = artifact_count`
+- `visible_snapshot_unchanged = true`
+
+Do NOT proceed to artifact consumption until production validation passes and a new phase plan (Phase 7B or Phase 8) is reviewed and approved.
+
+---
+
 ## 2026-05-07 — Phase 6B: Controlled SEC Production Validation + Readiness Observability (Level 2)
 
 ### Status

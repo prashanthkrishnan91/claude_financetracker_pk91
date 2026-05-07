@@ -79,6 +79,9 @@ class ArtifactObservabilitySummary:
     artifacts_without_source_linked_facts_count: int = 0
     phase5_ready_but_decision_blocked_count: int = 0
     readiness_visible_snapshot_unchanged: bool = True
+    # Phase 7A: metric_observation aggregate counters (default 0 — backward-compatible).
+    artifacts_with_metric_observations_count: int = 0
+    metric_observation_fact_count: int = 0
 
 
 def _disabled_summary(
@@ -329,6 +332,9 @@ def summarize_recent_research_artifacts(
     artifacts_with_source_linked_facts_count = 0
     artifacts_without_source_linked_facts_count = 0
     phase5_ready_but_decision_blocked_count = 0
+    # Phase 7A counters.
+    artifacts_with_metric_observations_count = 0
+    metric_observation_fact_count = 0
 
     if artifact_rows:
         artifact_ids_6b = [str(r["id"]) for r in artifact_rows if r.get("id")]
@@ -382,6 +388,15 @@ def summarize_recent_research_artifacts(
                     artifacts_with_source_linked_facts_count += 1
                 else:
                     artifacts_without_source_linked_facts_count += 1
+
+                # Phase 7A: count metric_observation facts (aggregate only — no payloads).
+                artifact_metric_count = sum(
+                    1 for f in artifact_facts
+                    if str(f.get("fact_kind") or "") == "metric_observation"
+                )
+                if artifact_metric_count > 0:
+                    artifacts_with_metric_observations_count += 1
+                    metric_observation_fact_count += artifact_metric_count
 
                 try:
                     result = evaluate_artifact_truth_readiness(
@@ -453,6 +468,8 @@ def summarize_recent_research_artifacts(
         artifacts_without_source_linked_facts_count=artifacts_without_source_linked_facts_count,
         phase5_ready_but_decision_blocked_count=phase5_ready_but_decision_blocked_count,
         readiness_visible_snapshot_unchanged=True,
+        artifacts_with_metric_observations_count=artifacts_with_metric_observations_count,
+        metric_observation_fact_count=metric_observation_fact_count,
     )
 
     if settings.intel_v3_research_artifact_observability_info_logs_enabled:
@@ -464,7 +481,8 @@ def summarize_recent_research_artifacts(
             "with_sources=%d with_facts=%d visible_snapshot_unchanged=%s "
             "readiness_evaluated=%d eligible_truth_adapter=%d "
             "eligible_decision_consumption=%d phase5_ready_blocked=%d "
-            "safe_for_decision_db_promotion_blocked=%d fail_closed=%d",
+            "safe_for_decision_db_promotion_blocked=%d fail_closed=%d "
+            "artifacts_with_metric_obs=%d metric_obs_facts=%d",
             summary.artifact_count,
             summary.active_count,
             summary.inactive_count,
@@ -482,6 +500,8 @@ def summarize_recent_research_artifacts(
             summary.phase5_ready_but_decision_blocked_count,
             summary.safe_for_decision_db_promotion_blocked_count,
             summary.fail_closed_count,
+            summary.artifacts_with_metric_observations_count,
+            summary.metric_observation_fact_count,
         )
 
     return summary

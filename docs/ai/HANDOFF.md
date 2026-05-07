@@ -1,4 +1,68 @@
 
+## 2026-05-07 — Phase 8D: Portfolio SEC Evidence Coverage Diagnostics (Level 2)
+
+### Status
+Phase 8D complete. All Phase 8A/8B/8C invariants preserved. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift. No SQL. No frontend changes.
+
+### What this phase adds
+Backend-only portfolio coverage diagnostic endpoint. Compares current portfolio tickers against Phase 8B SEC metric evidence snapshot output to produce a portfolio-wide readiness summary.
+
+- **New module**: `v2/backend/app/services/intelligence/research_workers/sec_metric_portfolio_coverage_dry_run.py`
+  - `SEC_METRIC_PORTFOLIO_COVERAGE_DRY_RUN_CONTRACT_VERSION = "phase8d_v1"`
+  - `_CATEGORY_BLOCKING_CODES`: maps ETF/Crypto categories to asset-type reason codes.
+  - `PortfolioSecCoverageDryRunResult` dataclass — aggregate-only, no raw values.
+  - `build_portfolio_sec_coverage_dry_run()` — pure function, deterministic, never raises, no DB calls.
+    Takes portfolio positions + Phase 8B snapshot_by_ticker. Returns per-ticker coverage and aggregate counts.
+    safe_for_decision always False, visible_snapshot_unchanged always True.
+  - `compute_portfolio_sec_metric_coverage()` — DB-reading orchestrator. Reads portfolio tickers from
+    `positions` table (with fallback to `portfolio_snapshots.positions_data`), reads research artifacts
+    and facts, runs Phase 8A → Phase 8B → build_portfolio_sec_coverage_dry_run(). Never raises.
+  - Portfolio tickers with no research artifacts: `missing_sec_research_artifact` blocking code, counted in
+    `tickers_without_sec_metric_coverage`.
+  - ETF/Crypto categories → `asset_type_not_sec_company` + `likely_fund_or_etf` / `likely_crypto` codes.
+  - All tickers always get `decision_consumption_disabled` + `safe_for_decision_db_lock` codes.
+  - No new SEC provider calls, no LLM calls, no decide() import, no snapshot writes.
+
+- **Extended**: `v2/backend/app/config.py`
+  - New flag: `intel_v3_sec_metric_portfolio_coverage_dry_run_enabled` (bool, default False).
+
+- **Extended**: `v2/backend/app/routers/diagnostics.py`
+  - New endpoint: `POST /diagnostics/finance-intel/sec-metric-evidence/portfolio-coverage`
+  - Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+  - Guard: `intel_v3_sec_metric_portfolio_coverage_dry_run_enabled=true` required (raises 403 if off).
+  - Independent of Phase 8A/8B flags.
+  - Returns: `sec_metric_portfolio_coverage_dry_run_enabled`, `sec_metric_portfolio_coverage_safe_for_decision` (always false), `sec_metric_portfolio_coverage_visible_snapshot_unchanged` (always true), `portfolio_ticker_count`, `portfolio_tickers_evaluated`, `tickers_with_research_artifacts_count`, `tickers_without_research_artifacts_count`, `tickers_with_source_linked_metric_evidence_count`, `tickers_ready_for_future_adapter_count`, `tickers_partial_for_future_adapter_count`, `tickers_blocked_for_future_adapter_count`, `tickers_without_sec_metric_coverage`, `readiness_counts`, `by_ticker`, `errors`.
+  - `by_ticker` shape per ticker: `has_research_artifacts`, `has_source_linked_metric_evidence`, `source_linked_metric_fact_count`, `future_adapter_readiness`, `present_buckets`, `missing_buckets`, `blocking_reason_codes`.
+  - No raw values, no structured_payload, no source URLs exposed.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase8d_portfolio_sec_metric_coverage.py` — 73 tests covering all 15 acceptance criteria.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_portfolio_coverage_dry_run.py` — new module
+- `v2/backend/app/config.py` — new kill-switch flag
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + import
+- `v2/backend/tests/test_intel_v3_phase8d_portfolio_sec_metric_coverage.py` — 73 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 8D portfolio coverage: **73/73** ✓ (new)
+- Phase 8C adapter replay: **74/74** ✓
+- Phase 8B evidence snapshot: **80/80** ✓
+- Phase 8A truth adapter: **68/68** ✓
+- Total new run: **295 passed** (Phase 8A–8D)
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new module.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- `safe_for_decision` — remains DB-hard-locked False.
+- `eligible_for_decision_consumption` — always 0 / absent from coverage result.
+- No LLM, no agents, no new paid providers, no SEC provider calls in coverage endpoint.
+- No SQL migration. No new tables. No schema changes.
+- No visible Intel v3 action/copy/snapshot change. No frontend change.
+
+---
+
 ## 2026-05-07 — Phase 8A: Truth Adapter Mapping Dry Run for SEC CompanyFacts (Level 2)
 
 ### Status

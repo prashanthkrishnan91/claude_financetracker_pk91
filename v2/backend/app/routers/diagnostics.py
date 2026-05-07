@@ -20,6 +20,7 @@ from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
 from ..services.intelligence.research_workers.artifact_observability import summarize_recent_research_artifacts
+from ..services.intelligence.research_workers.sec_metric_portfolio_coverage_dry_run import compute_portfolio_sec_metric_coverage
 from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.recommendation_engine import RecommendationService
 
@@ -490,4 +491,62 @@ async def observe_research_artifacts(
         "sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count": obs.sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count,
         "sec_metric_evidence_snapshot_tickers_blocked_from_decision_count": obs.sec_metric_evidence_snapshot_tickers_blocked_from_decision_count,
         "sec_metric_evidence_snapshot_by_ticker": obs.sec_metric_evidence_snapshot_by_ticker,
+    }
+
+
+@router.post("/sec-metric-evidence/portfolio-coverage")
+async def get_portfolio_sec_metric_coverage(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Phase 8D — operator-only portfolio SEC metric evidence coverage diagnostic.
+
+    Compares current portfolio tickers (from positions/portfolio_snapshots) against
+    Phase 8B SEC metric evidence output to produce a portfolio-wide coverage summary.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_SEC_METRIC_PORTFOLIO_COVERAGE_DRY_RUN_ENABLED=true
+
+    Worker/validation/observability flags are NOT required — this endpoint is
+    independent and controlled solely by INTEL_V3_SEC_METRIC_PORTFOLIO_COVERAGE_DRY_RUN_ENABLED.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER returns raw metric values, structured_payload, source URLs, raw DB rows.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to any DB table.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_sec_metric_portfolio_coverage_dry_run_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_SEC_METRIC_PORTFOLIO_COVERAGE_DRY_RUN_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    coverage = compute_portfolio_sec_metric_coverage(
+        user_id=str(user.id),
+        db_client=db_client,
+        settings=settings,
+    )
+
+    # Return only aggregate-safe fields — no raw payloads, no source URLs, no raw rows.
+    return {
+        "sec_metric_portfolio_coverage_dry_run_enabled": coverage.coverage_enabled,
+        "sec_metric_portfolio_coverage_safe_for_decision": coverage.safe_for_decision,
+        "sec_metric_portfolio_coverage_visible_snapshot_unchanged": coverage.visible_snapshot_unchanged,
+        "portfolio_ticker_count": coverage.portfolio_ticker_count,
+        "portfolio_tickers_evaluated": coverage.portfolio_tickers_evaluated,
+        "tickers_with_research_artifacts_count": coverage.tickers_with_research_artifacts_count,
+        "tickers_without_research_artifacts_count": coverage.tickers_without_research_artifacts_count,
+        "tickers_with_source_linked_metric_evidence_count": coverage.tickers_with_source_linked_metric_evidence_count,
+        "tickers_ready_for_future_adapter_count": coverage.tickers_ready_for_future_adapter_count,
+        "tickers_partial_for_future_adapter_count": coverage.tickers_partial_for_future_adapter_count,
+        "tickers_blocked_for_future_adapter_count": coverage.tickers_blocked_for_future_adapter_count,
+        "tickers_without_sec_metric_coverage": coverage.tickers_without_sec_metric_coverage,
+        "readiness_counts": coverage.readiness_counts,
+        "by_ticker": coverage.by_ticker,
+        "errors": coverage.errors,
     }

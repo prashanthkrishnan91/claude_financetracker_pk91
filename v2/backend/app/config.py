@@ -121,6 +121,14 @@ class Settings(BaseSettings):
     # Dry-run only — safe_for_decision remains False. No visible snapshot change.
     intel_v3_sec_metric_evidence_snapshot_dry_run_enabled: bool = False
 
+    # ── Intel v3 Phase 8D — SEC Metric Portfolio Coverage Dry Run (off by default) ──
+    # When True, enables the protected portfolio-coverage diagnostics endpoint that
+    # compares current portfolio tickers against Phase 8B SEC metric evidence output
+    # (aggregate-only, no raw values, no decision consumption).
+    # Independent of Phase 8A/8B flags — reads Phase 8B pure functions directly.
+    # Dry-run only — safe_for_decision remains False. No visible snapshot change.
+    intel_v3_sec_metric_portfolio_coverage_dry_run_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

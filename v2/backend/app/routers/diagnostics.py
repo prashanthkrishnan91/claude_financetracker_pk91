@@ -460,4 +460,9 @@ async def observe_research_artifacts(
         # Phase 7A: metric observation counters.
         "artifacts_with_metric_observations_count": obs.artifacts_with_metric_observations_count,
         "metric_observation_fact_count": obs.metric_observation_fact_count,
+        # Phase 7C: metric observation mix — aggregate-only, no raw values.
+        "by_metric_observation_tag": obs.by_metric_observation_tag,
+        "by_metric_observation_unit": obs.by_metric_observation_unit,
+        "by_metric_observation_form": obs.by_metric_observation_form,
+        "artifacts_with_companyfacts_metric_observations_count": obs.artifacts_with_companyfacts_metric_observations_count,
     }

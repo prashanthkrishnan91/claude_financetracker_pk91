@@ -82,6 +82,12 @@ class ArtifactObservabilitySummary:
     # Phase 7A: metric_observation aggregate counters (default 0 — backward-compatible).
     artifacts_with_metric_observations_count: int = 0
     metric_observation_fact_count: int = 0
+    # Phase 7C: metric observation mix aggregates (default {}0 — backward-compatible).
+    # Aggregate-only: no raw values, no structured_payload, no source URLs exposed.
+    by_metric_observation_tag: dict[str, int] = field(default_factory=dict)
+    by_metric_observation_unit: dict[str, int] = field(default_factory=dict)
+    by_metric_observation_form: dict[str, int] = field(default_factory=dict)
+    artifacts_with_companyfacts_metric_observations_count: int = 0
 
 
 def _disabled_summary(
@@ -332,9 +338,13 @@ def summarize_recent_research_artifacts(
     artifacts_with_source_linked_facts_count = 0
     artifacts_without_source_linked_facts_count = 0
     phase5_ready_but_decision_blocked_count = 0
-    # Phase 7A counters.
+    # Phase 7A/7C counters.
     artifacts_with_metric_observations_count = 0
     metric_observation_fact_count = 0
+    by_metric_observation_tag: dict[str, int] = {}
+    by_metric_observation_unit: dict[str, int] = {}
+    by_metric_observation_form: dict[str, int] = {}
+    artifacts_with_companyfacts_metric_observations_count = 0
 
     if artifact_rows:
         artifact_ids_6b = [str(r["id"]) for r in artifact_rows if r.get("id")]
@@ -389,14 +399,29 @@ def summarize_recent_research_artifacts(
                 else:
                     artifacts_without_source_linked_facts_count += 1
 
-                # Phase 7A: count metric_observation facts (aggregate only — no payloads).
-                artifact_metric_count = sum(
-                    1 for f in artifact_facts
-                    if str(f.get("fact_kind") or "") == "metric_observation"
-                )
+                # Phase 7A/7C: count metric_observation facts and aggregate tag/unit/form mix.
+                # Aggregate-only — no raw values or payloads are accumulated or returned.
+                artifact_metric_count = 0
+                artifact_has_companyfacts = False
+                for f in artifact_facts:
+                    if str(f.get("fact_kind") or "") != "metric_observation":
+                        continue
+                    artifact_metric_count += 1
+                    sp = f.get("structured_payload") or {}
+                    if isinstance(sp, dict):
+                        tag = str(sp.get("tag") or "UNKNOWN")
+                        by_metric_observation_tag[tag] = by_metric_observation_tag.get(tag, 0) + 1
+                        unit = str(sp.get("unit") or "UNKNOWN")
+                        by_metric_observation_unit[unit] = by_metric_observation_unit.get(unit, 0) + 1
+                        form = str(sp.get("form") or "UNKNOWN")
+                        by_metric_observation_form[form] = by_metric_observation_form.get(form, 0) + 1
+                        if sp.get("claim") == "sec_companyfact_observed":
+                            artifact_has_companyfacts = True
                 if artifact_metric_count > 0:
                     artifacts_with_metric_observations_count += 1
                     metric_observation_fact_count += artifact_metric_count
+                if artifact_has_companyfacts:
+                    artifacts_with_companyfacts_metric_observations_count += 1
 
                 try:
                     result = evaluate_artifact_truth_readiness(
@@ -470,6 +495,10 @@ def summarize_recent_research_artifacts(
         readiness_visible_snapshot_unchanged=True,
         artifacts_with_metric_observations_count=artifacts_with_metric_observations_count,
         metric_observation_fact_count=metric_observation_fact_count,
+        by_metric_observation_tag=by_metric_observation_tag,
+        by_metric_observation_unit=by_metric_observation_unit,
+        by_metric_observation_form=by_metric_observation_form,
+        artifacts_with_companyfacts_metric_observations_count=artifacts_with_companyfacts_metric_observations_count,
     )
 
     if settings.intel_v3_research_artifact_observability_info_logs_enabled:
@@ -482,7 +511,9 @@ def summarize_recent_research_artifacts(
             "readiness_evaluated=%d eligible_truth_adapter=%d "
             "eligible_decision_consumption=%d phase5_ready_blocked=%d "
             "safe_for_decision_db_promotion_blocked=%d fail_closed=%d "
-            "artifacts_with_metric_obs=%d metric_obs_facts=%d",
+            "artifacts_with_metric_obs=%d metric_obs_facts=%d "
+            "artifacts_with_companyfacts_obs=%d "
+            "metric_obs_tags=%d metric_obs_units=%d metric_obs_forms=%d",
             summary.artifact_count,
             summary.active_count,
             summary.inactive_count,
@@ -502,6 +533,10 @@ def summarize_recent_research_artifacts(
             summary.fail_closed_count,
             summary.artifacts_with_metric_observations_count,
             summary.metric_observation_fact_count,
+            summary.artifacts_with_companyfacts_metric_observations_count,
+            len(summary.by_metric_observation_tag),
+            len(summary.by_metric_observation_unit),
+            len(summary.by_metric_observation_form),
         )
 
     return summary

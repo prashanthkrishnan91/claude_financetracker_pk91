@@ -1,4 +1,13 @@
 
+## 2026-05-07 — Phase 3.7: Fix Real Supabase Artifact Writer Idempotency (Level 1)
+
+- Phase 3.7 fixes the production 42P10 error that blocked all Phase 3.6 writes. Root cause: `_upsert_artifact()` called `.upsert(on_conflict="replay_idempotency_key")` but migration 017 created that as a partial unique index (`WHERE is_active = TRUE`); PostgREST cannot use a partial index as an ON CONFLICT target.
+- Fix: replaced upsert with explicit select-then-insert. Step 1: SELECT by `replay_idempotency_key + is_active=True` — if found, log idempotency skip and return existing id. Step 2: INSERT new row. Step 3 (race fallback): if INSERT raises, re-SELECT; if found return id, else re-raise for audit.
+- Validation harness: added `errors.append("write_failed ticker=… artifact_id_none")` when `artifact_id is None`, preventing `failed_count > 0` with `errors=[]` in API summary.
+- No SQL migration. Partial unique index preserved. `safe_for_decision` remains False. No decide() change. No visible behavior change. No new providers/LLM/UI.
+- Tests: Phase 3: 85/85. Phase 3.5: 57/57. Phase 3.7: 16/16. Combined: 158/158.
+- Next: re-run Phase 3.6 validation endpoint (`POST …/research-workers/validate`) against real Supabase with AAPL/MSFT/NVDA after deploy; confirm `written_count=3`, `errors=[]`.
+
 ## 2026-05-07 — Phase 3.6: Controlled Real-DB Dark-Run Validation Invocation Path (Level 2)
 
 - Phase 3.6 adds the first safe operator-accessible path to invoke the Phase 3.5 validation harness against real Supabase, plus a clear runbook. Dark-run only — does not affect visible decisions.

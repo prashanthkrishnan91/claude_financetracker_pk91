@@ -1,4 +1,135 @@
 
+## 2026-05-07 — Phase 6B: Controlled SEC Production Validation + Readiness Observability (Level 2)
+
+### Status
+Phase 6B is complete and certified. Phases 0–6A remain unchanged and all passing. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift.
+
+### What this phase adds
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`
+  - New import: `evaluate_artifact_truth_readiness` from `artifact_truth_readiness`.
+  - `ArtifactObservabilitySummary` gains 11 new Phase 6B readiness aggregate fields (backward-compatible defaults):
+    `readiness_evaluated_count`, `eligible_for_truth_adapter_count`, `ineligible_for_truth_adapter_count`,
+    `eligible_for_decision_consumption_count` (always 0),
+    `safe_for_decision_db_promotion_blocked_count` (= readiness_evaluated_count),
+    `fail_closed_count` (= readiness_evaluated_count),
+    `by_readiness_reason_code: dict[str,int]`,
+    `artifacts_with_source_linked_facts_count`, `artifacts_without_source_linked_facts_count`,
+    `phase5_ready_but_decision_blocked_count`, `readiness_visible_snapshot_unchanged` (always True).
+  - Phase 6B evaluation block: after Phase 4 child queries, fetches full source details
+    (`id, artifact_id, source_kind, provider_name, source_url, source_id, source_hash, section_reference`)
+    and full fact details (`id, artifact_id, fact_kind, structured_payload, source_id`) per artifact,
+    builds per-artifact maps, calls `evaluate_artifact_truth_readiness()` for each, and aggregates
+    counters only. Raw source_url, structured_payload, and rows are never returned.
+  - If Phase 6B source/fact queries fail, errors[] is populated and evaluation proceeds fail-closed.
+  - INFO log extended with Phase 6B aggregates.
+
+- **Extended**: `v2/backend/app/routers/diagnostics.py`
+  - `POST /api/v1/diagnostics/finance-intel/research-artifacts/observe` response includes all 11 new
+    Phase 6B readiness aggregate fields. Backward-compatible addition — no request schema change.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase6b_readiness_observability.py` — 54 tests covering all 23 acceptance criteria.
+
+### Phase 6B Readiness Evaluation Proves
+- Phase 3/4 scaffold artifacts (UNKNOWN/UNKNOWN/0 sources): `eligible_for_truth_adapter=False`; reason codes include `unknown_or_invalid_confidence`, `unknown_or_invalid_freshness`, `no_valid_sources`.
+- Phase 6A SEC-backed artifacts (MEDIUM/FRESH + source-linked fact): `eligible_for_truth_adapter=True`.
+- Even eligible artifacts: `eligible_for_decision_consumption=False` always (decision consumption NOT enabled).
+- `safe_for_decision` remains false — DB constraint unchanged.
+
+### Architecture Invariants
+- `decide()` — NOT imported, NOT called.
+- `intel_v3_snapshots` — no reads or writes in `artifact_observability.py`.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- No LLM, no agents, no new providers.
+- No SQL migration. No new tables. No schema changes.
+- No visible Intel v3 action/copy/snapshot change. No frontend change.
+- Observability flag (`INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED`) controls both Phase 4 and Phase 6B.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/artifact_observability.py` — Phase 6B readiness evaluation added
+- `v2/backend/app/routers/diagnostics.py` — observe endpoint returns new readiness fields
+- `v2/backend/tests/test_intel_v3_phase6b_readiness_observability.py` — NEW (54 tests, 23 criteria)
+- `docs/ai/HANDOFF.md` — this entry
+- `v2/progress_log.md` — Phase 6B entry
+
+### Test results
+- Phase 6B readiness observability: 54/54 ✓
+- Phase 6A SEC EDGAR: 78/78 ✓
+- Phase 5 truth adapter readiness: 125/125 ✓
+- Phase 4 artifact observability (service): 58/58 ✓
+- Phase 4 artifact observability (endpoint): 31/31 ✓
+- Phase 3 research workers: 85/85 ✓
+- Phase 3.5 validation harness: 57/57 ✓
+- Phase 3.7 idempotency: 16/16 ✓
+- Combined (service-layer, all phases): 515/515 ✓
+- Phase 3.6 endpoint tests: require `pytest-asyncio` (not installed in CI env) — pre-existing limitation, not introduced by Phase 6B.
+
+### Post-deploy Railway validation sequence
+
+**Temporary Railway env for validation:**
+```
+FINANCE_RUNTIME_CERT_ENABLED=true
+INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=true
+INTEL_V3_RESEARCH_WORKERS_ENABLED=true
+INTEL_V3_EARNINGS_REVIEWER_ENABLED=true
+INTEL_V3_EARNINGS_REVIEWER_SEC_ENABLED=true
+SEC_EDGAR_USER_AGENT="FinanceTracker/1.0 <operator-email>"
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=true
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_INFO_LOGS_ENABLED=true  # optional
+```
+
+**Step 1 — Run validation endpoint (writes SEC-backed artifacts):**
+```
+POST /api/v1/diagnostics/finance-intel/research-workers/validate
+{"tickers":["AAPL","MSFT","NVDA"]}
+```
+
+**Step 2 — Run observe endpoint (reads + evaluates readiness):**
+```
+POST /api/v1/diagnostics/finance-intel/research-artifacts/observe
+{"tickers":["AAPL","MSFT","NVDA"],"lookback_days":30,"max_rows":250}
+```
+
+**Expected result after SEC-backed validation:**
+- `artifact_count >= 3`
+- `by_skill_pack` includes `earnings_reviewer`
+- `by_artifact_type` includes `catalyst_window`
+- `by_confidence_or_trust_level` includes `MEDIUM` and/or `LOW` (not all `UNKNOWN`)
+- `by_freshness_status` includes `FRESH` and/or `STALE` (not all `UNKNOWN`)
+- `artifacts_with_sources_count > 0`
+- `artifacts_with_facts_count > 0`
+- `artifacts_with_source_linked_facts_count > 0`
+- `eligible_for_truth_adapter_count > 0` (ideally 3 for AAPL/MSFT/NVDA if SEC returns recent filings)
+- `eligible_for_decision_consumption_count = 0` (invariant)
+- `phase5_ready_but_decision_blocked_count = eligible_for_truth_adapter_count`
+- `safe_for_decision_false_count = artifact_count`
+- `unexpected_safe_for_decision_true_count = 0`
+- `forbidden_payload_violation_count = 0`
+- `readiness_visible_snapshot_unchanged = true`
+- `errors = []`
+
+**Rollback after validation:**
+```
+FINANCE_RUNTIME_CERT_ENABLED=false
+INTEL_V3_RESEARCH_WORKER_VALIDATION_ENABLED=false
+INTEL_V3_RESEARCH_WORKERS_ENABLED=false
+INTEL_V3_EARNINGS_REVIEWER_ENABLED=false
+INTEL_V3_EARNINGS_REVIEWER_SEC_ENABLED=false
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=false
+INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_INFO_LOGS_ENABLED=false
+# Keep:
+INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true
+NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true
+```
+
+### Next recommended phase
+Phase 7 (deterministic truth adapter consumption) — only after production validation confirms:
+- `eligible_for_truth_adapter_count > 0`
+- `eligible_for_decision_consumption_count = 0`
+- `errors = []`
+Phase 7 will require dropping the Phase 2.1 `safe_for_decision=false` DB CHECK constraint and implementing the deterministic truth adapter read path.
+
+---
+
 ## 2026-05-07 — Phase 6A: SEC EDGAR Evidence Population + Grounding Upgrade (Level 2)
 
 ### Status

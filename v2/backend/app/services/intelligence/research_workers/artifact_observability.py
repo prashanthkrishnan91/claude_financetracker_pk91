@@ -31,6 +31,7 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 from app.config import Settings, get_settings
+from .artifact_truth_readiness import evaluate_artifact_truth_readiness
 from .contracts import _has_forbidden_key
 
 
@@ -66,6 +67,18 @@ class ArtifactObservabilitySummary:
     missing_evidence_count: int  # artifacts with non-empty limitations_or_missing_evidence
     visible_snapshot_unchanged: bool
     errors: list[str] = field(default_factory=list)
+    # Phase 6B: Truth Adapter Readiness aggregates (all default 0/{}/True — backward-compatible)
+    readiness_evaluated_count: int = 0
+    eligible_for_truth_adapter_count: int = 0
+    ineligible_for_truth_adapter_count: int = 0
+    eligible_for_decision_consumption_count: int = 0  # Phase 5/6B invariant: always 0
+    safe_for_decision_db_promotion_blocked_count: int = 0  # always = readiness_evaluated_count
+    fail_closed_count: int = 0  # always = readiness_evaluated_count
+    by_readiness_reason_code: dict[str, int] = field(default_factory=dict)
+    artifacts_with_source_linked_facts_count: int = 0
+    artifacts_without_source_linked_facts_count: int = 0
+    phase5_ready_but_decision_blocked_count: int = 0
+    readiness_visible_snapshot_unchanged: bool = True
 
 
 def _disabled_summary(
@@ -302,6 +315,105 @@ def summarize_recent_research_artifacts(
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"facts_query_error error={exc}")
 
+    # ── Phase 6B: Readiness evaluation ───────────────────────────────────────
+    # Query full source/fact details per artifact and evaluate Phase 5 readiness.
+    # Fail-closed: if queries fail, errors[] records the failure; evaluation skips
+    # affected artifacts. Never returns raw source_url, structured_payload, or rows.
+    readiness_evaluated_count = 0
+    eligible_for_truth_adapter_count = 0
+    ineligible_for_truth_adapter_count = 0
+    eligible_for_decision_consumption_count = 0  # invariant: always 0
+    safe_for_decision_db_promotion_blocked_count = 0
+    fail_closed_count = 0
+    by_readiness_reason_code: dict[str, int] = {}
+    artifacts_with_source_linked_facts_count = 0
+    artifacts_without_source_linked_facts_count = 0
+    phase5_ready_but_decision_blocked_count = 0
+
+    if artifact_rows:
+        artifact_ids_6b = [str(r["id"]) for r in artifact_rows if r.get("id")]
+        if artifact_ids_6b:
+            # Full source details for readiness evaluation (internal — never returned).
+            readiness_sources_by_artifact: dict[str, list[dict]] = {}
+            try:
+                src6b_result = (
+                    db_client.table("research_artifact_sources")
+                    .select(
+                        "id,artifact_id,source_kind,provider_name,"
+                        "source_url,source_id,source_hash,section_reference"
+                    )
+                    .eq("user_id", user_id)
+                    .in_("artifact_id", artifact_ids_6b)
+                    .execute()
+                )
+                for row in (src6b_result.data or []):
+                    aid = str(row.get("artifact_id", ""))
+                    if aid:
+                        readiness_sources_by_artifact.setdefault(aid, []).append(row)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"readiness_sources_query_error error={exc}")
+
+            # Full fact details for readiness evaluation (internal — never returned).
+            readiness_facts_by_artifact: dict[str, list[dict]] = {}
+            try:
+                fact6b_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("id,artifact_id,fact_kind,structured_payload,source_id")
+                    .eq("user_id", user_id)
+                    .in_("artifact_id", artifact_ids_6b)
+                    .execute()
+                )
+                for row in (fact6b_result.data or []):
+                    aid = str(row.get("artifact_id", ""))
+                    if aid:
+                        readiness_facts_by_artifact.setdefault(aid, []).append(row)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"readiness_facts_query_error error={exc}")
+
+            # Per-artifact readiness evaluation — aggregate counters only.
+            for artifact_row in artifact_rows:
+                aid = str(artifact_row.get("id", ""))
+                artifact_sources = readiness_sources_by_artifact.get(aid, [])
+                artifact_facts = readiness_facts_by_artifact.get(aid, [])
+
+                # Source-linked facts: any fact with a non-empty source_id.
+                has_source_linked = any(bool(f.get("source_id")) for f in artifact_facts)
+                if has_source_linked:
+                    artifacts_with_source_linked_facts_count += 1
+                else:
+                    artifacts_without_source_linked_facts_count += 1
+
+                try:
+                    result = evaluate_artifact_truth_readiness(
+                        artifact=artifact_row,
+                        sources=artifact_sources,
+                        facts=artifact_facts,
+                    )
+                    readiness_evaluated_count += 1
+
+                    # Derive all counters from the actual result — never assume invariants.
+                    if result.eligible_for_decision_consumption:
+                        eligible_for_decision_consumption_count += 1
+                    if result.safe_for_decision_db_promotion_blocked:
+                        safe_for_decision_db_promotion_blocked_count += 1
+                    if result.fail_closed:
+                        fail_closed_count += 1
+
+                    if result.eligible_for_truth_adapter:
+                        eligible_for_truth_adapter_count += 1
+                        # Ready for truth adapter but blocked from decision consumption.
+                        if not result.eligible_for_decision_consumption:
+                            phase5_ready_but_decision_blocked_count += 1
+                    else:
+                        ineligible_for_truth_adapter_count += 1
+
+                    for code in result.reason_codes:
+                        by_readiness_reason_code[code] = (
+                            by_readiness_reason_code.get(code, 0) + 1
+                        )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"readiness_eval_error artifact_id={aid} error={exc}")
+
     summary = ArtifactObservabilitySummary(
         observability_enabled=True,
         requested_tickers=requested_tickers,
@@ -329,6 +441,18 @@ def summarize_recent_research_artifacts(
         # Structural guarantee: this function never writes to intel_v3_snapshots.
         visible_snapshot_unchanged=True,
         errors=errors,
+        # Phase 6B readiness aggregates.
+        readiness_evaluated_count=readiness_evaluated_count,
+        eligible_for_truth_adapter_count=eligible_for_truth_adapter_count,
+        ineligible_for_truth_adapter_count=ineligible_for_truth_adapter_count,
+        eligible_for_decision_consumption_count=eligible_for_decision_consumption_count,
+        safe_for_decision_db_promotion_blocked_count=safe_for_decision_db_promotion_blocked_count,
+        fail_closed_count=fail_closed_count,
+        by_readiness_reason_code=by_readiness_reason_code,
+        artifacts_with_source_linked_facts_count=artifacts_with_source_linked_facts_count,
+        artifacts_without_source_linked_facts_count=artifacts_without_source_linked_facts_count,
+        phase5_ready_but_decision_blocked_count=phase5_ready_but_decision_blocked_count,
+        readiness_visible_snapshot_unchanged=True,
     )
 
     if settings.intel_v3_research_artifact_observability_info_logs_enabled:
@@ -337,7 +461,10 @@ def summarize_recent_research_artifacts(
             "artifact_count=%d active=%d inactive=%d expired=%d "
             "safe_for_decision_false=%d unexpected_safe_true=%d "
             "forbidden_payload_violations=%d missing_evidence=%d "
-            "with_sources=%d with_facts=%d visible_snapshot_unchanged=%s",
+            "with_sources=%d with_facts=%d visible_snapshot_unchanged=%s "
+            "readiness_evaluated=%d eligible_truth_adapter=%d "
+            "eligible_decision_consumption=%d phase5_ready_blocked=%d "
+            "safe_for_decision_db_promotion_blocked=%d fail_closed=%d",
             summary.artifact_count,
             summary.active_count,
             summary.inactive_count,
@@ -349,6 +476,12 @@ def summarize_recent_research_artifacts(
             summary.artifacts_with_sources_count,
             summary.artifacts_with_facts_count,
             summary.visible_snapshot_unchanged,
+            summary.readiness_evaluated_count,
+            summary.eligible_for_truth_adapter_count,
+            summary.eligible_for_decision_consumption_count,
+            summary.phase5_ready_but_decision_blocked_count,
+            summary.safe_for_decision_db_promotion_blocked_count,
+            summary.fail_closed_count,
         )
 
     return summary

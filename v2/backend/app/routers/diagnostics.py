@@ -445,4 +445,16 @@ async def observe_research_artifacts(
         "missing_evidence_count": obs.missing_evidence_count,
         "visible_snapshot_unchanged": obs.visible_snapshot_unchanged,
         "errors": obs.errors,
+        # Phase 6B: Truth Adapter Readiness aggregates — aggregate counters only.
+        "readiness_evaluated_count": obs.readiness_evaluated_count,
+        "eligible_for_truth_adapter_count": obs.eligible_for_truth_adapter_count,
+        "ineligible_for_truth_adapter_count": obs.ineligible_for_truth_adapter_count,
+        "eligible_for_decision_consumption_count": obs.eligible_for_decision_consumption_count,
+        "safe_for_decision_db_promotion_blocked_count": obs.safe_for_decision_db_promotion_blocked_count,
+        "fail_closed_count": obs.fail_closed_count,
+        "by_readiness_reason_code": obs.by_readiness_reason_code,
+        "artifacts_with_source_linked_facts_count": obs.artifacts_with_source_linked_facts_count,
+        "artifacts_without_source_linked_facts_count": obs.artifacts_without_source_linked_facts_count,
+        "phase5_ready_but_decision_blocked_count": obs.phase5_ready_but_decision_blocked_count,
+        "readiness_visible_snapshot_unchanged": obs.readiness_visible_snapshot_unchanged,
     }

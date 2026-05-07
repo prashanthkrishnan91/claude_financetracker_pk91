@@ -209,6 +209,18 @@ class TestEndpointInputGuardrails:
         self._call_endpoint_with_patches({"tickers": tickers}, settings, capture)
         assert len(capture["tickers"]) == 10
 
+    def test_ticker_dedup_before_cap(self):
+        """Normalization + dedup must happen before the 10-ticker cap."""
+        settings = _settings_for_endpoint()
+        capture: dict = {}
+        # 8 unique tickers + 4 duplicates (case variants) = 8 unique after dedup → all pass cap
+        tickers = ["aapl", "AAPL", "msft", "MSFT", "T1", "T2", "T3", "T4", "T5", "T6", "t1", "t2"]
+        self._call_endpoint_with_patches({"tickers": tickers}, settings, capture)
+        # After dedup: AAPL, MSFT, T1, T2, T3, T4, T5, T6 = 8 unique tickers
+        assert len(capture["tickers"]) == 8
+        assert "AAPL" in capture["tickers"]
+        assert "MSFT" in capture["tickers"]
+
     def test_lookback_days_min_clamped(self):
         settings = _settings_for_endpoint()
         capture: dict = {}

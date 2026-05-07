@@ -73,8 +73,11 @@ class _FakeQuery:
         if self._fail_with is not None:
             raise self._fail_with
 
-        # Apply in_ filter if set (for child table queries)
         rows = self._rows
+        # Apply eq filters (e.g. user_id guard on child tables)
+        for col, val in self._filters.items():
+            rows = [r for r in rows if str(r.get(col, "")) == str(val)]
+        # Apply in_ filters (e.g. artifact_id IN (...))
         for col, vals in self._in_filters.items():
             rows = [r for r in rows if str(r.get(col)) in {str(v) for v in vals}]
 
@@ -143,6 +146,9 @@ def _settings(enabled: bool = True, info_logs: bool = False) -> Settings:
     )
 
 
+USER_ID = "u"
+
+
 def _artifact(
     ticker: str = "AAPL",
     artifact_type: str = "catalyst_window",
@@ -152,12 +158,16 @@ def _artifact(
     safe_for_decision: bool = False,
     is_active: bool = True,
     expires_at: Optional[str] = None,
+    invalidated_at: Optional[str] = None,
     limitations: Optional[list] = None,
     payload: Optional[dict] = None,
+    user_id: str = USER_ID,
 ) -> dict:
+    """Build a fake research_artifacts row using the real production column names."""
     aid = str(uuid.uuid4())
     return {
         "id": aid,
+        "user_id": user_id,
         "ticker": ticker,
         "artifact_type": artifact_type,
         "skill_pack": skill_pack,
@@ -167,9 +177,19 @@ def _artifact(
         "is_active": is_active,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "expires_at": expires_at,
+        "invalidated_at": invalidated_at,
         "limitations_or_missing_evidence": limitations or [],
-        "artifact_payload": payload or {"summary": "ok"},
+        # Production column is "payload", not "artifact_payload"
+        "payload": payload or {"summary": "ok"},
     }
+
+
+def _source_row(artifact_id: str, user_id: str = USER_ID) -> dict:
+    return {"artifact_id": artifact_id, "user_id": user_id}
+
+
+def _fact_row(artifact_id: str, user_id: str = USER_ID) -> dict:
+    return {"artifact_id": artifact_id, "user_id": user_id}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -448,9 +468,10 @@ class TestSourcesFactsCounting:
         )
         art1 = _artifact()
         art2 = _artifact()
-        source_rows = [{"artifact_id": art1["id"], "source_kind": "filing"}]
+        # source row must include user_id to pass the child-table user guard
+        source_rows = [_source_row(art1["id"], USER_ID)]
         db = FakeSupabaseClient(artifact_rows=[art1, art2], source_rows=source_rows)
-        result = summarize_recent_research_artifacts("u", db, settings=_settings())
+        result = summarize_recent_research_artifacts(USER_ID, db, settings=_settings())
         assert result.artifacts_with_sources_count == 1
         assert result.artifacts_without_sources_count == 1
 
@@ -470,9 +491,10 @@ class TestSourcesFactsCounting:
         )
         art1 = _artifact()
         art2 = _artifact()
-        fact_rows = [{"artifact_id": art1["id"], "fact_kind": "eps"}]
+        # fact row must include user_id to pass the child-table user guard
+        fact_rows = [_fact_row(art1["id"], USER_ID)]
         db = FakeSupabaseClient(artifact_rows=[art1, art2], fact_rows=fact_rows)
-        result = summarize_recent_research_artifacts("u", db, settings=_settings())
+        result = summarize_recent_research_artifacts(USER_ID, db, settings=_settings())
         assert result.artifacts_with_facts_count == 1
         assert result.artifacts_without_facts_count == 1
 
@@ -751,15 +773,38 @@ class TestActiveInactiveCounting:
         assert result.active_count == 2
         assert result.inactive_count == 1
 
-    def test_invalidated_count_always_zero(self):
+    def test_invalidated_at_non_null_counted(self):
         from app.services.intelligence.research_workers.artifact_observability import (
             summarize_recent_research_artifacts,
         )
-        arts = [_artifact(is_active=False)]
+        ts = datetime.now(timezone.utc).isoformat()
+        arts = [
+            _artifact(invalidated_at=ts),
+            _artifact(invalidated_at=ts),
+            _artifact(invalidated_at=None),
+        ]
         db = FakeSupabaseClient(artifact_rows=arts)
         result = summarize_recent_research_artifacts("u", db, settings=_settings())
-        # No separate invalidated field in DB schema — always 0.
+        assert result.invalidated_count == 2
+
+    def test_invalidated_at_null_not_counted(self):
+        from app.services.intelligence.research_workers.artifact_observability import (
+            summarize_recent_research_artifacts,
+        )
+        arts = [_artifact(invalidated_at=None), _artifact(invalidated_at=None)]
+        db = FakeSupabaseClient(artifact_rows=arts)
+        result = summarize_recent_research_artifacts("u", db, settings=_settings())
         assert result.invalidated_count == 0
+
+    def test_all_invalidated_counted(self):
+        from app.services.intelligence.research_workers.artifact_observability import (
+            summarize_recent_research_artifacts,
+        )
+        ts = datetime.now(timezone.utc).isoformat()
+        arts = [_artifact(invalidated_at=ts) for _ in range(3)]
+        db = FakeSupabaseClient(artifact_rows=arts)
+        result = summarize_recent_research_artifacts("u", db, settings=_settings())
+        assert result.invalidated_count == 3
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -859,6 +904,16 @@ class TestStaticSourceGuard:
         src = inspect.getsource(mod)
         assert _observability_writes_only_reads(src), (
             "artifact_observability.py appears to write to research_artifacts"
+        )
+
+    def test_does_not_reference_artifact_payload_column(self):
+        """Regression: column must be 'payload', not 'artifact_payload'."""
+        mod = importlib.import_module(
+            "app.services.intelligence.research_workers.artifact_observability"
+        )
+        src = inspect.getsource(mod)
+        assert "artifact_payload" not in src, (
+            "artifact_observability.py references 'artifact_payload' — production column is 'payload'"
         )
 
     def test_no_safe_for_decision_true_assignment(self):

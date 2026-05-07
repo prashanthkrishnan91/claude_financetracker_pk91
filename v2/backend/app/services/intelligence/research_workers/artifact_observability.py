@@ -57,7 +57,7 @@ class ArtifactObservabilitySummary:
     forbidden_payload_violation_count: int
     active_count: int
     inactive_count: int
-    invalidated_count: int  # always 0 — no separate invalidated DB status field
+    invalidated_count: int  # rows where invalidated_at IS NOT NULL
     expired_count: int
     artifacts_with_sources_count: int
     artifacts_without_sources_count: int
@@ -166,7 +166,7 @@ def summarize_recent_research_artifacts(
                 "id,ticker,artifact_type,skill_pack,"
                 "confidence_or_trust_level,freshness_status,"
                 "safe_for_decision,is_active,created_at,expires_at,"
-                "limitations_or_missing_evidence,artifact_payload"
+                "invalidated_at,limitations_or_missing_evidence,payload"
             )
             .eq("user_id", user_id)
             .gte("created_at", cutoff)
@@ -194,6 +194,7 @@ def summarize_recent_research_artifacts(
     forbidden_payload_violation_count = 0
     active_count = 0
     inactive_count = 0
+    invalidated_count = 0
     expired_count = 0
     missing_evidence_count = 0
 
@@ -225,6 +226,9 @@ def summarize_recent_research_artifacts(
         else:
             inactive_count += 1
 
+        if row.get("invalidated_at") is not None:
+            invalidated_count += 1
+
         expires_at_raw = row.get("expires_at")
         if expires_at_raw:
             try:
@@ -246,7 +250,7 @@ def summarize_recent_research_artifacts(
             except Exception:  # noqa: BLE001
                 pass
 
-        payload = row.get("artifact_payload")
+        payload = row.get("payload")
         if payload is not None:
             try:
                 if isinstance(payload, dict):
@@ -272,6 +276,7 @@ def summarize_recent_research_artifacts(
                 src_result = (
                     db_client.table("research_artifact_sources")
                     .select("artifact_id")
+                    .eq("user_id", user_id)
                     .in_("artifact_id", artifact_ids)
                     .execute()
                 )
@@ -286,6 +291,7 @@ def summarize_recent_research_artifacts(
                 fact_result = (
                     db_client.table("research_artifact_facts")
                     .select("artifact_id")
+                    .eq("user_id", user_id)
                     .in_("artifact_id", artifact_ids)
                     .execute()
                 )
@@ -313,7 +319,7 @@ def summarize_recent_research_artifacts(
         forbidden_payload_violation_count=forbidden_payload_violation_count,
         active_count=active_count,
         inactive_count=inactive_count,
-        invalidated_count=0,
+        invalidated_count=invalidated_count,
         expired_count=expired_count,
         artifacts_with_sources_count=artifacts_with_sources_count,
         artifacts_without_sources_count=artifacts_without_sources_count,

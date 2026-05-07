@@ -397,8 +397,13 @@ async def observe_research_artifacts(
             detail="INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED is not enabled",
         )
 
-    # ── Guardrail: clamp inputs ───────────────────────────────────────────────
-    tickers_input = payload.tickers[:MAX_OBSERVE_TICKERS_PER_REQUEST]
+    # ── Guardrail: normalize/dedupe first, then cap ───────────────────────────
+    # Normalize and deduplicate before applying the cap so that e.g. 11 raw
+    # tickers that collapse to 8 unique ones are not over-rejected.
+    normalized_raw = list(
+        dict.fromkeys(t.upper().strip() for t in payload.tickers if t.strip())
+    )
+    tickers_input = normalized_raw[:MAX_OBSERVE_TICKERS_PER_REQUEST]
     lookback_days = max(MIN_OBSERVE_LOOKBACK_DAYS, min(MAX_OBSERVE_LOOKBACK_DAYS, payload.lookback_days))
     max_rows = max(MIN_OBSERVE_ROWS, min(MAX_OBSERVE_ROWS, payload.max_rows))
 

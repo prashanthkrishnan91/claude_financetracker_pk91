@@ -1,0 +1,354 @@
+"""Phase 4 — read-only research artifact observability service.
+
+Purpose:
+    Aggregate-counter diagnostics over existing research artifacts.
+    Answers: How many artifacts exist? Are they all safe_for_decision=false?
+    Any forbidden payload keys? What are confidence/freshness distributions?
+
+Enabled only when:
+    INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=true
+
+Architecture invariants (non-negotiable):
+    - NEVER imports or calls decide() from decision_policy_v1.
+    - NEVER writes to intel_v3_snapshots, research_artifacts, or any artifact table.
+    - NEVER runs on page load — explicit operator invocation only.
+    - NEVER feeds artifacts into the visible decision path.
+    - NEVER returns raw payload JSON, source URLs, quotes, excerpts, or full facts.
+    - NEVER returns raw DB rows.
+    - All failures are contained and returned in errors[]; none propagate to callers.
+    - safe_for_decision remains False — this service only reads and counts.
+    - Logs structured INFO only when
+      INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_INFO_LOGS_ENABLED=true.
+    - Logs are aggregate and safe — no full payloads, no secrets, no raw user data.
+"""
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from typing import Any, Optional
+
+logger = logging.getLogger(__name__)
+
+from app.config import Settings, get_settings
+from .contracts import _has_forbidden_key
+
+
+@dataclass
+class ArtifactObservabilitySummary:
+    """Compact read-only aggregate summary of recent research artifacts.
+
+    All fields are safe to log and return via the diagnostics endpoint.
+    No raw payloads, source URLs, quotes, or full facts are included.
+    """
+    observability_enabled: bool
+    requested_tickers: list[str]
+    normalized_tickers: list[str]
+    lookback_days: int
+    max_rows: int
+    artifact_count: int
+    by_ticker: dict[str, int]
+    by_artifact_type: dict[str, int]
+    by_skill_pack: dict[str, int]
+    by_confidence_or_trust_level: dict[str, int]
+    by_freshness_status: dict[str, int]
+    safe_for_decision_false_count: int
+    unexpected_safe_for_decision_true_count: int
+    forbidden_payload_violation_count: int
+    active_count: int
+    inactive_count: int
+    invalidated_count: int  # rows where invalidated_at IS NOT NULL
+    expired_count: int
+    artifacts_with_sources_count: int
+    artifacts_without_sources_count: int
+    artifacts_with_facts_count: int
+    artifacts_without_facts_count: int
+    missing_evidence_count: int  # artifacts with non-empty limitations_or_missing_evidence
+    visible_snapshot_unchanged: bool
+    errors: list[str] = field(default_factory=list)
+
+
+def _disabled_summary(
+    requested_tickers: list[str],
+    lookback_days: int,
+    max_rows: int,
+    reason: str,
+) -> ArtifactObservabilitySummary:
+    """Return a no-op summary when observability is disabled."""
+    return ArtifactObservabilitySummary(
+        observability_enabled=False,
+        requested_tickers=list(requested_tickers),
+        normalized_tickers=[],
+        lookback_days=lookback_days,
+        max_rows=max_rows,
+        artifact_count=0,
+        by_ticker={},
+        by_artifact_type={},
+        by_skill_pack={},
+        by_confidence_or_trust_level={},
+        by_freshness_status={},
+        safe_for_decision_false_count=0,
+        unexpected_safe_for_decision_true_count=0,
+        forbidden_payload_violation_count=0,
+        active_count=0,
+        inactive_count=0,
+        invalidated_count=0,
+        expired_count=0,
+        artifacts_with_sources_count=0,
+        artifacts_without_sources_count=0,
+        artifacts_with_facts_count=0,
+        artifacts_without_facts_count=0,
+        missing_evidence_count=0,
+        visible_snapshot_unchanged=True,
+        errors=[reason],
+    )
+
+
+def _safe_str_counter(rows: list[dict], key: str) -> dict[str, int]:
+    """Count occurrences of a string-valued column across rows."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        val = str(row.get(key) or "UNKNOWN")
+        counts[val] = counts.get(val, 0) + 1
+    return counts
+
+
+def summarize_recent_research_artifacts(
+    user_id: str,
+    db_client: Any,
+    tickers: Optional[list[str]] = None,
+    lookback_days: int = 30,
+    max_rows: int = 250,
+    settings: Optional[Settings] = None,
+) -> ArtifactObservabilitySummary:
+    """Read-only aggregate summary of recent research artifacts for a user.
+
+    Returns ArtifactObservabilitySummary regardless of outcome. Never raises.
+
+    Kill switch:
+        settings.intel_v3_research_artifact_observability_enabled must be True.
+
+    Args:
+        user_id:       User scope for artifact reads.
+        db_client:     Supabase-compatible client (real or fake in tests).
+        tickers:       Optional ticker filter. None or [] means all tickers.
+        lookback_days: Days back from now for the created_at window.
+        max_rows:      Row cap to avoid heavy scans.
+        settings:      Settings override; defaults to get_settings().
+    """
+    if settings is None:
+        settings = get_settings()
+
+    requested_tickers: list[str] = list(tickers or [])
+
+    if not settings.intel_v3_research_artifact_observability_enabled:
+        logger.debug("artifact_observability_skip reason=observability_flag_off")
+        return _disabled_summary(
+            requested_tickers,
+            lookback_days,
+            max_rows,
+            "intel_v3_research_artifact_observability_enabled=false",
+        )
+
+    normalized_tickers = list(
+        dict.fromkeys(t.upper().strip() for t in requested_tickers if t.strip())
+    )
+
+    errors: list[str] = []
+    artifact_rows: list[dict] = []
+
+    # ── Query research_artifacts ──────────────────────────────────────────────
+    try:
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=lookback_days)).isoformat()
+        query = (
+            db_client.table("research_artifacts")
+            .select(
+                "id,ticker,artifact_type,skill_pack,"
+                "confidence_or_trust_level,freshness_status,"
+                "safe_for_decision,is_active,created_at,expires_at,"
+                "invalidated_at,limitations_or_missing_evidence,payload"
+            )
+            .eq("user_id", user_id)
+            .gte("created_at", cutoff)
+            .order("created_at", desc=True)
+            .limit(max_rows)
+        )
+        if normalized_tickers:
+            query = query.in_("ticker", normalized_tickers)
+        result = query.execute()
+        artifact_rows = list(result.data or [])
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"artifact_query_error error={exc}")
+
+    now_utc = datetime.now(timezone.utc)
+
+    # ── Aggregate counters ────────────────────────────────────────────────────
+    artifact_count = len(artifact_rows)
+    by_ticker: dict[str, int] = {}
+    by_artifact_type: dict[str, int] = {}
+    by_skill_pack: dict[str, int] = {}
+    by_confidence: dict[str, int] = {}
+    by_freshness: dict[str, int] = {}
+    safe_for_decision_false_count = 0
+    unexpected_safe_for_decision_true_count = 0
+    forbidden_payload_violation_count = 0
+    active_count = 0
+    inactive_count = 0
+    invalidated_count = 0
+    expired_count = 0
+    missing_evidence_count = 0
+
+    for row in artifact_rows:
+        ticker = str(row.get("ticker") or "UNKNOWN")
+        by_ticker[ticker] = by_ticker.get(ticker, 0) + 1
+
+        atype = str(row.get("artifact_type") or "UNKNOWN")
+        by_artifact_type[atype] = by_artifact_type.get(atype, 0) + 1
+
+        sp = str(row.get("skill_pack") or "UNKNOWN")
+        by_skill_pack[sp] = by_skill_pack.get(sp, 0) + 1
+
+        ctl = str(row.get("confidence_or_trust_level") or "UNKNOWN")
+        by_confidence[ctl] = by_confidence.get(ctl, 0) + 1
+
+        fs = str(row.get("freshness_status") or "UNKNOWN")
+        by_freshness[fs] = by_freshness.get(fs, 0) + 1
+
+        sfd = row.get("safe_for_decision")
+        if sfd:
+            unexpected_safe_for_decision_true_count += 1
+        else:
+            safe_for_decision_false_count += 1
+
+        is_active = bool(row.get("is_active"))
+        if is_active:
+            active_count += 1
+        else:
+            inactive_count += 1
+
+        if row.get("invalidated_at") is not None:
+            invalidated_count += 1
+
+        expires_at_raw = row.get("expires_at")
+        if expires_at_raw:
+            try:
+                exp = datetime.fromisoformat(str(expires_at_raw).replace("Z", "+00:00"))
+                if exp.tzinfo is None:
+                    exp = exp.replace(tzinfo=timezone.utc)
+                if exp < now_utc:
+                    expired_count += 1
+            except Exception:  # noqa: BLE001
+                pass
+
+        limitations = row.get("limitations_or_missing_evidence")
+        if limitations:
+            try:
+                if isinstance(limitations, list) and len(limitations) > 0:
+                    missing_evidence_count += 1
+                elif isinstance(limitations, str) and limitations.strip() not in ("", "[]", "null"):
+                    missing_evidence_count += 1
+            except Exception:  # noqa: BLE001
+                pass
+
+        payload = row.get("payload")
+        if payload is not None:
+            try:
+                if isinstance(payload, dict):
+                    forbidden_key = _has_forbidden_key(payload)
+                    if forbidden_key is not None:
+                        forbidden_payload_violation_count += 1
+                        errors.append(
+                            f"forbidden_key_in_payload ticker={ticker} key={forbidden_key}"
+                        )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"forbidden_key_check_error ticker={ticker} error={exc}")
+
+    # ── Child table counts (sources / facts) ──────────────────────────────────
+    artifacts_with_sources_count = 0
+    artifacts_without_sources_count = artifact_count
+    artifacts_with_facts_count = 0
+    artifacts_without_facts_count = artifact_count
+
+    if artifact_rows:
+        artifact_ids = [str(r["id"]) for r in artifact_rows if r.get("id")]
+        if artifact_ids:
+            try:
+                src_result = (
+                    db_client.table("research_artifact_sources")
+                    .select("artifact_id")
+                    .eq("user_id", user_id)
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                src_rows = list(src_result.data or [])
+                ids_with_sources = {str(r["artifact_id"]) for r in src_rows if r.get("artifact_id")}
+                artifacts_with_sources_count = len(ids_with_sources)
+                artifacts_without_sources_count = artifact_count - artifacts_with_sources_count
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"sources_query_error error={exc}")
+
+            try:
+                fact_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("artifact_id")
+                    .eq("user_id", user_id)
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                fact_rows = list(fact_result.data or [])
+                ids_with_facts = {str(r["artifact_id"]) for r in fact_rows if r.get("artifact_id")}
+                artifacts_with_facts_count = len(ids_with_facts)
+                artifacts_without_facts_count = artifact_count - artifacts_with_facts_count
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"facts_query_error error={exc}")
+
+    summary = ArtifactObservabilitySummary(
+        observability_enabled=True,
+        requested_tickers=requested_tickers,
+        normalized_tickers=normalized_tickers,
+        lookback_days=lookback_days,
+        max_rows=max_rows,
+        artifact_count=artifact_count,
+        by_ticker=by_ticker,
+        by_artifact_type=by_artifact_type,
+        by_skill_pack=by_skill_pack,
+        by_confidence_or_trust_level=by_confidence,
+        by_freshness_status=by_freshness,
+        safe_for_decision_false_count=safe_for_decision_false_count,
+        unexpected_safe_for_decision_true_count=unexpected_safe_for_decision_true_count,
+        forbidden_payload_violation_count=forbidden_payload_violation_count,
+        active_count=active_count,
+        inactive_count=inactive_count,
+        invalidated_count=invalidated_count,
+        expired_count=expired_count,
+        artifacts_with_sources_count=artifacts_with_sources_count,
+        artifacts_without_sources_count=artifacts_without_sources_count,
+        artifacts_with_facts_count=artifacts_with_facts_count,
+        artifacts_without_facts_count=artifacts_without_facts_count,
+        missing_evidence_count=missing_evidence_count,
+        # Structural guarantee: this function never writes to intel_v3_snapshots.
+        visible_snapshot_unchanged=True,
+        errors=errors,
+    )
+
+    if settings.intel_v3_research_artifact_observability_info_logs_enabled:
+        logger.info(
+            "artifact_observability_complete "
+            "artifact_count=%d active=%d inactive=%d expired=%d "
+            "safe_for_decision_false=%d unexpected_safe_true=%d "
+            "forbidden_payload_violations=%d missing_evidence=%d "
+            "with_sources=%d with_facts=%d visible_snapshot_unchanged=%s",
+            summary.artifact_count,
+            summary.active_count,
+            summary.inactive_count,
+            summary.expired_count,
+            summary.safe_for_decision_false_count,
+            summary.unexpected_safe_for_decision_true_count,
+            summary.forbidden_payload_violation_count,
+            summary.missing_evidence_count,
+            summary.artifacts_with_sources_count,
+            summary.artifacts_with_facts_count,
+            summary.visible_snapshot_unchanged,
+        )
+
+    return summary

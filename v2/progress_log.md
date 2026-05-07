@@ -1,4 +1,16 @@
 
+## 2026-05-07 — Phase 4: Shadow-Only Research Artifact Observability (Level 2)
+
+- Phase 4 adds a read-only diagnostics lane over existing research artifacts. Artifacts remain `safe_for_decision=false`. No visible decision drift. No agents, LLM calls, or providers added.
+- New service: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`. `summarize_recent_research_artifacts()` reads `research_artifacts`, `research_artifact_sources`, and `research_artifact_facts` — read-only, no writes. Returns `ArtifactObservabilitySummary` with: artifact_count, by_ticker/type/skill_pack/trust/freshness, safe_for_decision_false_count, unexpected_safe_for_decision_true_count, forbidden_payload_violation_count, active/inactive/expired counts, sources/facts presence, missing_evidence_count, visible_snapshot_unchanged=True, errors.
+- New endpoint: `POST /api/v1/diagnostics/finance-intel/research-artifacts/observe` in diagnostics router. Reuses existing `_get_runtime_cert_user` runtime-cert auth pattern. Returns 403 if observability flag is off. Caps tickers=10, lookback_days∈[1,365], max_rows∈[1,1000]. Never returns raw payloads, source URLs, quotes, or raw DB rows.
+- Two new config flags (both default False): `INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED`, `INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_INFO_LOGS_ENABLED`. Independent of Phase 3/3.5 worker/validation flags.
+- Reuses `_has_forbidden_key()` from `contracts.py` for read-only forbidden key counting.
+- Tests: Phase 4 service: 58/58. Phase 4 endpoint: 30/30. Combined all phases: 329/329.
+- No SQL migration. No frontend changes. No visible Intel v3 action/copy changes. No decide() change. No providers/LLM. No artifact-to-decision integration. safe_for_decision remains False.
+- Production validation: set `INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED=true`, call endpoint for AAPL/MSFT/NVDA, confirm artifact_count≥3, safe_for_decision_false_count==artifact_count, unexpected_safe_true==0, forbidden_payload_violation_count==0, visible_snapshot_unchanged==true.
+- Next: Phase 5 truth adapter planning only after Phase 4 production logs validate artifact availability and quality.
+
 ## 2026-05-07 — Phase 3.7: Fix Real Supabase Artifact Writer Idempotency (Level 1)
 
 - Phase 3.7 fixes the production 42P10 error that blocked all Phase 3.6 writes. Root cause: `_upsert_artifact()` called `.upsert(on_conflict="replay_idempotency_key")` but migration 017 created that as a partial unique index (`WHERE is_active = TRUE`); PostgREST cannot use a partial index as an ON CONFLICT target.

@@ -86,6 +86,13 @@ class Settings(BaseSettings):
     # When True, logs structured INFO per validation run (aggregate only, no payloads).
     intel_v3_research_worker_validation_info_logs_enabled: bool = False
 
+    # ── Intel v3 Artifact Observability (Phase 4) — off by default ───────────
+    # Read-only diagnostics lane: aggregate counters only, zero decision drift.
+    # Independent of Phase 3/3.5 worker/validation flags — controlled solely here.
+    intel_v3_research_artifact_observability_enabled: bool = False
+    # When True, logs one structured INFO line per observability call (aggregates only).
+    intel_v3_research_artifact_observability_info_logs_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

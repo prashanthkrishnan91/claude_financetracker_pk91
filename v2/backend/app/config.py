@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     finance_runtime_cert_user_id: Optional[str] = None
     finance_runtime_cert_user_email: Optional[str] = None
 
+    # ── Intel v3 Research Workers (Phase 3) — dark-run, off by default ────────
+    # Kill switch: if False, no research worker of any kind runs.
+    intel_v3_research_workers_enabled: bool = False
+    # Per-worker flag: Earnings Reviewer scaffold.
+    intel_v3_earnings_reviewer_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

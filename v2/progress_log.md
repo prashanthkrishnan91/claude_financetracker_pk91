@@ -1,4 +1,16 @@
 
+## 2026-05-07 — Phase 3: Earnings Reviewer Dark-Run Scaffold (Level 2)
+
+- Phase 0, 0.5, 1, 2, and 2.1 closed and certified. Phase 2.1 migration applied in Supabase with PL/pgSQL hotfix.
+- New module: `v2/backend/app/services/intelligence/research_workers/` — contracts, earnings_reviewer, artifact_store_writer, runner, __init__.
+- Earnings Reviewer dark-run scaffold: one `catalyst_window` artifact per ticker, no external provider, records intended/found/missing fields from holding_context, `confidence_or_trust_level=UNKNOWN`, `freshness_status=UNKNOWN`.
+- Two new config flags (both default False): `INTEL_V3_RESEARCH_WORKERS_ENABLED`, `INTEL_V3_EARNINGS_REVIEWER_ENABLED`. Both must be True for any write to occur.
+- Artifact store writer: idempotent upsert on `replay_idempotency_key`, `safe_for_decision=False` hard-coded, DB errors caught and logged, failure audit event recorded without raising.
+- `validate_payload()` and `_has_forbidden_key()` in contracts.py mirror the DB trigger forbidden-key logic in Python — rejects final_action, buy, sell, trim, hold, final_conviction, final_allocation, deploy_amount, deploy_dollar, deploy_shares at any nesting depth, case-insensitive.
+- Tests: `test_intel_v3_phase3_research_workers.py` — 10 acceptance criteria, FakeSupabaseClient (no production DB), covers disabled-by-default, flag gates, write isolation, safe_for_decision=False, no forbidden keys, no decide() dependency, static source guards, no legacy aggregation, failure safety.
+- No `decide()` change. No `IntelV3Service` change. No certification detector change. No frontend change. No SQL migration. No new provider.
+- Next: Phase 4 — validate dark-run writes in staging, then shadow-diagnostics adapter.
+
 ## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Trigger Hotfix (Level 1, SQL Docs Only)
 
 - Migration 017_research_artifact_store_v1.sql applied in Supabase. Schema checks A/B/C/D passed. Trigger validation failed: `ERROR: jsonpath item method .keyvalue() can only be applied to an object`. Recursive CTE fallback also rejected by Postgres (`ERROR: 42P19`).

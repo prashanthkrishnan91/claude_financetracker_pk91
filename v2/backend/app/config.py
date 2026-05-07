@@ -112,6 +112,15 @@ class Settings(BaseSettings):
     # Dry-run only — safe_for_decision remains False. No visible snapshot change.
     intel_v3_sec_metric_truth_adapter_dry_run_enabled: bool = False
 
+    # ── Intel v3 Phase 8B — SEC Metric Evidence Snapshot Dry Run (off by default) ──
+    # When True, converts Phase 8A bucket counts into a per-ticker diagnostic
+    # contract: present/missing buckets, bucket-group coverage, future-adapter
+    # readiness level, and blocking reason codes (aggregate only — no raw values,
+    # no ratios, no decision consumption).
+    # Requires intel_v3_sec_metric_truth_adapter_dry_run_enabled to also be True.
+    # Dry-run only — safe_for_decision remains False. No visible snapshot change.
+    intel_v3_sec_metric_evidence_snapshot_dry_run_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

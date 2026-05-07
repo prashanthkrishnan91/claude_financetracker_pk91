@@ -33,6 +33,7 @@ logger = logging.getLogger(__name__)
 from app.config import Settings, get_settings
 from .artifact_truth_readiness import evaluate_artifact_truth_readiness
 from .contracts import _has_forbidden_key
+from .sec_metric_evidence_snapshot_dry_run import run_sec_metric_evidence_snapshot_dry_run
 from .sec_metric_truth_adapter_dry_run import run_sec_metric_truth_adapter_dry_run
 
 
@@ -104,6 +105,17 @@ class ArtifactObservabilitySummary:
     sec_metric_truth_adapter_by_form: dict[str, int] = field(default_factory=dict)
     sec_metric_truth_adapter_missing_buckets_by_ticker: dict[str, list] = field(default_factory=dict)
     sec_metric_truth_adapter_visible_snapshot_unchanged: bool = True
+    # Phase 8B: SEC metric evidence snapshot dry-run (all default off/0/{} — backward-compatible).
+    # Per-ticker diagnostic contract: present/missing buckets, group coverage, readiness, blockers.
+    # snapshot_safe_for_decision is always False; visible_snapshot_unchanged always True.
+    sec_metric_evidence_snapshot_dry_run_enabled: bool = False
+    sec_metric_evidence_snapshot_safe_for_decision: bool = False
+    sec_metric_evidence_snapshot_visible_snapshot_unchanged: bool = True
+    sec_metric_evidence_snapshot_tickers_evaluated_count: int = 0
+    sec_metric_evidence_snapshot_tickers_with_any_source_linked_evidence_count: int = 0
+    sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count: int = 0
+    sec_metric_evidence_snapshot_tickers_blocked_from_decision_count: int = 0
+    sec_metric_evidence_snapshot_by_ticker: dict[str, dict] = field(default_factory=dict)
 
 
 def _disabled_summary(
@@ -485,6 +497,25 @@ def summarize_recent_research_artifacts(
         except Exception as exc:  # noqa: BLE001
             errors.append(f"sec_metric_dry_run_error error={exc}")
 
+    # ── Phase 8B: SEC metric evidence snapshot dry-run ────────────────────────
+    # Converts Phase 8A bucket counts into a per-ticker diagnostic contract.
+    # Reuses Phase 8A result and already-fetched fact data — no DB re-query.
+    # Kill switch: settings.intel_v3_sec_metric_evidence_snapshot_dry_run_enabled.
+    # Requires dry_run_result (Phase 8A) to be non-None to proceed.
+    snapshot_result = None
+    if (
+        settings.intel_v3_sec_metric_evidence_snapshot_dry_run_enabled
+        and dry_run_result is not None
+    ):
+        try:
+            snapshot_result = run_sec_metric_evidence_snapshot_dry_run(
+                adapter_result=dry_run_result,
+                artifact_rows=artifact_rows,
+                facts_by_artifact=readiness_facts_by_artifact,
+            )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"sec_metric_evidence_snapshot_error error={exc}")
+
     summary = ArtifactObservabilitySummary(
         observability_enabled=True,
         requested_tickers=requested_tickers,
@@ -561,6 +592,25 @@ def summarize_recent_research_artifacts(
             dry_run_result.missing_buckets_by_ticker if dry_run_result else {}
         ),
         sec_metric_truth_adapter_visible_snapshot_unchanged=True,
+        # Phase 8B: SEC metric evidence snapshot dry-run fields.
+        sec_metric_evidence_snapshot_dry_run_enabled=snapshot_result is not None,
+        sec_metric_evidence_snapshot_safe_for_decision=False,
+        sec_metric_evidence_snapshot_visible_snapshot_unchanged=True,
+        sec_metric_evidence_snapshot_tickers_evaluated_count=(
+            snapshot_result.tickers_evaluated_count if snapshot_result else 0
+        ),
+        sec_metric_evidence_snapshot_tickers_with_any_source_linked_evidence_count=(
+            snapshot_result.tickers_with_any_source_linked_evidence_count if snapshot_result else 0
+        ),
+        sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count=(
+            snapshot_result.tickers_ready_for_future_adapter_count if snapshot_result else 0
+        ),
+        sec_metric_evidence_snapshot_tickers_blocked_from_decision_count=(
+            snapshot_result.tickers_blocked_from_decision_count if snapshot_result else 0
+        ),
+        sec_metric_evidence_snapshot_by_ticker=(
+            snapshot_result.by_ticker if snapshot_result else {}
+        ),
     )
 
     if settings.intel_v3_research_artifact_observability_info_logs_enabled:

@@ -479,4 +479,15 @@ async def observe_research_artifacts(
         "sec_metric_truth_adapter_by_form": obs.sec_metric_truth_adapter_by_form,
         "sec_metric_truth_adapter_missing_buckets_by_ticker": obs.sec_metric_truth_adapter_missing_buckets_by_ticker,
         "sec_metric_truth_adapter_visible_snapshot_unchanged": obs.sec_metric_truth_adapter_visible_snapshot_unchanged,
+        # Phase 8B: SEC metric evidence snapshot dry-run — per-ticker diagnostic contract.
+        # snapshot_safe_for_decision is always False; visible_snapshot_unchanged always True.
+        # by_ticker is aggregate-only: no raw metric values, no structured_payload, no source URLs.
+        "sec_metric_evidence_snapshot_dry_run_enabled": obs.sec_metric_evidence_snapshot_dry_run_enabled,
+        "sec_metric_evidence_snapshot_safe_for_decision": obs.sec_metric_evidence_snapshot_safe_for_decision,
+        "sec_metric_evidence_snapshot_visible_snapshot_unchanged": obs.sec_metric_evidence_snapshot_visible_snapshot_unchanged,
+        "sec_metric_evidence_snapshot_tickers_evaluated_count": obs.sec_metric_evidence_snapshot_tickers_evaluated_count,
+        "sec_metric_evidence_snapshot_tickers_with_any_source_linked_evidence_count": obs.sec_metric_evidence_snapshot_tickers_with_any_source_linked_evidence_count,
+        "sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count": obs.sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count,
+        "sec_metric_evidence_snapshot_tickers_blocked_from_decision_count": obs.sec_metric_evidence_snapshot_tickers_blocked_from_decision_count,
+        "sec_metric_evidence_snapshot_by_ticker": obs.sec_metric_evidence_snapshot_by_ticker,
     }

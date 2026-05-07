@@ -1,4 +1,76 @@
 
+## 2026-05-07 — Phase 5 Hardening: Contract Strengthening Pass (Level 2)
+
+### Status
+Phase 5 initial contract strengthened in three areas before merge. No scope change — still backend-only, pure/read-only, no artifact consumption, no visible decision change.
+
+### Changes from hardening pass
+1. **Explicit fact source linkage required** — every valid fact must now have a non-empty `source_id` that matches a valid source's DB `id`. `source_id=None` is no longer accepted for truth-adapter eligibility. New reason codes: `fact_missing_source_link`, `fact_source_not_found`.
+2. **Stricter valid source definition** — a source must have non-empty `source_kind` + `provider_name` + at least one provenance handle (`source_url`, `source_id`, `source_hash`, or `section_reference`). Sources with all-empty/null provenance handles are excluded.
+3. **Fail closed on `safe_for_decision=True`** — if this field unexpectedly arrives as `True` (impossible under Phase 2.1 DB CHECK but defensive), the artifact is rejected with `unexpected_safe_for_decision_true`. `eligible_for_decision_consumption` and `safe_for_decision_db_promotion_blocked` remain always False/True.
+4. **Phase 6 renamed** to "Evidence Population + Grounding Upgrade" in all docs — explicitly NOT artifact consumption; it only adds provider-backed sources and grounded facts so artifacts can pass Phase 5 readiness.
+
+### Test results after hardening
+- Phase 5: 125/125 ✓ (+21 new hardening tests: H1/H2 fact linkage, H3/H4 source provenance, H5 safe_for_decision guard)
+- Combined service-layer (Ph3+3.5+3.7+4+5): 344/344 ✓
+
+---
+
+## 2026-05-07 — Phase 5: Truth Adapter Readiness Contract (Level 2)
+
+### Status
+Phases 0 through 4 are closed and certified. Phase 5 defines the backend-only safety contract that future research artifacts must satisfy before deterministic Intel v3 policy can ever consume them. No artifacts are consumed. No visible decisions change. safe_for_decision remains DB-hard-locked false.
+
+### What this PR adds
+- New service: `v2/backend/app/services/intelligence/research_workers/artifact_truth_readiness.py`
+  - `ArtifactReadinessResult` dataclass — compact fail-closed readiness result.
+  - `evaluate_artifact_truth_readiness(artifact, sources, facts)` — pure, read-only, deterministic evaluator. No DB calls. Never raises. Returns ineligible on any exception.
+  - 12 readiness conditions: active, not invalidated, not expired, supported type/pack, known confidence, known freshness, ≥1 valid source, ≥1 valid fact, source-grounded facts, no forbidden payload keys, DB promotion explicitly blocked.
+  - `SUPPORTED_ARTIFACT_TYPES = {"catalyst_window"}`, `SUPPORTED_SKILL_PACKS = {"earnings_reviewer"}` — registered workers only.
+  - `VALID_CONFIDENCE_LEVELS = {"HIGH","MEDIUM","LOW"}`, `VALID_FRESHNESS_STATUSES = {"FRESH","STALE"}` — UNKNOWN fails.
+  - `eligible_for_decision_consumption` always False (Phase 5 invariant).
+  - `fail_closed`, `safe_for_decision_db_promotion_blocked` always True.
+  - Reuses `_has_forbidden_key()` from `contracts.py` for payload validation.
+- Updated `v2/backend/app/services/intelligence/research_workers/__init__.py` — exports `ArtifactReadinessResult` and `evaluate_artifact_truth_readiness`.
+- New test file: `v2/backend/tests/test_intel_v3_phase5_truth_adapter_readiness.py` — 104 tests, 15 acceptance criteria.
+- New spec doc: `docs/ai/INTEL_V3_TRUTH_ADAPTER_READINESS_CONTRACT.md` — contract definition, Phase 4 artifact status, 12 conditions, 7-item prerequisite gate for future consumption.
+
+### Current Production Artifact Status
+All Phase 4 production artifacts remain **excluded** by the readiness contract:
+- `confidence_or_trust_level=UNKNOWN` → fails condition 4
+- `freshness_status=UNKNOWN` → fails condition 5
+- zero sources → fails condition 6
+
+### Phase 5 Architecture Invariants
+- `decide()` in `decision_policy_v1.py` unchanged. Not imported by artifact_truth_readiness.py.
+- No artifact is fed into the visible decision path.
+- `safe_for_decision` remains False — DB-level CHECK constraint unchanged.
+- `visible_snapshot_unchanged` is structural (no writes to intel_v3_snapshots).
+- No SQL migration. No new external provider. No new LLM calls. No frontend changes.
+- No artifact-to-decision integration. No agents. No multi-agent framework.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/artifact_truth_readiness.py` — NEW
+- `v2/backend/app/services/intelligence/research_workers/__init__.py` — exports updated
+- `v2/backend/tests/test_intel_v3_phase5_truth_adapter_readiness.py` — NEW (104 tests)
+- `docs/ai/INTEL_V3_TRUTH_ADAPTER_READINESS_CONTRACT.md` — NEW
+- `docs/ai/HANDOFF.md` — this entry
+- `v2/progress_log.md` — Phase 5 entry
+
+### Test results
+- Phase 5 readiness contract: 104/104 ✓
+- Phase 3 research workers: 85/85 ✓
+- Phase 3.5 validation harness: 57/57 ✓
+- Phase 3.7 idempotency: 16/16 ✓
+- Phase 4 artifact observability: 58/58 ✓
+- Combined (service-layer, no supabase dep): 323/323 ✓
+- Phase 3.6/4-endpoint tests: not runnable in this environment (missing supabase dep — pre-existing, unrelated to Phase 5)
+
+### Next recommended phase
+Phase 6 — Truth Adapter: after production Phase 4 logs validate artifact availability, implement provider-backed sources + fact grounding so artifacts can pass the Phase 5 readiness contract, then design the deterministic adapter that maps validated facts into allowed decision evidence fields. Prerequisites: see `docs/ai/INTEL_V3_TRUTH_ADAPTER_READINESS_CONTRACT.md` §Prerequisite Gate.
+
+---
+
 ## 2026-05-07 — Phase 4: Shadow-Only Research Artifact Observability (Level 2)
 
 ### Status

@@ -394,9 +394,11 @@ def compute_coverage_expansion(
     Kill switch:
         settings.intel_v3_sec_metric_portfolio_coverage_expansion_enabled must be True.
 
-    Additional flags required for writes (dry_run=false):
+    Additional flags required for writes (dry_run=false) — all four must be met:
         settings.intel_v3_research_workers_enabled must be True.
         settings.intel_v3_earnings_reviewer_enabled must be True.
+        settings.intel_v3_earnings_reviewer_sec_enabled must be True.
+        settings.sec_edgar_user_agent must be non-empty.
 
     Never:
         - Imports or calls decide() / decision_policy_v1.
@@ -528,7 +530,43 @@ def _compute(
             errors=errors,
         )
 
-    # ── Step 5: dry_run=false — call existing SEC artifact writer per ticker ───
+    # ── Step 5: dry_run=false — SEC write-mode safety gate ────────────────────
+    # All four prerequisites must be met before any write proceeds.
+    # dry_run=true never reaches this block so SEC flags are not required there.
+    gate_errors: list[str] = []
+    if not getattr(settings, "intel_v3_research_workers_enabled", False):
+        gate_errors.append("intel_v3_research_workers_enabled=false")
+    if not getattr(settings, "intel_v3_earnings_reviewer_enabled", False):
+        gate_errors.append("intel_v3_earnings_reviewer_enabled=false")
+    if not getattr(settings, "intel_v3_earnings_reviewer_sec_enabled", False):
+        gate_errors.append("intel_v3_earnings_reviewer_sec_enabled=false")
+    if not (getattr(settings, "sec_edgar_user_agent", None) or "").strip():
+        gate_errors.append("sec_edgar_user_agent_missing")
+
+    if gate_errors:
+        return CoverageExpansionResult(
+            coverage_expansion_enabled=True,
+            dry_run=False,
+            safe_for_decision=False,
+            visible_snapshot_unchanged=True,
+            portfolio_ticker_count=len(portfolio_tickers),
+            candidate_count=len(selected_tickers),
+            selected_tickers=selected_tickers,
+            skipped_tickers_by_reason=skipped_by_reason,
+            attempted_count=0,
+            written_count=0,
+            skipped_count=skipped_count,
+            failed_count=0,
+            artifact_ids=[],
+            safe_for_decision_false_count=0,
+            unexpected_safe_for_decision_true_count=0,
+            forbidden_payload_violation_count=0,
+            before_coverage_summary=before_summary,
+            after_coverage_summary=None,
+            errors=errors + gate_errors,
+        )
+
+    # ── Step 6: dry_run=false — call existing SEC artifact writer per ticker ───
     from .runner import run_earnings_reviewer_dark
 
     artifact_ids: list[str] = []
@@ -567,7 +605,7 @@ def _compute(
             failed_count += 1
             errors.append(f"coverage_expansion_write_error ticker={ticker} error={exc}")
 
-    # ── Step 6: Compute after_coverage_summary if any writes succeeded ─────────
+    # ── Step 7: Compute after_coverage_summary if any writes succeeded ─────────
     after_summary: Optional[dict] = None
     if written_count > 0:
         try:

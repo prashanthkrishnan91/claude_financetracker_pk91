@@ -1,4 +1,52 @@
 
+## 2026-05-07 — Phase 8E.1: SEC Coverage Expansion Write-Mode Safety Gate (Level 2 hotfix)
+
+### Status
+Phase 8E.1 hotfix complete. SEC write-mode safety gate added to `compute_coverage_expansion`. `dry_run=false` now fails safely with clear operator error codes unless all four prerequisites are met. `dry_run=true` unchanged — does not require SEC flags. All Phase 8A–8E invariants preserved.
+
+### Root cause / gap addressed
+Phase 8E was merged with only two write-mode guards (`intel_v3_research_workers_enabled` + `intel_v3_earnings_reviewer_enabled`). The underlying runner `run_earnings_reviewer_dark()` only attempts SEC CompanyFacts when `intel_v3_earnings_reviewer_sec_enabled=true` and `sec_edgar_user_agent` is non-empty. Without those, it could fall back to scaffold/non-SEC artifacts — adding noise without expanding SEC metric coverage.
+
+### What this phase adds
+In `_compute()`, before the write loop (Step 6), a safety gate checks all four `dry_run=false` prerequisites and returns an aggregate-safe result with clear operator error codes if any are missing.
+
+**`dry_run=false` requires all four (unchanged for `dry_run=true`):**
+- `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`
+- `INTEL_V3_EARNINGS_REVIEWER_ENABLED=true`
+- `INTEL_V3_EARNINGS_REVIEWER_SEC_ENABLED=true`
+- `SEC_EDGAR_USER_AGENT` non-empty
+
+**Gate failure returns:**
+- `attempted_count=0`, `written_count=0`, `failed_count=0`, `artifact_ids=[]`
+- `safe_for_decision=false`, `visible_snapshot_unchanged=true`
+- `selected_tickers` still shows candidates that would have run
+- `errors` contains operator-safe reason codes for each missing prerequisite
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_coverage_expansion.py` — SEC write-mode safety gate in `_compute()`, updated docstring
+- `v2/backend/tests/test_intel_v3_phase8e_portfolio_sec_coverage_expansion.py` — 6 new AC20–25 tests; updated AC2 to use all four prerequisites
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 8E (including 8E.1): **33/33** ✓ (6 new)
+- Phase 8D: **73/73** ✓
+- Phase 8C: **74/74** ✓
+- Phase 8B: **80/80** ✓
+- Phase 8A: **71/71** ✓
+- Total: **331 passed**
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — remains DB-hard-locked False.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL changes.
+- `dry_run=true` still works without SEC flags.
+- `dry_run=false` cannot write non-SEC scaffold artifacts when SEC flags are missing.
+
+### Next: Phase 8F
+
+---
+
 ## 2026-05-07 — Phase 8E: Portfolio SEC Coverage Expansion Dry Run (Level 2)
 
 ### Status

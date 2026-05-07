@@ -43,6 +43,8 @@ from dataclasses import dataclass, field
 # Maps SEC XBRL us-gaap tag → internal evidence bucket name.
 # Only the listed tags are mapped; all others count as unmapped.
 # Do not add aliases, inferred tags, or computed tags here — only direct mappings.
+SEC_METRIC_TRUTH_ADAPTER_DRY_RUN_CONTRACT_VERSION = "phase8a_v1"
+
 SEC_METRIC_BUCKET_MAP: dict[str, str] = {
     "Revenues": "revenue",
     "RevenueFromContractWithCustomerExcludingAssessedTax": "revenue",

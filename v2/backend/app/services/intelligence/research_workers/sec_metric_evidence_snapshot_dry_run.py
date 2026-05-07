@@ -37,6 +37,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
+SEC_METRIC_EVIDENCE_SNAPSHOT_DRY_RUN_CONTRACT_VERSION = "phase8b_v1"
+
 from .sec_metric_truth_adapter_dry_run import (
     EXPECTED_BUCKETS,
     SEC_METRIC_BUCKET_MAP,

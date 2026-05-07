@@ -126,6 +126,13 @@ class FakeSupabaseClient:
             + self.tables["intel_v3_snapshots"].upserts
         )
 
+    def get_written_tables(self) -> list[str]:
+        """Return names of tables that actually received inserts or upserts."""
+        return sorted(
+            name for name, state in self.tables.items()
+            if state.inserts or state.upserts
+        )
+
 
 # ── Settings helpers ──────────────────────────────────────────────────────────
 
@@ -564,6 +571,47 @@ class TestCompactSummaryFields:
         assert "research_artifacts" in result.tables_touched
         assert "worker_audit_events" in result.tables_touched
 
+    def test_tables_touched_excludes_sources_when_worker_has_no_sources(self) -> None:
+        """Phase 3 Earnings Reviewer produces sources=[] so research_artifact_sources
+        must NOT appear in tables_touched — the harness must not overstate writes."""
+        client = FakeSupabaseClient()
+        result = run_validation(
+            tickers=["AAPL"],
+            user_id=str(uuid.uuid4()),
+            db_client=client,
+            settings=_all_on(),
+        )
+        assert "research_artifact_sources" not in result.tables_touched, (
+            "research_artifact_sources must not appear when worker produced no sources"
+        )
+
+    def test_tables_touched_empty_for_unobservable_client(self) -> None:
+        """When db_client has no get_written_tables(), tables_touched is [] (truthful)."""
+        class PlainFakeClient:
+            """A minimal fake client without get_written_tables() — simulates real Supabase."""
+            def __init__(self):
+                self._tables: dict[str, _TableState] = {
+                    "research_artifacts": _TableState(),
+                    "research_artifact_sources": _TableState(),
+                    "research_artifact_facts": _TableState(),
+                    "worker_audit_events": _TableState(),
+                }
+            def table(self, name: str) -> FakeTableQuery:
+                state = self._tables.setdefault(name, _TableState())
+                return FakeTableQuery(state)
+
+        result = run_validation(
+            tickers=["AAPL"],
+            user_id=str(uuid.uuid4()),
+            db_client=PlainFakeClient(),
+            settings=_all_on(),
+        )
+        assert result.tables_touched == [], (
+            "tables_touched must be [] when client does not support write observation"
+        )
+        # Writes still happen — just not observable via tables_touched.
+        assert result.written_count == 1
+
     def test_tables_touched_empty_when_nothing_written(self) -> None:
         client = FakeSupabaseClient()
         result = run_validation(
@@ -641,22 +689,26 @@ class TestNoForbiddenPayloadKeys:
         )
         assert result.forbidden_payload_violation_count == 0
 
-    def test_inspection_detects_forbidden_key_in_injected_worker(self) -> None:
-        """If a worker produces a forbidden key, forbidden_payload_violation_count > 0."""
+    def test_inspection_detects_forbidden_key_rejects_ticker(self) -> None:
+        """If a worker produces a forbidden key:
+        - forbidden_payload_violation_count == 1
+        - written_count == 0 (ticker is not written)
+        - failed_count == 1
+        - no artifact upsert in the fake client
+        - an error entry is present
+        """
         from unittest.mock import patch
         from app.services.intelligence.research_workers import earnings_reviewer
-        from app.services.intelligence.research_workers.contracts import WorkerInput, WorkerOutput, AuditEventRecord, FactRecord
+        from app.services.intelligence.research_workers.contracts import WorkerInput, WorkerOutput
 
         original_run = earnings_reviewer.run
 
         def _bad_run(worker_input: WorkerInput) -> WorkerOutput:
             out = original_run(worker_input)
-            bad_payload = dict(out.artifact_payload)
-            bad_payload["final_action"] = "BUY"  # Inject forbidden key
-            # Need to bypass validation — we're testing the harness detects it
-            # Use object.__setattr__ since __post_init__ validates on construction
             import copy
             bad_out = copy.copy(out)
+            bad_payload = dict(out.artifact_payload)
+            bad_payload["final_action"] = "BUY"  # Inject forbidden key
             object.__setattr__(bad_out, "artifact_payload", bad_payload)
             return bad_out
 
@@ -672,6 +724,10 @@ class TestNoForbiddenPayloadKeys:
                 settings=_all_on(),
             )
         assert result.forbidden_payload_violation_count == 1
+        assert result.written_count == 0, "Ticker with forbidden key must not be written"
+        assert result.failed_count == 1
+        assert client.artifact_inserts() == [], "No artifact upsert for rejected ticker"
+        assert any("forbidden_key_in_payload" in e for e in result.errors)
 
 
 # ── Criterion 11: does not import or call decide() ───────────────────────────

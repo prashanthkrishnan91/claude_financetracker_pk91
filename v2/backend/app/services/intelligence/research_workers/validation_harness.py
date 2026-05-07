@@ -41,14 +41,6 @@ from .runner import run_earnings_reviewer_dark
 
 MAX_TICKERS_PER_RUN: int = 5
 
-# Tables the writer always touches on a successful write (structural — not runtime-probed).
-_WRITER_TABLES = [
-    "research_artifacts",
-    "research_artifact_sources",
-    "research_artifact_facts",
-    "worker_audit_events",
-]
-
 
 @dataclass
 class ValidationSummary:
@@ -177,6 +169,8 @@ def run_validation(
     # inspect WorkerOutput.artifact_payload before the write. The runner also
     # calls earnings_reviewer.run() internally — the duplication is acceptable
     # for a capped validation harness (max 5 tickers, no IO).
+    # Tickers that fail inspection are tracked and skipped in the write phase.
+    tickers_rejected: set[str] = set()
     for ticker in capped:
         try:
             inspection_input = WorkerInput(
@@ -188,6 +182,8 @@ def run_validation(
             forbidden_key = _has_forbidden_key(inspection_output.artifact_payload)
             if forbidden_key is not None:
                 forbidden_payload_violation_count += 1
+                failed_count += 1
+                tickers_rejected.add(ticker)
                 errors.append(
                     f"forbidden_key_in_payload ticker={ticker} key={forbidden_key}"
                 )
@@ -195,7 +191,10 @@ def run_validation(
             errors.append(f"inspection_error ticker={ticker} error={exc}")
 
     # ── Write phase: run the existing Phase 3 runner ──────────────────────────
+    # Tickers rejected during inspection are not written.
     for ticker in capped:
+        if ticker in tickers_rejected:
+            continue
         try:
             artifact_id = run_earnings_reviewer_dark(
                 user_id=user_id,
@@ -215,9 +214,15 @@ def run_validation(
             failed_count += 1
             errors.append(f"write_error ticker={ticker} error={exc}")
 
-    # tables_touched is a structural inference: if any write succeeded, the
-    # writer always touches all four artifact tables.
-    tables_touched = list(_WRITER_TABLES) if written_count > 0 else []
+    # ── tables_touched: derive from actual observed writes if client supports it.
+    # Uses duck-typing: if db_client exposes get_written_tables(), call it for
+    # truth. Real Supabase clients do not implement this — returns [] there,
+    # which is safe and honest. FakeSupabaseClient in tests implements it so
+    # tests can verify exactly which tables received rows.
+    if hasattr(db_client, "get_written_tables"):
+        tables_touched = db_client.get_written_tables()
+    else:
+        tables_touched = []
 
     summary = ValidationSummary(
         validation_enabled=True,

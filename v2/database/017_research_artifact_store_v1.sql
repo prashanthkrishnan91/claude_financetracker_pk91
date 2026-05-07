@@ -31,7 +31,10 @@
 --      research_artifact_facts (inside shared trigger) are both covered.
 --   5. worker_audit_events user_id consistency trigger ADDED for non-null artifact_id
 --      rows (missing from Phase 2 draft — now addressed, see §5b below).
---   6. safe_for_decision defaults FALSE; comment and spec §6 forbid worker modification.
+--   6. safe_for_decision: defaults FALSE + DB-level CHECK constraint
+--      (research_artifacts_safe_for_decision_phase2_chk) hard-locks it FALSE in
+--      Phase 2.1. Workers cannot set it TRUE at all. The Phase 4/5 truth-adapter
+--      migration must explicitly DROP this constraint before allowing TRUE.
 --   7. No forbidden decision columns or payload keys (final_action, buy/sell/trim/hold,
 --      final_conviction, final_allocation, deploy_amount, deploy_dollar, deploy_shares).
 --   8. No FK coupling to legacy agent_runs, agent_insights, recommendations, or
@@ -39,6 +42,9 @@
 --   9. Indexes support future read paths without over-indexing. Phase 4 may add
 --      additional indexes when hot-path patterns are confirmed.
 --  10. Migration is additive; no existing tables are modified.
+--  11. research_artifact_facts.source_id, when non-null, is DB-verified to belong
+--      to the same artifact_id and user_id (trigger §5, facts branch). Cross-artifact
+--      citation smuggling is blocked at write time.
 --
 -- Manual apply (AFTER merge, with explicit approval only):
 --   1. Open Supabase SQL Editor.
@@ -62,8 +68,14 @@
 --   6. Test forbidden-field rejection (nested):
 --        -- Same but payload = '{"recommendation": {"final_action": "BUY"}}'::jsonb
 --        -- Expected: ERROR from the recursive BEFORE trigger.
---   7. Verify Intel v3 UI still loads from intel_v3_snapshots with no behavior change.
---   8. Confirm no page-load LLM calls.
+--   7. Test safe_for_decision hard lock:
+--        INSERT INTO research_artifacts (...same minimal columns..., safe_for_decision := TRUE)
+--        -- Expected: ERROR check_violation (research_artifacts_safe_for_decision_phase2_chk).
+--   8. Test source_id cross-artifact citation rejection:
+--        -- Insert a valid fact with a source_id belonging to a different artifact.
+--        -- Expected: ERROR check_violation from trigger §5 facts branch.
+--   9. Verify Intel v3 UI still loads from intel_v3_snapshots with no behavior change.
+--  10. Confirm no page-load LLM calls.
 -- ============================================================================
 
 -- Required extension (already enabled by 001_initial_schema.sql in production).
@@ -146,7 +158,17 @@ CREATE TABLE IF NOT EXISTS public.research_artifacts (
     -- Workers MUST NOT set safe_for_decision to TRUE. Only the future Phase 4/5
     -- truth adapter may flip this flag, and only after the artifact passes the
     -- per-axis evidence contract. This column NEVER feeds into decide() directly.
+    --
+    -- Phase 2.1 DB-level hard lock: no truth adapter exists in Phase 2.1, so this
+    -- CHECK constraint forces safe_for_decision = FALSE for every row. Workers cannot
+    -- bypass this at the DB level regardless of application logic.
+    -- IMPORTANT for Phase 4/5 implementer: before allowing TRUE values, the truth-adapter
+    -- migration must run:
+    --   ALTER TABLE public.research_artifacts
+    --     DROP CONSTRAINT research_artifacts_safe_for_decision_phase2_chk;
     safe_for_decision                 BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT research_artifacts_safe_for_decision_phase2_chk
+        CHECK (safe_for_decision = FALSE),
     deterministic_inputs_allowed      TEXT[] NOT NULL DEFAULT '{}',
     deterministic_inputs_forbidden    TEXT[] NOT NULL DEFAULT '{}',
 
@@ -189,7 +211,7 @@ COMMENT ON COLUMN public.research_artifacts.replay_idempotency_key IS
 COMMENT ON COLUMN public.research_artifacts.confidence_or_trust_level IS
     'Artifact trust, NOT decision conviction. Phase 1 §8 risk #12 forbids using this as conviction.';
 COMMENT ON COLUMN public.research_artifacts.safe_for_decision IS
-    'Defaults FALSE. Workers MUST NOT set this TRUE. Only the future Phase 4/5 truth adapter may flip it, behind a per-axis flag. Never read by decide().';
+    'Defaults FALSE. DB-locked FALSE in Phase 2.1 by research_artifacts_safe_for_decision_phase2_chk. Workers cannot set TRUE. Phase 4/5 truth-adapter migration must DROP that constraint before allowing TRUE. Never read by decide().';
 COMMENT ON COLUMN public.research_artifacts.deterministic_inputs_allowed IS
     'Explicit axis allow-list (e.g. {evidence_axis_band, risk_axis_band}). Advisory; binding only in Phase 5 when per-axis flags are enabled.';
 COMMENT ON COLUMN public.research_artifacts.payload IS
@@ -466,13 +488,33 @@ BEGIN
         END IF;
     END LOOP;
 
-    -- Defense-in-depth: research_artifact_facts.user_id must match parent artifact.
+    -- Defense-in-depth for research_artifact_facts rows.
     IF TG_TABLE_NAME = 'research_artifact_facts' THEN
+        -- (a) user_id must match parent artifact.
         IF NEW.user_id IS DISTINCT FROM (
             SELECT user_id FROM public.research_artifacts WHERE id = NEW.artifact_id
         ) THEN
             RAISE EXCEPTION 'research_artifact_facts.user_id must match parent research_artifacts.user_id'
                 USING ERRCODE = 'check_violation';
+        END IF;
+
+        -- (b) source_id, when non-null, must belong to the same artifact and the
+        -- same user. The FK to research_artifact_sources(id) guarantees the row
+        -- exists; this check additionally prevents cross-artifact citation smuggling
+        -- (e.g. a worker citing a source from another artifact or user).
+        IF NEW.source_id IS NOT NULL THEN
+            IF NOT EXISTS (
+                SELECT 1 FROM public.research_artifact_sources
+                WHERE id          = NEW.source_id
+                  AND artifact_id = NEW.artifact_id
+                  AND user_id     = NEW.user_id
+            ) THEN
+                RAISE EXCEPTION
+                    'research_artifact_facts.source_id must reference a source '
+                    'belonging to the same artifact_id and user_id. '
+                    'Cross-artifact citation is not allowed.'
+                    USING ERRCODE = 'check_violation';
+            END IF;
         END IF;
     END IF;
 
@@ -684,6 +726,11 @@ GRANT ALL ON public.worker_audit_events       TO authenticated, service_role;
 -- DROP TABLE   IF EXISTS public.research_artifact_sources;
 -- DROP TABLE   IF EXISTS public.research_artifacts;
 -- COMMIT;
+--
+-- NOTE FOR PHASE 4/5 TRUTH-ADAPTER IMPLEMENTER (not a rollback — a forward migration):
+-- To allow safe_for_decision = TRUE, run in the truth-adapter migration:
+--   ALTER TABLE public.research_artifacts
+--     DROP CONSTRAINT IF EXISTS research_artifacts_safe_for_decision_phase2_chk;
 -- ============================================================================
 -- END 017_research_artifact_store_v1.sql
 -- ============================================================================

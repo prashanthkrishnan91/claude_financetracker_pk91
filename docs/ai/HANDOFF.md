@@ -18,6 +18,8 @@ Phase 0 (PRs #220–#222), Phase 0.5 (PR #223), Phase 1 (PR #224), and Phase 2 (
 - Added PG 14+ compatibility confirmation and case-insensitivity note in migration comments.
 - Stripped DRAFT-ONLY header/footer; replaced with production migration header including embedded manual apply checklist.
 - Updated spec doc (`docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md`) status line to Phase 2.1 promoted.
+- **[Post-PR quality fix]** Added DB-level hard lock: `CONSTRAINT research_artifacts_safe_for_decision_phase2_chk CHECK (safe_for_decision = FALSE)`. Workers cannot set `safe_for_decision = TRUE` at the DB level. Phase 4/5 truth-adapter migration must explicitly `DROP CONSTRAINT` before allowing TRUE.
+- **[Post-PR quality fix]** Added `source_id` provenance enforcement in trigger facts branch: when `research_artifact_facts.source_id IS NOT NULL`, the trigger verifies the source belongs to the same `artifact_id` and `user_id`. Blocks cross-artifact citation smuggling at write time.
 
 ### Architecture rule reinforced
 Agents/workers may write only sourced research artifacts and audit events. `decide()` in `decision_policy_v1.py` remains the sole authority for visible Buy/Hold/Trim/Sell. `safe_for_decision` defaults FALSE and workers must not flip it. No page-load LLM calls. No legacy `recommendation_engine` re-coupling.

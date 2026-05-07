@@ -1,4 +1,15 @@
 
+## 2026-05-07 — Phase 5: Truth Adapter Readiness Contract (Level 2)
+
+- Phase 5 defines the backend-only safety contract that research artifacts must satisfy before any future deterministic Intel v3 consumption. No artifacts consumed. No visible decision drift. safe_for_decision remains DB-hard-locked false.
+- New module: `v2/backend/app/services/intelligence/research_workers/artifact_truth_readiness.py`. Pure/read-only/fail-closed. `evaluate_artifact_truth_readiness(artifact, sources, facts)` — no DB calls, no external calls, never raises. Returns `ArtifactReadinessResult`.
+- 12 readiness conditions: active + not invalidated, not expired, supported artifact_type/skill_pack (`{"catalyst_window"}`/`{"earnings_reviewer"}`), confidence_or_trust_level ∈ {HIGH,MEDIUM,LOW}, freshness_status ∈ {FRESH,STALE}, ≥1 valid source, ≥1 valid fact, source-grounded facts when source_id present, no forbidden payload keys, DB promotion explicitly blocked.
+- Phase 4 production artifacts: confidence=UNKNOWN, freshness=UNKNOWN, zero sources → fail conditions 4/5/6 → `eligible_for_truth_adapter=False`. Excluded. Unchanged.
+- `eligible_for_decision_consumption` always False. `fail_closed` always True. `safe_for_decision_db_promotion_blocked` always True. No SQL. No frontend. No decide() change.
+- New spec: `docs/ai/INTEL_V3_TRUTH_ADAPTER_READINESS_CONTRACT.md` — 12 conditions, 7-item prerequisite gate for future consumption, LLM authority boundary.
+- Tests: Phase 5 readiness: 104/104. Combined service-layer (Ph3+3.5+3.7+4+5): 323/323 ✓.
+- Next: Phase 6 — Truth Adapter (after production Phase 4 logs validate artifact availability; add provider-backed sources + fact grounding so artifacts can pass Phase 5 readiness).
+
 ## 2026-05-07 — Phase 4: Shadow-Only Research Artifact Observability (Level 2)
 
 - Phase 4 adds a read-only diagnostics lane over existing research artifacts. Artifacts remain `safe_for_decision=false`. No visible decision drift. No agents, LLM calls, or providers added.

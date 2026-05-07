@@ -1,4 +1,50 @@
 
+## 2026-05-07 — Phase 2.1: Research Artifact Store v1 — Migration Promotion (Level 2, SQL File Only, Not Applied)
+
+### Status
+Phase 0 (PRs #220–#222), Phase 0.5 (PR #223), Phase 1 (PR #224), and Phase 2 (PR #225) are closed and certified. This PR promotes the Phase 2 draft SQL into a real production migration file. No production Supabase SQL is applied — that requires explicit approval after merge.
+
+### What this PR adds
+- New migration file: `v2/database/017_research_artifact_store_v1.sql`. Additive, idempotent (`IF NOT EXISTS` / `CREATE OR REPLACE` / `DO $$` guards), RLS-gated, owner-only. Supersedes the Phase 2 draft at `docs/ai/sql_drafts/research_artifact_store_v1.sql`.
+- Four new tables: `research_artifacts`, `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events`.
+- Forbidden-key enforcement: column-level CHECK (top-level, exact) + recursive BEFORE trigger using `jsonb_path_query(... 'lax $.**.keyvalue()')` (case-insensitive, PG 14+ compatible).
+- RLS: owner-only policies matching `intel_v3_snapshots` pattern; service_role bypasses by Supabase default.
+- Grants: `authenticated` and `service_role` per `002_agent_insights.sql` style.
+- Rollback block: commented out in migration file, drop-children-first order.
+
+### Phase 2.1 promotion changes vs. Phase 2 draft
+- Renamed ambiguous `AS t(value)` column alias → `AS kv(obj)` in JSONPath recursive scan for clarity.
+- Added `worker_audit_events` user_id consistency trigger (`trg_worker_audit_events_user_consistency`) — was missing from Phase 2 draft; when `artifact_id IS NOT NULL`, enforces `worker_audit_events.user_id = research_artifacts.user_id`.
+- Added PG 14+ compatibility confirmation and case-insensitivity note in migration comments.
+- Stripped DRAFT-ONLY header/footer; replaced with production migration header including embedded manual apply checklist.
+- Updated spec doc (`docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md`) status line to Phase 2.1 promoted.
+- **[Post-PR quality fix]** Added DB-level hard lock: `CONSTRAINT research_artifacts_safe_for_decision_phase2_chk CHECK (safe_for_decision = FALSE)`. Workers cannot set `safe_for_decision = TRUE` at the DB level. Phase 4/5 truth-adapter migration must explicitly `DROP CONSTRAINT` before allowing TRUE.
+- **[Post-PR quality fix]** Added `source_id` provenance enforcement in trigger facts branch: when `research_artifact_facts.source_id IS NOT NULL`, the trigger verifies the source belongs to the same `artifact_id` and `user_id`. Blocks cross-artifact citation smuggling at write time.
+
+### Architecture rule reinforced
+Agents/workers may write only sourced research artifacts and audit events. `decide()` in `decision_policy_v1.py` remains the sole authority for visible Buy/Hold/Trim/Sell. `safe_for_decision` defaults FALSE and workers must not flip it. No page-load LLM calls. No legacy `recommendation_engine` re-coupling.
+
+### Files changed
+- `v2/database/017_research_artifact_store_v1.sql` — NEW (production migration, not applied).
+- `docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md` — status line updated to Phase 2.1 promoted.
+- `docs/ai/HANDOFF.md` — this entry.
+- `v2/progress_log.md` — concise Phase 2.1 entry.
+
+### Validation
+- `git diff` shows zero changes under `v2/backend/`, `v2/frontend/`. No `decide()` change. No `recommendation_engine` change. No frontend change.
+- No production Supabase SQL applied. Manual apply required after merge + explicit approval.
+- Phase 0/0.5/1 certified state preserved: `intel_v3_snapshots`, certification detectors, regression guardrails — all untouched.
+
+### Supabase SQL: Yes — migration file added but NOT APPLIED (manual apply required after merge)
+### Frontend changes: None
+### Visible behavior changes: None
+### Deterministic v3 policy remains sole action authority: Yes
+
+### Next recommended PR
+Phase 3 — single narrow research worker dark-run scaffold (Earnings Reviewer recommended), per Phase 1 §6 Phase 3 and Phase 2.1 spec §14. After Supabase apply is confirmed and four tables are verified.
+
+---
+
 ## 2026-05-07 — Phase 2: Research Artifact Store v1 — Planning + Draft SQL (Level 2, Docs/Draft Only)
 
 ### Status

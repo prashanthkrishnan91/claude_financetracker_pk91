@@ -1,4 +1,72 @@
 
+## 2026-05-07 — Phase 8A: Truth Adapter Mapping Dry Run for SEC CompanyFacts (Level 2)
+
+### Status
+Phase 8A complete. All invariants preserved. Phases 0–7C unchanged. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift. No SQL.
+
+### What this phase adds
+Backend-only dry-run mapper. No frontend changes. No decision changes. No provider additions. No SQL.
+
+- **New module**: `v2/backend/app/services/intelligence/research_workers/sec_metric_truth_adapter_dry_run.py`
+  - `SEC_METRIC_BUCKET_MAP`: 12 SEC XBRL tags → 10 internal evidence buckets (revenue, net_income,
+    operating_income, eps, operating_cash_flow, capex, cash, assets, liabilities, equity).
+  - `EXPECTED_BUCKETS`: frozenset of all 10 expected bucket names.
+  - `SecMetricTruthAdapterDryRunResult` dataclass — aggregate-only, no raw values.
+  - `run_sec_metric_truth_adapter_dry_run()` — pure function, never raises, no DB calls,
+    no decide() import, dry_run_safe_for_decision always False, visible_snapshot_unchanged always True.
+  - Only processes: fact_kind="metric_observation" AND claim="sec_companyfact_observed" AND source_id present.
+  - Unmapped tags counted separately in unmapped_metric_fact_count, never silently dropped.
+  - Missing/None tag/unit/form uses "UNKNOWN" safely — no crash.
+  - Returns per-ticker missing_buckets_by_ticker (sorted list of expected buckets with no evidence).
+
+- **Extended**: `v2/backend/app/config.py`
+  - New flag: `intel_v3_sec_metric_truth_adapter_dry_run_enabled` (bool, default False).
+
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`
+  - `ArtifactObservabilitySummary` gains 12 new Phase 8A fields (backward-compatible defaults):
+    `sec_metric_truth_adapter_dry_run_enabled`, `sec_metric_truth_adapter_dry_run_safe_for_decision`,
+    `sec_metric_truth_adapter_artifacts_evaluated_count`, `sec_metric_truth_adapter_source_linked_metric_fact_count`,
+    `sec_metric_truth_adapter_unmapped_metric_fact_count`, `sec_metric_truth_adapter_by_ticker`,
+    `sec_metric_truth_adapter_by_bucket`, `sec_metric_truth_adapter_by_tag`, `sec_metric_truth_adapter_by_unit`,
+    `sec_metric_truth_adapter_by_form`, `sec_metric_truth_adapter_missing_buckets_by_ticker`,
+    `sec_metric_truth_adapter_visible_snapshot_unchanged`.
+  - Calls `run_sec_metric_truth_adapter_dry_run()` when flag is True, reusing already-fetched `readiness_facts_by_artifact` — no additional DB queries.
+  - INFO log extended with Phase 8A counters.
+
+- **Extended**: `v2/backend/app/routers/diagnostics.py`
+  - observe endpoint response includes all 12 new Phase 8A aggregate fields.
+  - No raw values, no structured_payload, no source URLs exposed.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase8a_sec_metric_truth_adapter.py` — 63 tests.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_truth_adapter_dry_run.py` — new module
+- `v2/backend/app/config.py` — new kill-switch flag
+- `v2/backend/app/services/intelligence/research_workers/artifact_observability.py` — 12 new fields + dry-run call
+- `v2/backend/app/routers/diagnostics.py` — 12 new fields in observe response
+- `v2/backend/tests/test_intel_v3_phase8a_sec_metric_truth_adapter.py` — 63 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 8A truth adapter dry-run: **63/63** ✓ (new)
+- Phase 7C metric observation mix: **38/38** ✓
+- Phase 7A companyfacts: **70/70** ✓
+- Phase 6B readiness observability: **55/55** ✓ (6 fastapi env failures pre-existing, unchanged)
+- Phase 4 artifact observability: **58/58** ✓
+- Total run: **263 passed** + 6 pre-existing fastapi env failures unchanged
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new module.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- `safe_for_decision` — remains DB-hard-locked False.
+- `eligible_for_decision_consumption` — always False (invariant unchanged).
+- No LLM, no agents, no new paid providers.
+- No SQL migration. No new tables. No schema changes.
+- No visible Intel v3 action/copy/snapshot change. No frontend change.
+
+---
+
 ## 2026-05-07 — Phase 7C: Metric Observation Tag Mix Observability + Diagnostics Polish (Level 1)
 
 ### Status

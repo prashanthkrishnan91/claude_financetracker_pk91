@@ -1,9 +1,10 @@
 """Phase 8E — Portfolio SEC Coverage Expansion tests.
 
-Acceptance criteria (19 total):
+Acceptance criteria (25 total — includes 8E.1 SEC write-mode safety gate):
 
  1. dry_run=true selects eligible missing SEC-company tickers and writes nothing.
- 2. dry_run=false calls the existing SEC writer path for selected tickers.
+ 2. dry_run=false calls the existing SEC writer path for selected tickers
+    (requires all four SEC write prerequisites).
  3. ETFs are skipped as asset_type_not_sec_company + likely_fund_or_etf.
  4. Crypto tickers are skipped as asset_type_not_sec_company + likely_crypto.
  5. Tickers already covered (fact_count > 0) are skipped as
@@ -24,6 +25,17 @@ Acceptance criteria (19 total):
 17. Disabled flag path returns zero/empty/false safely.
 18. before_coverage_summary is aggregate-only (no raw values).
 19. Existing Phase 8A, 8B, 8C, and 8D tests still pass (enforced by running them).
+--- Phase 8E.1 SEC write-mode safety gate ---
+20. dry_run=true succeeds without SEC-specific flags or user agent.
+21. dry_run=false with intel_v3_earnings_reviewer_sec_enabled=false writes nothing
+    and returns error code intel_v3_earnings_reviewer_sec_enabled=false.
+22. dry_run=false with sec_edgar_user_agent missing/blank writes nothing
+    and returns error code sec_edgar_user_agent_missing.
+23. dry_run=false with intel_v3_research_workers_enabled=false writes nothing
+    and returns error code intel_v3_research_workers_enabled=false.
+24. dry_run=false with intel_v3_earnings_reviewer_enabled=false writes nothing
+    and returns error code intel_v3_earnings_reviewer_enabled=false.
+25. dry_run=false with all four prerequisites met calls the existing writer.
 
 Architecture invariants verified by this file:
     - NEVER imports or calls decide() from decision_policy_v1.
@@ -264,12 +276,14 @@ def test_dry_run_true_writes_nothing_and_selects_candidates():
 # ── Acceptance criterion 2: dry_run=false calls writer ────────────────────────
 
 def test_dry_run_false_calls_writer_via_runner(monkeypatch):
-    """AC2: dry_run=false calls run_earnings_reviewer_dark for selected tickers."""
+    """AC2: dry_run=false calls run_earnings_reviewer_dark when all four prerequisites met."""
     positions = [{"ticker": "AMD", "category": "Core"}]
     db = _FakeDB(positions=positions)
     settings = _enabled_settings(
         intel_v3_research_workers_enabled=True,
         intel_v3_earnings_reviewer_enabled=True,
+        intel_v3_earnings_reviewer_sec_enabled=True,
+        sec_edgar_user_agent="TestAgent/1.0 test@example.com",
     )
 
     written_tickers: list[str] = []
@@ -937,3 +951,230 @@ def test_compute_coverage_expansion_never_raises_on_db_error():
 
     assert result.safe_for_decision is False
     assert result.visible_snapshot_unchanged is True
+
+
+# ── Phase 8E.1: SEC write-mode safety gate tests ──────────────────────────────
+
+def _all_sec_flags_settings(**kwargs) -> _Settings:
+    """Settings with all four write prerequisites satisfied."""
+    return _Settings(
+        intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+        intel_v3_research_workers_enabled=True,
+        intel_v3_earnings_reviewer_enabled=True,
+        intel_v3_earnings_reviewer_sec_enabled=True,
+        sec_edgar_user_agent="TestAgent/1.0 test@example.com",
+        **kwargs,
+    )
+
+
+def test_dry_run_true_succeeds_without_sec_flags():
+    """AC20: dry_run=true does not require SEC flags or user agent."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+    # No SEC flags set — only the kill switch is enabled.
+    settings = _Settings(
+        intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+        intel_v3_research_workers_enabled=False,
+        intel_v3_earnings_reviewer_enabled=False,
+        intel_v3_earnings_reviewer_sec_enabled=False,
+        sec_edgar_user_agent=None,
+    )
+
+    result = compute_coverage_expansion(
+        user_id=_UID,
+        db_client=db,
+        max_tickers=10,
+        include_tickers=[],
+        exclude_tickers=[],
+        dry_run=True,
+        settings=settings,
+    )
+
+    assert result.coverage_expansion_enabled is True
+    assert result.dry_run is True
+    assert result.attempted_count == 0
+    assert result.written_count == 0
+    assert result.artifact_ids == []
+    assert result.safe_for_decision is False
+    assert result.visible_snapshot_unchanged is True
+    # AMD is eligible — selected without SEC flags.
+    assert "AMD" in result.selected_tickers
+    # No gate errors on dry_run path.
+    assert not any("sec_enabled" in e or "user_agent" in e for e in result.errors)
+
+
+def test_dry_run_false_sec_enabled_flag_off_writes_nothing():
+    """AC21: dry_run=false with intel_v3_earnings_reviewer_sec_enabled=false writes nothing."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+    settings = _Settings(
+        intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+        intel_v3_research_workers_enabled=True,
+        intel_v3_earnings_reviewer_enabled=True,
+        intel_v3_earnings_reviewer_sec_enabled=False,  # missing
+        sec_edgar_user_agent="TestAgent/1.0 test@example.com",
+    )
+
+    result = compute_coverage_expansion(
+        user_id=_UID,
+        db_client=db,
+        max_tickers=10,
+        include_tickers=[],
+        exclude_tickers=[],
+        dry_run=False,
+        settings=settings,
+    )
+
+    assert result.attempted_count == 0
+    assert result.written_count == 0
+    assert result.failed_count == 0
+    assert result.artifact_ids == []
+    assert result.safe_for_decision is False
+    assert result.visible_snapshot_unchanged is True
+    assert any("intel_v3_earnings_reviewer_sec_enabled=false" in e for e in result.errors)
+    # selected_tickers still shows candidates that would have run.
+    assert "AMD" in result.selected_tickers
+
+
+def test_dry_run_false_sec_user_agent_missing_writes_nothing():
+    """AC22: dry_run=false with sec_edgar_user_agent empty/None writes nothing."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+
+    for ua in [None, "", "   "]:
+        settings = _Settings(
+            intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+            intel_v3_research_workers_enabled=True,
+            intel_v3_earnings_reviewer_enabled=True,
+            intel_v3_earnings_reviewer_sec_enabled=True,
+            sec_edgar_user_agent=ua,
+        )
+
+        result = compute_coverage_expansion(
+            user_id=_UID,
+            db_client=db,
+            max_tickers=10,
+            include_tickers=[],
+            exclude_tickers=[],
+            dry_run=False,
+            settings=settings,
+        )
+
+        assert result.attempted_count == 0, f"ua={ua!r}: expected 0 attempted"
+        assert result.written_count == 0, f"ua={ua!r}: expected 0 written"
+        assert result.failed_count == 0, f"ua={ua!r}: expected 0 failed"
+        assert result.artifact_ids == [], f"ua={ua!r}: expected empty artifact_ids"
+        assert result.safe_for_decision is False
+        assert result.visible_snapshot_unchanged is True
+        assert any("sec_edgar_user_agent_missing" in e for e in result.errors), (
+            f"ua={ua!r}: expected sec_edgar_user_agent_missing in errors"
+        )
+
+
+def test_dry_run_false_global_worker_flag_off_writes_nothing():
+    """AC23: dry_run=false with intel_v3_research_workers_enabled=false writes nothing."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+    settings = _Settings(
+        intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+        intel_v3_research_workers_enabled=False,  # missing
+        intel_v3_earnings_reviewer_enabled=True,
+        intel_v3_earnings_reviewer_sec_enabled=True,
+        sec_edgar_user_agent="TestAgent/1.0 test@example.com",
+    )
+
+    result = compute_coverage_expansion(
+        user_id=_UID,
+        db_client=db,
+        max_tickers=10,
+        include_tickers=[],
+        exclude_tickers=[],
+        dry_run=False,
+        settings=settings,
+    )
+
+    assert result.attempted_count == 0
+    assert result.written_count == 0
+    assert result.failed_count == 0
+    assert result.artifact_ids == []
+    assert result.safe_for_decision is False
+    assert result.visible_snapshot_unchanged is True
+    assert any("intel_v3_research_workers_enabled=false" in e for e in result.errors)
+
+
+def test_dry_run_false_earnings_reviewer_flag_off_writes_nothing():
+    """AC24: dry_run=false with intel_v3_earnings_reviewer_enabled=false writes nothing."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+    settings = _Settings(
+        intel_v3_sec_metric_portfolio_coverage_expansion_enabled=True,
+        intel_v3_research_workers_enabled=True,
+        intel_v3_earnings_reviewer_enabled=False,  # missing
+        intel_v3_earnings_reviewer_sec_enabled=True,
+        sec_edgar_user_agent="TestAgent/1.0 test@example.com",
+    )
+
+    result = compute_coverage_expansion(
+        user_id=_UID,
+        db_client=db,
+        max_tickers=10,
+        include_tickers=[],
+        exclude_tickers=[],
+        dry_run=False,
+        settings=settings,
+    )
+
+    assert result.attempted_count == 0
+    assert result.written_count == 0
+    assert result.failed_count == 0
+    assert result.artifact_ids == []
+    assert result.safe_for_decision is False
+    assert result.visible_snapshot_unchanged is True
+    assert any("intel_v3_earnings_reviewer_enabled=false" in e for e in result.errors)
+
+
+def test_dry_run_false_all_flags_set_calls_writer(monkeypatch):
+    """AC25: dry_run=false with all four prerequisites met calls the existing writer."""
+    positions = [{"ticker": "AMD", "category": "Core"}]
+    db = _FakeDB(positions=positions)
+    settings = _all_sec_flags_settings()
+
+    written_tickers: list[str] = []
+
+    def _fake_runner(user_id, ticker, db_client, settings=None):
+        written_tickers.append(ticker)
+        return f"artifact-{ticker}"
+
+    import app.services.intelligence.research_workers.runner as runner_mod
+    original = runner_mod.run_earnings_reviewer_dark
+    runner_mod.run_earnings_reviewer_dark = _fake_runner
+    try:
+        result = compute_coverage_expansion(
+            user_id=_UID,
+            db_client=db,
+            max_tickers=10,
+            include_tickers=[],
+            exclude_tickers=[],
+            dry_run=False,
+            settings=settings,
+        )
+    finally:
+        runner_mod.run_earnings_reviewer_dark = original
+
+    assert result.attempted_count == len(result.selected_tickers)
+    assert "AMD" in written_tickers
+    assert result.written_count == 1
+    assert result.artifact_ids == ["artifact-AMD"]
+    assert result.safe_for_decision is False
+    assert result.visible_snapshot_unchanged is True
+    # No gate errors when all flags are set.
+    gate_error_codes = [
+        "intel_v3_research_workers_enabled=false",
+        "intel_v3_earnings_reviewer_enabled=false",
+        "intel_v3_earnings_reviewer_sec_enabled=false",
+        "sec_edgar_user_agent_missing",
+    ]
+    for code in gate_error_codes:
+        assert not any(code in e for e in result.errors), (
+            f"Unexpected gate error '{code}' when all flags are set"
+        )

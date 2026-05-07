@@ -11,7 +11,7 @@ Phases 0 through 3.7 are closed and certified. Phase 4 adds a read-only artifact
   - Reuses `_has_forbidden_key()` from `contracts.py` for forbidden-key counting.
   - Guard: returns no-op disabled summary if `intel_v3_research_artifact_observability_enabled=False`.
   - Structured INFO log (aggregate only) when `intel_v3_research_artifact_observability_info_logs_enabled=True`.
-  - `invalidated_count` always 0 — no separate invalidated DB status field in schema (documented limitation).
+  - `invalidated_count` counts rows where `research_artifacts.invalidated_at` is non-null.
   - All DB query failures contained in `errors[]`; never raises.
 - New endpoint in `v2/backend/app/routers/diagnostics.py`:
   `POST /api/v1/diagnostics/finance-intel/research-artifacts/observe`

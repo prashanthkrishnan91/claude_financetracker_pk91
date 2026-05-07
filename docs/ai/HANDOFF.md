@@ -1,4 +1,69 @@
 
+## 2026-05-07 — Phase 8E: Portfolio SEC Coverage Expansion Dry Run (Level 2)
+
+### Status
+Phase 8E complete. All Phase 8A/8B/8C/8D invariants preserved. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift. No SQL. No frontend changes. Pre-consumption only.
+
+### What this phase adds
+Protected operator-only endpoint that selects eligible SEC-company portfolio tickers missing SEC metric evidence and (when dry_run=false) runs the existing Phase 3/7A artifact writer for each selected ticker. Helps move SEC coverage from 3/34 toward near-complete for SEC-company tickers without touching decisions.
+
+- **New module**: `v2/backend/app/services/intelligence/research_workers/sec_metric_coverage_expansion.py`
+  - `SEC_METRIC_COVERAGE_EXPANSION_CONTRACT_VERSION = "phase8e_v1"`
+  - `MAX_TICKERS_PER_EXPANSION = 10` — defensive hard cap.
+  - `CoverageExpansionResult` dataclass — aggregate-only, no raw values. safe_for_decision always False, visible_snapshot_unchanged always True.
+  - `_select_candidates()` — pure function for candidate selection. Skips ETF/Crypto, already-covered tickers, exclude_tickers, tickers not in include_tickers (when set). Applies max_tickers cap on sorted order. Returns (selected, skipped_by_reason).
+  - `compute_coverage_expansion()` — DB-reading orchestrator with kill-switch guard. Reads portfolio from `positions` table (fallback: `portfolio_snapshots.positions_data`), reads artifacts/facts, runs Phase 8A + 8B pure functions for coverage check, selects candidates, optionally calls `run_earnings_reviewer_dark()` per selected ticker.
+  - Skip reasons: `asset_type_not_sec_company`, `likely_fund_or_etf`, `likely_crypto`, `already_has_sec_metric_evidence`, `excluded_by_request`, `over_max_tickers_cap`, `missing_or_invalid_ticker`.
+  - `before_coverage_summary` (always), `after_coverage_summary` (dry_run=false + writes succeed) — aggregate-only.
+  - Reuses Phase 8A + 8B + runner.run_earnings_reviewer_dark — no new SEC provider path.
+  - No LLM calls, no decide() import, no snapshot writes.
+
+- **Extended**: `v2/backend/app/config.py`
+  - New flag: `intel_v3_sec_metric_portfolio_coverage_expansion_enabled` (bool, default False).
+
+- **Extended**: `v2/backend/app/routers/diagnostics.py`
+  - New endpoint: `POST /diagnostics/finance-intel/sec-metric-evidence/expand-coverage`
+  - New request model: `SecMetricCoverageExpansionRequest` (max_tickers, include_tickers, exclude_tickers, dry_run).
+  - Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+  - Guard: `intel_v3_sec_metric_portfolio_coverage_expansion_enabled=true` required (raises 403 if off).
+  - Independent of Phase 8D flag. Additional flags required for writes: `intel_v3_research_workers_enabled` + `intel_v3_earnings_reviewer_enabled`.
+  - Returns: `coverage_expansion_enabled`, `dry_run`, `safe_for_decision` (always False), `visible_snapshot_unchanged` (always True), `portfolio_ticker_count`, `candidate_count`, `selected_tickers`, `skipped_tickers_by_reason`, `attempted_count`, `written_count`, `skipped_count`, `failed_count`, `artifact_ids`, `safe_for_decision_false_count`, `unexpected_safe_for_decision_true_count`, `forbidden_payload_violation_count`, `before_coverage_summary`, `after_coverage_summary`, `errors`.
+  - No raw values, no structured_payload, no source URLs exposed.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase8e_portfolio_sec_coverage_expansion.py` — 27 tests covering 19 acceptance criteria.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_coverage_expansion.py` — new module
+- `v2/backend/app/config.py` — new kill-switch flag
+- `v2/backend/app/routers/diagnostics.py` — new endpoint, request model, import
+- `v2/backend/tests/test_intel_v3_phase8e_portfolio_sec_coverage_expansion.py` — 27 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 8E coverage expansion: **27/27** ✓ (new)
+- Phase 8D portfolio coverage: **73/73** ✓
+- Phase 8C adapter replay: **74/74** ✓
+- Phase 8B evidence snapshot: **80/80** ✓
+- Phase 8A truth adapter: **68/68** ✓ (counts differ slightly between runs; latest 325 total)
+- Total new run: **325 passed** (Phase 8A–8E)
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new module.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- `safe_for_decision` — remains DB-hard-locked False. `unexpected_safe_for_decision_true_count = 0`.
+- Visible snapshot — unchanged. `visible_snapshot_unchanged = True` on all result paths.
+- No new SEC provider path — reuses existing `run_earnings_reviewer_dark()`.
+- No LLM calls, no Claude/Anthropic agent invocations.
+- `safe_for_decision_db_lock` blocking code preserved on all coverage tickers.
+
+### Next: Phase 8F
+- Run expand-coverage endpoint in production (dry_run=true first, then dry_run=false) for missing SEC-company tickers.
+- After coverage expansion, re-run Phase 8D to measure new coverage counts.
+- Phase 8F: after coverage reaches sufficient threshold, design safe consumption path (still requires Phase 9+ planning).
+
+---
+
 ## 2026-05-07 — Phase 8D: Portfolio SEC Evidence Coverage Diagnostics (Level 2)
 
 ### Status

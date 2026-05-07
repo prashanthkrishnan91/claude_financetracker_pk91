@@ -1,9 +1,9 @@
-"""Phase 5 Truth Adapter Readiness Contract — test suite.
+"""Phase 5 Truth Adapter Readiness Contract — test suite (hardened).
 
 Acceptance criteria covered:
   1.  Phase 4-style artifact (UNKNOWN confidence, UNKNOWN freshness, zero sources,
       facts present) => ineligible.
-  2.  Missing sources => ineligible.
+  2.  Missing sources / sources without provenance handle => ineligible.
   3.  Missing facts => ineligible.
   4.  UNKNOWN confidence/trust => ineligible.
   5.  UNKNOWN freshness => ineligible.
@@ -13,11 +13,18 @@ Acceptance criteria covered:
   9.  Unsupported artifact_type => ineligible.
   10. Unsupported skill_pack => ineligible.
   11. Malformed/null fields fail closed.
-  12. Theoretically well-formed sourced artifact: eligible_for_truth_adapter=True,
+  12. Well-formed source-linked artifact: eligible_for_truth_adapter=True,
       eligible_for_decision_consumption=False (Phase 5 invariant).
   13. Module does not import decide(), IntelV3Service, or frontend code.
   14. No visible snapshot/action behavior changes (structural source guard).
   15. Existing Phase 3/3.5/3.6/3.7/4 tests still pass (verified by joint test run).
+
+Phase 5 hardening additions:
+  H1. Every valid fact must have a non-empty source_id (fact_missing_source_link).
+  H2. Fact source_id must match a valid source's id (fact_source_not_found).
+  H3. Source without any provenance handle fails (no_valid_sources).
+  H4. Source provenance: source_url OR source_id OR source_hash OR section_reference.
+  H5. safe_for_decision=True fails with unexpected_safe_for_decision_true.
 
 All tests use in-memory fixtures only — no Supabase, no external calls.
 """
@@ -71,24 +78,27 @@ def _ideal_artifact() -> dict:
 
 
 def _ideal_sources() -> list[dict]:
+    # Must include at least one provenance handle (source_id here).
     return [
         {
             "id": "src-001",
             "artifact_id": "art-ideal-001",
             "source_kind": "earnings_report",
             "provider_name": "sec_edgar",
+            "source_id": "aapl-q1-2026-10q",  # provenance handle
         }
     ]
 
 
 def _ideal_facts() -> list[dict]:
+    # source_id links to _ideal_sources()[0]["id"] (DB row id = "src-001").
     return [
         {
             "id": "fact-001",
             "artifact_id": "art-ideal-001",
             "fact_kind": "earnings_event",
             "structured_payload": {"period": "Q1-2026", "status": "reported"},
-            "source_id": None,
+            "source_id": "src-001",
         }
     ]
 
@@ -416,11 +426,12 @@ class TestForbiddenPayloadKeyIneligible:
         assert result.forbidden_payload_violation is True
 
     def test_forbidden_key_in_fact_payload_ineligible(self):
+        # Fact has a forbidden key AND a missing source link — both are contract violations.
         bad_fact = {
             "id": "fact-bad",
             "fact_kind": "earnings_event",
             "structured_payload": {"buy": "strong signal"},  # forbidden key
-            "source_id": None,
+            "source_id": "src-001",  # linked, but payload is forbidden
         }
         result = evaluate_artifact_truth_readiness(
             artifact=_ideal_artifact(),
@@ -574,6 +585,7 @@ class TestMalformedFieldsFailClosed:
         assert "fact_source_not_found" in result.reason_codes
 
     def test_fact_with_valid_source_id_passes(self):
+        # _ideal_sources() includes a provenance handle, so "src-001" is in valid_source_ids.
         fact_linked = {
             "id": "fact-002",
             "fact_kind": "earnings_event",
@@ -586,6 +598,7 @@ class TestMalformedFieldsFailClosed:
             facts=[fact_linked],
         )
         assert "fact_source_not_found" not in result.reason_codes
+        assert "fact_missing_source_link" not in result.reason_codes
 
 
 # ── Acceptance criterion 12: Theoretically well-formed artifact ───────────────
@@ -681,18 +694,24 @@ class TestIdealArtifactEligibleForTruthAdapter:
         assert result.eligible_for_truth_adapter is True
 
     def test_multiple_sources_and_facts_eligible(self):
+        # Both sources have a provenance handle; both facts are source-linked.
         sources = [
-            {"id": "src-001", "source_kind": "earnings_report", "provider_name": "sec_edgar"},
-            {"id": "src-002", "source_kind": "analyst_report", "provider_name": "bloomberg"},
+            {"id": "src-001", "source_kind": "earnings_report", "provider_name": "sec_edgar",
+             "source_id": "aapl-q1-2026-10q"},
+            {"id": "src-002", "source_kind": "analyst_report", "provider_name": "bloomberg",
+             "source_url": "https://example.com/report"},
         ]
         facts = [
-            {"id": "f1", "fact_kind": "earnings_event", "structured_payload": {"period": "Q1"}, "source_id": None},
-            {"id": "f2", "fact_kind": "guidance_update", "structured_payload": {"note": "raised"}, "source_id": None},
+            {"id": "f1", "fact_kind": "earnings_event", "structured_payload": {"period": "Q1"},
+             "source_id": "src-001"},
+            {"id": "f2", "fact_kind": "guidance_update", "structured_payload": {"note": "raised"},
+             "source_id": "src-002"},
         ]
         result = evaluate_artifact_truth_readiness(
             artifact=_ideal_artifact(), sources=sources, facts=facts
         )
         assert result.eligible_for_truth_adapter is True
+        assert result.eligible_for_decision_consumption is False
         assert result.source_count == 2
         assert result.fact_count == 2
 
@@ -824,3 +843,251 @@ class TestResultInvariants:
         result = evaluate_artifact_truth_readiness(artifact=_phase4_artifact())
         assert result.eligible_for_truth_adapter is False
         assert len(result.reason_codes) > 0
+
+
+# ── Hardening H1/H2: Explicit fact source linkage required ────────────────────
+
+class TestFactSourceLinkageRequired:
+    """H1/H2: Every valid fact must have a non-empty source_id linked to a valid source."""
+
+    def test_fact_source_id_none_fails(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": None,
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_missing_source_link" in result.reason_codes
+
+    def test_fact_source_id_empty_string_fails(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": "",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_missing_source_link" in result.reason_codes
+
+    def test_fact_source_id_whitespace_only_fails(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": "   ",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_missing_source_link" in result.reason_codes
+
+    def test_fact_source_id_absent_fails(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            # source_id key entirely absent
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_missing_source_link" in result.reason_codes
+
+    def test_fact_source_id_not_in_valid_sources_fails(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": "src-unknown-xyz",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_source_not_found" in result.reason_codes
+
+    def test_fact_source_id_linked_to_valid_source_passes(self):
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": "src-001",  # matches _ideal_sources()[0]["id"]
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=[fact]
+        )
+        assert "fact_missing_source_link" not in result.reason_codes
+        assert "fact_source_not_found" not in result.reason_codes
+        assert result.eligible_for_truth_adapter is True
+        assert result.eligible_for_decision_consumption is False
+
+    def test_first_fact_without_link_blocks_eligibility(self):
+        # If even one valid fact has no source link, the whole artifact is ineligible.
+        facts = [
+            {"id": "f1", "fact_kind": "earnings_event", "structured_payload": {"period": "Q1"},
+             "source_id": "src-001"},
+            {"id": "f2", "fact_kind": "guidance_update", "structured_payload": {"note": "raised"},
+             "source_id": None},  # missing link
+        ]
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=_ideal_sources(), facts=facts
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "fact_missing_source_link" in result.reason_codes
+
+    def test_fact_linked_to_invalid_source_fails(self):
+        # Source lacks provenance handle → not a valid source → fact_source_not_found.
+        source_no_provenance = {
+            "id": "src-noprov",
+            "source_kind": "earnings_report",
+            "provider_name": "sec_edgar",
+            # no source_url / source_id / source_hash / section_reference
+        }
+        fact = {
+            "id": "fact-x",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1"},
+            "source_id": "src-noprov",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=[source_no_provenance], facts=[fact]
+        )
+        assert result.eligible_for_truth_adapter is False
+        # source is invalid → valid_source_ids is empty → fact_source_not_found
+        assert "fact_source_not_found" in result.reason_codes
+
+
+# ── Hardening H3/H4: Source provenance handle required ───────────────────────
+
+class TestSourceProvenanceRequired:
+    """H3/H4: Valid source must have source_kind + provider_name + ≥1 provenance handle."""
+
+    def test_source_without_any_provenance_handle_ineligible(self):
+        source = {
+            "id": "src-bad",
+            "source_kind": "earnings_report",
+            "provider_name": "sec_edgar",
+            # no source_url / source_id / source_hash / section_reference
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=[source], facts=_ideal_facts()
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "no_valid_sources" in result.reason_codes
+
+    @pytest.mark.parametrize("provenance_key,provenance_val", [
+        ("source_url", "https://www.sec.gov/10q"),
+        ("source_id", "aapl-q1-2026-10q"),
+        ("source_hash", "sha256:abc123def456"),
+        ("section_reference", "Part I Item 1"),
+    ])
+    def test_each_provenance_handle_independently_valid(self, provenance_key, provenance_val):
+        source = {
+            "id": "src-001",
+            "source_kind": "earnings_report",
+            "provider_name": "sec_edgar",
+            provenance_key: provenance_val,
+        }
+        fact = {
+            "id": "fact-001",
+            "fact_kind": "earnings_event",
+            "structured_payload": {"period": "Q1-2026"},
+            "source_id": "src-001",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=[source], facts=[fact]
+        )
+        assert "no_valid_sources" not in result.reason_codes
+        assert result.eligible_for_truth_adapter is True
+        assert result.eligible_for_decision_consumption is False
+
+    def test_source_with_empty_provenance_handles_ineligible(self):
+        source = {
+            "id": "src-bad",
+            "source_kind": "earnings_report",
+            "provider_name": "sec_edgar",
+            "source_url": "",
+            "source_id": "  ",
+            "source_hash": None,
+            "section_reference": "",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=[source], facts=_ideal_facts()
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "no_valid_sources" in result.reason_codes
+
+    def test_source_count_zero_when_no_provenance(self):
+        source = {
+            "id": "src-bad",
+            "source_kind": "earnings_report",
+            "provider_name": "sec_edgar",
+        }
+        result = evaluate_artifact_truth_readiness(
+            artifact=_ideal_artifact(), sources=[source], facts=_ideal_facts()
+        )
+        assert result.source_count == 0
+
+
+# ── Hardening H5: safe_for_decision=True fails ────────────────────────────────
+
+class TestUnexpectedSafeForDecisionTrue:
+    """H5: artifact.safe_for_decision=True must be rejected as unexpected/unsafe input."""
+
+    def test_safe_for_decision_true_ineligible(self):
+        art = {**_ideal_artifact(), "safe_for_decision": True}
+        result = evaluate_artifact_truth_readiness(
+            artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+        )
+        assert result.eligible_for_truth_adapter is False
+        assert "unexpected_safe_for_decision_true" in result.reason_codes
+
+    def test_safe_for_decision_false_passes(self):
+        art = {**_ideal_artifact(), "safe_for_decision": False}
+        result = evaluate_artifact_truth_readiness(
+            artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+        )
+        assert "unexpected_safe_for_decision_true" not in result.reason_codes
+        assert result.eligible_for_truth_adapter is True
+
+    def test_safe_for_decision_absent_passes(self):
+        # Field absent entirely — should not add reason code.
+        art = {k: v for k, v in _ideal_artifact().items() if k != "safe_for_decision"}
+        result = evaluate_artifact_truth_readiness(
+            artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+        )
+        assert "unexpected_safe_for_decision_true" not in result.reason_codes
+        assert result.eligible_for_truth_adapter is True
+
+    def test_safe_for_decision_none_passes(self):
+        art = {**_ideal_artifact(), "safe_for_decision": None}
+        result = evaluate_artifact_truth_readiness(
+            artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+        )
+        assert "unexpected_safe_for_decision_true" not in result.reason_codes
+        assert result.eligible_for_truth_adapter is True
+
+    def test_eligible_for_decision_consumption_still_false_even_if_safe_for_decision_true(self):
+        # Even if safe_for_decision=True somehow appeared, consumption is still False.
+        art = {**_ideal_artifact(), "safe_for_decision": True}
+        result = evaluate_artifact_truth_readiness(
+            artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+        )
+        assert result.eligible_for_decision_consumption is False
+
+    def test_db_promotion_blocked_always_true_regardless_of_safe_for_decision(self):
+        for sfd in [True, False, None]:
+            art = {**_ideal_artifact(), "safe_for_decision": sfd}
+            result = evaluate_artifact_truth_readiness(
+                artifact=art, sources=_ideal_sources(), facts=_ideal_facts()
+            )
+            assert result.safe_for_decision_db_promotion_blocked is True

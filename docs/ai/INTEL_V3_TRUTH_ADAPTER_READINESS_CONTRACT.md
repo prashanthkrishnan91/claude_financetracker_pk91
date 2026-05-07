@@ -38,7 +38,7 @@ These artifacts produce `eligible_for_truth_adapter=False` with reason codes:
 
 ---
 
-## Readiness Contract — 12 Conditions
+## Readiness Contract — Conditions
 
 Every condition must pass. Any failure → ineligible (fail-closed).
 
@@ -50,12 +50,15 @@ Every condition must pass. Any failure → ineligible (fail-closed).
 | 3 | `skill_pack` in supported registry | `unsupported_skill_pack` |
 | 4 | `confidence_or_trust_level` ∈ {HIGH, MEDIUM, LOW} | `unknown_or_invalid_confidence` |
 | 5 | `freshness_status` ∈ {FRESH, STALE} | `unknown_or_invalid_freshness` |
-| 6 | ≥1 valid source (non-empty `source_kind` + `provider_name`) | `no_valid_sources` |
-| 7 | ≥1 valid fact (non-empty `fact_kind` + `structured_payload` dict) | `no_valid_facts` |
-| 8 | Facts with `source_id` set must match a valid source | `fact_source_not_found` |
-| 9/10 | Payload and fact payloads contain no forbidden decision-authority keys | `forbidden_payload_key=*`, `forbidden_fact_payload_key=*` |
-| 11 | `safe_for_decision=True` is NOT required/checked — DB hard-locks it false | (invariant) |
+| 6 | `safe_for_decision` is not `True` | `unexpected_safe_for_decision_true` |
+| 7 | ≥1 valid source: non-empty `source_kind` + `provider_name` + ≥1 provenance handle | `no_valid_sources` |
+| 8 | ≥1 valid fact: non-empty `fact_kind` + non-empty `structured_payload` dict | `no_valid_facts` |
+| 9 | **Every** valid fact must have a non-empty `source_id` | `fact_missing_source_link` |
+| 9 | Every fact `source_id` must match a valid source's DB `id` | `fact_source_not_found` |
+| 10/11 | Payload and fact payloads contain no forbidden decision-authority keys | `forbidden_payload_key=*`, `forbidden_fact_payload_key=*` |
 | 12 | Any malformed/null/ambiguous field makes artifact ineligible | multiple |
+
+**Provenance handles** (at least one required per source): `source_url`, `source_id`, `source_hash`, `section_reference`.
 
 ### Supported Registries (Phase 5)
 
@@ -72,7 +75,7 @@ These grow only when a new worker is implemented and certified.
 
 | Field | Phase 5 value |
 |---|---|
-| `eligible_for_truth_adapter` | True only when all 12 conditions pass |
+| `eligible_for_truth_adapter` | True only when all conditions pass |
 | `eligible_for_decision_consumption` | **Always False** — DB promotion not enabled |
 | `fail_closed` | **Always True** |
 | `safe_for_decision_db_promotion_blocked` | **Always True** |
@@ -85,15 +88,25 @@ These grow only when a new worker is implemented and certified.
 
 ---
 
-## Prerequisite Gate for Future Consumption (Phase 6+)
+## Next Phase: Phase 6 — Evidence Population + Grounding Upgrade
 
-Before any artifact can influence visible Intel v3 decisions, ALL of the following must be satisfied:
+**Phase 6 does NOT consume artifacts into visible decisions.** It populates the evidence that artifacts need to pass the Phase 5 readiness contract.
 
-1. **Provider-backed sources** — real external providers (SEC EDGAR, earnings APIs, news feeds) must produce at least one valid source per artifact.
-2. **Grounded facts** — facts must be traceable to sources with explicit source linkage.
-3. **Confidence/trust calibration** — workers must classify `confidence_or_trust_level` as HIGH, MEDIUM, or LOW based on source quality and coverage.
-4. **Freshness classification** — workers must classify `freshness_status` as FRESH or STALE based on explicit time windows.
-5. **DB migration explicitly allowing `safe_for_decision=True`** — the Phase 2.1 CHECK constraint `research_artifacts_safe_for_decision_phase2_chk CHECK (safe_for_decision = FALSE)` must be explicitly dropped or replaced by a migration approved and applied after review. This requires explicit operator approval, a new migration file under `v2/database/`, and production runbook.
+Phase 6 objectives:
+1. **Provider-backed source rows** — add real external provider integration (SEC EDGAR, earnings APIs, news feeds) so artifacts have ≥1 source with provenance handle.
+2. **Source-linked facts** — ensure every fact is explicitly source-linked (`source_id` matching a valid source's DB `id`).
+3. **Confidence/trust calibration** — workers classify `confidence_or_trust_level` as HIGH, MEDIUM, or LOW based on source quality and coverage.
+4. **Freshness classification** — workers classify `freshness_status` as FRESH or STALE based on explicit time windows.
+5. **Still no visible decision consumption** — all artifacts remain `safe_for_decision=false`; no visible snapshots change.
+6. **Truth adapter mapping comes only after** artifacts consistently pass Phase 5 readiness AND after explicit review of the deterministic adapter logic.
+
+## Prerequisite Gate Before Any Artifact Can Influence Visible Decisions (Phase 7+)
+
+ALL of the following must be satisfied before visible consumption:
+
+1. Provider-backed sources and grounded facts (Phase 6 completes this).
+2. Artifacts consistently pass Phase 5 readiness contract in production.
+3. **DB migration explicitly allowing `safe_for_decision=True`** — the Phase 2.1 CHECK constraint `research_artifacts_safe_for_decision_phase2_chk CHECK (safe_for_decision = FALSE)` must be explicitly dropped or replaced by a migration approved and applied after review. This requires explicit operator approval, a new migration file under `v2/database/`, and production runbook.
 6. **Deterministic adapter mapping** — a new "truth adapter" module must map validated artifact facts into the allowed evidence fields consumed by `decide()` in `decision_policy_v1.py`. This module must be reviewed and certified before enabling.
 7. **Certification proving visible decision stability** — a full certification run must prove that consuming artifacts either produces no visible snapshot change (shadow mode) or produces only intended, auditable, deterministic changes with explicit approval.
 

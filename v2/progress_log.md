@@ -1,4 +1,13 @@
 
+## 2026-05-07 — Phase 5 Hardening: Contract Strengthening Pass (Level 2)
+
+- Three contract gaps closed before merge. Same constraints: no consumption, no visible decisions, no SQL, no decide() change.
+- (1) **Explicit fact source linkage**: every valid fact must have non-empty `source_id` matching a valid source's DB `id`. `source_id=None` fails with `fact_missing_source_link`. Unmatched id fails with `fact_source_not_found`.
+- (2) **Source provenance handle required**: `_valid_sources()` now requires ≥1 non-empty provenance handle (`source_url`, `source_id`, `source_hash`, or `section_reference`) in addition to `source_kind` + `provider_name`. Sources without any provenance handle excluded.
+- (3) **`safe_for_decision=True` rejected**: if field unexpectedly arrives as `True`, artifact fails with `unexpected_safe_for_decision_true`. `eligible_for_decision_consumption` remains always False.
+- Phase 6 renamed to "Evidence Population + Grounding Upgrade" in all docs — NOT consumption; it adds provider-backed sources and grounded facts.
+- Tests: 125/125 Phase 5 (+21 new) ✓. Combined 344/344 ✓. No SQL. No frontend. No decide() change.
+
 ## 2026-05-07 — Phase 5: Truth Adapter Readiness Contract (Level 2)
 
 - Phase 5 defines the backend-only safety contract that research artifacts must satisfy before any future deterministic Intel v3 consumption. No artifacts consumed. No visible decision drift. safe_for_decision remains DB-hard-locked false.

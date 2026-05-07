@@ -17,14 +17,32 @@ Phase 5 hard constraints (non-negotiable):
     - fail_closed is always True — any ambiguity makes the artifact ineligible.
     - safe_for_decision_db_promotion_blocked is always True in Phase 5.
 
+Readiness conditions (all must pass; fail-closed):
+    1.  is_active=True and invalidated_at IS NULL.
+    2.  Not expired (expires_at IS NULL OR expires_at >= now).
+    3.  artifact_type in SUPPORTED_ARTIFACT_TYPES.
+        skill_pack in SUPPORTED_SKILL_PACKS.
+    4.  confidence_or_trust_level in {HIGH, MEDIUM, LOW} (UNKNOWN fails).
+    5.  freshness_status in {FRESH, STALE} (UNKNOWN fails).
+    6.  safe_for_decision is not True (unexpected_safe_for_decision_true if it is).
+    7.  At least one valid source: non-empty source_kind + provider_name +
+        at least one provenance handle (source_url, source_id, source_hash,
+        or section_reference).
+    8.  At least one valid fact: non-empty fact_kind + non-empty structured_payload.
+    9.  Every valid fact must have a non-empty source_id that matches a valid
+        source id (fact_missing_source_link / fact_source_not_found).
+    10. Payload contains no forbidden decision-authority keys.
+    11. Fact structured_payloads contain no forbidden keys (defense in depth).
+    12. Any malformed/missing/ambiguous field makes the artifact ineligible.
+
 Current production status (Phase 4 artifacts):
     All current artifacts have confidence_or_trust_level=UNKNOWN,
     freshness_status=UNKNOWN, and zero sources. They fail conditions 4, 5,
-    and 6 respectively and remain excluded by this contract.
+    and 7 respectively and remain excluded by this contract.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -39,6 +57,9 @@ SUPPORTED_SKILL_PACKS: frozenset[str] = frozenset({"earnings_reviewer"})
 # Explicit known classifications — UNKNOWN/empty/null are not acceptable.
 VALID_CONFIDENCE_LEVELS: frozenset[str] = frozenset({"HIGH", "MEDIUM", "LOW"})
 VALID_FRESHNESS_STATUSES: frozenset[str] = frozenset({"FRESH", "STALE"})
+
+# Provenance handle keys — at least one must be non-empty for a source to be valid.
+_PROVENANCE_KEYS: tuple[str, ...] = ("source_url", "source_id", "source_hash", "section_reference")
 
 
 @dataclass
@@ -117,7 +138,7 @@ def _evaluate(
     sources: list[dict],
     facts: list[dict],
 ) -> ArtifactReadinessResult:
-    """Core readiness evaluation — all 12 conditions checked."""
+    """Core readiness evaluation — all conditions checked sequentially."""
     reason_codes: list[str] = []
 
     if not isinstance(artifact, dict):
@@ -149,6 +170,7 @@ def _evaluate(
     confidence_raw = artifact.get("confidence_or_trust_level")
     freshness_raw = artifact.get("freshness_status")
     payload = artifact.get("payload")
+    safe_for_decision = artifact.get("safe_for_decision")
 
     confidence_str = str(confidence_raw).strip().upper() if confidence_raw is not None else None
     freshness_str = str(freshness_raw).strip().upper() if freshness_raw is not None else None
@@ -187,28 +209,38 @@ def _evaluate(
     if not freshness_str or freshness_str not in VALID_FRESHNESS_STATUSES:
         reason_codes.append("unknown_or_invalid_freshness")
 
+    # ── Condition 6: safe_for_decision must not be True ───────────────────────
+    # The Phase 2.1 DB CHECK constraint hard-locks safe_for_decision=False.
+    # If it somehow arrives as True, that is an impossible/unsafe input — reject.
+    if safe_for_decision is True:
+        reason_codes.append("unexpected_safe_for_decision_true")
+
     # ── Valid sources and facts ───────────────────────────────────────────────
     valid_sources = _valid_sources(sources)
     valid_facts = _valid_facts(facts)
     valid_source_ids = {str(s.get("id")) for s in valid_sources if s.get("id") is not None}
 
-    # ── Condition 6: At least one valid source ────────────────────────────────
+    # ── Condition 7: At least one valid source ────────────────────────────────
+    # Valid = non-empty source_kind + non-empty provider_name + ≥1 provenance handle.
     if len(valid_sources) == 0:
         reason_codes.append("no_valid_sources")
 
-    # ── Condition 7: At least one valid fact ─────────────────────────────────
+    # ── Condition 8: At least one valid fact ─────────────────────────────────
     if len(valid_facts) == 0:
         reason_codes.append("no_valid_facts")
 
-    # ── Condition 8: Facts source-grounded when source_id is present ──────────
+    # ── Condition 9: Every valid fact must be explicitly source-linked ─────────
+    # A fact without a source_id cannot be traced to evidence — fail closed.
     for fact in valid_facts:
         src_id = fact.get("source_id")
-        if src_id is not None:
-            if str(src_id) not in valid_source_ids:
-                reason_codes.append("fact_source_not_found")
-                break
+        if not src_id or not str(src_id).strip():
+            reason_codes.append("fact_missing_source_link")
+            break
+        if str(src_id) not in valid_source_ids:
+            reason_codes.append("fact_source_not_found")
+            break
 
-    # ── Conditions 9/10: No forbidden payload keys ────────────────────────────
+    # ── Conditions 10/11: No forbidden payload keys ────────────────────────────
     forbidden_violation = False
 
     if payload is not None:
@@ -224,7 +256,7 @@ def _evaluate(
             forbidden_violation = True
             reason_codes.append("payload_check_exception")
 
-    # Also check fact structured_payloads (defense in depth)
+    # Defense in depth: also check fact structured_payloads.
     if not forbidden_violation:
         for fact in facts:
             try:
@@ -239,11 +271,6 @@ def _evaluate(
                 forbidden_violation = True
                 reason_codes.append("fact_payload_check_exception")
                 break
-
-    # ── Condition 11: DB safe_for_decision promotion explicitly blocked ────────
-    # Never require, read, or attempt to set safe_for_decision=True.
-    # The DB hard-locks it False via CHECK constraint. This is recorded as an
-    # explicit invariant in every result rather than a pass/fail condition.
 
     # ── Condition 12: Malformed/missing fields already handled above ──────────
     # Each malformed field adds a reason_code and makes the artifact ineligible.
@@ -273,8 +300,21 @@ def _evaluate(
     )
 
 
+def _has_provenance(src: dict) -> bool:
+    """Return True if source has at least one non-empty provenance handle."""
+    for key in _PROVENANCE_KEYS:
+        val = src.get(key)
+        if val is not None and str(val).strip():
+            return True
+    return False
+
+
 def _valid_sources(sources: list[dict]) -> list[dict]:
-    """Return sources with non-empty source_kind and provider_name."""
+    """Return sources with non-empty source_kind, provider_name, AND ≥1 provenance handle.
+
+    Provenance handles: source_url, source_id, source_hash, section_reference.
+    At least one must be non-empty for a source to count as valid.
+    """
     valid = []
     for src in sources:
         try:
@@ -282,7 +322,7 @@ def _valid_sources(sources: list[dict]) -> list[dict]:
                 continue
             sk = src.get("source_kind")
             pn = src.get("provider_name")
-            if sk and str(sk).strip() and pn and str(pn).strip():
+            if sk and str(sk).strip() and pn and str(pn).strip() and _has_provenance(src):
                 valid.append(src)
         except Exception:  # noqa: BLE001
             pass

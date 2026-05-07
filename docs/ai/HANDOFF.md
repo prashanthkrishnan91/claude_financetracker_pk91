@@ -1,4 +1,21 @@
 
+## 2026-05-07 — Phase 5 Hardening: Contract Strengthening Pass (Level 2)
+
+### Status
+Phase 5 initial contract strengthened in three areas before merge. No scope change — still backend-only, pure/read-only, no artifact consumption, no visible decision change.
+
+### Changes from hardening pass
+1. **Explicit fact source linkage required** — every valid fact must now have a non-empty `source_id` that matches a valid source's DB `id`. `source_id=None` is no longer accepted for truth-adapter eligibility. New reason codes: `fact_missing_source_link`, `fact_source_not_found`.
+2. **Stricter valid source definition** — a source must have non-empty `source_kind` + `provider_name` + at least one provenance handle (`source_url`, `source_id`, `source_hash`, or `section_reference`). Sources with all-empty/null provenance handles are excluded.
+3. **Fail closed on `safe_for_decision=True`** — if this field unexpectedly arrives as `True` (impossible under Phase 2.1 DB CHECK but defensive), the artifact is rejected with `unexpected_safe_for_decision_true`. `eligible_for_decision_consumption` and `safe_for_decision_db_promotion_blocked` remain always False/True.
+4. **Phase 6 renamed** to "Evidence Population + Grounding Upgrade" in all docs — explicitly NOT artifact consumption; it only adds provider-backed sources and grounded facts so artifacts can pass Phase 5 readiness.
+
+### Test results after hardening
+- Phase 5: 125/125 ✓ (+21 new hardening tests: H1/H2 fact linkage, H3/H4 source provenance, H5 safe_for_decision guard)
+- Combined service-layer (Ph3+3.5+3.7+4+5): 344/344 ✓
+
+---
+
 ## 2026-05-07 — Phase 5: Truth Adapter Readiness Contract (Level 2)
 
 ### Status

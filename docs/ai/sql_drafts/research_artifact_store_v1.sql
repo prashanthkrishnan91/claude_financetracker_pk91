@@ -371,12 +371,25 @@ BEGIN
     END IF;
 
     -- Recursively walk all keys of all object nodes inside the JSONB tree.
-    -- jsonb_path_query returns keys via the `keyvalue()` accessor.
+    -- `jsonb_path_query` returns a single `jsonb` column (NOT a composite),
+    -- so `(kv).key` is invalid SQL. The JSONPath `keyvalue()` accessor emits
+    -- objects shaped `{"key":"…","value":…,"id":…}`; we extract the key via
+    -- `->> 'key'`. We use `lax` mode (Postgres default) explicitly so that
+    -- non-object nodes encountered by the recursive `**` descent are silently
+    -- skipped instead of raising. Empty/NULL payloads are coalesced to `{}`.
+    -- DRAFT NOTE: this trigger body MUST be syntax-validated against the
+    -- target Postgres version (Supabase PG 14/15) before promotion to
+    -- `v2/database/`. See `docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md`
+    -- §11 (migration/runbook) and §12 (open question on recursive scan
+    -- performance / portability).
     FOR found_key IN
-        SELECT DISTINCT (kv).key
-        FROM jsonb_path_query(target_payload, '$.**.keyvalue()') AS kv
+        SELECT DISTINCT t.value ->> 'key'
+        FROM jsonb_path_query(
+                 COALESCE(target_payload, '{}'::jsonb),
+                 'lax $.**.keyvalue()'
+             ) AS t(value)
     LOOP
-        IF lower(found_key) = ANY (forbidden_keys) THEN
+        IF found_key IS NOT NULL AND lower(found_key) = ANY (forbidden_keys) THEN
             RAISE EXCEPTION
                 'Forbidden visible-decision key "%" present in % payload. See docs/ai/INTEL_V3_RESEARCH_ARTIFACT_STORE_V1.md §10 and Phase 1 spec §4 forbidden-field rule.',
                 found_key, TG_TABLE_NAME

@@ -6,12 +6,21 @@ These dataclasses define the boundary between:
   - The artifact store writer that persists a WorkerOutput to the DB.
 
 Architecture constraints (non-negotiable):
-  - Workers NEVER produce forbidden keys: final_action, buy, sell, trim, hold,
-    final_conviction, final_allocation, deploy_amount, deploy_dollar, deploy_shares.
+  - Workers NEVER produce forbidden keys — see WORKER_FORBIDDEN_PAYLOAD_KEYS below.
   - safe_for_decision is always False in every artifact row — enforced by DB constraint
     and by the writer (never settable by workers).
-  - Workers NEVER import or call decide() from decision_policy_v1.
+  - Workers NEVER import or call the deterministic decision policy function.
   - Workers NEVER alter intel_v3_snapshots or any visible Intel v3 surface.
+
+Two-layer forbidden-key boundary:
+  DB_FORBIDDEN_PAYLOAD_KEYS  — mirrors exactly the Phase 2.1 DB CHECK + recursive trigger.
+                               The DB will hard-reject any payload containing these keys.
+  WORKER_FORBIDDEN_PAYLOAD_KEYS — Phase 3 app-level boundary, intentionally stricter.
+                               Adds broader ambiguous authority keys (action, recommendation,
+                               target_price, allocation) that the DB does not explicitly block
+                               but that workers must never produce. Validated in Python at
+                               WorkerOutput / FactRecord construction time.
+  validate_payload() enforces WORKER_FORBIDDEN_PAYLOAD_KEYS (the stricter set).
 """
 from __future__ import annotations
 
@@ -20,8 +29,11 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
-# Immutable set of forbidden payload keys (mirrors the DB CHECK + trigger).
-FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = frozenset({
+# ── Phase 2.1 DB parity set ───────────────────────────────────────────────────
+# Exact match to the DB CHECK constraint + PL/pgSQL recursive trigger in
+# v2/database/017_research_artifact_store_v1.sql. The DB hard-rejects these
+# at write time. This set is NOT the full worker boundary — see below.
+DB_FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = frozenset({
     "final_action",
     "final_conviction",
     "final_allocation",
@@ -34,12 +46,32 @@ FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = frozenset({
     "hold",
 })
 
+# ── Phase 3 app-level worker boundary (stricter) ──────────────────────────────
+# Superset of DB_FORBIDDEN_PAYLOAD_KEYS. Workers must not produce ANY of these
+# keys. The extra keys below are NOT blocked by the DB trigger but represent
+# broader ambiguous decision-authority language that research workers must never
+# emit — per Phase 1 §4 "any field that, by name or content, asserts visible
+# recommendation authority."
+#
+# NOTE: Do NOT add legitimate neutral research keys here (review_status,
+# found_fields, evidence_summary, analyst_rating_change, etc.).
+WORKER_FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = DB_FORBIDDEN_PAYLOAD_KEYS | frozenset({
+    "action",
+    "recommendation",
+    "target_price",
+    "allocation",
+    "final_action",  # already in DB set; explicit for readability
+})
+
+# Backwards-compatible alias — validate_payload() now enforces the stricter set.
+FORBIDDEN_PAYLOAD_KEYS: frozenset[str] = WORKER_FORBIDDEN_PAYLOAD_KEYS
+
 
 def _has_forbidden_key(payload: Any) -> Optional[str]:
-    """Recursively check a dict/list for any forbidden key (case-insensitive).
+    """Recursively check a dict/list for any WORKER_FORBIDDEN_PAYLOAD_KEYS key (case-insensitive).
 
     Returns the first forbidden key found, or None.
-    Mirrors the PL/pgSQL walker in migration 017 so validation is identical.
+    Enforces the Phase 3 app-level boundary (stricter than the DB trigger).
     """
     if isinstance(payload, dict):
         for k, v in payload.items():

@@ -28,7 +28,9 @@ import pytest
 
 from app.config import Settings
 from app.services.intelligence.research_workers.contracts import (
+    DB_FORBIDDEN_PAYLOAD_KEYS,
     FORBIDDEN_PAYLOAD_KEYS,
+    WORKER_FORBIDDEN_PAYLOAD_KEYS,
     AuditEventRecord,
     FactRecord,
     SourceRecord,
@@ -439,6 +441,86 @@ class TestNoForbiddenPayloadKeys:
                 fact_kind="sourced_claim",
                 structured_payload={"final_action": "BUY"},
             )
+
+
+# ── Phase 3 app-level worker boundary (stricter than DB) ─────────────────────
+
+class TestWorkerForbiddenKeyBoundary:
+    """WORKER_FORBIDDEN_PAYLOAD_KEYS is a strict superset of DB_FORBIDDEN_PAYLOAD_KEYS.
+
+    The DB trigger blocks the non-negotiable visible-decision keys.
+    Worker code additionally blocks broader ambiguous authority keys
+    (action, recommendation, target_price, allocation) that could imply
+    final decision authority even without being the canonical DB-forbidden names.
+    """
+
+    def test_worker_set_is_superset_of_db_set(self) -> None:
+        assert DB_FORBIDDEN_PAYLOAD_KEYS.issubset(WORKER_FORBIDDEN_PAYLOAD_KEYS), (
+            "WORKER_FORBIDDEN_PAYLOAD_KEYS must include every key in DB_FORBIDDEN_PAYLOAD_KEYS"
+        )
+
+    def test_worker_set_adds_broader_authority_keys(self) -> None:
+        extra = WORKER_FORBIDDEN_PAYLOAD_KEYS - DB_FORBIDDEN_PAYLOAD_KEYS
+        assert "action" in extra
+        assert "recommendation" in extra
+        assert "target_price" in extra
+        assert "allocation" in extra
+
+    def test_forbidden_payload_keys_alias_equals_worker_set(self) -> None:
+        assert FORBIDDEN_PAYLOAD_KEYS == WORKER_FORBIDDEN_PAYLOAD_KEYS
+
+    # ── top-level rejections ──────────────────────────────────────────────────
+
+    @pytest.mark.parametrize("key", ["action", "recommendation", "target_price", "allocation"])
+    def test_rejects_broader_authority_key_top_level(self, key: str) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({key: "some value"})
+
+    @pytest.mark.parametrize("key", ["FINAL_ACTION", "Action", "RECOMMENDATION", "Target_Price", "ALLOCATION"])
+    def test_rejects_broader_authority_key_case_insensitive(self, key: str) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({key: "some value"})
+
+    @pytest.mark.parametrize("key", ["Buy", "HOLD", "Sell"])
+    def test_rejects_db_set_keys_case_insensitive(self, key: str) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({key: "some value"})
+
+    # ── nested rejections ─────────────────────────────────────────────────────
+
+    def test_rejects_action_nested(self) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({"context": {"action": "BUY"}})
+
+    def test_rejects_recommendation_nested(self) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({"output": {"recommendation": "strong buy"}})
+
+    def test_rejects_target_price_deeply_nested(self) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({"a": {"b": {"target_price": 150.0}}})
+
+    def test_rejects_allocation_in_list(self) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({"items": [{"allocation": 0.05}]})
+
+    def test_rejects_FINAL_ACTION_in_nested_object(self) -> None:
+        with pytest.raises(ValueError, match="Forbidden key"):
+            validate_payload({"summary": {"FINAL_ACTION": "SELL"}})
+
+    # ── valid neutral research keys still pass ────────────────────────────────
+
+    @pytest.mark.parametrize("payload", [
+        {"review_status": "dark_run_no_external_source"},
+        {"found_fields": ["eps_actual_last"], "missing_fields": ["earnings_date_next"]},
+        {"reviewed_ticker": "AAPL", "worker_phase": "phase3_dark_run"},
+        {"evidence_summary": "Earnings review attempted. No external data available."},
+        {"analyst_rating_change": "upgrade", "period": "2026Q2"},
+        {"claim": "earnings_review_attempted", "review_status": "dark_run_no_external_source",
+         "found_fields_count": 0, "missing_fields_count": 10},
+    ])
+    def test_valid_neutral_research_payload_passes(self, payload: dict) -> None:
+        validate_payload(payload)  # must not raise
 
 
 # ── Criterion 7: worker does not import or call decide() ─────────────────────

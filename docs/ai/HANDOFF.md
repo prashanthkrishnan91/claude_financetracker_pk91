@@ -31,11 +31,12 @@ Backend-only portfolio coverage diagnostic endpoint. Compares current portfolio 
   - Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
   - Guard: `intel_v3_sec_metric_portfolio_coverage_dry_run_enabled=true` required (raises 403 if off).
   - Independent of Phase 8A/8B flags.
-  - Returns: `sec_metric_portfolio_coverage_dry_run_enabled`, `sec_metric_portfolio_coverage_safe_for_decision` (always false), `sec_metric_portfolio_coverage_visible_snapshot_unchanged` (always true), `portfolio_ticker_count`, `portfolio_tickers_evaluated`, `tickers_with_research_artifacts_count`, `tickers_without_research_artifacts_count`, `tickers_with_source_linked_metric_evidence_count`, `tickers_ready_for_future_adapter_count`, `tickers_partial_for_future_adapter_count`, `tickers_blocked_for_future_adapter_count`, `tickers_without_sec_metric_coverage`, `readiness_counts`, `by_ticker`, `errors`.
-  - `by_ticker` shape per ticker: `has_research_artifacts`, `has_source_linked_metric_evidence`, `source_linked_metric_fact_count`, `future_adapter_readiness`, `present_buckets`, `missing_buckets`, `blocking_reason_codes`.
+  - Returns: `sec_metric_portfolio_coverage_dry_run_enabled`, `sec_metric_portfolio_coverage_safe_for_decision` (always false), `sec_metric_portfolio_coverage_visible_snapshot_unchanged` (always true), `portfolio_ticker_count`, `portfolio_tickers_evaluated`, `tickers_with_sec_research_artifacts_count`, `tickers_without_sec_research_artifacts_count`, `tickers_with_source_linked_metric_evidence_count`, `tickers_ready_for_future_adapter_count`, `tickers_partial_for_future_adapter_count`, `tickers_blocked_for_future_adapter_count`, `tickers_without_sec_metric_coverage`, `readiness_counts`, `by_ticker`, `errors`.
+  - `by_ticker` shape per ticker: `has_sec_research_artifacts`, `has_source_linked_metric_evidence`, `source_linked_metric_fact_count`, `future_adapter_readiness`, `present_buckets`, `missing_buckets`, `blocking_reason_codes`.
+  - SEC coverage signal: `has_sec_research_artifacts = fact_count > 0` (source_linked_metric_fact_count from Phase 8B). Tickers with generic artifacts but zero SEC CompanyFacts metric facts are treated as uncovered: `missing_sec_research_artifact` blocking code, counted in `tickers_without_sec_metric_coverage`.
   - No raw values, no structured_payload, no source URLs exposed.
 
-- **New test file**: `v2/backend/tests/test_intel_v3_phase8d_portfolio_sec_metric_coverage.py` — 73 tests covering all 15 acceptance criteria.
+- **New test file**: `v2/backend/tests/test_intel_v3_phase8d_portfolio_sec_metric_coverage.py` — 76 tests covering all 15 acceptance criteria.
 
 ### Files changed
 - `v2/backend/app/services/intelligence/research_workers/sec_metric_portfolio_coverage_dry_run.py` — new module

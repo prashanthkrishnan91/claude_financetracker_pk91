@@ -210,6 +210,7 @@ def run_validation(
                 safe_for_decision_false_count += 1
             else:
                 failed_count += 1
+                errors.append(f"write_failed ticker={ticker} artifact_id_none")
         except Exception as exc:  # noqa: BLE001
             failed_count += 1
             errors.append(f"write_error ticker={ticker} error={exc}")

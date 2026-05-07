@@ -84,7 +84,13 @@ class ArtifactStoreWriter:
     # ── private helpers ───────────────────────────────────────────────────────
 
     def _upsert_artifact(self, output: WorkerOutput) -> Optional[str]:
-        """Insert artifact row. On idempotency key conflict, return existing id."""
+        """Insert artifact row. On idempotency key conflict, return existing id.
+
+        Uses explicit select-then-insert instead of upsert() because the unique
+        constraint is a PARTIAL index (WHERE is_active = TRUE). PostgREST/Supabase
+        upsert() requires an unconditional unique constraint as the ON CONFLICT
+        target; using a partial index produces error 42P10 in production.
+        """
         row: dict[str, Any] = {
             "user_id": self._user_id,
             "artifact_schema_version": "artifact.v1",
@@ -120,16 +126,7 @@ class ArtifactStoreWriter:
         if output.model_version:
             row["model_version"] = output.model_version
 
-        result = (
-            self._client.table("research_artifacts")
-            .upsert(row, on_conflict="replay_idempotency_key", ignore_duplicates=True)
-            .execute()
-        )
-        data = result.data or []
-        if data:
-            return data[0].get("id")
-
-        # Row already exists (idempotency skip) — fetch the existing id.
+        # Step 1: Check for an existing active artifact before inserting.
         existing = (
             self._client.table("research_artifacts")
             .select("id")
@@ -138,16 +135,44 @@ class ArtifactStoreWriter:
             .limit(1)
             .execute()
         )
-        rows = existing.data or []
-        if rows:
+        existing_rows = existing.data or []
+        if existing_rows:
+            existing_id = existing_rows[0].get("id")
             logger.info(
                 "research_artifact_idempotency_skip ticker=%s key=%s existing_id=%s",
                 output.ticker,
                 output.replay_idempotency_key,
-                rows[0].get("id"),
+                existing_id,
             )
-            return rows[0].get("id")
-        return None
+            return existing_id
+
+        # Step 2: No existing artifact — insert new row.
+        try:
+            result = self._client.table("research_artifacts").insert(row).execute()
+            data = result.data or []
+            if data:
+                return data[0].get("id")
+            return None
+        except Exception as exc:
+            # Step 3: Insert failed — re-select in case of race/idempotency conflict.
+            logger.warning(
+                "research_artifact_insert_conflict_fallback ticker=%s key=%s error=%s",
+                output.ticker,
+                output.replay_idempotency_key,
+                exc,
+            )
+            fallback = (
+                self._client.table("research_artifacts")
+                .select("id")
+                .eq("replay_idempotency_key", output.replay_idempotency_key)
+                .eq("is_active", True)
+                .limit(1)
+                .execute()
+            )
+            fallback_rows = fallback.data or []
+            if fallback_rows:
+                return fallback_rows[0].get("id")
+            raise  # re-raise so outer write() catch records the failure audit
 
     def _insert_sources(
         self, output: WorkerOutput, artifact_id: str

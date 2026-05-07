@@ -115,7 +115,7 @@ class FakeSupabaseClient:
         return FakeTableQuery(state)
 
     def artifact_inserts(self) -> list[dict]:
-        return self.tables["research_artifacts"].upserts
+        return self.tables["research_artifacts"].inserts
 
     def audit_inserts(self) -> list[dict]:
         return self.tables["worker_audit_events"].inserts

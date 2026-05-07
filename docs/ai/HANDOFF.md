@@ -1,4 +1,53 @@
 
+## 2026-05-07 — Phase 3.7: Fix Real Supabase Artifact Writer Idempotency (Level 1)
+
+### Status
+Phase 3.7 fixes the production idempotency failure that blocked all Phase 3.6 validation writes. No SQL migration. No visible behavior change.
+
+### Root cause
+`ArtifactStoreWriter._upsert_artifact()` called `.upsert(row, on_conflict="replay_idempotency_key", ignore_duplicates=True)`. Migration 017 created the idempotency constraint as a **partial unique index** (`WHERE is_active = TRUE`). PostgREST/Supabase `upsert()` requires an unconditional unique constraint as the `ON CONFLICT` target; using a partial index produces error **42P10** in production:
+> there is no unique or exclusion constraint matching the ON CONFLICT specification
+
+### Fix
+Replaced `_upsert_artifact()` with explicit select-then-insert pattern:
+1. SELECT existing active artifact by `replay_idempotency_key` + `is_active = True` → if found, log idempotency skip and return existing id (no insert).
+2. If not found → INSERT new row → return new id.
+3. If INSERT raises (race conflict) → re-SELECT → if found return id, else re-raise to outer `write()` catch for audit recording.
+
+The partial unique index (`uq_research_artifacts_replay_active`) is preserved and remains correct — the Python layer now correctly implements idempotency without relying on PostgREST upsert against it.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/artifact_store_writer.py` — `_upsert_artifact()` rewritten
+- `v2/backend/app/services/intelligence/research_workers/validation_harness.py` — added `errors.append("write_failed ticker=… artifact_id_none")` when write returns None, so `failed_count > 0` is never paired with `errors=[]`
+- `v2/backend/tests/test_intel_v3_phase3_research_workers.py` — `artifact_inserts()` returns `inserts` (not `upserts`)
+- `v2/backend/tests/test_intel_v3_phase3_5_validation_harness.py` — same
+- `v2/backend/tests/test_intel_v3_phase3_7_artifact_idempotency.py` — new, 16 tests, 8 criteria
+
+### Test results
+- Phase 3: 85/85 ✓
+- Phase 3.5: 57/57 ✓
+- Phase 3.7: 16/16 ✓
+- Combined: 158/158 ✓
+- Phase 3.6: 4/35 pass (pre-existing environment issue — supabase SDK not installed; count unchanged from before this PR)
+
+### Re-run instructions (Phase 3.6 validation endpoint)
+After deploy, re-run Phase 3.6 validation against real Supabase:
+```bash
+curl -X POST https://<railway-host>/api/v1/diagnostics/finance-intel/research-workers/validate \
+  -H "X-Finance-Runtime-Cert-Secret: <secret>" \
+  -H "Content-Type: application/json" \
+  -d '{"tickers": ["AAPL", "MSFT", "NVDA"]}'
+```
+Expected: `written_count=3`, `safe_for_decision_false_count=3`, `unexpected_safe_for_decision_true_count=0`, `errors=[]`.
+
+### Architecture invariants preserved
+- No SQL migration. Existing partial unique index unchanged.
+- `safe_for_decision` remains False (DB constraint + writer hard-code preserved).
+- No `decide()` / `decision_policy_v1.py` change.
+- No visible Intel v3 snapshot behavior change.
+- No new providers, LLM calls, or UI changes.
+- No new SQL. No artifact-to-decision integration.
+
 ## 2026-05-07 — Phase 3.6: Controlled Real-DB Dark-Run Validation Invocation Path (Level 2)
 
 ### Status

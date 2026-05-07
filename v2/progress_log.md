@@ -1,4 +1,13 @@
 
+## 2026-05-07 — Phase 1: Finance Agent Skill Pack Audit (Spec Only, Level 1)
+
+- Phase 0 (PRs #220–#222) and Phase 0.5 (PR #223) certified. This PR adds the Phase 1 architecture spec only — no runtime code, no SQL, no providers, no LLM, no UI changes.
+- New doc: `docs/ai/INTEL_V3_FINANCE_AGENT_SKILL_PACK_AUDIT.md`. Defines: executive decision boundary (deterministic Intel v3 policy is sole Buy/Hold/Trim/Sell authority; agents may produce sourced research artifacts only), current-state repo audit (snapshot path, run/snapshot separation, ReadOnlyEvidenceAdapter role, certification tests, decoupled legacy paths, reusable seams), 11 skill packs with allowed/forbidden outputs and target phases, Research Artifact Contract v1 in prose (with forbidden-field hard rule), worker boundary contract, 6-phase roadmap with test/production/rollback gates, acceptance criteria for all future implementation PRs, risk register, and 4 short prompt templates for later phases.
+- HANDOFF.md updated with the same summary and the next recommended PR (Phase 2 — Research Artifact Store v1 planning + draft SQL proposal).
+- Architecture rule reinforced: agents are research artifact workers only. `decide()` in `decision_policy_v1.py` remains the sole visible decision authority. No re-coupling to legacy `recommendation_engine`. No page-load LLM calls.
+- Validation: docs-only; `git diff` confirms no runtime/SQL/UI changes. Phase 0/0.5 certification surfaces untouched.
+- Next strategic phase: Phase 2 — Research Artifact Store v1 planning + draft SQL proposal (no migration applied).
+
 ## 2026-05-06 — Phase 0.5: Intel v3 Regression Guardrails (Level 1)
 
 - Phase 0 certified (PRs #220–#222). This PR adds regression guardrails only — no visible behavior changes.

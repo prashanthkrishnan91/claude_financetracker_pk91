@@ -222,6 +222,10 @@ def run_validation(
     # tests can verify exactly which tables received rows.
     if hasattr(db_client, "get_written_tables"):
         tables_touched = db_client.get_written_tables()
+    elif written_count > 0:
+        # Real Supabase clients don't expose get_written_tables(). When at least
+        # one artifact was written, research_artifacts is always touched.
+        tables_touched = ["research_artifacts"]
     else:
         tables_touched = []
 

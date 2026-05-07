@@ -585,8 +585,9 @@ class TestCompactSummaryFields:
             "research_artifact_sources must not appear when worker produced no sources"
         )
 
-    def test_tables_touched_empty_for_unobservable_client(self) -> None:
-        """When db_client has no get_written_tables(), tables_touched is [] (truthful)."""
+    def test_tables_touched_includes_research_artifacts_on_write_for_unobservable_client(self) -> None:
+        """Phase 7C: when client has no get_written_tables() but writes occurred,
+        tables_touched accurately includes 'research_artifacts'."""
         class PlainFakeClient:
             """A minimal fake client without get_written_tables() — simulates real Supabase."""
             def __init__(self):
@@ -606,11 +607,10 @@ class TestCompactSummaryFields:
             db_client=PlainFakeClient(),
             settings=_all_on(),
         )
-        assert result.tables_touched == [], (
-            "tables_touched must be [] when client does not support write observation"
-        )
-        # Writes still happen — just not observable via tables_touched.
         assert result.written_count == 1
+        # Phase 7C fix: when written_count > 0 and no get_written_tables(),
+        # research_artifacts is known to have been touched.
+        assert "research_artifacts" in result.tables_touched
 
     def test_tables_touched_empty_when_nothing_written(self) -> None:
         client = FakeSupabaseClient()

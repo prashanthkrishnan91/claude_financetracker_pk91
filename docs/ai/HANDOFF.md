@@ -1,4 +1,63 @@
 
+## 2026-05-07 — Phase 7C: Metric Observation Tag Mix Observability + Diagnostics Polish (Level 1)
+
+### Status
+Phase 7C complete. All invariants preserved. Phases 0–7B unchanged. safe_for_decision remains DB-hard-locked false. No artifact consumption. No visible decision drift.
+
+### What this phase adds
+Backend-only diagnostics polish. No frontend changes. No decision changes. No provider additions.
+
+- **Extended**: `v2/backend/app/services/intelligence/research_workers/artifact_observability.py`
+  - `ArtifactObservabilitySummary` gains 4 new Phase 7C fields (backward-compatible defaults):
+    `by_metric_observation_tag` (dict[str,int]={}), `by_metric_observation_unit` (dict[str,int]={}),
+    `by_metric_observation_form` (dict[str,int]={}), `artifacts_with_companyfacts_metric_observations_count` (int=0).
+  - Per-artifact loop extended: for each `metric_observation` fact, extracts `tag`/`unit`/`form` from
+    `structured_payload` (aggregate count only — no raw values exposed). Detects `claim="sec_companyfact_observed"`
+    to count `artifacts_with_companyfacts_metric_observations_count`.
+  - INFO log extended with new Phase 7C counters (tag/unit/form distinct count, companyfacts artifact count).
+
+- **Extended**: `v2/backend/app/routers/diagnostics.py`
+  - observe endpoint response now includes the 4 new Phase 7C aggregate fields.
+  - No raw values, no structured_payload, no source URLs exposed.
+
+- **Fixed**: `v2/backend/app/services/intelligence/research_workers/validation_harness.py`
+  - `tables_touched` fallback: when `written_count > 0` and client has no `get_written_tables()`,
+    now returns `["research_artifacts"]` instead of `[]`. Previously returned `[]` even when artifacts
+    were written to real Supabase. Fix is an `elif written_count > 0` branch.
+
+- **New test file**: `v2/backend/tests/test_intel_v3_phase7c_metric_observation_mix.py` — 38 tests.
+
+- **Updated test**: `v2/backend/tests/test_intel_v3_phase3_5_validation_harness.py`
+  - `test_tables_touched_empty_for_unobservable_client` updated to reflect Phase 7C fix behavior.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/artifact_observability.py` — 4 new fields + aggregation
+- `v2/backend/app/routers/diagnostics.py` — 4 new fields in observe response
+- `v2/backend/app/services/intelligence/research_workers/validation_harness.py` — tables_touched fallback fix
+- `v2/backend/tests/test_intel_v3_phase7c_metric_observation_mix.py` — 38 new Phase 7C tests
+- `v2/backend/tests/test_intel_v3_phase3_5_validation_harness.py` — 1 test updated for tables_touched fix
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 7C metric observation mix: **38/38** ✓ (new)
+- Phase 7A companyfacts: **70/70** ✓
+- Phase 6B readiness observability (service): **55/55** ✓ (6 fastapi env failures pre-existing)
+- Phase 4 artifact observability: **58/58** ✓
+- Phase 3.5 validation harness: **57/57** ✓ (1 test updated, 56 unchanged)
+- Total new run: **281 passed** (6 pre-existing fastapi env failures unchanged)
+
+### Architecture Invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new module.
+- `intel_v3_snapshots` — no reads or writes.
+- `IntelV3Service`, `recommendation_engine` — NOT imported.
+- `safe_for_decision` — remains DB-hard-locked False.
+- `eligible_for_decision_consumption` — always False (invariant unchanged).
+- No LLM, no agents, no new paid providers.
+- No SQL migration. No new tables. No schema changes.
+- No visible Intel v3 action/copy/snapshot change. No frontend change.
+
+---
+
 ## 2026-05-07 — Phase 7A hardening pass: observe endpoint + request_count fix (Level 1)
 
 ### Status

@@ -189,6 +189,14 @@ class Settings(BaseSettings):
     # Independent of the consumption flag above — controlled solely here.
     intel_v3_valuation_context_adapter_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14A — Valuation Data Audit v1 (off by default) ─────────
+    # When True, enables the protected Phase 14A read-only diagnostics endpoint
+    # that audits whether existing stored data can support future valuation ratio
+    # computation. Returns aggregate-only counts by evidence category.
+    # Diagnostics-only — does NOT compute ratios, does NOT produce PriceBand,
+    # does NOT modify DecisionInputV3. No provider/LLM calls. No SQL writes.
+    intel_v3_valuation_data_audit_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

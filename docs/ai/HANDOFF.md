@@ -1,4 +1,147 @@
 
+## 2026-05-08 — Phase 14A: Valuation Data Audit v1 — Stored-Data Diagnostics (Level 1)
+
+### Status
+Phase 14A complete. **Read-only diagnostics-only** — adds a protected endpoint that audits whether existing stored SEC fundamentals and portfolio data are sufficient to support future valuation ratio computation (Phase 14B). No behavior changes, no SQL writes, no provider/LLM calls, no UI changes, no valuation ratios computed, no PriceBand produced, no DecisionInputV3 mutations. 103 tests covering hard locks, leakage prevention, non-company exclusion, TTM blocked, EPS/equity bucket counts, and production pass criteria.
+
+### Root cause / gap addressed
+Phase 13 established valuation readiness classification (READY=10, PARTIAL=6, SUPPRESSED_MISSING_FUNDAMENTALS=3, SUPPRESSED_NON_COMPANY=15). Phase 14A answers the prerequisite question before Phase 14B computation: "Does the existing stored data actually support FY EPS earnings yield computation?" This audit proves the data is present without running any computation. Opus recommended Phase 14A as the mandatory first step before any adapter or PriceBand logic is built.
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/v3/valuation_data_audit_v1.py`
+- `VALUATION_DATA_AUDIT_V1_CONTRACT_VERSION = "phase14a_v1"` — stable contract.
+- `PERIOD_LIMIT_PER_TAG = 2`, `TTM_BLOCKED_BY_PERIOD_LIMIT = True` — static inspection of `sec_companyfacts_parser._MAX_PERIODS_PER_TAG`.
+- `ValuationDataAuditResult` — frozen dataclass with all hard-lock fields always set to invariant values.
+- `build_valuation_data_audit(readiness, company_ticker_categories)` — pure, deterministic, read-only audit function. Accepts Phase 9 readiness result and a position category dict. Returns aggregate-only counts. Never raises, never writes to DB, never calls any provider.
+- EPS/equity counts: READY tickers guarantee eps+equity bucket coverage. PARTIAL tickers checked against `partial_tickers_with_missing_groups` to determine if eps/equity are available.
+- Market price: all company tickers with portfolio positions are counted as `price_or_position_available` (honest note: not a live current market price).
+- Sector: `positions.category` (Core/ETF/IPO/SELL) is the only available sector signal. Financial sector (Technology/Healthcare) is in `intel_v3_snapshots.raw.fundamentals` (yfinance), not queried. Future CHEAP/EXPENSIVE valuation band blocked without financial sector — gap reported.
+
+**New config flag**: `intel_v3_valuation_data_audit_v1_diagnostics_enabled: bool = False`
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/valuation-data-audit-v1`
+- Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+- Guard: `intel_v3_valuation_data_audit_v1_diagnostics_enabled=true` required (403 if off).
+- Data flow: (1) compute Phase 9 readiness, (2) query `positions` table for category info, (3) call pure audit function, (4) return aggregate-only response.
+- Hard-locks: safe_for_decision=False, visible_snapshot_unchanged=True, read_only=True, diagnostics_only=True, valuation_ratios_computed=False, price_context_unchanged=True.
+- TTM note in response: `ttm_blocked_by_period_limit=true`, `period_limit_per_tag=2`.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase14a_valuation_data_audit_v1.py` — 103 tests in 9 classes:
+- `TestPhase14AConfigFlagDefault` — flag exists, type is bool, defaults False.
+- `TestPhase14AEndpointFlagGate` — endpoint path registered, flag gate in router source, POST method, runtime-cert dependency present.
+- `TestPhase14AHardLocks` — 10 tests proving all 6 hard-lock fields are always correct for any readiness input.
+- `TestPhase14ALeakagePrevention` — no forbidden ratio keys, no PriceBand values, no per-ticker raw rows, all counts non-negative, no raw metric key names in strings.
+- `TestPhase14AAuditPureFunction` — 18 tests for pure function correctness including error propagation, never-raises guarantee.
+- `TestPhase14AStaticImportSafety` — AST-based: no decide(), no decision_policy_v1, no yfinance, no openai/anthropic, no HTTP clients, no DB writes, no intel_v3_snapshots table access, no PriceBand import.
+- `TestPhase14ATTMBlocked` — TTM constants, parser agreement, invariant for all readiness states.
+- `TestPhase14ANonCompanyExclusion` — ETF/crypto excluded from company counts, EPS counts, market price counts.
+- `TestPhase14AEPSEquityCountsFromBuckets` — partial ticker bucket logic for eps/equity availability.
+- `TestPhase14ASectorReporting` — portfolio_category_only note, ETF/crypto not sector_available, financial sector gap noted.
+- `TestPhase14AProductionPassCriteria` — 20 tests mirroring HANDOFF production pass/fail criteria for Phase 13.1 production counts (READY=10, PARTIAL=6, BLOCKED=3, NON_COMPANY=15).
+
+### Production validation steps (after Phase 14A merges)
+
+**Step 1: Enable only the Phase 14A diagnostics flag**
+```
+INTEL_V3_VALUATION_DATA_AUDIT_V1_DIAGNOSTICS_ENABLED=true
+```
+Do NOT enable `INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_ENABLED=true` at this stage.
+Do NOT enable any Phase 14B flag (which does not exist yet).
+
+**Step 2: Call the diagnostic endpoint**
+```
+POST /api/v1/diagnostics/finance-intel/valuation-data-audit-v1
+Headers: X-Finance-Runtime-Cert-Secret: <cert_secret>
+```
+
+**Step 3: Verify all pass criteria**
+
+| Field | Expected value | Pass criterion |
+|---|---|---|
+| `adapter_version` | `"phase14a_v1"` | Correct contract version |
+| `safe_for_decision` | `false` | Hard-locked — never true |
+| `visible_snapshot_unchanged` | `true` | Hard-locked — no snapshot writes |
+| `read_only` | `true` | Hard-locked — no DB writes |
+| `diagnostics_only` | `true` | Hard-locked — diagnostics only |
+| `valuation_ratios_computed` | `false` | Hard-locked — no ratios computed |
+| `price_context_unchanged` | `true` | Hard-locked — no PriceBand |
+| `portfolio_ticker_count` | `34` | Matches Phase 13.1 production count |
+| `company_ticker_count` | `19` | READY(10)+PARTIAL(6)+BLOCKED(3) |
+| `non_company_ticker_count` | `15` | SUPPRESSED_NON_COMPANY from Phase 13.1 |
+| `sec_ready_count` | `10` | READY tickers from Phase 13.1 |
+| `sec_partial_count` | `6` | PARTIAL tickers from Phase 13.1 |
+| `sec_blocked_count` | `3` | BLOCKED tickers from Phase 13.1 |
+| `latest_fy_eps_available_count` | `>= 10` | At least READY tickers have EPS |
+| `ttm_blocked_by_period_limit` | `true` | _MAX_PERIODS_PER_TAG=2 < 4 for TTM |
+| `period_limit_per_tag` | `2` | Confirms current parser limit |
+| `eligible_for_future_fy_earnings_yield_count` | `>= 10` | Phase 14B FY EPS feasible |
+| `errors` | `[]` | No audit errors |
+
+**Step 4: Fail criteria (stop and investigate if any occur)**
+- `safe_for_decision=true` → critical invariant violation; escalate immediately.
+- `valuation_ratios_computed=true` → critical invariant violation; escalate immediately.
+- Any forbidden key (pe_ratio, pb_ratio, ev_ebitda, price_target, fair_value) in response → critical leak; escalate immediately.
+- `errors` non-empty → audit adapter failure; investigate before proceeding.
+- `portfolio_ticker_count` ≠ 34 → portfolio changed; investigate and update expectations.
+
+**Step 5: Record results for Phase 14B planning**
+Document `eligible_for_future_fy_earnings_yield_count` and `eligible_for_future_book_value_proxy_count`. These are the inputs needed to decide Phase 14B scope.
+
+**Step 6: Note sector gap**
+`sector_source_note` will confirm that only `positions.category` (portfolio label, not financial sector) is available. Future CHEAP/EXPENSIVE requires financial sector from `intel_v3_snapshots.raw.fundamentals` — Phase 14B must account for this gap.
+
+### What remains out of scope
+- Computing actual valuation ratios (P/E, P/B, EV/EBITDA, FCF yield, earnings yield).
+- Producing PriceBand contributions from valuation signals.
+- Querying financial sector from `intel_v3_snapshots.raw.fundamentals` (deferred to Phase 14B).
+- Expanding `_MAX_PERIODS_PER_TAG` to support TTM (separate decision).
+- Modifying `DecisionInputV3` in any way.
+- SQL schema changes.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/valuation_data_audit_v1.py` — new Phase 14A pure audit module
+- `v2/backend/app/config.py` — new config flag `intel_v3_valuation_data_audit_v1_diagnostics_enabled`
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + imports
+- `v2/backend/tests/test_intel_v3_phase14a_valuation_data_audit_v1.py` — 103 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 14A: **103/103** ✓ (new)
+- Phase 13.1: **83/83** ✓
+- Phase 13: **144/144** ✓
+- Phase 11: **120/120** ✓
+- Phase 10: **94/94** ✓
+- Total: **544 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `PriceBand` — NOT imported in Phase 14A module.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — never set True.
+- `valuation_ratios_computed` — never set True.
+- `DecisionInputV3.price_context` — NEVER modified.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL writes.
+- ETF/fund/crypto tickers remain non-company — excluded from all company valuation counts.
+- No P/E, P/B, EV/EBITDA, FCF yield, or earnings yield computed.
+- No price targets, no fair-value estimates, no prediction-oracle behavior.
+- No raw valuation metric keys in any output field.
+- All 544 Phase 10/11/13/13.1/14A tests pass.
+
+### Next recommended phase
+**Phase 14B (separate PR, future)**: FY EPS Earnings Yield computation for eligible tickers (eligible_for_future_fy_earnings_yield_count >= 10). Requires:
+1. A price fetch path for current market price (live price, not position-derived).
+2. EPS extraction from stored Phase 8B metric observations (FY period, not TTM — TTM remains blocked).
+3. Sector-aware earnings yield comparison (requires financial sector from snapshots.raw.fundamentals or a new yfinance sector query).
+4. PriceBand.CHEAP / PriceBand.EXPENSIVE determination with sector normalization.
+5. Phase 14B should NOT be started until Phase 14A production diagnostics pass.
+
+### Supabase SQL
+None. Phase 14A adds no SQL migrations, no schema changes, no table writes.
+
+---
+
 ## 2026-05-08 — Phase 13.1: Valuation Context Readiness Production Diagnostics Validation (Level 1)
 
 ### Status

@@ -74,7 +74,15 @@ Phase 9 does not feed SEC metrics into DecisionInputV3 and does not change visib
 - ETF/fund/crypto tickers remain SKIPPED_NON_COMPANY.
 
 ### Next recommended phase
-**Phase 10**: Intel v3 Truth/Input Adapter — wire Phase 9 readiness contract into DecisionInputV3 for READY tickers only, after explicit operator approval and visibility gate review. Requires Phase 9 readiness adapter to be enabled and validated in production first.
+**Immediate next phase**: Evidence Source Registry v1 / Multi-Lane Governance v1, plus roadmap alignment for Deploy + Watchtower.
+
+Actual SEC metric consumption by DecisionInputV3 remains a **later explicitly approved phase** after:
+1. Phase 9 readiness adapter is validated in production.
+2. Evidence source registry / multi-lane governance exists.
+3. Replay/diff governance is in place.
+4. Operator approval is given for shadow-only input consumption.
+
+**Phase 9 invariant**: readiness-only — `safe_for_decision=false` and `visible_snapshot_unchanged=true` must be preserved until all four conditions above are satisfied.
 
 ---
 

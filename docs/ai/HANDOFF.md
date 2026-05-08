@@ -1,4 +1,90 @@
 
+## 2026-05-08 — Phase 13.1: Valuation Context Readiness Production Diagnostics Validation (Level 1)
+
+### Status
+Phase 13.1 complete. Diagnostics-validation-only — adds tests proving the Phase 13 diagnostic endpoint is aggregate-only, hard-locked, and cannot imply PriceBand contributions or action drift. No behavior changes, no SQL, no provider/LLM calls, no UI changes. 83 new tests covering diagnostic response contract, aggregate-only safety, and static analysis of the router.
+
+### Root cause / gap addressed
+Phase 13 merged the diagnostic endpoint but had no tests specifically targeting the **diagnostic response contract** — hard-locks (`readiness_only=True`, `price_context_unchanged=True`, `safe_for_decision=False`, `visible_snapshot_unchanged=True`) and aggregate-only safety (no forbidden metric keys, no PriceBand values, no per-ticker data, no price targets). Phase 13.1 closes that gap before production diagnostics are enabled.
+
+### What this phase adds
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase13_1_valuation_context_diagnostics_validation.py` — 83 tests organized in 5 classes:
+- `TestDiagnosticResponseHardLocks` — proves all 4 hard-lock fields are always set correctly regardless of readiness data.
+- `TestDiagnosticStatusCountsContract` — proves readiness_status_counts has all 7 ValuationSignalStatus keys, values are non-negative integers, and counts add up to processed ticker count.
+- `TestDiagnosticResponseAggregateSafety` — proves no forbidden metric keys (pe_ratio, pb_ratio, ev_ebitda, fcf_yield, roic, price_target, fair_value, source_url), no PriceBand values, no per-ticker data in response.
+- `TestDiagnosticBuildPathNoPriceContextContribution` — proves all signals built during diagnostic counting produce `price_context_contribution=None`.
+- `TestDiagnosticRouterStaticAnalysis` — static AST analysis of diagnostics.py: endpoint never sets `safe_for_decision=True`, hard-locks are present in source.
+- `TestDiagnosticBuildNoPriceContextChange` — proves `DecisionInputV3.price_context` is unchanged for all initial PriceBand values.
+- `TestProductionValidationPassCriteria` — mirrors HANDOFF production pass/fail criteria as executable tests.
+
+**Updated**: `docs/ai/HANDOFF.md` — this entry, including production validation steps below.
+
+### Production validation steps (after Phase 13.1 merges)
+
+**Step 1: Enable only diagnostics flag**
+```
+INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_DIAGNOSTICS_ENABLED=true
+```
+Do NOT enable `INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_ENABLED=true` at this stage.
+
+**Step 2: Call the diagnostic endpoint**
+```
+POST /api/v1/diagnostics/finance-intel/valuation-context-adapter-v1
+Headers: X-Finance-Runtime-Cert-Secret: <cert_secret>
+```
+
+**Step 3: Verify all pass criteria**
+
+| Field | Expected value | Pass criterion |
+|---|---|---|
+| `governance_gate_passed` | `true` | Governance gate passes for current registry |
+| `readiness_only` | `true` | Hard-locked — Phase 13 is readiness-only |
+| `price_context_unchanged` | `true` | Hard-locked — no PriceBand contributions |
+| `safe_for_decision` | `false` | Hard-locked — never true for Phase 13 |
+| `visible_snapshot_unchanged` | `true` | Hard-locked — no snapshot writes |
+| `errors` | `[]` | No readiness adapter errors |
+| `readiness_status_counts` | All 7 keys present, values >= 0 | Every ValuationSignalStatus counted |
+| `readiness_status_counts` values sum | <= `portfolio_ticker_count` | Counts are consistent |
+| Response keys | No `pe_ratio`, `pb_ratio`, `ev_ebitda`, `price_target`, `fair_value`, `source_url` | Aggregate-only |
+| `consumption_enabled` | `false` | Adapter not yet live |
+
+**Step 4: Fail criteria (stop and investigate if any occur)**
+- `governance_gate_passed=false` → registry misconfiguration; do not proceed.
+- `errors` non-empty → readiness adapter failure; investigate before proceeding.
+- `safe_for_decision=true` → critical invariant violation; escalate immediately.
+- Any forbidden metric key in response → critical leak; escalate immediately.
+- `readiness_status_counts` sum > `portfolio_ticker_count` → double-counting; investigate.
+
+**Step 5: Record results**
+Document the diagnostic response counts (READY_FOR_FUTURE_VALUATION, PARTIAL_FOR_FUTURE_VALUATION, SUPPRESSED_*) in the Phase 14 planning note.
+
+### Next recommended phase
+**Phase 13.2 (optional)**: Enable `INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_ENABLED=true` and run Intel v3 with readiness tracking live. Verify source_signal_summary["valuation_context_lane"] records appear and action counts are unchanged.
+**Phase 14 (separate PR, future)**: Promote `valuation_ratio_computed_v1` registry lifecycle from PLANNED to ACTIVE. Then implement actual valuation ratio computation (P/E, P/B from SEC + market price) with sector normalization and PriceBand contribution guardrails.
+
+### Files changed
+- `v2/backend/tests/test_intel_v3_phase13_1_valuation_context_diagnostics_validation.py` — 83 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 13.1: **83/83** ✓ (new)
+- Phase 13: **144/144** ✓
+- Phase 11: **120/120** ✓
+- Phase 10: **94/94** ✓
+- Total: **441 passed**
+
+### Architecture invariants (all preserved)
+- No behavior changes — diagnostic tests only.
+- `DecisionInputV3.price_context` — NEVER modified.
+- `decide()` — NOT imported in any new/modified module.
+- `PriceBand` — not produced by any Phase 13/13.1 code path.
+- No SQL. No provider/LLM calls. No UI changes. No config changes.
+- `safe_for_decision` — never set True.
+- All 441 Phase 10/11/13/13.1 tests pass.
+
+---
+
 ## 2026-05-08 — Phase 13: Valuation Context Readiness Adapter v1 (Level 2, Readiness-Only)
 
 ### Status

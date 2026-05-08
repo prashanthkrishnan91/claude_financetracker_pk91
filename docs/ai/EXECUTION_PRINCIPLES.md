@@ -59,6 +59,14 @@ Required behavior:
 - Do not leave directly related dangling threads that are cheap to close.
 - Do not expand into unrelated surfaces in the name of completeness.
 
+## Intel v3 architecture principle
+
+> Research is asynchronous. Decisions are deterministic. UI reads certified snapshots.
+> Deploy generates exact action plans. Watchtower sends rare actionable email alerts.
+
+See `artifacts/Intel_v3_Architecture_Plan_Draft3_Living_Investment_Cockpit_Addendum.md`
+for the full post-Phase-9 north-star architecture reference.
+
 ## Prompt requirement
 
 For non-trivial Claude/Codex prompts, include this line inside the copyable block:

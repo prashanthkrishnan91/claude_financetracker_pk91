@@ -36,6 +36,12 @@ from ..services.intelligence.v3.sec_metric_truth_adapter_v1 import (
     build_sec_fundamentals_signal,
     SEC_METRIC_TRUTH_ADAPTER_V1_CONTRACT_VERSION,
 )
+from ..services.intelligence.v3.valuation_context_adapter_v1 import (
+    check_governance_gate as check_valuation_governance_gate,
+    build_valuation_context_signal,
+    VALUATION_CONTEXT_ADAPTER_V1_CONTRACT_VERSION,
+    ValuationSignalStatus,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -822,5 +828,118 @@ async def get_sec_metric_truth_adapter_v1_diagnostics(
         "skipped_non_company_count": readiness.skipped_non_company_count,
         "evidence_quality_upgrades_ready": evidence_quality_upgrades_ready,
         "evidence_quality_upgrades_partial": evidence_quality_upgrades_partial,
+        "errors": readiness.errors,
+    }
+
+
+# ── Phase 13 — Valuation Context Adapter v1 diagnostics ─────────────────────
+
+@router.post("/valuation-context-adapter-v1")
+async def get_valuation_context_adapter_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 13 — operator-only Valuation Context Adapter v1 governance diagnostics.
+
+    Returns governance gate status and signal-status counts by category
+    (aggregate only). No raw valuation values, no metric keys, no payloads,
+    no price targets. Diagnostics-only — does not run the Intel v3 snapshot or
+    change decisions.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved:
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw valuation values, no metric keys, no structured payloads.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_valuation_context_adapter_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    gate_passed, gate_reason = check_valuation_governance_gate()
+
+    db_client = get_supabase_client()
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+
+    # Compute expected signal-status counts (aggregate only, no raw values).
+    # Use a simplified has_market_price=True for diagnostics since we only
+    # need to show governance/readiness counts, not portfolio-specific prices.
+    status_counts: dict[str, int] = {s.value: 0 for s in ValuationSignalStatus}
+    price_context_upgrades_ready = 0
+    price_context_upgrades_partial = 0
+
+    if gate_passed:
+        # Company tickers: READY
+        for ticker in readiness.ready_tickers:
+            sig = build_valuation_context_signal(
+                ticker=ticker,
+                category="stock",
+                sec_readiness=readiness,
+                has_market_price=True,
+            )
+            status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
+            if sig.status == ValuationSignalStatus.READY:
+                price_context_upgrades_ready += 1
+
+        # Company tickers: PARTIAL
+        for ticker in readiness.partial_tickers_with_missing_groups:
+            sig = build_valuation_context_signal(
+                ticker=ticker,
+                category="stock",
+                sec_readiness=readiness,
+                has_market_price=True,
+            )
+            status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
+            if sig.status == ValuationSignalStatus.PARTIAL:
+                price_context_upgrades_partial += 1
+
+        # Non-company tickers: SKIPPED
+        for _reason, tickers in readiness.skipped_tickers_by_reason.items():
+            for ticker in tickers:
+                sig = build_valuation_context_signal(
+                    ticker=ticker,
+                    category="etf",
+                    sec_readiness=readiness,
+                    has_market_price=True,
+                )
+                status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
+
+        # Blocked tickers
+        for ticker in readiness.blocked_tickers_with_reason:
+            sig = build_valuation_context_signal(
+                ticker=ticker,
+                category="stock",
+                sec_readiness=readiness,
+                has_market_price=True,
+            )
+            status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
+
+    return {
+        "adapter_version": VALUATION_CONTEXT_ADAPTER_V1_CONTRACT_VERSION,
+        "safe_for_decision": False,
+        "visible_snapshot_unchanged": True,
+        "governance_gate_passed": gate_passed,
+        "governance_gate_reason": gate_reason,
+        "consumption_enabled": settings.intel_v3_valuation_context_adapter_v1_enabled,
+        "portfolio_ticker_count": readiness.portfolio_ticker_count,
+        "signal_status_counts": status_counts,
+        "price_context_upgrades_ready": price_context_upgrades_ready,
+        "price_context_upgrades_partial": price_context_upgrades_partial,
         "errors": readiness.errors,
     }

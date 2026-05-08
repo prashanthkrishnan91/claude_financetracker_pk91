@@ -25,9 +25,17 @@ from ..services.intelligence.research_workers.sec_metric_coverage_expansion impo
     compute_coverage_expansion,
 )
 from ..services.intelligence.research_workers.sec_metric_portfolio_coverage_dry_run import compute_portfolio_sec_metric_coverage
-from ..services.intelligence.research_workers.sec_metric_evidence_readiness_adapter import compute_sec_metric_evidence_readiness
+from ..services.intelligence.research_workers.sec_metric_evidence_readiness_adapter import (
+    compute_sec_metric_evidence_readiness,
+    compute_sec_readiness_for_phase11_adapter,
+)
 from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.intelligence.v3.evidence_source_registry import build_registry_summary
+from ..services.intelligence.v3.sec_metric_truth_adapter_v1 import (
+    check_governance_gate,
+    build_sec_fundamentals_signal,
+    SEC_METRIC_TRUTH_ADAPTER_V1_CONTRACT_VERSION,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -739,3 +747,80 @@ async def get_evidence_source_registry_diagnostics(
     summary["safe_for_decision"] = False
     summary["visible_snapshot_unchanged"] = True
     return summary
+
+
+# ── Phase 11 — SEC Metric Truth Adapter v1 diagnostics ───────────────────────
+
+@router.post("/sec-metric-truth-adapter-v1")
+async def get_sec_metric_truth_adapter_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 11 — operator-only SEC Metric Truth Adapter v1 governance diagnostics.
+
+    Returns governance gate status, readiness counts, and expected evidence-quality
+    upgrade counts (aggregate only). No raw metric values, no payloads, no source
+    URLs. Diagnostics-only — does not run the Intel v3 snapshot or change decisions.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_SEC_METRIC_TRUTH_ADAPTER_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved:
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw metric values, no structured payloads, no source URLs.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_sec_metric_truth_adapter_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_SEC_METRIC_TRUTH_ADAPTER_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    gate_passed, gate_reason = check_governance_gate()
+
+    db_client = get_supabase_client()
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+
+    # Compute expected upgrade counts — how many tickers WOULD receive a
+    # positive evidence-quality contribution (aggregate only, no raw metrics).
+    evidence_quality_upgrades_ready = 0
+    evidence_quality_upgrades_partial = 0
+
+    if gate_passed:
+        for ticker in readiness.ready_tickers:
+            sig = build_sec_fundamentals_signal(ticker=ticker, readiness_result=readiness)
+            if sig.evidence_quality_contribution is not None:
+                evidence_quality_upgrades_ready += 1
+        for ticker in readiness.partial_tickers_with_missing_groups:
+            sig = build_sec_fundamentals_signal(ticker=ticker, readiness_result=readiness)
+            if sig.evidence_quality_contribution is not None:
+                evidence_quality_upgrades_partial += 1
+
+    return {
+        "adapter_version": SEC_METRIC_TRUTH_ADAPTER_V1_CONTRACT_VERSION,
+        "safe_for_decision": False,
+        "visible_snapshot_unchanged": True,
+        "governance_gate_passed": gate_passed,
+        "governance_gate_reason": gate_reason,
+        "consumption_enabled": settings.intel_v3_sec_metric_truth_adapter_v1_enabled,
+        "portfolio_ticker_count": readiness.portfolio_ticker_count,
+        "ready_count": readiness.ready_count,
+        "partial_count": readiness.partial_count,
+        "blocked_count": readiness.blocked_count,
+        "skipped_non_company_count": readiness.skipped_non_company_count,
+        "evidence_quality_upgrades_ready": evidence_quality_upgrades_ready,
+        "evidence_quality_upgrades_partial": evidence_quality_upgrades_partial,
+        "errors": readiness.errors,
+    }

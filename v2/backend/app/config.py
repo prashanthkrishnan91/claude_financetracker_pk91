@@ -155,6 +155,22 @@ class Settings(BaseSettings):
     # No decision consumption, no provider calls, no LLM calls, no SQL writes.
     intel_v3_evidence_source_registry_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 11 — SEC Metric Truth Adapter v1 (off by default) ─────
+    # When True, the Intel v3 run_v3() path will compute Phase 9 SEC metric
+    # readiness and apply governed evidence-quality signals per eligible ticker.
+    # READY tickers may receive AxisBand.OK contribution to evidence_quality.
+    # PARTIAL tickers may receive AxisBand.THIN (degraded) contribution only.
+    # BLOCKED / SKIPPED_NON_COMPANY tickers receive no SEC fundamentals signal.
+    # Governance gate: Phase 10 registry sec_companyfacts_v1 must pass all checks.
+    # Decisions remain deterministic — decision_policy_v1 is the only authority.
+    # No new provider calls. No LLM calls. No SQL writes.
+    intel_v3_sec_metric_truth_adapter_v1_enabled: bool = False
+
+    # When True, enables the protected Phase 11 diagnostics endpoint that returns
+    # governance gate status and evidence-quality upgrade counts (aggregate only).
+    # Independent of the consumption flag above — controlled solely here.
+    intel_v3_sec_metric_truth_adapter_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

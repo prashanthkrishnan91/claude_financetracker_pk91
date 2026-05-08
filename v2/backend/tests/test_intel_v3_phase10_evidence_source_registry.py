@@ -4,8 +4,8 @@ Acceptance criteria verified by this file:
 
  1. Backend-only registry/governance contract exists with contract version.
  2. All eleven evidence lanes are represented in the registry.
- 3. Current SEC metric lane (sec_companyfacts_v1) is represented but still
-    not decision-consuming (lifecycle_status != ACTIVE for decision use).
+ 3. Current SEC metric lane (sec_companyfacts_v1) is represented and ACTIVE
+    (Phase 11.1 registry lifecycle promotion).
  4. Finance-agent/research-artifact outputs are represented as non-authoritative
     (decision_input_eligible=False, trust_tier=LLM_GENERATED).
  5. Registry distinguishes decision_input_eligible from explanation_only.
@@ -162,14 +162,14 @@ class TestSecFundamentalsLane:
         defn = EVIDENCE_SOURCE_REGISTRY["sec_companyfacts_v1"]
         assert defn.lane == EvidenceLane.SEC_COMPANY_FUNDAMENTALS
 
-    def test_sec_companyfacts_lifecycle_is_planned(self) -> None:
+    def test_sec_companyfacts_lifecycle_is_active(self) -> None:
         defn = EVIDENCE_SOURCE_REGISTRY["sec_companyfacts_v1"]
-        # Phase 10: still shadow/readiness-only — PLANNED, not ACTIVE for decisions.
-        assert defn.lifecycle_status == LifecycleStatus.PLANNED
+        # Phase 11.1: promoted from PLANNED to ACTIVE after Phase 11 production validation.
+        assert defn.lifecycle_status == LifecycleStatus.ACTIVE
 
-    def test_sec_companyfacts_not_in_active_decision_eligible(self) -> None:
+    def test_sec_companyfacts_in_active_decision_eligible(self) -> None:
         active_eligible = {s.source_id for s in get_active_decision_eligible_sources()}
-        assert "sec_companyfacts_v1" not in active_eligible
+        assert "sec_companyfacts_v1" in active_eligible
 
     def test_sec_companyfacts_trust_tier_primary_hard_data(self) -> None:
         defn = EVIDENCE_SOURCE_REGISTRY["sec_companyfacts_v1"]

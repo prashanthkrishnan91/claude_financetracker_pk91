@@ -50,6 +50,21 @@ from ..services.intelligence.v3.valuation_input_verification_v1 import (
     build_valuation_input_verification,
     VALUATION_INPUT_VERIFICATION_V1_CONTRACT_VERSION,
 )
+from ..services.intelligence.v3.price_sector_source_resolution_v1 import (
+    build_price_sector_source_resolution,
+    PriceCandidateStats,
+    SectorCandidateStats,
+    PRICE_SECTOR_SOURCE_RESOLUTION_V1_CONTRACT_VERSION,
+    PRICE_STALE_THRESHOLD_DAYS as PSR_PRICE_STALE_THRESHOLD_DAYS,
+    PRICE_CANDIDATE_PRICE_HISTORY,
+    PRICE_CANDIDATE_MARKET_SNAPSHOTS,
+    PRICE_CANDIDATE_AGENT_FEATURES,
+    PRICE_CANDIDATE_POSITIONS_DERIVED,
+    SECTOR_CANDIDATE_MARKET_SNAPSHOTS,
+    SECTOR_CANDIDATE_AGENT_FEATURES,
+    SECTOR_CANDIDATE_INTEL_V3_PAYLOAD_BLOB,
+    SECTOR_CANDIDATE_POSITIONS_CATEGORY,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -1302,5 +1317,305 @@ async def get_valuation_input_verification_v1_diagnostics(
         "non_company_excluded_count": result.non_company_excluded_count,
         "ttm_blocked_by_period_limit": result.ttm_blocked_by_period_limit,
         "period_limit_per_tag": result.period_limit_per_tag,
+        "errors": result.errors,
+    }
+
+
+@router.post("/price-sector-source-resolution-v1")
+async def get_price_sector_source_resolution_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14C-Prep — operator-only Price + Sector Source Resolution v1 diagnostics.
+
+    Ranks candidate stored sources for current price and financial sector, and
+    reports a deterministic certification status (CERTIFIED | PARTIAL |
+    UNCERTIFIED | MISSING) for each. Returns aggregate-only counts. Used to
+    decide whether Phase 14C valuation computation can proceed without a
+    provider-backed ingestion PR.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_PRICE_SECTOR_SOURCE_RESOLUTION_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved (hard locks):
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - valuation_ratios_computed is always False.
+      - earnings_yield_computed is always False.
+      - price_context_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw price values, sector strings, ratios, or PriceBand values.
+      - positions.market_value / cost_basis is always REJECTED as a price source.
+      - positions.category is always REJECTED as a financial sector source.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to intel_v3_snapshots or any DB table.
+    NEVER calls yfinance, SEC, OpenAI/Anthropic, or any external provider.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    settings = get_settings()
+    if not settings.intel_v3_price_sector_source_resolution_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_PRICE_SECTOR_SOURCE_RESOLUTION_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+    errors: list[str] = []
+
+    # ── Step 1: Phase 9 SEC metric readiness → company tickers + anchor ───────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+    company_tickers: set[str] = (
+        set(readiness.ready_tickers)
+        | set(readiness.partial_tickers_with_missing_groups.keys())
+        | set(readiness.blocked_tickers_with_reason.keys())
+    )
+    company_ticker_count = len(company_tickers)
+    non_company_ticker_count = readiness.skipped_non_company_count
+    portfolio_ticker_count = readiness.portfolio_ticker_count
+    # Anchor: SEC-fact-ready (READY+PARTIAL) company tickers — the set Phase 14C
+    # would compute earnings yield for. BLOCKED tickers cannot be Phase 14C
+    # eligible regardless of price/sector availability.
+    company_anchor_count = readiness.ready_count + readiness.partial_count
+
+    company_tickers_list = list(company_tickers)
+    cutoff_date = (
+        datetime.now(timezone.utc) - timedelta(days=PSR_PRICE_STALE_THRESHOLD_DAYS)
+    ).strftime("%Y-%m-%d")
+
+    # ── Step 2: price_history candidate ───────────────────────────────────────
+    ph_fresh: set[str] = set()
+    ph_stale: set[str] = set()
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("price_history")
+                .select("ticker,price_date")
+                .in_("ticker", company_tickers_list)
+                .order("price_date", desc=True)
+                .execute()
+            )
+            latest: dict[str, str] = {}
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                d = str(row.get("price_date") or "")[:10]
+                if t and d and (t not in latest or d > latest[t]):
+                    latest[t] = d
+            for t, d in latest.items():
+                if t in company_tickers:
+                    (ph_fresh if d >= cutoff_date else ph_stale).add(t)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"price_history_query_error: {exc}")
+
+    price_history_cand = PriceCandidateStats(
+        name=PRICE_CANDIDATE_PRICE_HISTORY,
+        available_count=len(ph_fresh) + len(ph_stale),
+        fresh_count=len(ph_fresh),
+        stale_count=len(ph_stale),
+        missing_count=max(0, company_ticker_count - len(ph_fresh) - len(ph_stale)),
+        freshness_basis="price_date",
+    )
+
+    # ── Step 3: market_snapshots candidate (price + sector) ───────────────────
+    ms_price_fresh: set[str] = set()
+    ms_price_stale: set[str] = set()
+    ms_sector: set[str] = set()
+    ms_industry: set[str] = set()
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("market_snapshots")
+                .select("ticker,as_of,price,sector,industry")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .order("as_of", desc=True)
+                .execute()
+            )
+            seen_price: dict[str, str] = {}
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                if not t or t not in company_tickers:
+                    continue
+                as_of = str(row.get("as_of") or "")
+                # Latest record per ticker (rows are ordered desc).
+                if t not in seen_price:
+                    seen_price[t] = as_of
+                    price_val = row.get("price")
+                    if price_val is not None and as_of:
+                        as_of_date = as_of[:10]
+                        if as_of_date >= cutoff_date:
+                            ms_price_fresh.add(t)
+                        else:
+                            ms_price_stale.add(t)
+                    sector_val = str(row.get("sector") or "").strip()
+                    industry_val = str(row.get("industry") or "").strip()
+                    if sector_val:
+                        ms_sector.add(t)
+                    if industry_val:
+                        ms_industry.add(t)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"market_snapshots_query_error: {exc}")
+
+    market_snapshots_price_cand = PriceCandidateStats(
+        name=PRICE_CANDIDATE_MARKET_SNAPSHOTS,
+        available_count=len(ms_price_fresh) + len(ms_price_stale),
+        fresh_count=len(ms_price_fresh),
+        stale_count=len(ms_price_stale),
+        missing_count=max(0, company_ticker_count - len(ms_price_fresh) - len(ms_price_stale)),
+        freshness_basis="as_of",
+    )
+    market_snapshots_sector_cand = SectorCandidateStats(
+        name=SECTOR_CANDIDATE_MARKET_SNAPSHOTS,
+        available_count=len(ms_sector),
+        industry_available_count=len(ms_industry),
+        missing_count=max(0, company_ticker_count - len(ms_sector)),
+    )
+
+    # ── Step 4: agent_features candidate (price + sector) ─────────────────────
+    af_price_fresh: set[str] = set()
+    af_price_stale: set[str] = set()
+    af_sector: set[str] = set()
+    af_industry: set[str] = set()
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("agent_features")
+                .select("ticker,as_of,price,sector,industry")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .order("as_of", desc=True)
+                .execute()
+            )
+            seen: dict[str, str] = {}
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                if not t or t not in company_tickers or t in seen:
+                    continue
+                as_of = str(row.get("as_of") or "")
+                seen[t] = as_of
+                price_val = row.get("price")
+                if price_val is not None and as_of:
+                    as_of_date = as_of[:10]
+                    if as_of_date >= cutoff_date:
+                        af_price_fresh.add(t)
+                    else:
+                        af_price_stale.add(t)
+                sector_val = str(row.get("sector") or "").strip()
+                industry_val = str(row.get("industry") or "").strip()
+                if sector_val:
+                    af_sector.add(t)
+                if industry_val:
+                    af_industry.add(t)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"agent_features_query_error: {exc}")
+
+    agent_features_price_cand = PriceCandidateStats(
+        name=PRICE_CANDIDATE_AGENT_FEATURES,
+        available_count=len(af_price_fresh) + len(af_price_stale),
+        fresh_count=len(af_price_fresh),
+        stale_count=len(af_price_stale),
+        missing_count=max(0, company_ticker_count - len(af_price_fresh) - len(af_price_stale)),
+        freshness_basis="as_of",
+    )
+    agent_features_sector_cand = SectorCandidateStats(
+        name=SECTOR_CANDIDATE_AGENT_FEATURES,
+        available_count=len(af_sector),
+        industry_available_count=len(af_industry),
+        missing_count=max(0, company_ticker_count - len(af_sector)),
+    )
+
+    # ── Step 5: positions-derived price candidate — REJECTED ──────────────────
+    # positions.market_value / cost_basis has no quote date / freshness basis.
+    # Per task spec: must NOT be treated as fresh/current price.
+    positions_price_cand = PriceCandidateStats(
+        name=PRICE_CANDIDATE_POSITIONS_DERIVED,
+        available_count=0,
+        fresh_count=0,
+        stale_count=0,
+        missing_count=company_ticker_count,
+        freshness_basis="none",
+        rejected_reason="no_quote_date_position_value_is_not_a_price_source",
+    )
+
+    # ── Step 6: intel_v3_snapshots payload — peek-only sector candidate ───────
+    # The payload is a JSON blob. We do NOT deserialise it at diagnostics time.
+    # Reported as available=0 (UNCERTIFIED → treated as MISSING by the
+    # classifier when no rows are observed). Even if rows exist, parsing the
+    # blob per-ticker is out of scope for this diagnostics path.
+    intel_payload_sector_cand = SectorCandidateStats(
+        name=SECTOR_CANDIDATE_INTEL_V3_PAYLOAD_BLOB,
+        available_count=0,
+        industry_available_count=0,
+        missing_count=company_ticker_count,
+    )
+
+    # ── Step 7: positions.category — REJECTED as financial sector ────────────
+    positions_category_sector_cand = SectorCandidateStats(
+        name=SECTOR_CANDIDATE_POSITIONS_CATEGORY,
+        available_count=0,
+        industry_available_count=0,
+        missing_count=company_ticker_count,
+        rejected_reason="portfolio_category_not_gics_financial_sector",
+    )
+
+    # ── Step 8: Pure source resolution ────────────────────────────────────────
+    result = build_price_sector_source_resolution(
+        portfolio_ticker_count=portfolio_ticker_count,
+        company_ticker_count=company_ticker_count,
+        non_company_ticker_count=non_company_ticker_count,
+        company_anchor_count=company_anchor_count,
+        price_candidates=[
+            price_history_cand,
+            market_snapshots_price_cand,
+            agent_features_price_cand,
+            positions_price_cand,
+        ],
+        sector_candidates=[
+            market_snapshots_sector_cand,
+            agent_features_sector_cand,
+            intel_payload_sector_cand,
+            positions_category_sector_cand,
+        ],
+        extra_errors=errors,
+    )
+
+    return {
+        "adapter_version": PRICE_SECTOR_SOURCE_RESOLUTION_V1_CONTRACT_VERSION,
+        "safe_for_decision": False,
+        "visible_snapshot_unchanged": True,
+        "read_only": True,
+        "diagnostics_only": True,
+        "valuation_ratios_computed": False,
+        "earnings_yield_computed": False,
+        "price_context_unchanged": True,
+        "portfolio_ticker_count": result.portfolio_ticker_count,
+        "company_ticker_count": result.company_ticker_count,
+        "non_company_ticker_count": result.non_company_ticker_count,
+        "price_source_candidates_checked": result.price_source_candidates_checked,
+        "selected_price_source_name": result.selected_price_source_name,
+        "selected_price_source_available_count": result.selected_price_source_available_count,
+        "selected_price_source_fresh_count": result.selected_price_source_fresh_count,
+        "selected_price_source_stale_count": result.selected_price_source_stale_count,
+        "selected_price_source_missing_count": result.selected_price_source_missing_count,
+        "selected_price_source_freshness_basis": result.selected_price_source_freshness_basis,
+        "price_source_certification_status": result.price_source_certification_status,
+        "sector_source_candidates_checked": result.sector_source_candidates_checked,
+        "selected_sector_source_name": result.selected_sector_source_name,
+        "selected_sector_available_count": result.selected_sector_available_count,
+        "selected_industry_available_count": result.selected_industry_available_count,
+        "selected_sector_missing_count": result.selected_sector_missing_count,
+        "sector_source_certification_status": result.sector_source_certification_status,
+        "ready_for_phase14c_computation": result.ready_for_phase14c_computation,
+        "phase14c_blocking_reasons": result.phase14c_blocking_reasons,
+        "recommended_next_step": result.recommended_next_step,
         "errors": result.errors,
     }

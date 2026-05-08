@@ -1,4 +1,92 @@
 
+## 2026-05-08 — Phase 11: SEC Metric Truth Adapter v1 (Level 2)
+
+### Status
+Phase 11 complete. Backend-only, first governed evidence-consumption phase. All Phase 8A–10 invariants preserved. Kill switch `intel_v3_sec_metric_truth_adapter_v1_enabled` defaults to False — existing visible decision behavior is unchanged until explicitly enabled. Deterministic decision policy remains the sole Buy/Hold/Trim/Sell authority. No UI, no SQL writes, no new providers, no LLM calls.
+
+### Root cause / gap addressed
+Phase 10 established the Evidence Source Registry and confirmed `sec_companyfacts_v1` as a planned, decision-input-eligible, PRIMARY_HARD_DATA source. Phase 11 builds the first governed bridge from Phase 9 readiness results into DecisionInputV3's `evidence_quality` axis — the smallest safe evidence-consumption step, gated by the Phase 10 registry contract.
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/v3/sec_metric_truth_adapter_v1.py`
+- `SEC_METRIC_TRUTH_ADAPTER_V1_CONTRACT_VERSION = "phase11_v1"` — stable contract.
+- `SecFundamentalsSignal` — frozen typed output contract for per-ticker SEC fundamentals contribution. Contains no raw metric values, keys, payloads, or Buy/Hold/Trim/Sell labels.
+- `check_governance_gate(registry)` — validates Phase 10 registry for `sec_companyfacts_v1`: checks lane, trust_tier, numeric_authority, decision_input_eligible, explanation_only, lifecycle_status. Explicitly accepts PLANNED and ACTIVE (Phase 11 is the PLANNED→ACTIVE transition step). Returns (bool, reason).
+- `build_sec_fundamentals_signal(ticker, readiness_result, registry)` — pure function mapping Phase 9 readiness to a typed signal: READY→AxisBand.OK, PARTIAL→AxisBand.THIN (degraded), BLOCKED/SKIPPED_NON_COMPANY→None.
+- `apply_sec_fundamentals_to_decision_input(inp, signal)` — merge rule: max(current_rank, contrib_rank), upgrade-only, never downgrades. Records contribution in source_signal_summary. No raw metric keys.
+- Pure data/logic only — no IO, no LLM, no DB.
+
+**Signal rules**:
+- READY ticker: evidence_quality_contribution = AxisBand.OK (all expected metric bucket groups covered).
+- PARTIAL ticker: evidence_quality_contribution = AxisBand.THIN, degraded=True (limited coverage).
+- BLOCKED/SKIPPED_NON_COMPANY: contribution = None (no signal). ETF/fund/crypto always SKIPPED.
+- Merge: SUPPRESSED+READY→OK, THIN+READY→OK, OK+READY→OK, STRONG→unchanged.
+
+**Extended**: `v2/backend/app/services/intelligence/research_workers/sec_metric_evidence_readiness_adapter.py`
+- New function: `compute_sec_readiness_for_phase11_adapter(user_id, db_client)` — computes Phase 9 readiness without the Phase 9 kill switch. Called by intel_v3_service for Phase 11 consumption. Never raises.
+
+**Extended**: `v2/backend/app/config.py`
+- New flag: `intel_v3_sec_metric_truth_adapter_v1_enabled` (bool, default False) — enables consumption in run_v3().
+- New flag: `intel_v3_sec_metric_truth_adapter_v1_diagnostics_enabled` (bool, default False) — enables diagnostic endpoint.
+
+**Extended**: `v2/backend/app/services/intelligence/v3/intel_v3_service.py`
+- New async helper `_get_sec_metric_readiness_for_v1()` — fetches Phase 9 readiness via `asyncio.to_thread()`. Returns None when kill switch off or on error.
+- `run_v3()` updated: calls helper before per-ticker loop, checks governance gate once (fail-fast if gate fails), applies `build_sec_fundamentals_signal` + `apply_sec_fundamentals_to_decision_input` per ticker if enabled and gate passes.
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/sec-metric-truth-adapter-v1`
+- Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+- Guard: `intel_v3_sec_metric_truth_adapter_v1_diagnostics_enabled=true` required (403 if off).
+- Returns: adapter_version, governance_gate_passed/reason, consumption_enabled, readiness counts, evidence_quality_upgrades_ready, evidence_quality_upgrades_partial, errors. No raw metrics, no payloads.
+- Hard-locks: safe_for_decision=False, visible_snapshot_unchanged=True.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase11_sec_metric_truth_adapter_v1.py` — 120 tests covering all 20 acceptance criteria.
+
+### What remains out of scope
+- Updating sec_companyfacts_v1 registry lifecycle_status to ACTIVE (scheduled for a follow-up registry-only update after Phase 11 validates in production)
+- Changing visible Buy/Hold/Trim/Sell decisions without explicit kill switch enablement
+- Deploy or Watchtower implementation
+- Consuming any other evidence lane
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/sec_metric_truth_adapter_v1.py` — new Phase 11 adapter
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_evidence_readiness_adapter.py` — new `compute_sec_readiness_for_phase11_adapter()`
+- `v2/backend/app/config.py` — two new kill-switch flags
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — Phase 11 wiring
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + imports
+- `v2/backend/tests/test_intel_v3_phase11_sec_metric_truth_adapter_v1.py` — 120 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 11: **120/120** ✓ (new)
+- Phase 10: **94/94** ✓
+- Phase 9: **79/79** ✓
+- Phase 8F: **67/67** ✓
+- Phase 8E: **33/33** ✓
+- Phase 8D: **73/73** ✓
+- Phase 8C: **74/74** ✓
+- Phase 8B: **80/80** ✓
+- Phase 8A: **71/71** ✓
+- Total: **691 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module (verified by AST test).
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — remains controlled by kill switch (default False).
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL writes.
+- ETF/fund/crypto tickers remain SKIPPED_NON_COMPANY — no SEC company signal.
+- BLSH/KLAR/TSM remain BLOCKED — no retry, no SEC signal.
+- Research artifacts (LLM_GENERATED) remain decision_input_eligible=False.
+- Phase 10 registry invariants all pass (94/94 Phase 10 tests unchanged).
+
+### Next recommended phase
+**Phase 11.1 (follow-up)**: Update `sec_companyfacts_v1` registry entry from `lifecycle_status=PLANNED` to `lifecycle_status=ACTIVE` after Phase 11 validates in production. Then:
+**Phase 12**: Enable Phase 11 kill switch in production + observe evidence-quality upgrade counts via diagnostic endpoint. Validate decision change rates are expected before certifying Phase 11 as production-ready.
+**Phase 13**: Valuation Ratio Computed lane (price_context axis) — combine SEC fundamentals + market price for PriceBand signals.
+
+---
+
 ## 2026-05-08 — Phase 10: Evidence Source Registry v1 / Multi-Lane Governance v1 (Level 2)
 
 ### Status

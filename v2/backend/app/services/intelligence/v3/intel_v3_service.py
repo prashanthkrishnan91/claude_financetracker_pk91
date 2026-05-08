@@ -30,6 +30,7 @@ from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
+from ....config import get_settings
 from ....database import get_supabase_client
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
@@ -110,6 +111,7 @@ class IntelV3Service:
         Steps:
           1. Fetch existing InsightCards (uses existing legacy service — data source only).
           2. Fetch portfolio positions for weight-based governor.
+          2b. (Phase 11) Optionally fetch SEC metric readiness if adapter enabled.
           3. For each card: run v3 decision kernel.
           4. Validate snapshot cards.
           5. Build and persist snapshot.
@@ -139,6 +141,19 @@ class IntelV3Service:
 
             # Step 2: get portfolio positions for governor weights.
             weight_map = await self._get_weight_map()
+
+            # Step 2b: Phase 11 — SEC metric readiness (off by default; governance-gated).
+            sec_readiness = await self._get_sec_metric_readiness_for_v1()
+            sec_gate_passed = False
+            if sec_readiness is not None:
+                from .sec_metric_truth_adapter_v1 import check_governance_gate
+                sec_gate_passed, sec_gate_reason = check_governance_gate()
+                if not sec_gate_passed:
+                    logger.warning(
+                        "intel_v3_phase11_governance_gate_failed user_id=%s run_id=%s reason=%s",
+                        self.user_id, run_id, sec_gate_reason,
+                    )
+                    sec_readiness = None
 
             # Step 3: build decisions for each card.
             decisions = []
@@ -215,6 +230,18 @@ class IntelV3Service:
                         suppression_reasons=suppression_reasons,
                     )
                     inp.portfolio_fit = fit
+
+                # Phase 11 — apply SEC fundamentals signal if enabled and gate passed.
+                if sec_readiness is not None and sec_gate_passed:
+                    from .sec_metric_truth_adapter_v1 import (
+                        build_sec_fundamentals_signal,
+                        apply_sec_fundamentals_to_decision_input,
+                    )
+                    sec_signal = build_sec_fundamentals_signal(
+                        ticker=ticker.upper(),
+                        readiness_result=sec_readiness,
+                    )
+                    apply_sec_fundamentals_to_decision_input(inp, sec_signal)
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -414,6 +441,36 @@ class IntelV3Service:
                 "intel_v3.weight_map_failed user_id=%s error=%s", self.user_id, exc
             )
             return {}
+
+    async def _get_sec_metric_readiness_for_v1(self) -> "Optional[Any]":
+        """Fetch Phase 9 SEC metric readiness for Phase 11 integration.
+
+        Returns SecMetricEvidenceReadinessResult when Phase 11 kill switch is on,
+        or None when disabled / unavailable. Never raises.
+
+        Called once per run_v3() invocation — not per ticker.
+        No SQL writes. No provider calls. No LLM calls.
+        """
+        settings = get_settings()
+        if not getattr(settings, "intel_v3_sec_metric_truth_adapter_v1_enabled", False):
+            return None
+
+        try:
+            from ..research_workers.sec_metric_evidence_readiness_adapter import (
+                compute_sec_readiness_for_phase11_adapter,
+            )
+            result = await asyncio.to_thread(
+                compute_sec_readiness_for_phase11_adapter,
+                str(self.user_id),
+                self.client,
+            )
+            return result
+        except Exception as exc:
+            logger.warning(
+                "intel_v3_phase11_sec_readiness_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return None
 
     async def _persist_snapshot(
         self,

@@ -253,6 +253,48 @@ def _build(
     )
 
 
+def compute_sec_readiness_for_phase11_adapter(
+    user_id: str,
+    db_client: Any,
+) -> SecMetricEvidenceReadinessResult:
+    """Compute Phase 9 SEC metric readiness for Phase 11 adapter consumption.
+
+    Unlike compute_sec_metric_evidence_readiness(), this function has no Phase 9
+    kill switch dependency. The Phase 11 adapter has its own kill switch
+    (intel_v3_sec_metric_truth_adapter_v1_enabled) and calls this directly.
+
+    Returns SecMetricEvidenceReadinessResult regardless of outcome. Never raises.
+
+    Never:
+        - Writes to any DB table.
+        - Calls SEC providers, LLMs, decide(), IntelV3Service.
+        - Returns raw metric values, structured_payload, source URLs.
+        - Sets safe_for_decision=True.
+    """
+    errors: list[str] = []
+    try:
+        return _compute(user_id=user_id, db_client=db_client, errors=errors)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "sec_readiness_for_phase11_error user_id=%s error=%s", user_id, exc
+        )
+        return SecMetricEvidenceReadinessResult(
+            adapter_enabled=True,
+            safe_for_decision=False,
+            visible_snapshot_unchanged=True,
+            portfolio_ticker_count=0,
+            ready_count=0,
+            partial_count=0,
+            blocked_count=0,
+            skipped_non_company_count=0,
+            ready_tickers=[],
+            partial_tickers_with_missing_groups={},
+            blocked_tickers_with_reason={},
+            skipped_tickers_by_reason={},
+            errors=errors + [f"compute_error error={exc}"],
+        )
+
+
 def compute_sec_metric_evidence_readiness(
     user_id: str,
     db_client: Any,

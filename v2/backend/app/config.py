@@ -197,6 +197,15 @@ class Settings(BaseSettings):
     # does NOT modify DecisionInputV3. No provider/LLM calls. No SQL writes.
     intel_v3_valuation_data_audit_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14B — Valuation Input Verification v1 (off by default) ──
+    # When True, enables the protected Phase 14B read-only diagnostics endpoint
+    # that verifies actual stored inputs needed for future FY EPS earnings-yield
+    # computation: raw EPS facts, equity facts, stored price availability/freshness,
+    # and financial sector availability. Returns aggregate-only counts.
+    # Diagnostics-only — does NOT compute ratios, does NOT produce PriceBand,
+    # does NOT modify DecisionInputV3. No provider/LLM calls. No SQL writes.
+    intel_v3_valuation_input_verification_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

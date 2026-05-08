@@ -46,6 +46,10 @@ from ..services.intelligence.v3.valuation_data_audit_v1 import (
     build_valuation_data_audit,
     VALUATION_DATA_AUDIT_V1_CONTRACT_VERSION,
 )
+from ..services.intelligence.v3.valuation_input_verification_v1 import (
+    build_valuation_input_verification,
+    VALUATION_INPUT_VERIFICATION_V1_CONTRACT_VERSION,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -1057,4 +1061,246 @@ async def get_valuation_data_audit_v1_diagnostics(
         "ttm_blocked_by_period_limit": audit.ttm_blocked_by_period_limit,
         "period_limit_per_tag": audit.period_limit_per_tag,
         "errors": all_errors,
+    }
+
+
+# ── Phase 14B — Valuation Input Verification v1 diagnostics ─────────────────
+
+@router.post("/valuation-input-verification-v1")
+async def get_valuation_input_verification_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14B — operator-only Valuation Input Verification v1 diagnostics.
+
+    Verifies actual stored inputs needed for future FY EPS earnings-yield
+    computation: raw EPS facts from research_artifact_facts, equity facts,
+    stored price availability/freshness from price_history, and financial
+    sector availability from stored records. Returns aggregate-only counts.
+
+    Key difference from Phase 14A:
+        Phase 14A inferred EPS availability from Phase 9 bucket readiness.
+        Phase 14B verifies raw EPS facts from actual stored fact records.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_VALUATION_INPUT_VERIFICATION_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved:
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - valuation_ratios_computed is always False.
+      - earnings_yield_computed is always False.
+      - price_context_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw metric values, no valuation ratios, no PriceBand values.
+      - TTM blocked: _MAX_PERIODS_PER_TAG=2 < 4 periods needed for TTM.
+      - Financial sector: not available from stored per-ticker records (gap noted).
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER sets safe_for_decision=True.
+    NEVER computes P/E, P/B, EV/EBITDA, earnings yield, or any valuation ratio.
+    NEVER produces PriceBand contributions.
+    NEVER modifies DecisionInputV3.
+    NEVER writes to intel_v3_snapshots or any DB table.
+    NEVER calls yfinance, SEC, OpenAI/Anthropic, or any external provider.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    settings = get_settings()
+
+    if not settings.intel_v3_valuation_input_verification_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_VALUATION_INPUT_VERIFICATION_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    # ── Step 1: Compute Phase 9 SEC metric readiness ──────────────────────────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+
+    # ── Step 2: Identify company tickers from Phase 9 readiness ───────────────
+    company_tickers: set[str] = (
+        set(readiness.ready_tickers)
+        | set(readiness.partial_tickers_with_missing_groups.keys())
+        | set(readiness.blocked_tickers_with_reason.keys())
+    )
+
+    errors: list[str] = []
+
+    # ── Step 3: Verify raw EPS/equity facts from stored research_artifact_facts ─
+    # Query research_artifacts for company tickers, then their facts.
+    # This is a direct stored-record check — not a Phase 9 inference.
+    eps_basic_tickers: set[str] = set()
+    eps_diluted_tickers: set[str] = set()
+    equity_tickers: set[str] = set()
+    source_linked_eps_tickers: set[str] = set()
+    source_linked_equity_tickers: set[str] = set()
+
+    if company_tickers:
+        try:
+            art_result = (
+                db_client.table("research_artifacts")
+                .select("id,ticker")
+                .eq("user_id", str(user.id))
+                .in_("ticker", list(company_tickers))
+                .execute()
+            )
+            artifact_rows = list(art_result.data or [])
+
+            ticker_by_artifact_id: dict[str, str] = {
+                str(row["id"]): str(row.get("ticker") or "").upper().strip()
+                for row in artifact_rows
+                if row.get("id") and row.get("ticker")
+            }
+            artifact_ids = list(ticker_by_artifact_id.keys())
+
+            if artifact_ids:
+                fact_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("artifact_id,fact_kind,structured_payload,source_id")
+                    .eq("user_id", str(user.id))
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                for row in (fact_result.data or []):
+                    if str(row.get("fact_kind") or "") != "metric_observation":
+                        continue
+                    sp = row.get("structured_payload")
+                    if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
+                        continue
+
+                    aid = str(row.get("artifact_id") or "")
+                    ticker = ticker_by_artifact_id.get(aid, "")
+                    if not ticker:
+                        continue
+
+                    tag = str(sp.get("tag") or "")
+                    has_source = bool(
+                        row.get("source_id") and str(row.get("source_id")).strip()
+                    )
+
+                    if tag == "EarningsPerShareBasic":
+                        eps_basic_tickers.add(ticker)
+                        if has_source:
+                            source_linked_eps_tickers.add(ticker)
+                    elif tag == "EarningsPerShareDiluted":
+                        eps_diluted_tickers.add(ticker)
+                        if has_source:
+                            source_linked_eps_tickers.add(ticker)
+                    elif tag == "StockholdersEquity":
+                        equity_tickers.add(ticker)
+                        if has_source:
+                            source_linked_equity_tickers.add(ticker)
+
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"research_artifact_facts_query_error: {exc}")
+
+    # ── Step 4: Verify stored price availability/freshness from price_history ──
+    # price_history is a global ticker table (no user_id filter).
+    # Fresh = price_date within last PRICE_STALE_THRESHOLD_DAYS days.
+    # Stale = price_date older than threshold. Missing = no record.
+    from ..services.intelligence.v3.valuation_input_verification_v1 import (
+        PRICE_STALE_THRESHOLD_DAYS,
+    )
+    fresh_price_tickers: set[str] = set()
+    stale_price_tickers: set[str] = set()
+
+    if company_tickers:
+        try:
+            now_utc = datetime.now(timezone.utc)
+            stale_cutoff_date = (
+                now_utc - timedelta(days=PRICE_STALE_THRESHOLD_DAYS)
+            ).strftime("%Y-%m-%d")
+
+            price_result = (
+                db_client.table("price_history")
+                .select("ticker,price_date")
+                .in_("ticker", list(company_tickers))
+                .order("price_date", desc=True)
+                .execute()
+            )
+            latest_date_by_ticker: dict[str, str] = {}
+            for row in (price_result.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                d = str(row.get("price_date") or "")[:10]
+                if t and d:
+                    if t not in latest_date_by_ticker or d > latest_date_by_ticker[t]:
+                        latest_date_by_ticker[t] = d
+
+            for ticker, price_date in latest_date_by_ticker.items():
+                if price_date >= stale_cutoff_date:
+                    fresh_price_tickers.add(ticker)
+                else:
+                    stale_price_tickers.add(ticker)
+
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"price_history_query_error: {exc}")
+
+    # ── Step 5: Financial sector availability ──────────────────────────────────
+    # Financial sector (Technology/Healthcare/etc.) is from yfinance fundamentals.
+    # intel_v3_snapshots stores a full snapshot payload blob — not per-ticker sector
+    # in a directly queryable form. positions.category is portfolio category only.
+    # Report gap: sector is not available from current stored per-ticker records.
+    financial_sector_tickers: set[str] = set()
+
+    # ── Step 6: Build aggregate-only verification result ──────────────────────
+    result = build_valuation_input_verification(
+        readiness=readiness,
+        eps_basic_tickers=eps_basic_tickers,
+        eps_diluted_tickers=eps_diluted_tickers,
+        equity_tickers=equity_tickers,
+        source_linked_eps_tickers=source_linked_eps_tickers,
+        source_linked_equity_tickers=source_linked_equity_tickers,
+        fresh_price_tickers=fresh_price_tickers,
+        stale_price_tickers=stale_price_tickers,
+        financial_sector_tickers=financial_sector_tickers,
+        extra_errors=errors,
+    )
+
+    # Return aggregate-only response — no raw values, no ratios, no PriceBand.
+    return {
+        "adapter_version": VALUATION_INPUT_VERIFICATION_V1_CONTRACT_VERSION,
+        "safe_for_decision": False,
+        "visible_snapshot_unchanged": True,
+        "read_only": True,
+        "diagnostics_only": True,
+        "valuation_ratios_computed": False,
+        "earnings_yield_computed": False,
+        "price_context_unchanged": True,
+        "portfolio_ticker_count": result.portfolio_ticker_count,
+        "company_ticker_count": result.company_ticker_count,
+        "non_company_ticker_count": result.non_company_ticker_count,
+        "sec_ready_count": result.sec_ready_count,
+        "sec_partial_count": result.sec_partial_count,
+        "sec_blocked_count": result.sec_blocked_count,
+        "raw_eps_fact_available_count": result.raw_eps_fact_available_count,
+        "raw_eps_diluted_fact_available_count": result.raw_eps_diluted_fact_available_count,
+        "raw_eps_basic_fact_available_count": result.raw_eps_basic_fact_available_count,
+        "raw_equity_fact_available_count": result.raw_equity_fact_available_count,
+        "source_linked_eps_fact_count": result.source_linked_eps_fact_count,
+        "source_linked_equity_fact_count": result.source_linked_equity_fact_count,
+        "stored_price_available_count": result.stored_price_available_count,
+        "stored_price_fresh_count": result.stored_price_fresh_count,
+        "stored_price_stale_count": result.stored_price_stale_count,
+        "stored_price_missing_count": result.stored_price_missing_count,
+        "stored_price_source": result.stored_price_source,
+        "financial_sector_available_count": result.financial_sector_available_count,
+        "financial_sector_missing_count": result.financial_sector_missing_count,
+        "financial_sector_source": result.financial_sector_source,
+        "eligible_for_future_fy_eps_yield_verified_count": result.eligible_for_future_fy_eps_yield_verified_count,
+        "partial_or_degraded_input_count": result.partial_or_degraded_input_count,
+        "blocked_or_unusable_input_count": result.blocked_or_unusable_input_count,
+        "non_company_excluded_count": result.non_company_excluded_count,
+        "ttm_blocked_by_period_limit": result.ttm_blocked_by_period_limit,
+        "period_limit_per_tag": result.period_limit_per_tag,
+        "errors": result.errors,
     }

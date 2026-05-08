@@ -206,6 +206,15 @@ class Settings(BaseSettings):
     # does NOT modify DecisionInputV3. No provider/LLM calls. No SQL writes.
     intel_v3_valuation_input_verification_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14C-Prep — Price + Sector Source Resolution v1 (off by default) ──
+    # When True, enables the protected Phase 14C-Prep read-only diagnostics endpoint
+    # that ranks candidate stored sources for current price and financial sector,
+    # and reports a certification status for each. Diagnostics-only — does NOT
+    # compute ratios, does NOT compute earnings yield, does NOT produce PriceBand,
+    # does NOT modify DecisionInputV3, does NOT change visible behavior.
+    # No provider/LLM calls. No SQL writes. Aggregate-only response.
+    intel_v3_price_sector_source_resolution_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

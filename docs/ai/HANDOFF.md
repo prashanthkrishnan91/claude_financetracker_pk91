@@ -1,4 +1,191 @@
 
+## 2026-05-08 — Phase 14C-Prep: Price + Sector Source Resolution v1 (Level 2)
+
+### Status
+Phase 14C-Prep complete. **Read-only diagnostics-only** — adds a protected
+endpoint that ranks candidate stored sources for current price and financial
+sector and reports a deterministic certification status (CERTIFIED | PARTIAL
+| UNCERTIFIED | MISSING) for each. No behavior changes, no SQL writes, no
+provider/LLM calls, no UI changes, no valuation ratios, no earnings yield, no
+PriceBand, no DecisionInputV3 mutation, no `decide()` / `run_v3` wiring. 42
+tests covering hard locks, leakage, ranking, certification rules, rejection
+of positions-derived price and `positions.category` sector, static
+import/write safety (AST-based), and the recommended-next-step decision tree.
+
+### Root cause / gap addressed
+Phase 14B production diagnostics confirmed SEC raw EPS/equity facts are
+strong (15/15 source-linked), but Phase 14C earnings-yield computation
+remains blocked because:
+- `stored_price_available_count=2`, `stored_price_fresh_count=1`,
+  `stored_price_missing_count=17` — `price_history` has weak coverage and
+  almost everything is stale.
+- `financial_sector_available_count=0` — sector is not exposed in any
+  per-ticker queryable column today; `positions.category` holds portfolio
+  category (Core/ETF/IPO/Other) which is NOT a GICS financial sector.
+
+This phase resolves the durable source layer rather than computing valuation
+on weak inputs. It picks the strongest existing stored source for each
+dimension or, when none qualify, recommends a documented split into a
+provider-backed ingestion PR.
+
+### What this phase adds
+
+**New module:** `v2/backend/app/services/intelligence/v3/price_sector_source_resolution_v1.py`
+- `PRICE_SECTOR_SOURCE_RESOLUTION_V1_CONTRACT_VERSION = "phase14c_prep_v1"`.
+- `PRICE_STALE_THRESHOLD_DAYS = 7` (aligned with Phase 14B).
+- `PriceCandidateStats`, `SectorCandidateStats` — frozen dataclasses for
+  per-candidate aggregate stats (no per-ticker rows).
+- `PriceSectorSourceResolutionResult` — frozen aggregate-only result with
+  hard-lock fields, selected source name + counts + freshness basis,
+  certification status, `ready_for_phase14c_computation`,
+  `phase14c_blocking_reasons`, and `recommended_next_step`.
+- `build_price_sector_source_resolution(...)` — pure, deterministic,
+  never-raises function. Classifies candidates by deterministic rules and
+  picks the winner by (status, count, priority order).
+
+**New config flag:** `intel_v3_price_sector_source_resolution_v1_diagnostics_enabled: bool = False`.
+
+**New endpoint:** `POST /diagnostics/finance-intel/price-sector-source-resolution-v1`
+- Auth: same `_get_runtime_cert_user` runtime-cert dependency as all other
+  diagnostics endpoints.
+- Guard: `INTEL_V3_PRICE_SECTOR_SOURCE_RESOLUTION_V1_DIAGNOSTICS_ENABLED=true`
+  required (403 if off).
+- Read-only queries against existing tables: `price_history`,
+  `market_snapshots`, `agent_features`. Never writes. Never deserialises the
+  `intel_v3_snapshots` payload blob (the payload candidate is reported as
+  available=0 — peek-only).
+- Aggregate-only response. No raw prices, sector strings, URLs, or per-ticker
+  rows.
+
+**New test file:** `v2/backend/tests/test_intel_v3_phase14c_prep_price_sector_source_resolution_v1.py`
+— 42 tests across 8 classes (Config flag default, Endpoint flag gate, Hard
+locks, Leakage prevention, Ranking and certification, Rejection rules,
+Static import safety, Recommended next step, Build error invariants).
+
+### Source-ranking rationale
+
+Price candidates checked, in priority order:
+1. **`price_history`** — has explicit `price_date` freshness basis.
+   *Why it loses today:* coverage is weak (2/17 in Phase 14B production).
+   *What would make it CERTIFIED:* daily refresh job populating
+   `price_history` for all SEC-fact-ready company tickers within 7 calendar
+   days.
+2. **`market_snapshots`** — has explicit `as_of` freshness basis, `price`
+   column.
+   *Why it loses today:* populated only when the agent pipeline runs; rows
+   may not exist for current company set.
+   *What would make it CERTIFIED:* a recent agent run for all
+   ready+partial company tickers OR a scheduled per-ticker price refresh
+   that writes to this table.
+3. **`agent_features`** — has explicit `as_of` freshness basis, `price`
+   column.
+   *Why it loses today:* same as `market_snapshots` — bound to agent runs.
+   *What would make it CERTIFIED:* same.
+4. **`positions.market_value` / `cost_basis`** — REJECTED unconditionally.
+   *Why:* no quote date / freshness basis. Per task spec, position-derived
+   values cannot count as a current price.
+
+Sector candidates checked, in priority order:
+1. **`market_snapshots.sector`** — per-ticker, per-run.
+   *Why it loses today:* depends on agent run having populated yfinance
+   sector for every ready+partial ticker; production has zero rows.
+   *What would make it CERTIFIED:* `available_count` ≥ company anchor
+   (READY+PARTIAL) for sector with a non-empty value.
+2. **`agent_features.sector`** — per-ticker, per-run.
+   *Why it loses today:* same as above.
+   *What would make it CERTIFIED:* same.
+3. **`intel_v3_snapshots.payload`** — JSON blob; per-ticker sector is buried
+   inside the blob. Reported as `available_count=0` — UNCERTIFIED at best
+   because we will not deserialise the full payload at diagnostics time.
+   *What would make it CERTIFIED:* migrating per-ticker sector out of the
+   blob into a per-ticker queryable column (separate PR).
+4. **`positions.category`** — REJECTED unconditionally.
+   *Why:* "Crypto/Core/ETF/Other/IPO/SELL" is portfolio category, not GICS
+   financial sector.
+
+`ready_for_phase14c_computation` is True only when both selected price and
+selected sector source have status `CERTIFIED` AND the company anchor
+(READY+PARTIAL) is non-zero. Anything weaker emits a populated
+`phase14c_blocking_reasons` list and a `recommended_next_step` that names
+the next durable step.
+
+### Production validation steps (after merge)
+
+**Step 1: Enable only the Phase 14C-Prep flag (independent of all others).**
+```
+INTEL_V3_PRICE_SECTOR_SOURCE_RESOLUTION_V1_DIAGNOSTICS_ENABLED=true
+```
+
+**Step 2: Call the diagnostic endpoint.**
+```
+POST /api/v1/diagnostics/finance-intel/price-sector-source-resolution-v1
+Headers: X-Finance-Runtime-Cert-Secret: <cert_secret>
+```
+
+**Step 3: Verify hard-lock pass criteria.**
+
+| Field | Expected | Pass criterion |
+|---|---|---|
+| `adapter_version` | `"phase14c_prep_v1"` | Correct contract version |
+| `safe_for_decision` | `false` | Hard-locked |
+| `visible_snapshot_unchanged` | `true` | Hard-locked |
+| `read_only` | `true` | Hard-locked |
+| `diagnostics_only` | `true` | Hard-locked |
+| `valuation_ratios_computed` | `false` | Hard-locked |
+| `earnings_yield_computed` | `false` | Hard-locked |
+| `price_context_unchanged` | `true` | Hard-locked |
+| `portfolio_ticker_count` | `34` | Matches Phase 13.1 production |
+| `company_ticker_count` | `19` | READY+PARTIAL+BLOCKED |
+| `non_company_ticker_count` | `15` | Suppressed non-company |
+| `price_source_candidates_checked` | `[price_history, market_snapshots, agent_features, positions(REJECTED)]` | Four candidates listed |
+| `sector_source_candidates_checked` | `[market_snapshots, agent_features, intel_v3_snapshots_blob, positions_category(REJECTED)]` | Four candidates listed |
+
+### Next-step decision tree
+
+| price_status | sector_status | `recommended_next_step` |
+|---|---|---|
+| CERTIFIED | CERTIFIED | `phase14c_computation_unblocked` — proceed with Phase 14C valuation PR |
+| PARTIAL | any | `backfill_existing_source_to_full_company_anchor` — write a small backfill PR for the selected source |
+| any | PARTIAL | same as above |
+| CERTIFIED | UNCERTIFIED/MISSING | `split_pr_provider_backed_sector_ingestion` — open a separate sector ingestion PR (yfinance per-ticker sector → new column / table) |
+| UNCERTIFIED/MISSING | CERTIFIED | `split_pr_provider_backed_price_ingestion` — open a separate price ingestion PR |
+| MISSING | MISSING | `split_pr_provider_backed_ingestion_for_price_and_sector` — open a separate provider-backed ingestion PR for both |
+
+**This phase does not introduce any provider call, ingestion job, schema
+change, or backfill.** Whatever the diagnostic recommends, the next PR is
+explicit, scoped, and reviewed separately — Phase 14C valuation
+computation must not start until both sources are CERTIFIED.
+
+### Files changed
+- `v2/backend/app/config.py` — new flag
+  `intel_v3_price_sector_source_resolution_v1_diagnostics_enabled`.
+- `v2/backend/app/services/intelligence/v3/price_sector_source_resolution_v1.py`
+  — new pure module.
+- `v2/backend/app/routers/diagnostics.py` — new endpoint
+  `POST /diagnostics/finance-intel/price-sector-source-resolution-v1`.
+- `v2/backend/tests/test_intel_v3_phase14c_prep_price_sector_source_resolution_v1.py`
+  — new test file (42 tests).
+- `docs/ai/HANDOFF.md` — this entry.
+
+### Tests / results
+- 42 tests pass locally (`pytest -q`).
+- Phase 14B tests still pass (111/111) — no regressions.
+
+### Risks
+- Endpoint is off by default; the flag must be explicitly enabled in
+  production.
+- The pure module is deterministic and aggregate-only; static AST checks
+  prove no DB writes, no provider imports, no `decide()`/`run_v3`/PriceBand
+  references.
+
+### Supabase SQL: No.
+### UI changes: No.
+### Provider/LLM calls: No.
+### Visible behavior changed: No.
+### HANDOFF updated: Yes.
+
+---
+
 ## 2026-05-08 — Phase 14B: Valuation Input Verification v1 — Stored-Input Diagnostics (Level 1)
 
 ### Status

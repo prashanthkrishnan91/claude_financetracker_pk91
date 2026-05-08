@@ -159,13 +159,13 @@ _REGISTRY_ENTRIES: List[EvidenceSourceDefinition] = [
         source_type=SourceType.SEC_FILING,
         trust_tier=TrustTier.PRIMARY_HARD_DATA,
         freshness_sla_hours=24 * 90,  # SEC filings update quarterly (~90 days)
-        decision_input_eligible=True,  # future only — currently PLANNED, not consumed
+        decision_input_eligible=True,
         explanation_only=False,
         corroboration_required=False,
         numeric_authority=True,
         audit_url_required=True,
         provider_adapter="research_workers.sec_companyfacts_parser",
-        lifecycle_status=LifecycleStatus.PLANNED,
+        lifecycle_status=LifecycleStatus.ACTIVE,
         failure_behavior=FailureBehavior.SUPPRESS_AXIS,
         notes=(
             "Currently shadow/readiness-only (Phases 8A–9). Decision consumption requires "

@@ -1,4 +1,37 @@
 
+## 2026-05-08 — Phase 11.1: Registry Lifecycle Promotion — sec_companyfacts_v1 PLANNED→ACTIVE (Level 0)
+
+### Status
+Phase 11.1 complete. Registry-only governance update. No behavior changes. No UI, no SQL, no provider/LLM calls, no visible decision path changes. All 214 Phase 10+11 tests pass.
+
+### Root cause / gap addressed
+Phase 11 was gated on production validation before promoting `sec_companyfacts_v1` from `PLANNED` to `ACTIVE`. Phase 11 production validation passed (34 cards, BUY 10/HOLD 23/TRIM 1, hard_violations=0, soft_violations=0, llm_calls=0). This PR performs the registry lifecycle promotion.
+
+### What this phase adds
+- `evidence_source_registry.py`: `sec_companyfacts_v1.lifecycle_status` promoted from `PLANNED` to `ACTIVE`. Comment updated.
+- `test_intel_v3_phase10_evidence_source_registry.py`: Two tests updated — `test_sec_companyfacts_lifecycle_is_planned` → `test_sec_companyfacts_lifecycle_is_active`, `test_sec_companyfacts_not_in_active_decision_eligible` → `test_sec_companyfacts_in_active_decision_eligible`. Module docstring AC 3 updated.
+- `docs/ai/HANDOFF.md`: This entry.
+
+### Test results
+- Phase 10: **94/94** ✓
+- Phase 11: **120/120** ✓
+- Total: **214 passed**
+
+### Architecture invariants (all preserved)
+- Deterministic decision policy remains the sole Buy/Hold/Trim/Sell authority.
+- Finance-agent/research-artifact (LLM_GENERATED) remains non-authoritative.
+- Open-web/news remains corroboration_required=True and non-decision-consuming.
+- Explanation-only sources remain non-decision-eligible.
+- No visible decision path code changed.
+- No UI changes. No SQL. No provider/LLM calls.
+- ETF/fund/crypto tickers remain SKIPPED_NON_COMPANY.
+- BLSH/KLAR/TSM remain BLOCKED.
+
+### Next recommended phase
+**Phase 12**: Enable Phase 11 kill switch (`INTEL_V3_SEC_METRIC_TRUTH_ADAPTER_V1_ENABLED=true`) and observe evidence_quality upgrade counts via diagnostic endpoint. Validate decision change rates before certifying. Then **Phase 13**: Valuation Ratio Computed lane — SEC fundamentals + market price for PriceBand signals.
+
+---
+
 ## 2026-05-08 — Phase 11: SEC Metric Truth Adapter v1 (Level 2)
 
 ### Status

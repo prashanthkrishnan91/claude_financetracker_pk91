@@ -34,18 +34,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from .sec_metric_candidate_classifier import classify_sec_metric_candidate
 from .sec_metric_evidence_snapshot_dry_run import run_sec_metric_evidence_snapshot_dry_run
 from .sec_metric_truth_adapter_dry_run import EXPECTED_BUCKETS, run_sec_metric_truth_adapter_dry_run
 
 SEC_METRIC_PORTFOLIO_COVERAGE_DRY_RUN_CONTRACT_VERSION = "phase8d_v1"
-
-# Portfolio position category values → additional diagnostic reason codes.
-# Only categories that indicate non-SEC-company assets produce extra codes.
-# "Core", "Other", "IPO", "SELL" are treated as potentially SEC companies.
-_CATEGORY_BLOCKING_CODES: dict[str, list[str]] = {
-    "ETF": ["asset_type_not_sec_company", "likely_fund_or_etf"],
-    "Crypto": ["asset_type_not_sec_company", "likely_crypto"],
-}
 
 # Always-present blocking codes on every portfolio ticker — evidence lane is closed.
 _ALWAYS_BLOCKING: tuple[str, ...] = (
@@ -232,10 +225,20 @@ def _build(
         else:
             tickers_blocked_for_future_adapter_count += 1
 
-        # Add asset-type reason codes based on category, if known.
+        # Add asset-type reason codes via shared classifier (category + symbol override).
+        # Phase 8F: known fund/ETF/crypto tickers classified as non-company even if
+        # their portfolio category is wrong or missing (e.g., VUG as Core).
         blocking_set = set(base_blocking)
-        extra_codes = _CATEGORY_BLOCKING_CODES.get(category, [])
-        blocking_set.update(extra_codes)
+        clf = classify_sec_metric_candidate(ticker, category)
+        blocking_set.update(clf["blocking_reason_codes"])
+
+        # Phase 8F: distinguish "attempted but no source-linked SEC metric evidence"
+        # from "no artifact ever created". Only added for sec_company_like tickers
+        # (not ETF/fund/crypto) that have a Phase 8B snapshot entry with fact_count==0.
+        if phase8b_data is not None and fact_count == 0 and clf["is_sec_company_candidate"]:
+            blocking_set.add("attempted_no_source_linked_sec_metric_evidence")
+            blocking_set.add("manual_review_required_before_retry")
+
         blocking_codes = sorted(blocking_set)
 
         by_ticker_out[ticker] = {

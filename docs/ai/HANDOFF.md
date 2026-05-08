@@ -1,4 +1,199 @@
 
+## 2026-05-08 — Phase 14B: Valuation Input Verification v1 — Stored-Input Diagnostics (Level 1)
+
+### Status
+Phase 14B complete. **Read-only diagnostics-only** — adds a protected endpoint that verifies actual stored inputs needed for future FY EPS earnings-yield computation. No behavior changes, no SQL writes, no provider/LLM calls, no UI changes, no valuation ratios computed, no earnings yield computed, no PriceBand produced, no DecisionInputV3 mutations. 111 tests covering hard locks, leakage prevention, non-company exclusion, raw EPS fact verification (stored records, not Phase 9 inference), stored price freshness classification, financial sector gap reporting, eligibility classification, and production pass criteria.
+
+### Root cause / gap addressed
+Phase 14A proved inferred feasibility (EPS counts from Phase 9 bucket groups, price availability from position existence). Phase 14B closes the verification gap by checking actual stored records: raw `research_artifact_facts` rows for EPS/equity tags, `price_history` for stored price and freshness, and reporting that financial sector is unavailable from stored per-ticker records (gap). This is the mandatory "are the raw inputs actually in the DB?" step before Phase 14C can compute FY EPS earnings yield.
+
+### Key difference from Phase 14A
+- Phase 14A: EPS availability **inferred** from Phase 9 bucket readiness groups.
+- Phase 14B: EPS availability **verified** from actual stored `research_artifact_facts` records — direct check.
+- Phase 14A: Price availability from portfolio position existence (position-derived, not stored price).
+- Phase 14B: Price availability from `price_history` table with fresh/stale/missing classification.
+- Phase 14A: Sector gap noted but not verified.
+- Phase 14B: Sector gap verified — financial sector is confirmed unavailable from per-ticker stored records (intel_v3_snapshots stores a full payload blob, not per-ticker fundamentals).
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/v3/valuation_input_verification_v1.py`
+- `VALUATION_INPUT_VERIFICATION_V1_CONTRACT_VERSION = "phase14b_v1"` — stable contract.
+- `PERIOD_LIMIT_PER_TAG = 2`, `TTM_BLOCKED_BY_PERIOD_LIMIT = True` — static inspection.
+- `PRICE_STALE_THRESHOLD_DAYS = 7` — price freshness threshold (7 calendar days).
+- `ValuationInputVerificationResult` — frozen dataclass with all hard-lock fields.
+- `build_valuation_input_verification(readiness, eps_basic_tickers, eps_diluted_tickers, equity_tickers, source_linked_eps_tickers, source_linked_equity_tickers, fresh_price_tickers, stale_price_tickers, financial_sector_tickers, extra_errors)` — pure, deterministic, read-only function. Accepts pre-fetched sets of verified ticker facts and returns aggregate-only counts. Never raises, never writes to DB, never calls any provider.
+- EPS counts: verified from stored `research_artifact_facts` with tags EarningsPerShareBasic/EarningsPerShareDiluted.
+- Equity counts: verified from stored facts with tag StockholdersEquity.
+- Source-linked counts: verified from fact rows with non-null source_id.
+- Price availability: fresh/stale/missing from `price_history.price_date` vs PRICE_STALE_THRESHOLD_DAYS.
+- Financial sector: always unavailable from stored per-ticker records — gap reported honestly.
+- Eligibility classification: eligible (EPS+price+sector), partial/degraded (some but not all), blocked/unusable (SEC BLOCKED or no EPS and no price).
+
+**New config flag**: `intel_v3_valuation_input_verification_v1_diagnostics_enabled: bool = False`
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/valuation-input-verification-v1`
+- Auth: `_get_runtime_cert_user` (same pattern as all other diagnostics endpoints).
+- Guard: `intel_v3_valuation_input_verification_v1_diagnostics_enabled=true` required (403 if off).
+- Data flow: (1) compute Phase 9 readiness, (2) query `research_artifacts` + `research_artifact_facts` for company tickers to build EPS/equity fact sets, (3) query `price_history` for stored price freshness, (4) financial_sector_tickers = empty (gap), (5) call pure verification function, (6) return aggregate-only response.
+- Hard-locks: safe_for_decision=False, visible_snapshot_unchanged=True, read_only=True, diagnostics_only=True, valuation_ratios_computed=False, earnings_yield_computed=False, price_context_unchanged=True.
+- TTM note: `ttm_blocked_by_period_limit=true`, `period_limit_per_tag=2`.
+- Sector note: `financial_sector_source` identifies gap — sector unavailable from stored records.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase14b_valuation_input_verification_v1.py` — 111 tests in 13 classes:
+- `TestPhase14BConfigFlagDefault` — flag exists, is bool, defaults False, independent of Phase 14A flag.
+- `TestPhase14BEndpointFlagGate` — endpoint path, flag gate, 403 pattern, runtime-cert, POST, version constant.
+- `TestPhase14BHardLocks` — 10 tests proving all 7 hard-lock fields invariant including error path.
+- `TestPhase14BLeakagePrevention` — no forbidden ratio keys, no PriceBand values, all counts non-negative, no raw metric keys in strings, no per-ticker dict fields, all expected fields present.
+- `TestPhase14BVerificationPureFunction` — 19 tests for pure function correctness including error propagation, never-raises guarantee.
+- `TestPhase14BStaticImportSafety` — AST-based: no decide(), no decision_policy_v1, no yfinance, no openai/anthropic, no HTTP clients, no DB writes, no intel_v3_snapshots write.
+- `TestPhase14BTTMBlocked` — TTM constants, parser agreement, invariant for all readiness states.
+- `TestPhase14BNonCompanyExclusion` — ETF/crypto excluded from all counts via intersection guard.
+- `TestPhase14BRawEPSFactVerification` — EPS count zero without facts (not Phase 9 inference), independent of Phase 9, blocked tickers counted in unusable.
+- `TestPhase14BStoredPriceFreshness` — fresh/stale/missing classification, threshold constant defined.
+- `TestPhase14BFinancialSectorGap` — sector always 0 by default, gap note, partial sector if provided.
+- `TestPhase14BEligibilityClassification` — blocked always unusable, all three = eligible, missing sector = partial, no EPS no price = unusable, counts sum to company_count.
+- `TestPhase14BProductionPassCriteria` — 20 tests mirroring HANDOFF production pass/fail criteria.
+
+### Production validation steps (after Phase 14B merges)
+
+**Step 1: Enable only the Phase 14B diagnostics flag**
+```
+INTEL_V3_VALUATION_INPUT_VERIFICATION_V1_DIAGNOSTICS_ENABLED=true
+```
+Do NOT enable Phase 14A flag at this stage (it is independent).
+Do NOT enable `INTEL_V3_VALUATION_CONTEXT_ADAPTER_V1_ENABLED=true`.
+
+**Step 2: Call the diagnostic endpoint**
+```
+POST /api/v1/diagnostics/finance-intel/valuation-input-verification-v1
+Headers: X-Finance-Runtime-Cert-Secret: <cert_secret>
+```
+
+**Step 3: Verify all pass criteria**
+
+| Field | Expected value | Pass criterion |
+|---|---|---|
+| `adapter_version` | `"phase14b_v1"` | Correct contract version |
+| `safe_for_decision` | `false` | Hard-locked — never true |
+| `visible_snapshot_unchanged` | `true` | Hard-locked — no snapshot writes |
+| `read_only` | `true` | Hard-locked — no DB writes |
+| `diagnostics_only` | `true` | Hard-locked — diagnostics only |
+| `valuation_ratios_computed` | `false` | Hard-locked — no ratios computed |
+| `earnings_yield_computed` | `false` | Hard-locked — no earnings yield |
+| `price_context_unchanged` | `true` | Hard-locked — no PriceBand |
+| `portfolio_ticker_count` | `34` | Matches Phase 13.1 production count |
+| `company_ticker_count` | `19` | READY(10)+PARTIAL(6)+BLOCKED(3) |
+| `non_company_ticker_count` | `15` | SUPPRESSED_NON_COMPANY from Phase 13.1 |
+| `sec_ready_count` | `10` | READY tickers from Phase 13.1 |
+| `sec_partial_count` | `6` | PARTIAL tickers from Phase 13.1 |
+| `sec_blocked_count` | `3` | BLOCKED tickers from Phase 13.1 |
+| `raw_eps_fact_available_count` | `>= 10` | At least READY tickers have stored EPS facts |
+| `stored_price_fresh_count` | `>= 0` | Fresh prices from price_history (0 = all stale/missing) |
+| `stored_price_available_count` | `>= 0` | Any stored price in price_history |
+| `financial_sector_available_count` | `0` | Gap — sector not in stored per-ticker records |
+| `financial_sector_missing_count` | `19` | All company tickers missing financial sector |
+| `ttm_blocked_by_period_limit` | `true` | _MAX_PERIODS_PER_TAG=2 < 4 for TTM |
+| `period_limit_per_tag` | `2` | Confirms current parser limit |
+| `errors` | `[]` | No verification errors |
+
+**Step 4: Fail criteria (stop and investigate if any occur)**
+- `safe_for_decision=true` → critical invariant violation; escalate immediately.
+- `valuation_ratios_computed=true` → critical invariant violation; escalate immediately.
+- `earnings_yield_computed=true` → critical invariant violation; escalate immediately.
+- Any forbidden key (pe_ratio, pb_ratio, fair_value, price_target) in response → critical leak.
+- `errors` non-empty → verification adapter failure; investigate before proceeding.
+- `portfolio_ticker_count` ≠ 34 → portfolio changed; investigate and update expectations.
+- `raw_eps_fact_available_count` < 10 → fewer raw EPS facts than Phase 9 READY count; investigate.
+
+**Step 5: Record results for Phase 14C planning**
+Document:
+- `raw_eps_fact_available_count` — actual stored EPS facts (compared to Phase 14A's inferred count).
+- `stored_price_fresh_count` / `stored_price_available_count` — whether price_history is populated.
+- `eligible_for_future_fy_eps_yield_verified_count` — fully verified eligible tickers.
+- `partial_or_degraded_input_count` — tickers with partial inputs (need sector or fresh price).
+- `blocked_or_unusable_input_count` — tickers with no usable inputs.
+
+**Step 6: Note sector gap**
+`financial_sector_source` confirms that financial sector is not available from stored per-ticker records. Future CHEAP/EXPENSIVE requires financial sector — likely requires a live yfinance query or a new stored sector field. Phase 14C must account for this gap.
+
+### What remains out of scope
+- Computing FY EPS earnings yield (Phase 14C).
+- Computing any valuation ratio (P/E, P/B, EV/EBITDA, FCF yield).
+- Producing PriceBand contributions.
+- Querying financial sector from yfinance live calls (deferred).
+- Expanding `_MAX_PERIODS_PER_TAG` for TTM (separate decision).
+- Modifying `DecisionInputV3` in any way.
+- SQL schema changes.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/valuation_input_verification_v1.py` — new Phase 14B pure module
+- `v2/backend/app/config.py` — new config flag `intel_v3_valuation_input_verification_v1_diagnostics_enabled`
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + imports
+- `v2/backend/tests/test_intel_v3_phase14b_valuation_input_verification_v1.py` — 111 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 14B: **111/111** ✓ (new)
+- Phase 14A: **103/103** ✓
+- Phase 13.1: **83/83** ✓
+- Phase 13: **144/144** ✓
+- Total (intel v3 phases): **441 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `PriceBand` — NOT imported in Phase 14B module.
+- `intel_v3_snapshots` — no reads or writes in Phase 14B module; no writes in endpoint.
+- `safe_for_decision` — never set True.
+- `valuation_ratios_computed` — never set True.
+- `earnings_yield_computed` — never set True.
+- `DecisionInputV3.price_context` — NEVER modified.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL writes.
+- ETF/fund/crypto tickers remain non-company — excluded from all company valuation counts.
+- No P/E, P/B, EV/EBITDA, FCF yield, or earnings yield computed.
+- No price targets, no fair-value estimates, no prediction-oracle behavior.
+- No raw valuation metric keys in any output field.
+- All prior Intel v3 phase tests pass (Phase 13, 13.1, 14A, 14B: 441 total).
+
+### Mandatory self-audit (pre-PR)
+
+| Acceptance Criterion | File/Function | Test Coverage | Enforcement | Limitation |
+|---|---|---|---|---|
+| AC1: endpoint env-gated | diagnostics.py, config.py | TestPhase14BConfigFlagDefault, TestPhase14BEndpointFlagGate | 403 HTTPException if flag off | — |
+| AC2: runtime-cert protected | diagnostics.py `_get_runtime_cert_user` | TestPhase14BEndpointFlagGate | Depends on cert user | — |
+| AC3: read-only + aggregate-only | valuation_input_verification_v1.py | TestPhase14BHardLocks, TestPhase14BLeakagePrevention | No .table() calls, frozen dataclass, no dict fields | — |
+| AC4: raw EPS fact from stored records | diagnostics.py Step 3, pure func | TestPhase14BRawEPSFactVerification | fact_kind + structured_payload.claim check | Blocked tickers EPS facts counted but unusable |
+| AC5: stored price freshness | diagnostics.py Step 4, pure func | TestPhase14BStoredPriceFreshness | price_history query + date comparison | No user_id filter on price_history (global table) |
+| AC6: financial sector gap | pure func, diagnostics.py Step 5 | TestPhase14BFinancialSectorGap | financial_sector_tickers always empty | Sector unavailable without live yfinance |
+| AC7: no valuation ratios | pure func | TestPhase14BHardLocks, TestPhase14BLeakagePrevention | valuation_ratios_computed=False; no ratio field names | — |
+| AC8: no earnings yield | pure func | TestPhase14BHardLocks | earnings_yield_computed=False | — |
+| AC9: no PriceBand | pure func | TestPhase14BStaticImportSafety | PriceBand not imported | — |
+| AC10: no DecisionInputV3 mutation | pure func | TestPhase14BStaticImportSafety | decide() not imported | — |
+| AC11: no visible decision change | diagnostics endpoint isolation | TestPhase14BStaticImportSafety | Endpoint never calls run_v3() | — |
+| AC12: no UI changes | static | no new UI imports | — | — |
+| AC13: no SQL | pure func + endpoint | TestPhase14BStaticImportSafety | no .insert/.upsert/.update | Endpoint reads price_history (read-only) |
+| AC14: no provider calls | pure func + endpoint | TestPhase14BStaticImportSafety | no yfinance/SEC imports | — |
+| AC15: no LLM calls | pure func + endpoint | TestPhase14BStaticImportSafety | no openai/anthropic imports | — |
+| AC16: response has feasibility counts | pure func fields | TestPhase14BProductionPassCriteria | all required fields present | sector always 0 = eligible always 0 in prod |
+| AC17: TTM blocked identified | pure func constants | TestPhase14BTTMBlocked | ttm_blocked_by_period_limit=True | — |
+| AC18: sector normalization blocked | pure func + endpoint | TestPhase14BFinancialSectorGap | financial_sector_source gap note | Sector requires live yfinance call |
+| AC19: tests cover all dimensions | test file | 111 tests in 13 classes | pytest | — |
+| AC20: HANDOFF updated | HANDOFF.md | manual | — | — |
+| AC21: PR summary in HANDOFF | HANDOFF.md | this entry | — | — |
+
+### Supabase SQL
+None. Phase 14B adds no SQL migrations, no schema changes, no table writes.
+
+### Next recommended phase
+**Phase 14C (separate PR, future)**: FY EPS Earnings Yield computation. Requires:
+1. Financial sector source — either from a stored per-ticker field, a yfinance sector query, or an intel_v3_snapshots sector-extraction path.
+2. Decision to define eligibility for earnings yield computation (all three inputs verified).
+3. Phase 14B production diagnostics must pass before Phase 14C starts.
+4. Phase 14C must NOT modify DecisionInputV3 until a separate governance gate is passed.
+
+---
+
 ## 2026-05-08 — Phase 14A: Valuation Data Audit v1 — Stored-Data Diagnostics (Level 1)
 
 ### Status

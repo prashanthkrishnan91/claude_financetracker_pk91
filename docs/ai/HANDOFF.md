@@ -1,4 +1,62 @@
 
+## 2026-05-08 — Phase 8F: SEC Coverage Cleanup + Non-Company Classification Guardrails (Level 1)
+
+### Status
+Phase 8F complete. Backend-only, pre-consumption. All Phase 8A–8E invariants preserved. safe_for_decision remains DB-hard-locked false. visible_snapshot_unchanged remains true. No UI, no SQL, no new providers, no LLM calls, no decision policy changes.
+
+### Root cause / gap addressed
+Phase 8D/8E used only category values (ETF/Crypto) to identify non-company tickers. VUG, which appears with category=Core in some portfolio data, was treated as a SEC-company candidate and could appear in Phase 8E expansion candidates. Additionally, tickers that were attempted (had a Phase 8B snapshot) but produced zero source-linked SEC metric facts (BLSH, KLAR, TSM) were not distinguished from "never attempted" tickers — they could remain eligible for blind retry in Phase 8E.
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/research_workers/sec_metric_candidate_classifier.py`
+- `classify_sec_metric_candidate(ticker, category) -> dict` — pure, deterministic shared helper.
+- Classification priority: category-based (ETF/Crypto) → symbol-based override → sec_company_like.
+- `KNOWN_FUND_OR_ETF_TICKERS` — conservative portfolio-specific list including VUG.
+- `KNOWN_CRYPTO_TICKERS` — BTC, XRP.
+- No DB reads, no provider calls, no LLM calls.
+
+**Updated Phase 8D** (`sec_metric_portfolio_coverage_dry_run.py`):
+- Replaced `_CATEGORY_BLOCKING_CODES` dict with call to `classify_sec_metric_candidate()`.
+- VUG (and other known fund/ETF-like tickers) now get `asset_type_not_sec_company` + `likely_fund_or_etf` codes even when category is wrong or missing.
+- BTC/XRP get `asset_type_not_sec_company` + `likely_crypto` codes even when category is wrong.
+- When `phase8b_data is not None` and `fact_count == 0` and ticker is `sec_company_like`: adds `attempted_no_source_linked_sec_metric_evidence` + `manual_review_required_before_retry` codes to distinguish "tried but no evidence" from "never attempted".
+
+**Updated Phase 8E** (`sec_metric_coverage_expansion.py`):
+- Removed local `_ETF_CATEGORIES`/`_CRYPTO_CATEGORIES` dicts; replaced with `classify_sec_metric_candidate()`.
+- Known fund/ETF/crypto tickers skipped even when category is wrong.
+- When snapshot is present (`snap is not None`) and `fact_count == 0`: skipped with `attempted_no_source_linked_sec_metric_evidence` + `manual_review_required_before_retry`. Prevents blind retry of BLSH/KLAR/TSM.
+- Tickers with no snapshot (never attempted) remain eligible for future expansion.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase8f_sec_coverage_cleanup.py` — 67 tests covering all 13 acceptance criteria.
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_candidate_classifier.py` — new shared classifier
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_portfolio_coverage_dry_run.py` — use classifier, add attempted-no-evidence codes
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_coverage_expansion.py` — use classifier, add attempted-no-evidence skip
+- `v2/backend/tests/test_intel_v3_phase8f_sec_coverage_cleanup.py` — 67 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 8F: **67/67** ✓ (new)
+- Phase 8E (including 8E.1): **33/33** ✓
+- Phase 8D: **73/73** ✓
+- Phase 8C: **74/74** ✓ (via full suite run)
+- Phase 8B: **80/80** ✓ (via full suite run)
+- Phase 8A: **71/71** ✓ (via full suite run)
+- Total: **398 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — remains DB-hard-locked False.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL changes.
+- No visible decision consumption added.
+- BLSH/KLAR/TSM-style tickers (snapshot-present/fact_count=0) are now BLOCKED from blind retry in Phase 8E.
+- VUG is now treated as fund/ETF-like even if position category is wrong.
+
+---
+
 ## 2026-05-07 — Phase 8E.1: SEC Coverage Expansion Write-Mode Safety Gate (Level 2 hotfix)
 
 ### Status

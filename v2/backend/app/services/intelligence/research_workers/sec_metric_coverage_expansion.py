@@ -36,6 +36,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+from .sec_metric_candidate_classifier import classify_sec_metric_candidate
 from .sec_metric_truth_adapter_dry_run import run_sec_metric_truth_adapter_dry_run
 from .sec_metric_evidence_snapshot_dry_run import run_sec_metric_evidence_snapshot_dry_run
 
@@ -43,10 +44,6 @@ SEC_METRIC_COVERAGE_EXPANSION_CONTRACT_VERSION = "phase8e_v1"
 
 # Hard cap applied after all other candidate filters — never exceed this count.
 MAX_TICKERS_PER_EXPANSION: int = 10
-
-# Category values that indicate non-SEC-company assets.
-_ETF_CATEGORIES: frozenset[str] = frozenset({"ETF"})
-_CRYPTO_CATEGORIES: frozenset[str] = frozenset({"Crypto"})
 
 # Readiness values that mean the ticker already has meaningful SEC evidence.
 _ALREADY_COVERED_READINESS: frozenset[str] = frozenset({
@@ -325,20 +322,26 @@ def _select_candidates(
         category = seen[ticker]
         reasons: list[str] = []
 
-        # Check asset type first (ETF/Crypto).
-        if category in _ETF_CATEGORIES:
-            reasons.extend(["asset_type_not_sec_company", "likely_fund_or_etf"])
-        elif category in _CRYPTO_CATEGORIES:
-            reasons.extend(["asset_type_not_sec_company", "likely_crypto"])
-
-        # Check if already has SEC metric evidence.
-        if not reasons:
+        # Phase 8F: use shared classifier (category + symbol override).
+        # Known fund/ETF/crypto tickers are skipped even if category is wrong.
+        clf = classify_sec_metric_candidate(ticker, category)
+        if not clf["is_sec_company_candidate"]:
+            reasons.extend(clf["blocking_reason_codes"])
+        else:
+            # Check if already has SEC metric evidence or was attempted with no result.
             snap = snapshot_by_ticker.get(ticker)
             if snap is not None:
                 fact_count = int(snap.get("source_linked_metric_fact_count") or 0)
                 readiness = str(snap.get("future_adapter_readiness") or "BLOCKED_DRY_RUN_ONLY")
                 if fact_count > 0 or readiness in _ALREADY_COVERED_READINESS:
                     reasons.append("already_has_sec_metric_evidence")
+                else:
+                    # Phase 8F: snapshot present but no source-linked SEC metric facts.
+                    # Skip to prevent blind retry loops (e.g., BLSH/KLAR/TSM).
+                    reasons.extend([
+                        "attempted_no_source_linked_sec_metric_evidence",
+                        "manual_review_required_before_retry",
+                    ])
 
         # Check exclude_tickers.
         if ticker in exclude_set and "already_has_sec_metric_evidence" not in reasons:

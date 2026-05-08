@@ -171,6 +171,24 @@ class Settings(BaseSettings):
     # Independent of the consumption flag above — controlled solely here.
     intel_v3_sec_metric_truth_adapter_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 13 — Valuation Context Adapter v1 (off by default) ─────
+    # When True, the Intel v3 run_v3() path will compute SEC metric readiness
+    # and apply governed price-context signals to eligible company tickers.
+    # READY tickers may receive PriceBand.FAIR contribution to price_context
+    # (upgrade from SUPPRESSED only — never downgrades CHEAP/FULL/EXPENSIVE).
+    # PARTIAL tickers may receive PriceBand.FAIR (degraded) contribution only.
+    # ETF / fund / crypto tickers are always SUPPRESSED_NON_COMPANY.
+    # Governance gate: Phase 10 registry valuation_ratio_computed_v1 must pass.
+    # Decisions remain deterministic — decision_policy_v1 is the only authority.
+    # No new provider calls. No LLM calls. No SQL writes.
+    intel_v3_valuation_context_adapter_v1_enabled: bool = False
+
+    # When True, enables the protected Phase 13 diagnostics endpoint that returns
+    # governance gate status and signal-status counts per ticker category.
+    # Aggregate only — no raw valuation values, no metric keys, no payloads.
+    # Independent of the consumption flag above — controlled solely here.
+    intel_v3_valuation_context_adapter_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

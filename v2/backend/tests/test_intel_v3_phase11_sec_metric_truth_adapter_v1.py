@@ -1083,8 +1083,12 @@ class TestKillSwitchAndServiceIntegration:
         assert "get_settings" in source
 
     def test_intel_v3_service_has_phase11_readiness_helper(self) -> None:
+        # Phase 13 unified the helper under _get_sec_readiness_for_adapters.
         source = _load_source(_INTEL_V3_SERVICE_MODULE)
-        assert "_get_sec_metric_readiness_for_v1" in source
+        assert (
+            "_get_sec_metric_readiness_for_v1" in source
+            or "_get_sec_readiness_for_adapters" in source
+        )
 
     def test_intel_v3_service_references_phase11_kill_switch(self) -> None:
         source = _load_source(_INTEL_V3_SERVICE_MODULE)

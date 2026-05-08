@@ -142,18 +142,38 @@ class IntelV3Service:
             # Step 2: get portfolio positions for governor weights.
             weight_map = await self._get_weight_map()
 
-            # Step 2b: Phase 11 — SEC metric readiness (off by default; governance-gated).
-            sec_readiness = await self._get_sec_metric_readiness_for_v1()
+            # Step 2b: Phase 11 and/or Phase 13 — SEC metric readiness.
+            # Fetched once if either adapter is enabled; shared between both phases.
+            sec_readiness = await self._get_sec_readiness_for_adapters()
+
+            # Phase 11 governance gate (off by default; governance-gated).
             sec_gate_passed = False
             if sec_readiness is not None:
-                from .sec_metric_truth_adapter_v1 import check_governance_gate
-                sec_gate_passed, sec_gate_reason = check_governance_gate()
-                if not sec_gate_passed:
+                settings = get_settings()
+                if getattr(settings, "intel_v3_sec_metric_truth_adapter_v1_enabled", False):
+                    from .sec_metric_truth_adapter_v1 import check_governance_gate as _p11_gate
+                    sec_gate_passed, sec_gate_reason = _p11_gate()
+                    if not sec_gate_passed:
+                        logger.warning(
+                            "intel_v3_phase11_governance_gate_failed user_id=%s run_id=%s reason=%s",
+                            self.user_id, run_id, sec_gate_reason,
+                        )
+
+            # Phase 13 governance gate (off by default; governance-gated).
+            val_gate_passed = False
+            settings = get_settings()
+            if sec_readiness is not None and getattr(
+                settings, "intel_v3_valuation_context_adapter_v1_enabled", False
+            ):
+                from .valuation_context_adapter_v1 import (
+                    check_governance_gate as _p13_gate,
+                )
+                val_gate_passed, val_gate_reason = _p13_gate()
+                if not val_gate_passed:
                     logger.warning(
-                        "intel_v3_phase11_governance_gate_failed user_id=%s run_id=%s reason=%s",
-                        self.user_id, run_id, sec_gate_reason,
+                        "intel_v3_phase13_governance_gate_failed user_id=%s run_id=%s reason=%s",
+                        self.user_id, run_id, val_gate_reason,
                     )
-                    sec_readiness = None
 
             # Step 3: build decisions for each card.
             decisions = []
@@ -242,6 +262,21 @@ class IntelV3Service:
                         readiness_result=sec_readiness,
                     )
                     apply_sec_fundamentals_to_decision_input(inp, sec_signal)
+
+                # Phase 13 — apply valuation context signal if enabled and gate passed.
+                if sec_readiness is not None and val_gate_passed:
+                    from .valuation_context_adapter_v1 import (
+                        build_valuation_context_signal,
+                        apply_valuation_context_to_decision_input,
+                    )
+                    has_price = ticker.upper() in weight_map
+                    val_signal = build_valuation_context_signal(
+                        ticker=ticker.upper(),
+                        category=category,
+                        sec_readiness=sec_readiness,
+                        has_market_price=has_price,
+                    )
+                    apply_valuation_context_to_decision_input(inp, val_signal)
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -442,17 +477,20 @@ class IntelV3Service:
             )
             return {}
 
-    async def _get_sec_metric_readiness_for_v1(self) -> "Optional[Any]":
-        """Fetch Phase 9 SEC metric readiness for Phase 11 integration.
+    async def _get_sec_readiness_for_adapters(self) -> "Optional[Any]":
+        """Fetch Phase 9 SEC metric readiness for Phase 11 and/or Phase 13.
 
-        Returns SecMetricEvidenceReadinessResult when Phase 11 kill switch is on,
-        or None when disabled / unavailable. Never raises.
+        Returns SecMetricEvidenceReadinessResult when at least one of the
+        Phase 11 or Phase 13 kill switches is on. Returns None when both are
+        disabled or when readiness computation fails. Never raises.
 
         Called once per run_v3() invocation — not per ticker.
         No SQL writes. No provider calls. No LLM calls.
         """
         settings = get_settings()
-        if not getattr(settings, "intel_v3_sec_metric_truth_adapter_v1_enabled", False):
+        phase11_on = getattr(settings, "intel_v3_sec_metric_truth_adapter_v1_enabled", False)
+        phase13_on = getattr(settings, "intel_v3_valuation_context_adapter_v1_enabled", False)
+        if not (phase11_on or phase13_on):
             return None
 
         try:
@@ -467,7 +505,7 @@ class IntelV3Service:
             return result
         except Exception as exc:
             logger.warning(
-                "intel_v3_phase11_sec_readiness_failed user_id=%s error=%s",
+                "intel_v3_sec_readiness_for_adapters_failed user_id=%s error=%s",
                 self.user_id, exc,
             )
             return None

@@ -1,4 +1,97 @@
 
+## 2026-05-08 — Phase 13: Valuation Context Readiness Adapter v1 (Level 2, Readiness-Only)
+
+### Status
+Phase 13 complete. **Readiness-only** — this phase classifies ticker valuation readiness but produces NO `price_context` changes and NO `PriceBand` contributions. Kill switch `intel_v3_valuation_context_adapter_v1_enabled` defaults to False. Deterministic decision policy remains the sole Buy/Hold/Trim/Sell authority. No UI, no SQL writes, no new providers, no LLM calls, no action drift risk.
+
+### Root cause / gap addressed
+Phase 11 established governed evidence-quality signals from SEC fundamentals. Phase 13 establishes whether tickers have the prerequisite evidence (SEC fundamentals + market price/position) for **future** valuation ratio computation. It does NOT compute actual valuation ratios — doing so without validated P/E or P/B calculations and sector context would introduce fake precision and HOLD→BUY action drift risk. Actual PriceBand contributions are deferred to a future phase that computes validated ratios with sector/context guardrails.
+
+### Scope correction (applied before merge)
+The initial implementation emitted `PriceBand.FAIR` based on `ticker in weight_map` (portfolio position availability). This was semantically wrong — portfolio position presence proves a position exists, not that a validated market price or computed valuation ratio is available. Emitting PriceBand.FAIR on this basis could cause HOLD→BUY action drift once the flag was enabled. The implementation was revised to readiness-only before PR merge: `price_context_contribution=None` for ALL statuses.
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/v3/valuation_context_adapter_v1.py`
+- `VALUATION_CONTEXT_ADAPTER_V1_CONTRACT_VERSION = "phase13_v1"` — stable contract.
+- `ValuationSignalStatus` — 7-member readiness-only enum: READY_FOR_FUTURE_VALUATION, PARTIAL_FOR_FUTURE_VALUATION, SUPPRESSED_MISSING_PRICE_OR_POSITION, SUPPRESSED_MISSING_FUNDAMENTALS, SUPPRESSED_NON_COMPANY, SUPPRESSED_CONFLICTING_OR_STALE, GOVERNANCE_BLOCKED.
+- `ValuationContextSignal` — frozen typed output contract. `price_context_contribution: None` always. No raw metric values, no price targets, no metric key names.
+- `check_governance_gate(registry)` — validates Phase 10 registry for `valuation_ratio_computed_v1`: checks lane=VALUATION_CONTEXT, trust_tier=SECONDARY_COMPUTED, numeric_authority, decision_input_eligible, explanation_only, lifecycle in {PLANNED,ACTIVE}. Returns (bool, reason).
+- `_is_non_company_ticker(ticker, category)` — ETF/fund/crypto exclusion by category keywords and known crypto tickers.
+- `build_valuation_context_signal(ticker, category, sec_readiness, has_market_price, registry)` — pure function mapping SEC readiness + price availability → readiness-only ValuationContextSignal. Returns `price_context_contribution=None` on ALL paths.
+- `apply_valuation_context_to_decision_input(inp, signal)` — RECORD-ONLY: writes readiness summary to `source_signal_summary["valuation_context_lane"]`. Never modifies `inp.price_context`.
+- Does NOT import PriceBand. Pure data/logic only — no IO, no LLM, no DB.
+
+**Readiness classification rules** (no PriceBand contribution for any status):
+- Governance gate fails → GOVERNANCE_BLOCKED (all tickers).
+- ETF/fund/crypto category or known crypto ticker → SUPPRESSED_NON_COMPANY.
+- No market price → SUPPRESSED_MISSING_PRICE_OR_POSITION.
+- SEC readiness None/BLOCKED → SUPPRESSED_MISSING_FUNDAMENTALS.
+- SEC readiness SKIPPED_NON_COMPANY → SUPPRESSED_NON_COMPANY.
+- SEC READY + price available → READY_FOR_FUTURE_VALUATION (prerequisite evidence sufficient).
+- SEC PARTIAL + price available → PARTIAL_FOR_FUTURE_VALUATION (degraded=True; limited evidence).
+
+**Extended**: `v2/backend/app/services/intelligence/v3/intel_v3_service.py`
+- `_get_sec_metric_readiness_for_v1()` renamed to `_get_sec_readiness_for_adapters()` — shared between Phase 11 and Phase 13; fetched once when either adapter is enabled.
+- `run_v3()`: Phase 13 block added after Phase 11 — checks `intel_v3_valuation_context_adapter_v1_enabled`, runs valuation governance gate once, applies `build_valuation_context_signal` + `apply_valuation_context_to_decision_input` per ticker.
+- Phase 13 never modifies `inp.price_context` — verified by 144 tests.
+
+**Extended**: `v2/backend/app/config.py`
+- New flag: `intel_v3_valuation_context_adapter_v1_enabled` (bool, default False).
+- New flag: `intel_v3_valuation_context_adapter_v1_diagnostics_enabled` (bool, default False).
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/valuation-context-adapter-v1`
+- Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+- Guard: `intel_v3_valuation_context_adapter_v1_diagnostics_enabled=true` required (403 if off).
+- Returns: adapter_version, governance_gate_passed/reason, consumption_enabled, `readiness_status_counts` (by ValuationSignalStatus), `readiness_only=True`, `price_context_unchanged=True`, errors. No raw valuation values, no price_context_upgrades fields.
+- Hard-locks: safe_for_decision=False, visible_snapshot_unchanged=True.
+
+**Updated**: `v2/backend/tests/test_intel_v3_phase11_sec_metric_truth_adapter_v1.py`
+- One test updated: `test_intel_v3_service_has_phase11_readiness_helper` now accepts either `_get_sec_metric_readiness_for_v1` or `_get_sec_readiness_for_adapters` (Phase 13 unified the helper).
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase13_valuation_context_adapter_v1.py` — 144 tests covering all 25 acceptance criteria, including explicit proofs that `DecisionInputV3.price_context` is never modified and no HOLD→BUY action drift is possible.
+
+### What remains out of scope
+- Promoting `valuation_ratio_computed_v1` registry lifecycle from PLANNED to ACTIVE (scheduled after Phase 13 validates in production).
+- Actual PriceBand contributions from valuation signals — deferred to a future phase that computes validated valuation ratios (P/E, P/B) with sector context to avoid fake precision.
+- Computing actual P/E or P/B ratios (requires sector context to avoid fake precision).
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/valuation_context_adapter_v1.py` — new Phase 13 readiness-only adapter
+- `v2/backend/app/config.py` — two new kill-switch flags
+- `v2/backend/app/services/intelligence/v3/intel_v3_service.py` — shared readiness helper + Phase 13 wiring
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + imports
+- `v2/backend/tests/test_intel_v3_phase13_valuation_context_adapter_v1.py` — 144 new tests
+- `v2/backend/tests/test_intel_v3_phase11_sec_metric_truth_adapter_v1.py` — one test updated for renamed helper
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 13: **144/144** ✓ (new, includes no-price-context-change and no-action-drift proofs)
+- Phase 11: **120/120** ✓
+- Phase 10: **94/94** ✓
+- Total: **358 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `PriceBand` — NOT imported in Phase 13 adapter module.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — never set True by Phase 13.
+- `DecisionInputV3.price_context` — NEVER modified by Phase 13 apply function.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL writes.
+- ETF/fund/crypto tickers remain SUPPRESSED_NON_COMPANY — no valuation signal.
+- All Phase 13 statuses produce `price_context_contribution=None`.
+- No HOLD→BUY action drift possible from Phase 13 signals.
+- No price targets, no fair-value estimates, no prediction-oracle behavior.
+- No raw valuation metric keys (pe_ratio, pb_ratio, etc.) in any output field.
+- Research artifacts (LLM_GENERATED) remain decision_input_eligible=False.
+
+### Next recommended phase
+**Phase 13.1 (follow-up)**: Promote `valuation_ratio_computed_v1` registry lifecycle from PLANNED to ACTIVE after Phase 13 validates in production (same pattern as Phase 11.1).
+**Phase 14 (future, separate PR)**: Implement actual valuation ratio computation — P/E, P/B, EV/EBITDA from SEC fundamentals + live market price — with sector normalization and precision guardrails. Only after that phase should PriceBand contributions be introduced for this lane.
+
+---
+
 ## 2026-05-08 — Phase 11.1: Registry Lifecycle Promotion — sec_companyfacts_v1 PLANNED→ACTIVE (Level 0)
 
 ### Status

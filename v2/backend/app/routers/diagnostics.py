@@ -42,6 +42,10 @@ from ..services.intelligence.v3.valuation_context_adapter_v1 import (
     VALUATION_CONTEXT_ADAPTER_V1_CONTRACT_VERSION,
     ValuationSignalStatus,
 )
+from ..services.intelligence.v3.valuation_data_audit_v1 import (
+    build_valuation_data_audit,
+    VALUATION_DATA_AUDIT_V1_CONTRACT_VERSION,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -936,4 +940,121 @@ async def get_valuation_context_adapter_v1_diagnostics(
         "portfolio_ticker_count": readiness.portfolio_ticker_count,
         "readiness_status_counts": status_counts,
         "errors": readiness.errors,
+    }
+
+
+# ── Phase 14A — Valuation Data Audit v1 diagnostics ─────────────────────────
+
+@router.post("/valuation-data-audit-v1")
+async def get_valuation_data_audit_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14A — operator-only Valuation Data Audit v1 diagnostics.
+
+    Read-only stored-data audit that reports whether existing SEC fundamentals
+    and portfolio data are sufficient to support future valuation ratio
+    computation (Phase 14B). Returns aggregate-only counts — no raw metric
+    values, no ratios, no PriceBand, no per-ticker raw rows.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_VALUATION_DATA_AUDIT_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved:
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - valuation_ratios_computed is always False.
+      - price_context_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw metric values, no valuation ratios, no PriceBand values.
+      - TTM blocked: _MAX_PERIODS_PER_TAG=2 < 4 periods needed for TTM.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER sets safe_for_decision=True.
+    NEVER computes P/E, P/B, EV/EBITDA, earnings yield, or any valuation ratio.
+    NEVER produces PriceBand contributions.
+    NEVER modifies DecisionInputV3.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_valuation_data_audit_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_VALUATION_DATA_AUDIT_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    # ── Step 1: Compute Phase 9 SEC metric readiness ──────────────────────────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+
+    # ── Step 2: Read positions for portfolio category info ────────────────────
+    # positions.category provides portfolio category (Core/ETF/Crypto/IPO/SELL).
+    # This is NOT financial sector — financial sector (Technology/Healthcare/etc.)
+    # is stored in intel_v3_snapshots.raw.fundamentals and is not queried here.
+    company_ticker_categories: dict[str, str] = {}
+    errors: list[str] = []
+
+    try:
+        pos_result = (
+            db_client.table("positions")
+            .select("ticker,category")
+            .eq("user_id", str(user.id))
+            .execute()
+        )
+        for row in (pos_result.data or []):
+            ticker = str(row.get("ticker") or "").upper().strip()
+            category = str(row.get("category") or "")
+            if ticker:
+                company_ticker_categories[ticker] = category
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"positions_category_query_error: {exc}")
+
+    # ── Step 3: Build the aggregate-only audit ────────────────────────────────
+    audit = build_valuation_data_audit(
+        readiness=readiness,
+        company_ticker_categories=company_ticker_categories,
+    )
+
+    # Merge any endpoint-layer errors into the response.
+    all_errors = list(audit.errors) + errors
+
+    # Return aggregate-only response — no raw values, no ratios, no PriceBand.
+    return {
+        "adapter_version": VALUATION_DATA_AUDIT_V1_CONTRACT_VERSION,
+        "safe_for_decision": False,
+        "visible_snapshot_unchanged": True,
+        "read_only": True,
+        "diagnostics_only": True,
+        "valuation_ratios_computed": False,
+        "price_context_unchanged": True,
+        "portfolio_ticker_count": audit.portfolio_ticker_count,
+        "company_ticker_count": audit.company_ticker_count,
+        "non_company_ticker_count": audit.non_company_ticker_count,
+        "sec_ready_count": audit.sec_ready_count,
+        "sec_partial_count": audit.sec_partial_count,
+        "sec_blocked_count": audit.sec_blocked_count,
+        "latest_fy_eps_available_count": audit.latest_fy_eps_available_count,
+        "latest_fy_eps_diluted_available_count": audit.latest_fy_eps_diluted_available_count,
+        "stockholders_equity_available_count": audit.stockholders_equity_available_count,
+        "market_price_available_count": audit.market_price_available_count,
+        "market_price_fresh_count": audit.market_price_fresh_count,
+        "market_price_source_note": audit.market_price_source_note,
+        "sector_available_count": audit.sector_available_count,
+        "sector_missing_count": audit.sector_missing_count,
+        "sector_source_note": audit.sector_source_note,
+        "eligible_for_future_fy_earnings_yield_count": audit.eligible_for_future_fy_earnings_yield_count,
+        "eligible_for_future_book_value_proxy_count": audit.eligible_for_future_book_value_proxy_count,
+        "requires_provider_or_coverage_expansion_count": audit.requires_provider_or_coverage_expansion_count,
+        "ttm_blocked_by_period_limit": audit.ttm_blocked_by_period_limit,
+        "period_limit_per_tag": audit.period_limit_per_tag,
+        "errors": all_errors,
     }

@@ -27,6 +27,7 @@ from ..services.intelligence.research_workers.sec_metric_coverage_expansion impo
 from ..services.intelligence.research_workers.sec_metric_portfolio_coverage_dry_run import compute_portfolio_sec_metric_coverage
 from ..services.intelligence.research_workers.sec_metric_evidence_readiness_adapter import compute_sec_metric_evidence_readiness
 from ..services.intelligence.research_workers.validation_harness import run_validation
+from ..services.intelligence.v3.evidence_source_registry import build_registry_summary
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -699,3 +700,42 @@ async def get_sec_metric_evidence_readiness(
         "skipped_tickers_by_reason": readiness.skipped_tickers_by_reason,
         "errors": readiness.errors,
     }
+
+
+# ── Phase 10 — Evidence Source Registry diagnostics ──────────────────────────
+
+@router.post("/evidence-source-registry")
+async def get_evidence_source_registry_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Return the Phase 10 Evidence Source Registry governance summary.
+
+    Protected diagnostics endpoint — ops-only via runtime cert auth.
+    Returns aggregate governance metadata only: lane counts, source counts,
+    trust tiers, lifecycle statuses. No raw metric values, no payloads,
+    no source URLs, no decision signals.
+
+    Governance invariants preserved:
+      - safe_for_decision is always False.
+      - visible_snapshot_unchanged is always True.
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No visible Buy/Hold/Trim/Sell behavior changes.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_evidence_source_registry_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_EVIDENCE_SOURCE_REGISTRY_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    summary = build_registry_summary()
+    # Governance hard-lock: safe_for_decision must remain False.
+    summary["safe_for_decision"] = False
+    summary["visible_snapshot_unchanged"] = True
+    return summary

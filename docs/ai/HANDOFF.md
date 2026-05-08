@@ -1,4 +1,84 @@
 
+## 2026-05-08 — Phase 10: Evidence Source Registry v1 / Multi-Lane Governance v1 (Level 2)
+
+### Status
+Phase 10 complete. Backend-only, governance/registry-only. All Phase 9 invariants preserved. safe_for_decision remains false. visible_snapshot_unchanged remains true. No UI, no SQL, no new providers, no LLM calls, no decision policy changes, no visible recommendation behavior changes.
+
+### Root cause / gap addressed
+Phase 9 established typed readiness contracts for SEC metric evidence but provided no authoritative, auditable registry of all governed evidence sources and lanes. Future phases (11+) would otherwise consume new evidence sources without explicit governance approval, trust tier, failure-behavior, or corroboration contracts in place. Phase 10 fills this gap with a durable internal governance registry.
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/v3/evidence_source_registry.py`
+- `EVIDENCE_SOURCE_REGISTRY_CONTRACT_VERSION = "phase10_v1"` — stable contract.
+- `EvidenceLane` — 11-member enum covering all governed evidence lanes.
+- `SourceType`, `TrustTier`, `LifecycleStatus`, `FailureBehavior` — typed governance enums.
+- `EvidenceSourceDefinition` — frozen dataclass with all governance fields: source_id, lane, display_name, description, source_type, trust_tier, freshness_sla_hours, decision_input_eligible, explanation_only, corroboration_required, numeric_authority, audit_url_required, provider_adapter, lifecycle_status, failure_behavior, notes.
+- 11 governed source definitions (one per lane minimum): sec_companyfacts_v1, valuation_ratio_computed_v1, price_history_v1, analyst_consensus_v1, sec_earnings_transcript_v1, news_feed_v1, macro_indicator_v1, etf_holdings_v1, portfolio_positions_v1, user_thesis_v1, research_artifact_llm_v1.
+- `EVIDENCE_SOURCE_REGISTRY` — immutable dict indexed by source_id.
+- Query helpers: `get_all_sources()`, `get_sources_by_lane()`, `get_decision_eligible_sources()`, `get_active_decision_eligible_sources()`, `get_explanation_only_sources()`, `get_sources_requiring_corroboration()`, `get_lanes_represented()`, `build_registry_summary()`.
+- Pure data only — no IO, no LLM, no DB, no frontend imports.
+
+**Governance invariants encoded:**
+- finance-agent/research-artifact (LLM_GENERATED trust tier) sources: decision_input_eligible=False always.
+- explanation_only=True sources: decision_input_eligible=False always (mutually exclusive).
+- OPEN_WEB trust tier sources: corroboration_required=True always.
+- RESEARCH_ARTIFACT lane: decision_input_eligible=False, explanation_only=True, corroboration_required=True always.
+- ETF/fund lane uses separate provider_adapter from SEC company fundamentals lane.
+- Portfolio exposure sources: influence decisions via deterministic rules only (no LLM mediation).
+- Missing/stale/weak evidence: SUPPRESS_AXIS or DEGRADE_CONFIDENCE, never IGNORE for decision-eligible sources.
+
+**Extended**: `v2/backend/app/config.py`
+- New flag: `intel_v3_evidence_source_registry_diagnostics_enabled` (bool, default False).
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/evidence-source-registry`
+- Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+- Guard: `intel_v3_evidence_source_registry_diagnostics_enabled=true` required (403 if off).
+- Returns: governance summary only — lane counts, source counts, trust tier counts, lifecycle status counts, all_lanes_represented boolean. No raw metric values, no payloads, no source URLs.
+- Hard-locks: safe_for_decision=False, visible_snapshot_unchanged=True.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase10_evidence_source_registry.py` — 94 tests covering all 15 acceptance criteria (ACs 1–15).
+
+### What remains out of scope
+- Consuming any registry source in DecisionInputV3
+- Changing visible Buy/Hold/Trim/Sell decisions
+- Supabase SQL or schema changes
+- Frontend or UI changes
+- LLM calls, SEC provider calls
+- Deploy or Watchtower implementation
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/evidence_source_registry.py` — new Phase 10 registry
+- `v2/backend/app/config.py` — new kill-switch flag
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + import
+- `v2/backend/tests/test_intel_v3_phase10_evidence_source_registry.py` — 94 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 10: **94/94** ✓ (new)
+- Phase 9: **79/79** ✓
+- Phase 8F: **67/67** ✓
+- Phase 8E: **33/33** ✓
+- Phase 8D: **73/73** ✓
+- Phase 8C: **74/74** ✓
+- Phase 8B: **80/80** ✓
+- Phase 8A: **71/71** ✓
+- Total: **571 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — remains DB-hard-locked False.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL changes.
+- No visible decision consumption added.
+- Registry not imported by decision_policy_v1, intel_v3_service, or snapshot_builder.
+
+### Next recommended phase
+**Phase 11**: SEC Metric Truth Adapter v1 — controlled consumption of sec_companyfacts_v1 evidence into DecisionInputV3 for READY/PARTIAL tickers, under explicit governance approval from the Phase 10 registry contract. Requires: confirm governance approval gate, map READY tickers to evidence_quality axis, preserve safe_for_decision=False until cert gate passes.
+
+---
+
 ## 2026-05-08 — Architecture Addendum: Living Investment Cockpit North Star (docs-only)
 
 ### Current architecture source-of-truth

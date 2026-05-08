@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     # Dry-run only — safe_for_decision remains False. No visible snapshot change.
     intel_v3_sec_metric_evidence_readiness_adapter_enabled: bool = False
 
+    # ── Intel v3 Phase 10 — Evidence Source Registry diagnostics (off by default) ──
+    # When True, enables the protected evidence-source-registry diagnostics endpoint
+    # that returns the governance summary of all defined evidence sources and lanes.
+    # Registry-only — safe_for_decision remains False. No visible snapshot change.
+    # No decision consumption, no provider calls, no LLM calls, no SQL writes.
+    intel_v3_evidence_source_registry_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -1,4 +1,26 @@
 
+## 2026-05-08 — Architecture Addendum: Living Investment Cockpit North Star (docs-only)
+
+### Current architecture source-of-truth
+
+The canonical post-Phase-9 architecture reference is:
+
+> `artifacts/Intel_v3_Architecture_Plan_Draft3_Living_Investment_Cockpit_Addendum.md`
+
+Future chats should read this file for current north-star decisions on evidence lanes,
+source governance, finance-agent role, Deploy, Watchtower, event-driven email alerts,
+sequencing, and the full post-Phase-9 roadmap (Phases 10–23).
+
+The original `artifacts/Intel_v3_Architecture_Plan_Draft2.pdf` and
+`artifacts/Intel_v3_Architecture_Plan_Draft2_Anthropic_Finance_Agent_Addendum.md`
+remain valid historical inputs. Draft3 addendum supersedes sequencing guidance where
+conflicts exist.
+
+**Next implementation phase**: Phase 10 — Evidence Source Registry v1 / Multi-Lane Governance v1.
+Do not move directly to SEC metric consumption in DecisionInputV3 before Phase 10 completes.
+
+---
+
 ## 2026-05-08 — Phase 9: SEC Metric Evidence Readiness Adapter (Level 2)
 
 ### Status

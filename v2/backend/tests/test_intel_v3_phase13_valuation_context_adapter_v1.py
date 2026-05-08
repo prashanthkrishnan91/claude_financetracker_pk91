@@ -12,11 +12,13 @@ Acceptance criteria verified by this file:
     (Static import analysis verifies no provider/LLM imports.)
  5. ETF / fund / crypto tickers are always SUPPRESSED_NON_COMPANY.
  6. Missing / stale / weak / conflicting SEC evidence suppresses the lane.
- 7. Missing market price suppresses the lane.
- 8. READY tickers with price produce PriceBand.FAIR contribution (non-degraded).
- 9. PARTIAL tickers with price produce PriceBand.FAIR contribution (degraded=True).
-10. Adapter integrates into DecisionInputV3.price_context via a narrow typed contract
-    and upgrade-only merge rule (SUPPRESSED → FAIR; never downgrades CHEAP/FULL/EXPENSIVE).
+ 7. Missing market price suppresses the lane (SUPPRESSED_MISSING_PRICE_OR_POSITION).
+ 8. READY tickers produce READY_FOR_FUTURE_VALUATION (non-degraded).
+    price_context_contribution is ALWAYS None — readiness-only phase.
+ 9. PARTIAL tickers produce PARTIAL_FOR_FUTURE_VALUATION (degraded=True).
+    price_context_contribution is ALWAYS None — readiness-only phase.
+10. Phase 13 NEVER changes DecisionInputV3.price_context for any signal status.
+    apply_valuation_context_to_decision_input() is record-only.
 11. Deterministic decision policy remains the only final Buy/Hold/Trim/Sell authority.
     (No decide() call in adapter module — static import analysis.)
 12. No new provider calls. (Static import analysis on new module.)
@@ -27,16 +29,15 @@ Acceptance criteria verified by this file:
 16. ValuationContextSignal is frozen (immutable after creation).
 17. source_id is always valuation_ratio_computed_v1.
 18. adapter_version is always phase13_v1.
-19. price_context_contribution is None for all SUPPRESSED_* and GOVERNANCE_BLOCKED.
-20. price_context_contribution is PriceBand.FAIR for READY and PARTIAL.
-21. price_context_contribution is never CHEAP, FULL, or EXPENSIVE.
-22. Upgrade-only merge: existing CHEAP/FULL/EXPENSIVE price_context is never overridden.
-23. source_signal_summary records valuation_context_lane for all signal outcomes.
-24. Governance gate passes for the real Phase 10 registry (current state).
-25. Governance gate rejects wrong lane, wrong trust_tier, explanation_only=True,
+19. price_context_contribution is None for ALL statuses (readiness-only phase).
+20. No HOLD→BUY action drift is possible from Phase 13 signals.
+    (price_context is never upgraded by this adapter.)
+21. source_signal_summary records readiness_only=True and price_context_unchanged=True.
+22. Governance gate passes for the real Phase 10 registry (current state).
+23. Governance gate rejects wrong lane, wrong trust_tier, explanation_only=True,
     decision_input_eligible=False, numeric_authority=False, bad lifecycle.
-26. HANDOFF.md is updated with Phase 13 summary. (Checked separately.)
-27. Existing Phase 10/11 tests still pass. (No adapter module imports break them.)
+24. HANDOFF.md is updated with Phase 13 summary. (Checked separately.)
+25. Existing Phase 10/11 tests still pass. (No adapter module imports break them.)
 
 All tests use in-memory fixtures — no Supabase dependency.
 """
@@ -215,6 +216,24 @@ class TestContractVersion:
 
     def test_known_crypto_tickers_includes_btc(self) -> None:
         assert "BTC" in _KNOWN_CRYPTO_TICKERS
+
+    def test_status_enum_has_ready_for_future_valuation(self) -> None:
+        assert ValuationSignalStatus.READY_FOR_FUTURE_VALUATION
+
+    def test_status_enum_has_partial_for_future_valuation(self) -> None:
+        assert ValuationSignalStatus.PARTIAL_FOR_FUTURE_VALUATION
+
+    def test_status_enum_has_suppressed_missing_price_or_position(self) -> None:
+        assert ValuationSignalStatus.SUPPRESSED_MISSING_PRICE_OR_POSITION
+
+    def test_status_enum_has_suppressed_missing_fundamentals(self) -> None:
+        assert ValuationSignalStatus.SUPPRESSED_MISSING_FUNDAMENTALS
+
+    def test_status_enum_has_suppressed_non_company(self) -> None:
+        assert ValuationSignalStatus.SUPPRESSED_NON_COMPANY
+
+    def test_status_enum_has_governance_blocked(self) -> None:
+        assert ValuationSignalStatus.GOVERNANCE_BLOCKED
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -466,7 +485,7 @@ class TestFundamentalsSuppression:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 7 — Missing market price suppresses the lane
+# AC 7 — Missing market price suppresses the lane (SUPPRESSED_MISSING_PRICE_OR_POSITION)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestMissingPriceSuppression:
@@ -476,7 +495,7 @@ class TestMissingPriceSuppression:
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=False,
         )
-        assert sig.status == ValuationSignalStatus.SUPPRESSED_MISSING_PRICE
+        assert sig.status == ValuationSignalStatus.SUPPRESSED_MISSING_PRICE_OR_POSITION
         assert sig.price_context_contribution is None
 
     def test_no_price_suppression_reason_present(self) -> None:
@@ -504,27 +523,33 @@ class TestMissingPriceSuppression:
         )
         assert sig.degraded is False
 
+    def test_suppressed_missing_price_or_position_status_value(self) -> None:
+        assert (
+            ValuationSignalStatus.SUPPRESSED_MISSING_PRICE_OR_POSITION.value
+            == "SUPPRESSED_MISSING_PRICE_OR_POSITION"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 8 — READY tickers produce PriceBand.FAIR (non-degraded)
+# AC 8 — READY tickers produce READY_FOR_FUTURE_VALUATION (readiness-only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestReadySignal:
-    def test_ready_ticker_status_is_ready(self) -> None:
+    def test_ready_ticker_status_is_ready_for_future_valuation(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        assert sig.status == ValuationSignalStatus.READY
+        assert sig.status == ValuationSignalStatus.READY_FOR_FUTURE_VALUATION
 
-    def test_ready_ticker_contribution_is_fair(self) -> None:
+    def test_ready_ticker_contribution_is_none(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        assert sig.price_context_contribution == PriceBand.FAIR
+        assert sig.price_context_contribution is None
 
     def test_ready_ticker_degraded_false(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
@@ -550,7 +575,7 @@ class TestReadySignal:
         )
         assert sig.governance_gate_passed is True
 
-    def test_ready_ticker_contribution_never_cheap(self) -> None:
+    def test_ready_ticker_contribution_not_cheap(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -558,7 +583,15 @@ class TestReadySignal:
         )
         assert sig.price_context_contribution != PriceBand.CHEAP
 
-    def test_ready_ticker_contribution_never_full(self) -> None:
+    def test_ready_ticker_contribution_not_fair(self) -> None:
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        assert sig.price_context_contribution != PriceBand.FAIR
+
+    def test_ready_ticker_contribution_not_full(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -566,7 +599,7 @@ class TestReadySignal:
         )
         assert sig.price_context_contribution != PriceBand.FULL
 
-    def test_ready_ticker_contribution_never_expensive(self) -> None:
+    def test_ready_ticker_contribution_not_expensive(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -574,27 +607,33 @@ class TestReadySignal:
         )
         assert sig.price_context_contribution != PriceBand.EXPENSIVE
 
+    def test_ready_for_future_valuation_status_value(self) -> None:
+        assert (
+            ValuationSignalStatus.READY_FOR_FUTURE_VALUATION.value
+            == "READY_FOR_FUTURE_VALUATION"
+        )
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 9 — PARTIAL tickers produce PriceBand.FAIR (degraded=True)
+# AC 9 — PARTIAL tickers produce PARTIAL_FOR_FUTURE_VALUATION (degraded=True)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestPartialSignal:
-    def test_partial_ticker_status_is_partial(self) -> None:
+    def test_partial_ticker_status_is_partial_for_future_valuation(self) -> None:
         readiness = _make_readiness(partial={"MSFT": ["eps"]})
         sig = build_valuation_context_signal(
             ticker="MSFT", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        assert sig.status == ValuationSignalStatus.PARTIAL
+        assert sig.status == ValuationSignalStatus.PARTIAL_FOR_FUTURE_VALUATION
 
-    def test_partial_ticker_contribution_is_fair(self) -> None:
+    def test_partial_ticker_contribution_is_none(self) -> None:
         readiness = _make_readiness(partial={"MSFT": ["eps"]})
         sig = build_valuation_context_signal(
             ticker="MSFT", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        assert sig.price_context_contribution == PriceBand.FAIR
+        assert sig.price_context_contribution is None
 
     def test_partial_ticker_degraded_true(self) -> None:
         readiness = _make_readiness(partial={"MSFT": ["eps"]})
@@ -612,7 +651,7 @@ class TestPartialSignal:
         )
         assert sig.suppression_reason is None
 
-    def test_partial_contribution_never_cheap(self) -> None:
+    def test_partial_contribution_not_cheap(self) -> None:
         readiness = _make_readiness(partial={"MSFT": ["eps"]})
         sig = build_valuation_context_signal(
             ticker="MSFT", category="stock",
@@ -620,13 +659,27 @@ class TestPartialSignal:
         )
         assert sig.price_context_contribution != PriceBand.CHEAP
 
-    def test_partial_contribution_never_full(self) -> None:
+    def test_partial_contribution_not_fair(self) -> None:
+        readiness = _make_readiness(partial={"MSFT": ["eps"]})
+        sig = build_valuation_context_signal(
+            ticker="MSFT", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        assert sig.price_context_contribution != PriceBand.FAIR
+
+    def test_partial_contribution_not_full(self) -> None:
         readiness = _make_readiness(partial={"MSFT": ["eps"]})
         sig = build_valuation_context_signal(
             ticker="MSFT", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
         assert sig.price_context_contribution != PriceBand.FULL
+
+    def test_partial_for_future_valuation_status_value(self) -> None:
+        assert (
+            ValuationSignalStatus.PARTIAL_FOR_FUTURE_VALUATION.value
+            == "PARTIAL_FOR_FUTURE_VALUATION"
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -677,10 +730,13 @@ class TestGovernanceBlockedSignal:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 10 / AC 22 — Merge rule: upgrade-only from SUPPRESSED
+# AC 10 / AC 20 — price_context is NEVER changed by Phase 13 (record-only)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class TestMergeRule:
+class TestNoPriceContextChange:
+    """Phase 13 is readiness-only. apply_valuation_context_to_decision_input()
+    must NEVER modify DecisionInputV3.price_context regardless of signal status."""
+
     def _make_ready_signal(self, ticker: str = "AAPL") -> ValuationContextSignal:
         readiness = _make_readiness(ready=[ticker])
         return build_valuation_context_signal(
@@ -695,49 +751,43 @@ class TestMergeRule:
             sec_readiness=readiness, has_market_price=True,
         )
 
-    def test_suppressed_plus_fair_upgrades_to_fair(self) -> None:
+    def test_suppressed_input_stays_suppressed_after_ready_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
         sig = self._make_ready_signal()
         apply_valuation_context_to_decision_input(inp, sig)
-        assert inp.price_context == PriceBand.FAIR
+        assert inp.price_context == PriceBand.SUPPRESSED
 
-    def test_fair_plus_fair_stays_fair(self) -> None:
+    def test_suppressed_input_stays_suppressed_after_partial_signal(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        sig = self._make_partial_signal()
+        apply_valuation_context_to_decision_input(inp, sig)
+        assert inp.price_context == PriceBand.SUPPRESSED
+
+    def test_fair_input_stays_fair_after_ready_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.FAIR)
         sig = self._make_ready_signal()
         apply_valuation_context_to_decision_input(inp, sig)
         assert inp.price_context == PriceBand.FAIR
 
-    def test_cheap_plus_fair_stays_cheap(self) -> None:
+    def test_cheap_input_stays_cheap_after_ready_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.CHEAP)
         sig = self._make_ready_signal()
         apply_valuation_context_to_decision_input(inp, sig)
         assert inp.price_context == PriceBand.CHEAP
 
-    def test_full_plus_fair_stays_full(self) -> None:
+    def test_full_input_stays_full_after_ready_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.FULL)
         sig = self._make_ready_signal()
         apply_valuation_context_to_decision_input(inp, sig)
         assert inp.price_context == PriceBand.FULL
 
-    def test_expensive_plus_fair_stays_expensive(self) -> None:
+    def test_expensive_input_stays_expensive_after_ready_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.EXPENSIVE)
         sig = self._make_ready_signal()
         apply_valuation_context_to_decision_input(inp, sig)
         assert inp.price_context == PriceBand.EXPENSIVE
 
-    def test_suppressed_plus_partial_fair_upgrades_to_fair(self) -> None:
-        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
-        sig = self._make_partial_signal()
-        apply_valuation_context_to_decision_input(inp, sig)
-        assert inp.price_context == PriceBand.FAIR
-
-    def test_cheap_not_downgraded_by_partial_fair(self) -> None:
-        inp = _make_decision_input(price_context=PriceBand.CHEAP)
-        sig = self._make_partial_signal()
-        apply_valuation_context_to_decision_input(inp, sig)
-        assert inp.price_context == PriceBand.CHEAP
-
-    def test_no_contribution_does_not_change_price_context(self) -> None:
+    def test_suppressed_input_unchanged_after_suppressed_signal(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -746,26 +796,114 @@ class TestMergeRule:
         apply_valuation_context_to_decision_input(inp, sig)
         assert inp.price_context == PriceBand.SUPPRESSED
 
-    def test_upgrade_removes_price_context_suppression_reason(self) -> None:
+    def test_price_context_unchanged_after_governance_blocked(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
-        inp.suppression_reasons["price_context"] = "No clear price signal."
-        sig = self._make_ready_signal()
-        apply_valuation_context_to_decision_input(inp, sig)
-        assert "price_context" not in inp.suppression_reasons
-
-    def test_no_upgrade_preserves_suppression_reason(self) -> None:
-        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
-        inp.suppression_reasons["price_context"] = "No clear price signal."
+        reg = {}
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
-            sec_readiness=None, has_market_price=True,
+            sec_readiness=_make_readiness(ready=["AAPL"]),
+            has_market_price=True,
+            registry=reg,
         )
         apply_valuation_context_to_decision_input(inp, sig)
-        assert "price_context" in inp.suppression_reasons
+        assert inp.price_context == PriceBand.SUPPRESSED
+
+    def test_price_context_unchanged_after_non_company_signal(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        sig = build_valuation_context_signal(
+            ticker="VTI", category="etf",
+            sec_readiness=_make_readiness(), has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        assert inp.price_context == PriceBand.SUPPRESSED
+
+    def test_price_context_unchanged_after_missing_price_signal(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=_make_readiness(ready=["AAPL"]),
+            has_market_price=False,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        assert inp.price_context == PriceBand.SUPPRESSED
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 23 — source_signal_summary records valuation_context_lane
+# AC 20 — No HOLD→BUY action drift is possible from Phase 13
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestNoActionDrift:
+    """Phase 13 produces no PriceBand contribution. The decision policy BUY rule
+    requires price_context in {CHEAP, FAIR} (or SUPPRESSED + STRONG evidence).
+    Since Phase 13 never changes price_context, it can never cause action drift."""
+
+    def _apply_ready_signal(self, inp: DecisionInputV3) -> None:
+        readiness = _make_readiness(ready=[inp.ticker])
+        sig = build_valuation_context_signal(
+            ticker=inp.ticker, category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+
+    def test_hold_ticker_price_context_unchanged_cannot_drift_to_buy(self) -> None:
+        inp = _make_decision_input(
+            ticker="AAPL",
+            price_context=PriceBand.SUPPRESSED,
+            evidence_quality=AxisBand.THIN,
+        )
+        original_price_context = inp.price_context
+        self._apply_ready_signal(inp)
+        assert inp.price_context == original_price_context
+
+    def test_all_ready_tickers_contribute_none_price_context(self) -> None:
+        tickers = ["AAPL", "MSFT", "GOOG", "AMZN"]
+        readiness = _make_readiness(ready=tickers)
+        for ticker in tickers:
+            sig = build_valuation_context_signal(
+                ticker=ticker, category="stock",
+                sec_readiness=readiness, has_market_price=True,
+            )
+            assert sig.price_context_contribution is None, (
+                f"READY ticker {ticker} should not contribute price_context"
+            )
+
+    def test_all_partial_tickers_contribute_none_price_context(self) -> None:
+        readiness = _make_readiness(partial={"AAPL": ["eps"], "MSFT": ["revenue"]})
+        for ticker in ["AAPL", "MSFT"]:
+            sig = build_valuation_context_signal(
+                ticker=ticker, category="stock",
+                sec_readiness=readiness, has_market_price=True,
+            )
+            assert sig.price_context_contribution is None, (
+                f"PARTIAL ticker {ticker} should not contribute price_context"
+            )
+
+    def test_apply_does_not_introduce_fair_into_suppressed_input(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        assert inp.price_context != PriceBand.FAIR
+        assert inp.price_context == PriceBand.SUPPRESSED
+
+    def test_apply_does_not_introduce_cheap_into_any_input(self) -> None:
+        for initial in [PriceBand.SUPPRESSED, PriceBand.FULL, PriceBand.EXPENSIVE]:
+            inp = _make_decision_input(price_context=initial)
+            readiness = _make_readiness(ready=["AAPL"])
+            sig = build_valuation_context_signal(
+                ticker="AAPL", category="stock",
+                sec_readiness=readiness, has_market_price=True,
+            )
+            apply_valuation_context_to_decision_input(inp, sig)
+            assert inp.price_context != PriceBand.CHEAP
+            assert inp.price_context == initial
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AC 21 — source_signal_summary records readiness_only and price_context_unchanged
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestSourceSignalSummary:
@@ -797,9 +935,9 @@ class TestSourceSignalSummary:
         )
         apply_valuation_context_to_decision_input(inp, sig)
         lane_summary = inp.source_signal_summary["valuation_context_lane"]
-        assert lane_summary["status"] == ValuationSignalStatus.READY.value
+        assert lane_summary["status"] == ValuationSignalStatus.READY_FOR_FUTURE_VALUATION.value
 
-    def test_summary_records_upgraded_true_on_upgrade(self) -> None:
+    def test_summary_records_readiness_only_true(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
@@ -808,10 +946,10 @@ class TestSourceSignalSummary:
         )
         apply_valuation_context_to_decision_input(inp, sig)
         lane = inp.source_signal_summary["valuation_context_lane"]
-        assert lane["price_context_upgraded"] is True
+        assert lane["readiness_only"] is True
 
-    def test_summary_records_upgraded_false_when_no_upgrade(self) -> None:
-        inp = _make_decision_input(price_context=PriceBand.FAIR)
+    def test_summary_records_price_context_unchanged_true(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -819,7 +957,28 @@ class TestSourceSignalSummary:
         )
         apply_valuation_context_to_decision_input(inp, sig)
         lane = inp.source_signal_summary["valuation_context_lane"]
-        assert lane["price_context_upgraded"] is False
+        assert lane["price_context_unchanged"] is True
+
+    def test_summary_price_context_contribution_is_none(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        lane = inp.source_signal_summary["valuation_context_lane"]
+        assert lane["price_context_contribution"] is None
+
+    def test_summary_records_price_context_unchanged_true_for_suppressed(self) -> None:
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=None, has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        lane = inp.source_signal_summary["valuation_context_lane"]
+        assert lane["price_context_unchanged"] is True
 
     def test_summary_records_source_id(self) -> None:
         inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
@@ -862,6 +1021,18 @@ class TestSourceSignalSummary:
                 if isinstance(v, str):
                     assert key not in v.lower(), f"Forbidden key {key!r} found in value {v!r}"
 
+    def test_summary_no_price_context_upgraded_key(self) -> None:
+        """Phase 13 never upgrades price_context — the old key must not exist."""
+        inp = _make_decision_input(price_context=PriceBand.SUPPRESSED)
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        apply_valuation_context_to_decision_input(inp, sig)
+        lane = inp.source_signal_summary["valuation_context_lane"]
+        assert "price_context_upgraded" not in lane
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # AC 15–18 — Signal contract invariants (immutability, fields, no raw values)
@@ -893,7 +1064,7 @@ class TestSignalContractInvariants:
         )
         assert sig.adapter_version == "phase13_v1"
 
-    def test_contribution_none_for_suppressed_missing_price(self) -> None:
+    def test_contribution_none_for_suppressed_missing_price_or_position(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
@@ -918,13 +1089,28 @@ class TestSignalContractInvariants:
         )
         assert sig.price_context_contribution is None
 
+    def test_contribution_none_for_ready_signal(self) -> None:
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        assert sig.price_context_contribution is None
+
+    def test_contribution_none_for_partial_signal(self) -> None:
+        readiness = _make_readiness(partial={"AAPL": ["eps"]})
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        assert sig.price_context_contribution is None
+
     def test_no_raw_numeric_values_in_signal_fields(self) -> None:
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        # Check all string fields for numeric-looking content
         fields_to_check = [sig.suppression_reason, sig.source_id, sig.adapter_version]
         for val in fields_to_check:
             if val is not None:
@@ -939,26 +1125,23 @@ class TestSignalContractInvariants:
         )
         assert sig.ticker == "NVDA"
 
-    def test_degraded_false_for_non_partial_statuses(self) -> None:
-        for status_name, kwargs in [
-            ("ready", {"ready": ["AAPL"]}),
-        ]:
-            readiness = _make_readiness(**kwargs)
-            sig = build_valuation_context_signal(
-                ticker="AAPL", category="stock",
-                sec_readiness=readiness, has_market_price=True,
-            )
-            if sig.status == ValuationSignalStatus.READY:
-                assert sig.degraded is False
+    def test_degraded_false_for_ready_for_future_valuation(self) -> None:
+        readiness = _make_readiness(ready=["AAPL"])
+        sig = build_valuation_context_signal(
+            ticker="AAPL", category="stock",
+            sec_readiness=readiness, has_market_price=True,
+        )
+        assert sig.status == ValuationSignalStatus.READY_FOR_FUTURE_VALUATION
+        assert sig.degraded is False
 
-    def test_degraded_true_only_for_partial(self) -> None:
+    def test_degraded_true_only_for_partial_for_future_valuation(self) -> None:
         readiness = _make_readiness(partial={"AAPL": ["eps"]})
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
         assert sig.degraded is True
-        assert sig.status == ValuationSignalStatus.PARTIAL
+        assert sig.status == ValuationSignalStatus.PARTIAL_FOR_FUTURE_VALUATION
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1054,7 +1237,6 @@ class TestStaticImportAnalysis:
                             f"DB import found: {full!r}"
 
     def test_adapter_does_not_set_safe_for_decision_true(self) -> None:
-        # Check actual assignment nodes in AST (docstrings mentioning the term are OK).
         src = _load_source(_ADAPTER_MODULE)
         tree = ast.parse(src)
         for node in ast.walk(tree):
@@ -1062,19 +1244,29 @@ class TestStaticImportAnalysis:
                 for target in node.targets:
                     if isinstance(target, ast.Attribute):
                         if target.attr == "safe_for_decision":
-                            # Check it's not assigned True
                             if isinstance(node.value, ast.Constant):
                                 assert node.value.value is not True, \
                                     "safe_for_decision must never be set to True"
 
     def test_adapter_does_not_write_to_snapshots(self) -> None:
         src = _load_source(_ADAPTER_MODULE)
-        # Check import statements only (docstrings may mention table names)
         tree = ast.parse(src)
         for node in ast.walk(tree):
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 module = getattr(node, "module", "") or ""
                 assert "snapshots" not in module
+
+    def test_adapter_does_not_import_price_band(self) -> None:
+        """Phase 13 readiness-only adapter must not import PriceBand."""
+        src = _load_source(_ADAPTER_MODULE)
+        tree = ast.parse(src)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                for alias in node.names:
+                    assert alias.name != "PriceBand", (
+                        "Phase 13 readiness-only adapter must not import PriceBand"
+                    )
 
     def test_adapter_module_exists(self) -> None:
         assert _ADAPTER_MODULE.exists(), "valuation_context_adapter_v1.py must exist"
@@ -1088,14 +1280,11 @@ class TestStaticImportAnalysis:
         assert "intel_v3_valuation_context_adapter_v1_enabled" in src
 
     def test_adapter_forbidden_keys_not_in_output_fields(self) -> None:
-        # Check that forbidden metric keys are not present in the ValuationContextSignal
-        # dataclass field definitions (only dataclass definitions matter, not docstrings).
         readiness = _make_readiness(ready=["AAPL"])
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
         )
-        # The frozen signal should not have any forbidden keys in its field names
         forbidden_fields = {"pe_ratio", "pb_ratio", "ev_ebitda", "price_target",
                             "fair_value", "eps_value", "book_value_per_share"}
         import dataclasses
@@ -1105,7 +1294,7 @@ class TestStaticImportAnalysis:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AC 24 — Governance gate passes for real Phase 10 registry (dedicated block)
+# AC 22 — Real registry integration and config flags
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestRealRegistryIntegration:
@@ -1124,16 +1313,19 @@ class TestRealRegistryIntegration:
         sig = build_valuation_context_signal(
             ticker="AAPL", category="stock",
             sec_readiness=readiness, has_market_price=True,
-            registry=None,  # uses module-level real registry
+            registry=None,
         )
         assert sig.governance_gate_passed is True
-        assert sig.status == ValuationSignalStatus.READY
+        assert sig.status == ValuationSignalStatus.READY_FOR_FUTURE_VALUATION
 
     def test_valuation_signal_status_enum_has_all_required_statuses(self) -> None:
         required = {
-            "READY", "PARTIAL",
-            "SUPPRESSED_MISSING_PRICE", "SUPPRESSED_MISSING_FUNDAMENTALS",
-            "SUPPRESSED_NON_COMPANY", "SUPPRESSED_CONFLICTING_OR_STALE",
+            "READY_FOR_FUTURE_VALUATION",
+            "PARTIAL_FOR_FUTURE_VALUATION",
+            "SUPPRESSED_MISSING_PRICE_OR_POSITION",
+            "SUPPRESSED_MISSING_FUNDAMENTALS",
+            "SUPPRESSED_NON_COMPANY",
+            "SUPPRESSED_CONFLICTING_OR_STALE",
             "GOVERNANCE_BLOCKED",
         }
         actual = {s.value for s in ValuationSignalStatus}
@@ -1157,7 +1349,7 @@ class TestRealRegistryIntegration:
         assert not settings.intel_v3_valuation_context_adapter_v1_enabled
         assert not settings.intel_v3_valuation_context_adapter_v1_diagnostics_enabled
 
-    def test_multiple_ready_tickers_all_produce_fair(self) -> None:
+    def test_multiple_ready_tickers_all_produce_none_contribution(self) -> None:
         tickers = ["AAPL", "MSFT", "GOOG", "AMZN"]
         readiness = _make_readiness(ready=tickers)
         for ticker in tickers:
@@ -1165,8 +1357,8 @@ class TestRealRegistryIntegration:
                 ticker=ticker, category="stock",
                 sec_readiness=readiness, has_market_price=True,
             )
-            assert sig.status == ValuationSignalStatus.READY
-            assert sig.price_context_contribution == PriceBand.FAIR
+            assert sig.status == ValuationSignalStatus.READY_FOR_FUTURE_VALUATION
+            assert sig.price_context_contribution is None
 
     def test_mixed_portfolio_signals(self) -> None:
         readiness = _make_readiness(
@@ -1176,8 +1368,8 @@ class TestRealRegistryIntegration:
             skipped={"etf_fund": ["VTI", "QQQ"]},
         )
         cases = [
-            ("AAPL", "stock", True, ValuationSignalStatus.READY),
-            ("MSFT", "stock", True, ValuationSignalStatus.PARTIAL),
+            ("AAPL", "stock", True, ValuationSignalStatus.READY_FOR_FUTURE_VALUATION),
+            ("MSFT", "stock", True, ValuationSignalStatus.PARTIAL_FOR_FUTURE_VALUATION),
             ("BLSH", "stock", True, ValuationSignalStatus.SUPPRESSED_MISSING_FUNDAMENTALS),
             ("VTI", "etf", True, ValuationSignalStatus.SUPPRESSED_NON_COMPANY),
             ("QQQ", "stock", True, ValuationSignalStatus.SUPPRESSED_NON_COMPANY),
@@ -1190,3 +1382,25 @@ class TestRealRegistryIntegration:
             assert sig.status == expected_status, (
                 f"Ticker {ticker}: expected {expected_status}, got {sig.status}"
             )
+            assert sig.price_context_contribution is None, (
+                f"Ticker {ticker}: price_context_contribution must be None"
+            )
+
+    def test_mixed_portfolio_no_price_context_changes(self) -> None:
+        readiness = _make_readiness(
+            ready=["AAPL"],
+            partial={"MSFT": ["eps"]},
+            blocked={"BLSH": ["manual_block"]},
+        )
+        for ticker, category in [("AAPL", "stock"), ("MSFT", "stock"), ("BLSH", "stock")]:
+            for initial_price in [PriceBand.SUPPRESSED, PriceBand.CHEAP, PriceBand.FULL]:
+                inp = _make_decision_input(ticker=ticker, price_context=initial_price)
+                sig = build_valuation_context_signal(
+                    ticker=ticker, category=category,
+                    sec_readiness=readiness, has_market_price=True,
+                )
+                apply_valuation_context_to_decision_input(inp, sig)
+                assert inp.price_context == initial_price, (
+                    f"Ticker {ticker} with initial {initial_price}: "
+                    f"price_context should not change, got {inp.price_context}"
+                )

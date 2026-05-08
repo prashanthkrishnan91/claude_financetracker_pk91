@@ -877,12 +877,10 @@ async def get_valuation_context_adapter_v1_diagnostics(
         db_client=db_client,
     )
 
-    # Compute expected signal-status counts (aggregate only, no raw values).
-    # Use a simplified has_market_price=True for diagnostics since we only
-    # need to show governance/readiness counts, not portfolio-specific prices.
+    # Compute readiness status counts (aggregate only, no raw values).
+    # Phase 13 is readiness-only — no price_context changes.
+    # Use has_market_price=True for diagnostics (counts governance/readiness only).
     status_counts: dict[str, int] = {s.value: 0 for s in ValuationSignalStatus}
-    price_context_upgrades_ready = 0
-    price_context_upgrades_partial = 0
 
     if gate_passed:
         # Company tickers: READY
@@ -894,8 +892,6 @@ async def get_valuation_context_adapter_v1_diagnostics(
                 has_market_price=True,
             )
             status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
-            if sig.status == ValuationSignalStatus.READY:
-                price_context_upgrades_ready += 1
 
         # Company tickers: PARTIAL
         for ticker in readiness.partial_tickers_with_missing_groups:
@@ -906,8 +902,6 @@ async def get_valuation_context_adapter_v1_diagnostics(
                 has_market_price=True,
             )
             status_counts[sig.status.value] = status_counts.get(sig.status.value, 0) + 1
-            if sig.status == ValuationSignalStatus.PARTIAL:
-                price_context_upgrades_partial += 1
 
         # Non-company tickers: SKIPPED
         for _reason, tickers in readiness.skipped_tickers_by_reason.items():
@@ -934,12 +928,12 @@ async def get_valuation_context_adapter_v1_diagnostics(
         "adapter_version": VALUATION_CONTEXT_ADAPTER_V1_CONTRACT_VERSION,
         "safe_for_decision": False,
         "visible_snapshot_unchanged": True,
+        "price_context_unchanged": True,
+        "readiness_only": True,
         "governance_gate_passed": gate_passed,
         "governance_gate_reason": gate_reason,
         "consumption_enabled": settings.intel_v3_valuation_context_adapter_v1_enabled,
         "portfolio_ticker_count": readiness.portfolio_ticker_count,
-        "signal_status_counts": status_counts,
-        "price_context_upgrades_ready": price_context_upgrades_ready,
-        "price_context_upgrades_partial": price_context_upgrades_partial,
+        "readiness_status_counts": status_counts,
         "errors": readiness.errors,
     }

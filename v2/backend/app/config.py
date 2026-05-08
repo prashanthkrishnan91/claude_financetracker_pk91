@@ -139,6 +139,15 @@ class Settings(BaseSettings):
     # intel_v3_earnings_reviewer_enabled for writes to succeed.
     intel_v3_sec_metric_portfolio_coverage_expansion_enabled: bool = False
 
+    # ── Intel v3 Phase 9 — SEC Metric Evidence Readiness Adapter (off by default) ──
+    # When True, enables the protected readiness-adapter endpoint that classifies
+    # each portfolio ticker into a typed readiness status (READY/PARTIAL/BLOCKED/
+    # SKIPPED_NON_COMPANY) based on existing Phase 8 SEC metric evidence.
+    # Shadow/readiness-only — does NOT feed SEC metrics into DecisionInputV3,
+    # does NOT change visible decisions, does NOT invoke expansion write mode.
+    # Dry-run only — safe_for_decision remains False. No visible snapshot change.
+    intel_v3_sec_metric_evidence_readiness_adapter_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

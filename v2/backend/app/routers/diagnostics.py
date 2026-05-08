@@ -25,6 +25,7 @@ from ..services.intelligence.research_workers.sec_metric_coverage_expansion impo
     compute_coverage_expansion,
 )
 from ..services.intelligence.research_workers.sec_metric_portfolio_coverage_dry_run import compute_portfolio_sec_metric_coverage
+from ..services.intelligence.research_workers.sec_metric_evidence_readiness_adapter import compute_sec_metric_evidence_readiness
 from ..services.intelligence.research_workers.validation_harness import run_validation
 from ..services.recommendation_engine import RecommendationService
 
@@ -636,4 +637,65 @@ async def expand_sec_metric_evidence_coverage(
         "before_coverage_summary": result.before_coverage_summary,
         "after_coverage_summary": result.after_coverage_summary,
         "errors": result.errors,
+    }
+
+
+@router.post("/sec-metric-evidence/readiness-adapter")
+async def get_sec_metric_evidence_readiness(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Phase 9 — operator-only SEC metric evidence readiness adapter.
+
+    Classifies each portfolio ticker into a typed readiness status
+    (READY / PARTIAL / BLOCKED / SKIPPED_NON_COMPANY) based on existing
+    Phase 8 SEC metric evidence. Produces aggregate diagnostics for future
+    Phase 10 truth-adapter input consumption planning.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_SEC_METRIC_EVIDENCE_READINESS_ADAPTER_ENABLED=true
+
+    This endpoint is shadow/readiness-only. It does NOT:
+      - Feed SEC metrics into DecisionInputV3.
+      - Change visible Buy/Hold/Trim/Sell decisions.
+      - Invoke SEC coverage expansion write mode.
+      - Retry blocked tickers (BLSH/KLAR/TSM).
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER returns raw metric values, structured_payload, source URLs, raw DB rows.
+    NEVER imports or calls decide() / decision_policy_v1.
+    NEVER writes to any DB table.
+    NEVER sets safe_for_decision=True.
+    """
+    settings = get_settings()
+
+    if not settings.intel_v3_sec_metric_evidence_readiness_adapter_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_SEC_METRIC_EVIDENCE_READINESS_ADAPTER_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+
+    readiness = compute_sec_metric_evidence_readiness(
+        user_id=str(user.id),
+        db_client=db_client,
+        settings=settings,
+    )
+
+    # Return only aggregate-safe fields — no raw payloads, no source URLs, no raw rows.
+    return {
+        "sec_metric_evidence_readiness_adapter_enabled": readiness.adapter_enabled,
+        "safe_for_decision": readiness.safe_for_decision,
+        "visible_snapshot_unchanged": readiness.visible_snapshot_unchanged,
+        "portfolio_ticker_count": readiness.portfolio_ticker_count,
+        "ready_count": readiness.ready_count,
+        "partial_count": readiness.partial_count,
+        "blocked_count": readiness.blocked_count,
+        "skipped_non_company_count": readiness.skipped_non_company_count,
+        "ready_tickers": readiness.ready_tickers,
+        "partial_tickers_with_missing_groups": readiness.partial_tickers_with_missing_groups,
+        "blocked_tickers_with_reason": readiness.blocked_tickers_with_reason,
+        "skipped_tickers_by_reason": readiness.skipped_tickers_by_reason,
+        "errors": readiness.errors,
     }

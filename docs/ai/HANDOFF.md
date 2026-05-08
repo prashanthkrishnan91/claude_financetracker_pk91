@@ -1,4 +1,83 @@
 
+## 2026-05-08 — Phase 9: SEC Metric Evidence Readiness Adapter (Level 2)
+
+### Status
+Phase 9 complete. Backend-only, shadow/readiness-only. All Phase 8A–8F invariants preserved. safe_for_decision remains DB-hard-locked false. visible_snapshot_unchanged remains true. No UI, no SQL, no new providers, no LLM calls, no decision policy changes, no visible recommendation behavior changes.
+
+### Root cause / gap addressed
+Phase 8 established SEC metric evidence for portfolio tickers but provided no typed, aggregate-safe readiness contract classifying each ticker's readiness state for future Intel v3 truth-adapter input consumption. Phase 9 fills this gap with a shadow/readiness-only adapter layer — the correct next step before Phase 10 (actual consumption).
+
+### What this phase adds
+
+**New module**: `v2/backend/app/services/intelligence/research_workers/sec_metric_evidence_readiness_adapter.py`
+- `SEC_METRIC_EVIDENCE_READINESS_CONTRACT_VERSION = "phase9_v1"` — stable contract for future Phase 10 dependency.
+- `READINESS_STATUS_READY`, `READINESS_STATUS_PARTIAL`, `READINESS_STATUS_BLOCKED`, `READINESS_STATUS_SKIPPED_NON_COMPANY` — typed status constants.
+- `SecMetricEvidenceReadinessResult` dataclass — aggregate-only, typed readiness contract. safe_for_decision always False, visible_snapshot_unchanged always True.
+- `build_sec_metric_evidence_readiness(portfolio_positions, snapshot_by_ticker)` — pure, deterministic. Reuses Phase 8D's `build_portfolio_sec_coverage_dry_run()` and Phase 8F's `classify_sec_metric_candidate()`. Maps per-ticker data to the 4 readiness statuses. No new classification logic — depends on tested Phase 8 output.
+- `compute_sec_metric_evidence_readiness(user_id, db_client, settings)` — DB-reading orchestrator. Follows Phase 8D pattern: reads positions → artifacts → facts → Phase 8A → Phase 8B → calls pure function. Kill switch: `intel_v3_sec_metric_evidence_readiness_adapter_enabled`.
+- No SEC provider calls, no LLM calls, no writes to any DB table, no decide() dependency.
+
+**Phase 9 classification of Phase 8F universe:**
+- READY (10): AAPL, COST, CRM, GOOGL, META, MSFT, NFLX, RDDT, SNOW, STUB
+- PARTIAL (6): ALK (missing capex+liabilities), AMD (missing liabilities), BRK-B (missing cash+eps+operating_income), NVDA (missing capex), QCOM (missing capex+equity), WMT (missing liabilities)
+- SKIPPED_NON_COMPANY (15): BTC, XRP (likely_crypto) + GLD, QQQ, SCHD, SPY, VGT, VHT, VIS, VOO, VTI, VUG, VXUS, VYM, XLE (likely_fund_or_etf)
+- BLOCKED (3): BLSH, KLAR, TSM — attempted but no source-linked SEC metric evidence; manual review required; NOT retried
+
+**Extended**: `v2/backend/app/config.py`
+- New flag: `intel_v3_sec_metric_evidence_readiness_adapter_enabled` (bool, default False).
+
+**Extended**: `v2/backend/app/routers/diagnostics.py`
+- New endpoint: `POST /diagnostics/finance-intel/sec-metric-evidence/readiness-adapter`
+- Auth: same `_get_runtime_cert_user` as all other diagnostics endpoints.
+- Guard: `intel_v3_sec_metric_evidence_readiness_adapter_enabled=true` required (raises 403 if off).
+- Returns: `sec_metric_evidence_readiness_adapter_enabled`, `safe_for_decision` (always False), `visible_snapshot_unchanged` (always True), `portfolio_ticker_count`, `ready_count`, `partial_count`, `blocked_count`, `skipped_non_company_count`, `ready_tickers`, `partial_tickers_with_missing_groups`, `blocked_tickers_with_reason`, `skipped_tickers_by_reason`, `errors`.
+- No raw metric values, no structured_payload, no source URLs, no Buy/Hold/Trim/Sell signals.
+
+**New test file**: `v2/backend/tests/test_intel_v3_phase9_evidence_readiness_adapter.py` — 79 tests covering all 10 acceptance criteria.
+
+### Why shadow/readiness-only
+Phase 9 does not feed SEC metrics into DecisionInputV3 and does not change visible actions. It establishes the readiness contract so Phase 10 can later depend on it after explicit approval. All BLSH/KLAR/TSM-style tickers are BLOCKED and will not be retried until a manual review authorizes expansion.
+
+### What remains out of scope
+- Feeding SEC metrics into DecisionInputV3 (Phase 10)
+- Changing visible Buy/Hold/Trim/Sell decisions
+- Supabase SQL or schema changes
+- Frontend or UI changes
+- LLM calls
+- New SEC provider calls
+- Retrying BLSH, KLAR, or TSM
+
+### Files changed
+- `v2/backend/app/services/intelligence/research_workers/sec_metric_evidence_readiness_adapter.py` — new Phase 9 service
+- `v2/backend/app/config.py` — new kill-switch flag
+- `v2/backend/app/routers/diagnostics.py` — new endpoint + import
+- `v2/backend/tests/test_intel_v3_phase9_evidence_readiness_adapter.py` — 79 new tests
+- `docs/ai/HANDOFF.md` — this entry
+
+### Test results
+- Phase 9: **79/79** ✓ (new)
+- Phase 8F: **67/67** ✓
+- Phase 8E (including 8E.1): **33/33** ✓
+- Phase 8D: **73/73** ✓
+- Phase 8C: **74/74** ✓
+- Phase 8B: **80/80** ✓
+- Phase 8A: **71/71** ✓
+- Total: **477 passed**
+
+### Architecture invariants (all preserved)
+- `decide()` — NOT imported, NOT called in any new/modified module.
+- `intel_v3_snapshots` — no reads or writes.
+- `safe_for_decision` — remains DB-hard-locked False.
+- No new SEC provider path. No LLM calls. No frontend changes. No SQL changes.
+- No visible decision consumption added.
+- BLSH/KLAR/TSM remain BLOCKED; Phase 9 does not retry them.
+- ETF/fund/crypto tickers remain SKIPPED_NON_COMPANY.
+
+### Next recommended phase
+**Phase 10**: Intel v3 Truth/Input Adapter — wire Phase 9 readiness contract into DecisionInputV3 for READY tickers only, after explicit operator approval and visibility gate review. Requires Phase 9 readiness adapter to be enabled and validated in production first.
+
+---
+
 ## 2026-05-08 — Phase 8F: SEC Coverage Cleanup + Non-Company Classification Guardrails (Level 1)
 
 ### Status

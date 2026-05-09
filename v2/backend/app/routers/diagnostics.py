@@ -65,6 +65,12 @@ from ..services.intelligence.v3.price_sector_source_resolution_v1 import (
     SECTOR_CANDIDATE_INTEL_V3_PAYLOAD_BLOB,
     SECTOR_CANDIDATE_POSITIONS_CATEGORY,
 )
+from ..services.intelligence.v3.fy_eps_earnings_yield_v1 import (
+    build_fy_eps_earnings_yield,
+    EarningsYieldInputRecord,
+    FY_EPS_EARNINGS_YIELD_V1_CONTRACT_VERSION,
+    PRICEBAND_READY_MIN_COMPUTED_RATIO as _PB_READY_COMPUTED_RATIO,  # noqa: F401
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -1616,6 +1622,275 @@ async def get_price_sector_source_resolution_v1_diagnostics(
         "sector_source_certification_status": result.sector_source_certification_status,
         "ready_for_phase14c_computation": result.ready_for_phase14c_computation,
         "phase14c_blocking_reasons": result.phase14c_blocking_reasons,
+        "recommended_next_step": result.recommended_next_step,
+        "errors": result.errors,
+    }
+
+
+# ── Phase 14C — FY EPS Earnings Yield v1 (shadow-only diagnostics) ──────────
+# Source-of-truth labels exposed in the response (aggregate-safe — name the
+# table only, never raw values).
+_PHASE14C_SEC_EPS_SOURCE: str = "research_artifact_facts"
+_PHASE14C_PRICE_SOURCE: str = "market_snapshots_table"
+_PHASE14C_SECTOR_SOURCE: str = "market_snapshots_sector"
+
+
+@router.post("/fy-eps-earnings-yield-v1")
+async def get_fy_eps_earnings_yield_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14C — operator-only FY EPS Earnings Yield v1 shadow diagnostics.
+
+    Computes FY EPS earnings yield (EPS / market price) from source-linked
+    stored SEC EPS facts and certified market_snapshots price for company
+    tickers. Returns aggregate counts and bucket distribution only — never
+    raw EPS, prices, yields, source URLs, or per-ticker rows.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_FY_EPS_EARNINGS_YIELD_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved (hard locks):
+      - safe_for_decision is always False.
+      - shadow_only is always True.
+      - visible_snapshot_unchanged is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - price_context_unchanged is always True.
+      - priceband_produced is always False.
+      - decision_input_mutated is always False.
+      - visible_decision_changed is always False.
+      - ttm_computed is always False (FY only — SEC parser period limit).
+      - No decision path is called or modified.
+      - No DB writes, no provider calls, no LLM calls.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No raw EPS values, raw prices, raw yields, source URLs, or per-ticker
+        rows.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1 / DecisionInputV3 /
+    PriceBand. NEVER writes to intel_v3_snapshots or any DB table. NEVER
+    calls yfinance, SEC, OpenAI/Anthropic, or any external provider.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    settings = get_settings()
+    if not settings.intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_FY_EPS_EARNINGS_YIELD_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+    errors: list[str] = []
+
+    # ── Step 1: Phase 9 SEC metric readiness → company tickers ────────────────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+    company_tickers: set[str] = (
+        set(readiness.ready_tickers)
+        | set(readiness.partial_tickers_with_missing_groups.keys())
+        | set(readiness.blocked_tickers_with_reason.keys())
+    )
+    company_tickers_list = list(company_tickers)
+    company_ticker_count = len(company_tickers)
+    non_company_ticker_count = readiness.skipped_non_company_count
+    portfolio_ticker_count = readiness.portfolio_ticker_count
+
+    # ── Step 2: FY EPS facts from research_artifact_facts (source-linked) ─────
+    # Pick the most-recent fiscal_year FY observation per (ticker, tag).
+    fy_diluted_by_ticker: dict[str, tuple[int, float]] = {}
+    fy_basic_by_ticker: dict[str, tuple[int, float]] = {}
+    eps_source_linked_tickers: set[str] = set()
+
+    if company_tickers_list:
+        try:
+            art_result = (
+                db_client.table("research_artifacts")
+                .select("id,ticker")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .execute()
+            )
+            ticker_by_artifact_id: dict[str, str] = {
+                str(row["id"]): str(row.get("ticker") or "").upper().strip()
+                for row in (art_result.data or [])
+                if row.get("id") and row.get("ticker")
+            }
+            artifact_ids = list(ticker_by_artifact_id.keys())
+            if artifact_ids:
+                fact_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("artifact_id,fact_kind,structured_payload,source_id")
+                    .eq("user_id", str(user.id))
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                for row in (fact_result.data or []):
+                    if str(row.get("fact_kind") or "") != "metric_observation":
+                        continue
+                    sp = row.get("structured_payload")
+                    if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
+                        continue
+
+                    aid = str(row.get("artifact_id") or "")
+                    ticker = ticker_by_artifact_id.get(aid, "")
+                    if not ticker or ticker not in company_tickers:
+                        continue
+
+                    tag = str(sp.get("tag") or "")
+                    if tag not in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+                        continue
+
+                    # FY only — TTM blocked by SEC parser period limit.
+                    if str(sp.get("fiscal_period") or "") != "FY":
+                        continue
+
+                    fy_raw = sp.get("fiscal_year")
+                    val_raw = sp.get("value")
+                    if fy_raw is None or val_raw is None:
+                        continue
+                    try:
+                        fy = int(fy_raw)
+                        val = float(val_raw)
+                    except (TypeError, ValueError):
+                        continue
+
+                    has_source = bool(
+                        row.get("source_id") and str(row.get("source_id")).strip()
+                    )
+                    if has_source:
+                        eps_source_linked_tickers.add(ticker)
+
+                    target = (
+                        fy_diluted_by_ticker
+                        if tag == "EarningsPerShareDiluted"
+                        else fy_basic_by_ticker
+                    )
+                    cur = target.get(ticker)
+                    if cur is None or fy > cur[0]:
+                        target[ticker] = (fy, val)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"research_artifact_facts_query_error: {exc}")
+
+    # ── Step 3: Certified price/sector/industry from market_snapshots ─────────
+    cutoff_date = (
+        datetime.now(timezone.utc) - timedelta(days=PSR_PRICE_STALE_THRESHOLD_DAYS)
+    ).strftime("%Y-%m-%d")
+    price_by_ticker: dict[str, tuple[float, bool]] = {}
+    sector_by_ticker: dict[str, bool] = {}
+    industry_by_ticker: dict[str, bool] = {}
+
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("market_snapshots")
+                .select("ticker,as_of,price,sector,industry")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .order("as_of", desc=True)
+                .execute()
+            )
+            seen: set[str] = set()
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                if not t or t not in company_tickers or t in seen:
+                    continue
+                seen.add(t)
+                as_of = str(row.get("as_of") or "")
+                price_val = row.get("price")
+                if price_val is not None and as_of:
+                    try:
+                        p = float(price_val)
+                        is_fresh = as_of[:10] >= cutoff_date
+                        price_by_ticker[t] = (p, is_fresh)
+                    except (TypeError, ValueError):
+                        pass
+                sector_val = str(row.get("sector") or "").strip()
+                industry_val = str(row.get("industry") or "").strip()
+                if sector_val:
+                    sector_by_ticker[t] = True
+                if industry_val:
+                    industry_by_ticker[t] = True
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"market_snapshots_query_error: {exc}")
+
+    # ── Step 4: Build sanitized per-ticker records for the pure module ────────
+    records: list[EarningsYieldInputRecord] = []
+    for ticker in company_tickers_list:
+        diluted = fy_diluted_by_ticker.get(ticker)
+        basic = fy_basic_by_ticker.get(ticker)
+        price_entry = price_by_ticker.get(ticker)
+        records.append(
+            EarningsYieldInputRecord(
+                ticker=ticker,
+                fy_diluted_eps=(diluted[1] if diluted is not None else None),
+                fy_basic_eps=(basic[1] if basic is not None else None),
+                eps_source_linked=(ticker in eps_source_linked_tickers),
+                price=(price_entry[0] if price_entry is not None else None),
+                price_fresh=(price_entry[1] if price_entry is not None else False),
+                sector_available=sector_by_ticker.get(ticker, False),
+                industry_available=industry_by_ticker.get(ticker, False),
+            )
+        )
+
+    # ── Step 5: Pure computation ──────────────────────────────────────────────
+    result = build_fy_eps_earnings_yield(
+        portfolio_ticker_count=portfolio_ticker_count,
+        company_ticker_count=company_ticker_count,
+        non_company_ticker_count=non_company_ticker_count,
+        records=records,
+        sec_eps_source=_PHASE14C_SEC_EPS_SOURCE,
+        price_source=_PHASE14C_PRICE_SOURCE,
+        sector_source=_PHASE14C_SECTOR_SOURCE,
+        extra_errors=errors,
+    )
+
+    # Aggregate-only response — never raw EPS, prices, yields, or per-ticker rows.
+    return {
+        "adapter_version": result.adapter_version,
+        "safe_for_decision": result.safe_for_decision,
+        "shadow_only": result.shadow_only,
+        "visible_snapshot_unchanged": result.visible_snapshot_unchanged,
+        "read_only": result.read_only,
+        "diagnostics_only": result.diagnostics_only,
+        "price_context_unchanged": result.price_context_unchanged,
+        "priceband_produced": result.priceband_produced,
+        "decision_input_mutated": result.decision_input_mutated,
+        "visible_decision_changed": result.visible_decision_changed,
+        "valuation_ratios_computed": result.valuation_ratios_computed,
+        "earnings_yield_computed": result.earnings_yield_computed,
+        "ttm_computed": result.ttm_computed,
+        "fy_only": result.fy_only,
+        "sec_eps_source": result.sec_eps_source,
+        "price_source": result.price_source,
+        "sector_source": result.sector_source,
+        "eps_preference_order": result.eps_preference_order,
+        "portfolio_ticker_count": result.portfolio_ticker_count,
+        "company_ticker_count": result.company_ticker_count,
+        "non_company_ticker_count": result.non_company_ticker_count,
+        "eligible_input_count": result.eligible_input_count,
+        "computed_earnings_yield_count": result.computed_earnings_yield_count,
+        "skipped_missing_eps_count": result.skipped_missing_eps_count,
+        "skipped_missing_price_count": result.skipped_missing_price_count,
+        "skipped_stale_price_count": result.skipped_stale_price_count,
+        "skipped_non_positive_price_count": result.skipped_non_positive_price_count,
+        "skipped_missing_sector_count": result.skipped_missing_sector_count,
+        "skipped_invalid_eps_count": result.skipped_invalid_eps_count,
+        "negative_eps_count": result.negative_eps_count,
+        "positive_eps_count": result.positive_eps_count,
+        "zero_eps_count": result.zero_eps_count,
+        "diluted_eps_used_count": result.diluted_eps_used_count,
+        "basic_eps_fallback_used_count": result.basic_eps_fallback_used_count,
+        "source_linked_eps_used_count": result.source_linked_eps_used_count,
+        "fresh_price_used_count": result.fresh_price_used_count,
+        "sector_available_count": result.sector_available_count,
+        "industry_available_count": result.industry_available_count,
+        "earnings_yield_distribution_buckets": result.earnings_yield_distribution_buckets,
+        "ready_for_future_priceband_phase": result.ready_for_future_priceband_phase,
+        "future_priceband_blocking_reasons": result.future_priceband_blocking_reasons,
         "recommended_next_step": result.recommended_next_step,
         "errors": result.errors,
     }

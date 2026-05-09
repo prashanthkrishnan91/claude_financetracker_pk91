@@ -215,6 +215,16 @@ class Settings(BaseSettings):
     # No provider/LLM calls. No SQL writes. Aggregate-only response.
     intel_v3_price_sector_source_resolution_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14C — FY EPS Earnings Yield v1 (off by default) ──
+    # When True, enables the protected Phase 14C read-only diagnostics endpoint
+    # that computes FY EPS earnings yield from source-linked stored SEC EPS
+    # facts and certified market_snapshots price. Aggregate-only response —
+    # no raw EPS, raw prices, raw yields, or per-ticker rows. Shadow/diagnostic
+    # only — does NOT modify DecisionInputV3, does NOT produce PriceBand,
+    # does NOT change visible Buy/Hold/Trim/Sell behavior. No provider/LLM
+    # calls. No SQL writes.
+    intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

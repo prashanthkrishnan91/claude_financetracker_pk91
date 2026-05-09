@@ -41,4 +41,26 @@ Return:
 - SQL/env/manual-action omissions in PR summaries
 - deployment storm from file-by-file workflow/docs commits
 
+## Pinnacle OS v3 checks
+
+- prompt intake classification quality
+- reviewer-agent budget (only relevant reviewers invoked)
+- subagent output quality (concise, evidence-based, blockers/risks called out)
+- token/cost discipline
+- compaction / new-chat discipline
+- OS drift
+- permission/memory boundary concerns
+- whether the proposed promotion target is precise and anti-bloat compliant
+
+## Finance reviewer-agent budget defaults
+
+Prefer:
+
+- `policy-authority-reviewer` for decision/snapshot/action changes
+- `data-truth-reviewer` for evidence/Data Truth/source mapping changes
+- `sql-runtime-reviewer` for SQL/env/runtime cert/persistence changes
+- `plain-english-ui-reviewer` for visible UI/copy/card changes
+
+Do not run all four on docs-only or unrelated PRs. Choose by changed surface, not by ceremony.
+
 Do not edit files. Return blockers/risks/evidence only.

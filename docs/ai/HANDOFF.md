@@ -1,4 +1,83 @@
 
+## 2026-05-09 — Phase 14D: PriceBand Shadow Policy v1 — backend governance + shadow diagnostic (Level 2)
+
+### Status
+Phase 14D complete. **Backend-only, shadow-diagnostics-only** PriceBand
+governance layer that consumes certified Phase 14C inputs (source-linked
+FY EPS + fresh `market_snapshots` price + sector/industry) and emits a
+humble valuation classification per company ticker:
+
+  `valuation_signal` ∈ {unavailable, negative_eps, expensive, elevated,
+                        reasonable, attractive, unusually_cheap}
+  `valuation_confidence` ∈ {low, medium, high}
+  `valuation_basis` = "fy_eps_earnings_yield"
+  `valuation_policy_table` = "policy_static_v1"
+
+Hard locks: `safe_for_decision=False`, `shadow_only=True`,
+`visible_decision_changed=False`, `decision_input_mutated=False`,
+`no_target_price_emitted=True`, `no_fair_value_emitted=True`,
+`fy_only=True`, `ttm_computed=False`. NO DecisionInputV3 mutation, NO
+PriceBand enum wiring, NO Buy/Hold/Trim/Sell change, NO frontend wiring,
+NO Deploy/Watchtower change, NO DB writes, NO provider calls, NO LLM calls,
+NO target/fair-value/buy_below/sell_above keys, NO raw EPS / raw price /
+raw earnings yield numbers.
+
+### Policy thresholds (`policy_static_v1`, broad-market, FY E/P pct)
+  `y_pct < 2.0`           → `expensive`
+  `2.0 <= y_pct < 4.0`    → `elevated`
+  `4.0 <= y_pct < 6.0`    → `reasonable`
+  `6.0 <= y_pct < 9.0`    → `attractive`
+  `y_pct >= 9.0`          → `unusually_cheap`
+  `EPS < 0`               → `negative_eps` (NEVER cheap)
+  Missing/stale/zero/non-positive inputs → `unavailable` with stable reason
+
+Sector-aware bands deferred — not enabled until stored sector benchmark
+data exists. Missing sector → broad fallback (explicitly labelled);
+EPS=0 → `unavailable` (zero_eps_invalid_for_valuation).
+
+### Confidence policy
+  `high`   — diluted EPS + source-linked + fresh price + sector available
+  `medium` — basic-EPS fallback OR sector-missing-broad-fallback (still
+             source-linked + fresh positive price)
+  `low`    — non-source-linked EPS, OR `unavailable` valuation_signal
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/priceband_shadow_policy_v1.py`
+  (new pure module — no IO, no DB, no provider, no LLM)
+- `v2/backend/app/routers/diagnostics.py` (adds protected endpoint
+  `POST /api/v1/diagnostics/finance-intel/priceband-shadow-v1`)
+- `v2/backend/app/config.py` (adds off-by-default flag
+  `intel_v3_priceband_shadow_v1_diagnostics_enabled`)
+- `v2/backend/tests/test_intel_v3_phase14d_priceband_shadow_v1.py`
+  (73 tests covering hard locks, leakage prevention, deterministic
+  thresholds, EPS preference, negative-EPS handling, all unavailable
+  reasons, broad fallback, confidence ladder, aggregate counts,
+  determinism, plain-English summary shape, AST-based static safety,
+  endpoint-shape AST checks)
+- `docs/ai/HANDOFF.md` (this entry)
+
+### Production validation after merge (operator-only)
+1. Set `INTEL_V3_PRICEBAND_SHADOW_V1_DIAGNOSTICS_ENABLED=true` and ensure
+   `finance_runtime_cert_enabled=true` is already set.
+2. `POST /api/v1/diagnostics/finance-intel/priceband-shadow-v1` with
+   `X-Finance-Runtime-Cert-Secret: <secret>` header.
+3. Verify `priceband_computed_count` aligns with the
+   Phase 14C `computed_earnings_yield_count` (expected ~14/19 today).
+4. Verify `no_target_price_emitted=true`, `no_fair_value_emitted=true`,
+   `visible_decision_changed=false`, `decision_input_mutated=false`,
+   `safe_for_decision=false`, `shadow_only=true`.
+5. Verify Intel v3 visible Buy/Hold/Trim/Sell snapshot is unchanged.
+6. Disable the diagnostics flag.
+
+### This does NOT yet influence Buy/Hold/Trim/Sell
+The shadow PriceBand classification is diagnostics-only. It is NEVER
+written to `DecisionInputV3.price_context`, NEVER stored in
+`intel_v3_snapshots`, NEVER consumed by `decision_policy_v1`, NEVER
+exposed to the frontend. Promotion to visible decision authority requires
+a separate governance-review phase with explicit operator approval.
+
+Supabase SQL: No.
+
 ## 2026-05-09 — Phase 14C.1: EPS Payload Shape Reconciliation (Level 2)
 
 ### Status

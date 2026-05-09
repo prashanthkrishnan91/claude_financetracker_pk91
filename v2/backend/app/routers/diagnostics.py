@@ -91,6 +91,13 @@ from ..services.intelligence.v3.fy_eps_raw_trace_v1 import (
     FyEpsRawTraceInput,
     FY_EPS_RAW_TRACE_V1_CONTRACT_VERSION,
 )
+from ..services.intelligence.v3.priceband_shadow_policy_v1 import (
+    build_priceband_shadow,
+    PriceBandShadowInput,
+    PRICEBAND_SHADOW_POLICY_V1_CONTRACT_VERSION,
+    PRICEBAND_POLICY_TABLE_ID,
+    PRICEBAND_POLICY_BASIS,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -2953,3 +2960,271 @@ async def get_fy_eps_raw_trace_v1_diagnostics(
             "support, fix artifact writer, or classify true unsupported tickers."
         ),
     }
+
+
+# ── Phase 14D — PriceBand Shadow Policy v1 (shadow-only diagnostics) ────────
+
+
+@router.post("/priceband-shadow-v1")
+async def get_priceband_shadow_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14D — operator-only PriceBand Shadow Policy v1 diagnostics.
+
+    Classifies certified Phase 14C inputs (source-linked FY EPS + fresh
+    market price + sector/industry) into humble, evidence-bounded valuation
+    buckets using a static broad-market governance table (policy_static_v1).
+
+    Buckets (positive EPS, broad-market, FY-only earnings yield y_pct = E/P):
+      y_pct < 2.0          → expensive
+      2.0 <= y_pct < 4.0   → elevated
+      4.0 <= y_pct < 6.0   → reasonable
+      6.0 <= y_pct < 9.0   → attractive
+      y_pct >= 9.0         → unusually_cheap
+      EPS < 0              → negative_eps   (NEVER cheap)
+      Missing/stale inputs → unavailable
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_PRICEBAND_SHADOW_V1_DIAGNOSTICS_ENABLED=true
+
+    Hard governance invariants:
+      - safe_for_decision is always False.
+      - shadow_only is always True.
+      - visible_snapshot_unchanged is always True.
+      - decision_input_mutated is always False.
+      - visible_decision_changed is always False.
+      - no_target_price_emitted is always True.
+      - no_fair_value_emitted is always True.
+      - fy_only is always True; ttm_computed is always False.
+      - No DecisionInputV3 mutation. No PriceBand enum wiring.
+      - No DB writes. No provider calls. No LLM calls.
+      - No raw EPS, no raw price, no raw earnings yield numeric values.
+      - No buy_below / sell_above / target_price / fair_value keys.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot
+    reads. NEVER imports decide() / decision_policy_v1 / DecisionInputV3 /
+    PriceBand. NEVER writes to intel_v3_snapshots or any DB table.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    settings = get_settings()
+    if not settings.intel_v3_priceband_shadow_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_PRICEBAND_SHADOW_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+    errors: list[str] = []
+
+    # ── Step 1: Phase 9 SEC metric readiness → company tickers ───────────────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+    company_tickers: set[str] = (
+        set(readiness.ready_tickers)
+        | set(readiness.partial_tickers_with_missing_groups.keys())
+        | set(readiness.blocked_tickers_with_reason.keys())
+    )
+    company_tickers_list = list(company_tickers)
+
+    # ── Step 2: FY EPS facts from research_artifact_facts (source-linked) ────
+    fy_diluted_by_ticker: dict[str, tuple[int, float]] = {}
+    fy_basic_by_ticker: dict[str, tuple[int, float]] = {}
+    eps_source_linked_tickers: set[str] = set()
+
+    if company_tickers_list:
+        try:
+            art_result = (
+                db_client.table("research_artifacts")
+                .select("id,ticker")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .execute()
+            )
+            ticker_by_artifact_id: dict[str, str] = {
+                str(row["id"]): str(row.get("ticker") or "").upper().strip()
+                for row in (art_result.data or [])
+                if row.get("id") and row.get("ticker")
+            }
+            artifact_ids = list(ticker_by_artifact_id.keys())
+            if artifact_ids:
+                fact_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("artifact_id,fact_kind,structured_payload,source_id")
+                    .eq("user_id", str(user.id))
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                for row in (fact_result.data or []):
+                    if str(row.get("fact_kind") or "") != "metric_observation":
+                        continue
+                    sp = row.get("structured_payload")
+                    if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
+                        continue
+                    tag_pre = str(sp.get("tag") or "")
+                    if tag_pre not in (
+                        "EarningsPerShareDiluted", "EarningsPerShareBasic"
+                    ):
+                        continue
+                    aid = str(row.get("artifact_id") or "")
+                    ticker = ticker_by_artifact_id.get(aid, "")
+                    if not ticker or ticker not in company_tickers:
+                        continue
+                    has_source = bool(
+                        row.get("source_id") and str(row.get("source_id")).strip()
+                    )
+                    extraction = extract_fy_eps_observation_from_payload(
+                        sp, has_source=has_source
+                    )
+                    if extraction.skip_reason:
+                        continue
+                    eps_source_linked_tickers.add(ticker)
+                    target = (
+                        fy_diluted_by_ticker
+                        if extraction.tag == "EarningsPerShareDiluted"
+                        else fy_basic_by_ticker
+                    )
+                    cur = target.get(ticker)
+                    if cur is None or extraction.ordering_year > cur[0]:
+                        target[ticker] = (
+                            extraction.ordering_year, extraction.eps_value
+                        )
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"research_artifact_facts_query_error: {exc}")
+
+    # ── Step 3: Fresh price + sector/industry from market_snapshots ──────────
+    cutoff_date = (
+        datetime.now(timezone.utc) - timedelta(days=PSR_PRICE_STALE_THRESHOLD_DAYS)
+    ).strftime("%Y-%m-%d")
+    price_by_ticker: dict[str, tuple[float, bool]] = {}
+    sector_label_by_ticker: dict[str, str] = {}
+    industry_label_by_ticker: dict[str, str] = {}
+
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("market_snapshots")
+                .select("ticker,as_of,price,sector,industry")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .order("as_of", desc=True)
+                .execute()
+            )
+            seen: set[str] = set()
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                if not t or t not in company_tickers or t in seen:
+                    continue
+                seen.add(t)
+                as_of = str(row.get("as_of") or "")
+                price_val = row.get("price")
+                if price_val is not None and as_of:
+                    try:
+                        p = float(price_val)
+                        is_fresh = as_of[:10] >= cutoff_date
+                        price_by_ticker[t] = (p, is_fresh)
+                    except (TypeError, ValueError):
+                        pass
+                sector_val = str(row.get("sector") or "").strip()
+                industry_val = str(row.get("industry") or "").strip()
+                if sector_val:
+                    sector_label_by_ticker[t] = sector_val
+                if industry_val:
+                    industry_label_by_ticker[t] = industry_val
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"market_snapshots_query_error: {exc}")
+
+    # ── Step 4: Build sanitized per-ticker records ───────────────────────────
+    records: list[PriceBandShadowInput] = []
+    for ticker in company_tickers_list:
+        diluted = fy_diluted_by_ticker.get(ticker)
+        basic = fy_basic_by_ticker.get(ticker)
+        price_entry = price_by_ticker.get(ticker)
+        sector_label = sector_label_by_ticker.get(ticker)
+        industry_label = industry_label_by_ticker.get(ticker)
+        records.append(
+            PriceBandShadowInput(
+                ticker=ticker,
+                fy_diluted_eps=(diluted[1] if diluted is not None else None),
+                fy_basic_eps=(basic[1] if basic is not None else None),
+                eps_source_linked=(ticker in eps_source_linked_tickers),
+                price=(price_entry[0] if price_entry is not None else None),
+                price_fresh=(price_entry[1] if price_entry is not None else False),
+                sector_available=bool(sector_label),
+                industry_available=bool(industry_label),
+                sector_label=sector_label,
+                industry_label=industry_label,
+            )
+        )
+
+    # ── Step 5: Pure classification ──────────────────────────────────────────
+    result = build_priceband_shadow(records=records, extra_errors=errors)
+
+    # ── Step 6: Build aggregate-safe response ────────────────────────────────
+    # Per-ticker rows are cert-gated diagnostics. They MUST NOT include raw
+    # EPS values, raw prices, or raw earnings yields.
+    per_ticker = [
+        {
+            "ticker": d.ticker,
+            "priceband_policy_version": d.priceband_policy_version,
+            "safe_for_decision": d.safe_for_decision,
+            "shadow_only": d.shadow_only,
+            "visible_decision_changed": d.visible_decision_changed,
+            "priceband_produced": d.priceband_produced,
+            "valuation_signal": d.valuation_signal,
+            "valuation_confidence": d.valuation_confidence,
+            "valuation_basis": d.valuation_basis,
+            "valuation_policy_table": d.valuation_policy_table,
+            "earnings_yield_bucket": d.earnings_yield_bucket,
+            "sector": d.sector,
+            "industry": d.industry,
+            "sector_used_for_classification": d.sector_used_for_classification,
+            "broad_fallback_used": d.broad_fallback_used,
+            "input_quality": d.input_quality,
+            "plain_english_summary": d.plain_english_summary,
+            "limitations": d.limitations,
+            "unavailable_reason": d.unavailable_reason,
+        }
+        for d in result.priceband_diagnostics
+    ]
+
+    return {
+        "adapter_version": result.adapter_version,
+        "policy_table_id": result.policy_table_id,
+        "policy_basis": result.policy_basis,
+        # Hard locks.
+        "safe_for_decision": result.safe_for_decision,
+        "shadow_only": result.shadow_only,
+        "visible_snapshot_unchanged": result.visible_snapshot_unchanged,
+        "read_only": result.read_only,
+        "diagnostics_only": result.diagnostics_only,
+        "decision_input_mutated": result.decision_input_mutated,
+        "visible_decision_changed": result.visible_decision_changed,
+        "no_target_price_emitted": result.no_target_price_emitted,
+        "no_fair_value_emitted": result.no_fair_value_emitted,
+        "fy_only": result.fy_only,
+        "ttm_computed": result.ttm_computed,
+        # Per-ticker diagnostics (cert-gated).
+        "priceband_diagnostics": per_ticker,
+        # Aggregate counts.
+        "evaluated_company_ticker_count": result.evaluated_company_ticker_count,
+        "priceband_computed_count": result.priceband_computed_count,
+        "priceband_unavailable_count": result.priceband_unavailable_count,
+        "by_valuation_signal": result.by_valuation_signal,
+        "by_confidence": result.by_confidence,
+        "unavailable_reason_counts": result.unavailable_reason_counts,
+        "earnings_yield_bucket_counts": result.earnings_yield_bucket_counts,
+        "negative_eps_count": result.negative_eps_count,
+        "missing_eps_count": result.missing_eps_count,
+        "fresh_price_count": result.fresh_price_count,
+        "source_linked_eps_count": result.source_linked_eps_count,
+        "sector_available_count": result.sector_available_count,
+        "industry_available_count": result.industry_available_count,
+        "broad_fallback_count": result.broad_fallback_count,
+        "recommended_next_step": result.recommended_next_step,
+        "errors": result.errors,
+    }
+

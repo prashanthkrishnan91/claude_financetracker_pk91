@@ -254,6 +254,17 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation.
     intel_v3_fy_eps_raw_trace_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14D — PriceBand Shadow Policy v1 (off by default) ──────
+    # When True, enables the protected POST /diagnostics/finance-intel/
+    # priceband-shadow-v1 endpoint which classifies certified Phase 14C inputs
+    # (source-linked FY EPS + fresh price + sector) into a humble valuation
+    # bucket using a static governance table (policy_static_v1).
+    # Cert-gated, read-only, shadow-only. NO target prices, NO fair values,
+    # NO buy_below/sell_above thresholds, NO DecisionInputV3 mutation, NO
+    # PriceBand wiring into the visible decision path. NO frontend wiring.
+    # Must NOT be enabled in normal app operation.
+    intel_v3_priceband_shadow_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

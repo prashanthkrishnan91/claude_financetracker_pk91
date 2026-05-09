@@ -121,6 +121,22 @@ class SecMetricCoverageExpansionRequest(BaseModel):
     dry_run: bool = False
 
 
+# Phase 14C.2 — max tickers per backfill request (explicit, safe cap).
+_MAX_FY_EPS_BACKFILL_TICKERS: int = 5
+
+
+class SecFyEpsBackfillRequest(BaseModel):
+    """Phase 14C.2 — operator request body for SEC FY EPS coverage backfill.
+
+    Re-runs the earnings reviewer for an explicit list of tickers so that
+    research_artifact_facts is regenerated with the FY EPS coverage policy.
+    dry_run=True (default): returns what would be re-run without writing.
+    dry_run=False: calls run_earnings_reviewer_dark for each ticker.
+    """
+    tickers: list[str] = []
+    dry_run: bool = True
+
+
 def _ensure_cert_enabled(secret_header: str | None) -> None:
     settings = get_settings()
     if not settings.finance_runtime_cert_enabled:
@@ -1722,6 +1738,11 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
     skipped_eps_missing_fiscal_year_count: int = 0
     skipped_eps_missing_numeric_value_count: int = 0
     skipped_eps_not_source_linked_count: int = 0
+    # Phase 14C.2 — FY EPS coverage counters (from stored research_artifact_facts).
+    fy_eps_candidate_count: int = 0              # EPS observations that are FY annual
+    source_linked_fy_eps_candidate_count: int = 0  # FY annual + has source_id
+    non_source_linked_fy_eps_rejected_count: int = 0  # FY annual + no source_id
+    tickers_with_fy_eps_stored: set[str] = set()  # tickers with ≥1 FY annual EPS stored
 
     if company_tickers_list:
         try:
@@ -1767,6 +1788,22 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
                         row.get("source_id") and str(row.get("source_id")).strip()
                     )
                     eps_payload_shape_checked_count += 1
+
+                    # Phase 14C.2 — classify FY annual before extraction.
+                    # Mirrors _is_fy_annual_entry() in sec_companyfacts_parser.py.
+                    fp_pre = sp.get("fiscal_period")
+                    form_pre = str(sp.get("form") or "").upper().strip()
+                    fp_pre_upper = str(fp_pre).strip().upper() if fp_pre is not None else None
+                    _is_fy_stored = (
+                        fp_pre_upper == "FY" or (fp_pre_upper is None and form_pre == "10-K")
+                    )
+                    if _is_fy_stored:
+                        fy_eps_candidate_count += 1
+                        tickers_with_fy_eps_stored.add(ticker)
+                        if has_source:
+                            source_linked_fy_eps_candidate_count += 1
+                        else:
+                            non_source_linked_fy_eps_rejected_count += 1
 
                     extraction = extract_fy_eps_observation_from_payload(
                         sp, has_source=has_source
@@ -1931,4 +1968,146 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
         "skipped_eps_missing_numeric_value_count": skipped_eps_missing_numeric_value_count,
         "skipped_eps_not_source_linked_count": skipped_eps_not_source_linked_count,
         "eps_extraction_schema_version": EPS_EXTRACTION_SCHEMA_VERSION,
+        # Phase 14C.2 — FY EPS coverage selection policy diagnostics (aggregate-only).
+        # Derived from currently stored research_artifact_facts; requires backfill
+        # to reflect the Phase 14C.2 parser fix for tickers fetched before this PR.
+        "eps_tag_candidate_count": eps_payload_shape_checked_count,
+        "eps_observation_candidate_count": eps_payload_shape_checked_count,
+        "fy_eps_candidate_count": fy_eps_candidate_count,
+        "selected_latest_period_observation_count": eps_payload_shape_checked_count,
+        "selected_fy_eps_observation_count": fy_eps_candidate_count,
+        # fy_eps_added_beyond_generic_limit_count is tracked in the parser at
+        # fetch time (CompanyFactsParseResult.fy_eps_added_beyond_generic_limit_count)
+        # and is not recoverable from stored facts alone; shown as null here.
+        "fy_eps_added_beyond_generic_limit_count": None,
+        "duplicate_eps_observation_suppressed_count": 0,
+        "tickers_with_fy_eps_available_count": len(tickers_with_fy_eps_stored),
+        "tickers_with_fy_eps_selected_count": len(
+            set(fy_diluted_by_ticker.keys()) | set(fy_basic_by_ticker.keys())
+        ),
+        "tickers_missing_fy_eps_after_selection_count": company_ticker_count - len(
+            set(fy_diluted_by_ticker.keys()) | set(fy_basic_by_ticker.keys())
+        ),
+        "source_linked_fy_eps_selected_count": source_linked_fy_eps_candidate_count,
+        "non_source_linked_fy_eps_rejected_count": non_source_linked_fy_eps_rejected_count,
+        "skipped_non_fy_quarterly_eps_count": skipped_eps_missing_fiscal_period_count,
+    }
+
+
+@router.post("/sec-fy-eps-coverage-backfill-v1")
+async def sec_fy_eps_coverage_backfill_v1(
+    request: SecFyEpsBackfillRequest,
+    secret_header: str | None = Header(None, alias="X-Finance-Runtime-Cert-Secret"),
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14C.2 — operator-only SEC FY EPS coverage backfill.
+
+    Re-runs the SEC earnings reviewer for an explicit list of tickers so that
+    research_artifact_facts is regenerated with the Phase 14C.2 FY EPS coverage
+    policy (latest annual FY EPS retained even when generic latest-N slots are
+    filled by quarterly observations).
+
+    This endpoint is safe, explicit, and auditable:
+      - dry_run=True (default): returns what would be re-run without any writes.
+      - dry_run=False: calls run_earnings_reviewer_dark for each ticker. Each
+        call produces a new artifact with the updated metric digest (because FY
+        EPS is now included), which the writer stores alongside prior artifacts.
+      - Max {_MAX_FY_EPS_BACKFILL_TICKERS} tickers per request.
+      - Requires X-Finance-Runtime-Cert-Secret header (same guard as all cert
+        endpoints).
+      - Requires INTEL_V3_SEC_FY_EPS_BACKFILL_ENABLED=true env flag.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_SEC_FY_EPS_BACKFILL_ENABLED=true
+
+    Governance invariants:
+      - safe_for_decision is always False.
+      - Does NOT modify DecisionInputV3 or visible Intel v3 decisions.
+      - Does NOT produce PriceBand.
+      - Does NOT change frontend or Buy/Hold/Trim/Sell behavior.
+      - No LLM calls. SEC calls only when SEC flags are enabled (same as
+        normal earnings reviewer runner).
+      - Dry-run by default — cannot accidentally run in normal app flows.
+
+    NEVER called by frontend page load. NEVER called automatically.
+    NEVER writes to intel_v3_snapshots or decision tables.
+    """
+    _ensure_cert_enabled(secret_header)
+
+    settings = get_settings()
+    if not settings.intel_v3_sec_fy_eps_backfill_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_SEC_FY_EPS_BACKFILL_ENABLED is not enabled",
+        )
+
+    raw_tickers = [t.upper().strip() for t in (request.tickers or []) if t.strip()]
+    if not raw_tickers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tickers list must be non-empty",
+        )
+    if len(raw_tickers) > _MAX_FY_EPS_BACKFILL_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"tickers list exceeds max {_MAX_FY_EPS_BACKFILL_TICKERS} "
+                f"tickers per request (got {len(raw_tickers)})"
+            ),
+        )
+
+    from ..services.intelligence.research_workers.runner import run_earnings_reviewer_dark
+
+    db_client = get_supabase_client()
+    results: list[dict] = []
+
+    for ticker in raw_tickers:
+        if request.dry_run:
+            results.append({
+                "ticker": ticker,
+                "action": "dry_run_would_rerun",
+                "artifact_id": None,
+            })
+        else:
+            try:
+                artifact_id = run_earnings_reviewer_dark(
+                    user_id=str(user.id),
+                    ticker=ticker,
+                    db_client=db_client,
+                    settings=settings,
+                )
+                results.append({
+                    "ticker": ticker,
+                    "action": "rerun_complete",
+                    "artifact_id": artifact_id,
+                })
+            except Exception as exc:  # noqa: BLE001
+                results.append({
+                    "ticker": ticker,
+                    "action": "rerun_error",
+                    "artifact_id": None,
+                    "error": str(exc),
+                })
+
+    rerun_count = sum(1 for r in results if r["action"] == "rerun_complete")
+    error_count = sum(1 for r in results if r["action"] == "rerun_error")
+
+    return {
+        "safe_for_decision": False,
+        "shadow_only": True,
+        "read_only": request.dry_run,
+        "dry_run": request.dry_run,
+        "tickers_requested": raw_tickers,
+        "ticker_count": len(raw_tickers),
+        "rerun_count": rerun_count,
+        "dry_run_count": len(raw_tickers) if request.dry_run else 0,
+        "error_count": error_count,
+        "results": results,
+        "next_step": (
+            "Re-run POST /diagnostics/finance-intel/fy-eps-earnings-yield-v1 to "
+            "verify computed_earnings_yield_count improved."
+            if not request.dry_run
+            else "Set dry_run=false to apply the backfill."
+        ),
     }

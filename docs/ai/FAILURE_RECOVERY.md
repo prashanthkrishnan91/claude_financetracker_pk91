@@ -33,6 +33,13 @@ Use this whenever a PR, prompt, runtime validation, SQL check, or UI test expose
 - Do not continue feature work until persistence correctness is restored.
 - Include the exact manual SQL/sanity action in PR summary.
 
+## Workflow miss recovery (OS v3)
+
+- If the failure is caused by a workflow/prompt/process miss, run `.claude/skills/workflow-retrospective/SKILL.md`.
+- If repeated, update `docs/ai/MISS_LEDGER.md` and recommend a promotion target via the ladder in `docs/ai/OS_LEARNING_PROTOCOL.md`.
+- Do not immediately add broad rules from a one-off failure.
+- If the failure involved deployment/build-cost usage, classify deployment-cost risk and update `MISS_LEDGER.md`.
+
 ## Escalate when
 
 - Deterministic decision authority is compromised.

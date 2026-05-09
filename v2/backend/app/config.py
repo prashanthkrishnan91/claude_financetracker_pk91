@@ -225,6 +225,14 @@ class Settings(BaseSettings):
     # calls. No SQL writes.
     intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14C.3 — Ticker FY EPS Gap v1 Diagnostics (off by default) ──
+    # When True, enables the protected ticker-level FY EPS gap diagnostic
+    # endpoint. Returns per-ticker gap classification with stable gap_reason
+    # enums explaining why each company ticker does or does not have usable
+    # FY EPS. Operator/cert-gated only — never called by frontend page load.
+    # No DB writes, no provider/LLM calls, no decision mutations.
+    intel_v3_fy_eps_ticker_gap_v1_diagnostics_enabled: bool = False
+
     # ── Intel v3 Phase 14C.2 — SEC FY EPS Coverage Backfill (off by default) ──
     # When True, enables the protected backfill endpoint that re-runs the
     # SEC earnings reviewer for an explicit list of tickers, regenerating

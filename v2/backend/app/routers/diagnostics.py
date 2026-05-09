@@ -79,6 +79,13 @@ from ..services.intelligence.v3.eps_payload_extractor_v1 import (
     SKIP_MISSING_VALUE,
     SKIP_NOT_SOURCE_LINKED,
 )
+from ..services.intelligence.v3.ticker_fy_eps_gap_classifier_v1 import (
+    build_ticker_fy_eps_gap_diagnostics,
+    classify_ticker_fy_eps_gap,
+    TickerFyEpsGapInput,
+    TICKER_FY_EPS_GAP_CLASSIFIER_V1_CONTRACT_VERSION,
+    COMPANY_CLASS_SEC_COMPANY,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -1991,6 +1998,295 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
         "source_linked_fy_eps_selected_count": source_linked_fy_eps_candidate_count,
         "non_source_linked_fy_eps_rejected_count": non_source_linked_fy_eps_rejected_count,
         "skipped_non_fy_quarterly_eps_count": skipped_eps_missing_fiscal_period_count,
+    }
+
+
+# ── Phase 14C.3 — Ticker-level FY EPS gap diagnostics ───────────────────────
+
+@router.post("/fy-eps-ticker-gap-v1")
+async def get_fy_eps_ticker_gap_v1_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14C.3 — operator-only ticker-level FY EPS gap diagnostics.
+
+    For each company ticker, returns a compact diagnostic object explaining
+    exactly why the ticker does or does not have usable FY EPS for the Phase
+    14C earnings yield computation. Each missing ticker is assigned exactly
+    one stable gap_reason enum.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_FY_EPS_TICKER_GAP_V1_DIAGNOSTICS_ENABLED=true
+
+    Governance invariants preserved (hard locks):
+      - safe_for_decision is always False.
+      - shadow_only is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - No PriceBand produced or modified.
+      - No DecisionInputV3 mutation.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No TTM computation or quarterly annualization.
+      - No DB writes, no provider calls, no LLM calls.
+      - selected_eps_value is surfaced here (cert-gated, operator-only).
+        It is NEVER returned to frontend page load paths.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1 / DecisionInputV3 /
+    PriceBand. NEVER writes to intel_v3_snapshots or any DB table.
+    """
+    from collections import defaultdict
+    from datetime import datetime, timedelta, timezone
+
+    settings = get_settings()
+    if not settings.intel_v3_fy_eps_ticker_gap_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_FY_EPS_TICKER_GAP_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    db_client = get_supabase_client()
+    errors: list[str] = []
+
+    # ── Step 1: Phase 9 SEC metric readiness → company tickers ────────────────
+    readiness = compute_sec_readiness_for_phase11_adapter(
+        user_id=str(user.id),
+        db_client=db_client,
+    )
+    company_tickers: set[str] = (
+        set(readiness.ready_tickers)
+        | set(readiness.partial_tickers_with_missing_groups.keys())
+        | set(readiness.blocked_tickers_with_reason.keys())
+    )
+    company_tickers_list = list(company_tickers)
+
+    # ── Step 2: Price / sector presence (from market_snapshots) ───────────────
+    cutoff_date = (
+        datetime.now(timezone.utc) - timedelta(days=PSR_PRICE_STALE_THRESHOLD_DAYS)
+    ).strftime("%Y-%m-%d")
+    price_present: dict[str, bool] = {}
+    sector_present: dict[str, bool] = {}
+
+    if company_tickers_list:
+        try:
+            res = (
+                db_client.table("market_snapshots")
+                .select("ticker,as_of,price,sector")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .order("as_of", desc=True)
+                .execute()
+            )
+            seen: set[str] = set()
+            for row in (res.data or []):
+                t = str(row.get("ticker") or "").upper().strip()
+                if not t or t not in company_tickers or t in seen:
+                    continue
+                seen.add(t)
+                pv = row.get("price")
+                if pv is not None:
+                    try:
+                        p = float(pv)
+                        is_fresh = str(row.get("as_of") or "")[:10] >= cutoff_date
+                        price_present[t] = p > 0 and is_fresh
+                    except (TypeError, ValueError):
+                        pass
+                sv = str(row.get("sector") or "").strip()
+                if sv:
+                    sector_present[t] = True
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"market_snapshots_query_error: {exc}")
+
+    # ── Step 3: EPS facts from research_artifacts + research_artifact_facts ────
+    # Per-ticker tracking maps.
+    ticker_has_artifact: dict[str, bool] = {}
+    ticker_has_any_fact: dict[str, bool] = {}
+    ticker_eps_payload_count: dict[str, int] = defaultdict(int)
+    ticker_fy_eps_payload_count: dict[str, int] = defaultdict(int)
+    ticker_source_linked_fy_eps_count: dict[str, int] = defaultdict(int)
+    ticker_fy_eps_skip_missing_year: dict[str, int] = defaultdict(int)
+    ticker_fy_eps_skip_missing_value: dict[str, int] = defaultdict(int)
+    # Final computable FY EPS: dict[ticker] = (ordering_year, value, tag, form, source_id_present)
+    ticker_fy_diluted: dict[str, tuple[int, float, str, str, bool]] = {}
+    ticker_fy_basic: dict[str, tuple[int, float, str, str, bool]] = {}
+
+    if company_tickers_list:
+        try:
+            art_result = (
+                db_client.table("research_artifacts")
+                .select("id,ticker")
+                .eq("user_id", str(user.id))
+                .in_("ticker", company_tickers_list)
+                .execute()
+            )
+            ticker_by_artifact_id: dict[str, str] = {}
+            for row in (art_result.data or []):
+                aid = str(row.get("id") or "")
+                t = str(row.get("ticker") or "").upper().strip()
+                if aid and t and t in company_tickers:
+                    ticker_by_artifact_id[aid] = t
+                    ticker_has_artifact[t] = True
+
+            artifact_ids = list(ticker_by_artifact_id.keys())
+            if artifact_ids:
+                fact_result = (
+                    db_client.table("research_artifact_facts")
+                    .select("artifact_id,fact_kind,structured_payload,source_id")
+                    .eq("user_id", str(user.id))
+                    .in_("artifact_id", artifact_ids)
+                    .execute()
+                )
+                for row in (fact_result.data or []):
+                    aid = str(row.get("artifact_id") or "")
+                    ticker = ticker_by_artifact_id.get(aid, "")
+                    if not ticker:
+                        continue
+
+                    ticker_has_any_fact[ticker] = True
+
+                    if str(row.get("fact_kind") or "") != "metric_observation":
+                        continue
+                    sp = row.get("structured_payload")
+                    if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
+                        continue
+
+                    tag_pre = str(sp.get("tag") or "")
+                    if tag_pre not in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+                        continue
+
+                    ticker_eps_payload_count[ticker] += 1
+
+                    has_source = bool(
+                        row.get("source_id") and str(row.get("source_id")).strip()
+                    )
+
+                    # Classify FY annual (mirrors existing endpoint logic).
+                    fp_pre = sp.get("fiscal_period")
+                    form_pre = str(sp.get("form") or "").upper().strip()
+                    fp_upper = str(fp_pre).strip().upper() if fp_pre is not None else None
+                    is_fy = fp_upper == "FY" or (fp_upper is None and form_pre == "10-K")
+
+                    if not is_fy:
+                        continue
+
+                    ticker_fy_eps_payload_count[ticker] += 1
+                    if has_source:
+                        ticker_source_linked_fy_eps_count[ticker] += 1
+
+                    extraction = extract_fy_eps_observation_from_payload(
+                        sp, has_source=has_source
+                    )
+
+                    if extraction.skip_reason == SKIP_MISSING_YEAR:
+                        ticker_fy_eps_skip_missing_year[ticker] += 1
+                        continue
+                    if extraction.skip_reason == SKIP_MISSING_VALUE:
+                        ticker_fy_eps_skip_missing_value[ticker] += 1
+                        continue
+                    if extraction.skip_reason:
+                        continue
+
+                    fy = extraction.ordering_year
+                    val = extraction.eps_value
+                    form_str = str(sp.get("form") or "")
+                    tag = extraction.tag
+
+                    target = (
+                        ticker_fy_diluted
+                        if tag == "EarningsPerShareDiluted"
+                        else ticker_fy_basic
+                    )
+                    cur = target.get(ticker)
+                    if cur is None or fy > cur[0]:
+                        target[ticker] = (fy, val, tag, form_str, has_source)
+
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"research_artifact_facts_query_error: {exc}")
+
+    # ── Step 4: Build per-ticker gap inputs and classify ──────────────────────
+    gap_inputs: list[TickerFyEpsGapInput] = []
+    for ticker in company_tickers_list:
+        diluted = ticker_fy_diluted.get(ticker)
+        basic = ticker_fy_basic.get(ticker)
+
+        # Selected observation: diluted preferred, basic fallback.
+        selected = diluted or basic
+        sel_tag = selected[2] if selected else None
+        sel_val = selected[1] if selected else None
+        sel_fy = selected[0] if selected else None
+        sel_form = selected[3] if selected else None
+        sel_src = selected[4] if selected else False
+
+        gap_inputs.append(TickerFyEpsGapInput(
+            ticker=ticker,
+            company_classification=COMPANY_CLASS_SEC_COMPANY,
+            has_price=price_present.get(ticker, False),
+            has_sector=sector_present.get(ticker, False),
+            has_any_sec_metric_artifact=ticker_has_artifact.get(ticker, False),
+            has_any_fact=ticker_has_any_fact.get(ticker, False),
+            eps_payload_count=ticker_eps_payload_count.get(ticker, 0),
+            fy_eps_payload_count=ticker_fy_eps_payload_count.get(ticker, 0),
+            source_linked_fy_eps_count=ticker_source_linked_fy_eps_count.get(ticker, 0),
+            fy_eps_skip_missing_year_count=ticker_fy_eps_skip_missing_year.get(ticker, 0),
+            fy_eps_skip_missing_value_count=ticker_fy_eps_skip_missing_value.get(ticker, 0),
+            has_computable_diluted_fy_eps=diluted is not None,
+            has_computable_basic_fy_eps=basic is not None,
+            selected_eps_tag=sel_tag,
+            selected_eps_value=sel_val,
+            selected_eps_fiscal_year=sel_fy,
+            selected_eps_form=sel_form,
+            selected_eps_source_id_present=sel_src,
+        ))
+
+    # ── Step 5: Pure classifier ───────────────────────────────────────────────
+    gap_result = build_ticker_fy_eps_gap_diagnostics(
+        inputs=gap_inputs,
+        extra_errors=errors,
+    )
+
+    # ── Step 6: Serialize per-ticker diagnostics (cert-gated response) ────────
+    ticker_gap_list = [
+        {
+            "ticker": d.ticker,
+            "company_classification": d.company_classification,
+            "has_price": d.has_price,
+            "has_sector": d.has_sector,
+            "has_any_sec_metric_artifact": d.has_any_sec_metric_artifact,
+            "has_any_eps_payload": d.has_any_eps_payload,
+            "eps_payload_count": d.eps_payload_count,
+            "has_fy_eps_payload": d.has_fy_eps_payload,
+            "fy_eps_payload_count": d.fy_eps_payload_count,
+            "has_source_linked_fy_eps": d.has_source_linked_fy_eps,
+            "usable_fy_eps_for_yield": d.usable_fy_eps_for_yield,
+            "selected_eps_tag": d.selected_eps_tag,
+            "selected_eps_value": d.selected_eps_value,
+            "selected_eps_fiscal_year": d.selected_eps_fiscal_year,
+            "selected_eps_form": d.selected_eps_form,
+            "selected_eps_source_id_present": d.selected_eps_source_id_present,
+            "gap_reason": d.gap_reason,
+        }
+        for d in gap_result.ticker_gap_diagnostics
+    ]
+
+    return {
+        "classifier_version": gap_result.classifier_version,
+        "safe_for_decision": False,
+        "shadow_only": True,
+        "read_only": True,
+        "diagnostics_only": True,
+        "priceband_produced": False,
+        "decision_input_mutated": False,
+        "visible_decision_changed": False,
+        "ttm_computed": False,
+        "fy_only": True,
+        "ticker_gap_diagnostics_count": gap_result.ticker_gap_diagnostics_count,
+        "usable_fy_eps_ticker_count": gap_result.usable_fy_eps_ticker_count,
+        "missing_fy_eps_ticker_count": gap_result.missing_fy_eps_ticker_count,
+        "unsupported_or_excludable_ticker_count": gap_result.unsupported_or_excludable_ticker_count,
+        "potentially_fixable_ticker_count": gap_result.potentially_fixable_ticker_count,
+        "gap_reason_counts": gap_result.gap_reason_counts,
+        "ticker_gap_diagnostics": ticker_gap_list,
+        "errors": gap_result.errors,
     }
 
 

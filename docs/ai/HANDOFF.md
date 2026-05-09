@@ -1,4 +1,132 @@
 
+## 2026-05-09 — Phase 14C: FY EPS Earnings Yield v1 — Shadow/Diagnostics Only (Level 2)
+
+### Status
+Phase 14C complete. **Shadow/diagnostics-only** computation boundary —
+adds a protected endpoint that computes FY EPS earnings yield (EPS / market
+price) from source-linked stored SEC EPS facts (`research_artifact_facts`)
+and certified `market_snapshots` price/sector. Returns aggregate counts +
+distribution buckets only — never raw EPS, prices, yields, or per-ticker
+rows. No DecisionInputV3 mutation, no PriceBand production, no visible
+Buy/Hold/Trim/Sell behavior change, no UI change, no SQL writes, no
+provider/LLM calls. 56 tests covering hard locks, leakage prevention, EPS
+preference (diluted preferred, basic fallback), negative-EPS bucketing,
+skip rules, distribution-bucket aggregate-only correctness, future-PriceBand
+readiness gate, and AST-based static import/write safety.
+
+### Root cause / gap addressed
+Phase 14B proved SEC EPS/equity facts are strong (15/15 source-linked),
+and Phase 14C-Prep proved `market_snapshots` is CERTIFIED for both price
+and sector. Phase 14C is the first true valuation computation boundary.
+It must remain non-decisioning so that any later PriceBand/valuation policy
+phase has aggregate evidence to reason about coverage and distribution
+without leaking per-ticker raw values into the visible decision path.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/fy_eps_earnings_yield_v1.py` (new
+  pure module — no IO, no DB, no provider, no LLM).
+- `v2/backend/app/routers/diagnostics.py` (adds protected endpoint
+  `POST /api/v1/diagnostics/finance-intel/fy-eps-earnings-yield-v1` —
+  fetches sanitized inputs and delegates to the pure module).
+- `v2/backend/app/config.py` (adds off-by-default flag
+  `intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled`).
+- `v2/backend/tests/test_intel_v3_phase14c_fy_eps_earnings_yield_v1.py`
+  (56 tests).
+- `docs/ai/HANDOFF.md` (this entry).
+
+### Computation
+- Formula: `earnings_yield = fy_eps / price` where `price > 0` and
+  `fy_eps != 0`.
+- EPS source: `research_artifact_facts` rows with
+  `claim == "sec_companyfact_observed"` and `fiscal_period == "FY"`. Latest
+  `fiscal_year` per (ticker, tag) is selected.
+- EPS preference: diluted (`EarningsPerShareDiluted`) preferred; basic
+  (`EarningsPerShareBasic`) used only as fallback when diluted is unavailable.
+- TTM is intentionally NOT computed (`ttm_computed=false`) — SEC parser
+  `_MAX_PERIODS_PER_TAG = 2 < 4` periods needed for TTM.
+- Price source: `market_snapshots.price` with `as_of` freshness
+  (`PRICE_STALE_THRESHOLD_DAYS = 7`, aligned with Phase 14B/14C-Prep).
+- Sector/industry source: `market_snapshots.sector` /
+  `market_snapshots.industry` (GICS-style — NOT `positions.category`).
+- Bucket bins (positive EPS only): `[0,2)% / [2,4)% / [4,6)% / [6,8)% /
+  >=8%`. Negative EPS records are bucketed under `negative_eps` (never
+  interpreted as "cheap").
+
+### Hard locks (always asserted)
+- `safe_for_decision = false`
+- `shadow_only = true`
+- `visible_snapshot_unchanged = true`
+- `read_only = true`
+- `diagnostics_only = true`
+- `price_context_unchanged = true`
+- `priceband_produced = false`
+- `decision_input_mutated = false`
+- `visible_decision_changed = false`
+- `ttm_computed = false`, `fy_only = true`
+- `valuation_ratios_computed = true` and `earnings_yield_computed = true`
+  ONLY because earnings yield is intentionally computed in this shadow
+  diagnostic — neither value implies any visible behavior change or any
+  DecisionInputV3/PriceBand wiring.
+
+### Future-PriceBand readiness gate
+`ready_for_future_priceband_phase` is True only when ALL of:
+- `computed_earnings_yield_count >= 0.70 * company_ticker_count`
+- `sector_available_count >= 0.70 * company_ticker_count`
+- `source_linked_eps_used_count >= 0.70 * computed_earnings_yield_count`
+- `company_ticker_count > 0`
+
+Otherwise `future_priceband_blocking_reasons` enumerates the gaps and
+`recommended_next_step` selects from the deterministic decision tree
+(`improve_eps_or_price_coverage_before_priceband_design` /
+`improve_sector_coverage_before_priceband_design` /
+`improve_source_linked_eps_coverage_before_priceband_design` /
+`design_priceband_policy_phase_pending_governance_review`).
+
+### Validation steps
+1. Confirm flag is OFF by default in production
+   (`INTEL_V3_FY_EPS_EARNINGS_YIELD_V1_DIAGNOSTICS_ENABLED` unset → 403).
+2. Enable only this flag for one operator session and POST to
+   `/api/v1/diagnostics/finance-intel/fy-eps-earnings-yield-v1` with the
+   `X-Finance-Runtime-Cert-Secret` header.
+3. Inspect the aggregate response. Confirm:
+   - `safe_for_decision=false`, `shadow_only=true`,
+     `priceband_produced=false`, `visible_decision_changed=false`.
+   - `ttm_computed=false`, `fy_only=true`, `eps_preference_order=
+     ["diluted","basic"]`.
+   - `earnings_yield_distribution_buckets` is the only dict in the response
+     and its keys are the six stable bucket labels.
+   - No raw EPS / price / yield / ticker symbol leakage anywhere in the
+     response.
+4. Compare `computed_earnings_yield_count` against
+   `company_ticker_count` and against the Phase 14C-Prep
+   `selected_price_source_fresh_count` to detect drift between source
+   certification and computation eligibility.
+5. Use `ready_for_future_priceband_phase` and
+   `future_priceband_blocking_reasons` to drive the next-step decision tree:
+
+| Outcome | Recommended next step |
+|---|---|
+| ready=true | Begin a separate, governance-reviewed PriceBand policy PR — Phase 14C does NOT design or wire PriceBand. |
+| computed coverage low | Improve EPS or price coverage; do not design PriceBand yet. |
+| sector coverage low | Improve sector coverage; do not design PriceBand yet. |
+| source-linked EPS coverage low | Improve source-linked EPS coverage; do not design PriceBand yet. |
+
+### Tests
+- 56/56 Phase 14C tests pass.
+- Phase 14A (88), 14B (111), 14C-Prep (57) tests still pass — no regressions.
+
+### Hard NOs (still enforced)
+- No `decide()` / `run_v3` / `DecisionInputV3` / `PriceBand` import or
+  reference (AST-checked).
+- No provider / LLM / HTTP / DB-write imports in the pure module
+  (AST-checked). No `.insert/.upsert/.update/.delete` calls in the pure
+  module or in the endpoint body (AST-checked).
+- No "CHEAP"/"EXPENSIVE"/"FAIR" string in any field. Negative EPS never
+  implies cheapness — bucketed under `negative_eps`.
+- No raw EPS / price / yield / ticker symbol in the response (test
+  enumerates synthetic tickers and asserts they never appear in any field).
+- No frontend/UI changes. No SQL/migration changes (Supabase SQL: No).
+
 ## 2026-05-08 — Phase 14C-Prep: Price + Sector Source Resolution v1 (Level 2)
 
 ### Status

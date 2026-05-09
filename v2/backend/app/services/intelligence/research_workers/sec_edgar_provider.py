@@ -284,6 +284,35 @@ def fetch_for_ticker(
                     report_date=str(rd) if rd else None,
                     filing_url=_filing_index_url(cik_int, str(acc)),
                 ))
+
+            # Phase 14C.5: Include the latest 10-K even when recent 10-Qs fill
+            # the max_filings_to_return cap before it appears.
+            # For mature companies (AAPL, MSFT, etc.) the 5 most recent relevant
+            # filings are often all 10-Qs, leaving the annual 10-K outside the
+            # collected set. Without the 10-K accession in source_accessions, the
+            # companyfacts parser skips all FY EPS observations.
+            # Additive only: scan for the most recent 10-K if not already present.
+            # Bounded: at most one additional 10-K filing is appended.
+            if not any(f.form_type == "10-K" for f in filings):
+                _collected_accns = frozenset(f.accession_number for f in filings)
+                for _i, _form in enumerate(forms):
+                    _form_str = str(_form).upper().strip()
+                    if _form_str != "10-K":
+                        continue
+                    _fd = dates[_i] if _i < len(dates) else ""
+                    _acc = accessions[_i] if _i < len(accessions) else ""
+                    if not _fd or not _acc or str(_acc) in _collected_accns:
+                        continue
+                    _rd = report_dates[_i] if _i < len(report_dates) else None
+                    filings.append(SecFilingRecord(
+                        form_type=_form_str,
+                        filing_date=str(_fd),
+                        accession_number=str(_acc),
+                        report_date=str(_rd) if _rd else None,
+                        filing_url=_filing_index_url(cik_int, str(_acc)),
+                    ))
+                    break  # Only the most recent 10-K — bounded.
+
         except Exception as exc:  # noqa: BLE001
             return _fail_closed(ticker_upper, "malformed",
                                 f"Malformed submissions JSON: {exc}", request_count)

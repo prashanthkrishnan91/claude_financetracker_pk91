@@ -14,6 +14,19 @@ Hard constraints (non-negotiable):
   - Source-linked: only includes facts with matching accession in source_accessions.
   - Never fabricates missing facts.
   - Never runs on page load — called only from research worker pipeline.
+
+Phase 14C.2 — FY EPS coverage selection policy:
+  For EPS tags only, after applying the generic latest-N policy, the parser
+  also retains the latest annual FY observation if it is not already in the
+  selection. This prevents the FY 10-K EPS from being dropped when the two
+  most recently filed observations are Q1/Q2/Q3 quarterly 10-Qs.
+
+  Rules:
+    - A FY annual entry is one where fp=="FY" OR (fp absent AND form=="10-K").
+    - Additive only: the generic latest-N entries are always kept unchanged.
+    - Deduplication by accession_number — no duplicate observations.
+    - No annualization of quarterly EPS values.
+    - Non-EPS tags use the generic latest-N policy without modification.
 """
 from __future__ import annotations
 
@@ -92,11 +105,18 @@ class CompanyFactsParseResult:
       no_facts    — parsed OK but no observations matched all constraints.
       error       — malformed input or exception; observations is empty.
       not_fetched — companyfacts was not attempted (request cap or upstream error).
+
+    Phase 14C.2 counters (EPS FY coverage policy):
+      fy_eps_added_beyond_generic_limit_count — number of FY annual EPS
+        observations added beyond the generic latest-N limit, to ensure the
+        most recent FY EPS is retained when only quarterly observations fill
+        the generic slots.
     """
     observations: list[MetricObservation] = field(default_factory=list)
     parse_status: str = "not_fetched"
     error_message: Optional[str] = None
     tags_found: list[str] = field(default_factory=list)
+    fy_eps_added_beyond_generic_limit_count: int = 0
 
     @property
     def observation_count(self) -> int:
@@ -161,6 +181,18 @@ def compute_metric_digest(observations: list[MetricObservation]) -> str:
 
 # ── Internal parsing logic ────────────────────────────────────────────────────
 
+def _is_fy_annual_entry(entry: dict) -> bool:
+    """Return True if entry represents a fiscal-year annual observation.
+
+    FY annual = fiscal_period=="FY"  OR  (fiscal_period absent AND form=="10-K").
+    This mirrors the detection logic in eps_payload_extractor_v1.py shapes A/B/C.
+    """
+    fp_raw = entry.get("fp")
+    fp = str(fp_raw).strip().upper() if fp_raw is not None else None
+    form = str(entry.get("form") or "").upper().strip()
+    return fp == "FY" or (fp is None and form == "10-K")
+
+
 def _parse(
     raw_json: Any,
     source_accessions: frozenset[str],
@@ -189,6 +221,7 @@ def _parse(
 
     observations: list[MetricObservation] = []
     tags_found: list[str] = []
+    fy_eps_added_beyond_generic_limit_count: int = 0
 
     # Iterate tags in sorted order for determinism.
     for tag in sorted(_METRIC_TAG_ALLOWLIST):
@@ -234,8 +267,32 @@ def _parse(
         # Sort by filed date descending (most recent first).
         candidates.sort(key=lambda e: str(e.get("filed") or ""), reverse=True)
 
-        # Keep at most max_periods_per_tag most recent entries.
+        # Generic latest-N selection (unchanged behavior for all tags).
         selected = candidates[:max_periods_per_tag]
+
+        # Phase 14C.2 — FY EPS coverage policy (EPS tags only, additive).
+        # If none of the generic-selected observations is a FY annual, find
+        # the latest FY annual in the full candidate list and append it.
+        # This prevents quarterly Q1/Q2/Q3 observations from crowding out the
+        # FY 10-K EPS observation when max_periods_per_tag is small.
+        # Rules: no annualization, no fabrication, dedup by accession_number.
+        if tag in _EPS_TAGS:
+            has_fy_in_selected = any(_is_fy_annual_entry(e) for e in selected)
+            if not has_fy_in_selected:
+                selected_accns: frozenset[str] = frozenset(
+                    str(e.get("accn") or "") for e in selected
+                )
+                for candidate in candidates:
+                    accn_c = str(candidate.get("accn") or "")
+                    if accn_c in selected_accns:
+                        continue  # already in selection
+                    if _is_fy_annual_entry(candidate):
+                        # candidates is sorted by filed desc, so first FY hit
+                        # is the most recently filed FY annual observation.
+                        selected.append(candidate)
+                        fy_eps_added_beyond_generic_limit_count += 1
+                        break  # one FY annual per tag is sufficient
+
         tags_found.append(tag)
 
         for entry in selected:
@@ -259,4 +316,5 @@ def _parse(
         observations=observations,
         parse_status=parse_status,
         tags_found=sorted(set(tags_found)),  # sorted for determinism
+        fy_eps_added_beyond_generic_limit_count=fy_eps_added_beyond_generic_limit_count,
     )

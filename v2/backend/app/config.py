@@ -225,6 +225,15 @@ class Settings(BaseSettings):
     # calls. No SQL writes.
     intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14C.2 — SEC FY EPS Coverage Backfill (off by default) ──
+    # When True, enables the protected backfill endpoint that re-runs the
+    # SEC earnings reviewer for an explicit list of tickers, regenerating
+    # research_artifact_facts with the Phase 14C.2 FY EPS coverage policy.
+    # Guarded by the existing finance_runtime_cert_secret header.
+    # dry_run=True by default — no DB writes without explicit dry_run=False.
+    # Must NOT be enabled in normal app operation. Explicit, auditable only.
+    intel_v3_sec_fy_eps_backfill_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

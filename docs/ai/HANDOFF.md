@@ -1,4 +1,62 @@
 
+## 2026-05-09 — Phase 14C.1: EPS Payload Shape Reconciliation (Level 2)
+
+### Status
+Phase 14C.1 complete. Root-cause extraction fix for low FY EPS coverage
+(5/19 computed, 15/15 source-linked available per Phase 14B).
+
+### Root cause found
+Phase 14C originally required **both** `fiscal_period == "FY"` **and**
+`fiscal_year` present in the stored payload. However, the SEC CompanyFacts
+adapter writes these fields conditionally:
+
+```python
+if obs.fiscal_year is not None:
+    metric_payload["fiscal_year"] = obs.fiscal_year
+if obs.fiscal_period is not None:
+    metric_payload["fiscal_period"] = obs.fiscal_period
+```
+
+Two payload shapes were silently rejected:
+
+- **Shape B**: `fiscal_period == "FY"` but `fiscal_year` absent (SEC API
+  `fy` field missing for some entries). Filed date is always present and
+  provides a durable annual ordering year.
+- **Shape C**: `fiscal_period` absent (SEC API `fp` field missing) but
+  `form == "10-K"` — the annual report form, FY-equivalent by definition.
+
+### Fix
+Added `extract_fy_eps_observation_from_payload()` — a pure helper that
+accepts all three supported shapes:
+
+- **Shape A** (was accepted): `fiscal_period=="FY"` + `fiscal_year` present
+- **Shape B** (now accepted): `fiscal_period=="FY"` + `fiscal_year` absent
+  → year from `filed` date
+- **Shape C** (now accepted): `fiscal_period` absent + `form=="10-K"` +
+  `filed` present → FY-equivalent
+
+Added aggregate diagnostics to the response to reveal which shapes explain
+remaining misses if coverage cannot reach 15.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/eps_payload_extractor_v1.py`
+  (new pure module — EPS payload shape extractor).
+- `v2/backend/app/routers/diagnostics.py` (Phase 14C Step 2 loop replaced
+  with extractor call; 7 new aggregate diagnostic fields added to response).
+- `v2/backend/tests/test_intel_v3_phase14c1_eps_payload_extractor_v1.py`
+  (new test file — all shapes, all skip scenarios, leakage prevention,
+  static import safety, determinism).
+- `docs/ai/HANDOFF.md` (this entry).
+
+### Expected production outcome
+- If missing tickers have Shape B or C payloads: coverage improves from 5
+  toward 15.
+- If missing tickers have non-FY period (Q1/Q2/Q3) stored due to parser
+  `_MAX_PERIODS_PER_TAG=2` ordering: `skipped_eps_missing_fiscal_period_count`
+  will reveal the gap and next step is a parser period-selection policy fix.
+- Hard locks: unchanged. Shadow-only. No DB writes. No visible behavior.
+- Supabase SQL: No.
+
 ## 2026-05-09 — Phase 14C: FY EPS Earnings Yield v1 — Shadow/Diagnostics Only (Level 2)
 
 ### Status

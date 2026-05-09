@@ -71,6 +71,14 @@ from ..services.intelligence.v3.fy_eps_earnings_yield_v1 import (
     FY_EPS_EARNINGS_YIELD_V1_CONTRACT_VERSION,
     PRICEBAND_READY_MIN_COMPUTED_RATIO as _PB_READY_COMPUTED_RATIO,  # noqa: F401
 )
+from ..services.intelligence.v3.eps_payload_extractor_v1 import (
+    extract_fy_eps_observation_from_payload,
+    EPS_EXTRACTION_SCHEMA_VERSION,
+    SKIP_NOT_FY,
+    SKIP_MISSING_YEAR,
+    SKIP_MISSING_VALUE,
+    SKIP_NOT_SOURCE_LINKED,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -1700,10 +1708,20 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
     portfolio_ticker_count = readiness.portfolio_ticker_count
 
     # ── Step 2: FY EPS facts from research_artifact_facts (source-linked) ─────
-    # Pick the most-recent fiscal_year FY observation per (ticker, tag).
+    # Pick the most-recent ordering-year FY observation per (ticker, tag).
+    # Uses extract_fy_eps_observation_from_payload which supports:
+    #   Shape A: fiscal_period=="FY" + fiscal_year present
+    #   Shape B: fiscal_period=="FY" + fiscal_year absent → filed year fallback
+    #   Shape C: fiscal_period absent + form=="10-K" → FY-equivalent
     fy_diluted_by_ticker: dict[str, tuple[int, float]] = {}
     fy_basic_by_ticker: dict[str, tuple[int, float]] = {}
     eps_source_linked_tickers: set[str] = set()
+    eps_payload_shape_checked_count: int = 0
+    eps_payload_shape_computable_count: int = 0
+    skipped_eps_missing_fiscal_period_count: int = 0
+    skipped_eps_missing_fiscal_year_count: int = 0
+    skipped_eps_missing_numeric_value_count: int = 0
+    skipped_eps_not_source_linked_count: int = 0
 
     if company_tickers_list:
         try:
@@ -1735,34 +1753,46 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
                     if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
                         continue
 
+                    # Only count and process EPS tags; skip all others silently.
+                    tag_pre = str(sp.get("tag") or "")
+                    if tag_pre not in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+                        continue
+
                     aid = str(row.get("artifact_id") or "")
                     ticker = ticker_by_artifact_id.get(aid, "")
                     if not ticker or ticker not in company_tickers:
                         continue
 
-                    tag = str(sp.get("tag") or "")
-                    if tag not in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
-                        continue
-
-                    # FY only — TTM blocked by SEC parser period limit.
-                    if str(sp.get("fiscal_period") or "") != "FY":
-                        continue
-
-                    fy_raw = sp.get("fiscal_year")
-                    val_raw = sp.get("value")
-                    if fy_raw is None or val_raw is None:
-                        continue
-                    try:
-                        fy = int(fy_raw)
-                        val = float(val_raw)
-                    except (TypeError, ValueError):
-                        continue
-
                     has_source = bool(
                         row.get("source_id") and str(row.get("source_id")).strip()
                     )
-                    if has_source:
-                        eps_source_linked_tickers.add(ticker)
+                    eps_payload_shape_checked_count += 1
+
+                    extraction = extract_fy_eps_observation_from_payload(
+                        sp, has_source=has_source
+                    )
+
+                    if extraction.skip_reason == SKIP_NOT_SOURCE_LINKED:
+                        skipped_eps_not_source_linked_count += 1
+                        continue
+                    if extraction.skip_reason == SKIP_MISSING_VALUE:
+                        skipped_eps_missing_numeric_value_count += 1
+                        continue
+                    if extraction.skip_reason == SKIP_NOT_FY:
+                        skipped_eps_missing_fiscal_period_count += 1
+                        continue
+                    if extraction.skip_reason == SKIP_MISSING_YEAR:
+                        skipped_eps_missing_fiscal_year_count += 1
+                        continue
+                    if extraction.skip_reason:
+                        continue  # Unknown skip reason — safe fallback
+
+                    eps_payload_shape_computable_count += 1
+                    eps_source_linked_tickers.add(ticker)
+
+                    tag = extraction.tag
+                    fy = extraction.ordering_year
+                    val = extraction.eps_value
 
                     target = (
                         fy_diluted_by_ticker
@@ -1893,4 +1923,12 @@ async def get_fy_eps_earnings_yield_v1_diagnostics(
         "future_priceband_blocking_reasons": result.future_priceband_blocking_reasons,
         "recommended_next_step": result.recommended_next_step,
         "errors": result.errors,
+        # Phase 14C.1 — EPS payload shape diagnostics (aggregate-only).
+        "eps_payload_shape_checked_count": eps_payload_shape_checked_count,
+        "eps_payload_shape_computable_count": eps_payload_shape_computable_count,
+        "skipped_eps_missing_fiscal_period_count": skipped_eps_missing_fiscal_period_count,
+        "skipped_eps_missing_fiscal_year_count": skipped_eps_missing_fiscal_year_count,
+        "skipped_eps_missing_numeric_value_count": skipped_eps_missing_numeric_value_count,
+        "skipped_eps_not_source_linked_count": skipped_eps_not_source_linked_count,
+        "eps_extraction_schema_version": EPS_EXTRACTION_SCHEMA_VERSION,
     }

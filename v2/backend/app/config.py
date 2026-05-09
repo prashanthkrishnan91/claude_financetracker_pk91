@@ -242,6 +242,18 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation. Explicit, auditable only.
     intel_v3_sec_fy_eps_backfill_enabled: bool = False
 
+    # ── Intel v3 Phase 14C.4 — FY EPS Raw Trace Diagnostics (off by default) ──
+    # When True, enables the protected per-ticker FY EPS raw trace endpoint.
+    # For each explicitly requested ticker (max 5), traces exactly where in the
+    # pipeline annual FY EPS is lost: from raw SEC EDGAR companyfacts through
+    # source accession linkage, parser selection, artifact write, and extractor.
+    # Returns compact counts only — no raw SEC payloads, no source URLs,
+    # no unrestricted DB rows. Cert-gated + explicit ticker input + read-only.
+    # No DB writes. No decision mutations. No PriceBand. No TTM.
+    # Provider calls allowed only within this endpoint (cert-gated, read-only).
+    # Must NOT be enabled in normal app operation.
+    intel_v3_fy_eps_raw_trace_v1_diagnostics_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

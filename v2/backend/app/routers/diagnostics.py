@@ -86,6 +86,11 @@ from ..services.intelligence.v3.ticker_fy_eps_gap_classifier_v1 import (
     TICKER_FY_EPS_GAP_CLASSIFIER_V1_CONTRACT_VERSION,
     COMPANY_CLASS_SEC_COMPANY,
 )
+from ..services.intelligence.v3.fy_eps_raw_trace_v1 import (
+    build_fy_eps_raw_trace,
+    FyEpsRawTraceInput,
+    FY_EPS_RAW_TRACE_V1_CONTRACT_VERSION,
+)
 from ..services.recommendation_engine import RecommendationService
 
 logger = logging.getLogger(__name__)
@@ -131,6 +136,9 @@ class SecMetricCoverageExpansionRequest(BaseModel):
 # Phase 14C.2 — max tickers per backfill request (explicit, safe cap).
 _MAX_FY_EPS_BACKFILL_TICKERS: int = 5
 
+# Phase 14C.4 — max tickers per raw trace request (explicit, safe cap).
+_MAX_FY_EPS_RAW_TRACE_TICKERS: int = 5
+
 
 class SecFyEpsBackfillRequest(BaseModel):
     """Phase 14C.2 — operator request body for SEC FY EPS coverage backfill.
@@ -142,6 +150,27 @@ class SecFyEpsBackfillRequest(BaseModel):
     """
     tickers: list[str] = []
     dry_run: bool = True
+
+
+class FyEpsRawTraceRequest(BaseModel):
+    """Phase 14C.4 — operator request body for FY EPS raw trace diagnostic.
+
+    For each explicitly requested ticker, traces exactly where in the data
+    pipeline annual FY EPS is lost between raw SEC EDGAR companyfacts and the
+    Phase 14C earnings-yield extractor.
+
+    tickers:                 Explicit list of tickers. Max 5 per request.
+    include_raw_counts_only: When True (default), attempt a raw SEC EDGAR
+                             companyfacts fetch for each ticker to produce
+                             unfiltered FY EPS counts. Requires
+                             SEC_EDGAR_USER_AGENT to be configured. If the
+                             user agent is absent, the fetch is skipped and
+                             raw_companyfacts_fetch_status is "no_user_agent".
+                             Set to False to restrict analysis to stored DB
+                             data only (no external HTTP calls).
+    """
+    tickers: list[str]
+    include_raw_counts_only: bool = True
 
 
 def _ensure_cert_enabled(secret_header: str | None) -> None:
@@ -2405,5 +2434,522 @@ async def sec_fy_eps_coverage_backfill_v1(
             "verify computed_earnings_yield_count improved."
             if not request.dry_run
             else "Set dry_run=false to apply the backfill."
+        ),
+    }
+
+
+# ── Phase 14C.4 — FY EPS Raw Trace Diagnostic ────────────────────────────────
+
+# EPS tag names expected in SEC us-gaap companyfacts (mirrors parser allowlist).
+_RAW_TRACE_EPS_TAGS: frozenset[str] = frozenset({
+    "EarningsPerShareBasic",
+    "EarningsPerShareDiluted",
+})
+_RAW_TRACE_EPS_CORRECT_UNIT: str = "USD/shares"
+_RAW_TRACE_ALLOWED_FORMS: frozenset[str] = frozenset({"10-K", "10-Q"})
+
+
+def _raw_trace_is_fy_annual(entry: dict) -> bool:
+    """Return True if an SEC XBRL entry is a fiscal-year annual observation."""
+    fp_raw = entry.get("fp")
+    fp = str(fp_raw).strip().upper() if fp_raw is not None else None
+    form = str(entry.get("form") or "").upper().strip()
+    return fp == "FY" or (fp is None and form == "10-K")
+
+
+def _fetch_raw_companyfacts_trace(
+    ticker: str,
+    user_agent: str,
+    stored_10k_accessions: frozenset[str],
+) -> dict:
+    """Fetch raw SEC companyfacts for one ticker and return trace counts.
+
+    Makes at most 2 HTTP requests: CIK lookup + companyfacts JSON.
+    Parses companyfacts with empty frozenset to count raw unfiltered FY EPS.
+    Also counts how many raw FY EPS entries would be filtered by the stored
+    source_accession set.
+
+    Returns a dict of trace fields — never raises. All counts are integers.
+    No raw payloads, no accession numbers, no source URLs in the return value.
+    """
+    _COMPANY_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
+    _COMPANYFACTS_TMPL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+
+    _empty: dict = {
+        "raw_companyfacts_fetch_attempted": True,
+        "raw_companyfacts_fetch_status": "failed",
+        "raw_eps_tag_present_count": 0,
+        "raw_eps_unit_keys": [],
+        "raw_eps_observation_count": 0,
+        "raw_fy_eps_observation_count": 0,
+        "raw_latest_fy_eps_filed": None,
+        "raw_latest_fy_eps_form": None,
+        "raw_latest_fy_eps_fp": None,
+        "raw_latest_fy_eps_has_accn": False,
+        "fy_eps_filtered_by_unit_count": 0,
+        "fy_eps_filtered_by_source_accession_count": 0,
+        "fy_eps_selected_by_parser_count": 0,
+    }
+
+    try:
+        import httpx  # deferred import — not needed in test paths
+    except ImportError:
+        return {**_empty, "raw_companyfacts_fetch_status": "failed"}
+
+    timeout = 12.0
+    headers = {"User-Agent": user_agent}
+    ticker_upper = ticker.upper().strip()
+
+    try:
+        with httpx.Client(headers=headers, timeout=timeout) as client:
+            # Request 1: CIK lookup
+            r1 = client.get(_COMPANY_TICKERS_URL)
+            r1.raise_for_status()
+            cik_map: dict = r1.json() or {}
+            cik_padded: str | None = None
+            for _entry in cik_map.values():
+                if (
+                    isinstance(_entry, dict)
+                    and str(_entry.get("ticker") or "").upper() == ticker_upper
+                ):
+                    cik_int = _entry.get("cik_str") or _entry.get("cik")
+                    if cik_int is not None:
+                        cik_padded = str(int(cik_int)).zfill(10)
+                    break
+
+            if not cik_padded:
+                return {**_empty, "raw_companyfacts_fetch_status": "no_cik"}
+
+            # Request 2: companyfacts JSON (raw, unfiltered)
+            cf_url = _COMPANYFACTS_TMPL.format(cik=cik_padded)
+            r2 = client.get(cf_url)
+            r2.raise_for_status()
+            cf_raw: dict = r2.json() or {}
+
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("fy_eps_raw_trace_sec_fetch_failed ticker=%s error=%s", ticker_upper, exc)
+        return {**_empty, "raw_companyfacts_fetch_status": "failed"}
+
+    # ── Parse raw companyfacts for EPS counts (unfiltered by source accessions) ──
+    us_gaap = (cf_raw.get("facts") or {}).get("us-gaap") or {}
+
+    raw_eps_tag_present_count = 0
+    raw_eps_unit_keys: list[str] = []
+    raw_eps_observation_count = 0
+    raw_fy_eps_entries: list[dict] = []
+
+    for tag in sorted(_RAW_TRACE_EPS_TAGS):
+        tag_data = us_gaap.get(tag)
+        if not isinstance(tag_data, dict):
+            continue
+        raw_eps_tag_present_count += 1
+        units_data = tag_data.get("units") or {}
+        for unit_key, entries in units_data.items():
+            if unit_key not in raw_eps_unit_keys:
+                raw_eps_unit_keys.append(unit_key)
+            if unit_key != _RAW_TRACE_EPS_CORRECT_UNIT or not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                form = str(entry.get("form") or "").upper().strip()
+                if form not in _RAW_TRACE_ALLOWED_FORMS:
+                    continue
+                val = entry.get("val")
+                if val is None or not isinstance(val, (int, float)):
+                    continue
+                raw_eps_observation_count += 1
+                if _raw_trace_is_fy_annual(entry):
+                    raw_fy_eps_entries.append(entry)
+
+    # Sort FY entries by filed date desc to find latest.
+    raw_fy_eps_entries.sort(key=lambda e: str(e.get("filed") or ""), reverse=True)
+    raw_fy_eps_observation_count = len(raw_fy_eps_entries)
+
+    raw_latest_fy_eps_filed: str | None = None
+    raw_latest_fy_eps_form: str | None = None
+    raw_latest_fy_eps_fp: str | None = None
+    raw_latest_fy_eps_has_accn = False
+    if raw_fy_eps_entries:
+        latest = raw_fy_eps_entries[0]
+        raw_latest_fy_eps_filed = str(latest.get("filed") or "") or None
+        raw_latest_fy_eps_form = str(latest.get("form") or "") or None
+        raw_latest_fy_eps_fp = str(latest.get("fp") or "") if latest.get("fp") else None
+        raw_latest_fy_eps_has_accn = bool(str(latest.get("accn") or "").strip())
+
+    # ── Simulate parser: filter FY EPS by stored 10-K source_accessions ───────
+    fy_eps_filtered_by_source_accession_count = 0
+    fy_eps_selected_by_parser_count = 0
+    for entry in raw_fy_eps_entries:
+        accn = str(entry.get("accn") or "").strip()
+        if not accn or accn not in stored_10k_accessions:
+            fy_eps_filtered_by_source_accession_count += 1
+        else:
+            fy_eps_selected_by_parser_count += 1
+
+    return {
+        "raw_companyfacts_fetch_attempted": True,
+        "raw_companyfacts_fetch_status": "success",
+        "raw_eps_tag_present_count": raw_eps_tag_present_count,
+        "raw_eps_unit_keys": sorted(raw_eps_unit_keys),
+        "raw_eps_observation_count": raw_eps_observation_count,
+        "raw_fy_eps_observation_count": raw_fy_eps_observation_count,
+        "raw_latest_fy_eps_filed": raw_latest_fy_eps_filed,
+        "raw_latest_fy_eps_form": raw_latest_fy_eps_form,
+        "raw_latest_fy_eps_fp": raw_latest_fy_eps_fp,
+        "raw_latest_fy_eps_has_accn": raw_latest_fy_eps_has_accn,
+        "fy_eps_filtered_by_unit_count": 0,  # wrong-unit entries excluded before counting
+        "fy_eps_filtered_by_source_accession_count": fy_eps_filtered_by_source_accession_count,
+        "fy_eps_selected_by_parser_count": fy_eps_selected_by_parser_count,
+    }
+
+
+@router.post("/fy-eps-raw-trace-v1")
+async def get_fy_eps_raw_trace_v1_diagnostics(
+    request: FyEpsRawTraceRequest,
+    secret_header: str | None = Header(None, alias="X-Finance-Runtime-Cert-Secret"),
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Phase 14C.4 — operator-only FY EPS raw trace diagnostic.
+
+    For each explicitly requested ticker (max 5), traces exactly where in the
+    data pipeline annual FY EPS is lost: from raw SEC EDGAR companyfacts through
+    source accession linkage, parser selection, artifact write, and the Phase
+    14C earnings-yield extractor.
+
+    This endpoint answers the production questions from Phase 14C.3 analysis:
+    - For AAPL/MSFT/GOOGL/COST/QCOM/ALK: does raw SEC have FY EPS? Is 10-K
+      in the stored source_accession set?
+    - For BRK-B: are EPS tags absent from raw companyfacts?
+    - For BLSH/KLAR/TSM: genuine no-facts cases vs artifact-writer gaps?
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_FY_EPS_RAW_TRACE_V1_DIAGNOSTICS_ENABLED=true
+
+    Optional env for raw SEC fetch:
+      SEC_EDGAR_USER_AGENT=<app_name/version contact@email> (required by SEC TOS)
+      When absent, raw_companyfacts_fetch_status="no_user_agent" and
+      include_raw_counts_only analysis is skipped.
+
+    Governance invariants (non-negotiable hard locks):
+      - safe_for_decision is always False.
+      - shadow_only is always True.
+      - read_only is always True.
+      - diagnostics_only is always True.
+      - No PriceBand produced.
+      - No DecisionInputV3 mutation.
+      - No Buy/Hold/Trim/Sell behavior changes.
+      - No TTM computation or quarterly annualization.
+      - No DB writes.
+      - No raw SEC JSON, no source URLs, no unrestricted DB rows in response.
+      - Provider calls only within this endpoint (cert-gated, read-only).
+      - Max 5 tickers per request.
+
+    NEVER called by frontend page load. NEVER called by Intel v3 snapshot reads.
+    NEVER imports or calls decide() / decision_policy_v1 / DecisionInputV3 /
+    PriceBand. NEVER writes to intel_v3_snapshots or any DB table.
+    """
+    from collections import defaultdict
+
+    _ensure_cert_enabled(secret_header)
+
+    settings = get_settings()
+    if not settings.intel_v3_fy_eps_raw_trace_v1_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_FY_EPS_RAW_TRACE_V1_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    raw_tickers = [t.upper().strip() for t in (request.tickers or []) if t.strip()]
+    if not raw_tickers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tickers list must be non-empty",
+        )
+    if len(raw_tickers) > _MAX_FY_EPS_RAW_TRACE_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"tickers list exceeds max {_MAX_FY_EPS_RAW_TRACE_TICKERS} "
+                f"tickers per request (got {len(raw_tickers)})"
+            ),
+        )
+
+    db_client = get_supabase_client()
+    errors: list[str] = []
+
+    # ── Per-ticker data containers ────────────────────────────────────────────
+    ticker_artifact_count: dict[str, int] = defaultdict(int)
+    ticker_latest_artifact_id: dict[str, str] = {}
+    ticker_latest_artifact_created_at: dict[str, str] = {}
+    # artifact_id → ticker, created_at
+    artifact_id_to_ticker: dict[str, str] = {}
+    artifact_id_to_created_at: dict[str, str] = {}
+
+    ticker_fact_count: dict[str, int] = defaultdict(int)
+    ticker_eps_fact_count: dict[str, int] = defaultdict(int)
+    ticker_fy_eps_fact_count: dict[str, int] = defaultdict(int)
+    ticker_quarterly_eps_fact_count: dict[str, int] = defaultdict(int)
+    ticker_source_record_count: dict[str, int] = defaultdict(int)
+    ticker_source_10k_count: dict[str, int] = defaultdict(int)
+    ticker_source_10q_count: dict[str, int] = defaultdict(int)
+
+    # {ticker: {artifact_id: bool}} — which artifacts have FY EPS stored
+    ticker_artifact_fy_eps_present: dict[str, dict[str, bool]] = defaultdict(dict)
+
+    # {ticker: count} — extractable FY EPS from stored facts
+    ticker_extractor_usable_count: dict[str, int] = defaultdict(int)
+
+    # Stored 10-K accession numbers per ticker (for SEC filter simulation)
+    ticker_stored_10k_accessions: dict[str, set[str]] = defaultdict(set)
+
+    # ── Step 1: Fetch research_artifacts for requested tickers ─────────────────
+    try:
+        art_result = (
+            db_client.table("research_artifacts")
+            .select("id,ticker,created_at")
+            .eq("user_id", str(user.id))
+            .in_("ticker", raw_tickers)
+            .order("created_at", desc=False)
+            .execute()
+        )
+        for row in (art_result.data or []):
+            aid = str(row.get("id") or "")
+            t = str(row.get("ticker") or "").upper().strip()
+            cat = str(row.get("created_at") or "")
+            if not aid or not t or t not in raw_tickers:
+                continue
+            artifact_id_to_ticker[aid] = t
+            artifact_id_to_created_at[aid] = cat
+            ticker_artifact_count[t] += 1
+            # Track latest artifact by created_at (rows ordered asc, so last wins)
+            ticker_latest_artifact_id[t] = aid
+            ticker_latest_artifact_created_at[t] = cat
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"research_artifacts_query_error: {exc}")
+
+    all_artifact_ids = list(artifact_id_to_ticker.keys())
+
+    # ── Step 2: Fetch research_artifact_facts for all artifact IDs ─────────────
+    if all_artifact_ids:
+        try:
+            fact_result = (
+                db_client.table("research_artifact_facts")
+                .select("artifact_id,fact_kind,structured_payload,source_id")
+                .eq("user_id", str(user.id))
+                .in_("artifact_id", all_artifact_ids)
+                .execute()
+            )
+            for row in (fact_result.data or []):
+                aid = str(row.get("artifact_id") or "")
+                ticker = artifact_id_to_ticker.get(aid)
+                if not ticker:
+                    continue
+
+                fact_kind = str(row.get("fact_kind") or "")
+                sp = row.get("structured_payload") or {}
+
+                ticker_fact_count[ticker] += 1
+
+                # ── sourced_claim facts → source filing form_type analysis ────
+                if fact_kind == "sourced_claim" and isinstance(sp, dict):
+                    form_type = str(sp.get("form_type") or "").upper().strip()
+                    accn = str(sp.get("accession_number") or "").strip()
+                    ticker_source_record_count[ticker] += 1
+                    if form_type == "10-K":
+                        ticker_source_10k_count[ticker] += 1
+                        if accn:
+                            ticker_stored_10k_accessions[ticker].add(accn)
+                    elif form_type == "10-Q":
+                        ticker_source_10q_count[ticker] += 1
+                    continue
+
+                # ── metric_observation facts → EPS analysis ────────────────────
+                if fact_kind != "metric_observation":
+                    continue
+                if not isinstance(sp, dict) or sp.get("claim") != "sec_companyfact_observed":
+                    continue
+
+                tag = str(sp.get("tag") or "")
+                if tag not in ("EarningsPerShareDiluted", "EarningsPerShareBasic"):
+                    continue
+
+                ticker_eps_fact_count[ticker] += 1
+                has_source = bool(
+                    row.get("source_id") and str(row.get("source_id")).strip()
+                )
+
+                # Classify FY vs quarterly (mirrors parser / earnings yield router)
+                fp_raw = sp.get("fiscal_period")
+                form_raw = str(sp.get("form") or "").upper().strip()
+                fp_upper = str(fp_raw).strip().upper() if fp_raw is not None else None
+                is_fy = fp_upper == "FY" or (fp_upper is None and form_raw == "10-K")
+
+                if is_fy:
+                    ticker_fy_eps_fact_count[ticker] += 1
+                    ticker_artifact_fy_eps_present[ticker][aid] = True
+
+                    # Try extraction via Phase 14C extractor
+                    extraction = extract_fy_eps_observation_from_payload(
+                        sp, has_source=has_source
+                    )
+                    if not extraction.skip_reason:
+                        ticker_extractor_usable_count[ticker] += 1
+                else:
+                    ticker_quarterly_eps_fact_count[ticker] += 1
+
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"research_artifact_facts_query_error: {exc}")
+
+    # ── Step 3: Build per-ticker trace inputs ──────────────────────────────────
+    trace_inputs: list[FyEpsRawTraceInput] = []
+
+    for ticker in raw_tickers:
+        has_artifact = ticker_artifact_count.get(ticker, 0) > 0
+        latest_aid = ticker_latest_artifact_id.get(ticker)
+        stored_10k_accns = frozenset(ticker_stored_10k_accessions.get(ticker, set()))
+
+        # Multi-artifact FY EPS analysis
+        artifact_fy_map = ticker_artifact_fy_eps_present.get(ticker, {})
+        any_artifact_has_fy_eps = len(artifact_fy_map) > 0
+        latest_artifact_has_fy_eps = (
+            latest_aid is not None and artifact_fy_map.get(latest_aid, False)
+        )
+
+        # ── Optional raw SEC companyfacts fetch ───────────────────────────────
+        raw_trace_fields: dict = {
+            "raw_companyfacts_fetch_attempted": False,
+            "raw_companyfacts_fetch_status": "skipped",
+            "raw_eps_tag_present_count": 0,
+            "raw_eps_unit_keys": [],
+            "raw_eps_observation_count": 0,
+            "raw_fy_eps_observation_count": 0,
+            "raw_latest_fy_eps_filed": None,
+            "raw_latest_fy_eps_form": None,
+            "raw_latest_fy_eps_fp": None,
+            "raw_latest_fy_eps_has_accn": False,
+            "fy_eps_filtered_by_unit_count": 0,
+            "fy_eps_filtered_by_source_accession_count": 0,
+            "fy_eps_selected_by_parser_count": 0,
+        }
+
+        if request.include_raw_counts_only:
+            ua = (settings.sec_edgar_user_agent or "").strip()
+            if not ua:
+                raw_trace_fields["raw_companyfacts_fetch_attempted"] = True
+                raw_trace_fields["raw_companyfacts_fetch_status"] = "no_user_agent"
+            else:
+                try:
+                    raw_trace_fields = _fetch_raw_companyfacts_trace(
+                        ticker=ticker,
+                        user_agent=ua,
+                        stored_10k_accessions=stored_10k_accns,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    errors.append(f"raw_sec_fetch_error ticker={ticker}: {exc}")
+                    raw_trace_fields["raw_companyfacts_fetch_attempted"] = True
+                    raw_trace_fields["raw_companyfacts_fetch_status"] = "failed"
+
+        inp = FyEpsRawTraceInput(
+            ticker=ticker,
+            has_research_artifact=has_artifact,
+            artifact_count=ticker_artifact_count.get(ticker, 0),
+            latest_artifact_id=latest_aid,
+            artifact_fact_count=ticker_fact_count.get(ticker, 0),
+            stored_eps_fact_count=ticker_eps_fact_count.get(ticker, 0),
+            stored_fy_eps_fact_count=ticker_fy_eps_fact_count.get(ticker, 0),
+            stored_quarterly_eps_fact_count=ticker_quarterly_eps_fact_count.get(ticker, 0),
+            source_record_count=ticker_source_record_count.get(ticker, 0),
+            source_10k_accession_count=ticker_source_10k_count.get(ticker, 0),
+            source_10q_accession_count=ticker_source_10q_count.get(ticker, 0),
+            source_accessions_include_10k=ticker_source_10k_count.get(ticker, 0) > 0,
+            latest_artifact_has_fy_eps=latest_artifact_has_fy_eps,
+            any_artifact_has_fy_eps=any_artifact_has_fy_eps,
+            fy_eps_extractor_usable_count=ticker_extractor_usable_count.get(ticker, 0),
+            raw_companyfacts_fetch_attempted=raw_trace_fields["raw_companyfacts_fetch_attempted"],
+            raw_companyfacts_fetch_status=raw_trace_fields["raw_companyfacts_fetch_status"],
+            raw_eps_tag_present_count=raw_trace_fields["raw_eps_tag_present_count"],
+            raw_eps_unit_keys=raw_trace_fields["raw_eps_unit_keys"],
+            raw_eps_observation_count=raw_trace_fields["raw_eps_observation_count"],
+            raw_fy_eps_observation_count=raw_trace_fields["raw_fy_eps_observation_count"],
+            raw_latest_fy_eps_filed=raw_trace_fields["raw_latest_fy_eps_filed"],
+            raw_latest_fy_eps_form=raw_trace_fields["raw_latest_fy_eps_form"],
+            raw_latest_fy_eps_fp=raw_trace_fields["raw_latest_fy_eps_fp"],
+            raw_latest_fy_eps_has_accn=raw_trace_fields["raw_latest_fy_eps_has_accn"],
+            fy_eps_filtered_by_unit_count=raw_trace_fields["fy_eps_filtered_by_unit_count"],
+            fy_eps_filtered_by_source_accession_count=raw_trace_fields[
+                "fy_eps_filtered_by_source_accession_count"
+            ],
+            fy_eps_selected_by_parser_count=raw_trace_fields["fy_eps_selected_by_parser_count"],
+            fy_eps_stored_as_fact_count=ticker_fy_eps_fact_count.get(ticker, 0),
+        )
+        trace_inputs.append(inp)
+
+    # ── Step 4: Pure classifier ────────────────────────────────────────────────
+    trace_result = build_fy_eps_raw_trace(inputs=trace_inputs, extra_errors=errors)
+
+    # ── Step 5: Serialize (cert-gated — no raw SEC payloads, no source URLs) ───
+    per_ticker_trace = [
+        {
+            "ticker": d.ticker,
+            "has_research_artifact": d.has_research_artifact,
+            "artifact_count": d.artifact_count,
+            "latest_artifact_id": d.latest_artifact_id,
+            "artifact_fact_count": d.artifact_fact_count,
+            "stored_eps_fact_count": d.stored_eps_fact_count,
+            "stored_fy_eps_fact_count": d.stored_fy_eps_fact_count,
+            "stored_quarterly_eps_fact_count": d.stored_quarterly_eps_fact_count,
+            "source_record_count": d.source_record_count,
+            "source_10k_accession_count": d.source_10k_accession_count,
+            "source_10q_accession_count": d.source_10q_accession_count,
+            "source_accessions_include_10k": d.source_accessions_include_10k,
+            "raw_companyfacts_fetch_attempted": d.raw_companyfacts_fetch_attempted,
+            "raw_companyfacts_fetch_status": d.raw_companyfacts_fetch_status,
+            "raw_eps_tag_present_count": d.raw_eps_tag_present_count,
+            "raw_eps_unit_keys": d.raw_eps_unit_keys,
+            "raw_eps_observation_count": d.raw_eps_observation_count,
+            "raw_fy_eps_observation_count": d.raw_fy_eps_observation_count,
+            "raw_latest_fy_eps_filed": d.raw_latest_fy_eps_filed,
+            "raw_latest_fy_eps_form": d.raw_latest_fy_eps_form,
+            "raw_latest_fy_eps_fp": d.raw_latest_fy_eps_fp,
+            "raw_latest_fy_eps_has_accn": d.raw_latest_fy_eps_has_accn,
+            "fy_eps_filtered_by_unit_count": d.fy_eps_filtered_by_unit_count,
+            "fy_eps_filtered_by_source_accession_count": d.fy_eps_filtered_by_source_accession_count,
+            "fy_eps_selected_by_parser_count": d.fy_eps_selected_by_parser_count,
+            "fy_eps_stored_as_fact_count": d.fy_eps_stored_as_fact_count,
+            "fy_eps_extractor_usable_count": d.fy_eps_extractor_usable_count,
+            "loss_stage": d.loss_stage,
+            "recommended_next_action": d.recommended_next_action,
+        }
+        for d in trace_result.trace_diagnostics
+    ]
+
+    return {
+        "trace_version": trace_result.trace_version,
+        "safe_for_decision": False,
+        "shadow_only": True,
+        "read_only": True,
+        "diagnostics_only": True,
+        "priceband_produced": False,
+        "decision_input_mutated": False,
+        "visible_decision_changed": False,
+        "ttm_computed": False,
+        "fy_only": True,
+        "tickers_requested": raw_tickers,
+        "include_raw_counts_only": request.include_raw_counts_only,
+        "raw_sec_fetch_attempted": request.include_raw_counts_only,
+        "trace_count": trace_result.trace_count,
+        "usable_fy_eps_count": trace_result.usable_fy_eps_count,
+        "missing_fy_eps_count": trace_result.missing_fy_eps_count,
+        "raw_fetch_attempted_count": trace_result.raw_fetch_attempted_count,
+        "raw_fetch_succeeded_count": trace_result.raw_fetch_succeeded_count,
+        "loss_stage_counts": trace_result.loss_stage_counts,
+        "per_ticker_trace": per_ticker_trace,
+        "errors": trace_result.errors,
+        "next_step": (
+            "Review loss_stage for each ticker and apply the recommended_next_action "
+            "to decide Phase 14C.5: fix source accession selection, expand EPS tag/unit "
+            "support, fix artifact writer, or classify true unsupported tickers."
         ),
     }

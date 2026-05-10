@@ -265,6 +265,16 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation.
     intel_v3_priceband_shadow_v1_diagnostics_enabled: bool = False
 
+    # ── Intel v3 Phase 14F — PriceBand Visible Context Scaffold v1 (off by default) ──
+    # Hidden backend scaffold only. Composes Phase 14D shadow diagnostics with
+    # the Phase 14E visible-language translator into a future-renderable internal
+    # context object. NOT wired to any route, snapshot, frontend, or visible path.
+    # NO DecisionInputV3 mutation. NO Buy/Hold/Trim/Sell changes. NO SQL writes.
+    # NO provider/LLM calls. NO target price, fair value, or threshold exposure.
+    # enabled=True is for tests and scaffold validation only — never runtime.
+    # Must NOT be enabled in normal app operation.
+    intel_v3_priceband_visible_context_v1_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

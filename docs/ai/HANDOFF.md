@@ -23,8 +23,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
-- 2026-05-10 — workflow architecture hygiene: removed claude-flow helper/hook stack from `.claude/settings.json`, deleted `.claude/helpers/`, `.claude-flow/`, and legacy `.claude/commands/` claude-flow docs; compacted this HANDOFF; added handoff maintenance rule.
-- 2026-05-10 — workflow/setup asset hygiene (PR #269): removed ~75 stale/duplicate workflow/setup assets across root, `.claude`, `docs/ai`, and experimental folders; CLAUDE.md anchors updated to point at `.claude/skills/` directly.
+- 2026-05-10 — workflow architecture hygiene completed (claude-flow stack, helpers, legacy `.claude/commands/`, ~75 stale/duplicate workflow assets, root-surface clutter all removed; canonical anchors are `.claude/skills/`, `docs/ai/TEST_ROUTING.md`, `docs/ai/PROMPT_LIBRARY.md`, `.github/pull_request_template.md`, `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md`). Active docs/configs no longer reference deleted assets.
 - Earlier Intel v3 / Deploy-prep / evidence-check copy work has been folded into product source-of-truth docs and is no longer tracked PR-by-PR here. See `docs/product/DECISION_LOG.md` and `docs/ai/MISS_LEDGER.md` for durable records.
 
 ## Active invariants / safety packs to remember

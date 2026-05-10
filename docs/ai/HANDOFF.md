@@ -1,4 +1,87 @@
 
+## 2026-05-10 — Phase 14E: PriceBand Visible Governance Contract (Level 2, backend-only)
+
+### Status
+Phase 14E complete. **Backend-only governance contract** defining how PriceBand
+valuation context may safely be shown as supporting context in a future visible
+phase. No visible behavior change. No Buy/Hold/Trim/Sell change. No frontend
+change. No SQL. No provider or LLM calls.
+
+### What was done
+1. **Governance translator module** added:
+   `v2/backend/app/services/intelligence/v3/priceband_visible_language_v1.py`
+
+   Pure, deterministic module (no IO, no DB, no provider, no LLM). Defines:
+   - Approved visible-language translations for all 7 internal shadow labels:
+     - `expensive`        → "Valuation looks demanding"
+     - `elevated`         → "Valuation looks somewhat demanding"
+     - `reasonable`       → "Valuation looks reasonable"
+     - `attractive`       → "Valuation looks favorable"
+     - `unusually_cheap`  → "Valuation looks unusually low — review quality/risk first"
+     - `negative_eps`     → "Earnings are negative; valuation signal unavailable"
+     - `unavailable`      → "Valuation signal unavailable"
+   - `BACKEND_ONLY_FIELDS` — what must never reach the frontend (raw signal enum,
+     earnings_yield_bucket, EPS value, price value, computed yield, threshold
+     boundaries, technical unavailable_reason codes).
+   - `PHASE_14F_PROMOTION_GATES` — all gates that must be verified before Phase
+     14F adds any visible scaffolding.
+   - `INTERACTION_MODES_ALLOWED` / `INTERACTION_MODES_PROHIBITED` — how valuation
+     context may and may not interact with visible decisions later.
+
+   Hard invariants embedded:
+   - Module MUST NOT be imported by decision_policy_v1, snapshot_builder,
+     intel_v3_service, or any visible-path serializer.
+   - `negative_eps` maps to unavailable-style language (never cheap/favorable).
+   - `unusually_cheap` carries explicit quality/risk caution.
+   - No raw numbers, no price targets, no fair values, no action authority.
+
+2. **Tests** added:
+   `v2/backend/tests/test_intel_v3_phase14e_priceband_visible_language_v1.py`
+
+   Covers: all 7 labels translate without error; no forbidden-term leakage;
+   no raw numbers; `negative_eps` → unavailable-style; `unusually_cheap` →
+   caution language; `has_valuation_context` flag correct per label; deterministic
+   output; unknown signal raises `ValueError`; module constants present and
+   complete; AST-based static import safety (no decision_policy_v1,
+   decision_contracts, intel_v3_service, snapshot_builder imported).
+
+### What is NOT done (by design)
+- No DecisionInputV3 mutation.
+- No decision_policy_v1 change.
+- No visible snapshot response change.
+- No frontend wiring.
+- No SQL.
+- No flag addition to config.py (Phase 14F adds the flag when scaffolding is ready).
+- No Buy/Hold/Trim/Sell change.
+
+### Phase 14F next step
+Phase 14F should add a backend-only visible-language translator scaffold behind
+an explicit disabled flag (`intel_v3_priceband_visible_language_enabled=False`
+by default) — still with no action changes, no DecisionInputV3 mutation, and no
+visible snapshot changes. Phase 14F must satisfy all `PHASE_14F_PROMOTION_GATES`
+before integration.
+
+Phase 14F is NOT opened in this PR.
+
+### Files changed
+- `v2/backend/app/services/intelligence/v3/priceband_visible_language_v1.py` (new)
+- `v2/backend/tests/test_intel_v3_phase14e_priceband_visible_language_v1.py` (new)
+- `docs/ai/HANDOFF.md` (this entry)
+
+### Confirmations
+- Supabase SQL: No.
+- UI changes: No.
+- Buy/Hold/Trim/Sell changes: No.
+- DecisionInputV3 mutation: No.
+- decision_policy_v1 changes: No.
+- visible snapshot changes: No.
+- Provider/LLM calls: No.
+- Frontend wiring: No.
+- Config flag added: No (deferred to Phase 14F).
+- Target price emitted: No.
+- Fair value emitted: No.
+- Deterministic decision authority preserved: Yes — unchanged.
+
 ## 2026-05-10 — Intel v3 Living Cockpit Status Reconciliation + Intel v4 Upgrade Path (Level 2, docs only)
 
 ### Status

@@ -34,6 +34,7 @@ If compaction is needed, preserve only:
 - SQL/env/manual action status
 - known risks/limitations
 - next required action
+- current roadmap stage and build queue item (OS v4)
 
 Do not preserve long implementation narration unless needed for review.
 
@@ -43,6 +44,13 @@ Do not preserve long implementation narration unless needed for review.
 - Do not keep adding process fixes to a bloated implementation chat.
 - For workflow upgrades that touch many files, use Claude/Sonnet to batch one branch and one PR. Do not use file-by-file connector edits.
 - ChatGPT GitHub connector should be reserved for tiny/surgical edits, not bulk workflow/docs updates.
+
+## OS v4 routing notes
+
+- When user dumps ideas, route to `docs/product/IDEA_INBOX.md` via `idea-triage` skill, not immediate implementation.
+- When user asks "where are we", use `progress-report` skill against `docs/product/*` and `docs/ai/HANDOFF.md`.
+- When user asks "what next", use `roadmap-check` skill and `docs/product/BUILD_QUEUE.md`.
+- If chat is bloated, preserve current roadmap stage, build queue item, PR, files changed, tests, blockers, and next action before compacting / new chat.
 
 ## Built-in Claude command discipline
 
@@ -74,12 +82,14 @@ Before `/compact`, preserve:
 - manual actions (SQL/env/runtime/Vercel/Railway)
 - next required action
 - whether workflow retrospective or `MISS_LEDGER` update is needed
+- current roadmap stage and build queue item (OS v4)
 
 ## Reviewer-agent budget
 
 - Do not run every reviewer on every PR.
-- Choose reviewer agents based on changed contracts and risk.
+- Choose reviewer agents based on changed contracts and risk via `docs/ai/AGENT_ROUTER.md`.
 - Common default:
+  - `roadmap-guardian` for product-direction or scope-creep risk
   - `contract-auditor` for shared contract/API/output changes
   - `test-strategist` for non-trivial test planning
   - `pr-reviewer` before merge on meaningful PRs
@@ -88,4 +98,10 @@ Before `/compact`, preserve:
   - `data-truth-reviewer` for evidence/Data Truth/source mapping changes
   - `sql-runtime-reviewer` for SQL/env/runtime cert/persistence changes
   - `plain-english-ui-reviewer` for visible UI/copy/card changes
+- Certification pack only when applicable:
+  - `reality-checker` for release-readiness or "is this done?" PRs
+  - `evidence-collector` for scattered-evidence PRs
+  - `premium-delight-reviewer` for design-polish surfaces
+  - `accessibility-reviewer` for UI/design changes
+  - `performance-benchmarker` for latency/responsiveness claims
 - `workflow-retrospective-reviewer` only when a miss, failed validation, or promotion candidate exists.

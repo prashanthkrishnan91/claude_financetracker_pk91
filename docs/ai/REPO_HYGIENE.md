@@ -93,6 +93,13 @@ What it scans:
 - Legacy strings: `streamlit`, `Portfolio War Room`, `seed_v1_positions`, `seed-v1` migration endpoint, `migration_service` import, root `App.py` shim references.
 - Stale paths: presence of `v1/`, root `App.py`, root `requirements.txt` Streamlit shim, `.streamlit/`.
 - Skipped/xfail test markers without a documented reason.
+- Async-test antipattern: `asyncio.get_event_loop()` used inside a test.
+  In a pytest-asyncio suite the default loop is created and closed
+  per-async-test, so a sync test that calls `asyncio.get_event_loop()`
+  passes in isolation but raises `RuntimeError: There is no current
+  event loop in thread 'MainThread'` once an async test has run first.
+  Use `asyncio.run(...)` (or explicit `asyncio.new_event_loop()` +
+  `asyncio.set_event_loop(...)`) instead.
 - `v2/progress_log.md` line count vs the ~250 soft cap.
 - Orphaned `progress_log_archive.md` files.
 

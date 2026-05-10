@@ -155,6 +155,13 @@ async def test_get_job_status_marks_stale_active_as_failed(monkeypatch):
 
     monkeypatch.setattr(svc, "_db", lambda _name, fn: SimpleNamespace(data=stale_row.copy()))
     monkeypatch.setattr(svc, "_mark_stale_run_failed", lambda _run_id, **_kwargs: None)
+    # ``get_job_status`` now also calls ``get_insight_cards`` to attach
+    # portfolio synthesis when cards exist. Stub it to a deterministic
+    # empty list so the stale-detection branch is exercised in isolation
+    # and we don't iterate the broad ``_db`` stub as a positions query.
+    async def _no_cards():
+        return []
+    monkeypatch.setattr(svc, "get_insight_cards", _no_cards)
 
     out = await svc.get_job_status(uuid4())
     assert out.status == "failed"

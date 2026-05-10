@@ -1048,10 +1048,11 @@ class TestEndpointHasPhase8AFields:
         ]:
             assert f'"{key}"' in src, f"Phase 7C key missing from endpoint: {key}"
 
-    def test_no_raw_value_keys_in_endpoint(self):
-        src = _read_src("app/routers/diagnostics.py")
-        for bad in ['"raw_metric_values"', '"structured_payload"']:
-            assert bad not in src, f"Forbidden key in diagnostics.py: {bad}"
+    # Removed test_no_raw_value_keys_in_endpoint:
+    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
+    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
+    # which asserts on the runtime response shape rather than grepping
+    # diagnostics.py source for forbidden keys.
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -118,16 +118,30 @@ def test_action_to_suggested_action_mapping():
     assert action_to_suggested_action("INSUFFICIENT_DATA") == "HOLD"
 
 
-def test_format_thesis_cites_drivers_and_risks():
+def test_format_thesis_cites_primary_driver_risk_action():
+    """Memo-format thesis cites WHY/RISK/ACTION/ALT VIEW from named memo fields.
+
+    The compact memo replaced the older "embed key_drivers/risks lists"
+    rendering. Format is: WHY: <primary_driver> / RISK: <risk_flag> /
+    ACTION: <action_reason> / ALT VIEW: <differentiation or '—'>.
+    """
     v = AnalystVerdict(
-        ticker="AAPL", action="BUY", conviction=0.7,
-        key_drivers=["earnings beat", "sector rotation"],
-        risks=["macro headwinds"],
+        ticker="AAPL",
+        action="BUY",
+        conviction=0.7,
         confidence=0.7,
+        primary_driver="Strong iPhone 16 demand drove 12% YoY services growth",
+        risk_flag="China demand softness could cut FY revenue 5%",
+        action_reason="Adding here while services margin keeps expanding",
+        differentiation="Unlike Samsung, services revenue is now 25% of mix",
     )
     thesis = format_thesis(v)
-    assert "earnings beat" in thesis
-    assert "macro headwinds" in thesis
+    assert "WHY:" in thesis
+    assert "RISK:" in thesis
+    assert "ACTION:" in thesis
+    assert "ALT VIEW:" in thesis
+    assert "Strong iPhone 16 demand" in thesis
+    assert "China demand softness" in thesis
 
 
 def test_validate_verdict_keeps_reasoning_without_sentiment():
@@ -515,14 +529,20 @@ async def test_analyze_portfolio_failure_rate_under_threshold():
 
 @pytest.mark.asyncio
 async def test_analyze_ticker_rejects_banned_indicator_language():
+    """The first response uses still-banned indicator vocabulary
+    ("uptrend") and must trigger a retry. The second response uses
+    business language and is accepted. This pins the retry-on-banned
+    contract under the current banned-pattern set in
+    per_ticker_analyst._BANNED_INDICATOR_PATTERNS.
+    """
     llm = FakeLLM([
         {
             "action": "BUY",
             "conviction": 0.5,
             "confidence": 0.5,
-            "summary": "Demand is improving.",
-            "thesis": "Momentum is improving in this name.",
-            "plain_language_explanation": "Buyers are active.",
+            "summary": "Uptrend continues.",
+            "thesis": "The uptrend is intact across timeframes.",
+            "plain_language_explanation": "Uptrend continues.",
         },
         {
             "action": "BUY",
@@ -598,9 +618,14 @@ async def test_orchestrator_applies_verdicts_to_insights(monkeypatch):
         "VOO":  TickerInsight(ticker="VOO",  suggested_action="HOLD"),
     }
     verdicts = {
-        "AAPL": AnalystVerdict(ticker="AAPL", action="BUY", conviction=0.7,
-                               key_drivers=["earnings"], risks=["rates"],
-                               confidence=0.7),
+        "AAPL": AnalystVerdict(
+            ticker="AAPL", action="BUY", conviction=0.7,
+            key_drivers=["earnings"], risks=["rates"],
+            confidence=0.7,
+            primary_driver="Earnings beat on services strength",
+            risk_flag="Rate path could compress multiple",
+            action_reason="Adding while services margin expands",
+        ),
         "TSLA": AnalystVerdict(ticker="TSLA", action="REDUCE", conviction=0.5,
                                key_drivers=["breakdown"], risks=["vol"],
                                confidence=0.6),
@@ -612,7 +637,7 @@ async def test_orchestrator_applies_verdicts_to_insights(monkeypatch):
 
     assert state.insights["AAPL"].suggested_action == "BUY"
     assert state.insights["AAPL"].conviction_score == 0.7
-    assert "earnings" in state.insights["AAPL"].investment_thesis
+    assert "Earnings beat" in state.insights["AAPL"].investment_thesis
 
     assert state.insights["TSLA"].suggested_action == "TRIM"  # REDUCE → TRIM
     assert state.insights["TSLA"].conviction_score == -0.5
@@ -625,13 +650,13 @@ async def test_orchestrator_applies_verdicts_to_insights(monkeypatch):
     assert state.insights["VOO"].suggested_allocation == 0.0
 
 
-# ── human_v2 schema validation tests ──────────────────────────────────────
+# ── Generation-version schema validation tests ────────────────────────────
 
 
-def test_generation_version_is_human_v2():
-    """Ensure every validated verdict carries the human_v2 schema version."""
+def test_generation_version_is_active_label():
+    """The active analyst generation_version label is the compact_v1 schema."""
     from app.services.intelligence.per_ticker_analyst import ANALYST_GENERATION_VERSION
-    assert ANALYST_GENERATION_VERSION == "human_v2"
+    assert ANALYST_GENERATION_VERSION == "compact_v1"
 
 
 def test_validate_verdict_sets_generation_version():
@@ -645,12 +670,12 @@ def test_validate_verdict_sets_generation_version():
     }
     v = validate_verdict(raw, ticker="NVDA")
     assert v is not None
-    assert v.generation_version == "human_v2"
+    assert v.generation_version == "compact_v1"
 
 
 def test_insufficient_data_verdict_generation_version():
     v = insufficient_data_verdict("TSM")
-    assert v.generation_version == "human_v2"
+    assert v.generation_version == "compact_v1"
 
 
 # ── Banned language rejection tests ────────────────────────────────────────
@@ -680,9 +705,14 @@ def test_banned_momentum_in_summary_is_rejected():
     assert _contains_banned_indicator_language(v) is True
 
 
-def test_banned_trending_in_risk_flag_is_rejected():
+def test_banned_downtrend_in_risk_flag_is_rejected():
+    """Bare "trending" was de-listed from the banned vocabulary because it
+    appears in legitimate business language ("AI is trending in
+    enterprise"). The technical-direction labels uptrend/downtrend remain
+    banned and are exercised here.
+    """
     from app.services.intelligence.per_ticker_analyst import _contains_banned_indicator_language
-    v = _make_verdict("AAPL", risk_flag="Stock is trending lower.")
+    v = _make_verdict("AAPL", risk_flag="Stock is in a downtrend on multi-week timeframes.")
     assert _contains_banned_indicator_language(v) is True
 
 
@@ -719,33 +749,32 @@ def test_differentiation_field_is_validated():
 # ── Stale run not reused test ───────────────────────────────────────────────
 
 
-def test_stale_pre_human_v2_row_is_excluded_from_preferred_live():
-    """Old verdict rows (generation_version != human_v2) must not enter the
-    preferred_live_llm pool that feeds fresh cards."""
-    # Simulate an old verdict written before the human_v2 schema was active.
+def test_stale_pre_active_schema_row_is_excluded_from_preferred_live():
+    """Old verdict rows whose generation_version differs from the active label
+    must not enter the preferred_live_llm pool that feeds fresh cards."""
+    from app.services.intelligence.per_ticker_analyst import ANALYST_GENERATION_VERSION
     old_verdict = {
         "analysis_source": "live_llm",
         "used_fallback": False,
-        "generation_version": "v2_strict_reasoning",   # old version
+        "generation_version": "v2_strict_reasoning",
         "primary_driver": "Trending higher on SMA20 breakout",
     }
-    # The card assembly would label this stale_db via its logic, but
-    # _resolve_card_analysis_source treats the stored source at face value.
-    # We verify the recommendation_engine logic correctly gates on generation_version.
-    # This is tested indirectly: the row SHOULD NOT be admitted to latest_live_llm_by_ticker.
-    # We test the generation_version guard by asserting the old version string is != human_v2.
-    assert old_verdict["generation_version"] != "human_v2"
+    # Recommendation engine gates the preferred-live pool on generation_version.
+    # The contract tested here: an old version string is not the active label.
+    assert old_verdict["generation_version"] != ANALYST_GENERATION_VERSION
 
 
-def test_human_v2_verdict_passes_preferred_live_gate():
-    """New human_v2 verdicts should be admitted to the preferred_live_llm pool."""
+def test_active_schema_verdict_passes_preferred_live_gate():
+    """Verdicts written with the active generation_version are admitted to
+    the preferred_live_llm pool."""
     from app.services.intelligence.per_ticker_analyst import ANALYST_GENERATION_VERSION
     new_verdict = {
         "analysis_source": "live_llm",
         "used_fallback": False,
         "generation_version": ANALYST_GENERATION_VERSION,
     }
-    assert new_verdict["generation_version"] == "human_v2"
+    assert new_verdict["generation_version"] == ANALYST_GENERATION_VERSION
+    assert new_verdict["generation_version"] == "compact_v1"
 
 
 def test_reasoning_contract_scrubs_forbidden_rec_fallback():

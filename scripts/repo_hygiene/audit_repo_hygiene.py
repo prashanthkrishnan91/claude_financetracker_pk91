@@ -302,6 +302,43 @@ def check_skipped_tests(report: Report) -> None:
                 ))
 
 
+# Async test antipattern — calling asyncio.get_event_loop() inside a sync
+# test runs against an event loop that pytest-asyncio may have closed for
+# an earlier async test. Result: order-dependent failures of the form
+# "RuntimeError: There is no current event loop in thread 'MainThread'".
+# Tests should use ``asyncio.run(...)`` (or an explicit
+# ``asyncio.new_event_loop()`` / ``asyncio.set_event_loop()`` setup).
+_ASYNCIO_GET_LOOP_RE = re.compile(r"asyncio\.get_event_loop\s*\(")
+
+
+def check_async_test_antipatterns(report: Report) -> None:
+    tests_root = os.path.join(REPO_ROOT, "v2", "backend", "tests")
+    if not os.path.isdir(tests_root):
+        return
+    for dirpath, dirnames, filenames in os.walk(tests_root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in sorted(filenames):
+            if not fn.endswith(".py"):
+                continue
+            abs_path = os.path.join(dirpath, fn)
+            lines = _file_lines(abs_path)
+            if lines is None:
+                continue
+            for i, raw in enumerate(lines, start=1):
+                if _ASYNCIO_GET_LOOP_RE.search(raw):
+                    report.add(Finding(
+                        severity="warn",
+                        category="async_test_antipattern",
+                        path=_rel(abs_path),
+                        line_no=i,
+                        message=(
+                            "asyncio.get_event_loop() in a test — prefer "
+                            "asyncio.run(...) to avoid order-dependent "
+                            "'no current event loop' failures"
+                        ),
+                    ))
+
+
 # Frontend skipped tests — describe.skip / it.skip / test.skip / .todo
 _FE_SKIP_RE = re.compile(r"(describe|it|test)\.(skip|todo)\b")
 
@@ -358,6 +395,7 @@ def main() -> int:
     check_progress_log_size(report)
     check_legacy_strings(report)
     check_skipped_tests(report)
+    check_async_test_antipatterns(report)
     check_frontend_skipped_tests(report)
 
     if report.findings:

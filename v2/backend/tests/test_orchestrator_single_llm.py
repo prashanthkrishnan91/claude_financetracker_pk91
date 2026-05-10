@@ -26,15 +26,22 @@ async def test_single_llm_call_increments_counter(monkeypatch):
         user_id=uuid4(), anthropic_api_key="fake-key"
     )
 
+    # ``_single_llm_call`` retries-once and falls back when the LLM returns
+    # no cards, so a happy-path test must supply a non-empty ``cards`` list.
+    valid_response = {
+        "summary": "ok",
+        "cards": [{"ticker": "AAPL", "action": "HOLD", "conviction": 0.0}],
+    }
+
     async def _fake_ask(**kwargs):
-        return {"summary": "ok", "cards": []}
+        return valid_response
 
     orch._llm.ask_json = _fake_ask  # type: ignore[assignment]
 
     assert orch._llm_call_count == 0
     out = await orch._single_llm_call({"portfolio": [{"ticker": "AAPL"}]})
     assert orch._llm_call_count == 1
-    assert out == {"summary": "ok", "cards": []}
+    assert out == valid_response
 
 
 @pytest.mark.asyncio
@@ -55,7 +62,10 @@ async def test_second_llm_call_is_blocked(monkeypatch):
     async def _fake_ask(**kwargs):
         nonlocal call_count
         call_count += 1
-        return {"summary": "first", "cards": []}
+        return {
+            "summary": "first",
+            "cards": [{"ticker": "AAPL", "action": "HOLD", "conviction": 0.0}],
+        }
 
     orch._llm.ask_json = _fake_ask  # type: ignore[assignment]
 
@@ -77,7 +87,8 @@ def test_llm_semaphore_is_binary():
 
 @pytest.mark.asyncio
 async def test_missing_api_key_does_not_bump_counter(monkeypatch):
-    """If no API key is configured, the LLM stage is a no-op — counter stays zero."""
+    """If no API key is configured, the LLM stage is a no-op for the counter
+    and emits the deterministic-fallback recs (never returns {})."""
     from app.services.agents import orchestrator as orch_mod
 
     mock_db = MagicMock()
@@ -86,5 +97,8 @@ async def test_missing_api_key_does_not_bump_counter(monkeypatch):
 
     orch = orch_mod.AgentOrchestrator(user_id=uuid4(), anthropic_api_key="")
     out = await orch._single_llm_call({"portfolio": [{"ticker": "AAPL"}]})
-    assert out == {}
     assert orch._llm_call_count == 0
+    assert orch._fallback_used is True
+    # Deterministic-fallback path must yield a non-empty response shape.
+    assert out, "missing API key path must not return {}; expected fallback recs"
+    assert "cards" in out

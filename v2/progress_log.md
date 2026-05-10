@@ -1,4 +1,14 @@
 
+## 2026-05-10 — Intel v3 Living Cockpit Status Reconciliation + Intel v4 Upgrade Path (Level 2, docs only)
+
+- Adds `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_and_Intel_v4_Upgrade_Path.md` as the canonical roadmap bridge between Draft2 (Anthropic Finance Agent Addendum), Draft3 (Living Investment Cockpit Addendum), the Phase 14 SEC / valuation / PriceBand reality, and the eventual full redesign.
+- Explicitly acknowledges current SEC EDGAR + CompanyFacts ingestion, source-linked `research_artifact_facts`, Phase 14A/14B coverage diagnostics, Phase 14C/14C.1 FY EPS earnings yield (shadow), and Phase 14D PriceBand classification (shadow). Reconciliation, not duplication: future prompts must not propose these as new ideas.
+- Defines the Unified Intelligence Spine (Ingestion → Source Governance → Research Artifacts → Eval & Replay → Deterministic Policy → Deploy → Watchtower → Certified-Snapshot UI). Every external tool must land on a stage of this spine or be rejected.
+- Maps external references (TradingAgents, last30days-skill, OpenBB, Microsoft Qlib, K-Dense scientific-agent-skills, Anthropic financial-services, Xynth, EdgarTools, sec-edgar-downloader / sec-api, FinanceBench / Fin-RATE / FinRetrieval, vectorbt / PyBroker / Alphalens / QuantStats / LEAN / NautilusTrader / FinRL, PyPortfolioOpt / skfolio / Riskfolio-Lib, FinGPT / FinRobot, Quiver Quantitative / Unusual Whales, FinChat) into existing Intel v3 lanes with explicit absorb / defer / reject verdicts.
+- Adds documentation-only modules: SEC Company Fundamentals Lane Maturity Ladder, Finance QA Eval Harness, Signal Registry / Feature Store Extension, Quant Replay / Signal Validation Lab, Research Artifact Workers + Debate Layer, Alternative Data / Narrative / Flow Lane, Deploy Optimizer Research Lane, Watchtower Trigger Governance, Redesign-Ready Product Information Architecture, Updated Sequencing, Promotion Gates, Anti-Drift Rule.
+- Preserves deterministic decision authority: `decide()` remains the sole owner of visible Buy/Hold/Trim/Sell. No LLM/agent path to visible decisions, Deploy amounts, Watchtower triggers, price targets, or fair values. No auto-trading. No broker execution. No day-trading pivot. UI stays plain-English. Missing/stale/weak/conflicting evidence suppresses; never fabricates. Current SEC/valuation/PriceBand shadow work continues unchanged.
+- No backend / frontend / DB / provider / env / dependency changes. Only HANDOFF.md and this progress entry plus the new addendum file are touched.
+
 ## 2026-05-07 — Phase 7A: SEC CompanyFacts Financial Evidence v1 (Level 2)
 
 - Phase 7A upgrades SEC-backed Earnings Reviewer artifacts from filing-metadata-only evidence to source-linked XBRL financial metric observations from the official SEC CompanyFacts API. Still no artifact consumption. Still no visible decision change. safe_for_decision remains false.

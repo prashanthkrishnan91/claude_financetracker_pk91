@@ -122,8 +122,7 @@ class TestEndpointFlagGating:
         with patch("app.routers.diagnostics.get_settings", return_value=settings), \
              patch("app.routers.diagnostics.get_supabase_client", return_value=MagicMock()), \
              patch("app.routers.diagnostics.summarize_recent_research_artifacts", return_value=summary):
-            coro = observe_research_artifacts(payload=payload, user=user)
-            return asyncio.get_event_loop().run_until_complete(coro)
+            return asyncio.run(observe_research_artifacts(payload=payload, user=user))
 
     def test_observability_flag_off_raises_403(self):
         settings = _settings_for_endpoint(observability_enabled=False)
@@ -140,9 +139,7 @@ class TestEndpointFlagGating:
         with patch("app.routers.diagnostics.get_settings", return_value=settings), \
              patch("app.routers.diagnostics.get_supabase_client", return_value=MagicMock()):
             with pytest.raises(HTTPException) as exc_info:
-                asyncio.get_event_loop().run_until_complete(
-                    observe_research_artifacts(payload=payload, user=user)
-                )
+                asyncio.run(observe_research_artifacts(payload=payload, user=user))
         assert exc_info.value.status_code == 403
         assert "INTEL_V3_RESEARCH_ARTIFACT_OBSERVABILITY_ENABLED" in str(exc_info.value.detail)
 
@@ -197,9 +194,7 @@ class TestEndpointInputGuardrails:
         with patch("app.routers.diagnostics.get_settings", return_value=settings), \
              patch("app.routers.diagnostics.get_supabase_client", return_value=MagicMock()), \
              patch("app.routers.diagnostics.summarize_recent_research_artifacts", side_effect=fake_summarize):
-            asyncio.get_event_loop().run_until_complete(
-                observe_research_artifacts(payload=payload, user=user)
-            )
+            asyncio.run(observe_research_artifacts(payload=payload, user=user))
 
     def test_tickers_capped_to_10(self):
         settings = _settings_for_endpoint()
@@ -276,9 +271,7 @@ class TestEndpointResponseShape:
              patch("app.routers.diagnostics.get_supabase_client", return_value=MagicMock()), \
              patch("app.routers.diagnostics.summarize_recent_research_artifacts",
                    return_value=summary or _fake_summary()):
-            return asyncio.get_event_loop().run_until_complete(
-                observe_research_artifacts(payload=payload, user=user)
-            )
+            return asyncio.run(observe_research_artifacts(payload=payload, user=user))
 
     def test_response_has_required_counter_fields(self):
         resp = self._get_response()
@@ -297,8 +290,11 @@ class TestEndpointResponseShape:
 
     def test_response_has_no_raw_payload_field(self):
         resp = self._get_response()
-        forbidden_keys = {"artifact_payload", "payloads", "raw_rows", "source_url",
-                          "source_urls", "quote_or_excerpt", "facts", "excerpts"}
+        forbidden_keys = {
+            "artifact_payload", "payloads", "raw_rows", "source_url",
+            "source_urls", "quote_or_excerpt", "facts", "excerpts",
+            "structured_payload", "raw_metric_values", "raw_companyfacts",
+        }
         overlap = forbidden_keys & set(resp.keys())
         assert not overlap, f"Response contains forbidden raw-data fields: {overlap}"
 

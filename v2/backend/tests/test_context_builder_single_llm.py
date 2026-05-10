@@ -9,10 +9,30 @@ These tests lock in the invariant that broke the AI pipeline:
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
 import pytest
+
+
+def _orchestrator_mock_db(run_id: str) -> MagicMock:
+    """Mock supabase client that satisfies orchestrator's update + verify chain.
+
+    ``_run_agent_runs_update`` issues an UPDATE followed by a SELECT to
+    confirm at least one row matched. A bare ``MagicMock`` returns
+    ``len(verify.data) == 0`` (MagicMock.__len__ default), tripping the
+    "matched zero rows" guardrail. This helper wires the verify path to
+    return a single-row payload so the test exercises real orchestrator
+    flow rather than the schema-fallback branch.
+    """
+    db = MagicMock()
+    db.table.return_value.update.return_value.eq.return_value.eq.return_value.execute.return_value = MagicMock()
+    # SELECT id,status used by _update_and_verify
+    db.table.return_value.select.return_value.eq.return_value.eq.return_value.limit.return_value.execute.return_value = (
+        SimpleNamespace(data=[{"id": run_id, "status": "running"}])
+    )
+    return db
 
 
 # ── Context builder shape ───────────────────────────────────────────────────
@@ -127,8 +147,7 @@ class TestOrchestratorSingleCall:
         """No positions → no LLM call, run marked completed with no_data."""
         from app.services.agents import orchestrator as orch_mod
 
-        mock_db = MagicMock()
-        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        mock_db = _orchestrator_mock_db("run-1")
         monkeypatch.setattr(orch_mod, "get_supabase_client", lambda: mock_db)
         monkeypatch.setattr(
             orch_mod, "build_portfolio_context",
@@ -164,8 +183,7 @@ class TestOrchestratorSingleCall:
         """
         from app.services.agents import orchestrator as orch_mod
 
-        mock_db = MagicMock()
-        mock_db.table.return_value.update.return_value.eq.return_value.execute.return_value = MagicMock()
+        mock_db = _orchestrator_mock_db("run-2")
         monkeypatch.setattr(orch_mod, "get_supabase_client", lambda: mock_db)
         monkeypatch.setattr(
             orch_mod, "build_portfolio_context",

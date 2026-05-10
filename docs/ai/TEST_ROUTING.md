@@ -72,6 +72,26 @@ Do not merge without targeted coverage for the slice's relevant invariants. Comm
 - No raw metric / threshold / shadow label leakage in visible UI
 - No price target / fair value / intrinsic value text in visible surfaces
 
+## Test infrastructure invariants
+
+Two classes of failure look like product bugs but are actually test-infra bugs.
+Catch them at PR time rather than chasing assertions:
+
+- **Order-dependent async tests.** Never use `asyncio.get_event_loop()`
+  inside a test. In a pytest-asyncio suite the default loop is created
+  and closed per async test, so a sync test that grabs the default loop
+  passes in isolation but fails after any async test runs first
+  (`RuntimeError: There is no current event loop in thread 'MainThread'`).
+  Use `asyncio.run(...)` (or explicit `asyncio.new_event_loop()` +
+  `asyncio.set_event_loop(...)`) instead. The hygiene audit flags this.
+- **Source-grep tests for forbidden field names.** Asserting
+  `"forbidden_key" not in <module source>` is fragile: it conflates
+  legitimate row reads (`row.get("structured_payload")`) with response
+  exposure. Prefer asserting on the runtime response shape (e.g.
+  `forbidden_keys & set(resp.keys())`) — see
+  `tests/test_intel_v3_phase4_artifact_observability_endpoint.py
+  ::TestEndpointResponseShape::test_response_has_no_raw_payload_field`.
+
 ## Runtime validation
 
 Required only when deployment or user-visible behavior changes (e.g., visible decision authority, snapshot shape, UI surface, provider behavior). Not required for backend-only scaffolds gated off by default.

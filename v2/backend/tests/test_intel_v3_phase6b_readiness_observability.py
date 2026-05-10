@@ -831,17 +831,12 @@ class TestEndpointNewFields:
         ]:
             assert field_name in src, f"Missing Phase 7A metric counter in endpoint response: {field_name}"
 
-    def test_endpoint_metric_fields_not_raw_payloads(self):
-        """Phase 7A counter fields are aggregate counts — endpoint source must not return raw payloads."""
-        import os
-        diagnostics_path = os.path.join(
-            os.path.dirname(__file__), "..", "app", "routers", "diagnostics.py"
-        )
-        src = open(diagnostics_path).read()
-        for forbidden in ["structured_payload", "source_url", "quote_or_excerpt"]:
-            assert forbidden not in src, (
-                f"Endpoint must not return raw artifact field: {forbidden}"
-            )
+    # Removed test_endpoint_metric_fields_not_raw_payloads:
+    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
+    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
+    # which asserts directly on the runtime response shape rather than
+    # grepping diagnostics.py source (the latter conflated legitimate row
+    # reads like row.get("structured_payload") with response leakage).
 
 
 # ── AC 19: No frontend/page-load path references endpoint ────────────────────

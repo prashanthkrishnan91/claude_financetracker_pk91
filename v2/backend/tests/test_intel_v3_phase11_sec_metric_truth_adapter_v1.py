@@ -34,7 +34,9 @@ Acceptance criteria verified by this file:
 18. New tests cover governance gate, readiness status handling, non-company
     exclusions, blocked ticker behavior, and no LLM/provider/raw-payload leakage.
     (This entire file.)
-19. HANDOFF.md is updated with Phase 11 summary. (Checked by test_handoff_updated.)
+19. HANDOFF.md exists. (Checked by TestHandoffUpdated.test_handoff_file_exists.
+    The phase-mention assertions were retired with the HANDOFF current-state
+    convention — see docs/ai/HANDOFF.md and docs/ai/REPO_HYGIENE.md.)
 20. Final PR summary includes exact tests and self-audit. (Ensured by pre-PR workflow.)
 
 Additional invariants verified:
@@ -1037,20 +1039,16 @@ class TestGovernanceGateComprehensive:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class TestHandoffUpdated:
+    """The current HANDOFF convention (see docs/ai/HANDOFF.md and
+    docs/ai/REPO_HYGIENE.md) keeps the file as compact current state, not a
+    phase-by-phase log. The Phase-11 / SEC-Metric-Truth-Adapter mention
+    assertions were retired with the convention change; only the
+    file-exists smoke check remains here."""
+
     _HANDOFF = pathlib.Path(__file__).parent.parent.parent.parent / "docs/ai/HANDOFF.md"
 
     def test_handoff_file_exists(self) -> None:
         assert self._HANDOFF.exists(), "HANDOFF.md file must exist"
-
-    def test_handoff_mentions_phase11(self) -> None:
-        content = self._HANDOFF.read_text(encoding="utf-8")
-        assert "Phase 11" in content, "HANDOFF.md must mention Phase 11"
-
-    def test_handoff_mentions_sec_metric_truth_adapter(self) -> None:
-        content = self._HANDOFF.read_text(encoding="utf-8")
-        assert "SEC Metric Truth Adapter" in content, (
-            "HANDOFF.md must mention SEC Metric Truth Adapter"
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

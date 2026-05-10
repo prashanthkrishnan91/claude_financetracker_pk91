@@ -581,9 +581,6 @@ class TestFallbackShape:
 def _async_value(value):
     """Return an awaitable that resolves to ``value`` — used to mock async
     methods on MagicMocks."""
-    fut: asyncio.Future = asyncio.get_event_loop().create_future() \
-        if asyncio.get_event_loop().is_running() else asyncio.new_event_loop().create_future()
-    # Simpler: return a coroutine factory via a lambda stored on the MagicMock.
     async def _coro():
         return value
     return _coro()

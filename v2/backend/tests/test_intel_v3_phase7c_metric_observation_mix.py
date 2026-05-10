@@ -719,11 +719,11 @@ class TestEndpointNewFields:
         assert '"by_metric_observation_form"' in src
         assert '"artifacts_with_companyfacts_metric_observations_count"' in src
 
-    def test_observe_endpoint_does_not_expose_raw_values_key(self):
-        """Phase 7C: forbidden raw-data keys must not be in the observe endpoint response."""
-        src = _read_source_file("app/routers/diagnostics.py")
-        for bad_key in ['"raw_metric_values"', '"structured_payload"', '"raw_companyfacts"']:
-            assert bad_key not in src, f"forbidden key found in endpoint: {bad_key}"
+    # Removed test_observe_endpoint_does_not_expose_raw_values_key:
+    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
+    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
+    # which asserts directly on the runtime response shape rather than
+    # grepping diagnostics.py source.
 
     def test_artifact_observability_does_not_import_decide(self):
         """Invariant: artifact_observability must not import decide()."""

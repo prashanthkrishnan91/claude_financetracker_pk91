@@ -1,4 +1,55 @@
 
+## 2026-05-10 — Intel v3 Living Cockpit Status Reconciliation + Intel v4 Upgrade Path (Level 2, docs only)
+
+### Status
+Documentation-only roadmap bridge. Adds
+`artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_and_Intel_v4_Upgrade_Path.md`
+as the **current canonical roadmap bridge** between Draft2 (Anthropic Finance
+Agent Addendum) + Draft3 (Living Investment Cockpit Addendum) and the Phase 14
+SEC / valuation / PriceBand reality already in production. Maps every external
+finance/trading reference (TradingAgents, last30days-skill, OpenBB, Microsoft
+Qlib, K-Dense, Anthropic financial-services, Xynth, EdgarTools, sec-edgar-
+downloader / sec-api, FinanceBench / Fin-RATE / FinRetrieval, vectorbt /
+PyBroker / Alphalens / QuantStats / LEAN / NautilusTrader / FinRL,
+PyPortfolioOpt / skfolio / Riskfolio-Lib, FinGPT / FinRobot, Quiver Quantitative
+/ Unusual Whales, FinChat) into existing Intel v3 lanes. Defines the Unified
+Intelligence Spine, SEC Lane Maturity Ladder, Finance QA Eval Harness, Signal
+Registry / Feature Store, Quant Replay Lab, Research Artifact Workers + Debate
+Layer, Alt-Data Lane, Deploy Optimizer Research Lane, Watchtower Trigger
+Governance, Redesign-Ready IA, Updated Sequencing, Promotion Gates, and Anti-
+Drift Rule.
+
+### Why this is a bridge, not a rewrite or V4 feature list
+- Draft3 sequencing remains correct; Phases 14A–14D are executing it.
+- A rewrite would orphan in-flight SEC / valuation / PriceBand work.
+- An external "V4 features" list would create exactly the orphan-tool drift the
+  addendum forbids (§16 Anti-Drift Rule).
+- The addendum is therefore additive: it acknowledges current reality, raises
+  the roadmap ceiling, and constrains future prompts.
+
+### Files changed
+- `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_and_Intel_v4_Upgrade_Path.md` (new — 16 sections + cross-references + closing invariant).
+- `docs/ai/HANDOFF.md` (this entry).
+- `v2/progress_log.md` (concise documentation-only entry).
+
+### Confirmations
+- Supabase SQL required: No.
+- UI changes: No.
+- Provider integration: No.
+- Visible behavior change: No.
+- New dependencies: No.
+- Code behavior change: No.
+- Deterministic decision authority preserved: Yes — restated in addendum
+  closing invariant.
+- Current SEC / valuation / PriceBand shadow work paused or replaced: No —
+  explicitly continues.
+
+Use the new addendum as the source-of-truth bridge for any external
+intelligence ideas, SEC / valuation status, future Deploy / Watchtower scope,
+and the eventual full redesign. New tools, lanes, or surfaces must be mapped
+into an existing lane, deferred with rationale, or rejected — not chartered as
+orphan features.
+
 ## 2026-05-09 — Phase 14D: PriceBand Shadow Policy v1 — backend governance + shadow diagnostic (Level 2)
 
 ### Status

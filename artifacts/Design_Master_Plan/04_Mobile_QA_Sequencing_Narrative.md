@@ -248,7 +248,7 @@ For each PR: scope, model, risk, UI budget, why this order, how to avoid breakin
 | 14 | **Empty / loading / error pass.** Replace generic states with the "Quiet states" / "Composing intelligence" spec. | Codex | Low | 4 | Polish; lands late because each surface has its own empty state. | Existing fallback behaviors; no logic change. |
 | 15 | **Iconography swap.** Apply the bespoke top-level intent icons + heavier action icons. | Codex | Low | 3 | Final aesthetic detail. | Accessibility; ensure aria-labels remain. |
 
-After each PR: **Codex cheap visual merge gate** per `docs/ai/skills/ui_fix.md`.
+After each PR: **Codex cheap visual merge gate** per the Plain-English UI Pack and matching UI build archetype in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md`.
 
 After any Medium-High or High PR: **stop the Sonnet session**; bring the PR back to ChatGPT/Codex for review.
 
@@ -275,7 +275,7 @@ Before PR #1 starts:
 
 ## 20. Design QA Checklist
 
-Every UI PR before merge must pass this checklist. The merge gate (Codex per `docs/ai/skills/ui_fix.md`) reads this list against the diff.
+Every UI PR before merge must pass this checklist. The merge gate (Codex per the Plain-English UI Pack in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md`) reads this list against the diff.
 
 ### 20.1 Visual quality
 

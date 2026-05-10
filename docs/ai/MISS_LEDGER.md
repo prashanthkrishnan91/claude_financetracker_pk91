@@ -21,6 +21,23 @@ Follow-up needed:
 
 ---
 
+### 2026-05-10 — Workflow/setup asset bloat across root, .claude, docs/ai, and experimental folders
+
+Repo: claude_financetracker_pk91
+Area: Workflow architecture hygiene
+Severity: Level 2 workflow miss
+Miss: Repo accumulated duplicated/orphaned workflow/setup assets — lowercase `claude.md` conflicting with canonical `CLAUDE.md`, `.claude-flow/` capabilities/config from RuFlo V3, ~30 claude-flow skills in `.claude/skills/` (agentdb-*, v3-*, sparc, swarm-*, github-*, hooks-automation, pair-programming, reasoningbank-*, skill-builder, stream-chain, verification-quality, browser), pre-OS-v4 numbered docs in `.claude/`, `graphify-out/` only referenced by the deleted `claude.md`, `tasks/todo.md` only referenced by the deleted `claude.md`, dated transition handoff `HANDOFF_2026-05-10_OS_V4_CONSOLIDATION.md`, duplicate process docs (`PROMPT_BRIEF_TEMPLATE`, `TEST_SELECTOR`, `PR_REVIEW_CHECKLIST`, `CLAUDE_WORKFLOW_KIT`, `CLAUDE_PERSONAL_SKILLS`, `CLAUDE_HOOKS_ROADMAP`, `SUBAGENTS_ROADMAP`, `CONTEXT_MANAGEMENT`, `GITHUB_LABELS`, `HOOK_SAFETY`, `MANUAL_ACTIONS_CHECKLIST`, `UI_BASELINE`, `USAGE_LEDGER`, `PERMISSIONS_AND_MEMORY_BOUNDARIES`, `AI_OS_MANIFEST`, `NEW_REPO_BOOTSTRAP`), one-off `INTEL_V3_FINANCE_AGENT_SKILL_PACK_AUDIT.md` audit, and legacy `docs/ai/skills/` docs-style skill router superseded by `.claude/skills/`. Net: ~75 files removed.
+Impact: Bloated workflow surface confused canonical OS v4 entrypoints, made `CLAUDE.md` anchors unreliable (broken `docs/ai/skills/README.md` ref), and duplicated rules across multiple owners.
+What caught it: PK requested a cross-repo workflow hygiene cleanup.
+Root cause: Workflow/setup assets accumulated organically across multiple OS revisions and tool installations (claude-flow / v3 packages) without periodic pruning.
+What should catch it next time: After any OS version transition, run a workflow-asset reference scan and delete orphans. Do not install third-party tool skills/agents into `.claude/` unless they're routed by canonical OS docs. Bootstrap docs (`AI_OS_MANIFEST`, `NEW_REPO_BOOTSTRAP`) should not encourage copying every doc into new repos.
+One-off or repeated: First major workflow cleanup; pattern of accumulation is repeated.
+Promotion target: Add a periodic "workflow surface scan" step to OS_LEARNING_PROTOCOL or workflow-retrospective skill.
+Action taken: Deleted ~75 stale/duplicate/orphaned workflow assets in PR; updated `CLAUDE.md` to drop the broken `docs/ai/skills/README.md` anchor and point at `.claude/skills/` directly; recorded this entry. Note: `docs/ai/HANDOFF.md` exceeded ~378k chars and could not be updated in-place via the GitHub Contents API; cleanup is documented here and in the PR summary instead.
+Follow-up needed: After 1–2 PRs verify nothing depends on the removed claude-flow tooling. Some empty/orphaned files may remain inside deleted skill folders (only their `SKILL.md` was removed) — clean those up opportunistically.
+
+---
+
 ## Seed entries
 
 ### 2026-05-07 — Old-format prompt after OS v2

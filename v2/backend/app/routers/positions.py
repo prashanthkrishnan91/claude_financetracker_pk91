@@ -198,17 +198,3 @@ async def delete_position(
 
     if not result.data:
         raise HTTPException(status_code=404, detail=f"Position {ticker} not found")
-
-
-@router.post("/seed-v1", response_model=list[PositionResponse], status_code=status.HTTP_201_CREATED)
-async def seed_from_v1(
-    user: AuthenticatedUser = Depends(get_current_user),
-):
-    """Seed positions from v1 bootstrap data (data/portfolio.py).
-
-    This is a one-time migration endpoint for existing v1 users.
-    Skips tickers that already exist.
-    """
-    from ..services.migration_service import seed_v1_positions
-
-    return await seed_v1_positions(user_id=user.id)

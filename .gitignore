@@ -9,19 +9,6 @@ build/
 venv/
 env/
 
-# ── v1 runtime files (auto-created, never committed) ─────────────────────────
-tx_store.json
-crypto_overrides.json
-rec_history.json
-deposit_log.json
-targets.json
-price_cache.json
-recon_log.json
-holdings_cache.json
-plaid_snapshot.json
-decision_log.json
-system_state.json
-
 # ── v2 backend ────────────────────────────────────────────────────────────────
 v2/backend/.env
 v2/backend/.env.*
@@ -41,7 +28,6 @@ v2/frontend/.env.*.local
 !.env.example
 *.csv
 secrets.toml
-.streamlit/secrets.toml
 
 # ── IDE / OS ──────────────────────────────────────────────────────────────────
 .DS_Store

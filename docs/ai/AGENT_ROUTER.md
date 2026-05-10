@@ -1,14 +1,14 @@
 # Agent Router — Finance
 
-Select relevant reviewer agents. Do not run every agent by default.
+Select relevant reviewer agents. Do not run every agent by default. Reviewer agents return evidence/blockers/risks; they do not write code and they must not bloat builder context.
 
 ## Principles
 
-- Use only relevant agents.
+- Use only relevant agents for the change at hand.
 - Builder implements; agents review.
-- Reviewer agents return evidence/blockers/risks, not code edits.
-- Do not run every agent by default.
-- Prefer fewer high-signal reviewers over many generic reviewers.
+- Prefer **fewer high-signal reviewers** over many generic reviewers.
+- Reviewer agents must not become a substitute for repo-native safety packs or for the prompt-compression standard.
+- Subagents are for independent review and context isolation, not for repeated prompt boilerplate.
 
 ## Default routing
 
@@ -34,10 +34,10 @@ Select relevant reviewer agents. Do not run every agent by default.
 
 ## Finance-specific routing
 
-- `policy-authority-reviewer` — decision / snapshot / action changes.
-- `data-truth-reviewer` — evidence / Data Truth / source mapping.
-- `sql-runtime-reviewer` — SQL / env / runtime cert / persistence.
-- `plain-english-ui-reviewer` — visible UI / copy / card changes.
+- `policy-authority-reviewer` — decision / snapshot / action changes (covers Deterministic Decision Authority Pack).
+- `data-truth-reviewer` — evidence / Data Truth / source mapping (covers Data Truth / Evidence Suppression Pack).
+- `sql-runtime-reviewer` — SQL / env / runtime cert / persistence (covers Runtime/API Contract Pack and SQL/Persistence Manual Action Pack).
+- `plain-english-ui-reviewer` — visible UI / copy / card changes (covers Plain-English UI Pack).
 - `roadmap-guardian` — Deploy / Watchtower direction.
 
 ## High-confidence merge / release gating
@@ -49,7 +49,7 @@ Select relevant reviewer agents. Do not run every agent by default.
 
 - Running every agent on every PR.
 - Using reviewer agents to write code.
-- Ignoring agent recommendations because the PR is small.
+- Pasting reviewer agent rules into builder prompts (use the safety pack name instead).
 - Adding new reviewer agents without recording effectiveness in `AGENT_EFFECTIVENESS_LEDGER.md`.
 - Importing external agent libraries wholesale.
 - Asking reviewers to report only blockers at the start (use coverage-first audits).

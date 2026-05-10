@@ -80,7 +80,7 @@ Auto-stops polling when status is `completed` or `failed`.
 ## Database Design Principles
 
 - All monetary values use `NUMERIC(18,6)` — zero float drift
-- SHA-256 canonical fingerprints for transaction dedup (carried from v1)
+- SHA-256 canonical fingerprints for transaction dedup
 - JSONB for flexible snapshot data and allocation breakdowns
 - RLS on every user-scoped table
 - `updated_at` triggers on mutable tables

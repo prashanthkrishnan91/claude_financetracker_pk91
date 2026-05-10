@@ -1,3 +1,0 @@
-# Root requirements — Streamlit Cloud reads this file.
-# v1 dependencies (Portfolio War Room)
--r v1/requirements.txt

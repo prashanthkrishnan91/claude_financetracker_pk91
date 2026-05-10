@@ -33,7 +33,6 @@ def _parse_crypto_pdf(file_bytes: bytes) -> dict[str, dict]:
       "XRP      1.066       XRP  $1.47     0.06%"
 
     Returns {ticker: {shares, avg_cost}} where avg_cost is 0.0 (not in PDF).
-    Ported from v1/data_engine.py parse_crypto_pdf().
     """
     overrides: dict[str, dict] = {}
     try:

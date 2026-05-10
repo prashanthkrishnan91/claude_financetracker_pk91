@@ -1,8 +1,7 @@
 """CSV import service — Robinhood CSV ingestion with SHA-256 dedup.
 
-Ported from v1 data_engine.py with the canonical fingerprinting logic
-that ensures the same transaction never gets imported twice, regardless
-of date/number formatting differences between CSV exports.
+Canonical fingerprinting ensures the same transaction never gets imported
+twice, regardless of date/number formatting differences between CSV exports.
 """
 
 from __future__ import annotations

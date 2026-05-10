@@ -1,10 +1,10 @@
-# Portfolio Intelligence Platform v2
+# Portfolio Intelligence Platform — v2
 
-A ground-up rebuild of the Portfolio War Room as a production-grade serverless platform.
+The active production codebase. Personal portfolio intelligence cockpit with deterministic Buy/Hold/Trim/Sell decisions, sourced evidence, and a plain-English UI.
 
-**Stack:** FastAPI (Python) + Next.js 14 (TypeScript) + Supabase (PostgreSQL) + Tailwind CSS
+**Stack:** FastAPI (Python) + Next.js 14 (TypeScript) + Supabase (PostgreSQL) + Tailwind CSS. Deployed on Railway (backend) and Vercel (frontend).
 
-> **Branch policy**: All development commits go directly to `main`. No feature branches.
+> Roadmap and current product stage are owned by `docs/product/ROADMAP.md`, `docs/product/BUILD_QUEUE.md`, and `docs/ai/HANDOFF.md`. The phase checklist below is historical.
 
 ---
 
@@ -36,8 +36,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed system design.
 - [x] JWT auth middleware (Supabase Auth)
 - [x] Next.js 14 project skeleton (Tailwind, shadcn/ui foundations)
 - [x] Frontend components: PortfolioSummary, HoldingsList, InsightCard, BottomNav
-- [x] v1 migration service (seed 39 positions from bootstrap data)
-- [ ] **BLOCKED**: Supabase project creation (needs user account setup)
+- [x] Supabase project provisioned
 
 ### Phase 2: High-Performance Financial Engine
 - [x] Plaid integration (sync Robinhood holdings) — httpx-based, bypasses plaid-python SDK
@@ -45,7 +44,7 @@ See [docs/architecture.md](docs/architecture.md) for detailed system design.
 - [x] Alpaca Markets integration (real-time price updates)
 - [x] Async price fetching engine (gather + fallback chain: yfinance → Finnhub → Polygon → Alpaca → CoinGecko)
 - [x] Price caching in Supabase price_history table
-- [x] CSV import service (SHA-256 dedup from v1)
+- [x] CSV import service (SHA-256 canonical dedup)
 - [x] PDF statement import (crypto gains tracking)
 - [x] Unit + integration tests for all services (70+ test cases)
 - [x] Deposit tracking and frequency config
@@ -184,7 +183,6 @@ v2/
 | GET | `/api/v1/auth/me` | Get profile |
 | GET | `/api/v1/portfolio/summary` | Dashboard summary |
 | GET | `/api/v1/positions/` | List holdings |
-| POST | `/api/v1/positions/seed-v1` | Migrate v1 data |
 | POST | `/api/v1/prices/batch` | Batch price fetch |
 | GET | `/api/v1/prices/{ticker}/history` | OHLCV chart data |
 | GET | `/api/v1/recommendations/` | Active InsightCards |

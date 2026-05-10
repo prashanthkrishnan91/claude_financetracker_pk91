@@ -1,7 +1,6 @@
 """Recommendation engine — Buy/Sell/Trim/Hold analysis.
 
-Ported from v1 utils/rec_engine.py (v4) with improvements:
-- Database-backed instead of in-memory
+- Database-backed
 - Supports persistence and resolution tracking
 - Enriched with live prices from the concurrent price engine
 - Async-native for non-blocking operation
@@ -55,7 +54,7 @@ from ..models.recommendation import (
 )
 
 
-# ── Classification constants (from v1) ───────────────────────────────────────
+# ── Classification constants ─────────────────────────────────────────────────
 
 INCOME_FOREVER = {"VYM", "SCHD"}
 DCA_ALWAYS = {"VOO", "QQQ", "VTI"}
@@ -314,7 +313,7 @@ def invalidate_recommendations_aggregate_cache(
     )
 
 
-# ── Rec generation (ported from v1 generate_rec) ────────────────────────────
+# ── Rec generation ──────────────────────────────────────────────────────────
 
 @dataclass
 class RecResult:

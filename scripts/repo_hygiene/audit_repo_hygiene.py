@@ -45,19 +45,24 @@ SCAN_EXTENSIONS = {
     ".sh",
 }
 
+# Directories to skip outright. Note: dot-directories are *not* skipped by
+# default — repo-control dirs like `.github` and `.claude` can hide stale
+# deployment / workflow references. Only skip noisy/generated dot-dirs here.
 SKIP_DIRS = {
     ".git",
-    "node_modules",
     ".next",
-    "out",
-    "__pycache__",
     ".pytest_cache",
     ".mypy_cache",
     ".venv",
+    ".kiro",
+    ".claude-flow",
+    "node_modules",
+    "out",
+    "__pycache__",
     "venv",
+    "env",
     "dist",
     "build",
-    ".claude-flow",
     "graphify-out",
 }
 
@@ -112,6 +117,16 @@ LEGACY_PATTERNS = (
     ("seed_v1_positions", "Reference to removed migration helper"),
     ("seed-v1", "Reference to removed seed-v1 router endpoint"),
     ("migration_service", "Reference to removed migration_service module"),
+    # Stale historical-v1 wording. These are narrow English phrases that
+    # only appear when documentation still talks about the retired product.
+    # They will not match `/api/v1/...`, `_v1` policy modules, schema
+    # versions, or `Plan_v1.pdf`.
+    ("carried from v1", "Stale 'carried from v1' historical wording"),
+    ("from v1", "Stale 'from v1' historical wording"),
+    ("v1 migration", "Stale 'v1 migration' wording"),
+    ("v1 bootstrap", "Stale 'v1 bootstrap' wording"),
+    ("v1 users", "Stale 'v1 users' wording"),
+    ("v1-specific", "Stale 'v1-specific' wording"),
 )
 
 # Stale paths whose mere presence is a finding.
@@ -164,8 +179,10 @@ def _rel(path: str) -> str:
 def _iter_repo_files() -> list[str]:
     out: list[str] = []
     for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
-        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
-        # Re-allow specific top-level dotfiles we care about (none currently).
+        # Skip only the explicit SKIP_DIRS list (which already enumerates
+        # the noisy dot-dirs we care about). `.github` and `.claude` are
+        # intentionally NOT skipped so workflow / config files are scanned.
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             ext = os.path.splitext(fn)[1].lower()
             if ext in SCAN_EXTENSIONS:
@@ -257,29 +274,32 @@ def check_skipped_tests(report: Report) -> None:
     tests_root = os.path.join(REPO_ROOT, "v2", "backend", "tests")
     if not os.path.isdir(tests_root):
         return
-    for fn in sorted(os.listdir(tests_root)):
-        if not fn.endswith(".py"):
-            continue
-        abs_path = os.path.join(tests_root, fn)
-        lines = _file_lines(abs_path)
-        if lines is None:
-            continue
-        for i, raw in enumerate(lines, start=1):
-            if not _SKIP_RE.search(raw):
+    # Recurse so future nested test directories are covered.
+    for dirpath, dirnames, filenames in os.walk(tests_root):
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fn in sorted(filenames):
+            if not fn.endswith(".py"):
                 continue
-            # Look at a small window above the match for a conditional guard
-            # (defensive skip), which we treat as legitimate.
-            window_start = max(0, i - 4)
-            window = "".join(lines[window_start:i]).lower()
-            if any(hint in window for hint in CONDITIONAL_SKIP_HINTS):
+            abs_path = os.path.join(dirpath, fn)
+            lines = _file_lines(abs_path)
+            if lines is None:
                 continue
-            report.add(Finding(
-                severity="info",
-                category="skipped_test",
-                path=_rel(abs_path),
-                line_no=i,
-                message="skip/xfail without an obvious conditional guard",
-            ))
+            for i, raw in enumerate(lines, start=1):
+                if not _SKIP_RE.search(raw):
+                    continue
+                # Look at a small window above the match for a conditional
+                # guard (defensive skip), which we treat as legitimate.
+                window_start = max(0, i - 4)
+                window = "".join(lines[window_start:i]).lower()
+                if any(hint in window for hint in CONDITIONAL_SKIP_HINTS):
+                    continue
+                report.add(Finding(
+                    severity="info",
+                    category="skipped_test",
+                    path=_rel(abs_path),
+                    line_no=i,
+                    message="skip/xfail without an obvious conditional guard",
+                ))
 
 
 # Frontend skipped tests — describe.skip / it.skip / test.skip / .todo

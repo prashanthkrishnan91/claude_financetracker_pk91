@@ -1,7 +1,7 @@
 """
 Plaid service — sync holdings from Robinhood via Plaid Investments API.
 
-Design (carried from v1 with improvements):
+Design:
   - Call Plaid at most once per 24h (TTL cache in plaid_sync_log table)
   - Force-pull option for same-day trades
   - Upsert positions in Supabase (Plaid is authoritative for share quantities)

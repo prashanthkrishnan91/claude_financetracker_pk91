@@ -59,3 +59,9 @@ htmlcov/
 
 # ── Claude / tooling internals ────────────────────────────────────────────────
 .claude-flow/
+graphify-out/
+.kiro/
+.opencode.json
+.cursorrules
+.windsurfrules
+GEMINI.md

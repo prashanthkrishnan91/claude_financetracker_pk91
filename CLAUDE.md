@@ -64,7 +64,7 @@ For every non-trivial implementation, bug fix, UI change, provider/runtime chang
 5. Use a reviewer agent only when the change touches its domain (see `docs/ai/AGENT_ROUTER.md`).
 6. Use `docs/ai/TEST_ROUTING.md` to choose the smallest sufficient test tier.
 7. Treat `.claude/hooks/ai_os_advisory.py` reminders as advisory.
-8. Fill `.github/pull_request_template.md` honestly.
+8. Use `.github/pull_request_template.md` exactly and fill it honestly.
 9. Stop and propose a split only when the durable fix genuinely exceeds the current capability slice (see criteria above).
 
 ## Self-learning loop
@@ -134,6 +134,7 @@ Useful command aliases (call only when relevant): `/test-selector`, `/contract-a
 - For Level 2/3 implementation, run `feature-contract` and `golden-scenarios` before coding.
 - Important generated prompts run through `prompt-lint` / `prompt-quality-reviewer` before blind-copy.
 - Coverage-first audits for review prompts.
+- Keep Level 1/2 PR summaries concise; do not add extra long-form sections unless the task is Level 3 or explicitly requests architecture documentation.
 - Every PR summary must include a compact AI usage note. Run `bash scripts/ai/usage_snapshot.sh` before opening a PR and paste the output line into the **AI usage note** field. See `docs/ai/AI_USAGE_TRACKING.md`.
 
 ## Project invariants

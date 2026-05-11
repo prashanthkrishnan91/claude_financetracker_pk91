@@ -231,4 +231,4 @@ For workflow/docs/.claude/.github changes, CI runs:
 - `python3 scripts/repo_hygiene/audit_repo_hygiene.py`
 - `python3 scripts/workflow/certify_v4_1.py`
 
-This is intentionally lightweight and non-product: it validates PR-template anchors, advisory-hook safety posture, and core settings invariants without changing runtime/product authority boundaries.
+This is intentionally lightweight and non-product: it validates PR-template anchors, advisory-hook safety posture, and core settings invariants without changing runtime/product authority boundaries. It runs only when PRs touch workflow surfaces (`.github/**`, `.claude/**`, `docs/ai/**`, `scripts/**`) or via manual dispatch.

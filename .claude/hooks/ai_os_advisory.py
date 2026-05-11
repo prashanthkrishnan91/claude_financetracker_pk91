@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Advisory Claude Code hook reminders for AI Repo OS v2.
+"""Advisory Claude Code hook reminders for AI Repo OS v4.
 
 This script is intentionally non-blocking. It prints reminders only and exits 0.
 No product runtime code, secrets, network calls, or CI behavior are involved.

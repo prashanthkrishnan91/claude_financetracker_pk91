@@ -85,13 +85,13 @@ def finalize_item_actionability(item: DeployPlanItem) -> DeployPlanItem:
     if status != DeployActionabilityStatus.ACTIONABLE_CANDIDATE:
         return replace(item, final_actionability_status=FINAL_SUPPRESSED)
 
-    # ACTIONABLE_CANDIDATE — no dollar amount yet.
-    if item.recommended_dollar_amount is None:
+    # ACTIONABLE_CANDIDATE — no positive dollar amount (None, zero, or negative).
+    if item.recommended_dollar_amount is None or item.recommended_dollar_amount <= 0:
         if item.cash_constraint_status in _CASH_BLOCKING_STATUSES:
             return replace(item, final_actionability_status=FINAL_BLOCKED_CASH)
         return replace(item, final_actionability_status=FINAL_NOT_READY)
 
-    # ACTIONABLE_CANDIDATE with dollar amount — BUY path.
+    # ACTIONABLE_CANDIDATE with positive dollar amount — BUY path.
     if action == "BUY":
         if item.cash_constraint_status == _CASH_PASSED:
             return replace(item, final_actionability_status=FINAL_ACTIONABLE_PENDING_TAX)

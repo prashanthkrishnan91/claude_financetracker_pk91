@@ -431,3 +431,56 @@ def test_plan_builder_tax_wash_sale_placeholders_unchanged():
     assert item.wash_sale_guardrail_status == "not_evaluated_yet"
     # But final status is pending tax (honest about not evaluated)
     assert item.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
+
+
+# ---------------------------------------------------------------------------
+# Tests: non-positive dollar amounts must not produce actionable status
+# ---------------------------------------------------------------------------
+
+def test_buy_zero_dollar_amount_cash_passed_not_ready():
+    """BUY with recommended_dollar_amount=0 and cash passed → not_ready (not actionable)."""
+    item = _item("BUY", recommended_dollar_amount=0.0, cash_constraint_status="passed")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+
+
+def test_buy_negative_dollar_amount_cash_passed_not_ready():
+    """BUY with negative recommended_dollar_amount and cash passed → not_ready."""
+    item = _item("BUY", recommended_dollar_amount=-100.0, cash_constraint_status="passed")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+
+
+def test_buy_zero_dollar_blocked_cash_still_blocked():
+    """BUY with zero dollars and blocked cash → blocked_cash (primary reason preserved)."""
+    item = _item("BUY", recommended_dollar_amount=0.0, cash_constraint_status="blocked_insufficient_cash")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_BLOCKED_CASH
+
+
+def test_trim_zero_dollar_amount_not_ready():
+    """TRIM with zero dollar amount and non-blocking cash → not_ready."""
+    item = _item("TRIM", recommended_dollar_amount=0.0, cash_constraint_status="not_applicable_trim_sell")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+
+
+def test_trim_negative_dollar_amount_not_ready():
+    """TRIM with negative dollar amount and non-blocking cash → not_ready."""
+    item = _item("TRIM", recommended_dollar_amount=-50.0, cash_constraint_status="not_applicable_trim_sell")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+
+
+def test_sell_zero_dollar_amount_not_ready():
+    """SELL with zero dollar amount and non-blocking cash → not_ready."""
+    item = _item("SELL", recommended_dollar_amount=0.0, cash_constraint_status="not_applicable_trim_sell")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+
+
+def test_recommended_dollar_amount_not_mutated_by_zero_check():
+    """Finalization never mutates recommended_dollar_amount even when it's zero."""
+    item = _item("BUY", recommended_dollar_amount=0.0, cash_constraint_status="passed")
+    result = finalize_item_actionability(item)
+    assert result.recommended_dollar_amount == 0.0

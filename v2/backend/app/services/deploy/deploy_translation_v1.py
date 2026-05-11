@@ -30,6 +30,7 @@ from .deploy_contracts import (
 )
 from .deploy_cash_guardrail_v1 import apply_cash_guardrail_to_plan_items
 from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
+from .deploy_finalization_v1 import apply_finalization_to_plan_items
 from .deploy_sizing_contracts import DeploySizingInputBundle
 
 # Intel actions that may become future trade candidates (not HOLD).
@@ -193,6 +194,9 @@ def build_deploy_plan(
         items = apply_cash_guardrail_to_plan_items(bundle=sizing_bundle, items=items)
         cash_guardrail_evaluated = True
 
+    # Finalization always runs — derives final_actionability_status from existing fields.
+    items = apply_finalization_to_plan_items(items)
+
     # Guardrail counters — computed after dollar math so they reflect final state.
     buy_candidates = sum(
         1 for item in items
@@ -251,6 +255,7 @@ def build_deploy_plan(
         dollar_fields_null=dollar_fields_null,
         exact_dollar_math_evaluated=exact_dollar_math_evaluated,
         cash_guardrail_evaluated=cash_guardrail_evaluated,
+        finalization_evaluated=True,
         priceband_not_authority=priceband_not_authority,
         intel_action_preserved=intel_action_preserved,
         schema_version="deploy_v1_scaffold",

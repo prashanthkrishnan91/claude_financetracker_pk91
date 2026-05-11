@@ -11,6 +11,13 @@ In Stage 2.1, exact-dollar math is NOT implemented. These contracts exist to:
 Intel v3 remains the only Buy/Hold/Trim/Sell authority.
 Sizing inputs annotate trust state only — they cannot override Intel decisions,
 create BUY/TRIM/SELL candidates, or make HOLD positions actionable.
+
+Readiness model (three gates, all required for exact_dollar_ready):
+  - sizing_values_ready: cash, portfolio, positions all CERTIFIED with valid numeric values.
+  - target_allocation_ready: every position ticker has a CERTIFIED, valid target allocation.
+  - policy_ready: sizing policy (min-trade, rounding) is CERTIFIED.
+  In Stage 2.1, production-like bundles cannot be exact_dollar_ready because
+  target allocations are NOT_EVALUATED and policy is UNSUPPORTED.
 """
 from __future__ import annotations
 
@@ -32,18 +39,33 @@ class DeploySizingTrustStatus(str, Enum):
 
 class DeploySizingSuppressionReason(str, Enum):
     """Why portfolio-level exact-dollar readiness is suppressed."""
+    # Cash reasons
     MISSING_CASH = "MISSING_CASH"
     STALE_CASH = "STALE_CASH"
     WEAK_CASH = "WEAK_CASH"
     CONFLICTING_CASH = "CONFLICTING_CASH"
-    MISSING_POSITION_VALUE = "MISSING_POSITION_VALUE"
-    STALE_POSITION_VALUE = "STALE_POSITION_VALUE"
+    INVALID_CASH_VALUE = "INVALID_CASH_VALUE"           # CERTIFIED trust but None or negative value.
+    # Portfolio reasons
     MISSING_PORTFOLIO_VALUE = "MISSING_PORTFOLIO_VALUE"
     STALE_PORTFOLIO_VALUE = "STALE_PORTFOLIO_VALUE"
-    CONFLICTING_SIZING_DATA = "CONFLICTING_SIZING_DATA"
+    WEAK_PORTFOLIO_VALUE = "WEAK_PORTFOLIO_VALUE"
+    CONFLICTING_PORTFOLIO_VALUE = "CONFLICTING_PORTFOLIO_VALUE"
+    INVALID_PORTFOLIO_VALUE = "INVALID_PORTFOLIO_VALUE" # CERTIFIED trust but None/zero/negative value.
+    # Position reasons
+    MISSING_POSITION_VALUE = "MISSING_POSITION_VALUE"
+    STALE_POSITION_VALUE = "STALE_POSITION_VALUE"
+    WEAK_POSITION_VALUE = "WEAK_POSITION_VALUE"
+    CONFLICTING_POSITION_VALUE = "CONFLICTING_POSITION_VALUE"
+    INVALID_POSITION_VALUE = "INVALID_POSITION_VALUE"   # CERTIFIED trust but None/invalid value or weight.
+    # Target allocation reasons
     TARGET_ALLOCATION_NOT_EVALUATED = "TARGET_ALLOCATION_NOT_EVALUATED"
+    TARGET_ALLOCATION_MISSING = "TARGET_ALLOCATION_MISSING"   # Position ticker has no allocation entry.
+    TARGET_ALLOCATION_INVALID = "TARGET_ALLOCATION_INVALID"   # CERTIFIED but weight None or out of [0,1].
+    # Policy reasons
     MINIMUM_TRADE_UNSUPPORTED = "MINIMUM_TRADE_UNSUPPORTED"
     ROUNDING_POLICY_UNSUPPORTED = "ROUNDING_POLICY_UNSUPPORTED"
+    # General
+    CONFLICTING_SIZING_DATA = "CONFLICTING_SIZING_DATA"
     SIZING_INPUT_NOT_CERTIFIED = "SIZING_INPUT_NOT_CERTIFIED"
 
 
@@ -65,6 +87,10 @@ class DeployCashInput:
     available_cash_usd: Dollar amount available for new buy orders. None if unknown.
     trust_status: Trust classification for this value.
     source_label: Human-readable source identifier. Not validated by Deploy.
+
+    Value-level guardrails (enforced even when trust_status == CERTIFIED):
+      - available_cash_usd must not be None
+      - available_cash_usd must be >= 0
     """
     available_cash_usd: Optional[float]
     trust_status: DeploySizingTrustStatus
@@ -72,7 +98,12 @@ class DeployCashInput:
 
     @property
     def suppresses_exact_dollar_readiness(self) -> bool:
-        return self.trust_status in _SUPPRESSING_STATUSES
+        if self.trust_status in _SUPPRESSING_STATUSES:
+            return True
+        # Value-level check: CERTIFIED trust but missing or invalid value still suppresses.
+        if self.available_cash_usd is None or self.available_cash_usd < 0:
+            return True
+        return False
 
 
 @dataclass
@@ -83,6 +114,10 @@ class DeployPositionSizingInput:
     current_market_value_usd: Market value of the existing position. None if unknown.
     current_weight: Current portfolio weight as a fraction (0.0–1.0). None if unknown.
     trust_status: Trust classification for this ticker's sizing data.
+
+    Value-level guardrails (enforced even when trust_status == CERTIFIED):
+      - current_market_value_usd must not be None and must be >= 0
+      - current_weight must not be None and must be in [0.0, 1.0]
     """
     ticker: str
     current_market_value_usd: Optional[float]
@@ -92,7 +127,14 @@ class DeployPositionSizingInput:
 
     @property
     def suppresses_exact_dollar_readiness(self) -> bool:
-        return self.trust_status in _SUPPRESSING_STATUSES
+        if self.trust_status in _SUPPRESSING_STATUSES:
+            return True
+        # Value-level checks: CERTIFIED trust but missing or invalid values still suppress.
+        if self.current_market_value_usd is None or self.current_market_value_usd < 0:
+            return True
+        if self.current_weight is None or self.current_weight < 0 or self.current_weight > 1:
+            return True
+        return False
 
 
 @dataclass
@@ -101,6 +143,10 @@ class DeployPortfolioSizingInput:
 
     total_portfolio_value_usd: Sum of all position market values plus cash. None if unknown.
     trust_status: Trust classification.
+
+    Value-level guardrails (enforced even when trust_status == CERTIFIED):
+      - total_portfolio_value_usd must not be None
+      - total_portfolio_value_usd must be > 0
     """
     total_portfolio_value_usd: Optional[float]
     trust_status: DeploySizingTrustStatus
@@ -108,7 +154,12 @@ class DeployPortfolioSizingInput:
 
     @property
     def suppresses_exact_dollar_readiness(self) -> bool:
-        return self.trust_status in _SUPPRESSING_STATUSES
+        if self.trust_status in _SUPPRESSING_STATUSES:
+            return True
+        # Value-level check: CERTIFIED trust but missing or non-positive value still suppresses.
+        if self.total_portfolio_value_usd is None or self.total_portfolio_value_usd <= 0:
+            return True
+        return False
 
 
 @dataclass
@@ -118,7 +169,9 @@ class DeployTargetAllocationInput:
     Stage 2.1 placeholder only — target allocation logic is not yet implemented.
     target_weight: Target portfolio weight (0.0–1.0). None if not defined.
     trust_status: Must be NOT_EVALUATED or UNSUPPORTED in Stage 2.1.
+
     Fabrication guardrail: target_weight must not be set with non-CERTIFIED trust.
+    Math-readiness guardrail: requires CERTIFIED trust, non-None weight, weight in [0,1].
     """
     ticker: str
     target_weight: Optional[float] = None
@@ -131,6 +184,19 @@ class DeployTargetAllocationInput:
         return (
             self.target_weight is not None
             and self.trust_status != DeploySizingTrustStatus.CERTIFIED
+        )
+
+    @property
+    def is_ready_for_math(self) -> bool:
+        """True if trust is CERTIFIED, weight is set, and weight is in [0.0, 1.0].
+
+        In Stage 2.1, production-like target allocations are NOT_EVALUATED so this
+        is always False unless explicitly constructed with synthetic CERTIFIED data.
+        """
+        return (
+            self.trust_status == DeploySizingTrustStatus.CERTIFIED
+            and self.target_weight is not None
+            and 0.0 <= self.target_weight <= 1.0
         )
 
 
@@ -155,13 +221,22 @@ class DeploySizingPolicyPlaceholder:
 class DeploySizingInputBundle:
     """Complete sizing input bundle for one Deploy planning run.
 
-    Aggregates all sizing inputs and computes portfolio-level exact-dollar readiness.
-    Missing inputs suppress readiness; no fabrication is permitted.
+    Aggregates all sizing inputs and computes portfolio-level exact-dollar readiness
+    via three explicit readiness gates:
+
+      sizing_values_ready:      cash, portfolio, positions all CERTIFIED with valid values.
+      target_allocation_ready:  every position ticker has a CERTIFIED valid target allocation.
+      policy_ready:             policy (min-trade, rounding) is CERTIFIED.
+      exact_dollar_ready:       all three gates above are True simultaneously.
+
+    In Stage 2.1, production-like bundles are never exact_dollar_ready because:
+      - target allocations are NOT_EVALUATED (placeholder)
+      - policy is UNSUPPORTED (placeholder)
 
     Invariants (enforced here and in tests):
     - Sizing inputs cannot override Intel action or actionability.
-    - Missing/stale/weak/conflicting/not-evaluated/unsupported inputs suppress
-      exact_dollar_ready.
+    - Missing/stale/weak/conflicting/not-evaluated/unsupported inputs suppress readiness.
+    - CERTIFIED trust with missing or invalid numeric values also suppresses readiness.
     - recommended_dollar_amount and estimated_share_quantity remain None until
       exact-dollar math is implemented in a future stage.
     - Target allocations with non-None values require CERTIFIED trust; otherwise
@@ -176,13 +251,12 @@ class DeploySizingInputBundle:
     schema_version: str = "deploy_sizing_v1_contract"
 
     @property
-    def exact_dollar_ready(self) -> bool:
-        """True only when cash, portfolio, and all known positions are CERTIFIED.
+    def sizing_values_ready(self) -> bool:
+        """True when cash, portfolio, and all known positions have CERTIFIED trust AND valid values.
 
-        Any missing, stale, weak, conflicting, not-evaluated, or unsupported input
-        suppresses readiness. In Stage 2.1 this is always False unless fully-certified
-        synthetic data is provided in tests (to prove the model works correctly).
-        This property is a readiness gate — it does not compute any dollar amounts.
+        Does NOT check target allocations or policy — those are separate gates.
+        This may be True for a production-like Stage 2.1 bundle when all numeric inputs
+        are verified, even though exact_dollar_ready remains False.
         """
         if self.cash is None or self.cash.suppresses_exact_dollar_readiness:
             return False
@@ -193,29 +267,116 @@ class DeploySizingInputBundle:
                 return False
         return True
 
+    @property
+    def target_allocation_ready(self) -> bool:
+        """True when every position ticker has a CERTIFIED, valid, non-fabricated target allocation.
+
+        Vacuously True if there are no positions (nothing to allocate).
+        Always False in production-like Stage 2.1 bundles because target allocations
+        are NOT_EVALUATED placeholders.
+        """
+        for ticker in self.positions:
+            ta = self.target_allocations.get(ticker)
+            if ta is None or not ta.is_ready_for_math:
+                return False
+        return True
+
+    @property
+    def policy_ready(self) -> bool:
+        """True when the sizing policy (min-trade, rounding) is CERTIFIED.
+
+        Always False in Stage 2.1 because policy is UNSUPPORTED by default.
+        """
+        if self.policy is None:
+            return False
+        return self.policy.trust_status == DeploySizingTrustStatus.CERTIFIED
+
+    @property
+    def exact_dollar_ready(self) -> bool:
+        """True only when sizing_values_ready, target_allocation_ready, and policy_ready are all True.
+
+        This is the final gate before exact-dollar math may be computed in a future stage.
+        In Stage 2.1, production-like bundles always return False because target allocations
+        and policy are placeholders. This property is a readiness gate — it never computes
+        any dollar amounts.
+        """
+        return self.sizing_values_ready and self.target_allocation_ready and self.policy_ready
+
     def get_suppression_reasons(self) -> List[DeploySizingSuppressionReason]:
-        """Return all active suppression reasons for this bundle."""
+        """Return all active suppression reasons for this bundle.
+
+        Covers trust-level suppression, value-level suppression, target allocation
+        readiness, and policy readiness. Reasons are deduplicated.
+        """
+        seen: set = set()
         reasons: List[DeploySizingSuppressionReason] = []
 
+        def _add(r: DeploySizingSuppressionReason) -> None:
+            if r not in seen:
+                seen.add(r)
+                reasons.append(r)
+
+        # --- Cash ---
         if self.cash is None or self.cash.trust_status == DeploySizingTrustStatus.MISSING:
-            reasons.append(DeploySizingSuppressionReason.MISSING_CASH)
+            _add(DeploySizingSuppressionReason.MISSING_CASH)
         elif self.cash.trust_status == DeploySizingTrustStatus.STALE:
-            reasons.append(DeploySizingSuppressionReason.STALE_CASH)
+            _add(DeploySizingSuppressionReason.STALE_CASH)
         elif self.cash.trust_status == DeploySizingTrustStatus.WEAK:
-            reasons.append(DeploySizingSuppressionReason.WEAK_CASH)
+            _add(DeploySizingSuppressionReason.WEAK_CASH)
         elif self.cash.trust_status == DeploySizingTrustStatus.CONFLICTING:
-            reasons.append(DeploySizingSuppressionReason.CONFLICTING_CASH)
+            _add(DeploySizingSuppressionReason.CONFLICTING_CASH)
+        elif self.cash is not None and self.cash.trust_status == DeploySizingTrustStatus.CERTIFIED:
+            if self.cash.available_cash_usd is None or self.cash.available_cash_usd < 0:
+                _add(DeploySizingSuppressionReason.INVALID_CASH_VALUE)
 
+        # --- Portfolio ---
         if self.portfolio is None or self.portfolio.trust_status == DeploySizingTrustStatus.MISSING:
-            reasons.append(DeploySizingSuppressionReason.MISSING_PORTFOLIO_VALUE)
+            _add(DeploySizingSuppressionReason.MISSING_PORTFOLIO_VALUE)
         elif self.portfolio.trust_status == DeploySizingTrustStatus.STALE:
-            reasons.append(DeploySizingSuppressionReason.STALE_PORTFOLIO_VALUE)
+            _add(DeploySizingSuppressionReason.STALE_PORTFOLIO_VALUE)
+        elif self.portfolio.trust_status == DeploySizingTrustStatus.WEAK:
+            _add(DeploySizingSuppressionReason.WEAK_PORTFOLIO_VALUE)
+        elif self.portfolio.trust_status == DeploySizingTrustStatus.CONFLICTING:
+            _add(DeploySizingSuppressionReason.CONFLICTING_PORTFOLIO_VALUE)
+        elif self.portfolio is not None and self.portfolio.trust_status == DeploySizingTrustStatus.CERTIFIED:
+            v = self.portfolio.total_portfolio_value_usd
+            if v is None or v <= 0:
+                _add(DeploySizingSuppressionReason.INVALID_PORTFOLIO_VALUE)
 
+        # --- Positions ---
         for pos in self.positions.values():
             if pos.trust_status == DeploySizingTrustStatus.MISSING:
-                reasons.append(DeploySizingSuppressionReason.MISSING_POSITION_VALUE)
+                _add(DeploySizingSuppressionReason.MISSING_POSITION_VALUE)
             elif pos.trust_status == DeploySizingTrustStatus.STALE:
-                reasons.append(DeploySizingSuppressionReason.STALE_POSITION_VALUE)
+                _add(DeploySizingSuppressionReason.STALE_POSITION_VALUE)
+            elif pos.trust_status == DeploySizingTrustStatus.WEAK:
+                _add(DeploySizingSuppressionReason.WEAK_POSITION_VALUE)
+            elif pos.trust_status == DeploySizingTrustStatus.CONFLICTING:
+                _add(DeploySizingSuppressionReason.CONFLICTING_POSITION_VALUE)
+            elif pos.trust_status == DeploySizingTrustStatus.CERTIFIED:
+                mkt = pos.current_market_value_usd
+                w = pos.current_weight
+                if (mkt is None or mkt < 0 or w is None or w < 0 or w > 1):
+                    _add(DeploySizingSuppressionReason.INVALID_POSITION_VALUE)
+
+        # --- Target allocations (per position ticker) ---
+        for ticker in self.positions:
+            ta = self.target_allocations.get(ticker)
+            if ta is None:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_MISSING)
+            elif ta.trust_status == DeploySizingTrustStatus.NOT_EVALUATED:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_NOT_EVALUATED)
+            elif ta.trust_status == DeploySizingTrustStatus.CERTIFIED:
+                if ta.target_weight is None or not (0.0 <= ta.target_weight <= 1.0):
+                    _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_INVALID)
+            elif ta.trust_status in _SUPPRESSING_STATUSES:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_NOT_EVALUATED)
+
+        # --- Policy ---
+        if not self.policy_ready:
+            if self.policy is None or self.policy.trust_status == DeploySizingTrustStatus.UNSUPPORTED:
+                _add(DeploySizingSuppressionReason.MINIMUM_TRADE_UNSUPPORTED)
+                _add(DeploySizingSuppressionReason.ROUNDING_POLICY_UNSUPPORTED)
 
         return reasons
 
@@ -228,6 +389,17 @@ class DeploySizingInputBundle:
         if pos is None:
             return True
         return pos.suppresses_exact_dollar_readiness
+
+    def target_allocation_suppresses_exact_dollar_readiness(self, ticker: str) -> bool:
+        """True if the named ticker's target allocation suppresses exact-dollar readiness.
+
+        No entry → suppressed. NOT_EVALUATED → suppressed. Invalid weight → suppressed.
+        CERTIFIED with valid weight → not suppressed.
+        """
+        ta = self.target_allocations.get(ticker)
+        if ta is None:
+            return True
+        return not ta.is_ready_for_math
 
     def target_allocation_for(self, ticker: str) -> Optional[DeployTargetAllocationInput]:
         """Return target allocation for ticker, or None if not defined."""

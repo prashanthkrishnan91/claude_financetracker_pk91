@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.0 — Deploy Foundation v1 complete** (backend-only domain seam; next: Stage 2.1 exact-dollar planning math). See `docs/product/ROADMAP.md`.
-- Active build queue item: Deploy Foundation v1 merged; next item is exact-dollar planning math for Deploy. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.0 — Deploy Foundation v1 complete** (backend-only domain seam; next: Stage 2.1 Deploy sizing input contract). See `docs/product/ROADMAP.md`.
+- Active build queue item: Deploy Foundation v1 merged; next item is the Deploy sizing input contract (cash, position value, target-allocation, rounding policy placeholders) before exact-dollar math. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -42,13 +42,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Known risks / unresolved issues
 
-- Deploy exact-dollar math is not yet implemented — all dollar fields are null placeholders in v1. Stage 2.1 will implement cash-constraint, target-allocation, and exact-dollar calculation.
+- Deploy exact-dollar math is not yet implemented — all dollar fields are null placeholders in v1. Cash, position value, portfolio value, target-allocation inputs, and minimum-trade/rounding policy are not yet certified as authoritative inputs to the Deploy domain.
 - Watchtower trigger model is still scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-Implement Stage 2.1: Deploy exact-dollar planning math. Populate `recommended_dollar_amount`, `estimated_share_quantity`, cash-constraint, and target-allocation fields inside the Deploy domain seam. Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack.
+Stage 2.1 — Deploy sizing input contract: define authoritative cash, position value, portfolio value, target-allocation placeholders, minimum-trade/rounding policy placeholders, and suppression behavior before implementing final exact-dollar math. Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack.
 
 ## Handoff maintenance rule
 

@@ -15,15 +15,16 @@
 
 ## Current active phase
 
-- **Roadmap stage:** Stage 2.1 — Deploy sizing input contract complete (backend-only; next: Stage 2.2 exact-dollar math).
-- **Active build queue item:** Sizing input contract DONE. Next: exact-dollar math using certified DeploySizingInputBundle seam.
+- **Roadmap stage:** Stage 2.2 — Deploy policy + target-allocation readiness bridge complete (backend-only; next: Stage 2.3 exact-dollar math).
+- **Active build queue item:** Policy/allocation bridge DONE. Next: exact-dollar math using the fully-certified DeploySizingInputBundle seam (exact_dollar_ready=True).
 - **North-star reminder:** Intel → Deploy → Watchtower; deterministic backend Intel v3 policy owns visible Buy/Hold/Trim/Sell authority.
 - **Source of truth:** `docs/product/ROADMAP.md`, `docs/product/BUILD_QUEUE.md`, `docs/product/NORTH_STAR.md`, `docs/ai/HANDOFF.md`.
 
 ## Latest merged PRs
 
-- 2026-05-11 — Stage 2.1: Deploy sizing input contract. Added `deploy_sizing_contracts.py` (DeploySizingTrustStatus, DeploySizingSuppressionReason, DeployCashInput, DeployPositionSizingInput, DeployPortfolioSizingInput, DeployTargetAllocationInput, DeploySizingPolicyPlaceholder, DeploySizingInputBundle) and `deploy_sizing_builder.py` (pure builder). Trust model: CERTIFIED enables readiness; all other statuses suppress. Sizing inputs cannot override Intel actions. Dollar fields remain None. 69 new Stage 2.1 tests + 74 Stage 2.0 tests = 143 pass. No SQL, no UI, no routes.
-- 2026-05-11 — Stage 2.0: Deploy Foundation v1. New backend-only domain seam (`app/services/deploy/`). BUY/TRIM/SELL scaffold candidates; HOLD never actionable; THIN/stale/blocked suppresses. All dollar fields null. 74 tests pass.
+- 2026-05-11 — Stage 2.2: Deploy policy + target-allocation readiness bridge. Added `deploy_target_allocation_bridge.py` (certify_target_allocation, build_certified_target_allocations: explicit-source only, rejects placeholder labels) and `deploy_policy_bridge.py` (certify_sizing_policy, build_policy_from_config: WHOLE_DOLLAR/NEAREST_DOLLAR/NO_ROUNDING, non-negative min_trade). Bridges into DeploySizingInputBundle; production path stays exact_dollar_ready=False; synthetic certified path unlocks exact_dollar_ready=True (readiness gate only). 48 new + 192 prior = 240 passed / 0 failed. No SQL, no UI, no routes.
+- 2026-05-11 — Stage 2.1: Deploy sizing input contract. Added `deploy_sizing_contracts.py` and `deploy_sizing_builder.py`. Trust/suppression model; three readiness gates; policy UNSUPPORTED, target NOT_EVALUATED placeholders. 143 pass.
+- 2026-05-11 — Stage 2.0: Deploy Foundation v1. New backend-only domain seam (`app/services/deploy/`). BUY/TRIM/SELL scaffold; HOLD never actionable; dollar fields null. 74 tests pass.
 - 2026-05-10 — Final test-suite cleanup: backend full-suite stabilized at 3,926 passed / 0 failed. See HANDOFF for details.
 - 2026-05-10 — Repo cleanup: removed legacy Streamlit v1 app (`v1/`, root `App.py`, `requirements.txt`, `.streamlit/`, `.devcontainer/`), removed obsolete v2 `/api/v1/positions/seed-v1` endpoint and `migration_service.py`, compressed progress logs, and added `docs/ai/REPO_HYGIENE.md` + `scripts/repo_hygiene/audit_repo_hygiene.py`. v2 is now the only active product.
 - 2026-05-10 — Intel v3 Living Cockpit Status Reconciliation + Intel v4 Upgrade Path docs (`artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_and_Intel_v4_Upgrade_Path.md`). Defines the Unified Intelligence Spine; absorbs/defers/rejects external tool references; preserves deterministic decision authority.

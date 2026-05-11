@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.1 — Deploy sizing input contract complete** (backend-only; next: Stage 2.2 exact-dollar planning math). See `docs/product/ROADMAP.md`.
-- Active build queue item: Sizing input contract merged; next item is exact-dollar math using the certified sizing seam. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.2 — Deploy policy + target-allocation readiness bridge complete** (backend-only; next: Stage 2.3 exact-dollar planning math). See `docs/product/ROADMAP.md`.
+- Active build queue item: Policy/allocation bridge merged; next item is exact-dollar math using the fully-certified sizing seam. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,7 +23,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
-- 2026-05-11 — **Stage 2.1: Deploy sizing input contract** — added `deploy_sizing_contracts.py` (DeploySizingTrustStatus, DeploySizingSuppressionReason, DeployCashInput, DeployPositionSizingInput, DeployPortfolioSizingInput, DeployTargetAllocationInput, DeploySizingPolicyPlaceholder, DeploySizingInputBundle) and `deploy_sizing_builder.py` (pure builder from portfolio snapshot dict). Trust/suppression model: CERTIFIED enables readiness; MISSING/STALE/WEAK/CONFLICTING/NOT_EVALUATED/UNSUPPORTED suppress exact-dollar readiness. Sizing inputs cannot override Intel action or actionability. Target allocations cannot be fabricated. Policy (min-trade, rounding) is UNSUPPORTED placeholder. Dollar fields remain None. 69 focused Stage 2.1 tests + 74 Stage 2.0 tests = 143 passed / 0 failed. No SQL, no UI, no routes, no providers, no visible behavior change.
+- 2026-05-11 — **Stage 2.2: Deploy policy + target-allocation readiness bridge** — added `deploy_target_allocation_bridge.py` (certify_target_allocation, build_certified_target_allocations: validates explicit-source only, rejects placeholder labels, rejects fabricated weights) and `deploy_policy_bridge.py` (certify_sizing_policy, build_policy_from_config: validates WHOLE_DOLLAR/NEAREST_DOLLAR/NO_ROUNDING, non-negative min_trade). Bridges into DeploySizingInputBundle without changing Intel authority. Production/default builder path stays UNSUPPORTED/NOT_EVALUATED (exact_dollar_ready=False). Synthetic certified sizing+target+policy → exact_dollar_ready=True (readiness gate only, no dollar math). 48 Stage 2.2 + 118 Stage 2.1 + 74 Stage 2.0 = 240 passed / 0 failed. No SQL, no UI, no routes, no providers, no visible behavior change.
+- 2026-05-11 — **Stage 2.1: Deploy sizing input contract** — added `deploy_sizing_contracts.py` and `deploy_sizing_builder.py`. Trust/suppression model; three readiness gates; target allocations NOT_EVALUATED placeholder; policy UNSUPPORTED placeholder. 143 focused tests passed. No SQL, no UI, no routes, no visible behavior change.
 - 2026-05-11 — **Stage 2.0: Deploy Foundation v1** — new backend-only domain seam (`app/services/deploy/`). Created `deploy_contracts.py` (DeployPlan, DeployPlanItem, DeployGuardrailSummary, enums), `deploy_intel_adapter.py` (reads Intel v3 snapshot read-only), `deploy_translation_v1.py` (translates BUY/TRIM/SELL to scaffold candidates; HOLD → never actionable; THIN/stale/blocked suppresses). All dollar fields null in v1. PriceBand not a Deploy authority. 74 focused tests pass. No SQL, no UI, no routes, no providers, no visible behavior change.
 - 2026-05-10 — Phase 14F closure: added hidden backend-only visible context scaffold (`priceband_visible_context_v1.py`) behind a disabled-by-default config flag. No visible behavior changes, no route, no snapshot writes, no DecisionInputV3 mutation, no Buy/Hold/Trim/Sell changes. **Closed as hidden scaffold only.**
 - 2026-05-10 — Final test-suite cleanup: backend full-suite stabilized at **3,926 passed / 0 failed**; 5 stale tests retired with one-line justifications (no production code changed). `audit_repo_hygiene.py` gained an async-test antipattern check. Full backend suite is now a Tier-3 release/infra gate — see `docs/ai/TEST_ROUTING.md`.
@@ -43,15 +44,14 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Known risks / unresolved issues
 
-- Deploy exact-dollar math is not yet implemented — all dollar fields remain null in the Deploy plan items. The sizing input seam is now defined and certified (Stage 2.1); exact-dollar math can now be safely implemented in Stage 2.2 using the typed sizing contracts.
-- Target allocation logic is a NOT_EVALUATED placeholder — no optimizer exists yet.
-- Minimum-trade and rounding policy are UNSUPPORTED placeholders — wired in future stage.
+- Deploy exact-dollar math is not yet implemented — all dollar fields remain null in the Deploy plan items. The sizing input seam is now fully bridged (Stage 2.2); exact-dollar math can now be safely implemented in Stage 2.3 using the certified DeploySizingInputBundle.
+- Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower trigger model is still scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-Stage 2.2 — Deploy exact-dollar math: implement recommended_dollar_amount and estimated_share_quantity calculation using the certified DeploySizingInputBundle seam from Stage 2.1. Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack. Only proceed when DeploySizingInputBundle.exact_dollar_ready is True.
+Stage 2.3 — Deploy exact-dollar math: implement recommended_dollar_amount and estimated_share_quantity calculation using the certified DeploySizingInputBundle (exact_dollar_ready=True path). Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack. Prerequisite: DeploySizingInputBundle.exact_dollar_ready is True.
 
 ## Handoff maintenance rule
 

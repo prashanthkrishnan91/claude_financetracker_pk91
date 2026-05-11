@@ -28,6 +28,7 @@ from .deploy_contracts import (
     DeployPlanItem,
     DeployPlanStatus,
 )
+from .deploy_cash_guardrail_v1 import apply_cash_guardrail_to_plan_items
 from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
 from .deploy_sizing_contracts import DeploySizingInputBundle
 
@@ -177,6 +178,7 @@ def build_deploy_plan(
 
     # Apply exact-dollar math when a certified sizing bundle is provided.
     exact_dollar_math_evaluated = False
+    cash_guardrail_evaluated = False
     if sizing_bundle is not None and sizing_bundle.exact_dollar_ready:
         items = apply_dollar_math_to_plan_items(
             bundle=sizing_bundle,
@@ -184,6 +186,12 @@ def build_deploy_plan(
             price_per_share_map=price_per_share_map,
         )
         exact_dollar_math_evaluated = True
+
+    # Apply cash guardrail whenever a sizing bundle is provided (even if not exact_dollar_ready,
+    # so BUY items with uncertified cash are flagged rather than left as "not_evaluated_yet").
+    if sizing_bundle is not None:
+        items = apply_cash_guardrail_to_plan_items(bundle=sizing_bundle, items=items)
+        cash_guardrail_evaluated = True
 
     # Guardrail counters — computed after dollar math so they reflect final state.
     buy_candidates = sum(
@@ -242,6 +250,7 @@ def build_deploy_plan(
         hold_never_actionable=hold_never_actionable,
         dollar_fields_null=dollar_fields_null,
         exact_dollar_math_evaluated=exact_dollar_math_evaluated,
+        cash_guardrail_evaluated=cash_guardrail_evaluated,
         priceband_not_authority=priceband_not_authority,
         intel_action_preserved=intel_action_preserved,
         schema_version="deploy_v1_scaffold",

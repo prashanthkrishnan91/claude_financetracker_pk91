@@ -51,3 +51,6 @@ graphify-out/
 .cursorrules
 .windsurfrules
 GEMINI.md
+
+# ── AI usage snapshots (local only, never committed) ─────────────────────────
+.ai/usage/

@@ -6,13 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- Continue Intel → Deploy transition.
-- Define / confirm Deploy action-plan foundation if not already built.
+- Deploy guardrails / constraints: cash constraint evaluation, tax guardrail, wash-sale guardrail.
 
 ## Next
 
-- Exact-dollar buy / trim / sell action planner.
-- Guardrails / constraints for action planning.
+- Plain-English Deploy UI (action plan surface).
 - Watchtower trigger foundation.
 
 ## Later

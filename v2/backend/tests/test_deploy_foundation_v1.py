@@ -762,3 +762,214 @@ def test_deploy_translation_does_not_import_recommendation_service():
         src_text = f.read()
     assert "RecommendationService" not in src_text
     assert "intel_v2" not in src_text
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 14. build_deploy_plan wired to exact-dollar math (Stage 2.3A correction)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _make_certified_bundle(
+    ticker: str,
+    portfolio_value: float,
+    current_market_value: float,
+    current_weight: float,
+    target_weight: float,
+    minimum_trade_usd: float = 1.0,
+    rounding_policy: str = "WHOLE_DOLLAR",
+):
+    """Build a synthetic exact_dollar_ready bundle for integration tests."""
+    from app.services.deploy.deploy_policy_bridge import certify_sizing_policy
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeployPortfolioSizingInput,
+        DeployPositionSizingInput,
+        DeploySizingInputBundle,
+        DeploySizingTrustStatus,
+    )
+    from app.services.deploy.deploy_target_allocation_bridge import certify_target_allocation
+
+    return DeploySizingInputBundle(
+        cash=DeployCashInput(
+            available_cash_usd=portfolio_value * 0.1,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        portfolio=DeployPortfolioSizingInput(
+            total_portfolio_value_usd=portfolio_value,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        positions={
+            ticker: DeployPositionSizingInput(
+                ticker=ticker,
+                current_market_value_usd=current_market_value,
+                current_weight=current_weight,
+                trust_status=DeploySizingTrustStatus.CERTIFIED,
+                source_label="test",
+            )
+        },
+        target_allocations={
+            ticker: certify_target_allocation(ticker, target_weight, source_label="optimizer")
+        },
+        policy=certify_sizing_policy(minimum_trade_usd, rounding_policy),
+    )
+
+
+def test_build_deploy_plan_without_bundle_preserves_null_scaffold():
+    """No sizing bundle → old scaffold/null behavior unchanged."""
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs)  # no sizing_bundle
+    assert plan.items[0].recommended_dollar_amount is None
+    assert plan.items[0].estimated_share_quantity is None
+    assert plan.guardrail_summary.dollar_fields_null is True
+    assert plan.guardrail_summary.exact_dollar_math_evaluated is False
+
+
+def test_build_deploy_plan_with_certified_bundle_populates_buy_dollars():
+    """Certified exact-dollar-ready bundle → BUY item gets dollar amount."""
+    bundle = _make_certified_bundle(
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        current_market_value=10_000.0,
+        current_weight=0.10,
+        target_weight=0.15,   # delta=5000
+    )
+    assert bundle.exact_dollar_ready
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    assert plan.items[0].recommended_dollar_amount == 5000.0
+    assert plan.guardrail_summary.exact_dollar_math_evaluated is True
+    assert plan.guardrail_summary.dollar_fields_null is False
+
+
+def test_build_deploy_plan_readiness_false_keeps_outputs_null():
+    """exact_dollar_ready=False → bundle provided but outputs remain null."""
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeploySizingInputBundle,
+        DeploySizingPolicyPlaceholder,
+        DeploySizingTrustStatus,
+        DeployPortfolioSizingInput,
+        DeployPositionSizingInput,
+    )
+    # Make policy UNSUPPORTED so exact_dollar_ready=False.
+    from app.services.deploy.deploy_target_allocation_bridge import certify_target_allocation
+    bundle = DeploySizingInputBundle(
+        cash=DeployCashInput(
+            available_cash_usd=10_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        portfolio=DeployPortfolioSizingInput(
+            total_portfolio_value_usd=100_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        positions={
+            "AAPL": DeployPositionSizingInput(
+                ticker="AAPL",
+                current_market_value_usd=10_000.0,
+                current_weight=0.10,
+                trust_status=DeploySizingTrustStatus.CERTIFIED,
+                source_label="test",
+            )
+        },
+        target_allocations={
+            "AAPL": certify_target_allocation("AAPL", 0.15, source_label="optimizer")
+        },
+        policy=DeploySizingPolicyPlaceholder(
+            trust_status=DeploySizingTrustStatus.UNSUPPORTED,
+        ),
+    )
+    assert not bundle.exact_dollar_ready
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    assert plan.items[0].recommended_dollar_amount is None
+    assert plan.guardrail_summary.dollar_fields_null is True
+    assert plan.guardrail_summary.exact_dollar_math_evaluated is False
+
+
+def test_build_deploy_plan_absent_position_suppresses_output():
+    """Item ticker absent from bundle positions → dollar output suppressed."""
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeploySizingInputBundle,
+        DeploySizingTrustStatus,
+        DeployPortfolioSizingInput,
+    )
+    from app.services.deploy.deploy_policy_bridge import certify_sizing_policy
+    from app.services.deploy.deploy_target_allocation_bridge import certify_target_allocation
+    bundle = DeploySizingInputBundle(
+        cash=DeployCashInput(
+            available_cash_usd=10_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        portfolio=DeployPortfolioSizingInput(
+            total_portfolio_value_usd=100_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        positions={},   # AAPL not present
+        target_allocations={
+            "AAPL": certify_target_allocation("AAPL", 0.15, source_label="optimizer")
+        },
+        policy=certify_sizing_policy(1.0, "WHOLE_DOLLAR"),
+    )
+    assert bundle.exact_dollar_ready
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    assert plan.items[0].recommended_dollar_amount is None
+    assert plan.guardrail_summary.exact_dollar_math_evaluated is True   # math was attempted
+    assert plan.guardrail_summary.dollar_fields_null is True             # but nothing populated
+
+
+def test_build_deploy_plan_hold_non_actionable_with_certified_bundle():
+    """HOLD remains non-actionable even when certified bundle is provided."""
+    bundle = _make_certified_bundle(
+        ticker="GOOG",
+        portfolio_value=100_000.0,
+        current_market_value=15_000.0,
+        current_weight=0.15,
+        target_weight=0.20,
+    )
+    snap = _snapshot([_card("GOOG", "HOLD", evidence_band="STRONG", conviction="HIGH")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    assert plan.items[0].recommended_dollar_amount is None
+    assert plan.items[0].actionability_status == DeployActionabilityStatus.NOT_ACTIONABLE_HOLD
+    assert plan.guardrail_summary.hold_never_actionable is True
+
+
+def test_build_deploy_plan_trim_populated_and_intel_action_preserved():
+    """TRIM candidate gets dollar amount; Intel action is not changed."""
+    bundle = _make_certified_bundle(
+        ticker="NVDA",
+        portfolio_value=100_000.0,
+        current_market_value=20_000.0,
+        current_weight=0.20,
+        target_weight=0.15,   # delta=5000
+    )
+    snap = _snapshot([_card("NVDA", "TRIM", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    assert plan.items[0].recommended_dollar_amount == 5000.0
+    assert plan.items[0].intel_action == "TRIM"
+    assert plan.guardrail_summary.intel_action_preserved is True
+
+
+def test_build_deploy_plan_guardrail_dollar_fields_null_still_true_without_bundle():
+    """Existing guardrail invariant: dollar_fields_null=True when no bundle provided."""
+    snap = _snapshot([
+        _card("AAPL", "BUY", evidence_band="PARTIAL"),
+        _card("NVDA", "TRIM", evidence_band="PARTIAL"),
+        _card("GOOG", "HOLD"),
+    ])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs)
+    assert plan.guardrail_summary.dollar_fields_null is True
+    assert plan.guardrail_summary.exact_dollar_math_evaluated is False

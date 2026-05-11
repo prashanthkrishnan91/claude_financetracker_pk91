@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-11
+Last updated: 2026-05-11 (post Stage 2.3A merge)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.2 — Deploy policy + target-allocation readiness bridge complete** (backend-only; next: Stage 2.3 exact-dollar planning math). See `docs/product/ROADMAP.md`.
-- Active build queue item: Policy/allocation bridge merged; next item is exact-dollar math using the fully-certified sizing seam. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.3A — Deploy exact-dollar math v1 complete** (backend-only; next: Stage 2.3B guardrails/constraints, or plain-English Deploy UI). See `docs/product/ROADMAP.md`.
+- Active build queue item: Exact-dollar buy/trim/sell planner merged; next item is guardrails/constraints for action planning. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,6 +23,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
+- 2026-05-11 — **Stage 2.3A: Deploy exact-dollar math v1** — added `deploy_dollar_math_v1.py` (`compute_dollar_amount_for_item`, `apply_dollar_math_to_plan_items`). Hard gate: `exact_dollar_ready=True` required. BUY delta = target_dollars − current_dollars; TRIM/SELL delta = inverse. Rounding: WHOLE_DOLLAR/NEAREST_DOLLAR → `round()`; NO_ROUNDING → pass-through. Non-positive/zero-rounded deltas and sub-minimum-trade amounts suppressed. `estimated_share_quantity` populated only when certified positive `price_per_share_usd` provided. Intel action preserved verbatim; HOLD never actionable; suppressed items never receive dollar amounts. 29 new tests; 277 total Deploy tests; 0 failed. No SQL, no UI, no routes, no visible behavior change.
 - 2026-05-11 — **Stage 2.2: Deploy policy + target-allocation readiness bridge** — added `deploy_target_allocation_bridge.py` (certify_target_allocation, build_certified_target_allocations: validates explicit-source only, rejects placeholder labels, rejects fabricated weights) and `deploy_policy_bridge.py` (certify_sizing_policy, build_policy_from_config: validates WHOLE_DOLLAR/NEAREST_DOLLAR/NO_ROUNDING, non-negative min_trade). Bridges into DeploySizingInputBundle without changing Intel authority. Production/default builder path stays UNSUPPORTED/NOT_EVALUATED (exact_dollar_ready=False). Synthetic certified sizing+target+policy → exact_dollar_ready=True (readiness gate only, no dollar math). 48 Stage 2.2 + 118 Stage 2.1 + 74 Stage 2.0 = 240 passed / 0 failed. No SQL, no UI, no routes, no providers, no visible behavior change.
 - 2026-05-11 — **Stage 2.1: Deploy sizing input contract** — added `deploy_sizing_contracts.py` and `deploy_sizing_builder.py`. Trust/suppression model; three readiness gates; target allocations NOT_EVALUATED placeholder; policy UNSUPPORTED placeholder. 143 focused tests passed. No SQL, no UI, no routes, no visible behavior change.
 - 2026-05-11 — **Stage 2.0: Deploy Foundation v1** — new backend-only domain seam (`app/services/deploy/`). Created `deploy_contracts.py` (DeployPlan, DeployPlanItem, DeployGuardrailSummary, enums), `deploy_intel_adapter.py` (reads Intel v3 snapshot read-only), `deploy_translation_v1.py` (translates BUY/TRIM/SELL to scaffold candidates; HOLD → never actionable; THIN/stale/blocked suppresses). All dollar fields null in v1. PriceBand not a Deploy authority. 74 focused tests pass. No SQL, no UI, no routes, no providers, no visible behavior change.
@@ -44,14 +45,14 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Known risks / unresolved issues
 
-- Deploy exact-dollar math is not yet implemented — all dollar fields remain null in the Deploy plan items. The sizing input seam is now fully bridged (Stage 2.2); exact-dollar math can now be safely implemented in Stage 2.3 using the certified DeploySizingInputBundle.
+- Deploy exact-dollar math is implemented (Stage 2.3A). `recommended_dollar_amount` and `estimated_share_quantity` are computed for eligible BUY/TRIM/SELL candidates. Cash constraint evaluation and tax/wash-sale guardrails are not yet wired (`cash_constraint_status` and guardrail fields remain placeholders).
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower trigger model is still scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-Stage 2.3 — Deploy exact-dollar math: implement recommended_dollar_amount and estimated_share_quantity calculation using the certified DeploySizingInputBundle (exact_dollar_ready=True path). Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack. Prerequisite: DeploySizingInputBundle.exact_dollar_ready is True.
+Stage 2.3B — Deploy guardrails / constraints: wire cash constraint evaluation (`cash_constraint_status`), tax guardrail, and wash-sale guardrail into the dollar math layer. Alternatively, move to plain-English Deploy UI once the guardrail layer is scoped.
 
 ## Handoff maintenance rule
 

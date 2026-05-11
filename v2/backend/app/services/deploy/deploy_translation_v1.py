@@ -17,6 +17,8 @@ Intel v3 remains the only Buy/Hold/Trim/Sell authority.
 """
 from __future__ import annotations
 
+from typing import Optional
+
 from .deploy_contracts import (
     DeployActionabilityStatus,
     DeployActionSource,
@@ -26,6 +28,8 @@ from .deploy_contracts import (
     DeployPlanItem,
     DeployPlanStatus,
 )
+from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
+from .deploy_sizing_contracts import DeploySizingInputBundle
 
 # Intel actions that may become future trade candidates (not HOLD).
 _ACTIONABLE_INTEL_ACTIONS = frozenset({"BUY", "TRIM", "SELL"})
@@ -129,13 +133,24 @@ def _translate_item(inp: DeployPlanInput) -> DeployPlanItem:
     )
 
 
-def build_deploy_plan(inputs: list[DeployPlanInput]) -> DeployPlan:
-    """Build a complete Deploy plan scaffold from a list of DeployPlanInputs.
+def build_deploy_plan(
+    inputs: list[DeployPlanInput],
+    sizing_bundle: Optional[DeploySizingInputBundle] = None,
+    price_per_share_map: Optional[dict[str, float]] = None,
+) -> DeployPlan:
+    """Build a complete Deploy plan from a list of DeployPlanInputs.
 
-    Returns a DeployPlan with all items translated and a guardrail summary
-    that records enforcement of the Deploy/Intel boundary invariants.
+    When sizing_bundle is None (or exact_dollar_ready is False), all items remain
+    scaffold placeholders with null dollar fields — identical to v1 behavior.
 
-    This is a scaffold / planning artefact only — not an executable trade instruction.
+    When sizing_bundle is provided and exact_dollar_ready is True, eligible
+    BUY/TRIM/SELL ACTIONABLE_CANDIDATE items receive exact-dollar outputs.
+
+    price_per_share_map: optional ticker → certified price per share. Passed
+      through to dollar math for share-quantity computation.
+
+    Intel action is never created, overridden, or downgraded by this function.
+    HOLD is never made actionable. Suppressed items never receive dollar amounts.
     """
     if not inputs:
         return DeployPlan(
@@ -160,7 +175,17 @@ def build_deploy_plan(inputs: list[DeployPlanInput]) -> DeployPlan:
 
     items = [_translate_item(inp) for inp in inputs]
 
-    # Guardrail counters.
+    # Apply exact-dollar math when a certified sizing bundle is provided.
+    exact_dollar_math_evaluated = False
+    if sizing_bundle is not None and sizing_bundle.exact_dollar_ready:
+        items = apply_dollar_math_to_plan_items(
+            bundle=sizing_bundle,
+            items=items,
+            price_per_share_map=price_per_share_map,
+        )
+        exact_dollar_math_evaluated = True
+
+    # Guardrail counters — computed after dollar math so they reflect final state.
     buy_candidates = sum(
         1 for item in items
         if item.actionability_status == DeployActionabilityStatus.ACTIONABLE_CANDIDATE
@@ -194,12 +219,13 @@ def build_deploy_plan(inputs: list[DeployPlanInput]) -> DeployPlan:
         and item.actionability_status == DeployActionabilityStatus.ACTIONABLE_CANDIDATE
         for item in items
     )
+    # dollar_fields_null reflects the actual post-math state of all items.
     dollar_fields_null = all(
         item.recommended_dollar_amount is None
         and item.estimated_share_quantity is None
         for item in items
     )
-    # PriceBand is never read in _classify_actionability — always True in v1.
+    # PriceBand is never read in _classify_actionability — always True.
     priceband_not_authority = True
     intel_action_preserved = all(
         item.intel_action == inp.intel_action
@@ -215,6 +241,7 @@ def build_deploy_plan(inputs: list[DeployPlanInput]) -> DeployPlan:
         suppressed_items=suppressed_items,
         hold_never_actionable=hold_never_actionable,
         dollar_fields_null=dollar_fields_null,
+        exact_dollar_math_evaluated=exact_dollar_math_evaluated,
         priceband_not_authority=priceband_not_authority,
         intel_action_preserved=intel_action_preserved,
         schema_version="deploy_v1_scaffold",

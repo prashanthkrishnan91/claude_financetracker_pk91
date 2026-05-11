@@ -27,7 +27,6 @@ A non-positive computed delta suppresses output (no negative or zero trade amoun
 """
 from __future__ import annotations
 
-import math
 from dataclasses import replace
 from typing import Optional
 
@@ -97,12 +96,13 @@ def compute_dollar_amount_for_item(
 
     target_dollars = ta.target_weight * portfolio_value  # type: ignore[operator]
 
-    # Retrieve current position value (may be zero if ticker not in positions).
+    # Retrieve current position value. Position must be explicitly present and certified.
+    # An absent position is treated as missing certified data — suppress rather than
+    # assume zero. BUY-from-scratch requires an explicit certified zero position.
     pos = bundle.positions.get(ticker)
     if pos is None:
-        current_dollars = 0.0
-    else:
-        current_dollars = pos.current_market_value_usd or 0.0  # type: ignore[assignment]
+        return item
+    current_dollars = pos.current_market_value_usd if pos.current_market_value_usd is not None else 0.0
 
     # Compute action-specific delta.
     if intel_action == _BUY_ACTION:

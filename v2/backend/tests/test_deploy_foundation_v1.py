@@ -973,3 +973,157 @@ def test_build_deploy_plan_guardrail_dollar_fields_null_still_true_without_bundl
     plan = build_deploy_plan(inputs)
     assert plan.guardrail_summary.dollar_fields_null is True
     assert plan.guardrail_summary.exact_dollar_math_evaluated is False
+
+
+# ---------------------------------------------------------------------------
+# 15. Cash guardrail wired into build_deploy_plan (Stage 2.3B)
+# ---------------------------------------------------------------------------
+
+def test_build_deploy_plan_no_bundle_cash_status_placeholder():
+    """No sizing bundle → cash_constraint_status remains placeholder; cash_guardrail_evaluated=False."""
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs)
+    assert plan.items[0].cash_constraint_status == "not_evaluated_yet"
+    assert plan.guardrail_summary.cash_guardrail_evaluated is False
+
+
+def test_build_deploy_plan_certified_bundle_buy_sufficient_cash_passed():
+    """Certified exact-dollar-ready bundle, sufficient cash → BUY cash_constraint_status=passed."""
+    from app.services.deploy.deploy_cash_guardrail_v1 import CASH_PASSED
+    bundle = _make_certified_bundle(
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        current_market_value=10_000.0,
+        current_weight=0.10,
+        target_weight=0.15,  # delta = $5,000; cash = $10,000 → sufficient
+    )
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    item = plan.items[0]
+    assert item.recommended_dollar_amount == 5000.0
+    assert item.cash_constraint_status == CASH_PASSED
+    assert item.intel_action == "BUY"
+    assert plan.guardrail_summary.cash_guardrail_evaluated is True
+
+
+def test_build_deploy_plan_certified_bundle_buy_insufficient_cash_blocked():
+    """Certified bundle, cash less than recommended amount → blocked_insufficient_cash; dollar amount unchanged."""
+    from app.services.deploy.deploy_cash_guardrail_v1 import CASH_BLOCKED_INSUFFICIENT
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeploySizingTrustStatus,
+    )
+    bundle = _make_certified_bundle(
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        current_market_value=10_000.0,
+        current_weight=0.10,
+        target_weight=0.15,  # delta = $5,000
+    )
+    # Override cash to $1,000 — insufficient for $5,000 BUY.
+    import dataclasses
+    bundle = dataclasses.replace(
+        bundle,
+        cash=DeployCashInput(
+            available_cash_usd=1_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+    )
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    item = plan.items[0]
+    assert item.recommended_dollar_amount == 5000.0  # not changed by guardrail
+    assert item.cash_constraint_status == CASH_BLOCKED_INSUFFICIENT
+    assert item.intel_action == "BUY"  # Intel action unchanged
+
+
+def test_build_deploy_plan_trim_gets_explicit_non_blocking_cash_status():
+    """TRIM through build_deploy_plan gets not_applicable_trim_sell (never blocked)."""
+    from app.services.deploy.deploy_cash_guardrail_v1 import CASH_NOT_APPLICABLE_TRIM_SELL
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeploySizingTrustStatus,
+    )
+    bundle = _make_certified_bundle(
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        current_market_value=20_000.0,
+        current_weight=0.20,
+        target_weight=0.10,  # TRIM delta = $10,000
+    )
+    # Set cash to $0 — should not block TRIM.
+    import dataclasses
+    bundle = dataclasses.replace(
+        bundle,
+        cash=DeployCashInput(
+            available_cash_usd=0.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+    )
+    snap = _snapshot([_card("AAPL", "TRIM", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    item = plan.items[0]
+    assert item.cash_constraint_status == CASH_NOT_APPLICABLE_TRIM_SELL
+    assert item.intel_action == "TRIM"
+
+
+def test_build_deploy_plan_hold_cash_status_not_applicable():
+    """HOLD through build_deploy_plan gets not_applicable_hold."""
+    from app.services.deploy.deploy_cash_guardrail_v1 import CASH_NOT_APPLICABLE_HOLD
+    bundle = _make_certified_bundle(
+        ticker="AAPL",
+        portfolio_value=100_000.0,
+        current_market_value=10_000.0,
+        current_weight=0.10,
+        target_weight=0.10,
+    )
+    snap = _snapshot([_card("AAPL", "HOLD")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    item = plan.items[0]
+    assert item.cash_constraint_status == CASH_NOT_APPLICABLE_HOLD
+    assert item.recommended_dollar_amount is None
+
+
+def test_build_deploy_plan_readiness_false_buy_uncertified_cash_not_safe():
+    """exact_dollar_ready=False, uncertified cash → BUY not cash-safe."""
+    from app.services.deploy.deploy_cash_guardrail_v1 import CASH_BLOCKED_UNCERTIFIED
+    from app.services.deploy.deploy_sizing_contracts import (
+        DeployCashInput,
+        DeployPortfolioSizingInput,
+        DeployPositionSizingInput,
+        DeploySizingInputBundle,
+        DeploySizingPolicyPlaceholder,
+        DeploySizingTrustStatus,
+    )
+    # Build a bundle that is NOT exact_dollar_ready (policy UNSUPPORTED) but has uncertified cash.
+    bundle = DeploySizingInputBundle(
+        cash=DeployCashInput(
+            available_cash_usd=None,
+            trust_status=DeploySizingTrustStatus.MISSING,
+            source_label="test",
+        ),
+        portfolio=DeployPortfolioSizingInput(
+            total_portfolio_value_usd=100_000.0,
+            trust_status=DeploySizingTrustStatus.CERTIFIED,
+            source_label="test",
+        ),
+        positions={},
+        policy=DeploySizingPolicyPlaceholder(trust_status=DeploySizingTrustStatus.UNSUPPORTED),
+    )
+    assert not bundle.exact_dollar_ready
+    snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
+    inputs = build_deploy_inputs_from_snapshot(snap)
+    plan = build_deploy_plan(inputs, sizing_bundle=bundle)
+    item = plan.items[0]
+    # Dollar math not run (not exact_dollar_ready), so no dollar amount.
+    assert item.recommended_dollar_amount is None
+    # Cash guardrail still ran and correctly flagged uncertified cash.
+    assert item.cash_constraint_status == CASH_BLOCKED_UNCERTIFIED
+    assert plan.guardrail_summary.cash_guardrail_evaluated is True

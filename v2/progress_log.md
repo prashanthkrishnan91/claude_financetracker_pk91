@@ -15,14 +15,16 @@
 
 ## Current active phase
 
-- **Roadmap stage:** Stage 2.0 — Deploy Foundation v1 (backend-only domain seam complete; next: Stage 2.1 Deploy sizing input contract).
-- **Active build queue item:** Deploy action-plan foundation seam — DONE. Next: Deploy sizing input contract (cash, position value, target-allocation, rounding policy placeholders before exact-dollar math).
+- **Roadmap stage:** Stage 2.1 — Deploy sizing input contract complete (backend-only; next: Stage 2.2 exact-dollar math).
+- **Active build queue item:** Sizing input contract DONE. Next: exact-dollar math using certified DeploySizingInputBundle seam.
 - **North-star reminder:** Intel → Deploy → Watchtower; deterministic backend Intel v3 policy owns visible Buy/Hold/Trim/Sell authority.
 - **Source of truth:** `docs/product/ROADMAP.md`, `docs/product/BUILD_QUEUE.md`, `docs/product/NORTH_STAR.md`, `docs/ai/HANDOFF.md`.
 
 ## Latest merged PRs
 
-- 2026-05-10 — Final test-suite cleanup: backend full-suite stabilized 35 → 0 failing. Root causes fixed: `asyncio.get_event_loop()` antipattern in two test files (replaced with `asyncio.run`); per-ticker analyst tests realigned with active `compact_v1` schema label and memo-format `format_thesis`; orchestrator update+verify mock chain modeled by a small `_orchestrator_mock_db` helper; `get_job_status` test stubs the new `get_insight_cards` call; `test_orchestrator_full_mode_tracks_cost` rewritten against `_analyst_stage_stats`; crude string-grep tests in phases 6b/7c/8a retired in favor of structural response-shape coverage in phase 4. Stale `TestHandoffUpdated::test_handoff_mentions_phase11/SEC_Metric_Truth_Adapter` retired (HANDOFF is current-state only). Hygiene audit gained an async-test antipattern check.
+- 2026-05-11 — Stage 2.1: Deploy sizing input contract. Added `deploy_sizing_contracts.py` (DeploySizingTrustStatus, DeploySizingSuppressionReason, DeployCashInput, DeployPositionSizingInput, DeployPortfolioSizingInput, DeployTargetAllocationInput, DeploySizingPolicyPlaceholder, DeploySizingInputBundle) and `deploy_sizing_builder.py` (pure builder). Trust model: CERTIFIED enables readiness; all other statuses suppress. Sizing inputs cannot override Intel actions. Dollar fields remain None. 69 new Stage 2.1 tests + 74 Stage 2.0 tests = 143 pass. No SQL, no UI, no routes.
+- 2026-05-11 — Stage 2.0: Deploy Foundation v1. New backend-only domain seam (`app/services/deploy/`). BUY/TRIM/SELL scaffold candidates; HOLD never actionable; THIN/stale/blocked suppresses. All dollar fields null. 74 tests pass.
+- 2026-05-10 — Final test-suite cleanup: backend full-suite stabilized at 3,926 passed / 0 failed. See HANDOFF for details.
 - 2026-05-10 — Repo cleanup: removed legacy Streamlit v1 app (`v1/`, root `App.py`, `requirements.txt`, `.streamlit/`, `.devcontainer/`), removed obsolete v2 `/api/v1/positions/seed-v1` endpoint and `migration_service.py`, compressed progress logs, and added `docs/ai/REPO_HYGIENE.md` + `scripts/repo_hygiene/audit_repo_hygiene.py`. v2 is now the only active product.
 - 2026-05-10 — Intel v3 Living Cockpit Status Reconciliation + Intel v4 Upgrade Path docs (`artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_and_Intel_v4_Upgrade_Path.md`). Defines the Unified Intelligence Spine; absorbs/defers/rejects external tool references; preserves deterministic decision authority.
 - 2026-05-07 — Phase 7A: SEC CompanyFacts Financial Evidence v1. Earnings Reviewer artifacts now carry source-linked XBRL metric observations. Still no artifact consumption; `safe_for_decision=False`.
@@ -40,11 +42,13 @@
 
 ## Next recommended step
 
-Stage 2.1 — Deploy sizing input contract: define authoritative cash, position value, portfolio value, target-allocation placeholders, minimum-trade/rounding policy placeholders, and suppression behavior before implementing final exact-dollar math. Use the Deploy/Watchtower Boundary Pack.
+Stage 2.2 — Deploy exact-dollar math: implement recommended_dollar_amount and estimated_share_quantity in DeployPlanItem using the certified DeploySizingInputBundle seam. Gate on exact_dollar_ready=True before computing amounts. Use the Deploy/Watchtower Boundary Pack + Deterministic Decision Authority Pack.
 
 ## Unresolved risks
 
-- Deploy sizing inputs (cash, position value, target-allocation, rounding policy) are not yet certified as authoritative — all dollar fields remain null placeholders in v1.
+- Exact-dollar math not yet implemented — dollar fields remain None. Sizing seam is now certified and typed (Stage 2.1); math is next.
+- Target allocation logic is NOT_EVALUATED placeholder — no optimizer exists.
+- Minimum-trade and rounding policy are UNSUPPORTED placeholders — future stage.
 - Watchtower trigger model is scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 

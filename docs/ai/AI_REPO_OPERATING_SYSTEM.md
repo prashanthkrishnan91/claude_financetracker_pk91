@@ -222,3 +222,13 @@ Stop and ask for a split if:
 - The Feature Slice Contract is unclear and cannot be made clear within the current slice.
 
 Do not split a coherent capability slice merely because it includes related tests, docs, or contract work.
+
+
+## Workflow certification (v4.1 lightweight CI)
+
+For workflow/docs/.claude/.github changes, CI runs:
+
+- `python3 scripts/repo_hygiene/audit_repo_hygiene.py`
+- `python3 scripts/workflow/certify_v4_1.py`
+
+This is intentionally lightweight and non-product: it validates PR-template anchors, advisory-hook safety posture, and core settings invariants without changing runtime/product authority boundaries.

@@ -28,7 +28,8 @@ Covers:
  25.  apply_dollar_math_to_plan_items with missing ticker in price map leaves share qty null.
  26.  Rounding to zero suppresses output.
  27.  WHOLE_DOLLAR and NEAREST_DOLLAR behave identically.
- 28.  Position absent from bundle → treated as zero current value (BUY from scratch).
+ 28.  Position absent from bundle → output suppressed (not treated as zero).
+ 29.  Explicit certified zero position supports BUY-from-scratch (position present, value=0).
 """
 from __future__ import annotations
 
@@ -606,10 +607,10 @@ def test_whole_dollar_and_nearest_dollar_same_result():
 
 
 # ---------------------------------------------------------------------------
-# 28. Position absent from bundle → treated as zero current value (BUY from scratch)
+# 28. Position absent from bundle → output suppressed (not treated as zero)
 # ---------------------------------------------------------------------------
 
-def test_buy_from_scratch_position_absent_from_bundle():
+def test_buy_position_absent_from_bundle_suppresses_output():
     # Build bundle without the ticker in positions dict.
     cash_input = DeployCashInput(
         available_cash_usd=50_000.0,
@@ -626,11 +627,60 @@ def test_buy_from_scratch_position_absent_from_bundle():
     bundle = DeploySizingInputBundle(
         cash=cash_input,
         portfolio=portfolio_input,
-        positions={},            # No NVDA position yet
+        positions={},            # NVDA not present
         target_allocations={"NVDA": ta},
         policy=policy,
     )
     assert bundle.exact_dollar_ready  # vacuously true for positions
+
+    item = DeployPlanItem(
+        ticker="NVDA",
+        intel_action="BUY",
+        actionability_status=DeployActionabilityStatus.ACTIONABLE_CANDIDATE,
+        action_source=DeployActionSource.INTEL_V3,
+        intel_snapshot_id="snap-001",
+        intel_run_id="run-001",
+        plan_status=DeployPlanStatus.SCAFFOLD,
+    )
+    result = compute_dollar_amount_for_item(bundle, item)
+    # Absent position is missing certified data — suppress output.
+    assert result.recommended_dollar_amount is None
+    assert result.estimated_share_quantity is None
+
+
+# ---------------------------------------------------------------------------
+# 29. Explicit certified zero position supports BUY-from-scratch
+# ---------------------------------------------------------------------------
+
+def test_buy_from_scratch_explicit_zero_position():
+    # Position is present in bundle with certified zero value.
+    cash_input = DeployCashInput(
+        available_cash_usd=50_000.0,
+        trust_status=DeploySizingTrustStatus.CERTIFIED,
+        source_label="test",
+    )
+    portfolio_input = DeployPortfolioSizingInput(
+        total_portfolio_value_usd=100_000.0,
+        trust_status=DeploySizingTrustStatus.CERTIFIED,
+        source_label="test",
+    )
+    zero_position = DeployPositionSizingInput(
+        ticker="NVDA",
+        current_market_value_usd=0.0,
+        current_weight=0.0,
+        trust_status=DeploySizingTrustStatus.CERTIFIED,
+        source_label="test",
+    )
+    ta = certify_target_allocation("NVDA", 0.10, source_label="optimizer")
+    policy = certify_sizing_policy(1.0, "WHOLE_DOLLAR")
+    bundle = DeploySizingInputBundle(
+        cash=cash_input,
+        portfolio=portfolio_input,
+        positions={"NVDA": zero_position},
+        target_allocations={"NVDA": ta},
+        policy=policy,
+    )
+    assert bundle.exact_dollar_ready
 
     item = DeployPlanItem(
         ticker="NVDA",

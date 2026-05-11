@@ -111,10 +111,11 @@ class DeployGuardrailSummary:
     hold_items: int
     suppressed_items: int
 
-    hold_never_actionable: bool = True      # HOLD items never have ACTIONABLE_CANDIDATE status.
-    dollar_fields_null: bool = True         # All dollar/quantity fields are null in v1.
-    priceband_not_authority: bool = True    # PriceBand not used as Deploy decision authority.
-    intel_action_preserved: bool = True     # Intel action label preserved read-only in every item.
+    hold_never_actionable: bool = True         # HOLD items never have ACTIONABLE_CANDIDATE status.
+    dollar_fields_null: bool = True            # True only when all dollar/quantity fields are null.
+    exact_dollar_math_evaluated: bool = False  # True when a certified sizing bundle was provided and applied.
+    priceband_not_authority: bool = True       # PriceBand not used as Deploy decision authority.
+    intel_action_preserved: bool = True        # Intel action label preserved read-only in every item.
 
     schema_version: str = "deploy_v1_scaffold"
 

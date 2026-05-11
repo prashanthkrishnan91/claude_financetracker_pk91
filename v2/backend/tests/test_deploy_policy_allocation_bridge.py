@@ -19,6 +19,12 @@ Target-allocation bridge (certify_target_allocation / build_certified_target_all
  14.  build_certified_target_allocations processes a list correctly.
  15.  build_certified_target_allocations with invalid entry propagates ValueError.
  16.  Certified allocation is not flagged as fabricated.
+ 17.  Ticker is normalized to strip().upper() in certified output.
+ 18.  Lowercase ticker normalizes consistently to uppercase.
+ 19.  Mixed-case ticker normalizes consistently to uppercase.
+ 20.  Whitespace-only ticker is rejected.
+ 21.  build_certified_target_allocations raises ValueError on duplicate ticker (same weight).
+ 22.  build_certified_target_allocations raises ValueError on duplicate ticker (different weight).
 
 Policy bridge (certify_sizing_policy / build_policy_from_config):
  17.  Valid WHOLE_DOLLAR policy produces CERTIFIED DeploySizingPolicyPlaceholder.
@@ -242,6 +248,61 @@ def test_certify_target_allocation_is_not_fabricated():
     """A certified allocation with a valid weight is not flagged as fabricated."""
     ta = certify_target_allocation("AAPL", 0.05, "explicit_user_config")
     assert ta.is_fabricated is False
+
+
+def test_certify_target_allocation_ticker_normalized_to_uppercase():
+    """Ticker is stored as strip().upper() in the certified output."""
+    ta = certify_target_allocation("aapl", 0.05, "explicit_user_config")
+    assert ta.ticker == "AAPL"
+
+
+def test_certify_target_allocation_lowercase_ticker_normalizes():
+    """Lowercase ticker normalizes consistently to uppercase."""
+    ta = certify_target_allocation("nvda", 0.08, "model_portfolio_v1")
+    assert ta.ticker == "NVDA"
+    assert ta.is_ready_for_math is True
+
+
+def test_certify_target_allocation_mixed_case_ticker_normalizes():
+    """Mixed-case ticker normalizes consistently to uppercase."""
+    ta = certify_target_allocation("MsFt", 0.10, "explicit_user_config")
+    assert ta.ticker == "MSFT"
+
+
+def test_certify_target_allocation_whitespace_only_ticker_raises():
+    """Whitespace-only ticker is rejected even after stripping."""
+    with pytest.raises(ValueError, match="non-empty"):
+        certify_target_allocation("   ", 0.05, "explicit_user_config")
+
+
+def test_build_certified_target_allocations_duplicate_same_weight_raises():
+    """Duplicate ticker (same weight) raises ValueError — conflicting input."""
+    alloc_list = [
+        {"ticker": "AAPL", "target_weight": 0.10, "source_label": "model_portfolio_v1"},
+        {"ticker": "AAPL", "target_weight": 0.10, "source_label": "model_portfolio_v1"},
+    ]
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        build_certified_target_allocations(alloc_list)
+
+
+def test_build_certified_target_allocations_duplicate_different_weight_raises():
+    """Duplicate ticker with different weights raises ValueError — conflicting input."""
+    alloc_list = [
+        {"ticker": "AAPL", "target_weight": 0.10, "source_label": "model_portfolio_v1"},
+        {"ticker": "AAPL", "target_weight": 0.05, "source_label": "model_portfolio_v1"},
+    ]
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        build_certified_target_allocations(alloc_list)
+
+
+def test_build_certified_target_allocations_duplicate_case_insensitive_raises():
+    """Duplicate ticker detected regardless of case (normalized before check)."""
+    alloc_list = [
+        {"ticker": "aapl", "target_weight": 0.10, "source_label": "model_portfolio_v1"},
+        {"ticker": "AAPL", "target_weight": 0.10, "source_label": "model_portfolio_v1"},
+    ]
+    with pytest.raises(ValueError, match="[Dd]uplicate"):
+        build_certified_target_allocations(alloc_list)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

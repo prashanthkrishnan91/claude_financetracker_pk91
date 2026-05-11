@@ -49,8 +49,10 @@ def certify_target_allocation(
 ) -> DeployTargetAllocationInput:
     """Return a CERTIFIED DeployTargetAllocationInput from explicit input.
 
+    Ticker is normalized to strip().upper() before validation and storage.
+
     Raises ValueError if any invariant is violated:
-      - ticker must be a non-empty string
+      - ticker must be non-empty after stripping whitespace
       - target_weight must not be None and must be in [0.0, 1.0]
       - source_label must be non-empty and not a known placeholder
 
@@ -58,39 +60,41 @@ def certify_target_allocation(
     NOT_EVALUATED or UNSUPPORTED allocation — call it only when all
     inputs are known and valid.
     """
-    if not ticker or not isinstance(ticker, str):
+    if not isinstance(ticker, str) or not ticker.strip():
         raise ValueError(f"ticker must be a non-empty string, got: {ticker!r}")
 
+    normalized_ticker = ticker.strip().upper()
+
     if target_weight is None:
-        raise ValueError(f"target_weight must not be None for ticker {ticker!r}")
+        raise ValueError(f"target_weight must not be None for ticker {normalized_ticker!r}")
 
     if not isinstance(target_weight, (int, float)):
         raise ValueError(
-            f"target_weight must be a numeric value in [0.0, 1.0] for ticker {ticker!r}, "
+            f"target_weight must be a numeric value in [0.0, 1.0] for ticker {normalized_ticker!r}, "
             f"got: {target_weight!r}"
         )
 
     if not (0.0 <= target_weight <= 1.0):
         raise ValueError(
-            f"target_weight must be in [0.0, 1.0] for ticker {ticker!r}, "
+            f"target_weight must be in [0.0, 1.0] for ticker {normalized_ticker!r}, "
             f"got: {target_weight!r}"
         )
 
     if not source_label or not isinstance(source_label, str):
         raise ValueError(
-            f"source_label must be a non-empty string for ticker {ticker!r}"
+            f"source_label must be a non-empty string for ticker {normalized_ticker!r}"
         )
 
     normalized_label = source_label.strip().lower()
     if normalized_label in _PLACEHOLDER_SOURCE_LABELS:
         raise ValueError(
-            f"source_label {source_label!r} is a reserved placeholder for ticker {ticker!r}. "
+            f"source_label {source_label!r} is a reserved placeholder for ticker {normalized_ticker!r}. "
             "Provide a meaningful source identifier (e.g. 'explicit_user_config', "
             "'model_portfolio_v1')."
         )
 
     return DeployTargetAllocationInput(
-        ticker=ticker,
+        ticker=normalized_ticker,
         target_weight=float(target_weight),
         trust_status=DeploySizingTrustStatus.CERTIFIED,
         source_label=source_label,
@@ -103,17 +107,23 @@ def build_certified_target_allocations(
     """Build a certified target-allocation dict from an explicit allocation list.
 
     Each entry must have:
-      - ticker (str): Ticker symbol.
+      - ticker (str): Ticker symbol (normalized to strip().upper()).
       - target_weight (float): Target portfolio weight in [0.0, 1.0].
       - source_label (str): Meaningful source identifier.
 
-    Returns a dict keyed by ticker. Raises ValueError if any entry is invalid.
-    Duplicate tickers use the last entry.
+    Raises ValueError if any entry is invalid or if the same normalized ticker
+    appears more than once (duplicate/conflicting target allocation input).
     """
     result: Dict[str, DeployTargetAllocationInput] = {}
     for entry in (alloc_list or []):
-        ticker = str(entry.get("ticker") or "")
+        raw_ticker = str(entry.get("ticker") or "")
+        normalized_ticker = raw_ticker.strip().upper()
         target_weight = entry.get("target_weight")
         source_label = str(entry.get("source_label") or "")
-        result[ticker] = certify_target_allocation(ticker, target_weight, source_label)
+        if normalized_ticker in result:
+            raise ValueError(
+                f"Duplicate target allocation entry for ticker {normalized_ticker!r}. "
+                "Conflicting sizing inputs are not accepted — provide each ticker exactly once."
+            )
+        result[normalized_ticker] = certify_target_allocation(raw_ticker, target_weight, source_label)
     return result

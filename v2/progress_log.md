@@ -15,8 +15,8 @@
 
 ## Current active phase
 
-- **Roadmap stage:** Stage 1 → Stage 2 transition (Intel v3 correctness/evidence trust → Deploy exact-dollar action plans).
-- **Active build queue item:** confirm/define the Deploy action-plan foundation.
+- **Roadmap stage:** Stage 2.0 — Deploy Foundation v1 (backend-only domain seam complete; next: exact-dollar planning math).
+- **Active build queue item:** Deploy action-plan foundation seam — DONE. Next: exact-dollar planning phase.
 - **North-star reminder:** Intel → Deploy → Watchtower; deterministic backend Intel v3 policy owns visible Buy/Hold/Trim/Sell authority.
 - **Source of truth:** `docs/product/ROADMAP.md`, `docs/product/BUILD_QUEUE.md`, `docs/product/NORTH_STAR.md`, `docs/ai/HANDOFF.md`.
 
@@ -40,11 +40,11 @@
 
 ## Next recommended step
 
-Clarify or implement the Deploy action-plan foundation slice (one capability slice). Use the OS v4 work-order shape and the Deterministic Decision Authority + Backend-only Scaffold packs (`docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md`).
+Deploy exact-dollar planning math (Stage 2.1): populate `recommended_dollar_amount`, `estimated_share_quantity`, cash-constraint, and target-allocation fields in the Deploy domain. Use the Deploy/Watchtower Boundary Pack.
 
 ## Unresolved risks
 
-- Stage 2 (Deploy) entry gate not yet declared formally — Deploy action-plan foundation is the next plumbing piece.
+- Deploy exact-dollar math not yet implemented — all dollar fields are null placeholders in v1.
 - Watchtower trigger model is scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 

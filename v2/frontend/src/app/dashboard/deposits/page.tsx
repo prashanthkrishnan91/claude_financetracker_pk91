@@ -29,6 +29,7 @@ import type {
 import { InlineLoader } from "@/components/ui/Spinner";
 import { Spinner } from "@/components/ui/Spinner";
 import { DeployV3Panel } from "@/components/cards/DeployV3Panel";
+import { DeployV3ReadinessPanel } from "@/components/cards/DeployV3ReadinessPanel";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
 
@@ -260,6 +261,7 @@ export default function DepositsPage() {
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
         <DeployV3Panel />
+        <DeployV3ReadinessPanel />
 
         <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80 bg-gradient-to-b from-surface-elevated/25 to-transparent">
           <div className="flex items-start justify-between gap-3 flex-wrap">

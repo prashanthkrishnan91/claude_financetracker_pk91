@@ -8,8 +8,14 @@
 /** Canonical URL for the Deploy v3 plan endpoint. */
 export const DEPLOY_V3_PLAN_ENDPOINT = "/api/v1/deploy/v3/plan";
 
+/** Canonical URL for the Deploy v3 readiness diagnostic endpoint. */
+export const DEPLOY_V3_READINESS_ENDPOINT = "/api/v1/deploy/v3/readiness";
+
 /** React Query key for useDeployV3Plan. */
 export const DEPLOY_V3_PLAN_QUERY_KEY = ["deploy_v3", "plan"] as const;
+
+/** React Query key for useDeployV3Readiness. */
+export const DEPLOY_V3_READINESS_QUERY_KEY = ["deploy_v3", "readiness"] as const;
 
 // ── Readiness label mapping ───────────────────────────────────────────────────
 
@@ -61,6 +67,26 @@ export function getSizingDisclaimer(
     "Exact dollar amounts are not connected yet — no executable trade sizing available. " +
     "Dollar fields shown here are scaffold placeholders only."
   );
+}
+
+// ── Readiness diagnostic helpers ──────────────────────────────────────────────
+
+/** Map a policy_status string to a plain-English description (no values exposed). */
+export function policyStatusLabel(policyStatus: string | undefined): string {
+  switch (policyStatus) {
+    case "certified":
+      return "Policy configured and valid.";
+    case "missing_minimum_trade":
+      return "Minimum trade setting is not configured.";
+    case "missing_rounding_policy":
+      return "Rounding policy setting is not configured.";
+    case "invalid_policy_config":
+      return "Both settings are present but the configuration is invalid.";
+    case "unsupported_policy":
+      return "Deploy policy settings are not configured.";
+    default:
+      return "Policy status unknown.";
+  }
 }
 
 /**

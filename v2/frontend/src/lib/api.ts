@@ -4,7 +4,7 @@
  */
 
 import { supabase } from "./supabase";
-import { DEPLOY_V3_PLAN_ENDPOINT } from "./deploy-v3-helpers";
+import { DEPLOY_V3_PLAN_ENDPOINT, DEPLOY_V3_READINESS_ENDPOINT } from "./deploy-v3-helpers";
 
 // Enforce HTTPS when the page is served over HTTPS.
 // Guards against NEXT_PUBLIC_API_URL being set to http:// in production,
@@ -250,10 +250,11 @@ export const api = {
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },
 
-  // Deploy v3 read-only plan. Calls GET /api/v1/deploy/v3/plan.
-  // Intel v3 is the only Buy/Hold/Trim/Sell authority. No legacy allocation engine.
+  // Deploy v3 read-only plan and readiness. Intel v3 is the only Buy/Hold/Trim/Sell authority.
+  // Does not call the legacy allocation engine.
   deployV3: {
     getPlan: () => fetchApi<DeployV3PlanResponse>(DEPLOY_V3_PLAN_ENDPOINT),
+    getReadiness: () => fetchApi<DeployV3ReadinessDiagnostic>(DEPLOY_V3_READINESS_ENDPOINT),
   },
 };
 
@@ -1272,4 +1273,48 @@ export interface DeployV3PlanResponse {
     cash_source?: string | null;
     portfolio_source?: string | null;
   };
+}
+
+// ── Deploy v3 readiness diagnostic types (Stage 2.5E) ─────────────────────────
+
+export type DeployV3PolicyStatus =
+  | "certified"
+  | "missing_minimum_trade"
+  | "missing_rounding_policy"
+  | "invalid_policy_config"
+  | "unsupported_policy"
+  | string;
+
+export interface DeployV3ReadinessDiagnostic {
+  exact_dollar_ready: boolean;
+  sizing_values_ready: boolean;
+  target_allocation_ready: boolean;
+  policy_ready: boolean;
+  snapshot: {
+    present: boolean;
+    snapshot_id: string | null;
+    snapshot_at: string | null;
+    age_hours: number | null;
+    status: "missing" | "stale" | "fresh" | string;
+  };
+  market_values: {
+    all_positions_have_market_value: boolean;
+    uncertified_tickers: string[];
+    position_count: number;
+  };
+  target_allocations: {
+    unique_tickers_in_db: number;
+    missing_tickers: string[];
+    conflicting_tickers: string[];
+    target_total_pct: number | null;
+    target_total_in_range: boolean | null;
+  };
+  policy: {
+    minimum_trade_configured: boolean;
+    rounding_policy_configured: boolean;
+    policy_valid: boolean;
+    policy_status: DeployV3PolicyStatus;
+  };
+  suppression_reasons: string[];
+  next_required_action: string;
 }

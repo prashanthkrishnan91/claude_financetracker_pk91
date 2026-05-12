@@ -2,8 +2,8 @@
 
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { ActualDecisionItem, DeployV3PlanResponse, IntelV3Snapshot, IntelV3RunResult } from "./api";
-import { DEPLOY_V3_PLAN_QUERY_KEY } from "./deploy-v3-helpers";
+import type { ActualDecisionItem, DeployV3PlanResponse, DeployV3ReadinessDiagnostic, IntelV3Snapshot, IntelV3RunResult } from "./api";
+import { DEPLOY_V3_PLAN_QUERY_KEY, DEPLOY_V3_READINESS_QUERY_KEY } from "./deploy-v3-helpers";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
@@ -499,6 +499,26 @@ export function useDeployV3Plan(enabled = true) {
       if (error instanceof Error && error.message.includes("404")) return false;
       // No-snapshot returns a dict as detail, Error constructor produces "[object Object]"
       if (error instanceof Error && error.message === "[object Object]") return false;
+      return failureCount < 2;
+    },
+  });
+}
+
+// ── Deploy v3 readiness diagnostic ────────────────────────────────────────────
+
+/**
+ * Read the Deploy v3 exact-dollar readiness diagnostic from GET /api/v1/deploy/v3/readiness.
+ * Returns 404 when the feature flag is off.
+ * Does not call the legacy allocation plan endpoint.
+ */
+export function useDeployV3Readiness(enabled = true) {
+  return useQuery<DeployV3ReadinessDiagnostic>({
+    queryKey: DEPLOY_V3_READINESS_QUERY_KEY,
+    queryFn: api.deployV3.getReadiness,
+    enabled,
+    staleTime: 60_000,
+    retry: (failureCount, error: unknown) => {
+      if (error instanceof Error && error.message.includes("404")) return false;
       return failureCount < 2;
     },
   });

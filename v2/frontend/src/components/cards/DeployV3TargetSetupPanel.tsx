@@ -5,24 +5,19 @@ import { useTargets, usePositions, useSetDeployTargets } from "@/lib/hooks";
 import { cn } from "@/lib/utils";
 import { InlineLoader } from "@/components/ui/Spinner";
 import type { DeployV3ReadinessDiagnostic } from "@/lib/api";
+import {
+  TARGET_TOTAL_MIN,
+  TARGET_TOTAL_MAX,
+  parseInputPct,
+  computeTotal,
+  getMissingTickers,
+  isSaveAllowed,
+  buildTargetPayload,
+  hydrateRows,
+} from "@/lib/deploy-v3-target-helpers";
 
-// ── Validation helpers ────────────────────────────────────────────────────────
-
-const MIN_TOTAL = 98;
-const MAX_TOTAL = 102;
-
-function parseInputPct(val: string): number | null {
-  const n = parseFloat(val);
-  if (!isFinite(n) || n < 0) return null;
-  return n;
-}
-
-function computeTotal(rows: Record<string, string>): number {
-  return Object.values(rows).reduce((sum, v) => {
-    const n = parseFloat(v);
-    return sum + (isFinite(n) && n >= 0 ? n : 0);
-  }, 0);
-}
+const MIN_TOTAL = TARGET_TOTAL_MIN;
+const MAX_TOTAL = TARGET_TOTAL_MAX;
 
 // ── Policy guidance section ───────────────────────────────────────────────────
 
@@ -90,48 +85,43 @@ export function DeployV3TargetSetupPanel({ readinessDiagnostic }: Props) {
 
   // Editable rows: ticker → string (% value as typed)
   const [rows, setRows] = useState<Record<string, string>>({});
+  // Track which tickers the user has explicitly edited — those are never overwritten by refetches.
+  const [touchedTickers, setTouchedTickers] = useState<Set<string>>(new Set());
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saveSuccess, setSaveSuccess] = useState(false);
 
-  // Populate rows when data arrives
+  // Hydrate rows when positions or saved targets change.
+  // Touched tickers are never overwritten by late-arriving query data.
   useEffect(() => {
     if (!positionTickers.length) return;
     const saved = Object.fromEntries(
       (existingTargets ?? []).map((t) => [t.ticker, String(t.target_pct)])
     );
-    setRows((prev) => {
-      // Keep any in-progress edits; seed missing tickers from saved targets
-      const next: Record<string, string> = {};
-      for (const ticker of positionTickers) {
-        next[ticker] = prev[ticker] ?? saved[ticker] ?? "";
-      }
-      return next;
-    });
+    setRows((prev) => hydrateRows(positionTickers, saved, prev, touchedTickers));
+  // touchedTickers is intentionally excluded — it's a stable ref used inside hydrateRows
+  // and reading it here would cause an infinite loop on every keystroke.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [positionTickers, existingTargets]);
 
   const total = useMemo(() => computeTotal(rows), [rows]);
   const totalValid = total >= MIN_TOTAL && total <= MAX_TOTAL;
 
-  const missingTickers = positionTickers.filter((t) => {
-    const v = rows[t];
-    return !v || parseInputPct(v) === null;
-  });
+  const missingTickers = useMemo(
+    () => getMissingTickers(positionTickers, rows),
+    [positionTickers, rows],
+  );
   const invalidTickers = positionTickers.filter((t) => {
     const v = rows[t];
     if (!v) return false;
-    const n = parseInputPct(v);
-    return n === null; // non-numeric or negative
+    return parseInputPct(v) === null;
   });
 
-  const canSave =
-    positionTickers.length > 0 &&
-    missingTickers.length === 0 &&
-    invalidTickers.length === 0 &&
-    totalValid;
+  const canSave = invalidTickers.length === 0 && isSaveAllowed(positionTickers, rows);
 
   function handleChange(ticker: string, value: string) {
     setSaveError(null);
     setSaveSuccess(false);
+    setTouchedTickers((prev) => new Set([...prev, ticker]));
     setRows((prev) => ({ ...prev, [ticker]: value }));
   }
 
@@ -151,6 +141,7 @@ export function DeployV3TargetSetupPanel({ readinessDiagnostic }: Props) {
       draft[p.ticker] = pct.toFixed(2);
     }
     setRows(draft);
+    setTouchedTickers(new Set(Object.keys(draft)));
     setSaveError(null);
     setSaveSuccess(false);
   }
@@ -159,10 +150,7 @@ export function DeployV3TargetSetupPanel({ readinessDiagnostic }: Props) {
     if (!canSave) return;
     setSaveError(null);
     setSaveSuccess(false);
-    const payload = positionTickers.map((ticker) => ({
-      ticker,
-      target_pct: parseInputPct(rows[ticker])!,
-    }));
+    const payload = buildTargetPayload(positionTickers, rows);
     try {
       await setTargets.mutateAsync(payload);
       setSaveSuccess(true);

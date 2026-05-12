@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.5D — Deploy v3 production readiness diagnostic v1)
+Last updated: 2026-05-12 (post Stage 2.5E — Deploy v3 readiness UI surface v1)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.5D**. Stages 2.5A–2.5D complete. All three exact-dollar gates enforced and hardened (2.5A–2.5C); production readiness diagnostic endpoint added (2.5D). `GET /api/v1/deploy/v3/readiness` reports all gate statuses, snapshot age, per-ticker market-value coverage, target allocation gaps, policy config presence (no values exposed — `minimum_trade_configured`, `rounding_policy_configured`, `policy_valid`, `policy_status`), suppression reasons, and a plain-English `next_required_action`. 651 deploy tests; 0 failed. Backend-only, no SQL/migration, no UI.
-- Active build queue item: **Deploy v3 exact-dollar path completion** — call `/api/v1/deploy/v3/readiness` against real data to determine next action. Diagnostic will report: (1) missing/stale snapshot → refresh; (2) missing target allocations → add rows; (3) target total out of [98%, 102%] → fix total; (4) policy env vars missing → set vars; or (5) all gates pass → certified action-plan path exists and Stage 2 exit validation can proceed.
+- Roadmap stage: **Stage 2.5E** (complete). Stages 2.5A–2.5E complete. Exact-dollar gates enforced (2.5A–2.5C); readiness diagnostic backend endpoint (2.5D); readiness UI surface (2.5E). `GET /api/v1/deploy/v3/readiness` is now surfaced in `DeployV3ReadinessPanel` on the Deploy page — shows gate summary, snapshot status, market value coverage, target allocation gaps, policy status (no values), and plain-English `next_required_action`. 170+ frontend contract tests pass; 0 new backend changes; no SQL.
+- Active build queue item: **Deploy v3 production data validation** — use the readiness panel against real production data. The `next_required_action` field will tell you exactly which gate is blocking. Possible outcomes: (1) create fresh snapshot; (2) add target allocations; (3) fix target total to [98%, 102%]; (4) set deploy policy env vars; or (5) all gates pass → Stage 2 exit validation can proceed.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,6 +23,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
+- 2026-05-12 — **Stage 2.5E: Deploy v3 readiness UI surface v1** — `DeployV3ReadinessPanel` on Deploy page; calls `GET /api/v1/deploy/v3/readiness`; renders exact_dollar_ready gate summary, snapshot status (missing/stale/fresh), market value coverage (uncertified tickers), target allocation gaps (missing/conflicting tickers, total %), policy status (missing_minimum_trade/missing_rounding_policy/invalid/certified — no values). `useDeployV3Readiness()` hook with query key `["deploy_v3", "readiness"]`; `DEPLOY_V3_READINESS_ENDPOINT` constant; `DeployV3ReadinessDiagnostic` TypeScript type; `policyStatusLabel()` helper. Loading/error/missing-data/flag-off states do not crash. 43 new frontend contract tests; all pass. No backend changes, no SQL.
 - 2026-05-12 — **Stage 2.5D: Deploy v3 production readiness diagnostic v1** — `GET /api/v1/deploy/v3/readiness` (authenticated, read-only); reports all readiness gates, snapshot metadata (id, age, stale/fresh), per-ticker market-value coverage, target allocation gaps + total %, policy section (`minimum_trade_configured`, `rounding_policy_configured`, `policy_valid`, `policy_status`; no values exposed), suppression reasons, plain-English `next_required_action`. `deploy_readiness_diagnostic_v1.py` wraps the sizing adapter; zero LLM/provider/broker calls. 49 new backend tests (42 diagnostic + 7 router readiness; router tests cover registration, GET method, flag-off→404, delegation, no-legacy imports, auth); 651 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
 - 2026-05-12 — **Stage 2.5C: Deploy v3 target-allocation + policy readiness hardening v1** — portfolio-level target allocation total bounds (98%–102%) enforced in `target_allocation_ready` and `get_suppression_reasons` (Deploy v3 has no explicit cash/residual target contract; near-full specification required for exact-dollar readiness); duplicate DB rows → CONFLICTING trust; invalid policy config fails safe (UNSUPPORTED). 3 new suppression reasons in `DeploySizingSuppressionReason`; `TARGET_ALLOCATION_TOTAL_MIN/MAX` constants added. 46 new tests + updated 38 existing tests to use valid target totals (≥98%); 485 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
 - 2026-05-12 — **Stage 2.5B: Deploy v3 snapshot market-value source v1** — `PortfolioService.create_snapshot()` now enriches `positions_data` with `market_price_usd`, `market_value_usd`, `market_value_source`, `market_value_certified_at` when price is valid and fresh. Omits fields when price missing/stale/invalid (fail-safe). Cost basis never stored as market value. Price fetch failure falls back gracefully. Reuses price service cache — no second provider fetch. 33 new backend tests; 72 total for adapter + enrichment (0 failed). No SQL, no new providers, no LLM, no deploy decision changes.
@@ -57,7 +58,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Run `GET /api/v1/deploy/v3/readiness` against real data** (inside Stage 2). Stage 2.5D added the diagnostic endpoint — call it to discover exactly which gate(s) are blocking. The `next_required_action` field will say one of: create fresh snapshot, add missing target allocations, fix target total, set deploy policy env vars, or all gates pass. Do not build a UI/admin target-allocation flow or move to Stage 3 / Watchtower until the diagnostic has been validated against real production data and the `next_required_action` is confirmed. Watchtower trigger foundation stays in Next/Later until Deploy has a certified action-plan path.
+**Use the `DeployV3ReadinessPanel`** (Stage 2.5E) to validate readiness against real production data. The panel shows `next_required_action` from `GET /api/v1/deploy/v3/readiness`. Do not build a target-allocation editor, snapshot-create button, or move to Stage 3 / Watchtower until readiness has been validated and the `next_required_action` confirms all gates pass. Watchtower trigger foundation stays in Next/Later until Deploy has a certified action-plan path.
 
 Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 

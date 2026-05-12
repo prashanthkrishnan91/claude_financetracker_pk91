@@ -245,6 +245,37 @@ class PortfolioService:
         )
         return result.data
 
+    @staticmethod
+    def _lookup_price_result(raw_ticker: str, price_results: dict) -> Any:
+        """Resolve a price result for a raw ticker against the fetch_prices() result dict.
+
+        fetch_prices() normalizes some tickers before returning (e.g. BRK.B → BRK-B),
+        so the result dict may be keyed by the normalized form. This helper tries:
+          1. Uppercase raw ticker (covers most tickers as-is)
+          2. Uppercase with dots replaced by dashes (covers BRK.B, BF.B, etc.)
+        Does not reach into price engine private state.
+        """
+        upper = raw_ticker.upper()
+        return price_results.get(upper) or price_results.get(upper.replace(".", "-"))
+
+    @staticmethod
+    def _enrich_position_entry(pos: dict, price_result: Any, certified_at: str) -> dict:
+        """Return a copy of pos with market value fields added when price is valid and fresh.
+
+        Never stores cost basis under market_value_usd. If price_result is None,
+        invalid, or stale, returns pos unchanged so the Deploy adapter correctly
+        reads MISSING trust status for that position.
+        """
+        entry = dict(pos)
+        if price_result is not None and price_result.is_valid and not price_result.is_stale:
+            shares = float(pos.get("shares") or 0)
+            if shares > 0:
+                entry["market_price_usd"] = round(price_result.mid_price, 6)
+                entry["market_value_usd"] = round(shares * price_result.mid_price, 2)
+                entry["market_value_source"] = price_result.source
+                entry["market_value_certified_at"] = certified_at
+        return entry
+
     async def create_snapshot(self) -> SnapshotResponse:
         """Create a point-in-time snapshot using current data."""
         summary = await self.get_summary()
@@ -256,6 +287,30 @@ class PortfolioService:
             .execute()
         ).data
 
+        # Enrich positions with current market values.
+        # get_summary() already fetched prices; the price service's 5-minute in-memory
+        # cache means this second call returns cached data — no new provider requests.
+        enriched_positions: list = list(positions) if positions else []
+        if enriched_positions:
+            tickers = [p["ticker"] for p in enriched_positions if p.get("ticker")]
+            if tickers:
+                try:
+                    price_svc = self._get_price_service()
+                    price_results = await price_svc.fetch_prices(tickers)
+                    certified_at = datetime.now(timezone.utc).isoformat()
+                    enriched_positions = [
+                        self._enrich_position_entry(
+                            p,
+                            self._lookup_price_result(p.get("ticker", ""), price_results),
+                            certified_at,
+                        )
+                        for p in enriched_positions
+                    ]
+                except Exception:
+                    logger.debug(
+                        "Market value enrichment failed; snapshot stores positions without market values"
+                    )
+
         snapshot = {
             "user_id": str(self.user_id),
             "total_equity": summary.total_equity,
@@ -263,7 +318,7 @@ class PortfolioService:
             "total_pnl": summary.total_pnl,
             "total_pnl_pct": summary.total_pnl_pct,
             "cash_balance": summary.cash_balance,
-            "positions_data": positions,
+            "positions_data": enriched_positions,
             "metadata": {
                 "prices_fresh": summary.prices_fresh,
                 "prices_stale": summary.prices_stale,

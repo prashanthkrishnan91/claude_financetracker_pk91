@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-11 (post Stage 2.3A merge)
+Last updated: 2026-05-12 (post Stage 2.3E plan-rollup)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.3A — Deploy exact-dollar math v1 complete** (backend-only; next: Stage 2.3B guardrails/constraints, or plain-English Deploy UI). See `docs/product/ROADMAP.md`.
-- Active build queue item: Exact-dollar buy/trim/sell planner merged; next item is guardrails/constraints for action planning. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.3E — Deploy plan-level readiness rollup v1 complete** (backend-only). Item-level pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are all in place. Next: real tax/wash-sale guardrail logic, or plain-English Deploy UI on the existing rollup contract. See `docs/product/ROADMAP.md`.
+- Active build queue item: Plan-level readiness rollup merged; next item is real tax/wash-sale guardrail evaluation, or the plain-English Deploy UI surface. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,10 +23,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
-- 2026-05-11 — **Stage 2.3A: Deploy exact-dollar math v1** — added `deploy_dollar_math_v1.py` (`compute_dollar_amount_for_item`, `apply_dollar_math_to_plan_items`). Hard gate: `exact_dollar_ready=True` required. BUY delta = target_dollars − current_dollars; TRIM/SELL delta = inverse. Rounding: WHOLE_DOLLAR/NEAREST_DOLLAR → `round()`; NO_ROUNDING → pass-through. Non-positive/zero-rounded deltas and sub-minimum-trade amounts suppressed. `estimated_share_quantity` populated only when certified positive `price_per_share_usd` provided. Intel action preserved verbatim; HOLD never actionable; suppressed items never receive dollar amounts. 29 new tests; 277 total Deploy tests; 0 failed. No SQL, no UI, no routes, no visible behavior change.
-- 2026-05-11 — **Stage 2.2: Deploy policy + target-allocation readiness bridge** — added `deploy_target_allocation_bridge.py` (certify_target_allocation, build_certified_target_allocations: validates explicit-source only, rejects placeholder labels, rejects fabricated weights) and `deploy_policy_bridge.py` (certify_sizing_policy, build_policy_from_config: validates WHOLE_DOLLAR/NEAREST_DOLLAR/NO_ROUNDING, non-negative min_trade). Bridges into DeploySizingInputBundle without changing Intel authority. Production/default builder path stays UNSUPPORTED/NOT_EVALUATED (exact_dollar_ready=False). Synthetic certified sizing+target+policy → exact_dollar_ready=True (readiness gate only, no dollar math). 48 Stage 2.2 + 118 Stage 2.1 + 74 Stage 2.0 = 240 passed / 0 failed. No SQL, no UI, no routes, no providers, no visible behavior change.
-- 2026-05-11 — **Stage 2.1: Deploy sizing input contract** — added `deploy_sizing_contracts.py` and `deploy_sizing_builder.py`. Trust/suppression model; three readiness gates; target allocations NOT_EVALUATED placeholder; policy UNSUPPORTED placeholder. 143 focused tests passed. No SQL, no UI, no routes, no visible behavior change.
-- 2026-05-11 — **Stage 2.0: Deploy Foundation v1** — new backend-only domain seam (`app/services/deploy/`). Created `deploy_contracts.py` (DeployPlan, DeployPlanItem, DeployGuardrailSummary, enums), `deploy_intel_adapter.py` (reads Intel v3 snapshot read-only), `deploy_translation_v1.py` (translates BUY/TRIM/SELL to scaffold candidates; HOLD → never actionable; THIN/stale/blocked suppresses). All dollar fields null in v1. PriceBand not a Deploy authority. 74 focused tests pass. No SQL, no UI, no routes, no providers, no visible behavior change.
+- 2026-05-12 — **Stage 2.3E: Deploy plan-level readiness rollup v1** — added `deploy_plan_rollup_v1.py` (`build_plan_rollup`, `DeployPlanRollup`); wired into `build_deploy_plan` after finalization/pending-reason. Backend-only contract: counts by `final_actionability_status`, counts by `pending_guardrails_reason`, convenience totals (actionable/pending/blocked/informational/suppressed/not_ready/unknown), and a deterministic `plan_readiness_status` ladder (`no_items` → `all_informational` / `all_suppressed` → `ready_pending_guardrails` → `partially_ready` → `blocked` → `not_ready`). Unknown / unrecognized item fields fail safe into the unknown bucket and `not_ready`. No mutation of items. No UI, no API/route, no SQL/persistence, no providers, no LLM, no broker, no Watchtower, no visible behavior change. 31 new tests; 460 total Deploy tests; 0 failed.
+- 2026-05-11 — **Stages 2.3A–2.3D: Deploy exact-dollar pipeline + per-item finalization** — `deploy_dollar_math_v1.py` (Stage 2.3A; `exact_dollar_ready` gate; BUY/TRIM/SELL deltas; rounding & min-trade suppression; share-quantity only with certified price). `deploy_cash_guardrail_v1.py` (Stage 2.3B; cash certified vs blocked vs not-applicable). `deploy_finalization_v1.py` (Stage 2.3C; per-item `final_actionability_status` ∈ informational_hold | suppressed | blocked_cash | actionable_pending_tax | not_ready). Stage 2.3D added `pending_guardrails_reason` (deterministic across all paths; cleared on non-pending finalization). Item-level intel_action / actionability_status / dollar amount / cash status are never mutated by later stages.
+- 2026-05-11 — **Stages 2.0–2.2: Deploy foundation, sizing input contract, policy + target-allocation bridges** — `deploy_contracts.py` (DeployPlan, DeployPlanItem, DeployGuardrailSummary, enums), `deploy_intel_adapter.py` (read-only Intel v3 snapshot reader), `deploy_translation_v1.py` (BUY/TRIM/SELL scaffold; HOLD never actionable; THIN/stale/blocked/weak suppressed; PriceBand never an authority). `deploy_sizing_contracts.py` + `deploy_sizing_builder.py` (Stage 2.1; trust/suppression model; three readiness gates). `deploy_policy_bridge.py` + `deploy_target_allocation_bridge.py` (Stage 2.2; explicit-source-only certification; rejects placeholder labels and fabricated weights).
 - 2026-05-10 — Phase 14F closure: added hidden backend-only visible context scaffold (`priceband_visible_context_v1.py`) behind a disabled-by-default config flag. No visible behavior changes, no route, no snapshot writes, no DecisionInputV3 mutation, no Buy/Hold/Trim/Sell changes. **Closed as hidden scaffold only.**
 - 2026-05-10 — Final test-suite cleanup: backend full-suite stabilized at **3,926 passed / 0 failed**; 5 stale tests retired with one-line justifications (no production code changed). `audit_repo_hygiene.py` gained an async-test antipattern check. Full backend suite is now a Tier-3 release/infra gate — see `docs/ai/TEST_ROUTING.md`.
 - 2026-05-10 — Repo cleanup: removed legacy Streamlit v1 app and added repo hygiene tooling. Deleted `v1/`, root `App.py`, root `requirements.txt`, `.streamlit/`, `.devcontainer/`, the v2 `migration_service.py`, and the `/api/v1/positions/seed-v1` endpoint (zero callers). Compressed `v2/progress_log.md` to a current-state log under the new convention; deleted `v2/progress_log_archive.md`. Added `docs/ai/REPO_HYGIENE.md` and the read-only `scripts/repo_hygiene/audit_repo_hygiene.py` audit. v2 is now the only active product surface.
@@ -45,14 +44,14 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Known risks / unresolved issues
 
-- Deploy exact-dollar math is implemented (Stage 2.3A). `recommended_dollar_amount` and `estimated_share_quantity` are computed for eligible BUY/TRIM/SELL candidates. Cash constraint evaluation and tax/wash-sale guardrails are not yet wired (`cash_constraint_status` and guardrail fields remain placeholders).
+- Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower trigger model is still scoped but unbuilt; no live alerts.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-Stage 2.3B — Deploy guardrails / constraints: wire cash constraint evaluation (`cash_constraint_status`), tax guardrail, and wash-sale guardrail into the dollar math layer. Alternatively, move to plain-English Deploy UI once the guardrail layer is scoped.
+Either (a) Stage 2.3F — implement real tax-lot / wash-sale guardrail logic so items can reach a fully-actionable final status (and the rollup gains a non-zero `actionable_count`), or (b) start the plain-English Deploy UI on top of the existing `DeployPlanRollup` contract (no further backend churn needed for an initial read-only surface).
 
 ## Handoff maintenance rule
 

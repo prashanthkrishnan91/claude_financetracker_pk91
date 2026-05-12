@@ -13,7 +13,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
+
+if TYPE_CHECKING:
+    from .deploy_plan_rollup_v1 import DeployPlanRollup
 
 
 class DeployPlanStatus(str, Enum):
@@ -141,4 +144,8 @@ class DeployPlan:
     plan_status: DeployPlanStatus
     items: List[DeployPlanItem] = field(default_factory=list)
     guardrail_summary: Optional[DeployGuardrailSummary] = None
+    # Plan-level readiness rollup derived after finalization.
+    # Optional for backward compatibility with callers constructing DeployPlan
+    # directly without a rollup; build_deploy_plan always populates this.
+    rollup: Optional["DeployPlanRollup"] = None
     schema_version: str = "deploy_v1_scaffold"

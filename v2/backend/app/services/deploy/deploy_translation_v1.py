@@ -31,6 +31,7 @@ from .deploy_contracts import (
 from .deploy_cash_guardrail_v1 import apply_cash_guardrail_to_plan_items
 from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
 from .deploy_finalization_v1 import apply_finalization_to_plan_items
+from .deploy_plan_rollup_v1 import build_plan_rollup
 from .deploy_sizing_contracts import DeploySizingInputBundle
 
 # Intel actions that may become future trade candidates (not HOLD).
@@ -168,6 +169,7 @@ def build_deploy_plan(
                 hold_items=0,
                 suppressed_items=0,
             ),
+            rollup=build_plan_rollup([]),
             schema_version="deploy_v1_scaffold",
         )
 
@@ -269,11 +271,14 @@ def build_deploy_plan(
     else:
         plan_status = DeployPlanStatus.SCAFFOLD
 
+    rollup = build_plan_rollup(items)
+
     return DeployPlan(
         snapshot_id=snapshot_id,
         run_id=run_id,
         plan_status=plan_status,
         items=items,
         guardrail_summary=guardrail,
+        rollup=rollup,
         schema_version="deploy_v1_scaffold",
     )

@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- Deploy guardrails / constraints: cash constraint evaluation, tax guardrail, wash-sale guardrail.
+- Deploy real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract (today's `tax_guardrail_status` and `wash_sale_guardrail_status` are honest `not_evaluated_yet` placeholders).
 
 ## Next
 
-- Plain-English Deploy UI (action plan surface).
+- Plain-English Deploy UI (action-plan surface) on the existing `DeployPlanRollup` contract.
 - Watchtower trigger foundation.
 
 ## Later

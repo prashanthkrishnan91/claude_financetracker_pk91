@@ -56,6 +56,10 @@ FINAL_SUPPRESSED = "suppressed"
 FINAL_NOT_READY = "not_ready"
 FINAL_NOT_FINALIZED = "not_finalized"   # placeholder before finalization runs
 
+# Canonical pending_guardrails_reason values.
+PENDING_REASON_TAX_WASH_NOT_EVALUATED = "tax_and_wash_sale_not_evaluated"
+PENDING_REASON_NONE = "none"
+
 # Cash status values that indicate cash is blocked.
 _CASH_BLOCKING_STATUSES = frozenset({
     "blocked_insufficient_cash",
@@ -94,13 +98,21 @@ def finalize_item_actionability(item: DeployPlanItem) -> DeployPlanItem:
     # ACTIONABLE_CANDIDATE with positive dollar amount — BUY path.
     if action == "BUY":
         if item.cash_constraint_status == _CASH_PASSED:
-            return replace(item, final_actionability_status=FINAL_ACTIONABLE_PENDING_TAX)
+            return replace(
+                item,
+                final_actionability_status=FINAL_ACTIONABLE_PENDING_TAX,
+                pending_guardrails_reason=PENDING_REASON_TAX_WASH_NOT_EVALUATED,
+            )
         return replace(item, final_actionability_status=FINAL_BLOCKED_CASH)
 
-    # ACTIONABLE_CANDIDATE with dollar amount — TRIM/SELL path.
+    # ACTIONABLE_CANDIDATE with positive dollar amount — TRIM/SELL path.
     if action in _TRIM_SELL_ACTIONS:
         if item.cash_constraint_status == _CASH_NOT_APPLICABLE_TRIM_SELL:
-            return replace(item, final_actionability_status=FINAL_ACTIONABLE_PENDING_TAX)
+            return replace(
+                item,
+                final_actionability_status=FINAL_ACTIONABLE_PENDING_TAX,
+                pending_guardrails_reason=PENDING_REASON_TAX_WASH_NOT_EVALUATED,
+            )
         return replace(item, final_actionability_status=FINAL_NOT_READY)
 
     # Unknown action — not ready.

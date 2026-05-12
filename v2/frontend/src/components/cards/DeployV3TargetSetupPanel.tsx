@@ -121,7 +121,7 @@ export function DeployV3TargetSetupPanel({ readinessDiagnostic }: Props) {
   function handleChange(ticker: string, value: string) {
     setSaveError(null);
     setSaveSuccess(false);
-    setTouchedTickers((prev) => new Set([...prev, ticker]));
+    setTouchedTickers((prev) => new Set(Array.from(prev).concat(ticker)));
     setRows((prev) => ({ ...prev, [ticker]: value }));
   }
 

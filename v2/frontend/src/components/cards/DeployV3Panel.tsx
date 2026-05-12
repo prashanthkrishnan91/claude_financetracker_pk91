@@ -1,42 +1,9 @@
 "use client";
 
 import { useDeployV3Plan } from "@/lib/hooks";
-import type { DeployV3PlanRollup, DeployV3ReadinessStatus } from "@/lib/api";
+import { isNoSnapshotError, readinessMeta } from "@/lib/deploy-v3-helpers";
 import { cn } from "@/lib/utils";
 import { InlineLoader } from "@/components/ui/Spinner";
-
-// ── Readiness label mapping ───────────────────────────────────────────────────
-
-type ReadinessMeta = { label: string; cls: string };
-
-const READINESS_META: Record<string, ReadinessMeta> = {
-  no_items: { label: "No items in plan — run Intel v3 first", cls: "text-text-muted" },
-  all_informational: { label: "All positions: hold as planned", cls: "text-blue-300" },
-  all_suppressed: { label: "All items suppressed — evidence gaps present", cls: "text-yellow-300" },
-  ready_pending_guardrails: { label: "Ready — pending tax and guardrail review", cls: "text-emerald-300" },
-  partially_ready: { label: "Partially ready — some items blocked or not sized", cls: "text-yellow-300" },
-  blocked: { label: "Blocked — cash constraint limits deployment", cls: "text-red-400" },
-  not_ready: { label: "Not sized yet — sizing inputs not connected", cls: "text-text-muted" },
-};
-
-function readinessMeta(status: DeployV3ReadinessStatus | string): ReadinessMeta {
-  return READINESS_META[status] ?? { label: "Plan status unknown", cls: "text-text-muted" };
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function isNoSnapshotError(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  const msg = error.message;
-  // No-snapshot 404 serialises as "[object Object]" or contains "no_snapshot"
-  return (
-    msg.includes("404") ||
-    msg === "[object Object]" ||
-    msg.toLowerCase().includes("no_snapshot") ||
-    msg.toLowerCase().includes("snapshot") ||
-    msg.toLowerCase().includes("intel v3")
-  );
-}
 
 // ── Count row ─────────────────────────────────────────────────────────────────
 

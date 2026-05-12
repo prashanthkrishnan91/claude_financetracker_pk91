@@ -9,7 +9,7 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 2.4B — Deploy v3 read-only UI surface complete**. `DeployV3Panel` component is live on the Deploy page. Calls `GET /api/v1/deploy/v3/plan`; renders `plan_readiness_status`, counts (pending/blocked/informational/suppressed/not-ready), Intel v3 source note, and honest sizing-not-connected disclaimer when `source.sizing_bundle_provided=false`. Handles loading, 404/no-snapshot ("Run Intel v3 first"), flag-off, and error states. Legacy deposit workflow untouched. 25 new contract tests; all pass.
-- Active build queue item: **Watchtower trigger foundation** (Deploy v3 UI surface is complete). See `docs/product/BUILD_QUEUE.md`.
+- Active build queue item: **Deploy v3 certified sizing bundle source wiring** — Stage 2 is not yet ready to exit because plan items honestly show scaffold/null dollar fields and `not_ready` final statuses until a sizing bundle is wired. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -53,7 +53,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-Build the **Watchtower trigger foundation** — Stage 3 entry point. Detect meaningful portfolio changes worth a user's attention. No live alerts needed yet; just the trigger model and suppression rules.
+**Deploy v3 certified sizing bundle source wiring** (still inside Stage 2). The read-only UI surface and plan readiness rollup are live, but BUY/TRIM items honestly remain `not_ready` because no sizing bundle is wired. The next safe slice is scoping and wiring a certified sizing input so dollar amounts can be computed and the Deploy Stage 2 exit gate can eventually be evaluated. Watchtower trigger foundation stays in Next/Later until Deploy has a useful certified action-plan path.
 
 Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 

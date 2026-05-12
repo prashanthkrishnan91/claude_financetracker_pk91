@@ -4,6 +4,7 @@
  */
 
 import { supabase } from "./supabase";
+import { DEPLOY_V3_PLAN_ENDPOINT } from "./deploy-v3-helpers";
 
 // Enforce HTTPS when the page is served over HTTPS.
 // Guards against NEXT_PUBLIC_API_URL being set to http:// in production,
@@ -252,7 +253,7 @@ export const api = {
   // Deploy v3 read-only plan. Calls GET /api/v1/deploy/v3/plan.
   // Intel v3 is the only Buy/Hold/Trim/Sell authority. No legacy allocation engine.
   deployV3: {
-    getPlan: () => fetchApi<DeployV3PlanResponse>("/api/v1/deploy/v3/plan"),
+    getPlan: () => fetchApi<DeployV3PlanResponse>(DEPLOY_V3_PLAN_ENDPOINT),
   },
 };
 

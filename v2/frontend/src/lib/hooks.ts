@@ -3,6 +3,7 @@
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
 import type { ActualDecisionItem, DeployV3PlanResponse, IntelV3Snapshot, IntelV3RunResult } from "./api";
+import { DEPLOY_V3_PLAN_QUERY_KEY } from "./deploy-v3-helpers";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
@@ -490,7 +491,7 @@ export function useIntelV3RunStatus(runId: string | null, enabled = true) {
  */
 export function useDeployV3Plan(enabled = true) {
   return useQuery<DeployV3PlanResponse>({
-    queryKey: ["deploy_v3", "plan"],
+    queryKey: DEPLOY_V3_PLAN_QUERY_KEY,
     queryFn: api.deployV3.getPlan,
     enabled,
     staleTime: 60_000,

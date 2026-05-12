@@ -325,7 +325,7 @@ export default function DepositsPage() {
         {(isV3Loading || isPlanLoading) && !v3Plan && !deployPlan ? (
           <InlineLoader text="Building deployment plan…" />
         ) : useV3ForStep2 ? (
-          <DeployV3Step2Section step2={step2} amount={amount} deployPlan={deployPlan} />
+          <DeployV3Step2Section step2={step2} />
         ) : deployPlan ? (
           <DeploymentPlan deployPlan={deployPlan} amount={amount} />
         ) : null}
@@ -364,12 +364,8 @@ import type { Step2Result } from "@/lib/deploy-v3-step2-mapper";
 
 function DeployV3Step2Section({
   step2,
-  amount,
-  deployPlan,
 }: {
   step2: Step2Result;
-  amount: number;
-  deployPlan: DepositPlanResult | undefined;
 }) {
   return (
     <div className="space-y-4">
@@ -423,30 +419,15 @@ function DeployV3Step2Section({
         )}
       </section>
 
-      {/* Step 3 — re-use legacy decision log when legacy plan is available, else show note */}
-      {deployPlan ? (
-        <section id="step-3">
-          <DecisionLogMemoryPanel
-            deployPlan={deployPlan}
-            recommendations={(deployPlan.recommendations ?? []).map((rec) => ({
-              ...rec,
-              why_selected: "",
-              execution_plan: "",
-            }))}
-            amount={amount}
-            adaptive={deployPlan.adaptive ?? null}
-          />
-        </section>
-      ) : (
-        <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
-            Step 3 — Log your decision
-          </p>
-          <p className="text-xs text-text-muted">
-            Decision logging is available once the legacy plan loads or Intel v3 run is complete.
-          </p>
-        </section>
-      )}
+      {/* Step 3 — Deploy v3 path: placeholder until Deploy v3 decision logging is wired */}
+      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+          Step 3 — Log your decision
+        </p>
+        <p className="text-xs text-text-muted">
+          Decision logging for Deploy v3 actions is coming next. For now, review the Deploy v3 actions above before acting.
+        </p>
+      </section>
 
       <Link
         href="/dashboard/recommendations"

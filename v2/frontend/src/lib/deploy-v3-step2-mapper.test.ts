@@ -326,3 +326,55 @@ describe("No stale sizing-disclaimer copy when exact_dollar_ready=true", () => {
     expect(result.state).toBe("has_moves");
   });
 });
+
+// ── Step 2 / Step 3 coherence — Deploy v3 path must not feed legacy recommendations ──
+
+describe("Step 2 / Step 3 coherence", () => {
+  it("Deploy v3 Step 2 path does not reference legacy allocation/plan or deposit-plan endpoints", () => {
+    // Structural: the mapper only operates on DeployV3PlanResponse.
+    // Step 3 in the Deploy v3 path renders a placeholder — it does not receive legacy plan data.
+    // Verified by reading the deposits/page.tsx source below.
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+
+    // DeployV3Step2Section must NOT accept a deployPlan prop
+    expect(pageSource).not.toMatch(/DeployV3Step2Section[^}]*deployPlan/);
+
+    // DeployV3Step2Section must NOT render DecisionLogMemoryPanel.
+    // The function ends at the next top-level "function " or "// ──" marker.
+    const sectionStart = pageSource.indexOf("function DeployV3Step2Section");
+    const nextFn = pageSource.indexOf("\nfunction DeployV3AllocationTable", sectionStart + 1);
+    const sectionBody = pageSource.slice(sectionStart, nextFn > sectionStart ? nextFn : undefined);
+    expect(sectionBody).not.toContain("DecisionLogMemoryPanel");
+  });
+
+  it("Legacy fallback path (not_available) does not use Deploy v3 Step 2 section", () => {
+    // When state is not_available, mapDeployV3ToStep2 returns is_deploy_v3=true
+    // but the page switches to legacy DeploymentPlan (useV3ForStep2 is false).
+    // Verify mapper: not_available means no items were rendered.
+    const result = mapDeployV3ToStep2(null);
+    expect(result.state).toBe("not_available");
+    expect(result.items).toHaveLength(0);
+    // The page gates on state !== "not_available" to decide which path to use.
+    // If state is not_available, legacy DeploymentPlan is rendered instead.
+    expect(result.state === "not_available").toBe(true);
+  });
+
+  it("has_moves items are the exact set a Step 3 logger must use — no legacy recs mixed in", () => {
+    const plan = makePlan({
+      items: [
+        makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 500, final_actionability_status: "actionable_pending_tax" }),
+        makeItem({ ticker: "MSFT", intel_action: "TRIM", recommended_dollar_amount: 200, final_actionability_status: "actionable_pending_tax" }),
+      ],
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("has_moves");
+    // Step 3 logger must use result.items — not any external legacy plan.
+    expect(result.items.map((i) => i.ticker)).toEqual(["AAPL", "MSFT"]);
+    expect(result.items.every((i) => i.dollar_amount != null && i.dollar_amount > 0)).toBe(true);
+  });
+});

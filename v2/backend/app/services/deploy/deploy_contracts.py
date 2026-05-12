@@ -91,6 +91,10 @@ class DeployPlanItem:
     tax_guardrail_status: str = "not_evaluated_yet"
     wash_sale_guardrail_status: str = "not_evaluated_yet"
     final_actionability_status: str = "not_finalized"
+    # Plain-English reason for items that are pending guardrail evaluation.
+    # Populated only when final_actionability_status is actionable_pending_tax.
+    # "none" for all other statuses — never fabricated for non-pending items.
+    pending_guardrails_reason: str = "none"
 
     # Suppression reason (populated when actionability_status is SUPPRESSED_*).
     suppression_reason: Optional[str] = None

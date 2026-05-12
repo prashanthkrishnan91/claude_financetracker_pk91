@@ -118,13 +118,21 @@ def _fully_ready_bundle(tickers: list | None = None) -> DeploySizingInputBundle:
     """Bundle with all three readiness gates satisfied — proves exact_dollar_ready=True.
 
     For testing the gate only; no dollar amounts are computed.
+    Weights are distributed evenly so the total is ~0.95, satisfying the
+    TARGET_ALLOCATION_TOTAL_MIN/MAX bounds contract.
     """
     tickers = tickers or ["AAPL"]
+    weight = 0.95 / len(tickers)
     return DeploySizingInputBundle(
         cash=_certified_cash(),
         portfolio=_certified_portfolio(),
         positions={t: _certified_position(t) for t in tickers},
-        target_allocations={t: _certified_target_allocation(t) for t in tickers},
+        target_allocations={
+            t: DeployTargetAllocationInput(
+                ticker=t, target_weight=weight, trust_status=DeploySizingTrustStatus.CERTIFIED,
+            )
+            for t in tickers
+        },
         policy=_certified_policy(),
     )
 
@@ -757,7 +765,8 @@ def test_unsupported_policy_suppresses_exact_dollar_ready():
         cash=_certified_cash(),
         portfolio=_certified_portfolio(),
         positions={"AAPL": _certified_position()},
-        target_allocations={"AAPL": _certified_target_allocation("AAPL")},
+        # Use weight 0.95 so total passes TARGET_ALLOCATION_TOTAL_MIN/MAX bounds.
+        target_allocations={"AAPL": _certified_target_allocation("AAPL", weight=0.95)},
         policy=DeploySizingPolicyPlaceholder(),  # UNSUPPORTED.
     )
     assert bundle.sizing_values_ready is True
@@ -799,7 +808,8 @@ def test_sizing_values_ready_true_policy_ready_false_still_blocks_exact_dollar()
         cash=_certified_cash(),
         portfolio=_certified_portfolio(),
         positions={"AAPL": _certified_position()},
-        target_allocations={"AAPL": _certified_target_allocation("AAPL")},
+        # Use weight 0.95 so total passes TARGET_ALLOCATION_TOTAL_MIN/MAX bounds.
+        target_allocations={"AAPL": _certified_target_allocation("AAPL", weight=0.95)},
         # No policy provided.
     )
     assert bundle.sizing_values_ready is True

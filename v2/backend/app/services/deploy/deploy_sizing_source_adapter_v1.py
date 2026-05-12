@@ -41,6 +41,7 @@ from ..deploy.deploy_sizing_contracts import (
     DeployPortfolioSizingInput,
     DeploySizingInputBundle,
     DeploySizingTrustStatus,
+    DeployTargetAllocationInput,
 )
 from ..deploy.deploy_target_allocation_bridge import certify_target_allocation
 
@@ -227,6 +228,22 @@ async def _read_certified_target_allocations(
         target_pct = row.get("target_pct")
         if not ticker or target_pct is None:
             continue
+
+        # Duplicate ticker rows indicate conflicting data — mark CONFLICTING so the
+        # portfolio-level readiness gate sees an explicit suppression reason rather
+        # than silently accepting the last-write value.
+        if ticker in target_allocations:
+            logger.warning(
+                "sizing_adapter: duplicate target_allocation row for ticker=%s "
+                "— marking CONFLICTING to suppress exact-dollar readiness",
+                ticker,
+            )
+            target_allocations[ticker] = DeployTargetAllocationInput(
+                ticker=ticker,
+                trust_status=DeploySizingTrustStatus.CONFLICTING,
+            )
+            continue
+
         try:
             weight = float(target_pct) / 100.0
             ta = certify_target_allocation(

@@ -67,14 +67,18 @@ def _make_bundle(
     portfolio_value: float = 100_000.0,
     cash: float = 10_000.0,
     ticker: str = "AAPL",
-    current_market_value: float = 10_000.0,
-    current_weight: float = 0.10,
-    target_weight: float = 0.15,
+    current_market_value: float = 85_000.0,
+    current_weight: float = 0.85,
+    target_weight: float = 0.90,
     minimum_trade_usd: float = 1.0,
     rounding_policy: str = "WHOLE_DOLLAR",
     exact_dollar_ready: bool = True,
 ) -> DeploySizingInputBundle:
-    """Build a synthetic certified DeploySizingInputBundle for testing."""
+    """Build a synthetic certified DeploySizingInputBundle for testing.
+
+    Defaults: single-ticker portfolio at current=85 % (85k) with target=90 % (90k).
+    BUY delta = 90k - 85k = 5k.  All defaults satisfy TARGET_ALLOCATION_TOTAL_MIN.
+    """
     cash_input = DeployCashInput(
         available_cash_usd=cash,
         trust_status=DeploySizingTrustStatus.CERTIFIED,
@@ -177,12 +181,12 @@ def test_suppressed_item_receives_no_dollar_amounts():
 # ---------------------------------------------------------------------------
 
 def test_buy_computes_deterministic_rounded_dollars_whole_dollar():
-    # target=15%, current=10%, portfolio=100k → delta=5000 → rounded=5000
+    # target=90%, current=85%, portfolio=100k → delta=5000 → rounded=5000
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -193,12 +197,12 @@ def test_buy_computes_deterministic_rounded_dollars_whole_dollar():
 
 
 def test_buy_with_fractional_delta_rounds_whole_dollar():
-    # target=12.5%, current=10%, portfolio=100k → delta=2500 → 2500 (already whole)
+    # target=90%, current=87.5%, portfolio=100k → delta=2500 → 2500 (already whole)
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.125,
+        current_market_value=87_500.0,
+        current_weight=0.875,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -212,12 +216,12 @@ def test_buy_with_fractional_delta_rounds_whole_dollar():
 # ---------------------------------------------------------------------------
 
 def test_buy_no_rounding_passes_through_fractional():
-    # target=12.3%, current=10%, portfolio=100k → delta=2300.0
+    # target=90%, current=87.7%, portfolio=100k → delta=2300.0
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.123,
+        current_market_value=87_700.0,
+        current_weight=0.877,
+        target_weight=0.90,
         rounding_policy="NO_ROUNDING",
         minimum_trade_usd=1.0,
     )
@@ -231,12 +235,12 @@ def test_buy_no_rounding_passes_through_fractional():
 # ---------------------------------------------------------------------------
 
 def test_nearest_dollar_rounds_to_integer():
-    # target=15.5%, current=10%, portfolio=100k → delta=5500 → rounded=5500
+    # target=90%, current=84.5%, portfolio=100k → delta=5500 → rounded=5500
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.155,
+        current_market_value=84_500.0,
+        current_weight=0.845,
+        target_weight=0.90,
         rounding_policy="NEAREST_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -250,12 +254,12 @@ def test_nearest_dollar_rounds_to_integer():
 # ---------------------------------------------------------------------------
 
 def test_trim_computes_dollars_intel_action_unchanged():
-    # current=20%, target=15%, portfolio=100k → delta=5000
+    # current=95%, target=90%, portfolio=100k → delta=5000
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=20_000.0,
-        current_weight=0.20,
-        target_weight=0.15,
+        current_market_value=95_000.0,
+        current_weight=0.95,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -270,18 +274,18 @@ def test_trim_computes_dollars_intel_action_unchanged():
 # ---------------------------------------------------------------------------
 
 def test_sell_computes_dollars_intel_action_unchanged():
-    # current=30%, target=10%, portfolio=100k → delta=20000
+    # current=100%, target=90%, portfolio=100k → delta=10000
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=30_000.0,
-        current_weight=0.30,
-        target_weight=0.10,
+        current_market_value=100_000.0,
+        current_weight=1.0,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
     item = _make_item(intel_action="SELL")
     result = compute_dollar_amount_for_item(bundle, item)
-    assert result.recommended_dollar_amount == 20_000.0
+    assert result.recommended_dollar_amount == 10_000.0
     assert result.intel_action == "SELL"
 
 
@@ -290,12 +294,12 @@ def test_sell_computes_dollars_intel_action_unchanged():
 # ---------------------------------------------------------------------------
 
 def test_minimum_trade_threshold_suppresses_small_amount():
-    # delta=500, minimum=1000 → suppressed
+    # current=89.5%, target=90%, delta=500, minimum=1000 → suppressed
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.105,   # delta=500
+        current_market_value=89_500.0,
+        current_weight=0.895,
+        target_weight=0.90,   # delta=500
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1_000.0,
     )
@@ -310,12 +314,12 @@ def test_minimum_trade_threshold_suppresses_small_amount():
 # ---------------------------------------------------------------------------
 
 def test_amount_equal_to_minimum_trade_is_accepted():
-    # delta=1000, minimum=1000 → accepted
+    # current=89%, target=90%, delta=1000, minimum=1000 → accepted
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.11,    # delta=1000
+        current_market_value=89_000.0,
+        current_weight=0.89,
+        target_weight=0.90,    # delta=1000
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1_000.0,
     )
@@ -329,11 +333,12 @@ def test_amount_equal_to_minimum_trade_is_accepted():
 # ---------------------------------------------------------------------------
 
 def test_amount_above_minimum_trade_is_accepted():
+    # current=85%, target=90%, delta=5000, minimum=1000 → accepted
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,   # delta=5000
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,   # delta=5000
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1_000.0,
     )
@@ -347,11 +352,12 @@ def test_amount_above_minimum_trade_is_accepted():
 # ---------------------------------------------------------------------------
 
 def test_zero_minimum_trade_does_not_suppress_positive_amount():
+    # current=90%, target=90.1%, delta=100, min=0 → accepted
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.101,   # delta=100
+        current_market_value=90_000.0,
+        current_weight=0.90,
+        target_weight=0.901,   # delta=100
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=0.0,
     )
@@ -365,12 +371,12 @@ def test_zero_minimum_trade_does_not_suppress_positive_amount():
 # ---------------------------------------------------------------------------
 
 def test_buy_already_at_or_above_target_suppresses_output():
-    # current=20%, target=15% → delta for BUY is negative → suppressed
+    # current=95%, target=90% → BUY delta is negative → suppressed
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=20_000.0,
-        current_weight=0.20,
-        target_weight=0.15,
+        current_market_value=95_000.0,
+        current_weight=0.95,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -384,12 +390,12 @@ def test_buy_already_at_or_above_target_suppresses_output():
 # ---------------------------------------------------------------------------
 
 def test_trim_already_at_or_below_target_suppresses_output():
-    # current=10%, target=15% → delta for TRIM is negative → suppressed
+    # current=90%, target=95% → TRIM delta is negative → suppressed
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=90_000.0,
+        current_weight=0.90,
+        target_weight=0.95,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -403,11 +409,12 @@ def test_trim_already_at_or_below_target_suppresses_output():
 # ---------------------------------------------------------------------------
 
 def test_share_quantity_populated_when_certified_price_provided():
+    # current=85%, target=90%, delta=5000, price=100 → share_qty=50
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,   # delta=5000
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,   # delta=5000
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -418,11 +425,12 @@ def test_share_quantity_populated_when_certified_price_provided():
 
 
 def test_share_quantity_null_when_price_not_provided():
+    # current=85%, target=90%, delta=5000, no price → share_qty=None
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -433,11 +441,12 @@ def test_share_quantity_null_when_price_not_provided():
 
 
 def test_share_quantity_null_when_price_is_zero():
+    # current=85%, target=90%, delta=5000, price=0 → share_qty=None
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -447,11 +456,12 @@ def test_share_quantity_null_when_price_is_zero():
 
 
 def test_share_quantity_null_when_price_is_negative():
+    # current=85%, target=90%, delta=5000, price<0 → share_qty=None
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=1.0,
     )
@@ -465,7 +475,7 @@ def test_share_quantity_null_when_price_is_negative():
 # ---------------------------------------------------------------------------
 
 def test_intel_action_preserved_buy():
-    bundle = _make_bundle(target_weight=0.15, current_market_value=10_000.0)
+    bundle = _make_bundle(current_market_value=85_000.0, current_weight=0.85, target_weight=0.90)
     item = _make_item(intel_action="BUY")
     result = compute_dollar_amount_for_item(bundle, item)
     assert result.intel_action == "BUY"
@@ -473,7 +483,7 @@ def test_intel_action_preserved_buy():
 
 def test_intel_action_preserved_trim():
     bundle = _make_bundle(
-        current_market_value=20_000.0, current_weight=0.20, target_weight=0.15
+        current_market_value=95_000.0, current_weight=0.95, target_weight=0.90
     )
     item = _make_item(intel_action="TRIM")
     result = compute_dollar_amount_for_item(bundle, item)
@@ -482,7 +492,7 @@ def test_intel_action_preserved_trim():
 
 def test_intel_action_preserved_sell():
     bundle = _make_bundle(
-        current_market_value=30_000.0, current_weight=0.30, target_weight=0.10
+        current_market_value=100_000.0, current_weight=1.0, target_weight=0.90
     )
     item = _make_item(intel_action="SELL")
     result = compute_dollar_amount_for_item(bundle, item)
@@ -519,11 +529,12 @@ def test_original_item_not_mutated():
 # ---------------------------------------------------------------------------
 
 def test_apply_dollar_math_to_plan_items_mixed_list():
+    # current=85%, target=90%, delta=5000
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         minimum_trade_usd=1.0,
     )
     buy_item = _make_item(intel_action="BUY", actionability=DeployActionabilityStatus.ACTIONABLE_CANDIDATE)
@@ -541,11 +552,12 @@ def test_apply_dollar_math_to_plan_items_mixed_list():
 # ---------------------------------------------------------------------------
 
 def test_apply_dollar_math_price_map_populates_known_tickers():
+    # current=85%, target=90%, delta=5000, price=250 → share_qty=20
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,  # delta=5000
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,  # delta=5000
         minimum_trade_usd=1.0,
     )
     item = _make_item(intel_action="BUY")
@@ -554,11 +566,12 @@ def test_apply_dollar_math_price_map_populates_known_tickers():
 
 
 def test_apply_dollar_math_missing_ticker_in_price_map_leaves_share_qty_null():
+    # current=85%, target=90%, delta=5000; AAPL not in MSFT price map → share_qty=None
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,
+        current_market_value=85_000.0,
+        current_weight=0.85,
+        target_weight=0.90,
         minimum_trade_usd=1.0,
     )
     item = _make_item(intel_action="BUY")
@@ -575,9 +588,9 @@ def test_rounding_to_zero_suppresses_output():
     # delta=0.3, rounded to nearest whole dollar = 0 → suppressed
     bundle = _make_bundle(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.100003,   # tiny delta → rounds to 0
+        current_market_value=90_000.0,
+        current_weight=0.90,
+        target_weight=0.900003,   # tiny delta → rounds to 0
         rounding_policy="WHOLE_DOLLAR",
         minimum_trade_usd=0.0,
     )
@@ -591,11 +604,12 @@ def test_rounding_to_zero_suppresses_output():
 # ---------------------------------------------------------------------------
 
 def test_whole_dollar_and_nearest_dollar_same_result():
+    # current=89.43%, target=90%, delta=570 (rounds to 570 either way)
     common_kwargs = dict(
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.1557,   # delta=570.0 (rounds to 570 either way)
+        current_market_value=89_430.0,
+        current_weight=0.8943,
+        target_weight=0.90,   # delta=570
         minimum_trade_usd=1.0,
     )
     b1 = _make_bundle(**common_kwargs, rounding_policy="WHOLE_DOLLAR")
@@ -671,7 +685,7 @@ def test_buy_from_scratch_explicit_zero_position():
         trust_status=DeploySizingTrustStatus.CERTIFIED,
         source_label="test",
     )
-    ta = certify_target_allocation("NVDA", 0.10, source_label="optimizer")
+    ta = certify_target_allocation("NVDA", 0.90, source_label="optimizer")
     policy = certify_sizing_policy(1.0, "WHOLE_DOLLAR")
     bundle = DeploySizingInputBundle(
         cash=cash_input,
@@ -692,5 +706,5 @@ def test_buy_from_scratch_explicit_zero_position():
         plan_status=DeployPlanStatus.SCAFFOLD,
     )
     result = compute_dollar_amount_for_item(bundle, item)
-    # target=10% of 100k = 10000, current=0 → delta=10000
-    assert result.recommended_dollar_amount == 10_000.0
+    # target=90% of 100k = 90000, current=0 → delta=90000
+    assert result.recommended_dollar_amount == 90_000.0

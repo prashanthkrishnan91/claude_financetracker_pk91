@@ -485,7 +485,8 @@ def test_builder_no_bundle_buy_rollup_not_ready():
 
 def test_builder_certified_bundle_buy_sufficient_cash_ready_pending():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _certified_bundle("AAPL", 100_000.0, 10_000.0, 0.10, 0.15, cash_usd=10_000.0)
+    # current=90%, target=95%, delta=5000, cash=10000 > delta → passes
+    bundle = _certified_bundle("AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=10_000.0)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]), sizing_bundle=bundle)
     assert plan.rollup is not None
     assert plan.rollup.plan_readiness_status == ROLLUP_READY_PENDING_GUARDRAILS
@@ -497,7 +498,8 @@ def test_builder_certified_bundle_buy_sufficient_cash_ready_pending():
 
 def test_builder_certified_bundle_buy_insufficient_cash_blocked():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _certified_bundle("AAPL", 100_000.0, 10_000.0, 0.10, 0.15, cash_usd=1_000.0)
+    # current=90%, target=95%, delta=5000, cash=1000 < delta → blocked
+    bundle = _certified_bundle("AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=1_000.0)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]), sizing_bundle=bundle)
     assert plan.rollup is not None
     assert plan.rollup.plan_readiness_status == ROLLUP_BLOCKED
@@ -507,7 +509,8 @@ def test_builder_certified_bundle_buy_insufficient_cash_blocked():
 
 def test_builder_certified_bundle_trim_ready_pending():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _certified_bundle("AAPL", 100_000.0, 20_000.0, 0.20, 0.10)
+    # current=95%, target=90%, TRIM delta=5000
+    bundle = _certified_bundle("AAPL", 100_000.0, 95_000.0, 0.95, 0.90)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "TRIM")]), sizing_bundle=bundle)
     assert plan.rollup is not None
     assert plan.rollup.plan_readiness_status == ROLLUP_READY_PENDING_GUARDRAILS
@@ -542,7 +545,8 @@ def test_builder_empty_inputs_rollup_no_items():
 def test_builder_rollup_does_not_mutate_items():
     """Per-item fields after rollup must match what finalization produced."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _certified_bundle("AAPL", 100_000.0, 10_000.0, 0.10, 0.15, cash_usd=10_000.0)
+    # current=90%, target=95%, delta=5000, cash=10000 → passes
+    bundle = _certified_bundle("AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=10_000.0)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]), sizing_bundle=bundle)
     item = plan.items[0]
     assert item.intel_action == "BUY"
@@ -564,14 +568,15 @@ def test_builder_no_bundle_rollup_schema_version():
 def test_builder_mixed_plan_partially_ready():
     """1 BUY pending + 1 BUY blocked → partially_ready."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # AAPL gets full target funding from cash (ready); MSFT exceeds remaining cash (blocked).
+    # AAPL: current=50%, target=55%, delta=5000; MSFT: current=5%, target=40%, delta=35000
+    # Target total = 0.55+0.40 = 0.95 (valid); cash=6000: AAPL passes, MSFT blocked.
     bundle = _multi_certified_bundle(
         specs=[
-            ("AAPL", 10_000.0, 0.10, 0.15),  # BUY delta = 5_000
-            ("MSFT", 5_000.0, 0.05, 0.50),   # BUY delta = 45_000 (large)
+            ("AAPL", 50_000.0, 0.50, 0.55),  # BUY delta = 5_000
+            ("MSFT", 5_000.0, 0.05, 0.40),   # BUY delta = 35_000 (large)
         ],
         portfolio_value=100_000.0,
-        cash_usd=6_000.0,  # Enough for AAPL (5_000), not for MSFT (45_000).
+        cash_usd=6_000.0,  # Enough for AAPL (5_000), not for MSFT (35_000).
     )
     plan = build_deploy_plan(
         _snap_inputs([_card("AAPL", "BUY"), _card("MSFT", "BUY")]),

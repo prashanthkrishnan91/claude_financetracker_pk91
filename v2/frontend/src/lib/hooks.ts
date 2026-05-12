@@ -523,3 +523,21 @@ export function useDeployV3Readiness(enabled = true) {
     },
   });
 }
+
+// ── Deploy v3 target allocation setup ─────────────────────────────────────────
+
+/**
+ * Save portfolio target allocations and invalidate deploy v3 readiness + plan.
+ * Wraps PUT /api/v1/portfolio/targets.
+ */
+export function useSetDeployTargets() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: api.portfolio.setTargets,
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] });
+      qc.invalidateQueries({ queryKey: DEPLOY_V3_READINESS_QUERY_KEY });
+      qc.invalidateQueries({ queryKey: DEPLOY_V3_PLAN_QUERY_KEY });
+    },
+  });
+}

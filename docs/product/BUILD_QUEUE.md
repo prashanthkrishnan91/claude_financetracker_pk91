@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Deploy v3 production data validation** (Stage 2, still in progress). Stages 2.5A–2.5E complete. Use `DeployV3ReadinessPanel` on the Deploy page — it calls `GET /api/v1/deploy/v3/readiness` and shows `next_required_action`. Possible outcomes: (1) create fresh snapshot; (2) add target allocations; (3) fix target total to [98%, 102%]; (4) set deploy policy env vars; or (5) all gates pass → Stage 2 exit validation can proceed. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
+- **Deploy v3 production readiness re-validation** (Stage 2, still in progress). Stages 2.5A–2.5F complete. Two actions required: (1) set `DEPLOY_MINIMUM_TRADE_USD` + `DEPLOY_ROUNDING_POLICY` in Railway; (2) save target allocations via `DeployV3TargetSetupPanel`. After both, check the readiness panel — if all gates show green, Stage 2 exit validation can proceed. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
 
 ## Next
 
@@ -21,6 +21,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Stage 2.5F** — Deploy v3 target allocation setup flow v1 — `DeployV3TargetSetupPanel`; editable target % rows, 98–102% total gate, "use current weights as draft", save calls `PUT /api/v1/portfolio/targets`, invalidates deploy_v3 readiness + plan; `PolicyGuidance` for missing Railway env vars. 29 new contract tests; 200 total; 0 failed. No backend changes, no SQL.
 - **Stage 2.5E** — Deploy v3 readiness UI surface v1 — `DeployV3ReadinessPanel` on Deploy page; calls `GET /api/v1/deploy/v3/readiness`; renders gate summary, snapshot status, market value coverage, target allocation gaps, policy status (no values); `useDeployV3Readiness()` hook; `DEPLOY_V3_READINESS_ENDPOINT` constant; `DeployV3ReadinessDiagnostic` TypeScript type; `policyStatusLabel()` helper. 43 new frontend contract tests; 0 backend changes, no SQL.
 - **Stage 2.5D** — Deploy v3 production readiness diagnostic v1 — `GET /api/v1/deploy/v3/readiness`; reports all gate statuses, snapshot age, per-ticker market-value coverage, target allocation gaps + total %, policy section (`minimum_trade_configured`, `rounding_policy_configured`, `policy_valid`, `policy_status`; no values exposed), suppression reasons, plain-English `next_required_action`. 49 new tests (42 diagnostic + 7 router readiness); 651 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
 - **Stage 2.5C** — Deploy v3 target-allocation + policy readiness hardening v1 — portfolio-level target total bounds (98%–102%) enforced (no cash/residual contract yet; near-full specification required); duplicate DB rows → CONFLICTING trust; invalid policy → UNSUPPORTED fail-safe; 3 new suppression reasons in source metadata. 46 new tests + 38 updated; 485 deploy tests total; 0 failed. Backend-only, no SQL, no UI.

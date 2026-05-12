@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.3E plan-rollup)
+Last updated: 2026-05-12 (post Stage 2.3E plan-rollup; doc re-steer to read-only Deploy UI/API next)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.3E — Deploy plan-level readiness rollup v1 complete** (backend-only). Item-level pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are all in place. Next: real tax/wash-sale guardrail logic, or plain-English Deploy UI on the existing rollup contract. See `docs/product/ROADMAP.md`.
-- Active build queue item: Plan-level readiness rollup merged; next item is real tax/wash-sale guardrail evaluation, or the plain-English Deploy UI surface. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.3E — Deploy plan-level readiness rollup v1 complete** (backend-only). Item-level pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are all in place. See `docs/product/ROADMAP.md`.
+- Active build queue item: Plan-level readiness rollup merged; next item is a small **plain-English read-only Deploy UI/API surface** on the existing `DeployPlanRollup` contract. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -51,7 +51,9 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-Either (a) Stage 2.3F — implement real tax-lot / wash-sale guardrail logic so items can reach a fully-actionable final status (and the rollup gains a non-zero `actionable_count`), or (b) start the plain-English Deploy UI on top of the existing `DeployPlanRollup` contract (no further backend churn needed for an initial read-only surface).
+Start a small **plain-English read-only Deploy UI/API surface** on top of the existing `DeployPlanRollup` contract — no further backend churn needed. The surface should render plan-level readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference and without exposing raw metric keys or diagnostics.
+
+Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 
 ## Handoff maintenance rule
 

@@ -36,6 +36,8 @@ import { DeployV3TargetSetupPanel } from "@/components/cards/DeployV3TargetSetup
 import { mapDeployV3ToStep2 } from "@/lib/deploy-v3-step2-mapper";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
+import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3SessionKey } from "@/lib/deploy-v3-decision-log";
+import type { DeployV3PlanResponse } from "@/lib/api";
 
 const MAX_REASON_WORDS = 12;
 
@@ -325,7 +327,7 @@ export default function DepositsPage() {
         {(isV3Loading || isPlanLoading) && !v3Plan && !deployPlan ? (
           <InlineLoader text="Building deployment plan…" />
         ) : useV3ForStep2 ? (
-          <DeployV3Step2Section step2={step2} />
+          <DeployV3Step2Section step2={step2} v3Plan={v3Plan ?? null} amount={amount} />
         ) : deployPlan ? (
           <DeploymentPlan deployPlan={deployPlan} amount={amount} />
         ) : null}
@@ -364,8 +366,12 @@ import type { Step2Result } from "@/lib/deploy-v3-step2-mapper";
 
 function DeployV3Step2Section({
   step2,
+  v3Plan,
+  amount,
 }: {
   step2: Step2Result;
+  v3Plan: DeployV3PlanResponse | null;
+  amount: number;
 }) {
   return (
     <div className="space-y-4">
@@ -419,15 +425,7 @@ function DeployV3Step2Section({
         )}
       </section>
 
-      {/* Step 3 — Deploy v3 path: placeholder until Deploy v3 decision logging is wired */}
-      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
-          Step 3 — Log your decision
-        </p>
-        <p className="text-xs text-text-muted">
-          Decision logging for Deploy v3 actions is coming next. For now, review the Deploy v3 actions above before acting.
-        </p>
-      </section>
+      <DeployV3DecisionLogSection step2={step2} v3Plan={v3Plan} amount={amount} />
 
       <Link
         href="/dashboard/recommendations"
@@ -484,6 +482,176 @@ function DeployV3AllocationTable({ items }: { items: Step2Result["items"] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// ── Deploy v3 Step 3 — decision logging ──────────────────────────────────────
+
+function DeployV3DecisionLogSection({
+  step2,
+  v3Plan,
+  amount,
+}: {
+  step2: Step2Result;
+  v3Plan: DeployV3PlanResponse | null;
+  amount: number;
+}) {
+  const createLog = useCreateDecisionMemoryLog();
+  const updateLog = useUpdateDecisionMemoryLog();
+  const { data: recentLogs } = useDecisionMemoryLogs(6, true);
+  const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
+  const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>([]);
+  const [notes, setNotes] = useState("");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const sessionKey = buildDeployV3SessionKey(v3Plan?.run_id, step2.items);
+
+  // Initialize actual decisions from visible Step 2 items
+  useEffect(() => {
+    if (step2.state !== "has_moves" || step2.items.length === 0) return;
+    if (actualDecisions.length > 0) return;
+    setActualDecisions(buildDeployV3InitialActualDecisions(step2.items));
+  }, [actualDecisions.length, step2.items, step2.state]);
+
+  // Rehydrate from a matching existing log
+  const matchingLog = useMemo(() => {
+    if (!recentLogs?.length) return null;
+    return recentLogs.find((log) => {
+      const snap = log.recommendation_snapshot as { session_key?: string } | undefined;
+      return snap?.session_key === sessionKey;
+    }) ?? null;
+  }, [recentLogs, sessionKey]);
+
+  useEffect(() => {
+    if (savedLog || !matchingLog) return;
+    setSavedLog(matchingLog);
+    setNotes(matchingLog.notes ?? "");
+    if (matchingLog.actual_decisions?.length) {
+      setActualDecisions(matchingLog.actual_decisions);
+    }
+  }, [matchingLog, savedLog]);
+
+  async function onSave() {
+    if (createLog.isPending || updateLog.isPending) return;
+    setErrorMessage("");
+    setSaveSuccess(false);
+    try {
+      const snapshot = {
+        ...buildDeployV3DecisionSnapshot(step2, v3Plan ? { snapshot_id: v3Plan.snapshot_id, run_id: v3Plan.run_id, plan_status: v3Plan.plan_status } : null, { entered_amount: amount }),
+        session_key: sessionKey,
+      };
+      const target = savedLog ?? matchingLog;
+      if (target) {
+        const updated = await updateLog.mutateAsync({ id: target.id, patch: { actual_decisions: actualDecisions, notes } });
+        setSavedLog(updated);
+      } else {
+        const created = await createLog.mutateAsync({ snapshot, actualDecisions });
+        setSavedLog(created);
+      }
+      setSaveSuccess(true);
+    } catch {
+      setErrorMessage("Failed to save decision log. Please try again.");
+    }
+  }
+
+  // setup_incomplete: direct to diagnostics
+  if (step2.state === "setup_incomplete") {
+    return (
+      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
+        <p className="text-xs text-text-muted">Complete setup in Setup &amp; diagnostics below before logging.</p>
+      </section>
+    );
+  }
+
+  // no_moves: nothing to log
+  if (step2.state === "no_moves") {
+    return (
+      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
+        <p className="text-xs text-text-muted">No moves to log — your portfolio already matches your targets.</p>
+      </section>
+    );
+  }
+
+  // has_moves: full logging panel
+  const isPending = createLog.isPending || updateLog.isPending;
+  const isLogged = !!(savedLog ?? matchingLog);
+
+  return (
+    <section id="step-3" className="card-glass p-4 border border-border/80 space-y-4">
+      <div className="flex items-center justify-between gap-2 flex-wrap">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
+        {isLogged && (
+          <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-semibold uppercase tracking-wide">
+            Logged
+          </span>
+        )}
+      </div>
+
+      <p className="text-xs text-text-muted">
+        Record that you reviewed and acted on these Deploy v3 moves.{" "}
+        <span className="text-text-secondary">Step 1 amount ({formatCurrency(amount)}) is your context — not a Deploy v3 sizing input.</span>
+      </p>
+
+      {/* Editable actual-decision rows */}
+      {actualDecisions.length > 0 && (
+        <div className="space-y-2">
+          {actualDecisions.map((row, i) => (
+            <div key={row.ticker} className="grid grid-cols-12 gap-2 items-center text-xs">
+              <div className="col-span-3 font-mono font-bold text-text-primary">{row.ticker}</div>
+              <div className="col-span-3 text-text-secondary">{row.recommended_action}</div>
+              <div className="col-span-3">
+                <select
+                  value={row.actual_action ?? ""}
+                  onChange={(e) =>
+                    setActualDecisions((prev) =>
+                      prev.map((r, idx) => (idx === i ? { ...r, actual_action: e.target.value } : r)),
+                    )
+                  }
+                  className="w-full bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+                >
+                  <option value="BOUGHT">BOUGHT</option>
+                  <option value="TRIMMED">TRIMMED</option>
+                  <option value="SOLD">SOLD</option>
+                  <option value="HELD">HELD</option>
+                  <option value="SKIPPED">SKIPPED</option>
+                </select>
+              </div>
+              <div className="col-span-3 font-mono text-text-secondary text-right">
+                {row.recommended_amount != null ? formatCurrency(row.recommended_amount) : "—"}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <textarea
+        value={notes}
+        onChange={(e) => setNotes(e.target.value)}
+        placeholder="Notes (optional)"
+        rows={2}
+        className="w-full bg-surface border border-border/80 rounded-lg text-text-primary text-xs px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-accent"
+      />
+
+      {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
+      {saveSuccess && !errorMessage && (
+        <p className="text-xs text-emerald-400">Decision logged.</p>
+      )}
+
+      <button
+        onClick={onSave}
+        disabled={isPending}
+        className="px-4 py-2 text-xs font-semibold rounded-lg bg-accent text-background hover:bg-accent-hover transition-colors disabled:opacity-50"
+      >
+        {isPending ? "Saving…" : isLogged ? "Update log" : "Log this decision"}
+      </button>
+
+      <p className="text-[10px] text-text-muted">
+        Intel v3 owns all Buy / Hold / Trim / Sell decisions. This log records your execution, not a new recommendation.
+      </p>
+    </section>
   );
 }
 

@@ -7,7 +7,9 @@ Inspects persisted app data (portfolio_snapshots, target_allocations, Settings)
 and reports exactly why exact-dollar readiness is or is not met, with a
 plain-English next_required_action.
 
-Policy env var presence is reported (configured: yes/no). Values are not exposed.
+Policy env var presence is reported per-var (configured: yes/no). Values
+are never exposed. Policy status distinguishes: certified, missing_minimum_trade,
+missing_rounding_policy, invalid_policy_config, unsupported_policy.
 Intel v3 Buy/Hold/Trim/Sell authority is not changed.
 """
 from __future__ import annotations
@@ -34,6 +36,7 @@ async def build_readiness_diagnostic(
     user_id: UUID,
     db_client: Optional[Any] = None,
     _policy_config: Any = _DIAG_POLICY_UNSET,
+    _policy_presence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a production readiness diagnostic for the Deploy v3 exact-dollar path.
 
@@ -42,9 +45,15 @@ async def build_readiness_diagnostic(
     - Snapshot presence, age, and stale/fresh status
     - Market value coverage per position ticker
     - Target allocation rows, missing/conflicting tickers, portfolio total %
-    - Policy configuration presence (no secret values exposed)
+    - Policy configuration presence per env var (no values exposed), policy_status
     - Suppression reasons from the sizing bundle
     - Plain-English next_required_action
+
+    Args:
+        _policy_presence: Test-only injection. When None, reads Settings to check
+            which deploy policy env vars are present. Pass a dict with
+            ``minimum_trade_present`` and ``rounding_policy_present`` keys to
+            override for tests. Ignored when the bundle has CERTIFIED policy.
 
     No providers. No live price calls. No LLM. No broker. No legacy allocation engine.
     """
@@ -67,10 +76,71 @@ async def build_readiness_diagnostic(
     except Exception as exc:
         logger.warning("readiness_diagnostic: adapter error: %s", exc)
 
-    return _build_response(snap_meta, bundle)
+    return _build_response(snap_meta, bundle, policy_presence=_policy_presence)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
+
+
+def _read_policy_presence() -> Dict[str, Any]:
+    """Check which deploy policy env vars are set, without exposing their values."""
+    try:
+        from ...config import get_settings
+        settings = get_settings()
+        min_trade = getattr(settings, "deploy_minimum_trade_usd", None)
+        rounding = getattr(settings, "deploy_rounding_policy", None)
+        return {
+            "minimum_trade_present": min_trade is not None,
+            "rounding_policy_present": rounding is not None,
+        }
+    except Exception:
+        return {"minimum_trade_present": False, "rounding_policy_present": False}
+
+
+def _policy_section_from_bundle(
+    bundle: Any,
+    policy_presence: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Build the policy diagnostic section.
+
+    When bundle has CERTIFIED policy, derives presence from the bundle
+    (both vars are known-present and valid). When UNSUPPORTED, reads
+    Settings (or uses the injected override) to distinguish which var
+    is missing and why.
+    """
+    if (
+        bundle is not None
+        and bundle.policy is not None
+        and bundle.policy.trust_status == DeploySizingTrustStatus.CERTIFIED
+    ):
+        return {
+            "minimum_trade_configured": True,
+            "rounding_policy_configured": True,
+            "policy_valid": True,
+            "policy_status": "certified",
+        }
+
+    # UNSUPPORTED or None — read Settings to get per-var presence.
+    presence = policy_presence if policy_presence is not None else _read_policy_presence()
+    min_p = bool(presence.get("minimum_trade_present", False))
+    rounding_p = bool(presence.get("rounding_policy_present", False))
+
+    if not min_p and not rounding_p:
+        policy_status = "unsupported_policy"
+    elif not min_p:
+        policy_status = "missing_minimum_trade"
+    elif not rounding_p:
+        policy_status = "missing_rounding_policy"
+    else:
+        # Both vars present but bundle not CERTIFIED — values are invalid.
+        policy_status = "invalid_policy_config"
+
+    return {
+        "minimum_trade_configured": min_p,
+        "rounding_policy_configured": rounding_p,
+        "policy_valid": False,
+        "policy_status": policy_status,
+    }
 
 
 async def _read_snapshot_metadata(
@@ -124,6 +194,7 @@ def _age_hours(snapshot_at_raw: Any) -> Optional[float]:
 def _build_response(
     snap_meta: Optional[Dict[str, Any]],
     bundle: Any,  # Optional[DeploySizingInputBundle]
+    policy_presence: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Assemble the diagnostic response from snapshot metadata and sizing bundle."""
 
@@ -146,6 +217,7 @@ def _build_response(
         }
 
     if bundle is None:
+        policy_section = _policy_section_from_bundle(None, policy_presence)
         return {
             "exact_dollar_ready": False,
             "sizing_values_ready": False,
@@ -164,11 +236,7 @@ def _build_response(
                 "target_total_pct": None,
                 "target_total_in_range": None,
             },
-            "policy": {
-                "minimum_trade_configured": False,
-                "rounding_policy_configured": False,
-                "policy_valid": False,
-            },
+            "policy": policy_section,
             "suppression_reasons": [],
             "next_required_action": "Create a fresh portfolio snapshot to begin.",
         }
@@ -221,22 +289,8 @@ def _build_response(
         "target_total_in_range": target_total_in_range,
     }
 
-    # --- Policy section (no secret values exposed) ---
-    if (
-        bundle.policy is not None
-        and bundle.policy.trust_status == DeploySizingTrustStatus.CERTIFIED
-    ):
-        policy_section: Dict[str, Any] = {
-            "minimum_trade_configured": True,
-            "rounding_policy_configured": True,
-            "policy_valid": True,
-        }
-    else:
-        policy_section = {
-            "minimum_trade_configured": False,
-            "rounding_policy_configured": False,
-            "policy_valid": False,
-        }
+    # --- Policy section (no secret values) ---
+    policy_section = _policy_section_from_bundle(bundle, policy_presence)
 
     suppression_reasons = [r.value for r in bundle.get_suppression_reasons()]
 
@@ -299,6 +353,16 @@ def _next_required_action(
             "must not exceed 102%."
         )
     if not policy["policy_valid"]:
+        status = policy.get("policy_status", "")
+        if status == "missing_minimum_trade":
+            return "Set DEPLOY_MINIMUM_TRADE_USD environment variable."
+        if status == "missing_rounding_policy":
+            return "Set DEPLOY_ROUNDING_POLICY environment variable."
+        if status == "invalid_policy_config":
+            return (
+                "Fix deploy policy env vars — "
+                "both are set but the configuration is invalid."
+            )
         return (
             "Set DEPLOY_MINIMUM_TRADE_USD and DEPLOY_ROUNDING_POLICY "
             "environment variables."

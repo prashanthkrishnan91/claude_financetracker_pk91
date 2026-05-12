@@ -321,10 +321,20 @@ def test_target_total_over_102_next_action_adjust():
 # ── Gate G: invalid / missing policy config ───────────────────────────────────
 
 
+_PP_BOTH_MISSING = {"minimum_trade_present": False, "rounding_policy_present": False}
+_PP_BOTH_PRESENT = {"minimum_trade_present": True, "rounding_policy_present": True}
+_PP_MIN_MISSING = {"minimum_trade_present": False, "rounding_policy_present": True}
+_PP_ROUNDING_MISSING = {"minimum_trade_present": True, "rounding_policy_present": False}
+
+
 def test_missing_policy_suppresses_policy_ready():
     snap = _enriched_snapshot()
     db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
-    result = _run(build_readiness_diagnostic(_UID, db_client=db, _policy_config=None))
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_BOTH_MISSING
+        )
+    )
 
     assert result["policy_ready"] is False
     assert result["exact_dollar_ready"] is False
@@ -335,10 +345,91 @@ def test_missing_policy_suppresses_policy_ready():
 def test_missing_policy_next_action_set_env_vars():
     snap = _enriched_snapshot()
     db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
-    result = _run(build_readiness_diagnostic(_UID, db_client=db, _policy_config=None))
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_BOTH_MISSING
+        )
+    )
 
     assert "DEPLOY_MINIMUM_TRADE_USD" in result["next_required_action"]
     assert "DEPLOY_ROUNDING_POLICY" in result["next_required_action"]
+
+
+def test_policy_status_unsupported_when_both_missing():
+    snap = _enriched_snapshot()
+    db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_BOTH_MISSING
+        )
+    )
+
+    assert result["policy"]["policy_status"] == "unsupported_policy"
+    assert result["policy"]["minimum_trade_configured"] is False
+    assert result["policy"]["rounding_policy_configured"] is False
+
+
+def test_policy_status_missing_minimum_trade():
+    snap = _enriched_snapshot()
+    db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_MIN_MISSING
+        )
+    )
+
+    assert result["policy"]["policy_status"] == "missing_minimum_trade"
+    assert result["policy"]["minimum_trade_configured"] is False
+    assert result["policy"]["rounding_policy_configured"] is True
+    assert "DEPLOY_MINIMUM_TRADE_USD" in result["next_required_action"]
+    # Rounding var should NOT be mentioned when it's already set
+    assert "DEPLOY_ROUNDING_POLICY" not in result["next_required_action"]
+
+
+def test_policy_status_missing_rounding_policy():
+    snap = _enriched_snapshot()
+    db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_ROUNDING_MISSING
+        )
+    )
+
+    assert result["policy"]["policy_status"] == "missing_rounding_policy"
+    assert result["policy"]["minimum_trade_configured"] is True
+    assert result["policy"]["rounding_policy_configured"] is False
+    assert "DEPLOY_ROUNDING_POLICY" in result["next_required_action"]
+    assert "DEPLOY_MINIMUM_TRADE_USD" not in result["next_required_action"]
+
+
+def test_policy_status_invalid_when_both_present_but_unsupported():
+    """Both env vars present but bundle still UNSUPPORTED → invalid_policy_config."""
+    snap = _enriched_snapshot()
+    db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
+    result = _run(
+        build_readiness_diagnostic(
+            _UID, db_client=db, _policy_config=None, _policy_presence=_PP_BOTH_PRESENT
+        )
+    )
+
+    assert result["policy"]["policy_status"] == "invalid_policy_config"
+    assert result["policy"]["minimum_trade_configured"] is True
+    assert result["policy"]["rounding_policy_configured"] is True
+    assert result["policy"]["policy_valid"] is False
+    assert "invalid" in result["next_required_action"].lower()
+
+
+def test_policy_status_certified_when_all_ready():
+    snap = _enriched_snapshot()
+    db = _make_db(snap_rows=[snap], target_rows=[_target_row("AAPL", 100.0)])
+    result = _run(
+        build_readiness_diagnostic(_UID, db_client=db, _policy_config=_CERTIFIED_POLICY)
+    )
+
+    assert result["policy"]["policy_status"] == "certified"
+    assert result["policy"]["policy_valid"] is True
+    assert result["policy"]["minimum_trade_configured"] is True
+    assert result["policy"]["rounding_policy_configured"] is True
 
 
 # ── Gate H: all gates ready ───────────────────────────────────────────────────
@@ -398,6 +489,7 @@ def test_policy_section_does_not_expose_minimum_trade_value():
         "minimum_trade_configured",
         "rounding_policy_configured",
         "policy_valid",
+        "policy_status",
     }
 
 
@@ -517,12 +609,15 @@ def _ta(
     }
 
 
-def _pol(valid: bool) -> dict:
-    return {
+def _pol(valid: bool, status: str | None = None) -> dict:
+    d: dict = {
         "minimum_trade_configured": valid,
         "rounding_policy_configured": valid,
         "policy_valid": valid,
     }
+    if status is not None:
+        d["policy_status"] = status
+    return d
 
 
 def test_next_action_missing_snapshot():
@@ -572,11 +667,39 @@ def test_next_action_total_over_102():
     assert "102%" in action
 
 
-def test_next_action_policy_missing():
+def test_next_action_policy_both_missing():
     action = _next_required_action(
-        _snap("fresh"), _mv(True), _ta(total_pct=100.0, in_range=True), _pol(False)
+        _snap("fresh"), _mv(True), _ta(total_pct=100.0, in_range=True),
+        _pol(False, "unsupported_policy"),
     )
     assert "DEPLOY_MINIMUM_TRADE_USD" in action
+    assert "DEPLOY_ROUNDING_POLICY" in action
+
+
+def test_next_action_policy_min_trade_missing():
+    action = _next_required_action(
+        _snap("fresh"), _mv(True), _ta(total_pct=100.0, in_range=True),
+        _pol(False, "missing_minimum_trade"),
+    )
+    assert "DEPLOY_MINIMUM_TRADE_USD" in action
+    assert "DEPLOY_ROUNDING_POLICY" not in action
+
+
+def test_next_action_policy_rounding_missing():
+    action = _next_required_action(
+        _snap("fresh"), _mv(True), _ta(total_pct=100.0, in_range=True),
+        _pol(False, "missing_rounding_policy"),
+    )
+    assert "DEPLOY_ROUNDING_POLICY" in action
+    assert "DEPLOY_MINIMUM_TRADE_USD" not in action
+
+
+def test_next_action_policy_invalid_config():
+    action = _next_required_action(
+        _snap("fresh"), _mv(True), _ta(total_pct=100.0, in_range=True),
+        _pol(False, "invalid_policy_config"),
+    )
+    assert "invalid" in action.lower()
 
 
 def test_next_action_all_ready():

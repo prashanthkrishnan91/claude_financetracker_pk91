@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 2 exit validation** (Stage 2, still in progress). Stages 2.5A–2.6A complete. Step 1/2/3 is the primary UX; Deploy v3 powers Step 2. Validate the end-to-end flow in production: enter investment amount → confirm Step 2 shows has_moves with Deploy v3-backed recommendations. If any gate is still blocked, use "Setup & diagnostics" to fix it. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
+- **Stage 2.6B — Deploy v3 decision logging** (Stage 2, active). Wire Step 3 so the decision the user logs matches the visible Deploy v3 Step 2 items exactly. Step 3 currently shows a placeholder in the Deploy v3 path; `DecisionLogMemoryPanel` only renders in the legacy fallback path. Stage 2 exit validation follows after Step 2 and Step 3 are coherent — do not attempt exit validation until Step 3 is wired for the Deploy v3 path.
 
 ## Next
 
-- **Deploy v3 decision logging** (Stage 2.6B entry candidate) — wire Step 3 for Deploy v3 actions so the logged decision matches the visible Step 2 items. Currently Step 3 shows a placeholder in the Deploy v3 path. Required before Stage 2 exit validation is complete.
+- **Stage 2 exit validation** — after Stage 2.6B lands, validate the full Step 1/2/3 flow end-to-end in production: Step 2 shows has_moves (or appropriate state), Step 3 logs the correct Deploy v3 decision, readiness gates are green.
 - Watchtower trigger foundation (Stage 3 entry). Stays here until Deploy has a certified action-plan path and Step 3 is wired.
 
 ## Later

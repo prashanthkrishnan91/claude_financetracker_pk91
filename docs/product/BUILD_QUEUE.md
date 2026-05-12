@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- Plain-English read-only Deploy UI surface consuming `GET /api/v1/deploy/v3/plan` — renders plan readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference. Frontend must call the new Deploy v3 endpoint; it must **not** call the legacy `/allocation/plan` for Deploy v3 authority. Real tax/wash-sale guardrail evaluation stays out of scope and remains honestly `not_evaluated_yet` until separately scoped.
-
-## Next
-
 - Watchtower trigger foundation.
+
+## Completed (Stage 2.4B)
+
+- Plain-English read-only Deploy v3 UI surface — `DeployV3Panel` on Deploy page; calls `GET /api/v1/deploy/v3/plan`; renders `plan_readiness_status`, counts, Intel v3 authority note, honest sizing-not-connected disclaimer. 25 frontend contract tests; 0 backend changes.
 
 ## Later
 

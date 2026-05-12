@@ -2,7 +2,7 @@
 
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { ActualDecisionItem, IntelV3Snapshot, IntelV3RunResult } from "./api";
+import type { ActualDecisionItem, DeployV3PlanResponse, IntelV3Snapshot, IntelV3RunResult } from "./api";
 
 // ── Portfolio ────────────────────────────────────────────────────────────────
 
@@ -478,5 +478,27 @@ export function useIntelV3RunStatus(runId: string | null, enabled = true) {
     enabled: enabled && !!runId,
     refetchInterval: 2_000,
     staleTime: 0,
+  });
+}
+
+// ── Deploy v3 plan ────────────────────────────────────────────────────────────
+
+/**
+ * Read the Deploy v3 plan readiness from GET /api/v1/deploy/v3/plan.
+ * Returns 404 when no Intel v3 snapshot exists or the feature flag is off.
+ * Does not call the legacy allocation plan endpoint.
+ */
+export function useDeployV3Plan(enabled = true) {
+  return useQuery<DeployV3PlanResponse>({
+    queryKey: ["deploy_v3", "plan"],
+    queryFn: api.deployV3.getPlan,
+    enabled,
+    staleTime: 60_000,
+    retry: (failureCount, error: unknown) => {
+      if (error instanceof Error && error.message.includes("404")) return false;
+      // No-snapshot returns a dict as detail, Error constructor produces "[object Object]"
+      if (error instanceof Error && error.message === "[object Object]") return false;
+      return failureCount < 2;
+    },
   });
 }

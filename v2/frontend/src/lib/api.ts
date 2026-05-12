@@ -248,6 +248,12 @@ export const api = {
     getRunStatus: (runId: string) =>
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },
+
+  // Deploy v3 read-only plan. Calls GET /api/v1/deploy/v3/plan.
+  // Intel v3 is the only Buy/Hold/Trim/Sell authority. No legacy allocation engine.
+  deployV3: {
+    getPlan: () => fetchApi<DeployV3PlanResponse>("/api/v1/deploy/v3/plan"),
+  },
 };
 
 /** Form data upload (no JSON content-type) */
@@ -1182,4 +1188,80 @@ export interface IntelV3RunStatus {
   action_counts?: Record<IntelV3Action, number>;
   total_cards?: number;
   generated_at?: string;
+}
+
+// ── Deploy v3 types (read-only plan contract) ─────────────────────────────────
+
+/** Plan-level readiness status literals from the backend rollup. */
+export type DeployV3ReadinessStatus =
+  | "no_items"
+  | "all_informational"
+  | "all_suppressed"
+  | "ready_pending_guardrails"
+  | "partially_ready"
+  | "blocked"
+  | "not_ready";
+
+/** Deterministic plan-level readiness rollup from DeployPlanRollup. */
+export interface DeployV3PlanRollup {
+  total_items: number;
+  counts_by_final_actionability_status: Record<string, number>;
+  counts_by_pending_guardrails_reason: Record<string, number>;
+  actionable_count: number;
+  pending_count: number;
+  blocked_count: number;
+  informational_count: number;
+  suppressed_count: number;
+  not_ready_count: number;
+  unknown_count: number;
+  plan_readiness_status: DeployV3ReadinessStatus | string;
+  schema_version: string;
+}
+
+/** Per-item scaffold from the Deploy plan (read-only display). */
+export interface DeployV3PlanItem {
+  ticker: string;
+  intel_action: string;
+  actionability_status: string;
+  action_source: string;
+  intel_snapshot_id: string;
+  intel_run_id: string;
+  plan_status: string;
+  recommended_dollar_amount: number | null;
+  final_actionability_status: string;
+  pending_guardrails_reason: string;
+  suppression_reason: string | null;
+  schema_version: string;
+}
+
+/** Guardrail integrity summary for a Deploy plan run. */
+export interface DeployV3GuardrailSummary {
+  total_items: number;
+  buy_candidates: number;
+  trim_candidates: number;
+  sell_candidates: number;
+  hold_items: number;
+  suppressed_items: number;
+  hold_never_actionable: boolean;
+  dollar_fields_null: boolean;
+  exact_dollar_math_evaluated: boolean;
+  priceband_not_authority: boolean;
+  intel_action_preserved: boolean;
+  schema_version: string;
+}
+
+/** Full response from GET /api/v1/deploy/v3/plan. */
+export interface DeployV3PlanResponse {
+  plan_status: string;
+  snapshot_id: string;
+  run_id: string;
+  schema_version: string;
+  items: DeployV3PlanItem[];
+  guardrail_summary: DeployV3GuardrailSummary | null;
+  rollup: DeployV3PlanRollup | null;
+  source: {
+    intel_source: string;
+    sizing_bundle_provided: boolean;
+    note: string;
+  };
 }

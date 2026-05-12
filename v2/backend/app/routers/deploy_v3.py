@@ -1,14 +1,17 @@
-"""Deploy v3 read-only plan API — Stage 2.4A.
+"""Deploy v3 read-only plan API — Stage 2.4A + Stage 2.5A sizing source adapter.
 
 GET /deploy/v3/plan
 
-Returns a read-only Deploy v3 plan built from the latest Intel v3 snapshot.
-Zero LLM calls. Zero provider calls. Zero legacy allocation engine calls.
+Returns a read-only Deploy v3 plan built from the latest Intel v3 snapshot,
+with a certified sizing bundle when persisted data is sufficient.
+
+Zero LLM calls. Zero provider calls. Does not call the legacy allocation engine.
 
 Contract:
   - Intel v3 remains the only Buy/Hold/Trim/Sell authority.
-  - Sizing bundle is not provided; dollar fields are scaffold placeholders.
-  - Honest not-ready/scaffold behavior when sizing inputs are absent.
+  - Sizing bundle is built from portfolio_snapshots + target_allocations + Settings.
+  - If any source is missing, stale, or uncertified, dollar fields remain scaffold.
+  - Honest not-ready/scaffold behavior when sizing inputs cannot be certified.
   - Legacy /allocation/plan route is unaffected.
 
 Feature flag: INTEL_V3_VISIBLE_SNAPSHOT_ENABLED
@@ -23,6 +26,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..services.deploy.deploy_intel_adapter import build_deploy_inputs_from_snapshot
+from ..services.deploy.deploy_sizing_source_adapter_v1 import (
+    build_sizing_bundle_from_persisted_data,
+)
 from ..services.deploy.deploy_translation_v1 import build_deploy_plan
 from ..services.intelligence.v3.intel_v3_service import IntelV3Service, is_intel_v3_enabled
 
@@ -51,7 +57,8 @@ async def get_deploy_v3_plan(
     Read-only. Zero LLM calls. Zero provider calls.
     Does not call the legacy allocation engine.
     Returns 404 if no Intel v3 snapshot exists or flag is disabled.
-    Sizing bundle is not provided — dollar fields are scaffold placeholders only.
+    Attempts to build a certified sizing bundle from persisted portfolio data.
+    Falls back to scaffold/not_ready behavior if sources are unavailable or uncertified.
     """
     _check_flag()
 
@@ -68,16 +75,70 @@ async def get_deploy_v3_plan(
         )
 
     deploy_inputs = build_deploy_inputs_from_snapshot(snapshot)
-    plan = build_deploy_plan(deploy_inputs, sizing_bundle=None)
 
+    # Attempt to build a certified sizing bundle from persisted data.
+    # Falls back to None (scaffold/not_ready) on error or missing sources.
+    sizing_bundle = None
+    try:
+        sizing_bundle = await build_sizing_bundle_from_persisted_data(user_id=user.id)
+    except Exception as exc:
+        logger.warning(
+            "deploy_v3.plan: sizing adapter failed, proceeding without bundle: %s", exc
+        )
+
+    plan = build_deploy_plan(deploy_inputs, sizing_bundle=sizing_bundle)
     plan_dict = dataclasses.asdict(plan)
 
+    # Build source metadata reflecting readiness gates.
+    if sizing_bundle is not None:
+        suppression_reasons = [r.value for r in sizing_bundle.get_suppression_reasons()]
+        source = {
+            "intel_source": "INTEL_V3",
+            "sizing_bundle_provided": True,
+            "exact_dollar_ready": sizing_bundle.exact_dollar_ready,
+            "sizing_values_ready": sizing_bundle.sizing_values_ready,
+            "target_allocation_ready": sizing_bundle.target_allocation_ready,
+            "policy_ready": sizing_bundle.policy_ready,
+            "suppression_reasons": suppression_reasons,
+            "cash_source": (
+                sizing_bundle.cash.source_label if sizing_bundle.cash else None
+            ),
+            "portfolio_source": (
+                sizing_bundle.portfolio.source_label if sizing_bundle.portfolio else None
+            ),
+            "note": (
+                "Sizing bundle certified. Exact-dollar math evaluated."
+                if sizing_bundle.exact_dollar_ready
+                else (
+                    "Sizing bundle provided from persisted sources. "
+                    "Exact-dollar math not yet ready — see suppression_reasons."
+                )
+            ),
+        }
+    else:
+        source = {
+            "intel_source": "INTEL_V3",
+            "sizing_bundle_provided": False,
+            "exact_dollar_ready": False,
+            "sizing_values_ready": False,
+            "target_allocation_ready": False,
+            "policy_ready": False,
+            "suppression_reasons": [],
+            "note": (
+                "No sizing bundle provided. "
+                "Dollar fields are scaffold placeholders — not executable trade instructions."
+            ),
+        }
+
     logger.info(
-        "deploy_v3.plan user_id=%s snapshot_id=%s items=%d plan_readiness=%s",
+        "deploy_v3.plan user_id=%s snapshot_id=%s items=%d plan_readiness=%s "
+        "sizing_bundle_provided=%s exact_dollar_ready=%s",
         user.id,
         plan.snapshot_id,
         len(plan.items),
         plan.rollup.plan_readiness_status if plan.rollup else "no_rollup",
+        sizing_bundle is not None,
+        sizing_bundle.exact_dollar_ready if sizing_bundle else False,
     )
 
     return {
@@ -88,12 +149,5 @@ async def get_deploy_v3_plan(
         "items": plan_dict["items"],
         "guardrail_summary": plan_dict["guardrail_summary"],
         "rollup": plan_dict["rollup"],
-        "source": {
-            "intel_source": "INTEL_V3",
-            "sizing_bundle_provided": False,
-            "note": (
-                "No sizing bundle provided. "
-                "Dollar fields are scaffold placeholders — not executable trade instructions."
-            ),
-        },
+        "source": source,
     }

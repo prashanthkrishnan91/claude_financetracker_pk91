@@ -4,7 +4,6 @@ import { useDeployV3Plan } from "@/lib/hooks";
 import { getSizingDisclaimer, isNoSnapshotError, readinessMeta } from "@/lib/deploy-v3-helpers";
 import { cn } from "@/lib/utils";
 import { InlineLoader } from "@/components/ui/Spinner";
-import { DeployV3ReadinessPanel } from "@/components/cards/DeployV3ReadinessPanel";
 
 // ── Count row ─────────────────────────────────────────────────────────────────
 

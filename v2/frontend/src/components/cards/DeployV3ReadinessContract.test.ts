@@ -292,3 +292,18 @@ describe("Deploy v3 readiness does not call legacy endpoints", () => {
     }
   });
 });
+
+// ── Component hygiene — sibling panels, not cross-imported ───────────────────
+
+describe("DeployV3Panel does not import DeployV3ReadinessPanel", () => {
+  it("DeployV3Panel source does not contain a DeployV3ReadinessPanel import", async () => {
+    const fs = await import("fs");
+    const path = await import("path");
+    const filePath = path.resolve(
+      __dirname,
+      "DeployV3Panel.tsx",
+    );
+    const source = fs.readFileSync(filePath, "utf-8");
+    expect(source).not.toContain("DeployV3ReadinessPanel");
+  });
+});

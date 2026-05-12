@@ -363,9 +363,9 @@ def test_plan_builder_no_bundle_buy_not_ready():
 def test_plan_builder_certified_bundle_buy_sufficient_cash_actionable():
     """Certified bundle, sufficient cash → BUY final status actionable_pending_tax."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=90%, target=95%, delta=5000, cash=10000 > delta → passes
+    # current=95%, target=100%, delta=5000, cash=10000 > delta → passes
     bundle = _make_certified_bundle(
-        "AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=10_000.0
+        "AAPL", 100_000.0, 95_000.0, 0.95, 1.00, cash_usd=10_000.0
     )
     inputs = _snapshot_and_inputs([_card("AAPL", "BUY")])
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)
@@ -378,9 +378,9 @@ def test_plan_builder_certified_bundle_buy_sufficient_cash_actionable():
 def test_plan_builder_certified_bundle_buy_insufficient_cash_blocked():
     """Certified bundle, cash < amount → blocked_cash; dollar amount unchanged."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=90%, target=95%, delta=5000, cash=1000 < delta → blocked
+    # current=95%, target=100%, delta=5000, cash=1000 < delta → blocked
     bundle = _make_certified_bundle(
-        "AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=1_000.0
+        "AAPL", 100_000.0, 95_000.0, 0.95, 1.00, cash_usd=1_000.0
     )
     inputs = _snapshot_and_inputs([_card("AAPL", "BUY")])
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)
@@ -393,21 +393,21 @@ def test_plan_builder_certified_bundle_buy_insufficient_cash_blocked():
 def test_plan_builder_trim_actionable_pending_tax():
     """TRIM through plan builder with certified bundle → actionable_pending_tax."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=95%, target=90%, TRIM delta = $5,000
+    # current=100%, target=98%, TRIM delta = $2,000
     bundle = _make_certified_bundle(
-        "AAPL", 100_000.0, 95_000.0, 0.95, 0.90
+        "AAPL", 100_000.0, 100_000.0, 1.00, 0.98
     )
     inputs = _snapshot_and_inputs([_card("AAPL", "TRIM")])
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)
     item = plan.items[0]
-    assert item.recommended_dollar_amount == 5_000.0
+    assert item.recommended_dollar_amount == 2_000.0
     assert item.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
 
 
 def test_plan_builder_hold_informational():
     """HOLD through plan builder → informational_hold."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _make_certified_bundle("AAPL", 100_000.0, 90_000.0, 0.90, 0.90)
+    bundle = _make_certified_bundle("AAPL", 100_000.0, 100_000.0, 1.00, 1.00)
     inputs = _snapshot_and_inputs([_card("AAPL", "HOLD")])
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)
     assert plan.items[0].final_actionability_status == FINAL_INFORMATIONAL_HOLD
@@ -424,9 +424,9 @@ def test_plan_builder_finalization_evaluated_always_true():
 def test_plan_builder_tax_wash_sale_placeholders_unchanged():
     """Tax/wash-sale placeholders remain 'not_evaluated_yet' — not silently passed."""
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=90%, target=95%, delta=5000, cash=10000 → actionable
+    # current=95%, target=100%, delta=5000, cash=10000 → actionable
     bundle = _make_certified_bundle(
-        "AAPL", 100_000.0, 90_000.0, 0.90, 0.95, cash_usd=10_000.0
+        "AAPL", 100_000.0, 95_000.0, 0.95, 1.00, cash_usd=10_000.0
     )
     inputs = _snapshot_and_inputs([_card("AAPL", "BUY")])
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)

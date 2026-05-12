@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.5C Deploy v3 target-allocation + policy readiness hardening v1)
+Last updated: 2026-05-12 (post Stage 2.5C + portfolio target total MIN tightened to 98%)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.5C — Deploy v3 target-allocation + policy readiness hardening v1 complete**. Portfolio-level target allocation total bounds enforced (90%–102%); duplicate DB rows detected and marked CONFLICTING; invalid policy config falls safe (UNSUPPORTED, no crash); 3 new suppression reasons (`TARGET_ALLOCATION_CONFLICTING`, `TARGET_ALLOCATION_TOTAL_OVERALLOCATED`, `TARGET_ALLOCATION_TOTAL_UNDERALLOCATED`) exposed in source metadata. 46 new backend tests; 485 deploy tests total; 0 failed. Backend-only, no SQL/migration, no UI.
-- Active build queue item: **Deploy v3 exact-dollar path completion** — all three exact-dollar readiness gates are now enforced and hardened. `exact_dollar_ready=True` in production requires: (1) fresh snapshot with valid prices (Stage 2.5B), (2) complete valid target allocations for every position ticker with portfolio total in [90%, 102%] (Stage 2.5C), (3) `deploy_minimum_trade_usd` + `deploy_rounding_policy` set (Stage 2.5C). Next: production readiness validation or explicit target allocation setup flow for users.
+- Roadmap stage: **Stage 2.5C + target-total MIN tightened to 98%**. Portfolio-level target allocation total bounds enforced (98%–102%); duplicate DB rows detected and marked CONFLICTING; invalid policy config falls safe (UNSUPPORTED, no crash); 3 new suppression reasons (`TARGET_ALLOCATION_CONFLICTING`, `TARGET_ALLOCATION_TOTAL_OVERALLOCATED`, `TARGET_ALLOCATION_TOTAL_UNDERALLOCATED`) exposed in source metadata. Deploy v3 has no explicit cash/residual target contract; MIN=98% prevents exact-dollar math against incomplete allocation models. 485 deploy tests; 0 failed. Backend-only, no SQL/migration, no UI.
+- Active build queue item: **Deploy v3 exact-dollar path completion** — all three exact-dollar readiness gates are now enforced and hardened. `exact_dollar_ready=True` in production requires: (1) fresh snapshot with valid prices (Stage 2.5B), (2) complete valid target allocations for every position ticker with portfolio total in [98%, 102%] (Stage 2.5C), (3) `deploy_minimum_trade_usd` + `deploy_rounding_policy` set (Stage 2.5C). Next: production readiness validation or explicit target allocation setup flow for users.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state

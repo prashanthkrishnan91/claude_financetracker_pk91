@@ -238,8 +238,8 @@ def _card(ticker, action, evidence_band="PARTIAL"):
 
 def test_plan_builder_buy_sufficient_cash_pending_reason_exposed():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=85%, target=90%, delta=5000, cash=10000 → passes
-    bundle = _certified_bundle("AAPL", 100_000.0, 85_000.0, 0.85, 0.90, cash_usd=10_000.0)
+    # current=95%, target=100%, delta=5000, cash=10000 → passes
+    bundle = _certified_bundle("AAPL", 100_000.0, 95_000.0, 0.95, 1.00, cash_usd=10_000.0)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]), sizing_bundle=bundle)
     item = plan.items[0]
     assert item.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
@@ -248,8 +248,8 @@ def test_plan_builder_buy_sufficient_cash_pending_reason_exposed():
 
 def test_plan_builder_trim_pending_reason_exposed():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=95%, target=90%, TRIM delta=5000
-    bundle = _certified_bundle("AAPL", 100_000.0, 95_000.0, 0.95, 0.90)
+    # current=100%, target=98%, TRIM delta=2000
+    bundle = _certified_bundle("AAPL", 100_000.0, 100_000.0, 1.00, 0.98)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "TRIM")]), sizing_bundle=bundle)
     item = plan.items[0]
     assert item.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
@@ -258,8 +258,8 @@ def test_plan_builder_trim_pending_reason_exposed():
 
 def test_plan_builder_blocked_cash_buy_pending_reason_none():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    # current=85%, target=90%, delta=5000, cash=1000 < 5000 → blocked
-    bundle = _certified_bundle("AAPL", 100_000.0, 85_000.0, 0.85, 0.90, cash_usd=1_000.0)
+    # current=95%, target=100%, delta=5000, cash=1000 < 5000 → blocked
+    bundle = _certified_bundle("AAPL", 100_000.0, 95_000.0, 0.95, 1.00, cash_usd=1_000.0)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]), sizing_bundle=bundle)
     item = plan.items[0]
     assert item.final_actionability_status == FINAL_BLOCKED_CASH
@@ -268,7 +268,7 @@ def test_plan_builder_blocked_cash_buy_pending_reason_none():
 
 def test_plan_builder_hold_pending_reason_none():
     from app.services.deploy.deploy_translation_v1 import build_deploy_plan
-    bundle = _certified_bundle("AAPL", 100_000.0, 10_000.0, 0.10, 0.10)
+    bundle = _certified_bundle("AAPL", 100_000.0, 100_000.0, 1.00, 1.00)
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "HOLD")]), sizing_bundle=bundle)
     assert plan.items[0].pending_guardrails_reason == PENDING_REASON_NONE
 

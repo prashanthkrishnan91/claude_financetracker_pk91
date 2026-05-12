@@ -3,13 +3,15 @@
 Acceptance gates proven:
 
 Target-allocation total (portfolio-level):
-  A. Valid weights summing ~95 % → target_allocation_ready=True (regression/happy path).
-  B. Weights summing exactly at MIN (90 %) → target_allocation_ready=True (boundary).
+  A. Valid weights summing ~100 % → target_allocation_ready=True (regression/happy path).
+     Deploy v3 has no explicit cash/residual target contract yet; target allocations must
+     be near-fully specified (≥ 98 %) for exact-dollar readiness.
+  B. Weights summing exactly at MIN (98 %) → target_allocation_ready=True (boundary).
   C. Weights summing exactly at MAX (102 %) → target_allocation_ready=True (boundary).
   D. Weights summing > MAX (overallocated) → target_allocation_ready=False,
      suppression_reason TARGET_ALLOCATION_TOTAL_OVERALLOCATED.
-  E. Weights summing < MIN (severe underallocation) → target_allocation_ready=False,
-     suppression_reason TARGET_ALLOCATION_TOTAL_UNDERALLOCATED.
+  E. Weights summing < MIN (underallocated, incl. partial 90-97 % range) →
+     target_allocation_ready=False, suppression_reason TARGET_ALLOCATION_TOTAL_UNDERALLOCATED.
   F. No positions → target_allocation_ready vacuously True (total check skipped).
   G. Per-ticker check fails first → total check skipped (no spurious total reason added).
 
@@ -186,20 +188,20 @@ def _ta_row(ticker: str, pct: float) -> dict:
 # ── A. Regression: valid ~95 % total passes target_allocation_ready ────────────
 
 class TestValidTotalPassesReadiness:
-    def test_single_ticker_95pct_total_passes(self):
-        """Single ticker at 95 % → total within bounds → target_allocation_ready=True."""
+    def test_single_ticker_100pct_total_passes(self):
+        """Single ticker at 100 % → total within bounds → target_allocation_ready=True."""
         bundle = DeploySizingInputBundle(
             cash=_certified_cash(),
             portfolio=_certified_portfolio(),
             positions={"AAPL": _certified_pos("AAPL")},
-            target_allocations={"AAPL": _certified_ta("AAPL", 0.95)},
+            target_allocations={"AAPL": _certified_ta("AAPL", 1.00)},
             policy=_certified_policy(),
         )
         assert bundle.target_allocation_ready is True
         assert bundle.exact_dollar_ready is True
 
-    def test_two_tickers_sum_95pct_passes(self):
-        """Two tickers summing to 95 % (47.5 % each) → target_allocation_ready=True."""
+    def test_two_tickers_sum_near_full_passes(self):
+        """Two tickers summing to 100 % (50 % each) → target_allocation_ready=True."""
         bundle = DeploySizingInputBundle(
             cash=_certified_cash(),
             portfolio=_certified_portfolio(),
@@ -208,8 +210,8 @@ class TestValidTotalPassesReadiness:
                 "MSFT": _certified_pos("MSFT"),
             },
             target_allocations={
-                "AAPL": _certified_ta("AAPL", 0.475),
-                "MSFT": _certified_ta("MSFT", 0.475),
+                "AAPL": _certified_ta("AAPL", 0.50),
+                "MSFT": _certified_ta("MSFT", 0.50),
             },
             policy=_certified_policy(),
         )
@@ -240,7 +242,7 @@ class TestValidTotalPassesReadiness:
 
 class TestBoundaryTotals:
     def test_total_at_min_boundary_passes(self):
-        """Total exactly at TARGET_ALLOCATION_TOTAL_MIN (90 %) → target_allocation_ready=True."""
+        """Total exactly at TARGET_ALLOCATION_TOTAL_MIN (98 %) → target_allocation_ready=True."""
         bundle = DeploySizingInputBundle(
             cash=_certified_cash(),
             portfolio=_certified_portfolio(),
@@ -295,7 +297,7 @@ class TestBoundaryTotals:
         assert bundle.exact_dollar_ready is False
 
     def test_total_just_below_min_fails(self):
-        """Total just below MIN (<90 %) → target_allocation_ready=False."""
+        """Total just below MIN (<98 %) → target_allocation_ready=False."""
         just_under = TARGET_ALLOCATION_TOTAL_MIN - 0.001
         bundle = DeploySizingInputBundle(
             cash=_certified_cash(),
@@ -655,11 +657,11 @@ class TestRouterPolicyFailSafe:
 
 class TestEndToEndReadiness:
     def test_complete_valid_allocation_and_policy_exact_dollar_ready(self):
-        """Complete valid allocations (total in bounds) + valid policy → exact_dollar_ready=True."""
-        positions = [_pos_entry("AAPL", 60_000.0), _pos_entry("MSFT", 35_000.0)]
+        """Complete valid allocations (total 100 %, in [98 %, 102 %]) + valid policy → exact_dollar_ready=True."""
+        positions = [_pos_entry("AAPL", 60_000.0), _pos_entry("MSFT", 40_000.0)]
         db = _make_mock_db(
             portfolio_rows=[_snapshot_row(total_equity=100_000.0, positions_data=positions)],
-            target_alloc_rows=[_ta_row("AAPL", 60.0), _ta_row("MSFT", 35.0)],
+            target_alloc_rows=[_ta_row("AAPL", 60.0), _ta_row("MSFT", 40.0)],
         )
         bundle = _run(build_sizing_bundle_from_persisted_data(
             user_id=_UID, db_client=db, _policy_config=_CERTIFIED_POLICY_CONFIG,

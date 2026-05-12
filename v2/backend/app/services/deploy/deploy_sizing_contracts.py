@@ -28,10 +28,13 @@ from typing import Dict, List, Optional
 
 # Portfolio-level target allocation total bounds.
 # Applied to the sum of target_weight across all position tickers in a bundle.
-# Exceeding the maximum signals clear overallocation; falling below the minimum
-# signals significant unmodeled cash/residual allocation.
+#
+# Deploy v3 does not yet have an explicit cash/residual target contract.
+# Until one exists, target allocations must be near-fully specified so that
+# exact-dollar math is never run against an incomplete allocation model.
+# A future explicit residual/cash target can safely widen TARGET_ALLOCATION_TOTAL_MIN.
 TARGET_ALLOCATION_TOTAL_MAX: float = 1.02   # > 102 %: overallocated
-TARGET_ALLOCATION_TOTAL_MIN: float = 0.90   # < 90 %: unmodeled cash/residual too large
+TARGET_ALLOCATION_TOTAL_MIN: float = 0.98   # < 98 %: unmodeled residual too large
 
 
 class DeploySizingTrustStatus(str, Enum):

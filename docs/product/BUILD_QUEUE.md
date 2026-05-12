@@ -6,11 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- Deploy guardrails / constraints: cash constraint evaluation, tax guardrail, wash-sale guardrail.
+- Plain-English read-only Deploy UI/API surface on top of the existing `DeployPlanRollup` contract — small slice that renders plan readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference. Real tax/wash-sale guardrail evaluation stays out of scope here and remains honestly `not_evaluated_yet` until separately scoped.
 
 ## Next
 
-- Plain-English Deploy UI (action plan surface).
 - Watchtower trigger foundation.
 
 ## Later
@@ -18,6 +17,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Alerts / action feedback.
 - Research artifact UX.
 - Premium cockpit design polish.
+- Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Blocked
 
@@ -30,6 +30,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 ## Design Pause Candidates
 
 - Premium cockpit design polish after Deploy / Watchtower loop is stable.
+- Real tax-lot / wash-sale guardrail logic — pending an explicit tax-lot / trade-history source design (cost-basis source, lot accounting model, wash-sale window scope).
 
 ## Do Not Build Yet
 

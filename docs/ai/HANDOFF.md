@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.5F — Deploy v3 target allocation setup flow v1)
+Last updated: 2026-05-12 (post Stage 2.6A — Deploy v3 powers Step 1/2/3 flow)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.5F** (complete). Stages 2.5A–2.5F complete. Exact-dollar gates enforced (2.5A–2.5C); readiness diagnostic endpoint (2.5D); readiness UI (2.5E); target allocation setup flow (2.5F). `DeployV3TargetSetupPanel` on Deploy page: editable target % rows for all current position tickers, live total, 98–102% enforcement, "use current weights as draft" helper, save calls `PUT /api/v1/portfolio/targets`, invalidates deploy_v3 readiness + plan. Policy guidance section tells user which Railway env vars to set when policy is missing (no values exposed). 200 frontend contract tests pass; 0 backend changes; no SQL.
-- Active build queue item: **Deploy v3 production readiness re-validation** — set `DEPLOY_MINIMUM_TRADE_USD` + `DEPLOY_ROUNDING_POLICY` in Railway, save target allocations via the setup panel, then confirm the readiness panel shows all gates green. Once confirmed, Stage 2 exit validation can proceed.
+- Roadmap stage: **Stage 2.6A** (complete). Stages 2.5A–2.6A complete. Step 1/2/3 is the primary user flow; Deploy v3 is the Step 2 data source when exact_dollar_ready; legacy plan is fallback. Readiness/setup diagnostics collapsed into "Setup & diagnostics" `<details>` section below Step 3. `deploy-v3-step2-mapper.ts` maps `DeployV3PlanResponse` → Step 2 display (not_available / setup_incomplete / no_moves / has_moves). 256 frontend tests pass; 0 backend changes; no SQL.
+- Active build queue item: **Stage 2 exit validation** — confirm the Step 1/2/3 flow works end-to-end in production with real Deploy v3 data. Verify has_moves state renders correctly, policy env vars are set, targets are saved, readiness gates are green.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,6 +23,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
+- 2026-05-12 — **Stage 2.6A: Deploy v3 powers Step 1/2/3 flow** — Step 1/2/3 is now the primary Deploy page UX; Deploy v3 plan is Step 2 data source when exact_dollar_ready (has_moves / no_moves / setup_incomplete states); legacy deposit plan kept as fallback; diagnostic panels (DeployV3Panel, DeployV3ReadinessPanel, DeployV3TargetSetupPanel) collapsed into "Setup & diagnostics" details section below Step 3. `deploy-v3-step2-mapper.ts` pure mapper + 36 new contract tests. 256 total frontend tests; 0 backend changes; no SQL.
 - 2026-05-12 — **Stage 2.5F: Deploy v3 target allocation setup flow v1** — `DeployV3TargetSetupPanel` on Deploy page; editable target % rows for all position tickers; live total with 98–102% gate enforced; "use current weights as draft" (market values required, not auto-save); save calls `PUT /api/v1/portfolio/targets`; invalidates `["deploy_v3","readiness"]` + `["deploy_v3","plan"]` + `["portfolio","targets"]`; `useSetDeployTargets()` hook; `PolicyGuidance` section for missing Railway env vars (lists names and allowed values; never exposes values). 29 new contract tests; 200 total; 0 failed. No backend changes, no SQL.
 - 2026-05-12 — **Stage 2.5E: Deploy v3 readiness UI surface v1** — `DeployV3ReadinessPanel` on Deploy page; calls `GET /api/v1/deploy/v3/readiness`; renders exact_dollar_ready gate summary, snapshot status (missing/stale/fresh), market value coverage (uncertified tickers), target allocation gaps (missing/conflicting tickers, total %), policy status (missing_minimum_trade/missing_rounding_policy/invalid/certified — no values). `useDeployV3Readiness()` hook with query key `["deploy_v3", "readiness"]`; `DEPLOY_V3_READINESS_ENDPOINT` constant; `DeployV3ReadinessDiagnostic` TypeScript type; `policyStatusLabel()` helper. Loading/error/missing-data/flag-off states do not crash. 43 new frontend contract tests; all pass. No backend changes, no SQL.
 - 2026-05-12 — **Stage 2.5D: Deploy v3 production readiness diagnostic v1** — `GET /api/v1/deploy/v3/readiness` (authenticated, read-only); reports all readiness gates, snapshot metadata (id, age, stale/fresh), per-ticker market-value coverage, target allocation gaps + total %, policy section (`minimum_trade_configured`, `rounding_policy_configured`, `policy_valid`, `policy_status`; no values exposed), suppression reasons, plain-English `next_required_action`. `deploy_readiness_diagnostic_v1.py` wraps the sizing adapter; zero LLM/provider/broker calls. 49 new backend tests (42 diagnostic + 7 router readiness; router tests cover registration, GET method, flag-off→404, delegation, no-legacy imports, auth); 651 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
@@ -59,7 +60,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Set `DEPLOY_MINIMUM_TRADE_USD` and `DEPLOY_ROUNDING_POLICY`** in Railway (backend service → Variables), then use the `DeployV3TargetSetupPanel` to save target allocations for all current position tickers. The panel shows `next_required_action` from `GET /api/v1/deploy/v3/readiness`. Do not build a target-allocation editor, snapshot-create button, or move to Stage 3 / Watchtower until readiness has been validated and the `next_required_action` confirms all gates pass. Watchtower trigger foundation stays in Next/Later until Deploy has a certified action-plan path.
+**Validate the Step 1/2/3 flow end-to-end in production.** Open the Deploy page, enter an investment amount in Step 1, and confirm Step 2 shows Deploy v3-backed recommendations (has_moves) or the appropriate no_moves/setup_incomplete state. Use the "Setup & diagnostics" section if any gate is still blocked. The panel shows `next_required_action` from `GET /api/v1/deploy/v3/readiness`. Do not build a target-allocation editor, snapshot-create button, or move to Stage 3 / Watchtower until readiness has been validated and the `next_required_action` confirms all gates pass. Watchtower trigger foundation stays in Next/Later until Deploy has a certified action-plan path.
 
 Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 

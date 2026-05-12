@@ -828,12 +828,13 @@ def test_build_deploy_plan_without_bundle_preserves_null_scaffold():
 
 def test_build_deploy_plan_with_certified_bundle_populates_buy_dollars():
     """Certified exact-dollar-ready bundle → BUY item gets dollar amount."""
+    # current=95%, target=100%, delta=5000
     bundle = _make_certified_bundle(
         ticker="AAPL",
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,   # delta=5000
+        current_market_value=95_000.0,
+        current_weight=0.95,
+        target_weight=1.00,   # delta=5000
     )
     assert bundle.exact_dollar_ready
     snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
@@ -947,17 +948,18 @@ def test_build_deploy_plan_hold_non_actionable_with_certified_bundle():
 
 def test_build_deploy_plan_trim_populated_and_intel_action_preserved():
     """TRIM candidate gets dollar amount; Intel action is not changed."""
+    # current=100%, target=98%, TRIM delta=2000
     bundle = _make_certified_bundle(
         ticker="NVDA",
         portfolio_value=100_000.0,
-        current_market_value=20_000.0,
-        current_weight=0.20,
-        target_weight=0.15,   # delta=5000
+        current_market_value=100_000.0,
+        current_weight=1.00,
+        target_weight=0.98,   # TRIM delta=2000
     )
     snap = _snapshot([_card("NVDA", "TRIM", evidence_band="PARTIAL")])
     inputs = build_deploy_inputs_from_snapshot(snap)
     plan = build_deploy_plan(inputs, sizing_bundle=bundle)
-    assert plan.items[0].recommended_dollar_amount == 5000.0
+    assert plan.items[0].recommended_dollar_amount == 2000.0
     assert plan.items[0].intel_action == "TRIM"
     assert plan.guardrail_summary.intel_action_preserved is True
 
@@ -991,12 +993,13 @@ def test_build_deploy_plan_no_bundle_cash_status_placeholder():
 def test_build_deploy_plan_certified_bundle_buy_sufficient_cash_passed():
     """Certified exact-dollar-ready bundle, sufficient cash → BUY cash_constraint_status=passed."""
     from app.services.deploy.deploy_cash_guardrail_v1 import CASH_PASSED
+    # current=95%, target=100%, delta=5000; cash=10000 (portfolio*0.1) → sufficient
     bundle = _make_certified_bundle(
         ticker="AAPL",
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,  # delta = $5,000; cash = $10,000 → sufficient
+        current_market_value=95_000.0,
+        current_weight=0.95,
+        target_weight=1.00,  # delta = $5,000; cash = $10,000 → sufficient
     )
     snap = _snapshot([_card("AAPL", "BUY", evidence_band="PARTIAL")])
     inputs = build_deploy_inputs_from_snapshot(snap)
@@ -1015,12 +1018,13 @@ def test_build_deploy_plan_certified_bundle_buy_insufficient_cash_blocked():
         DeployCashInput,
         DeploySizingTrustStatus,
     )
+    # current=95%, target=100%, delta=5000
     bundle = _make_certified_bundle(
         ticker="AAPL",
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.15,  # delta = $5,000
+        current_market_value=95_000.0,
+        current_weight=0.95,
+        target_weight=1.00,  # delta = $5,000
     )
     # Override cash to $1,000 — insufficient for $5,000 BUY.
     import dataclasses
@@ -1051,9 +1055,9 @@ def test_build_deploy_plan_trim_gets_explicit_non_blocking_cash_status():
     bundle = _make_certified_bundle(
         ticker="AAPL",
         portfolio_value=100_000.0,
-        current_market_value=20_000.0,
-        current_weight=0.20,
-        target_weight=0.10,  # TRIM delta = $10,000
+        current_market_value=100_000.0,
+        current_weight=1.00,
+        target_weight=0.98,  # TRIM delta = $2,000
     )
     # Set cash to $0 — should not block TRIM.
     import dataclasses
@@ -1079,9 +1083,9 @@ def test_build_deploy_plan_hold_cash_status_not_applicable():
     bundle = _make_certified_bundle(
         ticker="AAPL",
         portfolio_value=100_000.0,
-        current_market_value=10_000.0,
-        current_weight=0.10,
-        target_weight=0.10,
+        current_market_value=100_000.0,
+        current_weight=1.00,
+        target_weight=1.00,
     )
     snap = _snapshot([_card("AAPL", "HOLD")])
     inputs = build_deploy_inputs_from_snapshot(snap)

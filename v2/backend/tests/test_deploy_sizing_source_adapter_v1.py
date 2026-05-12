@@ -287,7 +287,7 @@ class TestExactDollarReadyPath:
             portfolio_rows=[snap],
             target_alloc_rows=[
                 _target_alloc_row("AAPL", 60.0),
-                _target_alloc_row("MSFT", 35.0),
+                _target_alloc_row("MSFT", 40.0),  # 60+40=100% ≥ TARGET_ALLOCATION_TOTAL_MIN
             ],
         )
         return _run(build_sizing_bundle_from_persisted_data(
@@ -369,12 +369,13 @@ class TestExactDollarReadyPath:
             DeployPlanItem,
             DeployPlanStatus,
         )
-        # AAPL at $50k, target 70% of $100k = $70k → BUY $20k
+        # AAPL at $50k, target 100% of $100k = $100k → BUY $50k.
+        # Target is 100 % to satisfy TARGET_ALLOCATION_TOTAL_MIN (98 %).
         positions = [_pos_with_market_value("AAPL", 50_000.0)]
         snap = _snapshot_row(total_equity=100_000.0, cash_balance=5_000.0, positions_data=positions)
         db = _make_mock_db(
             portfolio_rows=[snap],
-            target_alloc_rows=[_target_alloc_row("AAPL", 70.0)],
+            target_alloc_rows=[_target_alloc_row("AAPL", 100.0)],
         )
         bundle = _run(build_sizing_bundle_from_persisted_data(
             user_id=_UID, db_client=db, _policy_config=_CERTIFIED_POLICY,
@@ -392,7 +393,7 @@ class TestExactDollarReadyPath:
             plan_status=DeployPlanStatus.SCAFFOLD,
         )
         result = compute_dollar_amount_for_item(bundle, item)
-        assert result.recommended_dollar_amount == 20_000.0
+        assert result.recommended_dollar_amount == 50_000.0
 
 
 # ── Gate E: Missing target allocation for one ticker → exact_dollar_ready False

@@ -26,6 +26,17 @@ from enum import Enum
 from typing import Dict, List, Optional
 
 
+# Portfolio-level target allocation total bounds.
+# Applied to the sum of target_weight across all position tickers in a bundle.
+#
+# Deploy v3 does not yet have an explicit cash/residual target contract.
+# Until one exists, target allocations must be near-fully specified so that
+# exact-dollar math is never run against an incomplete allocation model.
+# A future explicit residual/cash target can safely widen TARGET_ALLOCATION_TOTAL_MIN.
+TARGET_ALLOCATION_TOTAL_MAX: float = 1.02   # > 102 %: overallocated
+TARGET_ALLOCATION_TOTAL_MIN: float = 0.98   # < 98 %: unmodeled residual too large
+
+
 class DeploySizingTrustStatus(str, Enum):
     """Trust classification for a single sizing input value."""
     CERTIFIED = "CERTIFIED"         # Source verified, fresh, non-conflicting — ready for math.
@@ -59,8 +70,11 @@ class DeploySizingSuppressionReason(str, Enum):
     INVALID_POSITION_VALUE = "INVALID_POSITION_VALUE"   # CERTIFIED trust but None/invalid value or weight.
     # Target allocation reasons
     TARGET_ALLOCATION_NOT_EVALUATED = "TARGET_ALLOCATION_NOT_EVALUATED"
-    TARGET_ALLOCATION_MISSING = "TARGET_ALLOCATION_MISSING"   # Position ticker has no allocation entry.
-    TARGET_ALLOCATION_INVALID = "TARGET_ALLOCATION_INVALID"   # CERTIFIED but weight None or out of [0,1].
+    TARGET_ALLOCATION_MISSING = "TARGET_ALLOCATION_MISSING"         # Position ticker has no allocation entry.
+    TARGET_ALLOCATION_INVALID = "TARGET_ALLOCATION_INVALID"         # CERTIFIED but weight None or out of [0,1].
+    TARGET_ALLOCATION_CONFLICTING = "TARGET_ALLOCATION_CONFLICTING" # Duplicate/conflicting inputs for ticker.
+    TARGET_ALLOCATION_TOTAL_OVERALLOCATED = "TARGET_ALLOCATION_TOTAL_OVERALLOCATED"  # Sum > TARGET_ALLOCATION_TOTAL_MAX.
+    TARGET_ALLOCATION_TOTAL_UNDERALLOCATED = "TARGET_ALLOCATION_TOTAL_UNDERALLOCATED"  # Sum < TARGET_ALLOCATION_TOTAL_MIN.
     # Policy reasons
     MINIMUM_TRADE_UNSUPPORTED = "MINIMUM_TRADE_UNSUPPORTED"
     ROUNDING_POLICY_UNSUPPORTED = "ROUNDING_POLICY_UNSUPPORTED"
@@ -269,17 +283,29 @@ class DeploySizingInputBundle:
 
     @property
     def target_allocation_ready(self) -> bool:
-        """True when every position ticker has a CERTIFIED, valid, non-fabricated target allocation.
+        """True when every position ticker has a CERTIFIED, valid target allocation AND
+        the sum of all target weights falls within safe portfolio-level bounds.
 
         Vacuously True if there are no positions (nothing to allocate).
         Always False in production-like Stage 2.1 bundles because target allocations
         are NOT_EVALUATED placeholders.
+
+        Portfolio-level bounds (TARGET_ALLOCATION_TOTAL_MIN to TARGET_ALLOCATION_TOTAL_MAX):
+          - Sum > MAX → overallocated (more than 100 % + tolerance assigned to positions).
+          - Sum < MIN → significant unmodeled cash/residual without explicit contract.
         """
+        if not self.positions:
+            return True  # vacuously true — no positions, nothing to target
+
+        weights: List[float] = []
         for ticker in self.positions:
             ta = self.target_allocations.get(ticker)
             if ta is None or not ta.is_ready_for_math:
                 return False
-        return True
+            weights.append(ta.target_weight)  # type: ignore[arg-type]
+
+        total = sum(weights)
+        return TARGET_ALLOCATION_TOTAL_MIN <= total <= TARGET_ALLOCATION_TOTAL_MAX
 
     @property
     def policy_ready(self) -> bool:
@@ -360,17 +386,37 @@ class DeploySizingInputBundle:
                     _add(DeploySizingSuppressionReason.INVALID_POSITION_VALUE)
 
         # --- Target allocations (per position ticker) ---
+        certified_weights: List[float] = []
+        all_individual_certified = True
         for ticker in self.positions:
             ta = self.target_allocations.get(ticker)
             if ta is None:
                 _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_MISSING)
+                all_individual_certified = False
             elif ta.trust_status == DeploySizingTrustStatus.NOT_EVALUATED:
                 _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_NOT_EVALUATED)
+                all_individual_certified = False
+            elif ta.trust_status == DeploySizingTrustStatus.CONFLICTING:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_CONFLICTING)
+                all_individual_certified = False
             elif ta.trust_status == DeploySizingTrustStatus.CERTIFIED:
                 if ta.target_weight is None or not (0.0 <= ta.target_weight <= 1.0):
                     _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_INVALID)
+                    all_individual_certified = False
+                else:
+                    certified_weights.append(ta.target_weight)
             elif ta.trust_status in _SUPPRESSING_STATUSES:
                 _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_NOT_EVALUATED)
+                all_individual_certified = False
+
+        # --- Target allocation portfolio-level total ---
+        # Only evaluate total when all individual per-ticker checks passed.
+        if self.positions and all_individual_certified and certified_weights:
+            total = sum(certified_weights)
+            if total > TARGET_ALLOCATION_TOTAL_MAX:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_TOTAL_OVERALLOCATED)
+            elif total < TARGET_ALLOCATION_TOTAL_MIN:
+                _add(DeploySizingSuppressionReason.TARGET_ALLOCATION_TOTAL_UNDERALLOCATED)
 
         # --- Policy ---
         if not self.policy_ready:

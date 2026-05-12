@@ -127,19 +127,27 @@ def _bridge_certified_policy(
 
 
 def _bridge_certified_ta(
-    ticker: str = "AAPL", weight: float = 0.05
+    ticker: str = "AAPL", weight: float = 1.00
 ) -> DeployTargetAllocationInput:
     return certify_target_allocation(ticker, weight, "explicit_user_config")
 
 
 def _fully_ready_bundle_via_bridge(tickers=None) -> DeploySizingInputBundle:
-    """All three gates certified using the Stage 2.2 bridges."""
+    """All three gates certified using the Stage 2.2 bridges.
+
+    Weights are distributed evenly to 100 % total so the bundle satisfies the
+    TARGET_ALLOCATION_TOTAL_MIN/MAX portfolio-level bounds contract (Deploy v3 requires ≥ 98 %).
+    """
     tickers = tickers or ["AAPL"]
+    weight_per_ticker = 1.00 / len(tickers)
     return DeploySizingInputBundle(
         cash=_certified_cash(),
         portfolio=_certified_portfolio(),
         positions={t: _certified_position(t) for t in tickers},
-        target_allocations={t: _bridge_certified_ta(t) for t in tickers},
+        target_allocations={
+            t: certify_target_allocation(t, weight_per_ticker, "explicit_user_config")
+            for t in tickers
+        },
         policy=_bridge_certified_policy(),
     )
 

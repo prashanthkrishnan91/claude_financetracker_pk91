@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- Plain-English read-only Deploy UI/API surface on top of the existing `DeployPlanRollup` contract — small slice that renders plan readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference. Real tax/wash-sale guardrail evaluation stays out of scope here and remains honestly `not_evaluated_yet` until separately scoped.
+- Plain-English read-only Deploy UI surface consuming `GET /api/v1/deploy/v3/plan` — renders plan readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference. Frontend must call the new Deploy v3 endpoint; it must **not** call the legacy `/allocation/plan` for Deploy v3 authority. Real tax/wash-sale guardrail evaluation stays out of scope and remains honestly `not_evaluated_yet` until separately scoped.
 
 ## Next
 

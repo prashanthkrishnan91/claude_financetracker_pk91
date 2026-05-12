@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.3E plan-rollup; doc re-steer to read-only Deploy UI/API next)
+Last updated: 2026-05-12 (post Stage 2.4A Deploy v3 read-only API endpoint; next is plain-English Deploy UI consuming the new endpoint)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.3E — Deploy plan-level readiness rollup v1 complete** (backend-only). Item-level pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are all in place. See `docs/product/ROADMAP.md`.
-- Active build queue item: Plan-level readiness rollup merged; next item is a small **plain-English read-only Deploy UI/API surface** on the existing `DeployPlanRollup` contract. See `docs/product/BUILD_QUEUE.md`.
+- Roadmap stage: **Stage 2.4A — Deploy v3 read-only API endpoint complete**. `GET /api/v1/deploy/v3/plan` is live: authenticated, read-only, builds `DeployPlan` + `DeployPlanRollup` from the latest Intel v3 snapshot; returns `plan_status`, `items`, `guardrail_summary`, `rollup`, and `source` metadata. No sizing bundle wired yet — dollar fields are honest scaffold/null; BUY/TRIM items reach `not_ready`. Legacy `/allocation/plan` unchanged and is not Deploy v3 authority. See `docs/product/ROADMAP.md`.
+- Active build queue item: **Plain-English read-only Deploy UI surface** consuming `GET /api/v1/deploy/v3/plan`. Must not call legacy `/allocation/plan` for Deploy v3 decisions. See `docs/product/BUILD_QUEUE.md`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,7 +23,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
-- 2026-05-12 — **Stage 2.3E: Deploy plan-level readiness rollup v1** — added `deploy_plan_rollup_v1.py` (`build_plan_rollup`, `DeployPlanRollup`); wired into `build_deploy_plan` after finalization/pending-reason. Backend-only contract: counts by `final_actionability_status`, counts by `pending_guardrails_reason`, convenience totals (actionable/pending/blocked/informational/suppressed/not_ready/unknown), and a deterministic `plan_readiness_status` ladder (`no_items` → `all_informational` / `all_suppressed` → `ready_pending_guardrails` → `partially_ready` → `blocked` → `not_ready`). Unknown / unrecognized item fields fail safe into the unknown bucket and `not_ready`. No mutation of items. No UI, no API/route, no SQL/persistence, no providers, no LLM, no broker, no Watchtower, no visible behavior change. 31 new tests; 460 total Deploy tests; 0 failed.
+- 2026-05-12 — **Stage 2.4A: Deploy v3 read-only API endpoint** — added `app/routers/deploy_v3.py`; registered in `main.py`. `GET /api/v1/deploy/v3/plan`: authenticated, read-only, mirrors Intel v3 feature flag, returns 404/`no_snapshot` when no snapshot, calls `build_deploy_inputs_from_snapshot` → `build_deploy_plan(sizing_bundle=None)` → returns `plan_status`, `items`, `guardrail_summary`, `rollup`, `source` metadata. No sizing bundle → dollar fields null, `exact_dollar_math_evaluated=false`, BUY/TRIM `final_actionability_status=not_ready` (honest). Legacy `/allocation/plan` unchanged. No UI, no SQL, no providers, no LLM, no broker, no Watchtower. 25 new tests; 4418 total; 0 failed.
+- 2026-05-12 — **Stage 2.3E: Deploy plan-level readiness rollup v1** — `deploy_plan_rollup_v1.py` (`build_plan_rollup`, `DeployPlanRollup`); deterministic `plan_readiness_status` ladder; fail-safe unknown bucket. Backend-only; no API/route at that stage.
 - 2026-05-11 — **Stages 2.3A–2.3D: Deploy exact-dollar pipeline + per-item finalization** — `deploy_dollar_math_v1.py` (Stage 2.3A; `exact_dollar_ready` gate; BUY/TRIM/SELL deltas; rounding & min-trade suppression; share-quantity only with certified price). `deploy_cash_guardrail_v1.py` (Stage 2.3B; cash certified vs blocked vs not-applicable). `deploy_finalization_v1.py` (Stage 2.3C; per-item `final_actionability_status` ∈ informational_hold | suppressed | blocked_cash | actionable_pending_tax | not_ready). Stage 2.3D added `pending_guardrails_reason` (deterministic across all paths; cleared on non-pending finalization). Item-level intel_action / actionability_status / dollar amount / cash status are never mutated by later stages.
 - 2026-05-11 — **Stages 2.0–2.2: Deploy foundation, sizing input contract, policy + target-allocation bridges** — `deploy_contracts.py` (DeployPlan, DeployPlanItem, DeployGuardrailSummary, enums), `deploy_intel_adapter.py` (read-only Intel v3 snapshot reader), `deploy_translation_v1.py` (BUY/TRIM/SELL scaffold; HOLD never actionable; THIN/stale/blocked/weak suppressed; PriceBand never an authority). `deploy_sizing_contracts.py` + `deploy_sizing_builder.py` (Stage 2.1; trust/suppression model; three readiness gates). `deploy_policy_bridge.py` + `deploy_target_allocation_bridge.py` (Stage 2.2; explicit-source-only certification; rejects placeholder labels and fabricated weights).
 - 2026-05-10 — Phase 14F closure: added hidden backend-only visible context scaffold (`priceband_visible_context_v1.py`) behind a disabled-by-default config flag. No visible behavior changes, no route, no snapshot writes, no DecisionInputV3 mutation, no Buy/Hold/Trim/Sell changes. **Closed as hidden scaffold only.**
@@ -51,7 +52,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-Start a small **plain-English read-only Deploy UI/API surface** on top of the existing `DeployPlanRollup` contract — no further backend churn needed. The surface should render plan-level readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference and without exposing raw metric keys or diagnostics.
+Build the **plain-English read-only Deploy UI surface** consuming `GET /api/v1/deploy/v3/plan` — no further backend churn needed. The surface should render plan-level readiness (`plan_readiness_status`, counts by final status, counts by pending reason) without re-implementing inference and without exposing raw metric keys or diagnostics. Frontend must call `GET /api/v1/deploy/v3/plan`; it must **not** call the legacy `/allocation/plan` route for Deploy v3 authority.
 
 Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 

@@ -1,4 +1,4 @@
-"""Tests — Deploy v3 read-only plan API (Stage 2.4A).
+"""Tests — Deploy v3 read-only plan API (Stage 2.4A + Stage 2.5A).
 
 Proves the following invariants:
   1. Router is registered in the app at /api/v1/deploy/v3/plan.
@@ -11,6 +11,11 @@ Proves the following invariants:
   7. Route does NOT call legacy allocation engine.
   8. Intel v3 action is preserved read-only in item fields.
   9. Auth dependency is wired (get_current_user used).
+  10. Sizing adapter is wired — source metadata exposes readiness gates.
+  11. When adapter returns None (no portfolio snapshot), source reports sizing_bundle_provided=False.
+  12. When adapter returns a bundle, source reports exact_dollar_ready, sizing_values_ready,
+      target_allocation_ready, policy_ready, and suppression_reasons.
+  13. Route does not call providers, LLM paths, or legacy allocation engine even after wiring.
 """
 from __future__ import annotations
 
@@ -20,6 +25,22 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+
+
+# ── Module-level autouse fixture ──────────────────────────────────────────────
+# Patches the sizing adapter to return None by default for all existing tests.
+# This keeps existing tests isolated from DB calls and preserves their behavior.
+# New test classes that need a real bundle override this with their own patch.
+
+@pytest.fixture(autouse=True)
+def _patch_sizing_adapter():
+    """Default: adapter returns None (no portfolio snapshot available)."""
+    with patch(
+        "app.routers.deploy_v3.build_sizing_bundle_from_persisted_data",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
 
 from app.services.intelligence.v3.decision_contracts import ActionV3, ConvictionV3
 from app.services.intelligence.v3.snapshot_builder import build_snapshot
@@ -393,3 +414,202 @@ class TestSourceMetadata:
         result = self._get_plan(snap)
         assert result["snapshot_id"] == snap["snapshot_id"]
         assert result["run_id"] == snap["run_id"]
+
+
+# ── Gate I: Adapter wired — source metadata exposes readiness gates ───────────
+
+class TestAdapterWiredSourceMetadata:
+    """Stage 2.5A: source block exposes sizing bundle readiness gates."""
+
+    def _get_plan_with_bundle(self, snapshot: dict, bundle) -> dict:
+        """Call the endpoint with a specific sizing bundle mock."""
+        from app.routers.deploy_v3 import get_deploy_v3_plan
+        mock_user = MagicMock()
+        mock_user.id = uuid.UUID("00000000-0000-0000-0000-000000000070")
+        with (
+            patch.dict(os.environ, {"INTEL_V3_VISIBLE_SNAPSHOT_ENABLED": "true"}),
+            patch(
+                "app.routers.deploy_v3.IntelV3Service",
+                return_value=_mock_intel_service(snapshot),
+            ),
+            patch(
+                "app.routers.deploy_v3.build_sizing_bundle_from_persisted_data",
+                new_callable=AsyncMock,
+                return_value=bundle,
+            ),
+        ):
+            return asyncio.run(get_deploy_v3_plan(user=mock_user))
+
+    def _make_bundle(self, exact_dollar_ready: bool):
+        """Build a mock sizing bundle with controllable readiness state."""
+        from app.services.deploy.deploy_sizing_contracts import (
+            DeploySizingInputBundle,
+            DeployCashInput,
+            DeployPortfolioSizingInput,
+            DeployPositionSizingInput,
+            DeploySizingPolicyPlaceholder,
+            DeployTargetAllocationInput,
+            DeploySizingTrustStatus,
+        )
+        from app.services.deploy.deploy_target_allocation_bridge import certify_target_allocation
+        from app.services.deploy.deploy_policy_bridge import certify_sizing_policy
+
+        if exact_dollar_ready:
+            # Build a fully certified bundle
+            cash = DeployCashInput(
+                available_cash_usd=5_000.0,
+                trust_status=DeploySizingTrustStatus.CERTIFIED,
+                source_label="portfolio_snapshots:abc12345",
+            )
+            portfolio = DeployPortfolioSizingInput(
+                total_portfolio_value_usd=100_000.0,
+                trust_status=DeploySizingTrustStatus.CERTIFIED,
+                source_label="portfolio_snapshots:abc12345",
+            )
+            positions = {
+                "AAPL": DeployPositionSizingInput(
+                    ticker="AAPL",
+                    current_market_value_usd=60_000.0,
+                    current_weight=0.6,
+                    trust_status=DeploySizingTrustStatus.CERTIFIED,
+                    source_label="portfolio_snapshots:abc12345",
+                )
+            }
+            target_allocations = {
+                "AAPL": certify_target_allocation("AAPL", 0.6, "target_allocations_table")
+            }
+            policy = certify_sizing_policy(1.0, "WHOLE_DOLLAR")
+            return DeploySizingInputBundle(
+                cash=cash,
+                portfolio=portfolio,
+                positions=positions,
+                target_allocations=target_allocations,
+                policy=policy,
+            )
+        else:
+            # Build a bundle where sizing values are missing
+            cash = DeployCashInput(
+                available_cash_usd=None,
+                trust_status=DeploySizingTrustStatus.MISSING,
+                source_label="not_provided",
+            )
+            portfolio = DeployPortfolioSizingInput(
+                total_portfolio_value_usd=None,
+                trust_status=DeploySizingTrustStatus.MISSING,
+                source_label="not_provided",
+            )
+            return DeploySizingInputBundle(cash=cash, portfolio=portfolio)
+
+    def test_source_has_sizing_bundle_provided_true_when_adapter_returns_bundle(self):
+        """source.sizing_bundle_provided is True when adapter returns a bundle."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert result["source"]["sizing_bundle_provided"] is True
+
+    def test_source_exposes_exact_dollar_ready_gate(self):
+        """source must include exact_dollar_ready reflecting bundle state."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        source = result["source"]
+        assert "exact_dollar_ready" in source
+        assert source["exact_dollar_ready"] is False
+
+    def test_source_exposes_sizing_values_ready_gate(self):
+        """source must include sizing_values_ready."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert "sizing_values_ready" in result["source"]
+
+    def test_source_exposes_target_allocation_ready_gate(self):
+        """source must include target_allocation_ready."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert "target_allocation_ready" in result["source"]
+
+    def test_source_exposes_policy_ready_gate(self):
+        """source must include policy_ready."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert "policy_ready" in result["source"]
+
+    def test_source_exposes_suppression_reasons(self):
+        """source must include suppression_reasons list."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        source = result["source"]
+        assert "suppression_reasons" in source
+        assert isinstance(source["suppression_reasons"], list)
+
+    def test_source_exact_dollar_ready_true_when_bundle_certified(self):
+        """source.exact_dollar_ready is True when bundle is fully certified."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=True)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert result["source"]["exact_dollar_ready"] is True
+
+    def test_source_intel_source_always_intel_v3_with_bundle(self):
+        """source.intel_source remains INTEL_V3 regardless of sizing bundle state."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=True)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert result["source"]["intel_source"] == "INTEL_V3"
+
+    def test_source_note_present_when_bundle_not_exact_dollar_ready(self):
+        """source.note is present when bundle is provided but not exact_dollar_ready."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=False)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert "note" in result["source"]
+        assert "suppression_reasons" in result["source"]["note"].lower() or \
+               "not yet ready" in result["source"]["note"].lower()
+
+    def test_source_note_certified_when_exact_dollar_ready(self):
+        """source.note says 'certified' when exact_dollar_ready is True."""
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        bundle = self._make_bundle(exact_dollar_ready=True)
+        result = self._get_plan_with_bundle(snap, bundle)
+        assert "certified" in result["source"]["note"].lower()
+
+    def test_adapter_none_gives_sizing_bundle_provided_false(self):
+        """When adapter returns None (autouse fixture), source.sizing_bundle_provided is False."""
+        # This test relies on the autouse _patch_sizing_adapter returning None.
+        from app.routers.deploy_v3 import get_deploy_v3_plan
+        mock_user = MagicMock()
+        mock_user.id = uuid.UUID("00000000-0000-0000-0000-000000000080")
+        snap = _make_snapshot(("AAPL", ActionV3.BUY))
+        with (
+            patch.dict(os.environ, {"INTEL_V3_VISIBLE_SNAPSHOT_ENABLED": "true"}),
+            patch(
+                "app.routers.deploy_v3.IntelV3Service",
+                return_value=_mock_intel_service(snap),
+            ),
+        ):
+            result = asyncio.run(get_deploy_v3_plan(user=mock_user))
+        assert result["source"]["sizing_bundle_provided"] is False
+        assert result["source"]["exact_dollar_ready"] is False
+        assert result["source"]["intel_source"] == "INTEL_V3"
+
+    def test_router_does_not_call_providers_or_legacy_engine_after_adapter_wiring(self):
+        """deploy_v3 router source must not reference providers or legacy engine modules."""
+        import inspect
+        import app.routers.deploy_v3 as deploy_v3_module
+        source = inspect.getsource(deploy_v3_module)
+        forbidden = [
+            "allocation_engine",
+            "adaptive_deployment",
+            "deployment_engine",
+            "PriceService",
+            "fetch_prices",
+            "RecommendationService",
+            "build_allocation_plan",
+        ]
+        for name in forbidden:
+            assert name not in source, (
+                f"deploy_v3 router must not reference legacy/provider module: '{name}'"
+            )

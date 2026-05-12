@@ -18,6 +18,7 @@ import {
   DEPLOY_V3_PLAN_ENDPOINT,
   DEPLOY_V3_PLAN_QUERY_KEY,
   READINESS_META,
+  getSizingDisclaimer,
   readinessMeta,
   isNoSnapshotError,
 } from "@/lib/deploy-v3-helpers";
@@ -331,5 +332,140 @@ describe("Deploy v3 does not call legacy endpoints", () => {
       expect(DEPLOY_V3_PLAN_ENDPOINT).not.toBe(legacy);
       expect(DEPLOY_V3_PLAN_ENDPOINT).not.toContain(legacy);
     }
+  });
+});
+
+// ── getSizingDisclaimer — Stage 2.5A: exact_dollar_ready-based disclaimer ─────
+
+describe("getSizingDisclaimer — real helper from deploy-v3-helpers", () => {
+  it("returns null when exact_dollar_ready is true (no disclaimer needed)", () => {
+    expect(getSizingDisclaimer({ sizing_bundle_provided: true, exact_dollar_ready: true })).toBeNull();
+  });
+
+  it("sizing_bundle_provided=true + exact_dollar_ready=false → 'not ready' disclaimer", () => {
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: true, exact_dollar_ready: false });
+    expect(msg).not.toBeNull();
+    expect(msg!.toLowerCase()).toContain("not ready");
+    expect(msg!.toLowerCase()).toContain("sizing");
+  });
+
+  it("sizing_bundle_provided=false → 'not connected yet' disclaimer", () => {
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: false });
+    expect(msg).not.toBeNull();
+    expect(msg!.toLowerCase()).toContain("not connected yet");
+  });
+
+  it("sizing_bundle_provided=false + exact_dollar_ready omitted → 'not connected' (no bundle)", () => {
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: false });
+    expect(msg).not.toBeNull();
+    expect(msg!.toLowerCase()).not.toContain("not ready");
+  });
+
+  it("sizing_bundle_provided=true but exact_dollar_ready omitted → 'not ready' disclaimer", () => {
+    // exact_dollar_ready absent treated same as false
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: true });
+    expect(msg).not.toBeNull();
+    expect(msg!.toLowerCase()).toContain("not ready");
+  });
+
+  it("returns null when source is undefined", () => {
+    expect(getSizingDisclaimer(undefined)).toBeNull();
+  });
+
+  it("returns null when source is null", () => {
+    expect(getSizingDisclaimer(null)).toBeNull();
+  });
+
+  it("not-ready copy does not claim execute or trade-ready language", () => {
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: true, exact_dollar_ready: false });
+    const lower = msg!.toLowerCase();
+    expect(lower).not.toContain("execute");
+    expect(lower).not.toContain("buy now");
+    expect(lower).not.toContain("actionable");
+  });
+
+  it("not-connected copy mentions scaffold/placeholder", () => {
+    const msg = getSizingDisclaimer({ sizing_bundle_provided: false });
+    expect(msg!.toLowerCase()).toContain("scaffold placeholders");
+  });
+
+  it("not-ready and not-connected messages are distinct", () => {
+    const notConnected = getSizingDisclaimer({ sizing_bundle_provided: false });
+    const notReady = getSizingDisclaimer({ sizing_bundle_provided: true, exact_dollar_ready: false });
+    expect(notConnected).not.toBe(notReady);
+  });
+});
+
+// ── DeployV3PlanResponse source type contract (Stage 2.5A fields) ─────────────
+
+describe("DeployV3PlanResponse source — Stage 2.5A optional fields", () => {
+  it("source with only required fields is valid (old backend response)", () => {
+    const plan = makePlanResponse({
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: false,
+        note: "No sizing bundle.",
+      },
+    });
+    expect(plan.source.sizing_bundle_provided).toBe(false);
+    expect(plan.source.exact_dollar_ready).toBeUndefined();
+  });
+
+  it("source with sizing_bundle_provided=true and exact_dollar_ready=false is valid", () => {
+    const plan = makePlanResponse({
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Sizing bundle provided but not exact-dollar-ready.",
+        exact_dollar_ready: false,
+        sizing_values_ready: false,
+        target_allocation_ready: false,
+        policy_ready: false,
+        suppression_reasons: ["MISSING_POSITION_VALUE", "MINIMUM_TRADE_UNSUPPORTED"],
+      },
+    });
+    expect(plan.source.sizing_bundle_provided).toBe(true);
+    expect(plan.source.exact_dollar_ready).toBe(false);
+    expect(plan.source.suppression_reasons).toContain("MISSING_POSITION_VALUE");
+  });
+
+  it("source with all gates true and no suppression_reasons is valid", () => {
+    const plan = makePlanResponse({
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Sizing bundle certified.",
+        exact_dollar_ready: true,
+        sizing_values_ready: true,
+        target_allocation_ready: true,
+        policy_ready: true,
+        suppression_reasons: [],
+        cash_source: "portfolio_snapshots:abc12345",
+        portfolio_source: "portfolio_snapshots:abc12345",
+      },
+    });
+    expect(plan.source.exact_dollar_ready).toBe(true);
+    expect(plan.source.suppression_reasons).toHaveLength(0);
+    expect(getSizingDisclaimer(plan.source)).toBeNull();
+  });
+
+  it("getSizingDisclaimer returns null when source.exact_dollar_ready is true", () => {
+    const source = {
+      intel_source: "INTEL_V3",
+      sizing_bundle_provided: true,
+      note: "Certified.",
+      exact_dollar_ready: true,
+    };
+    expect(getSizingDisclaimer(source)).toBeNull();
+  });
+
+  it("getSizingDisclaimer returns non-null when sizing_bundle_provided=true exact_dollar_ready=false", () => {
+    const source = {
+      intel_source: "INTEL_V3",
+      sizing_bundle_provided: true,
+      note: "Not ready.",
+      exact_dollar_ready: false,
+    };
+    expect(getSizingDisclaimer(source)).not.toBeNull();
   });
 });

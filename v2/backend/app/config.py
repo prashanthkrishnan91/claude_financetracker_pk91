@@ -275,6 +275,13 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation.
     intel_v3_priceband_visible_context_v1_enabled: bool = False
 
+    # ── Deploy v3 sizing policy config (optional; policy is UNSUPPORTED if absent) ──
+    # When both are set, the sizing source adapter certifies the policy for exact-dollar math.
+    # deploy_minimum_trade_usd: minimum dollar threshold below which a trade is suppressed.
+    # deploy_rounding_policy: one of WHOLE_DOLLAR, NEAREST_DOLLAR, NO_ROUNDING.
+    deploy_minimum_trade_usd: Optional[float] = None
+    deploy_rounding_policy: Optional[str] = None
+
 
 @lru_cache
 def get_settings() -> Settings:

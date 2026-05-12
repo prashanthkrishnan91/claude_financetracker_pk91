@@ -30,6 +30,39 @@ export function readinessMeta(status: string): ReadinessMeta {
   return READINESS_META[status] ?? { label: "Plan status unknown", cls: "text-text-muted" };
 }
 
+// ── Sizing disclaimer ─────────────────────────────────────────────────────────
+
+/** Source shape subset needed for sizing disclaimer logic. */
+type SizingDisclaimerSource = {
+  sizing_bundle_provided?: boolean;
+  exact_dollar_ready?: boolean;
+};
+
+/**
+ * Returns the plain-English sizing disclaimer to show, or null if none needed.
+ *
+ * - null            → exact_dollar_ready is true; no disclaimer
+ * - "not connected" → sizing_bundle_provided is false (no portfolio snapshot found)
+ * - "not ready"     → sizing_bundle_provided is true but exact_dollar_ready is false
+ *                     (bundle found but one or more gates are uncertified)
+ */
+export function getSizingDisclaimer(
+  source: SizingDisclaimerSource | undefined | null,
+): string | null {
+  if (!source) return null;
+  if (source.exact_dollar_ready === true) return null;
+  if (source.sizing_bundle_provided) {
+    return (
+      "Sizing data was found, but exact dollar planning is still not ready. " +
+      "Some required inputs are missing or unsupported."
+    );
+  }
+  return (
+    "Exact dollar amounts are not connected yet — no executable trade sizing available. " +
+    "Dollar fields shown here are scaffold placeholders only."
+  );
+}
+
 /**
  * Returns true when the error represents a "no snapshot" 404.
  *

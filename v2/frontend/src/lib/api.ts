@@ -1264,5 +1264,12 @@ export interface DeployV3PlanResponse {
     intel_source: string;
     sizing_bundle_provided: boolean;
     note: string;
+    exact_dollar_ready?: boolean;
+    sizing_values_ready?: boolean;
+    target_allocation_ready?: boolean;
+    policy_ready?: boolean;
+    suppression_reasons?: string[];
+    cash_source?: string | null;
+    portfolio_source?: string | null;
   };
 }

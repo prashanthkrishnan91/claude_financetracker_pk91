@@ -165,6 +165,20 @@ describe("mapDeployV3ToStep2 — item filtering", () => {
     expect(result.items[0].ticker).toBe("AAPL");
   });
 
+  it("BUY actionable_pending_tax with null dollar_amount → no_moves", () => {
+    const plan = makePlan({
+      items: [makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: null as any })],
+    });
+    expect(mapDeployV3ToStep2(plan).state).toBe("no_moves");
+  });
+
+  it("BUY actionable_pending_tax with zero dollar_amount → no_moves", () => {
+    const plan = makePlan({
+      items: [makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: 0 })],
+    });
+    expect(mapDeployV3ToStep2(plan).state).toBe("no_moves");
+  });
+
   it("items sorted by dollar_amount descending", () => {
     const plan = makePlan({
       items: [
@@ -206,6 +220,15 @@ describe("isActionableMove", () => {
 
   it("BUY not_ready → false", () =>
     expect(isActionableMove(makeItem({ intel_action: "BUY", final_actionability_status: "not_ready" }))).toBe(false));
+
+  it("BUY actionable_pending_tax + null dollar_amount → false", () =>
+    expect(isActionableMove(makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: null as any }))).toBe(false));
+
+  it("BUY actionable_pending_tax + zero dollar_amount → false", () =>
+    expect(isActionableMove(makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: 0 }))).toBe(false));
+
+  it("BUY actionable_pending_tax + positive dollar_amount → true", () =>
+    expect(isActionableMove(makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: 150 }))).toBe(true));
 });
 
 // ── derivePlainReason ─────────────────────────────────────────────────────────
@@ -254,6 +277,33 @@ describe("Deploy v3 Step 2 does not use legacy endpoints", () => {
     for (const endpoint of legacyEndpoints) {
       expect(endpoint).not.toBe("/api/v1/deploy/v3/plan");
     }
+  });
+});
+
+// ── Dollar amount guard in isActionableMove ───────────────────────────────────
+
+describe("has_moves requires positive dollar_amount", () => {
+  it("plan with only null-amount actionable items → no_moves not has_moves", () => {
+    const plan = makePlan({
+      items: [
+        makeItem({ intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: null as any }),
+        makeItem({ ticker: "MSFT", intel_action: "TRIM", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: null as any }),
+      ],
+    });
+    expect(mapDeployV3ToStep2(plan).state).toBe("no_moves");
+  });
+
+  it("plan with one zero and one positive → has_moves with one item", () => {
+    const plan = makePlan({
+      items: [
+        makeItem({ ticker: "AAPL", intel_action: "BUY", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: 0 }),
+        makeItem({ ticker: "MSFT", intel_action: "TRIM", final_actionability_status: "actionable_pending_tax", recommended_dollar_amount: 250 }),
+      ],
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("has_moves");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].ticker).toBe("MSFT");
   });
 });
 

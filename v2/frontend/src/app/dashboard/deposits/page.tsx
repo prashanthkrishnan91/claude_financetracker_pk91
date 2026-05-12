@@ -401,7 +401,7 @@ function DeployV3Step2Section({
             <p className="text-sm text-blue-300 font-semibold">No additional dollars needed right now</p>
             <p className="text-xs text-text-secondary">
               Your target model says the current portfolio already matches your targets.
-              No cash deployment moves were produced for {formatCurrency(amount)}.
+              No cash deployment moves were produced from your certified portfolio model.
             </p>
             <p className="text-[11px] text-text-muted">
               Intel v3 owns all Buy / Hold / Trim / Sell decisions. Deploy only sizes validated moves.
@@ -412,7 +412,7 @@ function DeployV3Step2Section({
         {step2.state === "has_moves" && (
           <div className="space-y-3">
             <p className="text-xs text-text-secondary">
-              Intel v3 identified these moves. Deploy v3 sized them for {formatCurrency(amount)}.
+              Deploy v3 found target-driven moves from your certified portfolio model.
             </p>
             <DeployV3AllocationTable items={step2.items} />
             <p className="text-[11px] text-text-muted leading-snug">

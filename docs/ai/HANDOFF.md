@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.6A — Deploy v3 powers Step 1/2/3 flow)
+Last updated: 2026-05-12 (post Stage 2.6A patch — truth/contract fix: copy honest, isActionableMove requires dollar_amount > 0)
 
 ## Purpose
 
@@ -8,7 +8,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.6A** (complete). Stages 2.5A–2.6A complete. Step 1/2/3 is the primary user flow; Deploy v3 is the Step 2 data source when exact_dollar_ready; legacy plan is fallback. Readiness/setup diagnostics collapsed into "Setup & diagnostics" `<details>` section below Step 3. `deploy-v3-step2-mapper.ts` maps `DeployV3PlanResponse` → Step 2 display (not_available / setup_incomplete / no_moves / has_moves). 256 frontend tests pass; 0 backend changes; no SQL.
+- Roadmap stage: **Stage 2.6A** (complete, patched). Stages 2.5A–2.6A complete. Step 1/2/3 is the primary user flow; Deploy v3 is the Step 2 data source when exact_dollar_ready; legacy plan is fallback. Readiness/setup diagnostics collapsed into "Setup & diagnostics" `<details>` section below Step 3. `deploy-v3-step2-mapper.ts` maps `DeployV3PlanResponse` → Step 2 display (not_available / setup_incomplete / no_moves / has_moves). **Deploy v3 is not amount-aware** — the Step 1 investment amount is only used by the legacy deposit plan fallback; Step 2 copy does not claim sizing for a specific dollar amount. `isActionableMove` requires `recommended_dollar_amount > 0` (not just actionable status). 263 frontend tests pass (3 pre-existing suite-level failures in unrelated files); 0 backend changes; no SQL.
 - Active build queue item: **Stage 2 exit validation** — confirm the Step 1/2/3 flow works end-to-end in production with real Deploy v3 data. Verify has_moves state renders correctly, policy env vars are set, targets are saved, readiness gates are green.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 

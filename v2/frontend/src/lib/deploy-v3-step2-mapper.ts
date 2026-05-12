@@ -53,7 +53,8 @@ export function normalizeAction(raw: string): Step2ItemAction {
 export function isActionableMove(item: DeployV3PlanItem): boolean {
   const action = normalizeAction(item.intel_action);
   if (action === "HOLD") return false;
-  // pending_guardrails items can still show dollar amounts
+  // Must have a positive dollar amount — null/zero means not sized.
+  if (!(item.recommended_dollar_amount != null && item.recommended_dollar_amount > 0)) return false;
   const status = item.final_actionability_status;
   return (
     status === "actionable_pending_tax" ||

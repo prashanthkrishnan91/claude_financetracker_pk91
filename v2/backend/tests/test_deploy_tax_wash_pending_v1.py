@@ -275,3 +275,67 @@ def test_plan_builder_no_bundle_pending_reason_none():
     plan = build_deploy_plan(_snap_inputs([_card("AAPL", "BUY")]))
     assert plan.items[0].final_actionability_status == FINAL_NOT_READY
     assert plan.items[0].pending_guardrails_reason == PENDING_REASON_NONE
+
+
+# ---------------------------------------------------------------------------
+# Tests: stale pending_guardrails_reason is always cleared (determinism)
+# ---------------------------------------------------------------------------
+
+def _stale_item(intel_action: str = "BUY", **kwargs) -> DeployPlanItem:
+    """Item pre-set with a stale pending_guardrails_reason to prove finalization clears it."""
+    base = _item(intel_action, **kwargs)
+    import dataclasses
+    return dataclasses.replace(base, pending_guardrails_reason="tax_and_wash_sale_not_evaluated")
+
+
+def test_stale_reason_cleared_for_blocked_cash_buy():
+    item = _stale_item("BUY", recommended_dollar_amount=5_000.0, cash_constraint_status="blocked_insufficient_cash")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_BLOCKED_CASH
+    assert result.pending_guardrails_reason == PENDING_REASON_NONE
+
+
+def test_stale_reason_cleared_for_not_ready_buy():
+    item = _stale_item("BUY", recommended_dollar_amount=None, cash_constraint_status="not_evaluated_yet")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+    assert result.pending_guardrails_reason == PENDING_REASON_NONE
+
+
+def test_stale_reason_cleared_for_hold():
+    import dataclasses
+    base = _hold()
+    item = dataclasses.replace(base, pending_guardrails_reason="tax_and_wash_sale_not_evaluated")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_INFORMATIONAL_HOLD
+    assert result.pending_guardrails_reason == PENDING_REASON_NONE
+
+
+def test_stale_reason_cleared_for_suppressed():
+    import dataclasses
+    base = _suppressed()
+    item = dataclasses.replace(base, pending_guardrails_reason="tax_and_wash_sale_not_evaluated")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_SUPPRESSED
+    assert result.pending_guardrails_reason == PENDING_REASON_NONE
+
+
+def test_stale_reason_cleared_for_trim_unexpected_cash():
+    item = _stale_item("TRIM", recommended_dollar_amount=3_000.0, cash_constraint_status="not_evaluated_yet")
+    result = finalize_item_actionability(item)
+    assert result.final_actionability_status == FINAL_NOT_READY
+    assert result.pending_guardrails_reason == PENDING_REASON_NONE
+
+
+def test_valid_pending_tax_buy_reason_still_set_after_determinism_fix():
+    """Regression: valid BUY pending-tax path still produces correct reason."""
+    result = finalize_item_actionability(_item("BUY", recommended_dollar_amount=5_000.0, cash_constraint_status="passed"))
+    assert result.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
+    assert result.pending_guardrails_reason == PENDING_REASON_TAX_WASH_NOT_EVALUATED
+
+
+def test_valid_pending_tax_trim_reason_still_set_after_determinism_fix():
+    """Regression: valid TRIM pending-tax path still produces correct reason."""
+    result = finalize_item_actionability(_item("TRIM", recommended_dollar_amount=3_000.0, cash_constraint_status="not_applicable_trim_sell"))
+    assert result.final_actionability_status == FINAL_ACTIONABLE_PENDING_TAX
+    assert result.pending_guardrails_reason == PENDING_REASON_TAX_WASH_NOT_EVALUATED

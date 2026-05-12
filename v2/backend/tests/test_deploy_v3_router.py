@@ -476,7 +476,7 @@ class TestAdapterWiredSourceMetadata:
                 )
             }
             target_allocations = {
-                "AAPL": certify_target_allocation("AAPL", 0.6, "target_allocations_table")
+                "AAPL": certify_target_allocation("AAPL", 1.0, "target_allocations_table")
             }
             policy = certify_sizing_policy(1.0, "WHOLE_DOLLAR")
             return DeploySizingInputBundle(
@@ -613,3 +613,125 @@ class TestAdapterWiredSourceMetadata:
             assert name not in source, (
                 f"deploy_v3 router must not reference legacy/provider module: '{name}'"
             )
+
+
+# ── Readiness endpoint tests (Stage 2.5D) ─────────────────────────────────────
+
+
+class TestReadinessEndpoint:
+    """Tests for GET /api/v1/deploy/v3/readiness."""
+
+    def _get_readiness(self, diagnostic_return: dict) -> dict:
+        """Call the readiness endpoint with a mocked diagnostic builder."""
+        from app.routers.deploy_v3 import get_deploy_v3_readiness
+        mock_user = MagicMock()
+        mock_user.id = uuid.UUID("00000000-0000-0000-0000-000000000099")
+        with (
+            patch.dict(os.environ, {"INTEL_V3_VISIBLE_SNAPSHOT_ENABLED": "true"}),
+            patch(
+                "app.routers.deploy_v3.build_readiness_diagnostic",
+                new_callable=AsyncMock,
+                return_value=diagnostic_return,
+            ) as mock_diag,
+        ):
+            result = asyncio.run(get_deploy_v3_readiness(user=mock_user))
+        return result
+
+    def test_route_registered_at_readiness_path(self):
+        """Route /api/v1/deploy/v3/readiness is registered in the app."""
+        from app.main import app
+        routes = [r.path for r in app.routes]
+        assert "/api/v1/deploy/v3/readiness" in routes
+
+    def test_route_method_is_get(self):
+        """Readiness route accepts GET requests."""
+        from app.main import app
+        for route in app.routes:
+            if getattr(route, "path", None) == "/api/v1/deploy/v3/readiness":
+                assert "GET" in route.methods
+                return
+        pytest.fail("Route /api/v1/deploy/v3/readiness not found")
+
+    def test_flag_off_returns_404(self):
+        """Feature flag disabled → 404 with flag-off message."""
+        from fastapi import HTTPException
+        from app.routers.deploy_v3 import get_deploy_v3_readiness
+        mock_user = MagicMock()
+        mock_user.id = uuid.UUID("00000000-0000-0000-0000-000000000099")
+        with (
+            patch.dict(os.environ, {"INTEL_V3_VISIBLE_SNAPSHOT_ENABLED": "false"}),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                asyncio.run(get_deploy_v3_readiness(user=mock_user))
+        assert exc_info.value.status_code == 404
+
+    def test_flag_on_calls_build_readiness_diagnostic_with_user_id(self):
+        """Flag enabled → build_readiness_diagnostic is called with user_id."""
+        from app.routers.deploy_v3 import get_deploy_v3_readiness
+        mock_user = MagicMock()
+        user_id = uuid.UUID("00000000-0000-0000-0000-000000000099")
+        mock_user.id = user_id
+        diagnostic_return = {
+            "exact_dollar_ready": False,
+            "next_required_action": "Create a fresh portfolio snapshot to begin.",
+        }
+        with (
+            patch.dict(os.environ, {"INTEL_V3_VISIBLE_SNAPSHOT_ENABLED": "true"}),
+            patch(
+                "app.routers.deploy_v3.build_readiness_diagnostic",
+                new_callable=AsyncMock,
+                return_value=diagnostic_return,
+            ) as mock_diag,
+        ):
+            asyncio.run(get_deploy_v3_readiness(user=mock_user))
+        mock_diag.assert_called_once()
+        call_kwargs = mock_diag.call_args
+        assert call_kwargs.kwargs.get("user_id") == user_id or (
+            call_kwargs.args and call_kwargs.args[0] == user_id
+        )
+
+    def test_response_returns_diagnostic_dict(self):
+        """Response is the diagnostic dict returned by build_readiness_diagnostic."""
+        diagnostic = {
+            "exact_dollar_ready": False,
+            "sizing_values_ready": False,
+            "target_allocation_ready": False,
+            "policy_ready": False,
+            "snapshot": {"present": False, "status": "missing"},
+            "next_required_action": "Create a fresh portfolio snapshot to begin.",
+        }
+        result = self._get_readiness(diagnostic)
+        assert result["exact_dollar_ready"] is False
+        assert result["next_required_action"] == "Create a fresh portfolio snapshot to begin."
+        assert result["snapshot"]["status"] == "missing"
+
+    def test_router_source_has_no_providers_llm_broker_or_legacy(self):
+        """deploy_v3 router must not reference providers, LLM, broker, or legacy engine."""
+        import inspect
+        import app.routers.deploy_v3 as deploy_v3_module
+        source = inspect.getsource(deploy_v3_module)
+        forbidden = [
+            "allocation_engine",
+            "adaptive_deployment",
+            "deployment_engine",
+            "PriceService",
+            "fetch_prices",
+            "RecommendationService",
+            "build_allocation_plan",
+            "openai",
+            "anthropic",
+            "broker",
+        ]
+        for name in forbidden:
+            assert name not in source, (
+                f"deploy_v3 router must not reference forbidden module: '{name}'"
+            )
+
+    def test_auth_wired_consistently_with_plan_endpoint(self):
+        """Readiness endpoint uses get_current_user, consistent with the plan endpoint."""
+        import inspect
+        from app.routers import deploy_v3 as deploy_v3_module
+        source = inspect.getsource(deploy_v3_module)
+        readiness_fn_src = inspect.getsource(deploy_v3_module.get_deploy_v3_readiness)
+        assert "get_current_user" in readiness_fn_src
+        assert "AuthenticatedUser" in readiness_fn_src or "Depends" in readiness_fn_src

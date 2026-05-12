@@ -1,9 +1,7 @@
 """Deploy v3 read-only plan API — Stage 2.4A + Stage 2.5A sizing source adapter.
 
-GET /deploy/v3/plan
-
-Returns a read-only Deploy v3 plan built from the latest Intel v3 snapshot,
-with a certified sizing bundle when persisted data is sufficient.
+GET /deploy/v3/plan       — Deploy plan from latest Intel v3 snapshot.
+GET /deploy/v3/readiness  — Production readiness diagnostic (Stage 2.5D).
 
 Zero LLM calls. Zero provider calls. Does not call the legacy allocation engine.
 
@@ -15,7 +13,7 @@ Contract:
   - Legacy /allocation/plan route is unaffected.
 
 Feature flag: INTEL_V3_VISIBLE_SNAPSHOT_ENABLED
-  When disabled, returns 404 (mirrors intel_v3 router behavior).
+  When disabled, both endpoints return 404 (mirrors intel_v3 router behavior).
 """
 from __future__ import annotations
 
@@ -26,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..services.deploy.deploy_intel_adapter import build_deploy_inputs_from_snapshot
+from ..services.deploy.deploy_readiness_diagnostic_v1 import build_readiness_diagnostic
 from ..services.deploy.deploy_sizing_source_adapter_v1 import (
     build_sizing_bundle_from_persisted_data,
 )
@@ -42,10 +41,43 @@ def _check_flag() -> None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                "Deploy v3 plan requires Intel v3 to be enabled. "
+                "Deploy v3 requires Intel v3 to be enabled. "
                 "Set INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true to enable."
             ),
         )
+
+
+@router.get("/readiness")
+async def get_deploy_v3_readiness(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Get a production readiness diagnostic for the Deploy v3 exact-dollar path.
+
+    Read-only. Zero LLM calls. Zero provider calls. Does not call the legacy allocation engine.
+    Reports snapshot status, market value coverage, target allocation status and portfolio
+    total, policy configuration presence (no secret values), and a plain-English
+    next_required_action.
+    Returns 404 if the Intel v3 feature flag is disabled.
+    """
+    _check_flag()
+
+    try:
+        diagnostic = await build_readiness_diagnostic(user_id=user.id)
+    except Exception as exc:
+        logger.warning("deploy_v3.readiness: diagnostic build failed: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Readiness diagnostic unavailable.",
+        )
+
+    logger.info(
+        "deploy_v3.readiness user_id=%s exact_dollar_ready=%s next_action=%r",
+        user.id,
+        diagnostic.get("exact_dollar_ready"),
+        diagnostic.get("next_required_action"),
+    )
+
+    return diagnostic
 
 
 @router.get("/plan")

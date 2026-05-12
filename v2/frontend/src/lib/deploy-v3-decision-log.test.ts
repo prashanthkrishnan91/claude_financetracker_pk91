@@ -22,7 +22,7 @@ import {
 } from "@/lib/deploy-v3-decision-log";
 import type { Step2Item, Step2Result } from "@/lib/deploy-v3-step2-mapper";
 
-// ── Factories ─────────────────────────────────────────────────────────────────
+// ── Factories ─────────────────────────────────────────────────────
 
 function makeItem(overrides: Partial<Step2Item> = {}): Step2Item {
   return {
@@ -46,7 +46,7 @@ function makeStep2(state: Step2Result["state"], items: Step2Item[] = []): Pick<S
 const V3_META = { snapshot_id: "snap-001", run_id: "run-001", plan_status: "SCAFFOLD" };
 const CTX = { entered_amount: 900 };
 
-// ── buildDeployV3DecisionSnapshot ─────────────────────────────────────────────
+// ── buildDeployV3DecisionSnapshot ────────────────────────────────────────────────
 
 describe("buildDeployV3DecisionSnapshot", () => {
   it("source is always deploy_v3", () => {
@@ -119,7 +119,7 @@ describe("buildDeployV3DecisionSnapshot", () => {
   });
 });
 
-// ── buildDeployV3InitialActualDecisions ───────────────────────────────────────
+// ── buildDeployV3InitialActualDecisions ─────────────────────────────────────────────
 
 describe("buildDeployV3InitialActualDecisions", () => {
   it("returns one entry per Step 2 item", () => {
@@ -160,7 +160,7 @@ describe("buildDeployV3InitialActualDecisions", () => {
   });
 });
 
-// ── mapActionToActualDefault ──────────────────────────────────────────────────
+// ── mapActionToActualDefault ──────────────────────────────────────────────
 
 describe("mapActionToActualDefault", () => {
   it("BUY → BOUGHT", () => expect(mapActionToActualDefault("BUY")).toBe("BOUGHT"));
@@ -169,7 +169,7 @@ describe("mapActionToActualDefault", () => {
   it("HOLD → HELD", () => expect(mapActionToActualDefault("HOLD")).toBe("HELD"));
 });
 
-// ── buildDeployV3SessionKey ───────────────────────────────────────────────────
+// ── buildDeployV3SessionKey ────────────────────────────────────────────────
 
 describe("buildDeployV3SessionKey", () => {
   it("same run_id and items → same key", () => {
@@ -203,7 +203,7 @@ describe("buildDeployV3SessionKey", () => {
   });
 });
 
-// ── Visible Step 2 items equal logged recommended items ───────────────────────
+// ── Visible Step 2 items equal logged recommended items ───────────────────────────
 
 describe("Step 2 items are the exact logged recommended items", () => {
   it("each visible item appears once in the snapshot with unchanged values", () => {
@@ -237,7 +237,7 @@ describe("Step 2 items are the exact logged recommended items", () => {
   });
 });
 
-// ── No legacy endpoint usage ──────────────────────────────────────────────────
+// ── No legacy endpoint usage ──────────────────────────────────────────────
 
 describe("Deploy v3 decision logging does not use legacy endpoints", () => {
   it("deploy-v3-decision-log module does not import legacy api paths", () => {
@@ -250,5 +250,66 @@ describe("Deploy v3 decision logging does not use legacy endpoints", () => {
     expect(src).not.toContain("/api/deposit-plan");
     expect(src).not.toContain("/allocation/plan");
     expect(src).not.toContain("DepositPlanResult");
+  });
+});
+
+// ── Notes + source contract ───────────────────────────────────────────────────
+
+describe("Deploy v3 create API payload includes notes and source", () => {
+  it("frontend api.ts createDecisionLog signature accepts notes and source opts", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const src: string = fs.readFileSync(path.resolve(__dirname, "api.ts"), "utf8");
+    // opts parameter must exist on createDecisionLog
+    expect(src).toContain("opts?.notes");
+    expect(src).toContain("opts?.source");
+  });
+
+  it("hooks.ts useCreateDecisionMemoryLog threads notes and source to api", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const src: string = fs.readFileSync(path.resolve(__dirname, "hooks.ts"), "utf8");
+    expect(src).toContain("notes, source");
+    expect(src).toContain("{ notes, source }");
+  });
+
+  it("Deploy v3 onSave passes source: deploy_v3 on create (not legacy 'deploy')", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    // The Deploy v3 create call must include source: "deploy_v3"
+    expect(pageSource).toContain('source: "deploy_v3"');
+  });
+
+  it("Deploy v3 onSave passes notes on create", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    // The createLog call for Deploy v3 includes notes
+    expect(pageSource).toContain("createLog.mutateAsync({ snapshot, actualDecisions, notes, source");
+  });
+
+  it("legacy DecisionLogMemoryPanel create call is not changed (still uses default source)", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    // Legacy path: createLog.mutateAsync({ snapshot, actualDecisions: decisionData })
+    // It does NOT pass source: "deploy_v3" — source defaults to "deploy" via the API
+    expect(pageSource).toContain("createLog.mutateAsync({ snapshot, actualDecisions: decisionData })");
+  });
+
+  it("snapshot source field remains deploy_v3 for Deploy v3 logs", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2("has_moves", [makeItem()]), V3_META, CTX);
+    // recommendation_snapshot.source = "deploy_v3" (snapshot-level source)
+    expect(snap.source).toBe("deploy_v3");
   });
 });

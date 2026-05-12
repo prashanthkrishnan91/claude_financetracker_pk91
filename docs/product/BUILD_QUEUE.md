@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Deploy v3 production readiness validation or target allocation setup flow** (Stage 2, still in progress). Stages 2.5A–2.5C complete — all three exact-dollar gates enforced and hardened. For `exact_dollar_ready=True` in production: (1) `target_allocations` rows for every position ticker with portfolio total in [90%, 102%], and (2) `deploy_minimum_trade_usd` + `deploy_rounding_policy` env vars set. Next: production readiness check against real data, or a UI/admin flow for target allocation setup. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
+- **Deploy v3 production readiness validation or target allocation setup flow** (Stage 2, still in progress). Stages 2.5A–2.5C complete — all three exact-dollar gates enforced and hardened. For `exact_dollar_ready=True` in production: (1) `target_allocations` rows for every position ticker with portfolio total in [98%, 102%] (Deploy v3 has no explicit cash/residual target contract yet; near-full specification required), and (2) `deploy_minimum_trade_usd` + `deploy_rounding_policy` env vars set. Next: production readiness check against real data, or a UI/admin flow for target allocation setup. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
 
 ## Next
 
@@ -21,7 +21,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Stage 2.5C** — Deploy v3 target-allocation + policy readiness hardening v1 — portfolio-level target total bounds (90%–102%) enforced; duplicate DB rows → CONFLICTING trust; invalid policy → UNSUPPORTED fail-safe; 3 new suppression reasons in source metadata. 46 new tests + 38 updated; 485 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
+- **Stage 2.5C** — Deploy v3 target-allocation + policy readiness hardening v1 — portfolio-level target total bounds (98%–102%) enforced (no cash/residual contract yet; near-full specification required); duplicate DB rows → CONFLICTING trust; invalid policy → UNSUPPORTED fail-safe; 3 new suppression reasons in source metadata. 46 new tests + 38 updated; 485 deploy tests total; 0 failed. Backend-only, no SQL, no UI.
 - **Stage 2.5B** — Deploy v3 snapshot market-value source v1 — `PortfolioService.create_snapshot()` enriches `positions_data` with `market_value_usd` per position when price is valid/fresh. Cost basis never promoted. Fail-safe on missing/stale/invalid prices. 25 new backend tests; 0 failed. No SQL, no providers, no LLM.
 - **Stage 2.5A** — Deploy v3 certified sizing source adapter v1 — `deploy_sizing_source_adapter_v1.py` wired into `GET /api/v1/deploy/v3/plan`. Reads `portfolio_snapshots` + `target_allocations` + Settings. Source metadata expanded with readiness gates. Adapter is wired but `exact_dollar_ready` depends on source completeness (see Now). 51 new tests; 4469 total; 0 failed.
 - **Stage 2.4B** — Plain-English read-only Deploy v3 UI surface — `DeployV3Panel` on Deploy page; calls `GET /api/v1/deploy/v3/plan`; renders `plan_readiness_status`, counts, Intel v3 authority note, honest sizing-not-connected disclaimer. 25 frontend contract tests; 0 backend changes.

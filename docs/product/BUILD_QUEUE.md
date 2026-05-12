@@ -6,11 +6,12 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Deploy v3 production readiness re-validation** (Stage 2, still in progress). Stages 2.5A–2.5F complete. Two actions required: (1) set `DEPLOY_MINIMUM_TRADE_USD` + `DEPLOY_ROUNDING_POLICY` in Railway; (2) save target allocations via `DeployV3TargetSetupPanel`. After both, check the readiness panel — if all gates show green, Stage 2 exit validation can proceed. Do not exit Stage 2 until a certified action-plan path exists end-to-end.
+- **Stage 2.6B — Deploy v3 decision logging** (Stage 2, active). Wire Step 3 so the decision the user logs matches the visible Deploy v3 Step 2 items exactly. Step 3 currently shows a placeholder in the Deploy v3 path; `DecisionLogMemoryPanel` only renders in the legacy fallback path. Stage 2 exit validation follows after Step 2 and Step 3 are coherent — do not attempt exit validation until Step 3 is wired for the Deploy v3 path.
 
 ## Next
 
-- Watchtower trigger foundation (Stage 3 entry). Stays here until Deploy has a useful certified action-plan path.
+- **Stage 2 exit validation** — after Stage 2.6B lands, validate the full Step 1/2/3 flow end-to-end in production: Step 2 shows has_moves (or appropriate state), Step 3 logs the correct Deploy v3 decision, readiness gates are green.
+- Watchtower trigger foundation (Stage 3 entry). Stays here until Deploy has a certified action-plan path and Step 3 is wired.
 
 ## Later
 
@@ -21,6 +22,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Stage 2.6A** — Deploy v3 powers Step 1/2/3 flow (patched ×2) — Step 1/2/3 is primary UX; Deploy v3 is Step 2 data source; `isActionableMove` requires `recommended_dollar_amount > 0`; Step 2 copy honest (not amount-aware); Step 2/3 coherence enforced — Deploy v3 path shows Step 3 placeholder, does not pass legacy recs into `DecisionLogMemoryPanel`; 46 mapper contract tests (incl. 3 Step 2/3 coherence checks); 266 total; build green. No backend changes, no SQL.
 - **Stage 2.5F** — Deploy v3 target allocation setup flow v1 — `DeployV3TargetSetupPanel`; editable target % rows, 98–102% total gate, "use current weights as draft", save calls `PUT /api/v1/portfolio/targets`, invalidates deploy_v3 readiness + plan; `PolicyGuidance` for missing Railway env vars. 29 new contract tests; 200 total; 0 failed. No backend changes, no SQL.
 - **Stage 2.5E** — Deploy v3 readiness UI surface v1 — `DeployV3ReadinessPanel` on Deploy page; calls `GET /api/v1/deploy/v3/readiness`; renders gate summary, snapshot status, market value coverage, target allocation gaps, policy status (no values); `useDeployV3Readiness()` hook; `DEPLOY_V3_READINESS_ENDPOINT` constant; `DeployV3ReadinessDiagnostic` TypeScript type; `policyStatusLabel()` helper. 43 new frontend contract tests; 0 backend changes, no SQL.
 - **Stage 2.5D** — Deploy v3 production readiness diagnostic v1 — `GET /api/v1/deploy/v3/readiness`; reports all gate statuses, snapshot age, per-ticker market-value coverage, target allocation gaps + total %, policy section (`minimum_trade_configured`, `rounding_policy_configured`, `policy_valid`, `policy_status`; no values exposed), suppression reasons, plain-English `next_required_action`. 49 new tests (42 diagnostic + 7 router readiness); 651 deploy tests total; 0 failed. Backend-only, no SQL, no UI.

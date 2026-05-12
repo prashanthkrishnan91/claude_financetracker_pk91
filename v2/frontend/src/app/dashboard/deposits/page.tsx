@@ -15,6 +15,8 @@ import {
   useEvaluateDecisionMemoryLog,
   useUpdateDecisionMemoryLog,
   useDecisionPerformanceInsights,
+  useDeployV3Plan,
+  useDeployV3Readiness,
 } from "@/lib/hooks";
 import type {
   AdaptiveBlock,
@@ -31,7 +33,7 @@ import { Spinner } from "@/components/ui/Spinner";
 import { DeployV3Panel } from "@/components/cards/DeployV3Panel";
 import { DeployV3ReadinessPanel } from "@/components/cards/DeployV3ReadinessPanel";
 import { DeployV3TargetSetupPanel } from "@/components/cards/DeployV3TargetSetupPanel";
-import { useDeployV3Readiness } from "@/lib/hooks";
+import { mapDeployV3ToStep2 } from "@/lib/deploy-v3-step2-mapper";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
 
@@ -253,6 +255,11 @@ export default function DepositsPage() {
   const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount, portfolioBalance);
   const { data: outcomes } = useDecisionOutcomes();
   const { data: readinessDiagnostic } = useDeployV3Readiness();
+  const { data: v3Plan, isLoading: isV3Loading } = useDeployV3Plan();
+
+  // Map Deploy v3 plan → Step 2 display. Falls back gracefully when unavailable.
+  const step2 = mapDeployV3ToStep2(v3Plan ?? null);
+  const useV3ForStep2 = step2.state !== "not_available";
 
   return (
     <>
@@ -263,9 +270,6 @@ export default function DepositsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
-        <DeployV3Panel />
-        <DeployV3ReadinessPanel />
-        <DeployV3TargetSetupPanel readinessDiagnostic={readinessDiagnostic} />
 
         <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80 bg-gradient-to-b from-surface-elevated/25 to-transparent">
           <div className="flex items-start justify-between gap-3 flex-wrap">
@@ -317,8 +321,11 @@ export default function DepositsPage() {
           </div>
         </section>
 
-        {isPlanLoading ? (
-          <InlineLoader text="Building deployment plan..." />
+        {/* Step 2 — powered by Deploy v3 when available, legacy plan as fallback */}
+        {(isV3Loading || isPlanLoading) && !v3Plan && !deployPlan ? (
+          <InlineLoader text="Building deployment plan…" />
+        ) : useV3ForStep2 ? (
+          <DeployV3Step2Section step2={step2} />
         ) : deployPlan ? (
           <DeploymentPlan deployPlan={deployPlan} amount={amount} />
         ) : null}
@@ -334,10 +341,153 @@ export default function DepositsPage() {
           </details>
         )}
 
+        {/* Secondary diagnostics — collapsed by default */}
+        <details className="card-glass border border-border/70">
+          <summary className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer select-none">
+            Setup &amp; diagnostics
+          </summary>
+          <div className="px-4 pb-4 space-y-4 pt-2">
+            <DeployV3Panel />
+            <DeployV3ReadinessPanel />
+            <DeployV3TargetSetupPanel readinessDiagnostic={readinessDiagnostic} />
+          </div>
+        </details>
+
       </main>
     </>
   );
 }
+
+// ── Deploy v3 Step 2 section ──────────────────────────────────────────────────
+
+import type { Step2Result } from "@/lib/deploy-v3-step2-mapper";
+
+function DeployV3Step2Section({
+  step2,
+}: {
+  step2: Step2Result;
+}) {
+  return (
+    <div className="space-y-4">
+      <section className="card-glass p-4 space-y-4 border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+            Step 2 — Where should this go?
+          </p>
+          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-surface-elevated text-text-muted font-semibold uppercase tracking-wide">
+            Intel v3 · Deploy v3
+          </span>
+        </div>
+
+        {step2.state === "setup_incomplete" && (
+          <div className="space-y-2">
+            <p className="text-sm text-yellow-300 font-semibold">Setup required before sizing</p>
+            <p className="text-xs text-text-secondary">
+              Target allocations or deploy policy settings are not fully configured yet.
+              Use the Setup &amp; diagnostics section below to complete setup.
+            </p>
+            <p className="text-[11px] text-text-muted">
+              Intel v3 Buy / Hold / Trim / Sell authority is unaffected — only exact-dollar sizing is paused.
+            </p>
+          </div>
+        )}
+
+        {step2.state === "no_moves" && (
+          <div className="space-y-2">
+            <p className="text-sm text-blue-300 font-semibold">No additional dollars needed right now</p>
+            <p className="text-xs text-text-secondary">
+              Your target model says the current portfolio already matches your targets.
+              No cash deployment moves were produced from your certified portfolio model.
+            </p>
+            <p className="text-[11px] text-text-muted">
+              Intel v3 owns all Buy / Hold / Trim / Sell decisions. Deploy only sizes validated moves.
+            </p>
+          </div>
+        )}
+
+        {step2.state === "has_moves" && (
+          <div className="space-y-3">
+            <p className="text-xs text-text-secondary">
+              Deploy v3 found target-driven moves from your certified portfolio model.
+            </p>
+            <DeployV3AllocationTable items={step2.items} />
+            <p className="text-[11px] text-text-muted leading-snug">
+              <span className="font-semibold text-text-secondary">Decision authority:</span>{" "}
+              Intel v3 policy owns all Buy / Hold / Trim / Sell decisions. Pending tax and guardrail review.
+            </p>
+          </div>
+        )}
+      </section>
+
+      {/* Step 3 — Deploy v3 path: placeholder until Deploy v3 decision logging is wired */}
+      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
+        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+          Step 3 — Log your decision
+        </p>
+        <p className="text-xs text-text-muted">
+          Decision logging for Deploy v3 actions is coming next. For now, review the Deploy v3 actions above before acting.
+        </p>
+      </section>
+
+      <Link
+        href="/dashboard/recommendations"
+        className="flex items-center gap-1.5 text-xs text-accent hover:text-accent-hover transition-colors font-semibold"
+      >
+        View full Intel v3 analysis
+        <ArrowRightIcon className="w-3.5 h-3.5" />
+      </Link>
+    </div>
+  );
+}
+
+function DeployV3AllocationTable({ items }: { items: Step2Result["items"] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="card-glass overflow-hidden border border-border/80">
+      <div className="px-4 py-2.5 border-b border-border">
+        <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+          Allocation Breakdown — Deploy v3
+        </p>
+      </div>
+      <div className="divide-y divide-border">
+        <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
+          <div className="col-span-5">Ticker</div>
+          <div className="col-span-3">Action</div>
+          <div className="col-span-2 text-right">Amount</div>
+          <div className="col-span-2 text-right">Status</div>
+        </div>
+        {items.map((item) => (
+          <div key={item.ticker} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
+            <div className="grid grid-cols-12 gap-2 items-start">
+              <div className="col-span-5">
+                <span className="font-mono font-bold text-text-primary">{item.ticker}</span>
+                <p className="text-[11px] text-text-muted leading-snug mt-0.5">{item.reason}</p>
+              </div>
+              <div className="col-span-3">
+                <span className={cn(
+                  "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
+                  item.action === "BUY" ? "bg-emerald-500/10 text-emerald-300 border border-emerald-400/30" :
+                  item.action === "TRIM" || item.action === "SELL" ? "bg-red-500/10 text-red-300 border border-red-400/30" :
+                  "bg-blue-500/10 text-blue-300 border border-blue-400/25"
+                )}>
+                  {item.action}
+                </span>
+              </div>
+              <div className="col-span-2 text-right font-mono font-semibold text-emerald-300 text-sm">
+                {item.dollar_amount != null ? formatCurrency(item.dollar_amount) : "—"}
+              </div>
+              <div className="col-span-2 text-right text-[10px] text-text-muted">
+                {item.final_actionability_status.replace(/_/g, " ")}
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ── Legacy deployment plan ────────────────────────────────────────────────────
 
 function DeploymentPlan({ deployPlan, amount }: { deployPlan: DepositPlanResult; amount: number }) {
   const { plan, recommendations, summary, trims, notes, warning, explanation, exclusions, regime, adaptive } = deployPlan;

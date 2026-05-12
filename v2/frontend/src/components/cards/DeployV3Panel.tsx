@@ -1,7 +1,7 @@
 "use client";
 
 import { useDeployV3Plan } from "@/lib/hooks";
-import { isNoSnapshotError, readinessMeta } from "@/lib/deploy-v3-helpers";
+import { getSizingDisclaimer, isNoSnapshotError, readinessMeta } from "@/lib/deploy-v3-helpers";
 import { cn } from "@/lib/utils";
 import { InlineLoader } from "@/components/ui/Spinner";
 
@@ -57,7 +57,7 @@ export function DeployV3Panel() {
   if (!data) return null;
 
   const { rollup, source } = data;
-  const sizingConnected = source?.sizing_bundle_provided ?? false;
+  const sizingDisclaimer = getSizingDisclaimer(source);
   const meta = readinessMeta(rollup?.plan_readiness_status ?? "not_ready");
 
   return (
@@ -124,10 +124,9 @@ export function DeployV3Panel() {
           <span className="font-semibold text-text-secondary">Decision authority:</span>{" "}
           Intel v3 policy owns all Buy / Hold / Trim / Sell decisions. Deploy reads Intel output only.
         </p>
-        {!sizingConnected && (
+        {sizingDisclaimer !== null && (
           <p className="text-[11px] text-yellow-300/80 leading-snug">
-            Exact dollar amounts are not connected yet — no executable trade sizing available.
-            Dollar fields shown here are scaffold placeholders only.
+            {sizingDisclaimer}
           </p>
         )}
       </div>

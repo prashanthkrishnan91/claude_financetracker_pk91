@@ -13,6 +13,10 @@ Acceptance gates:
   J. create_snapshot: price fetch failure → falls back, no market_value_usd (no crash)
   K. adapter sees enriched snapshot as position-certified (sizing_values_ready True)
   L. adapter fails safe for legacy snapshot missing market_value_usd (sizing_values_ready False)
+  M. _lookup_price_result: raw ticker matched when key is uppercase
+  N. _lookup_price_result: dot-ticker (BRK.B) matched when fetch_prices() returns dash key (BRK-B)
+  O. _lookup_price_result: returns None when no key matches (fail-safe preserved)
+  P. create_snapshot: BRK.B position enriched when price_results keyed by BRK-B
 """
 from __future__ import annotations
 
@@ -601,3 +605,98 @@ class TestAdapterWithEnrichedSnapshot:
         ))
         assert bundle is not None
         assert bundle.positions["AAPL"].current_market_value_usd is None
+
+
+# ── Gates M–P: ticker normalization lookup ────────────────────────────────────
+
+class TestLookupPriceResult:
+
+    def test_gate_m_exact_uppercase_match(self):
+        """Standard ticker (e.g. AAPL) resolved by uppercase key lookup."""
+        pr = _fresh_price("AAPL", 200.0)
+        result = PortfolioService._lookup_price_result("AAPL", {"AAPL": pr})
+        assert result is pr
+
+    def test_gate_m_lowercase_raw_ticker_resolved(self):
+        """Raw ticker stored in lowercase is uppercased for lookup."""
+        pr = _fresh_price("NVDA", 800.0)
+        result = PortfolioService._lookup_price_result("nvda", {"NVDA": pr})
+        assert result is pr
+
+    def test_gate_n_dot_ticker_resolves_to_dash_key(self):
+        """BRK.B position resolved when fetch_prices() returns key BRK-B."""
+        pr = _fresh_price("BRK-B", 400.0)
+        result = PortfolioService._lookup_price_result("BRK.B", {"BRK-B": pr})
+        assert result is pr
+
+    def test_gate_n_bf_dot_b_resolves_to_dash_key(self):
+        """BF.B position resolved when fetch_prices() returns key BF-B."""
+        pr = _fresh_price("BF-B", 75.0)
+        result = PortfolioService._lookup_price_result("BF.B", {"BF-B": pr})
+        assert result is pr
+
+    def test_gate_o_no_match_returns_none(self):
+        """Returns None when neither raw nor normalized key matches — fail-safe."""
+        pr = _fresh_price("MSFT", 300.0)
+        result = PortfolioService._lookup_price_result("AAPL", {"MSFT": pr})
+        assert result is None
+
+    def test_gate_o_empty_price_results_returns_none(self):
+        """Returns None on empty price_results dict — fail-safe."""
+        result = PortfolioService._lookup_price_result("BRK.B", {})
+        assert result is None
+
+
+class TestCreateSnapshotNormalizationIntegration:
+
+    def test_gate_p_brkb_position_enriched_when_price_results_keyed_by_dash(self):
+        """BRK.B position is enriched when fetch_prices() returns key BRK-B."""
+        positions = [{"ticker": "BRK.B", "shares": 5.0, "avg_cost": 380.0}]
+        # fetch_prices() normalizes BRK.B → BRK-B; result dict has key "BRK-B"
+        price_results = {"BRK-B": _fresh_price("BRK-B", 400.0)}
+
+        service, captured = _make_service_with_mocks(positions, price_results)
+
+        from app.models.portfolio import PortfolioSummary
+        mock_summary = PortfolioSummary(
+            total_equity=2000.0, total_cost=1900.0, total_pnl=100.0, total_pnl_pct=5.26,
+            cash_balance=0.0, day_change=0.0, day_change_pct=0.0,
+            stocks_value=2000.0, etfs_value=0.0, crypto_value=0.0,
+            positions_count=1, prices_fresh=1, prices_stale=0,
+        )
+        with patch.object(service, "get_summary", AsyncMock(return_value=mock_summary)):
+            _run(service.create_snapshot())
+
+        stored = captured["snapshot"]["positions_data"]
+        assert len(stored) == 1
+        assert "market_value_usd" in stored[0], "BRK.B should be enriched via BRK-B key"
+        assert stored[0]["market_value_usd"] == pytest.approx(5.0 * 400.0)
+        assert stored[0]["market_price_usd"] == pytest.approx(400.0)
+
+    def test_gate_p_mixed_normal_and_dot_tickers_both_enriched(self):
+        """Normal (AAPL) and dot-format (BRK.B) positions are both enriched correctly."""
+        positions = [
+            {"ticker": "AAPL", "shares": 10.0, "avg_cost": 150.0},
+            {"ticker": "BRK.B", "shares": 5.0, "avg_cost": 380.0},
+        ]
+        price_results = {
+            "AAPL": _fresh_price("AAPL", 200.0),
+            "BRK-B": _fresh_price("BRK-B", 400.0),
+        }
+
+        service, captured = _make_service_with_mocks(positions, price_results)
+
+        from app.models.portfolio import PortfolioSummary
+        mock_summary = PortfolioSummary(
+            total_equity=4000.0, total_cost=3400.0, total_pnl=600.0, total_pnl_pct=17.6,
+            cash_balance=0.0, day_change=0.0, day_change_pct=0.0,
+            stocks_value=4000.0, etfs_value=0.0, crypto_value=0.0,
+            positions_count=2, prices_fresh=2, prices_stale=0,
+        )
+        with patch.object(service, "get_summary", AsyncMock(return_value=mock_summary)):
+            _run(service.create_snapshot())
+
+        stored = captured["snapshot"]["positions_data"]
+        stored_map = {p["ticker"]: p for p in stored}
+        assert stored_map["AAPL"]["market_value_usd"] == pytest.approx(2000.0)
+        assert stored_map["BRK.B"]["market_value_usd"] == pytest.approx(2000.0)

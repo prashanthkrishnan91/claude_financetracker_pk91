@@ -246,6 +246,19 @@ class PortfolioService:
         return result.data
 
     @staticmethod
+    def _lookup_price_result(raw_ticker: str, price_results: dict) -> Any:
+        """Resolve a price result for a raw ticker against the fetch_prices() result dict.
+
+        fetch_prices() normalizes some tickers before returning (e.g. BRK.B → BRK-B),
+        so the result dict may be keyed by the normalized form. This helper tries:
+          1. Uppercase raw ticker (covers most tickers as-is)
+          2. Uppercase with dots replaced by dashes (covers BRK.B, BF.B, etc.)
+        Does not reach into price engine private state.
+        """
+        upper = raw_ticker.upper()
+        return price_results.get(upper) or price_results.get(upper.replace(".", "-"))
+
+    @staticmethod
     def _enrich_position_entry(pos: dict, price_result: Any, certified_at: str) -> dict:
         """Return a copy of pos with market value fields added when price is valid and fresh.
 
@@ -288,7 +301,7 @@ class PortfolioService:
                     enriched_positions = [
                         self._enrich_position_entry(
                             p,
-                            price_results.get(p.get("ticker", "")),
+                            self._lookup_price_result(p.get("ticker", ""), price_results),
                             certified_at,
                         )
                         for p in enriched_positions

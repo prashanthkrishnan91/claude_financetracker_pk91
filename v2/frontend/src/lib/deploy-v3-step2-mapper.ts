@@ -38,6 +38,10 @@ export interface Step2Result {
   exact_dollar_ready: boolean;
   /** True when this result came from the Deploy v3 pipeline (not legacy). */
   is_deploy_v3: boolean;
+  /** True when backend confirms amount-aware new-cash sizing mode (source.amount_aware === true). */
+  amount_aware?: boolean;
+  /** The cash_to_deploy amount when amount_aware is true. Not broker-verified cash. */
+  cash_to_deploy?: number | null;
 }
 
 // ── Action helpers ────────────────────────────────────────────────────────────
@@ -93,9 +97,18 @@ export function mapDeployV3ToStep2(
   }
 
   const exactReady = plan.source?.exact_dollar_ready === true;
+  const amountAware = plan.source?.amount_aware === true;
+  const cashToDeploy = plan.source?.cash_to_deploy ?? null;
 
   if (!exactReady) {
-    return { state: "setup_incomplete", items: [], exact_dollar_ready: false, is_deploy_v3: true };
+    return {
+      state: "setup_incomplete",
+      items: [],
+      exact_dollar_ready: false,
+      is_deploy_v3: true,
+      amount_aware: amountAware,
+      cash_to_deploy: cashToDeploy,
+    };
   }
 
   // Map all items; only surface actionable moves in Step 2
@@ -111,10 +124,24 @@ export function mapDeployV3ToStep2(
     .sort((a, b) => (b.dollar_amount ?? 0) - (a.dollar_amount ?? 0));
 
   if (moveItems.length === 0) {
-    return { state: "no_moves", items: [], exact_dollar_ready: true, is_deploy_v3: true };
+    return {
+      state: "no_moves",
+      items: [],
+      exact_dollar_ready: true,
+      is_deploy_v3: true,
+      amount_aware: amountAware,
+      cash_to_deploy: cashToDeploy,
+    };
   }
 
-  return { state: "has_moves", items: moveItems, exact_dollar_ready: true, is_deploy_v3: true };
+  return {
+    state: "has_moves",
+    items: moveItems,
+    exact_dollar_ready: true,
+    is_deploy_v3: true,
+    amount_aware: amountAware,
+    cash_to_deploy: cashToDeploy,
+  };
 }
 
 /** Returns the "not_available" sentinel when Deploy v3 is not usable. */
@@ -123,4 +150,6 @@ export const STEP2_NOT_AVAILABLE: Step2Result = {
   items: [],
   exact_dollar_ready: false,
   is_deploy_v3: true,
+  amount_aware: false,
+  cash_to_deploy: null,
 };

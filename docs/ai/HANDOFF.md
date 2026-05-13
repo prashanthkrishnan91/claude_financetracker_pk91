@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-12 (post Stage 2.6B — Deploy v3 decision logging v1)
+Last updated: 2026-05-13 (post Stage 2.6C — Amount-aware Deploy v3 new-cash planning v1)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 2.6B** (complete). Stages 2.5A–2.6B complete. Step 1/2/3 is the primary user flow end-to-end. Deploy v3 powers Step 2; `DeployV3DecisionLogSection` powers Step 3 in the Deploy v3 path. `deploy-v3-decision-log.ts` pure helpers: `buildDeployV3DecisionSnapshot`, `buildDeployV3InitialActualDecisions`, `buildDeployV3SessionKey`. **Deploy v3 is not amount-aware** — Step 1 amount is recorded as user context only, not sizing authority. Step 3 no_moves/setup_incomplete states do not create fake logs. Legacy `DecisionLogMemoryPanel` remains in the legacy fallback path only. 301 frontend tests pass (3 pre-existing suite-level failures); 0 backend changes; no SQL.
-- Active build queue item: **Stage 2 exit validation** — validate the full Step 1/2/3 flow end-to-end in production: Step 2 shows has_moves (or appropriate state), Step 3 logs the correct Deploy v3 decision, readiness gates are green. Amount-aware Deploy v3 planning (Stage 2.6C) is a separate explicit decision, not silently claimed.
+- Roadmap stage: **Stage 2.6C** (complete). Stages 2.5A–2.6C complete. Step 1/2/3 is the primary user flow end-to-end. Deploy v3 now answers "I have $X of new cash — which positions should I buy?". `GET /api/v1/deploy/v3/plan?cash_to_deploy=900` triggers amount-aware BUY delta math: `target_weight * (portfolio + cash) - current_value`, total BUY capped at `cash_to_deploy`, TRIM/SELL unchanged. Source metadata exposes `amount_aware`, `cash_to_deploy`, `sizing_mode`. Frontend passes `amount` from Step 1 into `useDeployV3Plan(true, amount)`. Step 2 copy and Step 3 snapshot branched on `amount_aware`. 25 new backend tests (all pass); 10 new decision-log tests + 10 new mapper tests (100 total frontend tests in those files, all pass); no SQL; no provider/LLM changes.
+- Active build queue item: **Stage 2 exit validation** — re-validate end-to-end in production with a real dollar amount in Step 1: Step 2 should now show BUY recommendations (not "no moves"), Step 3 logs the correct amount-aware Deploy v3 decision. Readiness gates must be green.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture / runtime state
@@ -23,6 +23,7 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
+- 2026-05-13 — **Stage 2.6C: Amount-aware Deploy v3 new-cash planning v1** — `cash_to_deploy` optional query param added to `GET /api/v1/deploy/v3/plan`; BUY delta now `target_weight * (portfolio + cash) - current_value` in new-cash mode; total BUY capped at `cash_to_deploy`; cash guardrail uses planning capital (not persisted $0 balance); TRIM/SELL unchanged; `amount_aware`/`cash_to_deploy`/`sizing_mode` in source metadata; frontend passes Step 1 amount into hook; Step 2 and Step 3 copy branch on `amount_aware`; 25 new backend + 20 new frontend tests; no SQL.
 - 2026-05-12 — **Stage 2.6B: Deploy v3 decision logging v1** — `DeployV3DecisionLogSection` replaces Step 3 placeholder in Deploy v3 path; `deploy-v3-decision-log.ts` pure helpers (`buildDeployV3DecisionSnapshot`, `buildDeployV3InitialActualDecisions`, `buildDeployV3SessionKey`); snapshot records `source: "deploy_v3"`, Step 1 amount as context only, visible Step 2 items exactly; no_moves/setup_incomplete → no fake log; 35 contract tests in deploy-v3-decision-log.test.ts; 301 total; 0 backend changes; no SQL.
 - 2026-05-12 — **Stage 2.6A: Deploy v3 powers Step 1/2/3 flow (patched ×2)** — Step 1/2/3 primary UX; Deploy v3 Step 2 data source; `deploy-v3-step2-mapper.ts` pure mapper; Step 2/3 coherence enforced; 46 mapper contract tests; 266 total; 0 backend changes; no SQL.
 - 2026-05-12 — **Stage 2.5F: Deploy v3 target allocation setup flow v1** — `DeployV3TargetSetupPanel` on Deploy page; editable target % rows for all position tickers; live total with 98–102% gate enforced; "use current weights as draft" (market values required, not auto-save); save calls `PUT /api/v1/portfolio/targets`; invalidates `["deploy_v3","readiness"]` + `["deploy_v3","plan"]` + `["portfolio","targets"]`; `useSetDeployTargets()` hook; `PolicyGuidance` section for missing Railway env vars (lists names and allowed values; never exposes values). 29 new contract tests; 200 total; 0 failed. No backend changes, no SQL.
@@ -61,7 +62,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Stage 2 exit validation.** Open the Deploy page in production, enter an investment amount in Step 1, confirm Step 2 shows Deploy v3-backed has_moves (or appropriate state), and confirm Step 3 successfully logs the Deploy v3 decision matching the visible Step 2 items. Use "Setup & diagnostics" if any readiness gate is blocked. Do not move to Stage 3 / Watchtower until this end-to-end path is validated in production. Amount-aware Deploy v3 planning (Stage 2.6C) is a separate explicit decision — do not silently claim it.
+**Stage 2 exit validation (re-run).** Open the Deploy page in production, enter a dollar amount in Step 1 (e.g. $900), confirm Step 2 now shows BUY recommendations (not "no additional dollars needed"), and confirm Step 3 logs the correct amount-aware Deploy v3 decision. Readiness gates must be green. If any gate is blocked, use "Setup & diagnostics". Do not move to Stage 3 / Watchtower until this end-to-end path is validated in production with amount-aware mode producing visible BUY moves.
 
 Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels until a separately scoped design lands (it requires explicit decisions on tax-lot / trade-history source, cost-basis model, and wash-sale window scope). It is parked under Build Queue → Design Pause Candidates and Later, and must not be auto-promoted into Now by routine queue updates.
 

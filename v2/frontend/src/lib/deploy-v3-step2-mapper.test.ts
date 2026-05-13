@@ -268,6 +268,100 @@ describe("STEP2_NOT_AVAILABLE sentinel", () => {
   it("is_deploy_v3 is true", () => expect(STEP2_NOT_AVAILABLE.is_deploy_v3).toBe(true));
 });
 
+// ── Stage 2.6C: Amount-aware mapper contract tests ────────────────────────────
+
+describe("mapDeployV3ToStep2 — amount-aware (Stage 2.6C)", () => {
+  function makeAmountAwarePlan(items: DeployV3PlanItem[], cashToDeploy = 900): DeployV3PlanResponse {
+    return makePlan({
+      items,
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Amount-aware new-cash planning.",
+        exact_dollar_ready: true,
+        amount_aware: true,
+        cash_to_deploy: cashToDeploy,
+        sizing_mode: "new_cash",
+      },
+    });
+  }
+
+  it("amount_aware=true propagates from plan.source to Step2Result", () => {
+    const plan = makeAmountAwarePlan([makeItem()]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.amount_aware).toBe(true);
+  });
+
+  it("cash_to_deploy propagates from plan.source to Step2Result", () => {
+    const plan = makeAmountAwarePlan([makeItem()], 900);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.cash_to_deploy).toBe(900);
+  });
+
+  it("amount_aware=false when source.amount_aware is absent", () => {
+    const plan = makePlan({ items: [makeItem()] });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.amount_aware).toBeFalsy();
+  });
+
+  it("has_moves state when amount-aware plan has BUY items with positive dollar amounts", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("has_moves");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].dollar_amount).toBe(540);
+  });
+
+  it("amount-aware Step2Result no longer reports no_moves when BUY items have positive dollars", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).not.toBe("no_moves");
+  });
+
+  it("HOLD items still not surfaced as moves in amount-aware mode", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+      makeItem({ ticker: "MSFT", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    const tickers = result.items.map((i) => i.ticker);
+    expect(tickers).not.toContain("MSFT");
+    expect(tickers).toContain("AAPL");
+  });
+
+  it("exact_dollar_ready remains true in amount-aware mode", () => {
+    const plan = makeAmountAwarePlan([makeItem()]);
+    expect(mapDeployV3ToStep2(plan).exact_dollar_ready).toBe(true);
+  });
+
+  it("cash_to_deploy is null when source has no cash_to_deploy", () => {
+    const plan = makePlan({ items: [makeItem()] });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.cash_to_deploy).toBeNull();
+  });
+
+  it("amount_aware and cash_to_deploy present in setup_incomplete state", () => {
+    const plan = makePlan({
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: false,
+        note: "not ready",
+        exact_dollar_ready: false,
+        amount_aware: false,
+        cash_to_deploy: null,
+        sizing_mode: "current_gap",
+      },
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("setup_incomplete");
+    expect(result.amount_aware).toBe(false);
+  });
+});
+
 // ── No legacy endpoint usage ──────────────────────────────────────────────────
 
 describe("Deploy v3 Step 2 does not use legacy endpoints", () => {

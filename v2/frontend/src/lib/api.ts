@@ -253,7 +253,13 @@ export const api = {
   // Deploy v3 read-only plan and readiness. Intel v3 is the only Buy/Hold/Trim/Sell authority.
   // Does not call the legacy allocation engine.
   deployV3: {
-    getPlan: () => fetchApi<DeployV3PlanResponse>(DEPLOY_V3_PLAN_ENDPOINT),
+    getPlan: (cashToDeploy?: number) => {
+      const url =
+        cashToDeploy != null && cashToDeploy > 0
+          ? `${DEPLOY_V3_PLAN_ENDPOINT}?cash_to_deploy=${cashToDeploy}`
+          : DEPLOY_V3_PLAN_ENDPOINT;
+      return fetchApi<DeployV3PlanResponse>(url);
+    },
     getReadiness: () => fetchApi<DeployV3ReadinessDiagnostic>(DEPLOY_V3_READINESS_ENDPOINT),
   },
 };
@@ -1272,6 +1278,12 @@ export interface DeployV3PlanResponse {
     suppression_reasons?: string[];
     cash_source?: string | null;
     portfolio_source?: string | null;
+    /** true when the plan was sized for user-entered new-cash planning capital. */
+    amount_aware?: boolean;
+    /** The user-entered cash_to_deploy amount when amount_aware is true. Not broker-verified. */
+    cash_to_deploy?: number | null;
+    /** "new_cash" when amount-aware mode active; "current_gap" otherwise. */
+    sizing_mode?: "new_cash" | "current_gap" | string;
   };
 }
 

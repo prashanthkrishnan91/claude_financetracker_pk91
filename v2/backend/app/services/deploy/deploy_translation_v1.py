@@ -17,6 +17,7 @@ Intel v3 remains the only Buy/Hold/Trim/Sell authority.
 """
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional
 
 from .deploy_contracts import (
@@ -29,10 +30,14 @@ from .deploy_contracts import (
     DeployPlanStatus,
 )
 from .deploy_cash_guardrail_v1 import apply_cash_guardrail_to_plan_items
-from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
+from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items, cap_buy_amounts_to_cash
 from .deploy_finalization_v1 import apply_finalization_to_plan_items
 from .deploy_plan_rollup_v1 import build_plan_rollup
-from .deploy_sizing_contracts import DeploySizingInputBundle
+from .deploy_sizing_contracts import (
+    DeployCashInput,
+    DeploySizingInputBundle,
+    DeploySizingTrustStatus,
+)
 
 # Intel actions that may become future trade candidates (not HOLD).
 _ACTIONABLE_INTEL_ACTIONS = frozenset({"BUY", "TRIM", "SELL"})
@@ -140,6 +145,7 @@ def build_deploy_plan(
     inputs: list[DeployPlanInput],
     sizing_bundle: Optional[DeploySizingInputBundle] = None,
     price_per_share_map: Optional[dict[str, float]] = None,
+    cash_to_deploy: Optional[float] = None,
 ) -> DeployPlan:
     """Build a complete Deploy plan from a list of DeployPlanInputs.
 
@@ -148,6 +154,12 @@ def build_deploy_plan(
 
     When sizing_bundle is provided and exact_dollar_ready is True, eligible
     BUY/TRIM/SELL ACTIONABLE_CANDIDATE items receive exact-dollar outputs.
+
+    cash_to_deploy: when provided and > 0, enables new-cash mode for BUY items.
+      BUY deltas are sized relative to (portfolio_value + cash_to_deploy).
+      Total BUY dollars are capped at cash_to_deploy after rounding.
+      The user-entered planning capital is used as the cash guardrail budget for
+      BUY items (not the persisted cash balance). TRIM/SELL always use current-gap.
 
     price_per_share_map: optional ticker → certified price per share. Passed
       through to dollar math for share-quantity computation.
@@ -182,18 +194,41 @@ def build_deploy_plan(
     # Apply exact-dollar math when a certified sizing bundle is provided.
     exact_dollar_math_evaluated = False
     cash_guardrail_evaluated = False
+    new_cash_mode = bool(cash_to_deploy and cash_to_deploy > 0)
+
     if sizing_bundle is not None and sizing_bundle.exact_dollar_ready:
         items = apply_dollar_math_to_plan_items(
             bundle=sizing_bundle,
             items=items,
             price_per_share_map=price_per_share_map,
+            cash_to_deploy=cash_to_deploy if new_cash_mode else None,
         )
+        # In new-cash mode: cap total BUY dollars to user-entered cash_to_deploy.
+        if new_cash_mode and cash_to_deploy is not None and sizing_bundle.policy:
+            items = cap_buy_amounts_to_cash(
+                items=items,
+                cash_to_deploy=cash_to_deploy,
+                minimum_trade_usd=sizing_bundle.policy.minimum_trade_usd,
+                rounding_policy=sizing_bundle.policy.rounding_policy,
+            )
         exact_dollar_math_evaluated = True
 
     # Apply cash guardrail whenever a sizing bundle is provided (even if not exact_dollar_ready,
     # so BUY items with uncertified cash are flagged rather than left as "not_evaluated_yet").
     if sizing_bundle is not None:
-        items = apply_cash_guardrail_to_plan_items(bundle=sizing_bundle, items=items)
+        if new_cash_mode and cash_to_deploy is not None:
+            # Use user-entered planning capital as the cash budget for BUY guardrail.
+            # This allows sizing recommendations even when persisted cash balance is $0.
+            # Source is clearly labelled as user-entered planning capital, not broker-verified.
+            planning_cash = DeployCashInput(
+                available_cash_usd=cash_to_deploy,
+                trust_status=DeploySizingTrustStatus.CERTIFIED,
+                source_label="user_entered_planning_capital",
+            )
+            effective_bundle = replace(sizing_bundle, cash=planning_cash)
+        else:
+            effective_bundle = sizing_bundle
+        items = apply_cash_guardrail_to_plan_items(bundle=effective_bundle, items=items)
         cash_guardrail_evaluated = True
 
     # Finalization always runs — derives final_actionability_status from existing fields.

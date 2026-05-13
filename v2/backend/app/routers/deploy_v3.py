@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..services.deploy.deploy_intel_adapter import build_deploy_inputs_from_snapshot
@@ -83,6 +84,17 @@ async def get_deploy_v3_readiness(
 @router.get("/plan")
 async def get_deploy_v3_plan(
     user: AuthenticatedUser = Depends(get_current_user),
+    cash_to_deploy: Optional[float] = Query(
+        default=None,
+        ge=0,
+        description=(
+            "User-entered new-cash planning capital in USD. "
+            "When provided and > 0, enables amount-aware BUY sizing relative to "
+            "(portfolio_value + cash_to_deploy). "
+            "Does not claim broker-verified cash availability. "
+            "Omit or pass 0 to use the existing current-gap behavior."
+        ),
+    ),
 ):
     """Get the Deploy v3 plan built from the latest Intel v3 snapshot.
 
@@ -91,6 +103,12 @@ async def get_deploy_v3_plan(
     Returns 404 if no Intel v3 snapshot exists or flag is disabled.
     Attempts to build a certified sizing bundle from persisted portfolio data.
     Falls back to scaffold/not_ready behavior if sources are unavailable or uncertified.
+
+    When cash_to_deploy > 0, enables amount-aware new-cash planning:
+    BUY items are sized toward target_weight * (portfolio_value + cash_to_deploy).
+    Total BUY dollars are capped at cash_to_deploy. TRIM/SELL use current-gap math.
+    User-entered planning capital is NOT broker-verified cash — source metadata
+    reflects this clearly (sizing_mode: "new_cash", amount_aware: true).
     """
     _check_flag()
 
@@ -118,12 +136,36 @@ async def get_deploy_v3_plan(
             "deploy_v3.plan: sizing adapter failed, proceeding without bundle: %s", exc
         )
 
-    plan = build_deploy_plan(deploy_inputs, sizing_bundle=sizing_bundle)
+    # Coerce to float|None — guards against FastAPI Query() objects when called directly in tests.
+    _cash_float: Optional[float] = float(cash_to_deploy) if isinstance(cash_to_deploy, (int, float)) else None
+    is_amount_aware = bool(_cash_float and _cash_float > 0)
+    cash_to_deploy = _cash_float  # normalise for all downstream use
+    plan = build_deploy_plan(
+        deploy_inputs,
+        sizing_bundle=sizing_bundle,
+        cash_to_deploy=cash_to_deploy if is_amount_aware else None,
+    )
     plan_dict = dataclasses.asdict(plan)
 
-    # Build source metadata reflecting readiness gates.
+    # Build source metadata reflecting readiness gates and amount-aware mode.
     if sizing_bundle is not None:
         suppression_reasons = [r.value for r in sizing_bundle.get_suppression_reasons()]
+        if is_amount_aware:
+            note = (
+                f"Amount-aware new-cash planning. Sized for user-entered ${cash_to_deploy:.2f} "
+                "planning capital (not broker-verified cash). "
+                "BUY deltas relative to (portfolio + cash_to_deploy). "
+                "Total BUY capped at cash_to_deploy."
+            )
+        else:
+            note = (
+                "Sizing bundle certified. Exact-dollar math evaluated."
+                if sizing_bundle.exact_dollar_ready
+                else (
+                    "Sizing bundle provided from persisted sources. "
+                    "Exact-dollar math not yet ready — see suppression_reasons."
+                )
+            )
         source = {
             "intel_source": "INTEL_V3",
             "sizing_bundle_provided": True,
@@ -133,19 +175,16 @@ async def get_deploy_v3_plan(
             "policy_ready": sizing_bundle.policy_ready,
             "suppression_reasons": suppression_reasons,
             "cash_source": (
-                sizing_bundle.cash.source_label if sizing_bundle.cash else None
+                "user_entered_planning_capital" if is_amount_aware
+                else (sizing_bundle.cash.source_label if sizing_bundle.cash else None)
             ),
             "portfolio_source": (
                 sizing_bundle.portfolio.source_label if sizing_bundle.portfolio else None
             ),
-            "note": (
-                "Sizing bundle certified. Exact-dollar math evaluated."
-                if sizing_bundle.exact_dollar_ready
-                else (
-                    "Sizing bundle provided from persisted sources. "
-                    "Exact-dollar math not yet ready — see suppression_reasons."
-                )
-            ),
+            "amount_aware": is_amount_aware,
+            "cash_to_deploy": cash_to_deploy if is_amount_aware else None,
+            "sizing_mode": "new_cash" if is_amount_aware else "current_gap",
+            "note": note,
         }
     else:
         source = {
@@ -156,6 +195,9 @@ async def get_deploy_v3_plan(
             "target_allocation_ready": False,
             "policy_ready": False,
             "suppression_reasons": [],
+            "amount_aware": False,
+            "cash_to_deploy": None,
+            "sizing_mode": "current_gap",
             "note": (
                 "No sizing bundle provided. "
                 "Dollar fields are scaffold placeholders — not executable trade instructions."
@@ -164,13 +206,15 @@ async def get_deploy_v3_plan(
 
     logger.info(
         "deploy_v3.plan user_id=%s snapshot_id=%s items=%d plan_readiness=%s "
-        "sizing_bundle_provided=%s exact_dollar_ready=%s",
+        "sizing_bundle_provided=%s exact_dollar_ready=%s amount_aware=%s cash_to_deploy=%s",
         user.id,
         plan.snapshot_id,
         len(plan.items),
         plan.rollup.plan_readiness_status if plan.rollup else "no_rollup",
         sizing_bundle is not None,
         sizing_bundle.exact_dollar_ready if sizing_bundle else False,
+        is_amount_aware,
+        cash_to_deploy if is_amount_aware else None,
     )
 
     return {

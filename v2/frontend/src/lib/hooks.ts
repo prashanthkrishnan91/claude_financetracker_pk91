@@ -485,14 +485,16 @@ export function useIntelV3RunStatus(runId: string | null, enabled = true) {
 // ── Deploy v3 plan ────────────────────────────────────────────
 
 /**
- * Read the Deploy v3 plan readiness from GET /api/v1/deploy/v3/plan.
+ * Read the Deploy v3 plan from GET /api/v1/deploy/v3/plan.
+ * When cashToDeploy > 0, passes cash_to_deploy query param for amount-aware new-cash sizing.
  * Returns 404 when no Intel v3 snapshot exists or the feature flag is off.
  * Does not call the legacy allocation plan endpoint.
  */
-export function useDeployV3Plan(enabled = true) {
+export function useDeployV3Plan(enabled = true, cashToDeploy?: number) {
+  const amountKey = cashToDeploy != null && cashToDeploy > 0 ? cashToDeploy : undefined;
   return useQuery<DeployV3PlanResponse>({
-    queryKey: DEPLOY_V3_PLAN_QUERY_KEY,
-    queryFn: api.deployV3.getPlan,
+    queryKey: amountKey != null ? [...DEPLOY_V3_PLAN_QUERY_KEY, amountKey] : DEPLOY_V3_PLAN_QUERY_KEY,
+    queryFn: () => api.deployV3.getPlan(cashToDeploy),
     enabled,
     staleTime: 60_000,
     retry: (failureCount, error: unknown) => {

@@ -2,9 +2,10 @@
  * Pure helpers for Deploy v3 Step 3 decision logging.
  * No React, no Supabase, no external dependencies — safe to import in tests.
  *
- * Deploy v3 is NOT amount-aware. The Step 1 amount is recorded as user context
- * only, not as a sizing authority. Logged recommendations come exclusively from
- * the visible Step 2 items produced by deploy-v3-step2-mapper.ts.
+ * When Deploy v3 is amount-aware (source.amount_aware === true), the snapshot
+ * records that amount-aware sizing was used and includes cash_to_deploy.
+ * When not amount-aware, the entered amount is recorded as user context only.
+ * Logged recommendations come exclusively from visible Step 2 items.
  */
 
 import type { ActualDecisionItem } from "./api";
@@ -29,10 +30,12 @@ export interface DeployV3SnapshotContext {
 
 /**
  * Build the recommendation_snapshot for a Deploy v3 decision log.
- * Source is always "deploy_v3". Entered amount is context only.
+ * Source is always "deploy_v3".
+ * When step2.amount_aware is true, the snapshot records amount-aware sizing was used.
+ * When false, entered amount is recorded as user context only (not a sizing input).
  */
 export function buildDeployV3DecisionSnapshot(
-  step2: Pick<Step2Result, "state" | "items" | "exact_dollar_ready">,
+  step2: Pick<Step2Result, "state" | "items" | "exact_dollar_ready" | "amount_aware" | "cash_to_deploy">,
   v3Meta: {
     snapshot_id?: string | null;
     run_id?: string | null;
@@ -40,11 +43,21 @@ export function buildDeployV3DecisionSnapshot(
   } | null | undefined,
   context: DeployV3SnapshotContext,
 ): Record<string, unknown> {
+  const isAmountAware = step2.amount_aware === true;
   return {
     source: "deploy_v3",
     created_at_client: new Date().toISOString(),
-    amount_awareness_note:
-      "Deploy v3 is not amount-aware. Entered amount is user context only, not a Deploy v3 sizing input.",
+    amount_aware: isAmountAware,
+    ...(isAmountAware
+      ? {
+          amount_awareness_note:
+            "Deploy v3 sized this plan using user-entered planning capital. Not broker-verified cash.",
+          cash_to_deploy: step2.cash_to_deploy ?? null,
+        }
+      : {
+          amount_awareness_note:
+            "Deploy v3 is not amount-aware. Entered amount is user context only, not a Deploy v3 sizing input.",
+        }),
     entered_amount_context: context.entered_amount,
     exact_dollar_ready: step2.exact_dollar_ready,
     intel_snapshot_id: v3Meta?.snapshot_id ?? null,

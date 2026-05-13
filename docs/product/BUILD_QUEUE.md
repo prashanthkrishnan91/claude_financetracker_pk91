@@ -6,11 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 2 exit validation** (Stage 2, active). Stages 2.5A–2.6B complete. Validate the full Step 1/2/3 flow end-to-end in production: enter investment amount → Step 2 shows has_moves with Deploy v3-backed recommendations → Step 3 logs the Deploy v3 decision matching visible Step 2 items → readiness gates are green. Use "Setup & diagnostics" to fix any blocked gate. Do not exit Stage 2 or move to Stage 3 until this path is validated. Amount-aware Deploy v3 planning (Stage 2.6C) is a separate explicit decision — do not silently claim it.
+- **Stage 2 exit validation (re-run)** (Stage 2, active). Stages 2.5A–2.6C complete. Re-validate the full Step 1/2/3 flow in production with a real amount (e.g. $900): Step 2 should now show BUY recommendations in amount-aware mode (not "no moves"), Step 3 logs the correct amount-aware Deploy v3 decision. Readiness gates must be green. Do not exit Stage 2 or move to Stage 3 until this path is validated.
 
 ## Next
 
-- **Stage 2.6C — Amount-aware Deploy v3 planning** (explicit decision required before build). Make Deploy v3 accept the Step 1 investment amount as a sizing input. Requires product decision on how target-allocation sizing interacts with the entered capital amount.
 - Watchtower trigger foundation (Stage 3 entry). Stays here until Deploy / Stage 2 exit validation is confirmed.
 
 ## Later
@@ -22,6 +21,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Stage 2.6C** — Amount-aware Deploy v3 new-cash planning v1 — `cash_to_deploy` query param on `GET /api/v1/deploy/v3/plan`; BUY delta uses `target_weight * (portfolio + cash) - current_value`; total BUY capped at `cash_to_deploy`; cash guardrail replaced with planning capital in new-cash mode; TRIM/SELL unchanged; `amount_aware`/`cash_to_deploy`/`sizing_mode` in source metadata; frontend passes Step 1 amount into hook; Step 2 and Step 3 copy branch on `amount_aware`; 25 new backend + 20 new frontend tests; no SQL.
 - **Stage 2.6B** — Deploy v3 decision logging v1 — `DeployV3DecisionLogSection` replaces Step 3 placeholder in Deploy v3 path; `deploy-v3-decision-log.ts` pure helpers; snapshot records `source: "deploy_v3"`, Step 1 amount as context only, visible Step 2 items exactly; no_moves/setup_incomplete → no fake log; 35 contract tests in deploy-v3-decision-log.test.ts; 301 total; build green. No backend changes, no SQL.
 - **Stage 2.6A** — Deploy v3 powers Step 1/2/3 flow (patched ×2) — Step 1/2/3 primary UX; Deploy v3 Step 2 data source; `deploy-v3-step2-mapper.ts`; Step 2/3 coherence enforced; 46 mapper contract tests; 266 total; build green. No backend changes, no SQL.
 - **Stage 2.5F** — Deploy v3 target allocation setup flow v1 — `DeployV3TargetSetupPanel`; editable target % rows, 98–102% total gate, "use current weights as draft", save calls `PUT /api/v1/portfolio/targets`, invalidates deploy_v3 readiness + plan; `PolicyGuidance` for missing Railway env vars. 29 new contract tests; 200 total; 0 failed. No backend changes, no SQL.

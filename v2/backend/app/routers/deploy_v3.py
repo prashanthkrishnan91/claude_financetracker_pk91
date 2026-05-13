@@ -151,11 +151,18 @@ async def get_deploy_v3_plan(
     if sizing_bundle is not None:
         suppression_reasons = [r.value for r in sizing_bundle.get_suppression_reasons()]
         if is_amount_aware:
+            residual_note = ""
+            if plan.new_cash_residual_reason and plan.new_cash_residual_usd:
+                residual_note = (
+                    f" Residual: ${plan.new_cash_residual_usd:.0f} held back — "
+                    f"{plan.new_cash_residual_reason}"
+                )
             note = (
-                f"Amount-aware new-cash planning. Sized for user-entered ${cash_to_deploy:.2f} "
+                f"New-cash sleeve sizing. Sized for user-entered ${cash_to_deploy:.2f} "
                 "planning capital (not broker-verified cash). "
-                "BUY deltas relative to (portfolio + cash_to_deploy). "
+                "Up to 5 Intel v3 BUY recommendations across eligible candidates. "
                 "Total BUY capped at cash_to_deploy."
+                f"{residual_note}"
             )
         else:
             note = (
@@ -184,6 +191,8 @@ async def get_deploy_v3_plan(
             "amount_aware": is_amount_aware,
             "cash_to_deploy": cash_to_deploy if is_amount_aware else None,
             "sizing_mode": "new_cash" if is_amount_aware else "current_gap",
+            "residual_cash": plan.new_cash_residual_usd if is_amount_aware else None,
+            "residual_reason": plan.new_cash_residual_reason if is_amount_aware else None,
             "note": note,
         }
     else:
@@ -198,6 +207,8 @@ async def get_deploy_v3_plan(
             "amount_aware": False,
             "cash_to_deploy": None,
             "sizing_mode": "current_gap",
+            "residual_cash": None,
+            "residual_reason": None,
             "note": (
                 "No sizing bundle provided. "
                 "Dollar fields are scaffold placeholders — not executable trade instructions."
@@ -206,7 +217,8 @@ async def get_deploy_v3_plan(
 
     logger.info(
         "deploy_v3.plan user_id=%s snapshot_id=%s items=%d plan_readiness=%s "
-        "sizing_bundle_provided=%s exact_dollar_ready=%s amount_aware=%s cash_to_deploy=%s",
+        "sizing_bundle_provided=%s exact_dollar_ready=%s amount_aware=%s cash_to_deploy=%s "
+        "residual_cash=%s residual_reason=%r",
         user.id,
         plan.snapshot_id,
         len(plan.items),
@@ -215,6 +227,8 @@ async def get_deploy_v3_plan(
         sizing_bundle.exact_dollar_ready if sizing_bundle else False,
         is_amount_aware,
         cash_to_deploy if is_amount_aware else None,
+        plan.new_cash_residual_usd,
+        plan.new_cash_residual_reason,
     )
 
     return {

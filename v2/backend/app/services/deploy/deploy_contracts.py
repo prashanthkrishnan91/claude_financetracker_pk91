@@ -148,4 +148,8 @@ class DeployPlan:
     # Optional for backward compatibility with callers constructing DeployPlan
     # directly without a rollup; build_deploy_plan always populates this.
     rollup: Optional["DeployPlanRollup"] = None
+    # New-cash sleeve sizing residual (populated only in new_cash mode).
+    # None outside new_cash mode.
+    new_cash_residual_usd: Optional[float] = None
+    new_cash_residual_reason: Optional[str] = None
     schema_version: str = "deploy_v1_scaffold"

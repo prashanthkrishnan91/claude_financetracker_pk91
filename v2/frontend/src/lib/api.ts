@@ -1284,6 +1284,10 @@ export interface DeployV3PlanResponse {
     cash_to_deploy?: number | null;
     /** "new_cash" when amount-aware mode active; "current_gap" otherwise. */
     sizing_mode?: "new_cash" | "current_gap" | string;
+    /** Residual planning capital not allocated by new-cash sleeve sizing. Null outside new_cash mode. */
+    residual_cash?: number | null;
+    /** Plain-English reason for residual_cash > 0 (threshold suppression, few candidates, rounding). */
+    residual_reason?: string | null;
   };
 }
 

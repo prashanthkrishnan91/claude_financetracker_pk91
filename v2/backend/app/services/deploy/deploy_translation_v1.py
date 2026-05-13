@@ -30,8 +30,9 @@ from .deploy_contracts import (
     DeployPlanStatus,
 )
 from .deploy_cash_guardrail_v1 import apply_cash_guardrail_to_plan_items
-from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items, cap_buy_amounts_to_cash
+from .deploy_dollar_math_v1 import apply_dollar_math_to_plan_items
 from .deploy_finalization_v1 import apply_finalization_to_plan_items
+from .deploy_new_cash_sleeve_v1 import apply_new_cash_sleeve_sizing
 from .deploy_plan_rollup_v1 import build_plan_rollup
 from .deploy_sizing_contracts import (
     DeployCashInput,
@@ -195,21 +196,28 @@ def build_deploy_plan(
     exact_dollar_math_evaluated = False
     cash_guardrail_evaluated = False
     new_cash_mode = bool(cash_to_deploy and cash_to_deploy > 0)
+    new_cash_residual_usd: Optional[float] = None
+    new_cash_residual_reason: Optional[str] = None
 
     if sizing_bundle is not None and sizing_bundle.exact_dollar_ready:
+        # TRIM/SELL always use current-gap math. In new-cash mode we run
+        # current-gap math first (which produces zero/no BUY deltas when current
+        # weights match targets), then overwrite eligible BUYs via sleeve
+        # sizing so cash_to_deploy is actually allocated.
         items = apply_dollar_math_to_plan_items(
             bundle=sizing_bundle,
             items=items,
             price_per_share_map=price_per_share_map,
-            cash_to_deploy=cash_to_deploy if new_cash_mode else None,
+            cash_to_deploy=None,
         )
-        # In new-cash mode: cap total BUY dollars to user-entered cash_to_deploy.
-        if new_cash_mode and cash_to_deploy is not None and sizing_bundle.policy:
-            items = cap_buy_amounts_to_cash(
-                items=items,
-                cash_to_deploy=cash_to_deploy,
-                minimum_trade_usd=sizing_bundle.policy.minimum_trade_usd,
-                rounding_policy=sizing_bundle.policy.rounding_policy,
+        if new_cash_mode and cash_to_deploy is not None:
+            items, new_cash_residual_usd, new_cash_residual_reason = (
+                apply_new_cash_sleeve_sizing(
+                    bundle=sizing_bundle,
+                    items=items,
+                    cash_to_deploy=cash_to_deploy,
+                    price_per_share_map=price_per_share_map,
+                )
             )
         exact_dollar_math_evaluated = True
 
@@ -315,5 +323,7 @@ def build_deploy_plan(
         items=items,
         guardrail_summary=guardrail,
         rollup=rollup,
+        new_cash_residual_usd=new_cash_residual_usd,
+        new_cash_residual_reason=new_cash_residual_reason,
         schema_version="deploy_v1_scaffold",
     )

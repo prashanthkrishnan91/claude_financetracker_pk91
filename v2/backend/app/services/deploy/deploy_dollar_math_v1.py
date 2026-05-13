@@ -27,6 +27,7 @@ A non-positive computed delta suppresses output (no negative or zero trade amoun
 """
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Optional
 
@@ -195,11 +196,15 @@ def cap_buy_amounts_to_cash(
     for i in buy_indices:
         it = items[i]
         raw_scaled = it.recommended_dollar_amount * scale  # type: ignore[operator]
-        rounded = _apply_rounding(raw_scaled, rounding_policy)
-        if rounded <= 0 or (minimum_trade_usd is not None and rounded < minimum_trade_usd):
+        # Floor-round after scaling: guarantees sum(capped) ≤ cash_to_deploy
+        # regardless of rounding_policy.  Independent round-up would push the
+        # total back above budget (e.g. 3 × $67 scaled to 66.67 each rounds to
+        # $67 × 3 = $201 > $200 budget).
+        capped = float(math.floor(raw_scaled))
+        if capped <= 0 or (minimum_trade_usd is not None and capped < minimum_trade_usd):
             new_items[i] = replace(it, recommended_dollar_amount=None, estimated_share_quantity=None)
         else:
-            new_items[i] = replace(it, recommended_dollar_amount=rounded, estimated_share_quantity=None)
+            new_items[i] = replace(it, recommended_dollar_amount=capped, estimated_share_quantity=None)
 
     return new_items
 

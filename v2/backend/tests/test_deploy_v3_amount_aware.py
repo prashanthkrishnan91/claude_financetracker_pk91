@@ -359,6 +359,40 @@ class TestCapBuyAmounts:
         trim_result = next(i for i in result if i.ticker == "NVDA")
         assert trim_result.recommended_dollar_amount == 500.0
 
+    def test_adversarial_rounding_total_never_exceeds_budget(self):
+        """Adversarial rounding: independent rounding would exceed budget; floor prevents it.
+
+        3 BUY items at $67 each (total $201), budget $200.
+        scale = 200/201 ≈ 0.995; scaled = 66.67.
+        Independent WHOLE_DOLLAR rounding gives $67 each → $201 > $200.
+        Floor gives $66 each → $198 ≤ $200.
+        """
+        from app.services.deploy.deploy_dollar_math_v1 import cap_buy_amounts_to_cash
+
+        items = [
+            self._make_buy_item("AAPL", 67.0),
+            self._make_buy_item("MSFT", 67.0),
+            self._make_buy_item("GOOG", 67.0),
+        ]
+        result = cap_buy_amounts_to_cash(
+            items, cash_to_deploy=200.0, minimum_trade_usd=1.0, rounding_policy="WHOLE_DOLLAR"
+        )
+        total = sum(
+            i.recommended_dollar_amount
+            for i in result
+            if i.recommended_dollar_amount is not None
+        )
+        assert total <= 200.0, f"Total {total} exceeded budget 200"
+
+    def test_original_items_not_mutated(self):
+        """cap_buy_amounts_to_cash never mutates the original item list."""
+        from app.services.deploy.deploy_dollar_math_v1 import cap_buy_amounts_to_cash
+
+        original_amount = 600.0
+        items = [self._make_buy_item("AAPL", original_amount)]
+        cap_buy_amounts_to_cash(items, cash_to_deploy=100.0, minimum_trade_usd=1.0)
+        assert items[0].recommended_dollar_amount == original_amount
+
 
 # ── Router integration: amount-aware mode ────────────────────────────────────
 

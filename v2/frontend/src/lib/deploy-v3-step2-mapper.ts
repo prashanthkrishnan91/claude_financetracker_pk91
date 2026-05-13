@@ -83,6 +83,14 @@ export function derivePlainReason(item: DeployV3PlanItem): string {
   return item.intel_action.charAt(0) + item.intel_action.slice(1).toLowerCase();
 }
 
+// ── Amount-aware BUY cap ──────────────────────────────────────────────────────
+
+/**
+ * Maximum BUY items surfaced in Step 2 when amount-aware (new-cash mode).
+ * Produces a focused 3–5 recommendation set; never fabricates to satisfy count.
+ */
+const MAX_AMOUNT_AWARE_BUY_ITEMS = 5;
+
 // ── Main mapper ───────────────────────────────────────────────────────────────
 
 /**
@@ -111,8 +119,8 @@ export function mapDeployV3ToStep2(
     };
   }
 
-  // Map all items; only surface actionable moves in Step 2
-  const moveItems: Step2Item[] = plan.items
+  // Map all items; only surface actionable moves in Step 2, sorted by dollar_amount desc.
+  const sortedMoveItems: Step2Item[] = plan.items
     .filter(isActionableMove)
     .map((item) => ({
       ticker: item.ticker,
@@ -122,6 +130,20 @@ export function mapDeployV3ToStep2(
       final_actionability_status: item.final_actionability_status,
     }))
     .sort((a, b) => (b.dollar_amount ?? 0) - (a.dollar_amount ?? 0));
+
+  // In amount-aware mode cap BUY items to MAX_AMOUNT_AWARE_BUY_ITEMS.
+  // HOLD/TRIM/SELL are never pulled into the BUY list to satisfy the count.
+  let moveItems: Step2Item[] = sortedMoveItems;
+  if (amountAware) {
+    let buyCount = 0;
+    moveItems = sortedMoveItems.filter((item) => {
+      if (item.action === "BUY") {
+        buyCount += 1;
+        return buyCount <= MAX_AMOUNT_AWARE_BUY_ITEMS;
+      }
+      return true;
+    });
+  }
 
   if (moveItems.length === 0) {
     return {

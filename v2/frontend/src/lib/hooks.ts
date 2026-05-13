@@ -5,7 +5,7 @@ import { api } from "./api";
 import type { ActualDecisionItem, DeployV3PlanResponse, DeployV3ReadinessDiagnostic, IntelV3Snapshot, IntelV3RunResult } from "./api";
 import { DEPLOY_V3_PLAN_QUERY_KEY, DEPLOY_V3_READINESS_QUERY_KEY } from "./deploy-v3-helpers";
 
-// ── Portfolio ────────────────────────────────────────────────────────────────
+// ── Portfolio ────────────────────────────────────────────
 
 export function usePortfolioSummary() {
   return useQuery({
@@ -53,7 +53,7 @@ export function useTargets() {
   });
 }
 
-// ── Positions ────────────────────────────────────────────────────────────────
+// ── Positions ────────────────────────────────────────────
 
 export function usePositions(category?: string) {
   return useQuery({
@@ -71,7 +71,7 @@ export function usePosition(ticker: string) {
   });
 }
 
-// ── Prices ───────────────────────────────────────────────────────────────────
+// ── Prices ───────────────────────────────────────────────
 
 export function useBatchPrices(tickers: string[]) {
   return useQuery({
@@ -98,7 +98,7 @@ export function usePriceHealth() {
   });
 }
 
-// ── Recommendations ──────────────────────────────────────────────────────────
+// ── Recommendations ──────────────────────────────────────────
 
 export function invalidateRecommendationAggregateQueries(qc: QueryClient) {
   qc.invalidateQueries({ queryKey: ["recommendations"] });
@@ -186,7 +186,7 @@ export function useLatestAgentRun(enabled = true) {
   });
 }
 
-// ── Sync ─────────────────────────────────────────────────────────────────────
+// ── Sync ─────────────────────────────────────────────────
 
 export function usePlaidStatus() {
   return useQuery({
@@ -241,7 +241,7 @@ export function useImportPdf() {
   });
 }
 
-// ── DRIP ─────────────────────────────────────────────────────────────────────
+// ── DRIP ───────────────────────────────────────────────
 
 export function useDripSummary() {
   return useQuery({
@@ -267,7 +267,7 @@ export function useDripHistory() {
   });
 }
 
-// ── Cash Override ─────────────────────────────────────────────────────────────
+// ── Cash Override ─────────────────────────────────────────────
 
 export function useCashBalance() {
   return useQuery({
@@ -287,7 +287,7 @@ export function useSetCash() {
   });
 }
 
-// ── Recommendations Resolve & Decision Log ────────────────────────────────────
+// ── Recommendations Resolve & Decision Log ────────────────────────────
 
 export function useResolveRecommendation() {
   const qc = useQueryClient();
@@ -340,7 +340,7 @@ export function useDepositPlan(cashToInvest = 0, portfolioBalance = 0) {
   });
 }
 
-// ── Auth / Profile ────────────────────────────────────────────────────────────
+// ── Auth / Profile ────────────────────────────────────────────
 
 export function useUserProfile() {
   return useQuery({
@@ -366,7 +366,7 @@ export function useUpdateApiKeys() {
   });
 }
 
-// ── AI ────────────────────────────────────────────────────────────────────────
+// ── AI ──────────────────────────────────────────────────────
 
 export function useAiLatestAnalysis() {
   return useQuery({
@@ -387,7 +387,7 @@ export function useAiRebalance() {
   });
 }
 
-// ── Analytics ─────────────────────────────────────────────────────────────────
+// ── Analytics ─────────────────────────────────────────────────
 
 export function useStrategyPerformance() {
   return useQuery({
@@ -410,8 +410,8 @@ export function useDecisionMemoryLogs(limit = 10, enabled = true) {
 export function useCreateDecisionMemoryLog() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ snapshot, actualDecisions }: { snapshot: Record<string, unknown>; actualDecisions?: ActualDecisionItem[] }) =>
-      api.decisionLogs.createDecisionLog(snapshot, actualDecisions),
+    mutationFn: ({ snapshot, actualDecisions, notes, source }: { snapshot: Record<string, unknown>; actualDecisions?: ActualDecisionItem[]; notes?: string; source?: string }) =>
+      api.decisionLogs.createDecisionLog(snapshot, actualDecisions, { notes, source }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
   });
 }
@@ -443,7 +443,7 @@ export function useDecisionPerformanceInsights(enabled = true) {
   });
 }
 
-// ── Intel v3 snapshot ────────────────────────────────────────────────────────
+// ── Intel v3 snapshot ────────────────────────────────────────────
 
 /** Read the latest Intel v3 snapshot. Zero LLM calls on this path. */
 export function useIntelV3Snapshot(enabled = true) {
@@ -482,7 +482,7 @@ export function useIntelV3RunStatus(runId: string | null, enabled = true) {
   });
 }
 
-// ── Deploy v3 plan ────────────────────────────────────────────────────────────
+// ── Deploy v3 plan ────────────────────────────────────────────
 
 /**
  * Read the Deploy v3 plan readiness from GET /api/v1/deploy/v3/plan.
@@ -504,7 +504,7 @@ export function useDeployV3Plan(enabled = true) {
   });
 }
 
-// ── Deploy v3 readiness diagnostic ────────────────────────────────────────────
+// ── Deploy v3 readiness diagnostic ──────────────────────────────────
 
 /**
  * Read the Deploy v3 exact-dollar readiness diagnostic from GET /api/v1/deploy/v3/readiness.
@@ -524,7 +524,7 @@ export function useDeployV3Readiness(enabled = true) {
   });
 }
 
-// ── Deploy v3 target allocation setup ─────────────────────────────────────────
+// ── Deploy v3 target allocation setup ─────────────────────────────────
 
 /**
  * Save portfolio target allocations and invalidate deploy v3 readiness + plan.

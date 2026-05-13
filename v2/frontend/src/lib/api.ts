@@ -69,7 +69,7 @@ async function fetchLocal<T>(
   return response.json();
 }
 
-// ── Portfolio ────────────────────────────────────────────────────────────────
+// ── Portfolio ────────────────────────────────────────────────────────────────────────────
 
 export const api = {
   portfolio: {
@@ -213,10 +213,10 @@ export const api = {
   },
 
   decisionLogs: {
-    createDecisionLog: (snapshot: Record<string, unknown>, actualDecisions?: ActualDecisionItem[]) =>
+    createDecisionLog: (snapshot: Record<string, unknown>, actualDecisions?: ActualDecisionItem[], opts?: { notes?: string; source?: string }) =>
       fetchApi<DecisionMemoryLog>("/api/v1/decision-logs", {
         method: "POST",
-        body: JSON.stringify({ recommendation_snapshot: snapshot, source: "deploy", actual_decisions: actualDecisions ?? [] }),
+        body: JSON.stringify({ recommendation_snapshot: snapshot, source: opts?.source ?? "deploy", actual_decisions: actualDecisions ?? [], notes: opts?.notes ?? null }),
       }),
     listDecisionLogs: (limit = 25) =>
       fetchApi<DecisionMemoryLog[]>(`/api/v1/decision-logs?limit=${limit}`),
@@ -287,7 +287,7 @@ async function fetchApiForm<T>(
   return response.json();
 }
 
-// ── Types (mirrors backend Pydantic models) ──────────────────────────────────
+// ── Types (mirrors backend Pydantic models) ────────────────────────────────────────────────────────────────────────────
 
 export interface PortfolioSummary {
   total_equity: number;
@@ -1102,7 +1102,7 @@ export interface DepositPlanResult {
   debug?: Record<string, unknown>;
 }
 
-// ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────
+// ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────────────────────────────────────────────
 
 /** Actions valid for held positions. Radar labels (WATCH/AVOID) must not appear here. */
 export type IntelV3Action = "BUY" | "HOLD" | "TRIM" | "SELL";
@@ -1192,7 +1192,7 @@ export interface IntelV3RunStatus {
   generated_at?: string;
 }
 
-// ── Deploy v3 types (read-only plan contract) ─────────────────────────────────
+// ── Deploy v3 types (read-only plan contract) ────────────────────────────────────────────────────────────────────────────
 
 /** Plan-level readiness status literals from the backend rollup. */
 export type DeployV3ReadinessStatus =
@@ -1275,7 +1275,7 @@ export interface DeployV3PlanResponse {
   };
 }
 
-// ── Deploy v3 readiness diagnostic types (Stage 2.5E) ─────────────────────────
+// ── Deploy v3 readiness diagnostic types (Stage 2.5E) ────────────────────────────────────────────────────────────────────────────
 
 export type DeployV3PolicyStatus =
   | "certified"

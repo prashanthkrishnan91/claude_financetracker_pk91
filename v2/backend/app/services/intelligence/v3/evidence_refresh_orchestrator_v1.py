@@ -57,6 +57,7 @@ from .evidence_freshness_contract_v1 import (
     classify_run_mode,
     classify_source_state,
 )
+from .provider_registry_v1 import health_summary as _provider_health_summary
 
 logger = logging.getLogger(__name__)
 
@@ -183,6 +184,8 @@ class RefreshResult:
             "analyst_refresh_status":      self.analyst_refresh_status,
             "budget_exhausted":            self.budget_exhausted,
             "orchestrator_notes":          list(self.notes),
+            # §3 north-star — provider registry visibility.
+            "provider_registry_health":    _provider_health_summary(),
         }
 
 

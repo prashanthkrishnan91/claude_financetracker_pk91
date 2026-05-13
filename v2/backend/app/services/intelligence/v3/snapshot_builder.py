@@ -137,6 +137,7 @@ def build_snapshot(
     is_stale: bool = False,
     what_changed: Optional[list[str]] = None,
     warnings: Optional[list[str]] = None,
+    diagnostics: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """Build a complete IntelV3Snapshot payload.
 
@@ -219,4 +220,5 @@ def build_snapshot(
         "what_changed":   what_changed or [],
         "warnings":       warnings or [],
         "legacy_path_used": False,
+        "diagnostics":    diagnostics,
     }

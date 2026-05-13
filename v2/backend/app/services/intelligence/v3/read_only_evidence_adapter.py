@@ -18,10 +18,10 @@ class ReadOnlyEvidenceAdapter:
         self.user_id = user_id
         self.client = get_supabase_client()
 
-    async def load_cards(self) -> tuple[list[Any], dict[str, int]]:
+    async def load_cards(self) -> tuple[list[Any], dict[str, Any]]:
         rec_rows = await asyncio.to_thread(
             lambda: self.client.table("recommendations")
-            .select("id,ticker,action,technical_signal,conviction_score,agent_run_id,is_active")
+            .select("id,ticker,action,technical_signal,conviction_score,agent_run_id,is_active,created_at")
             .eq("user_id", str(self.user_id))
             .eq("is_active", True)
             .execute()
@@ -49,6 +49,13 @@ class ReadOnlyEvidenceAdapter:
         completed = run_rows.data or []
         run_ids = [str(r.get("id")) for r in completed if r.get("id")]
 
+        # Build run_id → finished_at for insight timestamp attribution.
+        run_finished_at: dict[str, str] = {
+            str(r["id"]): r["finished_at"]
+            for r in completed
+            if r.get("id") and r.get("finished_at")
+        }
+
         ai_lookup = {}
         if run_ids and tickers:
             ai_rows = await asyncio.to_thread(
@@ -65,9 +72,22 @@ class ReadOnlyEvidenceAdapter:
                 if rid and tk and (tk not in ai_lookup):
                     ai_lookup[tk] = row
 
-        cards=[]
-        missing=0
-        stale_or_missing_source_count=0
+        # Collect timestamps for freshness diagnostics.
+        # recommendation_timestamps: created_at of each active recommendation.
+        recommendation_timestamps: list[str] = [
+            r["created_at"] for r in recs if r.get("created_at")
+        ]
+        # agent_insight_run_timestamps: finished_at of the agent run that produced each insight.
+        agent_insight_run_timestamps: list[str] = []
+        for row in ai_lookup.values():
+            rid = str(row.get("run_id") or "")
+            ts = run_finished_at.get(rid)
+            if ts:
+                agent_insight_run_timestamps.append(ts)
+
+        cards = []
+        missing = 0
+        stale_or_missing_source_count = 0
         for rec in recs:
             t = rec.get("ticker") or "UNKNOWN"
             pos = positions.get(t, {})
@@ -92,7 +112,7 @@ class ReadOnlyEvidenceAdapter:
                 conviction_level=conviction_level,
                 technical_signal=rec.get("technical_signal"),
                 risk_flag=av.get("risk_flag") or "",
-                analyst_risks=risks if isinstance(risks,list) else [],
+                analyst_risks=risks if isinstance(risks, list) else [],
                 category=pos.get("category") or "stock",
                 data_quality_label=av.get("data_quality_label") or "MEDIUM",
                 intel_read=intel_read if isinstance(intel_read, dict) else None,
@@ -100,10 +120,10 @@ class ReadOnlyEvidenceAdapter:
                 analyst_used_fallback=bool(av.get("used_fallback", False)),
                 primary_driver=primary_driver,
                 action_reason=action_reason,
-                analyst_drivers=drivers if isinstance(drivers,list) else [],
+                analyst_drivers=drivers if isinstance(drivers, list) else [],
             ))
 
-        stats = {
+        stats: dict[str, Any] = {
             "active_position_count": len(positions),
             "persisted_recommendation_count": len(recs),
             "persisted_agent_insight_count": len(ai_lookup),
@@ -112,5 +132,8 @@ class ReadOnlyEvidenceAdapter:
             "stale_or_missing_source_count": stale_or_missing_source_count,
             "generated_legacy_recommendations": False,
             "attempted_llm_calls": 0,
+            # Freshness timestamps — used by snapshot_freshness_diagnostics.
+            "recommendation_timestamps": recommendation_timestamps,
+            "agent_insight_run_timestamps": agent_insight_run_timestamps,
         }
         return cards, stats

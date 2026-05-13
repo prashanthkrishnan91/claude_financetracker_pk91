@@ -37,6 +37,7 @@ from .existing_signal_adapter import build_truth_aware_decision_input
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
+from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
@@ -123,6 +124,10 @@ class IntelV3Service:
         started_at = datetime.now(timezone.utc)
 
         try:
+            # Step 0: capture the previous active snapshot for decision-diff diagnostics.
+            # Must happen before _persist_snapshot() deactivates it.
+            previous_snapshot = await self.get_latest_snapshot()
+
             # Step 1: load persisted signals via read-only adapter (no legacy aggregation).
             evidence_adapter = ReadOnlyEvidenceAdapter(user_id=self.user_id)
             cards, evidence_stats = await evidence_adapter.load_cards()
@@ -288,7 +293,7 @@ class IntelV3Service:
                     "thesis_state": "intact",
                 })
 
-            # Step 4: build snapshot.
+            # Step 4: build snapshot (without diagnostics initially; diagnostics need the payload).
             snapshot_payload = build_snapshot(
                 run_id=run_id,
                 decisions=decisions,
@@ -296,6 +301,14 @@ class IntelV3Service:
                 source_health={"status": "signals_from_existing_cards"},
                 is_stale=False,
             )
+
+            # Step 4a: compute freshness + decision-diff diagnostics and embed.
+            diagnostics = build_diagnostics(
+                evidence_stats=evidence_stats,
+                current_snapshot=snapshot_payload,
+                previous_snapshot=previous_snapshot,
+            )
+            snapshot_payload["diagnostics"] = diagnostics
 
             # Step 4b: certify cards — fail-closed on hard violations.
             held_cards = snapshot_payload.get("current_holdings", [])
@@ -385,6 +398,28 @@ class IntelV3Service:
                 duration_ms,
                 soft_violation_count,
                 len(spam_tickers),
+            )
+
+            # Freshness/diff summary — parse from Railway logs using key: intel_v3_freshness_summary
+            _diag = diagnostics
+            logger.info(
+                "intel_v3_freshness_summary user_id=%s snapshot_id=%s run_id=%s "
+                "evidence_mode=%s action_counts=%s "
+                "max_recommendation_age_hours=%s max_agent_insight_age_hours=%s "
+                "stale_evidence_count=%d missing_evidence_count=%d "
+                "changed_decision_count=%d previous_snapshot_id=%s "
+                "attempted_llm_calls=0 live_provider_calls=0",
+                self.user_id,
+                snapshot_id,
+                run_id,
+                _diag.get("evidence_mode"),
+                action_counts,
+                _diag.get("max_recommendation_age_hours"),
+                _diag.get("max_agent_insight_age_hours"),
+                _diag.get("stale_evidence_count", 0),
+                _diag.get("missing_evidence_count", 0),
+                _diag.get("changed_decision_count", 0),
+                _diag.get("previous_snapshot_id"),
             )
 
             # Certification summary — validates the v3 snapshot path after every run.

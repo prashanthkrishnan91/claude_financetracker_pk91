@@ -742,6 +742,8 @@ export interface ActualDecisionItem {
   replacement_amount?: number;
   reason?: string;
   executed_at?: string;
+  /** True when this row was added by the user, not part of the original Deploy v3 recommendation set. */
+  is_manual?: boolean;
 }
 
 export interface DecisionLogPatch {

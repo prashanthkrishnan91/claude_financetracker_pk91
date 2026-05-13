@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { cn, formatCurrency } from "@/lib/utils";
@@ -36,7 +36,7 @@ import { DeployV3TargetSetupPanel } from "@/components/cards/DeployV3TargetSetup
 import { mapDeployV3ToStep2 } from "@/lib/deploy-v3-step2-mapper";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
-import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3SessionKey } from "@/lib/deploy-v3-decision-log";
+import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, getDeployV3LogSessionKey, isManualDecisionRow, isSessionKeyChanged, shouldUpdateExistingLog } from "@/lib/deploy-v3-decision-log";
 import type { DeployV3PlanResponse } from "@/lib/api";
 
 const MAX_REASON_WORDS = 12;
@@ -499,6 +499,16 @@ function DeployV3AllocationTable({ items }: { items: Step2Result["items"] }) {
 
 // ── Deploy v3 Step 3 — decision logging ──────────────────────────────────────
 
+const V3_ACTUAL_STATUS_OPTIONS: string[] = [
+  "BOUGHT",
+  "PARTIAL",
+  "SKIPPED",
+  "WATCHED",
+  "TRIMMED",
+  "SOLD",
+  "HELD",
+];
+
 function DeployV3DecisionLogSection({
   step2,
   v3Plan,
@@ -510,14 +520,27 @@ function DeployV3DecisionLogSection({
 }) {
   const createLog = useCreateDecisionMemoryLog();
   const updateLog = useUpdateDecisionMemoryLog();
-  const { data: recentLogs } = useDecisionMemoryLogs(6, true);
+  const evaluateLog = useEvaluateDecisionMemoryLog();
+  const { data: recentLogs } = useDecisionMemoryLogs(10, true);
   const [savedLog, setSavedLog] = useState<DecisionMemoryLog | null>(null);
   const [actualDecisions, setActualDecisions] = useState<ActualDecisionItem[]>([]);
   const [notes, setNotes] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [manualDraft, setManualDraft] = useState<{ ticker: string; action: "BUY" | "TRIM" | "SELL"; amount: string; note: string }>({
+    ticker: "",
+    action: "BUY",
+    amount: "",
+    note: "",
+  });
 
   const sessionKey = buildDeployV3SessionKey(v3Plan?.run_id, step2.items);
+
+  // Track the previous sessionKey so we can reset stale state when the active
+  // Deploy v3 plan/session changes (different amount, recommendation set, or
+  // run_id). Without this, savedLog/actualDecisions/manual rows from a prior
+  // session would silently overwrite the previous log on save.
+  const previousSessionKeyRef = useRef<string | null>(null);
 
   // Initialize actual decisions from visible Step 2 items
   useEffect(() => {
@@ -526,34 +549,93 @@ function DeployV3DecisionLogSection({
     setActualDecisions(buildDeployV3InitialActualDecisions(step2.items));
   }, [actualDecisions.length, step2.items, step2.state]);
 
-  // Rehydrate from a matching existing log
+  // Rehydrate from a matching existing log (same active plan fingerprint)
   const matchingLog = useMemo(() => {
     if (!recentLogs?.length) return null;
-    return recentLogs.find((log) => {
-      const snap = log.recommendation_snapshot as { session_key?: string } | undefined;
-      return snap?.session_key === sessionKey;
-    }) ?? null;
+    return recentLogs.find((log) => getDeployV3LogSessionKey(log) === sessionKey) ?? null;
   }, [recentLogs, sessionKey]);
+
+  // Reset stale state when sessionKey changes (amount / recommendation set / run_id
+  // changed). Drops manual rows and any savedLog from the previous session;
+  // matchingLog effect below then rehydrates from the new session's saved log
+  // if one exists, otherwise the init effect leaves fresh Step 2 defaults.
+  useEffect(() => {
+    if (isSessionKeyChanged(previousSessionKeyRef.current, sessionKey)) {
+      setSavedLog(null);
+      setNotes("");
+      setSaveSuccess(false);
+      setErrorMessage("");
+      if (step2.state === "has_moves" && step2.items.length > 0) {
+        setActualDecisions(buildDeployV3InitialActualDecisions(step2.items));
+      } else {
+        setActualDecisions([]);
+      }
+    }
+    previousSessionKeyRef.current = sessionKey;
+  }, [sessionKey, step2.items, step2.state]);
 
   useEffect(() => {
     if (savedLog || !matchingLog) return;
+    // Guard: only rehydrate when matchingLog belongs to the current sessionKey.
+    if (getDeployV3LogSessionKey(matchingLog) !== sessionKey) return;
     setSavedLog(matchingLog);
     setNotes(matchingLog.notes ?? "");
     if (matchingLog.actual_decisions?.length) {
       setActualDecisions(matchingLog.actual_decisions);
     }
-  }, [matchingLog, savedLog]);
+  }, [matchingLog, savedLog, sessionKey]);
+
+  function updateRow(index: number, patch: Partial<ActualDecisionItem>) {
+    setActualDecisions((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
+  }
+
+  function removeRow(index: number) {
+    setActualDecisions((prev) => prev.filter((_, i) => i !== index));
+  }
+
+  function addManualRow() {
+    const ticker = manualDraft.ticker.trim().toUpperCase();
+    const amt = Number(manualDraft.amount);
+    if (!ticker || !Number.isFinite(amt) || amt <= 0) {
+      setErrorMessage("Manual row needs a ticker and a positive amount.");
+      return;
+    }
+    setErrorMessage("");
+    const row = buildDeployV3ManualRow(ticker, manualDraft.action, amt, manualDraft.note);
+    setActualDecisions((prev) => [...prev, row]);
+    setManualDraft({ ticker: "", action: "BUY", amount: "", note: "" });
+  }
 
   async function onSave() {
     if (createLog.isPending || updateLog.isPending) return;
     setErrorMessage("");
     setSaveSuccess(false);
     try {
+      const base = buildDeployV3DecisionSnapshot(
+        step2,
+        v3Plan ? { snapshot_id: v3Plan.snapshot_id, run_id: v3Plan.run_id, plan_status: v3Plan.plan_status } : null,
+        { entered_amount: amount },
+      );
+      const deployNowAmount =
+        step2.amount_aware && typeof step2.cash_to_deploy === "number" ? step2.cash_to_deploy : amount;
       const snapshot = {
-        ...buildDeployV3DecisionSnapshot(step2, v3Plan ? { snapshot_id: v3Plan.snapshot_id, run_id: v3Plan.run_id, plan_status: v3Plan.plan_status } : null, { entered_amount: amount }),
+        ...base,
         session_key: sessionKey,
+        // Mirror context so dedupeDecisionLogsForDisplay / DecisionHistoryEntry
+        // can read entered/deploy/reserve amounts uniformly across legacy + v3 logs.
+        decision_context: {
+          entered_capital_amount: amount,
+          deploy_now_amount: deployNowAmount,
+          reserve_amount: Math.max(0, amount - deployNowAmount),
+          session_key: sessionKey,
+          timestamp: new Date().toISOString(),
+        },
       };
-      const target = savedLog ?? matchingLog;
+      // Only update an existing log if it belongs to the CURRENT sessionKey.
+      // A stale savedLog from a prior plan/amount/session must not be patched
+      // with new-session actual_decisions — that would overwrite the wrong log.
+      const candidate = savedLog ?? matchingLog;
+      const target = shouldUpdateExistingLog(candidate, sessionKey) ? candidate : null;
       if (target) {
         const updated = await updateLog.mutateAsync({ id: target.id, patch: { actual_decisions: actualDecisions, notes } });
         setSavedLog(updated);
@@ -567,6 +649,22 @@ function DeployV3DecisionLogSection({
     }
   }
 
+  async function onEvaluatePerformance(logId: string) {
+    try {
+      const evaluated = await evaluateLog.mutateAsync(logId);
+      if (savedLog?.id === logId) setSavedLog(evaluated);
+    } catch {
+      // Evaluate errors are non-blocking for the journal UX.
+    }
+  }
+
+  // Decision log history (visible across all states except setup_incomplete)
+  const historyLogs = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []).slice(0, 10), [recentLogs]);
+  // Only treat a log as the "active" one when it belongs to the current sessionKey.
+  const activeLog = shouldUpdateExistingLog(savedLog ?? matchingLog, sessionKey)
+    ? (savedLog ?? matchingLog)
+    : null;
+
   // setup_incomplete: direct to diagnostics
   if (step2.state === "setup_incomplete") {
     return (
@@ -577,96 +675,249 @@ function DeployV3DecisionLogSection({
     );
   }
 
-  // no_moves: nothing to log
-  if (step2.state === "no_moves") {
-    return (
-      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
-        <p className="text-xs text-text-muted">No moves to log — your portfolio already matches your targets.</p>
-      </section>
-    );
-  }
-
-  // has_moves: full logging panel
   const isPending = createLog.isPending || updateLog.isPending;
-  const isLogged = !!(savedLog ?? matchingLog);
+  const isLogged = !!activeLog;
+  const totalActual = actualDecisions.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
 
   return (
-    <section id="step-3" className="card-glass p-4 border border-border/80 space-y-4">
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
-        {isLogged && (
-          <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-semibold uppercase tracking-wide">
-            Logged
-          </span>
-        )}
-      </div>
-
-      <p className="text-xs text-text-muted">
-        Record that you reviewed and acted on these Deploy v3 moves.{" "}
-        {step2.amount_aware
-          ? <span className="text-text-secondary">Sized for {formatCurrency(amount)} user-entered planning capital (not broker-verified cash).</span>
-          : <span className="text-text-secondary">Step 1 amount ({formatCurrency(amount)}) is your context — not a Deploy v3 sizing input.</span>
-        }
-      </p>
-
-      {/* Editable actual-decision rows */}
-      {actualDecisions.length > 0 && (
-        <div className="space-y-2">
-          {actualDecisions.map((row, i) => (
-            <div key={row.ticker} className="grid grid-cols-12 gap-2 items-center text-xs">
-              <div className="col-span-3 font-mono font-bold text-text-primary">{row.ticker}</div>
-              <div className="col-span-3 text-text-secondary">{row.recommended_action}</div>
-              <div className="col-span-3">
-                <select
-                  value={row.actual_action ?? ""}
-                  onChange={(e) =>
-                    setActualDecisions((prev) =>
-                      prev.map((r, idx) => (idx === i ? { ...r, actual_action: e.target.value } : r)),
-                    )
-                  }
-                  className="w-full bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
-                >
-                  <option value="BOUGHT">BOUGHT</option>
-                  <option value="TRIMMED">TRIMMED</option>
-                  <option value="SOLD">SOLD</option>
-                  <option value="HELD">HELD</option>
-                  <option value="SKIPPED">SKIPPED</option>
-                </select>
-              </div>
-              <div className="col-span-3 font-mono text-text-secondary text-right">
-                {row.recommended_amount != null ? formatCurrency(row.recommended_amount) : "—"}
-              </div>
-            </div>
-          ))}
+    <div className="space-y-4">
+      <section id="step-3" className="card-glass p-4 border border-border/80 space-y-4">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log what you actually did</p>
+          {isLogged && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-semibold uppercase tracking-wide">
+              Logged
+            </span>
+          )}
         </div>
+
+        <p className="text-xs text-text-secondary leading-snug">
+          These are Intel v3 planning recommendations, not broker-executed trades. Review and adjust below before
+          logging what you actually did.
+        </p>
+
+        {step2.state === "no_moves" ? (
+          <p className="text-xs text-text-muted">
+            No model moves to log right now — your portfolio already matches your targets. You can still add a manual
+            entry below if you acted on your own.
+          </p>
+        ) : (
+          <p className="text-xs text-text-muted">
+            Defaults match the Step 2 recommendation. Edit amounts, change status, or add a manual row before saving.{" "}
+            {step2.amount_aware
+              ? <span className="text-text-secondary">Sized for {formatCurrency(amount)} planning capital (not broker-verified cash).</span>
+              : <span className="text-text-secondary">Step 1 amount ({formatCurrency(amount)}) is your context only.</span>
+            }
+          </p>
+        )}
+
+        {/* Editable row list */}
+        {actualDecisions.length > 0 && (
+          <div className="space-y-1.5">
+            <div className="hidden sm:grid grid-cols-12 gap-2 px-1 text-[10px] uppercase tracking-wide text-text-muted font-semibold">
+              <div className="col-span-2">Ticker</div>
+              <div className="col-span-2">Recommended</div>
+              <div className="col-span-2 text-right">Rec. $</div>
+              <div className="col-span-2">Status</div>
+              <div className="col-span-3 text-right">Actual $</div>
+              <div className="col-span-1" />
+            </div>
+            {actualDecisions.map((row, i) => {
+              const manual = isManualDecisionRow(row);
+              return (
+                <div
+                  key={`${row.ticker ?? "row"}-${i}`}
+                  data-testid={`v3-actual-row-${i}`}
+                  className={cn(
+                    "grid grid-cols-12 gap-2 items-center text-xs px-1 py-1 rounded",
+                    manual ? "bg-amber-500/5 border border-amber-400/20" : "",
+                  )}
+                >
+                  <div className="col-span-2 font-mono font-bold text-text-primary flex items-center gap-1">
+                    <span>{row.ticker || "—"}</span>
+                    {manual && (
+                      <span
+                        data-testid={`v3-manual-badge-${i}`}
+                        className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-400/30 font-semibold uppercase tracking-wide"
+                      >
+                        Manual
+                      </span>
+                    )}
+                  </div>
+                  <div className="col-span-2 text-text-secondary">
+                    {row.recommended_action ?? <span className="text-text-muted italic">user-added</span>}
+                  </div>
+                  <div className="col-span-2 font-mono text-text-muted text-right">
+                    {typeof row.recommended_amount === "number" && row.recommended_amount > 0
+                      ? formatCurrency(row.recommended_amount)
+                      : "—"}
+                  </div>
+                  <div className="col-span-2">
+                    <select
+                      aria-label={`Actual status for ${row.ticker ?? "row"}`}
+                      data-testid={`v3-actual-action-${i}`}
+                      value={row.actual_action ?? "BOUGHT"}
+                      onChange={(e) => updateRow(i, { actual_action: e.target.value })}
+                      className="w-full bg-surface border border-border/80 rounded text-text-primary text-xs px-1.5 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+                    >
+                      {V3_ACTUAL_STATUS_OPTIONS.map((opt) => (
+                        <option key={opt} value={opt}>{opt}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="col-span-3 text-right">
+                    <input
+                      type="number"
+                      aria-label={`Actual amount for ${row.ticker ?? "row"}`}
+                      data-testid={`v3-actual-amount-${i}`}
+                      value={row.actual_amount ?? 0}
+                      onChange={(e) => updateRow(i, { actual_amount: Number(e.target.value) || 0 })}
+                      min={0}
+                      step={1}
+                      className="w-full bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 text-right font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+                    />
+                  </div>
+                  <div className="col-span-1 flex justify-end">
+                    {manual && (
+                      <button
+                        type="button"
+                        aria-label={`Remove manual row ${row.ticker ?? ""}`}
+                        onClick={() => removeRow(i)}
+                        className="text-[11px] text-text-muted hover:text-red-300"
+                      >
+                        ×
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+            <p className="text-[10px] text-text-muted text-right">
+              Total logged: <span className="font-mono text-text-primary">{formatCurrency(totalActual)}</span>
+            </p>
+          </div>
+        )}
+
+        {/* Manual add row */}
+        <details className="border border-border/70 rounded-md">
+          <summary className="px-3 py-2 text-[11px] uppercase tracking-wide font-semibold text-text-muted cursor-pointer select-none">
+            Add a manual action (e.g. NVDA BUY $100)
+          </summary>
+          <div className="p-3 grid grid-cols-12 gap-2 items-center text-xs border-t border-border/60">
+            <input
+              data-testid="v3-manual-ticker"
+              placeholder="Ticker"
+              value={manualDraft.ticker}
+              onChange={(e) => setManualDraft((d) => ({ ...d, ticker: e.target.value.toUpperCase() }))}
+              className="col-span-3 bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <select
+              data-testid="v3-manual-action"
+              value={manualDraft.action}
+              onChange={(e) => setManualDraft((d) => ({ ...d, action: e.target.value as "BUY" | "TRIM" | "SELL" }))}
+              className="col-span-2 bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+            >
+              <option value="BUY">BUY</option>
+              <option value="TRIM">TRIM</option>
+              <option value="SELL">SELL</option>
+            </select>
+            <input
+              type="number"
+              data-testid="v3-manual-amount"
+              placeholder="Amount"
+              value={manualDraft.amount}
+              onChange={(e) => setManualDraft((d) => ({ ...d, amount: e.target.value }))}
+              min={0}
+              step={1}
+              className="col-span-2 bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 text-right font-mono focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <input
+              data-testid="v3-manual-note"
+              placeholder="Note (optional)"
+              value={manualDraft.note}
+              onChange={(e) => setManualDraft((d) => ({ ...d, note: e.target.value }))}
+              className="col-span-3 bg-surface border border-border/80 rounded text-text-primary text-xs px-2 py-1 focus:outline-none focus:ring-1 focus:ring-accent"
+            />
+            <button
+              type="button"
+              data-testid="v3-manual-add"
+              onClick={addManualRow}
+              className="col-span-2 px-2 py-1 rounded bg-accent text-background text-xs font-semibold hover:bg-accent-hover transition-colors"
+            >
+              Add row
+            </button>
+            <p className="col-span-12 text-[10px] text-text-muted">
+              Manual entries are clearly labelled and never claim a model recommendation.
+            </p>
+          </div>
+        </details>
+
+        <textarea
+          value={notes}
+          onChange={(e) => setNotes(e.target.value)}
+          placeholder="Notes (optional)"
+          rows={2}
+          className="w-full bg-surface border border-border/80 rounded-lg text-text-primary text-xs px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-accent"
+        />
+
+        {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
+        {saveSuccess && !errorMessage && (
+          <p className="text-xs text-emerald-400">Decision logged.</p>
+        )}
+
+        <button
+          onClick={onSave}
+          disabled={isPending || actualDecisions.length === 0}
+          className="px-4 py-2 text-xs font-semibold rounded-lg bg-accent text-background hover:bg-accent-hover transition-colors disabled:opacity-50"
+        >
+          {isPending ? "Saving…" : isLogged ? "Update log" : "Log this decision"}
+        </button>
+
+        <p className="text-[10px] text-text-muted">
+          Intel v3 owns all Buy / Hold / Trim / Sell authority. This log records your execution journal — not a broker
+          trade or a new recommendation.
+        </p>
+      </section>
+
+      {historyLogs.length > 0 && (
+        <section
+          id="deploy-v3-decision-history"
+          data-testid="v3-decision-history"
+          className="card-glass p-4 space-y-3 border border-border/80"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-text-muted">
+              Recent decision log history
+            </p>
+            <span className="text-[10px] text-text-muted">{historyLogs.length} shown</span>
+          </div>
+          <div className="space-y-2">
+            {historyLogs.map((log) => (
+              <DecisionHistoryEntry
+                key={log.id}
+                log={log}
+                deployNow={
+                  (log.recommendation_snapshot as { decision_context?: { deploy_now_amount?: number } } | undefined)
+                    ?.decision_context?.deploy_now_amount ?? amount
+                }
+                isActive={activeLog?.id === log.id}
+                onEvaluate={() => onEvaluatePerformance(log.id)}
+                isEvaluating={evaluateLog.isPending}
+                onSelect={() => {
+                  setSavedLog(log);
+                  setActualDecisions(
+                    log.actual_decisions?.length
+                      ? log.actual_decisions
+                      : buildDeployV3InitialActualDecisions(step2.items),
+                  );
+                  setNotes(log.notes ?? "");
+                }}
+              />
+            ))}
+          </div>
+        </section>
       )}
-
-      <textarea
-        value={notes}
-        onChange={(e) => setNotes(e.target.value)}
-        placeholder="Notes (optional)"
-        rows={2}
-        className="w-full bg-surface border border-border/80 rounded-lg text-text-primary text-xs px-3 py-2 resize-none focus:outline-none focus:ring-1 focus:ring-accent"
-      />
-
-      {errorMessage && <p className="text-xs text-red-400">{errorMessage}</p>}
-      {saveSuccess && !errorMessage && (
-        <p className="text-xs text-emerald-400">Decision logged.</p>
-      )}
-
-      <button
-        onClick={onSave}
-        disabled={isPending}
-        className="px-4 py-2 text-xs font-semibold rounded-lg bg-accent text-background hover:bg-accent-hover transition-colors disabled:opacity-50"
-      >
-        {isPending ? "Saving…" : isLogged ? "Update log" : "Log this decision"}
-      </button>
-
-      <p className="text-[10px] text-text-muted">
-        Intel v3 owns all Buy / Hold / Trim / Sell decisions. This log records your execution, not a new recommendation.
-      </p>
-    </section>
+    </div>
   );
 }
 

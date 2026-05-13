@@ -61,6 +61,25 @@ function CommandCenter({ snapshot }: { snapshot: IntelV3Snapshot }) {
   );
 }
 
+function _formatAgeHours(hours: number | null | undefined): string | null {
+  if (hours == null) return null;
+  if (hours < 24) return `${hours.toFixed(1)}h`;
+  return `${(hours / 24).toFixed(1)} days`;
+}
+
+function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
+  const diag = snapshot.diagnostics;
+  if (!diag) return null;
+  const ageStr = _formatAgeHours(diag.max_recommendation_age_hours ?? diag.max_agent_insight_age_hours);
+  const oldestPart = ageStr ? `Oldest evidence: ${ageStr}.` : "Evidence age: unknown.";
+  const changedPart = `Decisions changed: ${diag.changed_decision_count}.`;
+  return (
+    <p className="mt-1 text-[11px] text-text-muted">
+      Intel v3 refreshed deterministic policy using stored evidence. {oldestPart} {changedPart}
+    </p>
+  );
+}
+
 function SnapshotBanner({
   snapshot,
   isStale,
@@ -94,6 +113,7 @@ function SnapshotBanner({
           <span key={i} className="text-amber-400">{w}</span>
         ))}
       </div>
+      <FreshnessLine snapshot={snapshot} />
     </div>
   );
 }

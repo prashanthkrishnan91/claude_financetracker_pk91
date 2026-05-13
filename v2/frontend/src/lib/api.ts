@@ -1181,6 +1181,28 @@ export interface IntelV3Snapshot {
   what_changed: string[];
   warnings: string[];
   legacy_path_used: false;
+  diagnostics?: IntelV3SnapshotDiagnostics;
+}
+
+export interface IntelV3SnapshotDiagnostics {
+  evidence_mode: string;
+  attempted_llm_calls: number;
+  live_provider_calls: number;
+  recommendation_count: number;
+  agent_insight_count: number;
+  position_count: number;
+  missing_evidence_count: number;
+  stale_evidence_count: number;
+  max_recommendation_age_hours: number | null;
+  max_agent_insight_age_hours: number | null;
+  oldest_source_timestamp: string | null;
+  newest_source_timestamp: string | null;
+  previous_snapshot_id: string | null;
+  previous_action_counts: Record<string, number> | null;
+  current_action_counts: Record<string, number>;
+  changed_decision_count: number;
+  changed_decisions: Array<{ ticker: string; previous_action: string; current_action: string }>;
+  unchanged_decision_count: number;
 }
 
 export interface IntelV3RunResult {

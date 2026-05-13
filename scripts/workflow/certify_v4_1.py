@@ -22,11 +22,21 @@ PR_TEMPLATE_REQUIRED_STRINGS = [
     "## AI usage note",
     "## Self-audit",
     "Usage ledger updated",
+    "Waste classification",
 ]
 
 PR_TEMPLATE_REQUIRED_SELF_AUDIT = [
     "Repository PR template used exactly: Yes/No",
     "Scope stayed workflow-only (no product code): Yes/No",
+]
+
+USAGE_LEDGER_ANCHORS = ["Prompt ID", "Phase", "Linked PR", "Δ total", "Waste"]
+
+SNAPSHOT_SCRIPT_ANCHORS = [
+    "--append-ledger",
+    "--prompt-id",
+    "--phase",
+    "--delta-from-baseline",
 ]
 
 ENV_DENY_RULES = ["Read(./.env)", "Read(./.env.*)"]
@@ -57,7 +67,7 @@ def main() -> int:
             fail(f"PR template missing required anchor: {needle}")
             failed = True
     if not failed:
-        ok("PR template anchors + AI usage note + ledger updated present")
+        ok("PR template anchors + AI usage note + ledger updated + waste classification present")
 
     settings = json.loads((ROOT / ".claude/settings.json").read_text(encoding="utf-8"))
     deny = settings.get("permissions", {}).get("deny", [])
@@ -95,17 +105,31 @@ def main() -> int:
         else:
             ok("AI_USAGE_TRACKING.md documents USAGE_LEDGER.md")
 
+    # Usage ledger column checks (26-column patch)
+    ledger_path = ROOT / "docs/ai/USAGE_LEDGER.md"
+    if ledger_path.exists():
+        ledger_text = ledger_path.read_text(encoding="utf-8")
+        missing_cols = [col for col in USAGE_LEDGER_ANCHORS if col not in ledger_text]
+        if missing_cols:
+            for col in missing_cols:
+                fail(f"USAGE_LEDGER.md missing required column anchor: {col}")
+            failed = True
+        else:
+            ok("USAGE_LEDGER.md has required delta/prompt/waste columns")
+
     snapshot_path = ROOT / "scripts/ai/usage_snapshot.sh"
     if not snapshot_path.exists():
         fail("scripts/ai/usage_snapshot.sh missing")
         failed = True
     else:
         snapshot_text = snapshot_path.read_text(encoding="utf-8")
-        if "--append-ledger" not in snapshot_text:
-            fail("scripts/ai/usage_snapshot.sh does not reference --append-ledger")
+        missing_flags = [flag for flag in SNAPSHOT_SCRIPT_ANCHORS if flag not in snapshot_text]
+        if missing_flags:
+            for flag in missing_flags:
+                fail(f"usage_snapshot.sh missing required flag: {flag}")
             failed = True
         else:
-            ok("usage_snapshot.sh references ledger append behavior")
+            ok("usage_snapshot.sh references all required ledger flags")
 
     gitignore_path = ROOT / ".gitignore"
     if not gitignore_path.exists():

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # scripts/ai/backfill_usage_ledger.sh
 #
-# Backfill sanitized ledger rows from local ccusage session data.
+# Backfill sanitized 26-column ledger rows from local ccusage session data.
 # PR mapping is marked unknown when it cannot be proven — never guess.
 #
 # Usage:
@@ -15,6 +15,7 @@
 #
 # Never commits raw JSON. Never guesses PR numbers.
 # Review printed rows and fill in PR/model/repo-area before committing.
+# Phase is always set to "backfill". Delta columns are always "unavailable".
 
 OPT_SINCE=""
 OPT_UNTIL=""
@@ -60,19 +61,26 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-# Normalize to array
-_type=$(printf '%s\n' "$CCUSAGE_JSON" | jq -r 'type' 2>/dev/null || echo "unknown")
-if [ "$_type" = "object" ]; then
-  CCUSAGE_JSON=$(printf '%s\n' "$CCUSAGE_JSON" | jq -c '[.]')
-elif [ "$_type" != "array" ]; then
-  printf 'Unrecognized ccusage output format. Cannot backfill.\n' >&2
-  exit 1
+# Extract session array from all known wrapper shapes
+SESSIONS_JSON=$(printf '%s\n' "$CCUSAGE_JSON" | jq -c '
+  if   .sessions != null then .sessions
+  elif .data     != null then .data
+  elif type == "array"   then .
+  else [.]
+  end
+' 2>/dev/null || echo "null")
+
+if [ "$SESSIONS_JSON" = "null" ] || [ "$SESSIONS_JSON" = "[]" ]; then
+  printf 'No sessions found in ccusage output.\n' >&2
+  exit 0
 fi
 
-printf '\n=== Backfill Candidate Ledger Rows ===\n'
-printf '# PR mapping is unknown — do not guess. Review and correct before committing.\n\n'
+printf '\n=== Backfill Candidate Ledger Rows (26 columns) ===\n'
+printf '# Phase=backfill. PR mapping is unknown — do not guess.\n'
+printf '# Review and fill PR/model/repo-area/efficiency-lesson before committing.\n'
+printf '# Delta columns are unavailable for backfill rows.\n\n'
 
-ROWS=$(printf '%s\n' "$CCUSAGE_JSON" | jq -r \
+ROWS=$(printf '%s\n' "$SESSIONS_JSON" | jq -r \
   --arg since "$OPT_SINCE" \
   --arg until "$OPT_UNTIL" \
   '.[] |
@@ -80,7 +88,34 @@ ROWS=$(printf '%s\n' "$CCUSAGE_JSON" | jq -r \
     (if $since != "" then (.date // "") >= $since else true end) and
     (if $until != "" then (.date // "") <= $until else true end)
   ) |
-  "| \(.date // "unknown") | unknown | unknown | unknown | unknown | unknown | ccusage | \(.inputTokens // "unavailable") | \(.outputTokens // "unavailable") | \(.cacheReadTokens // "unavailable") | \(.cacheWriteTokens // "unavailable") | \(.totalTokens // "unavailable") | \(if .totalCost != null then "$\(.totalCost)" else "unavailable" end) | unknown | 0 | review-and-fill |"
+  [
+    (.date // "unknown"),
+    "unknown",
+    "unknown",
+    "backfill",
+    "n/a",
+    "unknown",
+    "unknown",
+    "unknown",
+    "unknown",
+    "ccusage",
+    ((.inputTokens // "unavailable") | tostring),
+    ((.outputTokens // "unavailable") | tostring),
+    ((.cacheReadTokens // "unavailable") | tostring),
+    (((.cacheCreationTokens // .cacheWriteTokens) // "unavailable") | tostring),
+    ((.totalTokens // "unavailable") | tostring),
+    (if .totalCost != null then "$\(.totalCost)" else "unavailable" end),
+    "unavailable",
+    "unavailable",
+    "unavailable",
+    "unavailable",
+    "unavailable",
+    "unavailable",
+    "unknown",
+    "unknown",
+    "0",
+    "review-and-fill"
+  ] | "| " + join(" | ") + " |"
   ' 2>/dev/null || true)
 
 if [ -z "$ROWS" ]; then

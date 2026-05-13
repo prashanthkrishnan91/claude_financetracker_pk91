@@ -40,9 +40,12 @@ Run `bash scripts/ai/usage_snapshot.sh --pr <number> --model <model> --repo-area
 **Usage note:** Low/Medium/High; source: ccusage/statusline/manual/unavailable; main drivers: [fill]; justified: yes/partially/no; next efficiency improvement: [fill]
 
 **Usage ledger updated:** Yes / No / Not available
+**Prompt ID / phase:** [e.g. p01 / initial]
+**Linked PR if follow-up:** [n/a or #PR]
 **Ledger source:** ccusage / statusline / manual / unavailable
 **Main token drivers:** [fill]
 **Follow-up patches required:** [n]
+**Waste classification:** none / preventable-follow-up / necessary-follow-up / exploration / unknown
 **Next efficiency improvement:** [fill]
 
 ## Self-audit

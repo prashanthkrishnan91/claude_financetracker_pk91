@@ -103,5 +103,37 @@ export function buildDeployV3InitialActualDecisions(
     actual_action: mapActionToActualDefault(item.action),
     recommended_amount: item.dollar_amount ?? 0,
     actual_amount: item.dollar_amount ?? 0,
+    is_manual: false,
   }));
+}
+
+// ── Manual (user-added) row helpers ───────────────────────────────────────────
+
+/**
+ * Build a manual (user-added) actual decision row for a ticker that was NOT in
+ * the visible Step 2 recommendations. Manual rows preserve no recommended
+ * action/amount and are flagged with is_manual=true so consumers can label
+ * them clearly as user-added rather than model-recommended.
+ */
+export function buildDeployV3ManualRow(
+  ticker: string,
+  action: "BUY" | "TRIM" | "SELL",
+  amount: number,
+  note?: string,
+): ActualDecisionItem {
+  return {
+    ticker: ticker.trim().toUpperCase(),
+    actual_action: mapActionToActualDefault(action),
+    actual_amount: Number.isFinite(amount) && amount > 0 ? amount : 0,
+    is_manual: true,
+    ...(note && note.trim() ? { reason: note.trim() } : {}),
+  };
+}
+
+/** True when this row was added by the user, not recommended by Deploy v3. */
+export function isManualDecisionRow(row: ActualDecisionItem): boolean {
+  if (row.is_manual === true) return true;
+  // Back-compat heuristic: absence of recommended_action AND recommended_amount
+  // marks a row that did not originate from a Step 2 recommendation.
+  return !row.recommended_action && (row.recommended_amount == null || row.recommended_amount === 0);
 }

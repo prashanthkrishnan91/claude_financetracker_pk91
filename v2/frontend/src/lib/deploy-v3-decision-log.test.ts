@@ -17,7 +17,9 @@
 import {
   buildDeployV3DecisionSnapshot,
   buildDeployV3InitialActualDecisions,
+  buildDeployV3ManualRow,
   buildDeployV3SessionKey,
+  isManualDecisionRow,
   mapActionToActualDefault,
 } from "@/lib/deploy-v3-decision-log";
 import type { Step2Item, Step2Result } from "@/lib/deploy-v3-step2-mapper";
@@ -315,6 +317,152 @@ describe("Deploy v3 create API payload includes notes and source", () => {
 });
 
 // ── Amount-aware snapshot (Stage 2.6C) ───────────────────────────────────────
+
+// ── Stage 2.7: Editable actual amounts ─────────────────────────────────────
+
+describe("Editable actual amounts (Stage 2.7)", () => {
+  it("editing actual_amount preserves the recommended_amount alongside it", () => {
+    // Simulate the visible Step 2 NFLX $245 recommendation.
+    const decisions = buildDeployV3InitialActualDecisions([
+      makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 245 }),
+    ]);
+    expect(decisions[0].recommended_amount).toBe(245);
+    expect(decisions[0].actual_amount).toBe(245);
+
+    // User edits NFLX 245 → 250
+    const edited = decisions.map((row, i) => (i === 0 ? { ...row, actual_amount: 250 } : row));
+
+    expect(edited[0].actual_amount).toBe(250);
+    // Recommended is preserved so the log can show actual vs recommended cleanly.
+    expect(edited[0].recommended_amount).toBe(245);
+    expect(edited[0].recommended_action).toBe("BUY");
+    expect(edited[0].is_manual).toBe(false);
+  });
+
+  it("regression: with no edits, payload uses exactly the visible Step 2 defaults", () => {
+    const items: Step2Item[] = [
+      makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 245 }),
+      makeItem({ ticker: "META", action: "BUY", dollar_amount: 229 }),
+      makeItem({ ticker: "GOOGL", action: "BUY", dollar_amount: 203 }),
+      makeItem({ ticker: "TSM", action: "BUY", dollar_amount: 160 }),
+      makeItem({ ticker: "CRM", action: "BUY", dollar_amount: 61 }),
+    ];
+    const decisions = buildDeployV3InitialActualDecisions(items);
+    expect(decisions.map((d) => ({ ticker: d.ticker, actual: d.actual_amount, rec: d.recommended_amount }))).toEqual([
+      { ticker: "NFLX", actual: 245, rec: 245 },
+      { ticker: "META", actual: 229, rec: 229 },
+      { ticker: "GOOGL", actual: 203, rec: 203 },
+      { ticker: "TSM", actual: 160, rec: 160 },
+      { ticker: "CRM", actual: 61, rec: 61 },
+    ]);
+    // Initial rows are never flagged as manual.
+    expect(decisions.every((d) => d.is_manual === false)).toBe(true);
+  });
+});
+
+// ── Stage 2.7: Manual user-added rows ──────────────────────────────────────
+
+describe("buildDeployV3ManualRow / isManualDecisionRow (Stage 2.7)", () => {
+  it("NVDA BUY $100 manual entry is flagged is_manual and has no recommended fields", () => {
+    const row = buildDeployV3ManualRow("nvda", "BUY", 100, "added on my own");
+    expect(row.ticker).toBe("NVDA");
+    expect(row.actual_action).toBe("BOUGHT");
+    expect(row.actual_amount).toBe(100);
+    expect(row.is_manual).toBe(true);
+    expect(row.recommended_action).toBeUndefined();
+    expect(row.recommended_amount).toBeUndefined();
+    expect(row.reason).toBe("added on my own");
+    expect(isManualDecisionRow(row)).toBe(true);
+  });
+
+  it("manual TRIM/SELL map to default actual_action", () => {
+    expect(buildDeployV3ManualRow("AAPL", "TRIM", 50).actual_action).toBe("TRIMMED");
+    expect(buildDeployV3ManualRow("AAPL", "SELL", 50).actual_action).toBe("SOLD");
+  });
+
+  it("non-positive amount clamps to 0", () => {
+    expect(buildDeployV3ManualRow("X", "BUY", -10).actual_amount).toBe(0);
+    expect(buildDeployV3ManualRow("X", "BUY", Number.NaN).actual_amount).toBe(0);
+  });
+
+  it("a recommended row is NOT considered manual", () => {
+    const rec = buildDeployV3InitialActualDecisions([makeItem({ ticker: "NFLX", dollar_amount: 245 })])[0];
+    expect(isManualDecisionRow(rec)).toBe(false);
+  });
+
+  it("payload containing manual NVDA row preserves manual marker for backend", () => {
+    const initial = buildDeployV3InitialActualDecisions([makeItem({ ticker: "NFLX", dollar_amount: 245 })]);
+    const manual = buildDeployV3ManualRow("NVDA", "BUY", 100);
+    const payload = [...initial, manual];
+    const manualRows = payload.filter(isManualDecisionRow);
+    expect(manualRows).toHaveLength(1);
+    expect(manualRows[0].ticker).toBe("NVDA");
+    expect(manualRows[0].is_manual).toBe(true);
+  });
+});
+
+// ── Stage 2.7: Active fingerprint update vs duplicate (page wiring) ────────
+
+describe("Deploy v3 active fingerprint update behavior (page wiring)", () => {
+  it("page reuses buildDeployV3SessionKey to look up matchingLog (not a new fingerprint scheme)", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("buildDeployV3SessionKey(v3Plan?.run_id, step2.items)");
+    // Matching active log triggers update, not a new create.
+    expect(pageSource).toContain("updateLog.mutateAsync({ id: target.id");
+    // session_key is mirrored under decision_context so dedupe util works.
+    expect(pageSource).toContain("decision_context: {");
+    expect(pageSource).toContain("session_key: sessionKey");
+  });
+});
+
+// ── Stage 2.7: Decision log history is rendered in primary Deploy UX ───────
+
+describe("Deploy v3 primary UX shows decision log history (Stage 2.7)", () => {
+  it("page wires DecisionHistoryEntry below Step 3 using recent decision logs", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain('id="deploy-v3-decision-history"');
+    expect(pageSource).toContain("useDecisionMemoryLogs(10, true)");
+    expect(pageSource).toContain("dedupeDecisionLogsForDisplay(recentLogs");
+    // The v3 history section renders DecisionHistoryEntry rows (reuse, not a parallel impl).
+    const v3Section = pageSource.split('id="deploy-v3-decision-history"')[1] ?? "";
+    expect(v3Section).toContain("DecisionHistoryEntry");
+  });
+
+  it("there is only one DecisionHistoryEntry component definition (no duplicate history surfaces)", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    const defMatches = pageSource.match(/function DecisionHistoryEntry\b/g) ?? [];
+    expect(defMatches).toHaveLength(1);
+  });
+});
+
+// ── Stage 2.7: Clarity copy (no new intelligence) ──────────────────────────
+
+describe("Deploy v3 Step 3 clarity copy (Stage 2.7)", () => {
+  it("includes plain-English note that recommendations are not broker-executed", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("Intel v3 planning recommendations, not broker-executed trades");
+  });
+});
 
 describe("buildDeployV3DecisionSnapshot — amount-aware (Stage 2.6C)", () => {
   function makeStep2AmountAware(overrides: Partial<Step2Result> = {}): Pick<Step2Result, "state" | "items" | "exact_dollar_ready" | "amount_aware" | "cash_to_deploy"> {

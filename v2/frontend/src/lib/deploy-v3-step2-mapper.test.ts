@@ -577,3 +577,28 @@ describe("Step 2 / Step 3 coherence", () => {
     expect(result.items.every((i) => i.dollar_amount != null && i.dollar_amount > 0)).toBe(true);
   });
 });
+
+// ── Amount propagation contract — mapper output ───────────────────────────────
+// URL / fetch behavioral tests live in deploy-v3-api-url.test.ts.
+// Deposits page enabled-guard is verified there too.
+
+describe("Deploy v3 amount-aware mapper output", () => {
+  it("amount-aware plan result carries amount_aware=true and cash_to_deploy", () => {
+    const plan = makePlan({
+      items: [makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 900, final_actionability_status: "actionable_pending_tax" })],
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Amount-aware.",
+        exact_dollar_ready: true,
+        amount_aware: true,
+        cash_to_deploy: 900,
+        sizing_mode: "new_cash",
+      },
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.amount_aware).toBe(true);
+    expect(result.cash_to_deploy).toBe(900);
+    expect(result.state).toBe("has_moves");
+  });
+});

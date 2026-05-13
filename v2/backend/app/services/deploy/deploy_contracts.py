@@ -102,6 +102,17 @@ class DeployPlanItem:
     # Suppression reason (populated when actionability_status is SUPPRESSED_*).
     suppression_reason: Optional[str] = None
 
+    # Intel signal passthrough — read-only context for Deploy ranking/display.
+    # Never used to override Intel's Buy/Hold/Trim/Sell decision authority.
+    intel_conviction: str = "MEDIUM"             # HIGH | MEDIUM | LOW (from Intel card)
+    intel_evidence_band: str = "PARTIAL"         # STRONG | PARTIAL | THIN (display label)
+
+    # Plain-English explanation for why this item was selected into the new-cash
+    # sleeve top-N. Populated only for selected BUY items in new-cash mode; "none"
+    # otherwise. Never fabricated — describes the conviction/evidence already
+    # present on the Intel card.
+    selection_reason: str = "none"
+
     schema_version: str = "deploy_v1_scaffold"
 
 

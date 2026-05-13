@@ -77,6 +77,15 @@ export function derivePlainReason(item: DeployV3PlanItem): string {
   if (status === "blocked_cash") return "Blocked — insufficient cash";
   if (status === "informational_hold") return "Hold — no action needed";
   if (status === "not_ready") return "Not sized yet";
+  // Plain-English "why selected" for new-cash sleeve top-N BUYs. Only surfaced
+  // when backend populated a real reason (not the "none" sentinel).
+  if (
+    item.selection_reason &&
+    item.selection_reason !== "none" &&
+    item.intel_action.toUpperCase() === "BUY"
+  ) {
+    return item.selection_reason;
+  }
   if (item.pending_guardrails_reason) {
     return item.pending_guardrails_reason.toLowerCase().replace(/_/g, " ");
   }

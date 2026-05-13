@@ -1241,6 +1241,8 @@ export interface DeployV3PlanItem {
   final_actionability_status: string;
   pending_guardrails_reason: string;
   suppression_reason: string | null;
+  /** Plain-English reason a BUY made the new-cash sleeve top-N; "none" otherwise. */
+  selection_reason?: string;
   schema_version: string;
 }
 

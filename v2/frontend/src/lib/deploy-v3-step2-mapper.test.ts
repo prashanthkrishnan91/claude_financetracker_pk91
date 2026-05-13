@@ -257,6 +257,26 @@ describe("derivePlainReason", () => {
     expect(reason).not.toContain("$");
     expect(reason).not.toContain("env");
   });
+
+  it("BUY with backend selection_reason surfaces it as plain-English why-selected", () => {
+    const item = makeItem({
+      intel_action: "BUY",
+      final_actionability_status: "actionable_pending_tax",
+      recommended_dollar_amount: 200,
+      selection_reason: "high-conviction BUY with strong evidence from Intel v3.",
+    });
+    expect(derivePlainReason(item)).toContain("high-conviction");
+  });
+
+  it("BUY with sentinel selection_reason 'none' falls back without leaking the sentinel", () => {
+    const item = makeItem({
+      intel_action: "BUY",
+      final_actionability_status: "actionable_pending_tax",
+      recommended_dollar_amount: 200,
+      selection_reason: "none",
+    });
+    expect(derivePlainReason(item).toLowerCase()).not.toContain("none");
+  });
 });
 
 // ── STEP2_NOT_AVAILABLE sentinel ──────────────────────────────────────────────

@@ -138,6 +138,8 @@ def _translate_item(inp: DeployPlanInput) -> DeployPlanItem:
         tax_guardrail_status="not_evaluated_yet",
         wash_sale_guardrail_status="not_evaluated_yet",
         suppression_reason=suppression_reason,
+        intel_conviction=inp.intel_conviction,
+        intel_evidence_band=inp.intel_evidence_band,
         schema_version="deploy_v1_scaffold",
     )
 

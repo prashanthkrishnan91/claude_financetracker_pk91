@@ -19,9 +19,13 @@ import {
   buildDeployV3InitialActualDecisions,
   buildDeployV3ManualRow,
   buildDeployV3SessionKey,
+  getDeployV3LogSessionKey,
   isManualDecisionRow,
+  isSessionKeyChanged,
   mapActionToActualDefault,
+  shouldUpdateExistingLog,
 } from "@/lib/deploy-v3-decision-log";
+import type { DecisionMemoryLog } from "@/lib/api";
 import type { Step2Item, Step2Result } from "@/lib/deploy-v3-step2-mapper";
 
 // ── Factories ─────────────────────────────────────────────────────
@@ -461,6 +465,198 @@ describe("Deploy v3 Step 3 clarity copy (Stage 2.7)", () => {
       "utf8",
     );
     expect(pageSource).toContain("Intel v3 planning recommendations, not broker-executed trades");
+  });
+});
+
+// ── Stage 2.7 patch: session-key reconciliation ────────────────────────────
+
+describe("getDeployV3LogSessionKey (Stage 2.7 patch)", () => {
+  function makeLog(snapshot: Record<string, unknown>): DecisionMemoryLog {
+    return {
+      id: "log-1",
+      user_id: "u",
+      source: "deploy_v3",
+      status: "DRAFT",
+      recommendation_snapshot: snapshot,
+      actual_decisions: [],
+      created_at: "",
+      updated_at: "",
+    } as unknown as DecisionMemoryLog;
+  }
+
+  it("reads top-level session_key", () => {
+    expect(getDeployV3LogSessionKey(makeLog({ session_key: "deploy_v3:r1:AAPL:BUY:200" }))).toBe(
+      "deploy_v3:r1:AAPL:BUY:200",
+    );
+  });
+
+  it("falls back to decision_context.session_key", () => {
+    expect(
+      getDeployV3LogSessionKey(makeLog({ decision_context: { session_key: "deploy_v3:r1:AAPL:BUY:200" } })),
+    ).toBe("deploy_v3:r1:AAPL:BUY:200");
+  });
+
+  it("returns null when neither location has a string key", () => {
+    expect(getDeployV3LogSessionKey(makeLog({}))).toBeNull();
+    expect(getDeployV3LogSessionKey(makeLog({ session_key: "" }))).toBeNull();
+    expect(getDeployV3LogSessionKey(null)).toBeNull();
+  });
+});
+
+describe("shouldUpdateExistingLog (Stage 2.7 patch)", () => {
+  function makeLogWithKey(key: string | null): DecisionMemoryLog {
+    return {
+      id: "log-x",
+      user_id: "u",
+      source: "deploy_v3",
+      status: "DRAFT",
+      recommendation_snapshot: key === null ? {} : { session_key: key },
+      actual_decisions: [],
+      created_at: "",
+      updated_at: "",
+    } as unknown as DecisionMemoryLog;
+  }
+
+  it("returns true only when the candidate log's session_key matches the current sessionKey", () => {
+    expect(shouldUpdateExistingLog(makeLogWithKey("k1"), "k1")).toBe(true);
+  });
+
+  it("returns false when the candidate log is from a previous session", () => {
+    expect(shouldUpdateExistingLog(makeLogWithKey("k_old"), "k_new")).toBe(false);
+  });
+
+  it("returns false when the candidate log has no session_key (legacy log)", () => {
+    expect(shouldUpdateExistingLog(makeLogWithKey(null), "k_new")).toBe(false);
+  });
+
+  it("returns false when candidate is null", () => {
+    expect(shouldUpdateExistingLog(null, "k_new")).toBe(false);
+  });
+});
+
+describe("isSessionKeyChanged (Stage 2.7 patch)", () => {
+  it("initial mount (previous=null) is NOT a change", () => {
+    expect(isSessionKeyChanged(null, "k1")).toBe(false);
+  });
+
+  it("same key on re-render is NOT a change", () => {
+    expect(isSessionKeyChanged("k1", "k1")).toBe(false);
+  });
+
+  it("different key IS a change (amount/plan/run_id changed)", () => {
+    expect(isSessionKeyChanged("k1", "k2")).toBe(true);
+  });
+});
+
+describe("Stage 2.7 patch: sessionKey reset behavior in page wiring", () => {
+  it("page tracks previousSessionKeyRef and resets state when sessionKey changes", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("previousSessionKeyRef");
+    expect(pageSource).toContain("isSessionKeyChanged(previousSessionKeyRef.current, sessionKey)");
+    // On sessionKey change: clear savedLog, clear notes, reset to fresh defaults.
+    expect(pageSource).toContain("setSavedLog(null)");
+    expect(pageSource).toContain('setNotes("")');
+    expect(pageSource).toContain("buildDeployV3InitialActualDecisions(step2.items)");
+  });
+
+  it("save guard uses shouldUpdateExistingLog so previous-session log is never patched", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("shouldUpdateExistingLog(candidate, sessionKey)");
+    // Active-log indicator is also session-key-guarded.
+    expect(pageSource).toContain("shouldUpdateExistingLog(savedLog ?? matchingLog, sessionKey)");
+  });
+
+  it("matchingLog rehydrate effect is guarded by session_key equality", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("getDeployV3LogSessionKey(matchingLog) !== sessionKey");
+  });
+});
+
+describe("Stage 2.7 patch: session-local actual decisions (no manual leak)", () => {
+  it("a previous-session manual NVDA row is NOT carried into a new session's defaults", () => {
+    // Session A: NFLX $245 recommended + manual NVDA $100 user-added.
+    const sessionAItems = [makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 245 })];
+    const sessionAState = buildDeployV3InitialActualDecisions(sessionAItems).concat(
+      buildDeployV3ManualRow("NVDA", "BUY", 100),
+    );
+    expect(sessionAState.some((r) => r.ticker === "NVDA" && r.is_manual === true)).toBe(true);
+
+    // Session B (different recommendation set): GOOGL $203 + META $229. The
+    // reset-on-sessionKey-change logic recomputes from Step 2 defaults only.
+    const sessionBItems = [
+      makeItem({ ticker: "GOOGL", action: "BUY", dollar_amount: 203 }),
+      makeItem({ ticker: "META", action: "BUY", dollar_amount: 229 }),
+    ];
+    const sessionBDefaults = buildDeployV3InitialActualDecisions(sessionBItems);
+
+    expect(sessionBDefaults.map((r) => r.ticker)).toEqual(["GOOGL", "META"]);
+    // Crucially: no NVDA, no manual rows.
+    expect(sessionBDefaults.some((r) => r.ticker === "NVDA")).toBe(false);
+    expect(sessionBDefaults.some((r) => r.is_manual === true)).toBe(false);
+  });
+
+  it("same active plan (sessionKey unchanged) still updates the matching log, not duplicate-creates", () => {
+    // Both calls produce the same key — page logic uses this to detect "same active plan".
+    const items = [
+      makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 245 }),
+      makeItem({ ticker: "META", action: "BUY", dollar_amount: 229 }),
+    ];
+    const keyA = buildDeployV3SessionKey("run-001", items);
+    const keyB = buildDeployV3SessionKey("run-001", items);
+    expect(keyA).toBe(keyB);
+    expect(isSessionKeyChanged(keyA, keyB)).toBe(false);
+
+    // Same-key candidate is update-eligible.
+    const sameLog = {
+      id: "L",
+      user_id: "u",
+      source: "deploy_v3",
+      status: "DRAFT",
+      recommendation_snapshot: { session_key: keyA },
+      actual_decisions: [],
+      created_at: "",
+      updated_at: "",
+    } as unknown as DecisionMemoryLog;
+    expect(shouldUpdateExistingLog(sameLog, keyB)).toBe(true);
+  });
+
+  it("changed amount → different sessionKey → previous log is NOT update-eligible", () => {
+    // Different dollar_amount yields a different sessionKey (amount baked into key).
+    const $900Items = [makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 245 })];
+    const $1500Items = [makeItem({ ticker: "NFLX", action: "BUY", dollar_amount: 408 })];
+    const key900 = buildDeployV3SessionKey("run-001", $900Items);
+    const key1500 = buildDeployV3SessionKey("run-001", $1500Items);
+    expect(key900).not.toBe(key1500);
+    expect(isSessionKeyChanged(key900, key1500)).toBe(true);
+
+    const previousLog = {
+      id: "L_old",
+      user_id: "u",
+      source: "deploy_v3",
+      status: "DRAFT",
+      recommendation_snapshot: { session_key: key900 },
+      actual_decisions: [],
+      created_at: "",
+      updated_at: "",
+    } as unknown as DecisionMemoryLog;
+    // Critically: when user is on the $1500 session, the previous $900 log must
+    // NOT be the update target — that would overwrite it with $1500-session edits.
+    expect(shouldUpdateExistingLog(previousLog, key1500)).toBe(false);
   });
 });
 

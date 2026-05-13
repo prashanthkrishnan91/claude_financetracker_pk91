@@ -8,7 +8,7 @@
  * Logged recommendations come exclusively from visible Step 2 items.
  */
 
-import type { ActualDecisionItem } from "./api";
+import type { ActualDecisionItem, DecisionMemoryLog } from "./api";
 import type { Step2Item, Step2Result } from "./deploy-v3-step2-mapper";
 
 // ── Action default mapping ─────────────────────────────────────────────────────
@@ -136,4 +136,41 @@ export function isManualDecisionRow(row: ActualDecisionItem): boolean {
   // Back-compat heuristic: absence of recommended_action AND recommended_amount
   // marks a row that did not originate from a Step 2 recommendation.
   return !row.recommended_action && (row.recommended_amount == null || row.recommended_amount === 0);
+}
+
+// ── Session-key reconciliation helpers ────────────────────────────────────────
+
+/**
+ * Read the Deploy v3 session_key from a decision memory log, checking both the
+ * top-level snapshot field and the mirrored decision_context location.
+ */
+export function getDeployV3LogSessionKey(log: DecisionMemoryLog | null | undefined): string | null {
+  if (!log) return null;
+  const snap = log.recommendation_snapshot as
+    | { session_key?: unknown; decision_context?: { session_key?: unknown } }
+    | undefined;
+  const top = snap?.session_key;
+  if (typeof top === "string" && top.trim()) return top;
+  const ctx = snap?.decision_context?.session_key;
+  if (typeof ctx === "string" && ctx.trim()) return ctx;
+  return null;
+}
+
+/**
+ * True when an existing log should be PATCHed instead of creating a new log:
+ * the candidate log belongs to the same active sessionKey the user is editing.
+ * Guards against updating a previous-session log after the plan/amount changes.
+ */
+export function shouldUpdateExistingLog(
+  candidate: DecisionMemoryLog | null | undefined,
+  currentSessionKey: string,
+): boolean {
+  if (!candidate) return false;
+  const key = getDeployV3LogSessionKey(candidate);
+  return key !== null && key === currentSessionKey;
+}
+
+/** True when the active Deploy v3 sessionKey transitioned to a new plan/session. */
+export function isSessionKeyChanged(previous: string | null, next: string): boolean {
+  return previous !== null && previous !== next;
 }

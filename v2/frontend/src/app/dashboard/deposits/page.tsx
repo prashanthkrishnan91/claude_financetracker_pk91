@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { createPortal } from "react-dom";
 import { cn, formatCurrency } from "@/lib/utils";
@@ -36,7 +36,7 @@ import { DeployV3TargetSetupPanel } from "@/components/cards/DeployV3TargetSetup
 import { mapDeployV3ToStep2 } from "@/lib/deploy-v3-step2-mapper";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
-import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, isManualDecisionRow } from "@/lib/deploy-v3-decision-log";
+import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, getDeployV3LogSessionKey, isManualDecisionRow, isSessionKeyChanged, shouldUpdateExistingLog } from "@/lib/deploy-v3-decision-log";
 import type { DeployV3PlanResponse } from "@/lib/api";
 
 const MAX_REASON_WORDS = 12;
@@ -536,6 +536,12 @@ function DeployV3DecisionLogSection({
 
   const sessionKey = buildDeployV3SessionKey(v3Plan?.run_id, step2.items);
 
+  // Track the previous sessionKey so we can reset stale state when the active
+  // Deploy v3 plan/session changes (different amount, recommendation set, or
+  // run_id). Without this, savedLog/actualDecisions/manual rows from a prior
+  // session would silently overwrite the previous log on save.
+  const previousSessionKeyRef = useRef<string | null>(null);
+
   // Initialize actual decisions from visible Step 2 items
   useEffect(() => {
     if (step2.state !== "has_moves" || step2.items.length === 0) return;
@@ -546,20 +552,38 @@ function DeployV3DecisionLogSection({
   // Rehydrate from a matching existing log (same active plan fingerprint)
   const matchingLog = useMemo(() => {
     if (!recentLogs?.length) return null;
-    return recentLogs.find((log) => {
-      const snap = log.recommendation_snapshot as { session_key?: string; decision_context?: { session_key?: string } } | undefined;
-      return snap?.session_key === sessionKey || snap?.decision_context?.session_key === sessionKey;
-    }) ?? null;
+    return recentLogs.find((log) => getDeployV3LogSessionKey(log) === sessionKey) ?? null;
   }, [recentLogs, sessionKey]);
+
+  // Reset stale state when sessionKey changes (amount / recommendation set / run_id
+  // changed). Drops manual rows and any savedLog from the previous session;
+  // matchingLog effect below then rehydrates from the new session's saved log
+  // if one exists, otherwise the init effect leaves fresh Step 2 defaults.
+  useEffect(() => {
+    if (isSessionKeyChanged(previousSessionKeyRef.current, sessionKey)) {
+      setSavedLog(null);
+      setNotes("");
+      setSaveSuccess(false);
+      setErrorMessage("");
+      if (step2.state === "has_moves" && step2.items.length > 0) {
+        setActualDecisions(buildDeployV3InitialActualDecisions(step2.items));
+      } else {
+        setActualDecisions([]);
+      }
+    }
+    previousSessionKeyRef.current = sessionKey;
+  }, [sessionKey, step2.items, step2.state]);
 
   useEffect(() => {
     if (savedLog || !matchingLog) return;
+    // Guard: only rehydrate when matchingLog belongs to the current sessionKey.
+    if (getDeployV3LogSessionKey(matchingLog) !== sessionKey) return;
     setSavedLog(matchingLog);
     setNotes(matchingLog.notes ?? "");
     if (matchingLog.actual_decisions?.length) {
       setActualDecisions(matchingLog.actual_decisions);
     }
-  }, [matchingLog, savedLog]);
+  }, [matchingLog, savedLog, sessionKey]);
 
   function updateRow(index: number, patch: Partial<ActualDecisionItem>) {
     setActualDecisions((prev) => prev.map((r, i) => (i === index ? { ...r, ...patch } : r)));
@@ -607,7 +631,11 @@ function DeployV3DecisionLogSection({
           timestamp: new Date().toISOString(),
         },
       };
-      const target = savedLog ?? matchingLog;
+      // Only update an existing log if it belongs to the CURRENT sessionKey.
+      // A stale savedLog from a prior plan/amount/session must not be patched
+      // with new-session actual_decisions — that would overwrite the wrong log.
+      const candidate = savedLog ?? matchingLog;
+      const target = shouldUpdateExistingLog(candidate, sessionKey) ? candidate : null;
       if (target) {
         const updated = await updateLog.mutateAsync({ id: target.id, patch: { actual_decisions: actualDecisions, notes } });
         setSavedLog(updated);
@@ -632,7 +660,10 @@ function DeployV3DecisionLogSection({
 
   // Decision log history (visible across all states except setup_incomplete)
   const historyLogs = useMemo(() => dedupeDecisionLogsForDisplay(recentLogs ?? []).slice(0, 10), [recentLogs]);
-  const activeLog = savedLog ?? matchingLog;
+  // Only treat a log as the "active" one when it belongs to the current sessionKey.
+  const activeLog = shouldUpdateExistingLog(savedLog ?? matchingLog, sessionKey)
+    ? (savedLog ?? matchingLog)
+    : null;
 
   // setup_incomplete: direct to diagnostics
   if (step2.state === "setup_incomplete") {

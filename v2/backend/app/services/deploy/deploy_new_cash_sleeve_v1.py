@@ -135,6 +135,20 @@ def apply_new_cash_sleeve_sizing(
             allocations[k] = 0.0
             suppressed_below_min += 1
 
+    # Distribute leftover whole dollars from floor rounding to selected BUY rows
+    # in deterministic top-ranked-first order. Skips suppressed/zero slots so a
+    # below-min-trade row never gets resurrected by residual distribution.
+    # Never adds beyond floor(cash_to_deploy) so total <= cash_to_deploy holds.
+    nonzero_slots = [k for k in range(selected_count) if allocations[k] > 0]
+    if nonzero_slots:
+        current_total = sum(allocations)
+        leftover = int(math.floor(max(cash_to_deploy - current_total, 0.0)))
+        i = 0
+        while leftover > 0:
+            allocations[nonzero_slots[i % len(nonzero_slots)]] += 1.0
+            leftover -= 1
+            i += 1
+
     total_allocated = 0.0
     for k, idx in enumerate(selected_indices):
         amount = allocations[k]

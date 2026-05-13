@@ -36,7 +36,7 @@ import { DeployV3TargetSetupPanel } from "@/components/cards/DeployV3TargetSetup
 import { mapDeployV3ToStep2 } from "@/lib/deploy-v3-step2-mapper";
 import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, dedupeDecisionLogsForDisplay, deriveExecutionStatus, getDecisionLogSessionKey } from "@/lib/decision-log";
 import type { ExecutionStatus } from "@/lib/decision-log";
-import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, getDeployV3LogSessionKey, isManualDecisionRow, isSessionKeyChanged, shouldUpdateExistingLog } from "@/lib/deploy-v3-decision-log";
+import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, classifyActualAction, computeJournalTotals, getDeployV3LogSessionKey, isManualDecisionRow, isSessionKeyChanged, shouldUpdateExistingLog } from "@/lib/deploy-v3-decision-log";
 import type { DeployV3PlanResponse } from "@/lib/api";
 
 const MAX_REASON_WORDS = 12;
@@ -2143,12 +2143,16 @@ function DecisionHistoryEntry({
   const aiDeployNow = Number(ctx.deploy_now_amount) || deployNow;
   const aiReserve = Number(ctx.reserve_amount) || 0;
   const actuals = log.actual_decisions ?? [];
-  const actualTotal = actuals.reduce((s, r) => s + (Number(r.actual_amount) || 0), 0);
-  const actualReserve = totalDeposit > 0 ? totalDeposit - actualTotal : aiReserve;
+  // Action-aware journal totals: separates BUY spend from TRIM/SELL activity
+  // and never produces negative "reserve". Planned cash input prefers the
+  // deploy_now_amount (Deploy v3 cash_to_deploy) over the entered amount so
+  // amount-aware plans compare against the actual sleeve budget.
+  const plannedCashInput = aiDeployNow > 0 ? aiDeployNow : totalDeposit;
+  const journal = computeJournalTotals(actuals, plannedCashInput);
   const status = deriveExecutionStatus(actuals, aiDeployNow);
 
   const tickerActuals = actuals
-    .filter((r) => r.ticker && (r.actual_amount ?? 0) > 0)
+    .filter((r) => r.ticker && (r.actual_amount ?? 0) > 0 && classifyActualAction(r.actual_action) !== "skipped")
     .map((r) => `${r.ticker} ${formatCurrency(r.actual_amount ?? 0)}`)
     .join(" · ");
 
@@ -2182,8 +2186,28 @@ function DecisionHistoryEntry({
         </div>
         <div className="flex gap-3 mt-1 text-[11px] text-text-muted flex-wrap">
           {totalDeposit > 0 && <span>Deposit {formatCurrency(totalDeposit)}</span>}
-          <span>Invested <span className="text-text-primary font-semibold">{formatCurrency(actualTotal)}</span></span>
-          <span>Reserved <span className="text-text-primary">{formatCurrency(actualReserve)}</span></span>
+          <span data-testid="v3-history-buy-total">
+            BUY spend <span className="text-text-primary font-semibold">{formatCurrency(journal.actualBuyTotal)}</span>
+          </span>
+          {journal.manualBuyTotal > 0 && (
+            <span data-testid="v3-history-manual-buy-total" className="text-amber-300">
+              incl. manual {formatCurrency(journal.manualBuyTotal)}
+            </span>
+          )}
+          {journal.trimSellTotal > 0 && (
+            <span data-testid="v3-history-trim-sell-total">
+              Trim/Sell <span className="text-text-primary">{formatCurrency(journal.trimSellTotal)}</span>
+            </span>
+          )}
+          {journal.overPlannedAmount > 0 ? (
+            <span data-testid="v3-history-over-planned" className="text-amber-300">
+              Over planned by {formatCurrency(journal.overPlannedAmount)}
+            </span>
+          ) : journal.unallocatedAmount > 0 ? (
+            <span data-testid="v3-history-unallocated">
+              Unallocated <span className="text-text-primary">{formatCurrency(journal.unallocatedAmount)}</span>
+            </span>
+          ) : null}
         </div>
         {tickerActuals && (
           <p className="text-[11px] text-text-secondary mt-1 truncate">{tickerActuals}</p>
@@ -2195,24 +2219,44 @@ function DecisionHistoryEntry({
           {/* Ticker detail */}
           {actuals.filter((r) => r.ticker).length > 0 && (
             <div className="divide-y divide-border border border-border rounded-md overflow-hidden">
-              {actuals.filter((r) => r.ticker).map((r, i) => (
-                <div key={`${r.ticker}-${i}`} className="flex items-center justify-between px-3 py-1.5 text-xs">
-                  <span className="font-mono text-text-primary">{r.ticker}</span>
-                  <div className="flex items-center gap-2 text-text-muted">
-                    <span className={cn(
-                      "text-[10px] px-1 rounded font-semibold",
-                      r.actual_action === "SKIPPED" ? "text-red-300" :
-                      r.actual_action === "REPLACED" ? "text-amber-300" : "text-emerald-300"
-                    )}>{r.actual_action ?? "BOUGHT"}</span>
-                    {(r.actual_amount ?? 0) > 0 && (
-                      <span className="font-mono">{formatCurrency(r.actual_amount ?? 0)}</span>
-                    )}
-                    {r.replacement_ticker && (
-                      <span className="text-amber-300">→ {r.replacement_ticker}</span>
-                    )}
+              {actuals.filter((r) => r.ticker).map((r, i) => {
+                const kind = classifyActualAction(r.actual_action);
+                const manual = isManualDecisionRow(r);
+                const amountCls =
+                  kind === "trim_sell" ? "text-amber-300"
+                  : kind === "skipped" ? "text-text-muted"
+                  : "text-text-muted";
+                const actionCls =
+                  r.actual_action === "SKIPPED" ? "text-red-300"
+                  : r.actual_action === "REPLACED" ? "text-amber-300"
+                  : kind === "trim_sell" ? "text-amber-300"
+                  : kind === "skipped" ? "text-text-muted"
+                  : "text-emerald-300";
+                return (
+                  <div key={`${r.ticker}-${i}`} className="flex items-center justify-between px-3 py-1.5 text-xs">
+                    <div className="flex items-center gap-1.5">
+                      <span className="font-mono text-text-primary">{r.ticker}</span>
+                      {manual && (
+                        <span
+                          data-testid={`v3-history-manual-badge-${i}`}
+                          className="text-[9px] px-1 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-400/30 font-semibold uppercase tracking-wide"
+                        >
+                          Manual
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-text-muted">
+                      <span className={cn("text-[10px] px-1 rounded font-semibold", actionCls)}>{r.actual_action ?? "BOUGHT"}</span>
+                      {(r.actual_amount ?? 0) > 0 && (
+                        <span className={cn("font-mono", amountCls)}>{formatCurrency(r.actual_amount ?? 0)}</span>
+                      )}
+                      {r.replacement_ticker && (
+                        <span className="text-amber-300">→ {r.replacement_ticker}</span>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           )}
 

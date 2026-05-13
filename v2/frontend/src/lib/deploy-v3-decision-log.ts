@@ -44,10 +44,23 @@ export function buildDeployV3DecisionSnapshot(
   context: DeployV3SnapshotContext,
 ): Record<string, unknown> {
   const isAmountAware = step2.amount_aware === true;
+  // Mirror BUY rows into normalized_tickers so the existing decision-log
+  // evaluation backend (which reads recommendation_snapshot.normalized_tickers)
+  // can compute baseline/return math for Deploy v3 logs. Only BUY rows are
+  // mirrored — TRIM/SELL are not BUY investments and must not inflate
+  // performance math; manual user-added rows live in actual_decisions only.
+  const normalizedTickers = step2.items
+    .filter((item) => item.action === "BUY")
+    .map((item) => ({
+      ticker: item.ticker,
+      action: item.action,
+      amount: item.dollar_amount ?? 0,
+    }));
   return {
     source: "deploy_v3",
     created_at_client: new Date().toISOString(),
     amount_aware: isAmountAware,
+    normalized_tickers: normalizedTickers,
     ...(isAmountAware
       ? {
           amount_awareness_note:
@@ -173,4 +186,95 @@ export function shouldUpdateExistingLog(
 /** True when the active Deploy v3 sessionKey transitioned to a new plan/session. */
 export function isSessionKeyChanged(previous: string | null, next: string): boolean {
   return previous !== null && previous !== next;
+}
+
+// ── Journal accounting (history display) ─────────────────────────────────────
+
+/**
+ * Classify an actual_action label for journal accounting purposes.
+ *  - "buy": cash deployed into a position (BOUGHT, PARTIAL, REPLACED)
+ *  - "trim_sell": cash raised / exposure reduced (TRIMMED, SOLD)
+ *  - "skipped": no journal effect (SKIPPED, WATCHED, HELD)
+ */
+export type JournalActionKind = "buy" | "trim_sell" | "skipped" | "other";
+
+export function classifyActualAction(action: string | undefined | null): JournalActionKind {
+  const a = (action ?? "").toUpperCase();
+  if (a === "BOUGHT" || a === "PARTIAL" || a === "REPLACED") return "buy";
+  if (a === "TRIMMED" || a === "SOLD") return "trim_sell";
+  if (a === "SKIPPED" || a === "WATCHED" || a === "HELD") return "skipped";
+  return "other";
+}
+
+export interface JournalTotals {
+  plannedCashInput: number;
+  recommendedBuyTotal: number;
+  actualBuyTotal: number;
+  manualBuyTotal: number;
+  trimSellTotal: number;
+  /** Total dollar value of rows with no journal effect (SKIPPED/WATCHED/HELD). */
+  skippedTotal: number;
+  /** > 0 when actualBuyTotal exceeds plannedCashInput. */
+  overPlannedAmount: number;
+  /** > 0 when actualBuyTotal is below plannedCashInput. */
+  unallocatedAmount: number;
+}
+
+/**
+ * Compute journal totals from actual decision rows.
+ *
+ * - actualBuyTotal counts BOUGHT/PARTIAL/REPLACED rows only.
+ * - manualBuyTotal is the subset of actualBuyTotal contributed by manual rows.
+ * - trimSellTotal counts TRIMMED/SOLD rows separately as cash raised, NOT
+ *   investment dollars. Manual TRIM/SELL rows are included here, not in BUY.
+ * - SKIPPED/WATCHED/HELD never count as invested.
+ * - recommendedBuyTotal sums the original recommended_amount for rows whose
+ *   recommended_action was BUY (the planned BUY budget).
+ *
+ * When plannedCashInput > 0:
+ *  - overPlannedAmount surfaces when BUYs exceed planned cash input.
+ *  - unallocatedAmount surfaces when BUYs are below planned cash input.
+ *  Never both. Negative "reserve" is never produced.
+ */
+export function computeJournalTotals(
+  rows: ActualDecisionItem[],
+  plannedCashInput: number,
+): JournalTotals {
+  let recommendedBuyTotal = 0;
+  let actualBuyTotal = 0;
+  let manualBuyTotal = 0;
+  let trimSellTotal = 0;
+  let skippedTotal = 0;
+
+  for (const row of rows) {
+    const actual = Number(row.actual_amount) || 0;
+    const recommended = Number(row.recommended_amount) || 0;
+    const recAction = (row.recommended_action ?? "").toUpperCase();
+    if (recAction === "BUY") recommendedBuyTotal += recommended;
+
+    const kind = classifyActualAction(row.actual_action);
+    if (kind === "buy") {
+      actualBuyTotal += actual;
+      if (isManualDecisionRow(row)) manualBuyTotal += actual;
+    } else if (kind === "trim_sell") {
+      trimSellTotal += actual;
+    } else if (kind === "skipped") {
+      skippedTotal += actual;
+    }
+  }
+
+  const planned = plannedCashInput > 0 ? plannedCashInput : 0;
+  const overPlannedAmount = planned > 0 && actualBuyTotal > planned ? actualBuyTotal - planned : 0;
+  const unallocatedAmount = planned > 0 && actualBuyTotal < planned ? planned - actualBuyTotal : 0;
+
+  return {
+    plannedCashInput: planned,
+    recommendedBuyTotal,
+    actualBuyTotal,
+    manualBuyTotal,
+    trimSellTotal,
+    skippedTotal,
+    overPlannedAmount,
+    unallocatedAmount,
+  };
 }

@@ -463,3 +463,127 @@ class TestCurrentGapModePreserved:
         bundle = _make_bundle(10_000.0, {"A": (6_000.0, 0.6), "B": (4_000.0, 0.4)})
         plan = build_deploy_plan(inputs, sizing_bundle=bundle, cash_to_deploy=0)
         assert plan.new_cash_residual_usd is None
+
+
+class TestRoundingResidualDistribution:
+    """Stage 2.8: leftover whole dollars from floor rounding are distributed
+    deterministically to selected BUY rows so total BUY == cash_to_deploy when
+    no guardrail prevents it."""
+
+    def test_1500_split_uneven_weights_distributes_residual_to_match_budget(self):
+        # Weights that would floor-round to a residual without redistribution:
+        # 5 tickers with weights 0.21/0.20/0.20/0.20/0.19 summing to 1.0.
+        # 1500*0.21=315, 1500*0.20=300, 1500*0.19=285 → exact, no residual.
+        # Use weights that produce floor residue: 0.225/0.205/0.205/0.205/0.16
+        items = [_make_buy_item(t) for t in ["A", "B", "C", "D", "E"]]
+        bundle = _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={
+                "A": (0.0, 0.225),
+                "B": (0.0, 0.205),
+                "C": (0.0, 0.205),
+                "D": (0.0, 0.205),
+                "E": (0.0, 0.160),
+            },
+        )
+        out, residual, _ = apply_new_cash_sleeve_sizing(
+            bundle=bundle, items=items, cash_to_deploy=1500.0
+        )
+        sized = [i for i in out if i.recommended_dollar_amount is not None]
+        total = sum(i.recommended_dollar_amount for i in sized)
+        # Residual distribution closes any whole-dollar gap.
+        assert total == pytest.approx(1500.0)
+        assert residual == pytest.approx(0.0)
+
+    def test_residual_distribution_never_exceeds_cash_to_deploy(self):
+        # Regression: total BUY dollars must never exceed cash_to_deploy.
+        items = [_make_buy_item(t) for t in ["A", "B", "C", "D", "E", "F", "G"]]
+        bundle = _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={t: (0.0, 1.0 / 7) for t in ["A", "B", "C", "D", "E", "F", "G"]},
+        )
+        out, _, _ = apply_new_cash_sleeve_sizing(
+            bundle=bundle, items=items, cash_to_deploy=1500.0
+        )
+        total = sum(
+            i.recommended_dollar_amount
+            for i in out
+            if i.recommended_dollar_amount is not None
+        )
+        assert total <= 1500.0
+
+    def test_residual_distribution_only_to_selected_buys(self):
+        # HOLD/TRIM/SELL must never receive leftover whole dollars from BUY sleeve.
+        items = [
+            _make_buy_item("BUY1"),
+            _make_buy_item("BUY2"),
+            DeployPlanItem(
+                ticker="HLD",
+                intel_action="HOLD",
+                actionability_status=DeployActionabilityStatus.NOT_ACTIONABLE_HOLD,
+                action_source=DeployActionSource.INTEL_V3,
+                intel_snapshot_id="s",
+                intel_run_id="r",
+                plan_status=DeployPlanStatus.HOLD_ONLY,
+            ),
+            DeployPlanItem(
+                ticker="TRM",
+                intel_action="TRIM",
+                actionability_status=DeployActionabilityStatus.ACTIONABLE_CANDIDATE,
+                action_source=DeployActionSource.INTEL_V3,
+                intel_snapshot_id="s",
+                intel_run_id="r",
+                plan_status=DeployPlanStatus.SCAFFOLD,
+                recommended_dollar_amount=1234.0,
+            ),
+        ]
+        bundle = _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={
+                "BUY1": (0.0, 0.33),
+                "BUY2": (0.0, 0.33),
+                "HLD": (3_000.0, 0.20),
+                "TRM": (5_000.0, 0.14),
+            },
+        )
+        out, _, _ = apply_new_cash_sleeve_sizing(
+            bundle=bundle, items=items, cash_to_deploy=1501.0
+        )
+        out_by = {i.ticker: i for i in out}
+        # BUYs share the budget (residual distributed).
+        assert out_by["BUY1"].recommended_dollar_amount is not None
+        assert out_by["BUY2"].recommended_dollar_amount is not None
+        buy_total = (out_by["BUY1"].recommended_dollar_amount or 0.0) + (out_by["BUY2"].recommended_dollar_amount or 0.0)
+        assert buy_total <= 1501.0
+        # HOLD untouched. TRIM amount preserved (current-gap value), never gets BUY dollars.
+        assert out_by["HLD"].recommended_dollar_amount is None
+        assert out_by["TRM"].recommended_dollar_amount == 1234.0
+
+    def test_residual_distribution_skips_below_min_trade_rows(self):
+        # Below-min slots are zeroed; residual must NOT resurrect them.
+        items = [_make_buy_item(t) for t in ["A", "B", "C"]]
+        # 1500 split would be ~500 each; set min trade so A passes and B,C fail.
+        bundle = _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={"A": (0.0, 0.90), "B": (0.0, 0.05), "C": (0.0, 0.05)},
+            minimum_trade_usd=200.0,
+        )
+        out, _, _ = apply_new_cash_sleeve_sizing(
+            bundle=bundle, items=items, cash_to_deploy=1500.0
+        )
+        out_by = {i.ticker: i for i in out}
+        # A gets full budget (B/C below min are zeroed). Residual flows back to A.
+        assert (out_by["A"].recommended_dollar_amount or 0.0) <= 1500.0
+        # B and C are not resurrected by residual distribution.
+        assert out_by["B"].recommended_dollar_amount is None
+        assert out_by["C"].recommended_dollar_amount is None
+
+    def test_zero_cash_distribution_is_noop(self):
+        items = [_make_buy_item("A")]
+        bundle = _make_bundle(10_000.0, {"A": (0.0, 1.0)})
+        out, residual, reason = apply_new_cash_sleeve_sizing(
+            bundle=bundle, items=items, cash_to_deploy=0.0
+        )
+        assert out == items
+        assert residual == 0.0
+        assert reason is None

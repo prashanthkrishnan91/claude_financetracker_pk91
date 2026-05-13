@@ -257,7 +257,14 @@ export default function DepositsPage() {
   const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount, portfolioBalance);
   const { data: outcomes } = useDecisionOutcomes();
   const { data: readinessDiagnostic } = useDeployV3Readiness();
-  const { data: v3Plan, isLoading: isV3Loading } = useDeployV3Plan(true, amount);
+  // Only enable when amount is a valid positive number — prevents the deposits
+  // page from subscribing to the base no-amount query key (["deploy_v3","plan"])
+  // and receiving the stale no-cash result cached by DeployV3Panel.
+  const deployV3Enabled = Number.isFinite(amount) && amount > 0;
+  const { data: v3Plan, isLoading: isV3Loading } = useDeployV3Plan(
+    deployV3Enabled,
+    deployV3Enabled ? amount : undefined,
+  );
 
   // Map Deploy v3 plan → Step 2 display. Falls back gracefully when unavailable.
   const step2 = mapDeployV3ToStep2(v3Plan ?? null);

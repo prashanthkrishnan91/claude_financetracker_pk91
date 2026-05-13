@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 2 exit validation (re-run)** (Stage 2, active). Stages 2.5A–2.6C complete. Re-validate the full Step 1/2/3 flow in production with a real amount (e.g. $900): Step 2 should now show BUY recommendations in amount-aware mode (not "no moves"), Step 3 logs the correct amount-aware Deploy v3 decision. Readiness gates must be green. Do not exit Stage 2 or move to Stage 3 until this path is validated.
+- **Stage 2 exit validation (re-run)** (Stage 2, active). Stages 2.5A–2.6C complete + production amount-propagation patch applied. Re-validate the full Step 1/2/3 flow in production with a real amount (e.g. $900): Step 2 must show BUY recommendations in amount-aware mode (not "no moves"), Step 3 must log the correct amount-aware Deploy v3 decision. Expected production log: `deploy_v3.plan ... amount_aware=True cash_to_deploy=900`. Readiness gates must be green. Do not exit Stage 2 or move to Stage 3 until this path is validated.
 
 ## Next
 

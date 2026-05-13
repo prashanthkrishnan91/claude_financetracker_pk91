@@ -257,7 +257,7 @@ export default function DepositsPage() {
   const { data: deployPlan, isLoading: isPlanLoading } = useDepositPlan(amount, portfolioBalance);
   const { data: outcomes } = useDecisionOutcomes();
   const { data: readinessDiagnostic } = useDeployV3Readiness();
-  const { data: v3Plan, isLoading: isV3Loading } = useDeployV3Plan();
+  const { data: v3Plan, isLoading: isV3Loading } = useDeployV3Plan(true, amount);
 
   // Map Deploy v3 plan → Step 2 display. Falls back gracefully when unavailable.
   const step2 = mapDeployV3ToStep2(v3Plan ?? null);
@@ -414,12 +414,17 @@ function DeployV3Step2Section({
         {step2.state === "has_moves" && (
           <div className="space-y-3">
             <p className="text-xs text-text-secondary">
-              Deploy v3 found target-driven moves from your certified portfolio model.
+              {step2.amount_aware && step2.cash_to_deploy != null
+                ? `Deploy v3 sized this plan for your ${formatCurrency(step2.cash_to_deploy)} cash input.`
+                : "Deploy v3 found target-driven moves from your certified portfolio model."}
             </p>
             <DeployV3AllocationTable items={step2.items} />
             <p className="text-[11px] text-text-muted leading-snug">
               <span className="font-semibold text-text-secondary">Decision authority:</span>{" "}
               Intel v3 policy owns all Buy / Hold / Trim / Sell decisions. Pending tax and guardrail review.
+              {step2.amount_aware && (
+                <> Sized for user-entered planning capital — not broker-verified cash.</>
+              )}
             </p>
           </div>
         )}
@@ -592,7 +597,10 @@ function DeployV3DecisionLogSection({
 
       <p className="text-xs text-text-muted">
         Record that you reviewed and acted on these Deploy v3 moves.{" "}
-        <span className="text-text-secondary">Step 1 amount ({formatCurrency(amount)}) is your context — not a Deploy v3 sizing input.</span>
+        {step2.amount_aware
+          ? <span className="text-text-secondary">Sized for {formatCurrency(amount)} user-entered planning capital (not broker-verified cash).</span>
+          : <span className="text-text-secondary">Step 1 amount ({formatCurrency(amount)}) is your context — not a Deploy v3 sizing input.</span>
+        }
       </p>
 
       {/* Editable actual-decision rows */}

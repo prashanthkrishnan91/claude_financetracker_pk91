@@ -38,6 +38,10 @@ export interface Step2Result {
   exact_dollar_ready: boolean;
   /** True when this result came from the Deploy v3 pipeline (not legacy). */
   is_deploy_v3: boolean;
+  /** True when backend confirms amount-aware new-cash sizing mode (source.amount_aware === true). */
+  amount_aware?: boolean;
+  /** The cash_to_deploy amount when amount_aware is true. Not broker-verified cash. */
+  cash_to_deploy?: number | null;
 }
 
 // ── Action helpers ────────────────────────────────────────────────────────────
@@ -79,6 +83,14 @@ export function derivePlainReason(item: DeployV3PlanItem): string {
   return item.intel_action.charAt(0) + item.intel_action.slice(1).toLowerCase();
 }
 
+// ── Amount-aware BUY cap ──────────────────────────────────────────────────────
+
+/**
+ * Maximum BUY items surfaced in Step 2 when amount-aware (new-cash mode).
+ * Produces a focused 3–5 recommendation set; never fabricates to satisfy count.
+ */
+const MAX_AMOUNT_AWARE_BUY_ITEMS = 5;
+
 // ── Main mapper ───────────────────────────────────────────────────────────────
 
 /**
@@ -93,13 +105,22 @@ export function mapDeployV3ToStep2(
   }
 
   const exactReady = plan.source?.exact_dollar_ready === true;
+  const amountAware = plan.source?.amount_aware === true;
+  const cashToDeploy = plan.source?.cash_to_deploy ?? null;
 
   if (!exactReady) {
-    return { state: "setup_incomplete", items: [], exact_dollar_ready: false, is_deploy_v3: true };
+    return {
+      state: "setup_incomplete",
+      items: [],
+      exact_dollar_ready: false,
+      is_deploy_v3: true,
+      amount_aware: amountAware,
+      cash_to_deploy: cashToDeploy,
+    };
   }
 
-  // Map all items; only surface actionable moves in Step 2
-  const moveItems: Step2Item[] = plan.items
+  // Map all items; only surface actionable moves in Step 2, sorted by dollar_amount desc.
+  const sortedMoveItems: Step2Item[] = plan.items
     .filter(isActionableMove)
     .map((item) => ({
       ticker: item.ticker,
@@ -110,11 +131,39 @@ export function mapDeployV3ToStep2(
     }))
     .sort((a, b) => (b.dollar_amount ?? 0) - (a.dollar_amount ?? 0));
 
-  if (moveItems.length === 0) {
-    return { state: "no_moves", items: [], exact_dollar_ready: true, is_deploy_v3: true };
+  // In amount-aware mode cap BUY items to MAX_AMOUNT_AWARE_BUY_ITEMS.
+  // HOLD/TRIM/SELL are never pulled into the BUY list to satisfy the count.
+  let moveItems: Step2Item[] = sortedMoveItems;
+  if (amountAware) {
+    let buyCount = 0;
+    moveItems = sortedMoveItems.filter((item) => {
+      if (item.action === "BUY") {
+        buyCount += 1;
+        return buyCount <= MAX_AMOUNT_AWARE_BUY_ITEMS;
+      }
+      return true;
+    });
   }
 
-  return { state: "has_moves", items: moveItems, exact_dollar_ready: true, is_deploy_v3: true };
+  if (moveItems.length === 0) {
+    return {
+      state: "no_moves",
+      items: [],
+      exact_dollar_ready: true,
+      is_deploy_v3: true,
+      amount_aware: amountAware,
+      cash_to_deploy: cashToDeploy,
+    };
+  }
+
+  return {
+    state: "has_moves",
+    items: moveItems,
+    exact_dollar_ready: true,
+    is_deploy_v3: true,
+    amount_aware: amountAware,
+    cash_to_deploy: cashToDeploy,
+  };
 }
 
 /** Returns the "not_available" sentinel when Deploy v3 is not usable. */
@@ -123,4 +172,6 @@ export const STEP2_NOT_AVAILABLE: Step2Result = {
   items: [],
   exact_dollar_ready: false,
   is_deploy_v3: true,
+  amount_aware: false,
+  cash_to_deploy: null,
 };

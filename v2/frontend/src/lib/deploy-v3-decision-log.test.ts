@@ -313,3 +313,88 @@ describe("Deploy v3 create API payload includes notes and source", () => {
     expect(snap.source).toBe("deploy_v3");
   });
 });
+
+// ── Amount-aware snapshot (Stage 2.6C) ───────────────────────────────────────
+
+describe("buildDeployV3DecisionSnapshot — amount-aware (Stage 2.6C)", () => {
+  function makeStep2AmountAware(overrides: Partial<Step2Result> = {}): Pick<Step2Result, "state" | "items" | "exact_dollar_ready" | "amount_aware" | "cash_to_deploy"> {
+    return {
+      state: "has_moves",
+      items: [makeItem()],
+      exact_dollar_ready: true,
+      amount_aware: true,
+      cash_to_deploy: 900,
+      ...overrides,
+    };
+  }
+
+  it("amount_aware field is true when step2.amount_aware is true", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware(), V3_META, CTX);
+    expect(snap.amount_aware).toBe(true);
+  });
+
+  it("amount_aware field is false when step2.amount_aware is not set", () => {
+    const step2 = makeStep2AmountAware({ amount_aware: undefined });
+    const snap = buildDeployV3DecisionSnapshot(step2, V3_META, CTX);
+    expect(snap.amount_aware).toBe(false);
+  });
+
+  it("amount_aware field is false when step2.amount_aware is false", () => {
+    const step2 = makeStep2AmountAware({ amount_aware: false });
+    const snap = buildDeployV3DecisionSnapshot(step2, V3_META, CTX);
+    expect(snap.amount_aware).toBe(false);
+  });
+
+  it("when amount_aware=true: amount_awareness_note mentions planning capital not broker-verified", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware(), V3_META, CTX);
+    const note = snap.amount_awareness_note as string;
+    expect(typeof note).toBe("string");
+    expect(note.toLowerCase()).toContain("planning capital");
+    expect(note.toLowerCase()).toContain("not broker-verified");
+  });
+
+  it("when amount_aware=true: cash_to_deploy is recorded in snapshot", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware({ cash_to_deploy: 900 }), V3_META, CTX);
+    expect(snap.cash_to_deploy).toBe(900);
+  });
+
+  it("when amount_aware=true: cash_to_deploy null is propagated", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware({ cash_to_deploy: null }), V3_META, CTX);
+    expect(snap.cash_to_deploy).toBeNull();
+  });
+
+  it("when amount_aware=false: original not-amount-aware note is used and no cash_to_deploy key", () => {
+    const step2 = makeStep2AmountAware({ amount_aware: false });
+    const snap = buildDeployV3DecisionSnapshot(step2, V3_META, CTX);
+    const note = snap.amount_awareness_note as string;
+    expect(note.toLowerCase()).toContain("not amount-aware");
+    expect("cash_to_deploy" in snap).toBe(false);
+  });
+
+  it("visible_step2_items still logged exactly in amount-aware mode", () => {
+    const items = [
+      makeItem({ ticker: "AAPL", dollar_amount: 500 }),
+      makeItem({ ticker: "MSFT", action: "TRIM", dollar_amount: 200 }),
+    ];
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware({ items }), V3_META, CTX);
+    const logged = snap.visible_step2_items as Array<{ ticker: string; dollar_amount: number | null }>;
+    expect(logged).toHaveLength(2);
+    expect(logged[0].ticker).toBe("AAPL");
+    expect(logged[0].dollar_amount).toBe(500);
+    expect(logged[1].ticker).toBe("MSFT");
+    expect(logged[1].dollar_amount).toBe(200);
+  });
+
+  it("entered_amount_context is always recorded regardless of amount_aware", () => {
+    const snapAware = buildDeployV3DecisionSnapshot(makeStep2AmountAware(), V3_META, { entered_amount: 900 });
+    expect(snapAware.entered_amount_context).toBe(900);
+
+    const snapNotAware = buildDeployV3DecisionSnapshot(makeStep2AmountAware({ amount_aware: false }), V3_META, { entered_amount: 500 });
+    expect(snapNotAware.entered_amount_context).toBe(500);
+  });
+
+  it("source is always deploy_v3 in amount-aware mode", () => {
+    const snap = buildDeployV3DecisionSnapshot(makeStep2AmountAware(), V3_META, CTX);
+    expect(snap.source).toBe("deploy_v3");
+  });
+});

@@ -27,6 +27,7 @@ A non-positive computed delta suppresses output (no negative or zero trade amoun
 """
 from __future__ import annotations
 
+import math
 from dataclasses import replace
 from typing import Optional
 
@@ -54,6 +55,7 @@ def compute_dollar_amount_for_item(
     bundle: DeploySizingInputBundle,
     item: DeployPlanItem,
     price_per_share_usd: Optional[float] = None,
+    cash_to_deploy: Optional[float] = None,
 ) -> DeployPlanItem:
     """Return a new DeployPlanItem with exact-dollar fields populated if eligible.
 
@@ -71,6 +73,10 @@ def compute_dollar_amount_for_item(
 
     price_per_share_usd: certified price per share for this ticker. If None or
       non-positive, estimated_share_quantity is suppressed (left null).
+
+    cash_to_deploy: when provided and > 0, enables new-cash mode for BUY items.
+      BUY target dollars are sized relative to (portfolio_value + cash_to_deploy)
+      rather than portfolio_value alone. TRIM/SELL always use current-gap math.
     """
     # Gate 1: exact_dollar_ready.
     if not bundle.exact_dollar_ready:
@@ -94,7 +100,8 @@ def compute_dollar_amount_for_item(
     if ta is None or not ta.is_ready_for_math:
         return item
 
-    target_dollars = ta.target_weight * portfolio_value  # type: ignore[operator]
+    # Current-gap target dollars (used for TRIM/SELL and non-amount-aware BUY).
+    current_gap_target_dollars = ta.target_weight * portfolio_value  # type: ignore[operator]
 
     # Retrieve current position value. Position must be explicitly present and certified.
     # An absent position is treated as missing certified data — suppress rather than
@@ -105,11 +112,18 @@ def compute_dollar_amount_for_item(
     current_dollars = pos.current_market_value_usd if pos.current_market_value_usd is not None else 0.0
 
     # Compute action-specific delta.
-    if intel_action == _BUY_ACTION:
-        delta = target_dollars - current_dollars
+    new_cash_mode_active = intel_action == _BUY_ACTION and cash_to_deploy and cash_to_deploy > 0
+    if new_cash_mode_active:
+        # New-cash mode: size toward target fraction of (portfolio + new cash).
+        # This produces positive BUY deltas even when current weights already match
+        # targets, because the post-cash portfolio is larger.
+        effective_portfolio = portfolio_value + cash_to_deploy  # type: ignore[operator]
+        delta = ta.target_weight * effective_portfolio - current_dollars  # type: ignore[operator]
+    elif intel_action == _BUY_ACTION:
+        delta = current_gap_target_dollars - current_dollars
     else:
-        # TRIM or SELL
-        delta = current_dollars - target_dollars
+        # TRIM or SELL — always current-gap math.
+        delta = current_dollars - current_gap_target_dollars
 
     # Gate 4: suppress non-positive deltas (nothing to trade).
     if delta <= 0:
@@ -144,10 +158,62 @@ def compute_dollar_amount_for_item(
     )
 
 
+def cap_buy_amounts_to_cash(
+    items: list[DeployPlanItem],
+    cash_to_deploy: float,
+    minimum_trade_usd: Optional[float] = None,
+    rounding_policy: str = "WHOLE_DOLLAR",
+) -> list[DeployPlanItem]:
+    """Pro-rate BUY ACTIONABLE_CANDIDATE dollar amounts to fit within cash_to_deploy.
+
+    Only BUY items with a positive recommended_dollar_amount are considered.
+    If total BUY <= cash_to_deploy, returns items unchanged.
+    When total exceeds budget: pro-rates each item, re-applies rounding, and suppresses
+    items that fall below minimum_trade_usd (sets recommended_dollar_amount to None).
+    Share quantities are cleared after pro-rating (price unavailable at this stage).
+    Returns a new list. No item is mutated.
+    """
+    if cash_to_deploy <= 0:
+        return items
+
+    buy_indices = [
+        i for i, it in enumerate(items)
+        if it.intel_action.upper() == _BUY_ACTION
+        and it.actionability_status == DeployActionabilityStatus.ACTIONABLE_CANDIDATE
+        and it.recommended_dollar_amount is not None
+        and it.recommended_dollar_amount > 0
+    ]
+
+    if not buy_indices:
+        return items
+
+    total_buy = sum(items[i].recommended_dollar_amount for i in buy_indices)  # type: ignore[misc]
+    if total_buy <= cash_to_deploy:
+        return items
+
+    scale = cash_to_deploy / total_buy
+    new_items = list(items)
+    for i in buy_indices:
+        it = items[i]
+        raw_scaled = it.recommended_dollar_amount * scale  # type: ignore[operator]
+        # Floor-round after scaling: guarantees sum(capped) ≤ cash_to_deploy
+        # regardless of rounding_policy.  Independent round-up would push the
+        # total back above budget (e.g. 3 × $67 scaled to 66.67 each rounds to
+        # $67 × 3 = $201 > $200 budget).
+        capped = float(math.floor(raw_scaled))
+        if capped <= 0 or (minimum_trade_usd is not None and capped < minimum_trade_usd):
+            new_items[i] = replace(it, recommended_dollar_amount=None, estimated_share_quantity=None)
+        else:
+            new_items[i] = replace(it, recommended_dollar_amount=capped, estimated_share_quantity=None)
+
+    return new_items
+
+
 def apply_dollar_math_to_plan_items(
     bundle: DeploySizingInputBundle,
     items: list[DeployPlanItem],
     price_per_share_map: Optional[dict[str, float]] = None,
+    cash_to_deploy: Optional[float] = None,
 ) -> list[DeployPlanItem]:
     """Apply exact-dollar math to a list of DeployPlanItems.
 
@@ -156,6 +222,10 @@ def apply_dollar_math_to_plan_items(
 
     price_per_share_map: optional mapping of ticker → certified price per share.
       Tickers absent from the map will have share quantity suppressed (null).
+
+    cash_to_deploy: when provided and > 0, enables new-cash mode BUY sizing.
+      Passed through to compute_dollar_amount_for_item. Cap must be applied
+      separately via cap_buy_amounts_to_cash after this call.
     """
     if price_per_share_map is None:
         price_per_share_map = {}
@@ -165,6 +235,7 @@ def apply_dollar_math_to_plan_items(
             bundle=bundle,
             item=item,
             price_per_share_usd=price_per_share_map.get(item.ticker),
+            cash_to_deploy=cash_to_deploy,
         )
         for item in items
     ]

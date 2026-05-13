@@ -268,6 +268,205 @@ describe("STEP2_NOT_AVAILABLE sentinel", () => {
   it("is_deploy_v3 is true", () => expect(STEP2_NOT_AVAILABLE.is_deploy_v3).toBe(true));
 });
 
+// ── Stage 2.6C: Amount-aware mapper contract tests ────────────────────────────
+
+describe("mapDeployV3ToStep2 — amount-aware (Stage 2.6C)", () => {
+  function makeAmountAwarePlan(items: DeployV3PlanItem[], cashToDeploy = 900): DeployV3PlanResponse {
+    return makePlan({
+      items,
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Amount-aware new-cash planning.",
+        exact_dollar_ready: true,
+        amount_aware: true,
+        cash_to_deploy: cashToDeploy,
+        sizing_mode: "new_cash",
+      },
+    });
+  }
+
+  it("amount_aware=true propagates from plan.source to Step2Result", () => {
+    const plan = makeAmountAwarePlan([makeItem()]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.amount_aware).toBe(true);
+  });
+
+  it("cash_to_deploy propagates from plan.source to Step2Result", () => {
+    const plan = makeAmountAwarePlan([makeItem()], 900);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.cash_to_deploy).toBe(900);
+  });
+
+  it("amount_aware=false when source.amount_aware is absent", () => {
+    const plan = makePlan({ items: [makeItem()] });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.amount_aware).toBeFalsy();
+  });
+
+  it("has_moves state when amount-aware plan has BUY items with positive dollar amounts", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("has_moves");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0].dollar_amount).toBe(540);
+  });
+
+  it("amount-aware Step2Result no longer reports no_moves when BUY items have positive dollars", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).not.toBe("no_moves");
+  });
+
+  it("HOLD items still not surfaced as moves in amount-aware mode", () => {
+    const plan = makeAmountAwarePlan([
+      makeItem({ ticker: "AAPL", intel_action: "BUY", recommended_dollar_amount: 540, final_actionability_status: "actionable_pending_tax" }),
+      makeItem({ ticker: "MSFT", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+    ]);
+    const result = mapDeployV3ToStep2(plan);
+    const tickers = result.items.map((i) => i.ticker);
+    expect(tickers).not.toContain("MSFT");
+    expect(tickers).toContain("AAPL");
+  });
+
+  it("exact_dollar_ready remains true in amount-aware mode", () => {
+    const plan = makeAmountAwarePlan([makeItem()]);
+    expect(mapDeployV3ToStep2(plan).exact_dollar_ready).toBe(true);
+  });
+
+  it("cash_to_deploy is null when source has no cash_to_deploy", () => {
+    const plan = makePlan({ items: [makeItem()] });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.cash_to_deploy).toBeNull();
+  });
+
+  it("amount_aware and cash_to_deploy present in setup_incomplete state", () => {
+    const plan = makePlan({
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: false,
+        note: "not ready",
+        exact_dollar_ready: false,
+        amount_aware: false,
+        cash_to_deploy: null,
+        sizing_mode: "current_gap",
+      },
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.state).toBe("setup_incomplete");
+    expect(result.amount_aware).toBe(false);
+  });
+});
+
+// ── Amount-aware BUY cap (Stage 2.6C patch) ──────────────────────────────────
+
+describe("mapDeployV3ToStep2 — amount-aware BUY recommendation cap", () => {
+  /** Build a plan with n BUY items at descending dollar amounts */
+  function makeBuyPlanWithN(
+    count: number,
+    amountAware = true,
+  ): DeployV3PlanResponse {
+    const items = Array.from({ length: count }, (_, i) =>
+      makeItem({
+        ticker: `TK${String(i).padStart(2, "0")}`,
+        intel_action: "BUY",
+        recommended_dollar_amount: (count - i) * 100, // descending: 1000, 900, …
+        final_actionability_status: "actionable_pending_tax",
+      }),
+    );
+    return makePlan({
+      items,
+      source: {
+        intel_source: "INTEL_V3",
+        sizing_bundle_provided: true,
+        note: "Amount-aware.",
+        exact_dollar_ready: true,
+        amount_aware: amountAware,
+        cash_to_deploy: 5_000,
+        sizing_mode: "new_cash",
+      },
+    });
+  }
+
+  it("amount-aware mode with 10 BUY candidates returns exactly 5 BUY items", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(10));
+    const buyItems = result.items.filter((i) => i.action === "BUY");
+    expect(buyItems).toHaveLength(5);
+    expect(result.state).toBe("has_moves");
+  });
+
+  it("top-5 BUY items by dollar_amount are shown (highest amounts)", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(10));
+    const buyAmounts = result.items
+      .filter((i) => i.action === "BUY")
+      .map((i) => i.dollar_amount as number);
+    // Highest 5: 1000, 900, 800, 700, 600
+    expect(buyAmounts).toEqual([1000, 900, 800, 700, 600]);
+  });
+
+  it("ordering is deterministic: higher dollar_amount items appear first", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(5));
+    const amounts = result.items.map((i) => i.dollar_amount as number);
+    for (let i = 0; i < amounts.length - 1; i++) {
+      expect(amounts[i]).toBeGreaterThanOrEqual(amounts[i + 1]);
+    }
+  });
+
+  it("fewer than 3 BUY items: shows only 1 without fabricating", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(1));
+    const buyItems = result.items.filter((i) => i.action === "BUY");
+    expect(buyItems).toHaveLength(1);
+  });
+
+  it("fewer than 3 BUY items: shows only 2 without fabricating", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(2));
+    const buyItems = result.items.filter((i) => i.action === "BUY");
+    expect(buyItems).toHaveLength(2);
+  });
+
+  it("HOLD items are never included even in amount-aware mode with fewer than 5 BUYs", () => {
+    const plan = makePlan({
+      items: [
+        makeItem({ ticker: "BUY1", intel_action: "BUY", recommended_dollar_amount: 100, final_actionability_status: "actionable_pending_tax" }),
+        makeItem({ ticker: "H001", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+        makeItem({ ticker: "H002", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+        makeItem({ ticker: "H003", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+        makeItem({ ticker: "H004", intel_action: "HOLD", recommended_dollar_amount: null as any, final_actionability_status: "informational_hold" }),
+      ],
+      source: { intel_source: "INTEL_V3", sizing_bundle_provided: true, note: "", exact_dollar_ready: true, amount_aware: true, cash_to_deploy: 100 },
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.items.filter((i) => i.action === "BUY")).toHaveLength(1);
+    expect(result.items.filter((i) => i.action === "HOLD")).toHaveLength(0);
+  });
+
+  it("TRIM items are not subject to the BUY cap in amount-aware mode", () => {
+    const items: DeployV3PlanItem[] = [
+      ...Array.from({ length: 6 }, (_, i) =>
+        makeItem({ ticker: `BUY${i}`, intel_action: "BUY", recommended_dollar_amount: 100 + i, final_actionability_status: "actionable_pending_tax" }),
+      ),
+      makeItem({ ticker: "TRIM1", intel_action: "TRIM", recommended_dollar_amount: 200, final_actionability_status: "actionable_pending_tax" }),
+    ];
+    const plan = makePlan({
+      items,
+      source: { intel_source: "INTEL_V3", sizing_bundle_provided: true, note: "", exact_dollar_ready: true, amount_aware: true, cash_to_deploy: 1000 },
+    });
+    const result = mapDeployV3ToStep2(plan);
+    expect(result.items.filter((i) => i.action === "BUY")).toHaveLength(5);
+    expect(result.items.filter((i) => i.action === "TRIM")).toHaveLength(1);
+  });
+
+  it("current-gap mode (amount_aware=false) shows all items without the 5-cap", () => {
+    const result = mapDeployV3ToStep2(makeBuyPlanWithN(10, false));
+    const buyItems = result.items.filter((i) => i.action === "BUY");
+    expect(buyItems).toHaveLength(10);
+  });
+});
+
 // ── No legacy endpoint usage ──────────────────────────────────────────────────
 
 describe("Deploy v3 Step 2 does not use legacy endpoints", () => {

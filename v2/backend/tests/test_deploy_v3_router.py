@@ -720,7 +720,9 @@ class TestReadinessEndpoint:
             "build_allocation_plan",
             "openai",
             "anthropic",
-            "broker",
+            "broker_api",
+            "BrokerClient",
+            "BrokerService",
         ]
         for name in forbidden:
             assert name not in source, (

@@ -11,10 +11,15 @@ suppressed by the minimum trade threshold.
 
 Policy:
   - Eligible universe: ACTIONABLE_CANDIDATE BUY items only. HOLD/TRIM/SELL
-    never receive new-cash BUY dollars.
-  - Selection: deterministic input-order ranking, capped at
-    MAX_RECOMMENDATIONS. When fewer than MAX_RECOMMENDATIONS eligible BUYs
-    exist, return only those — no fabrication.
+    never receive new-cash BUY dollars. Weak/missing/stale/blocked candidates
+    are already suppressed upstream by the translation layer and therefore
+    never reach this ranker.
+  - Selection: deterministic ranking on Intel conviction (HIGH > MEDIUM > LOW)
+    then evidence band (STRONG > OK/PARTIAL > THIN), with ticker A→Z as a
+    stable tie-breaker. Capped at MAX_RECOMMENDATIONS. When fewer than
+    MAX_RECOMMENDATIONS eligible BUYs exist, return only those — no
+    fabrication. Each selected item gets a plain-English selection_reason
+    derived from its existing Intel labels (no invented confidence).
   - Allocation: distribute cash_to_deploy across selected items using saved
     target_weight as a relative-weight guardrail. Fall back to equal weight
     when target_weight is missing or sums to zero. Saved target allocation is
@@ -41,6 +46,54 @@ from .deploy_sizing_contracts import DeploySizingInputBundle
 MAX_RECOMMENDATIONS = 5
 
 _BUY_ACTION = "BUY"
+
+# Deterministic ranking keys for eligible BUY candidates. Higher number = stronger
+# signal. Unknown labels collapse to the weakest bucket so missing data never
+# wins over present data. These read Intel's existing conviction and evidence
+# labels — Deploy never invents new evidence.
+_CONVICTION_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+_EVIDENCE_RANK = {"STRONG": 3, "OK": 2, "PARTIAL": 2, "THIN": 1}
+
+
+def _rank_key(item: DeployPlanItem) -> tuple:
+    """Sort key for eligible BUY candidates.
+
+    Order: higher conviction first, then stronger evidence, then ticker A→Z as a
+    stable deterministic tie-breaker. Ticker tie-break guarantees identical
+    inputs in any order produce the same top-N.
+    """
+    conviction = _CONVICTION_RANK.get(item.intel_conviction.upper(), 0)
+    evidence = _EVIDENCE_RANK.get(item.intel_evidence_band.upper(), 0)
+    return (-conviction, -evidence, item.ticker)
+
+
+def _selection_reason(item: DeployPlanItem) -> str:
+    """Plain-English explanation of why this BUY made the top-N cut.
+
+    Uses Intel's conviction and evidence labels verbatim, translated to plain
+    English. No invented confidence. When both labels are missing or unknown,
+    returns a candid "no evidence detail available" string.
+    """
+    conviction = item.intel_conviction.upper()
+    evidence = item.intel_evidence_band.upper()
+    conv_phrase = {
+        "HIGH": "high-conviction BUY",
+        "MEDIUM": "medium-conviction BUY",
+        "LOW": "low-conviction BUY",
+    }.get(conviction)
+    ev_phrase = {
+        "STRONG": "strong evidence",
+        "OK": "supported evidence",
+        "PARTIAL": "partial evidence",
+        "THIN": "thin evidence",
+    }.get(evidence)
+    if conv_phrase and ev_phrase:
+        return f"{conv_phrase} with {ev_phrase} from Intel v3."
+    if conv_phrase:
+        return f"{conv_phrase} from Intel v3."
+    if ev_phrase:
+        return f"BUY with {ev_phrase} from Intel v3."
+    return "Selected from Intel v3 BUY candidates (no evidence detail available)."
 
 
 def apply_new_cash_sleeve_sizing(
@@ -100,7 +153,12 @@ def apply_new_cash_sleeve_sizing(
             cash_constraint_status="not_evaluated_yet",
         )
 
-    selected_indices = eligible_indices[:max_recommendations]
+    # Rank eligible BUYs by Intel conviction + evidence band so the top-N is
+    # explainable rather than dependent on snapshot card order. Python's sort is
+    # stable; the ticker tie-breaker inside _rank_key keeps identical-signal ties
+    # deterministic across re-orderings of the input list.
+    ranked_indices = sorted(eligible_indices, key=lambda i: _rank_key(items[i]))
+    selected_indices = ranked_indices[:max_recommendations]
     selected_count = len(selected_indices)
 
     # Relative weights using saved target allocation as a guardrail. Fall back
@@ -164,6 +222,7 @@ def apply_new_cash_sleeve_sizing(
             rounding_policy=rounding_policy,
             target_allocation_status="evaluated",
             cash_constraint_status="not_evaluated_yet",
+            selection_reason=_selection_reason(it),
         )
         total_allocated += amount
 

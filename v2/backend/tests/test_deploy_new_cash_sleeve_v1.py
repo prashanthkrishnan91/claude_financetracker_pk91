@@ -114,7 +114,11 @@ def _make_input(
     )
 
 
-def _make_buy_item(ticker: str) -> DeployPlanItem:
+def _make_buy_item(
+    ticker: str,
+    conviction: str = "MEDIUM",
+    evidence_band: str = "OK",
+) -> DeployPlanItem:
     return DeployPlanItem(
         ticker=ticker,
         intel_action="BUY",
@@ -123,6 +127,8 @@ def _make_buy_item(ticker: str) -> DeployPlanItem:
         intel_snapshot_id="snap1",
         intel_run_id="run1",
         plan_status=DeployPlanStatus.SCAFFOLD,
+        intel_conviction=conviction,
+        intel_evidence_band=evidence_band,
     )
 
 
@@ -181,8 +187,9 @@ class TestSleeveUnit:
         )
         sized = [i for i in out if i.recommended_dollar_amount is not None]
         assert len(sized) == MAX_RECOMMENDATIONS
-        # First MAX_RECOMMENDATIONS tickers in input order get the allocation.
-        assert {i.ticker for i in sized} == set(tickers[:MAX_RECOMMENDATIONS])
+        # Equal conviction/evidence → ticker A→Z tie-break selects the first
+        # MAX_RECOMMENDATIONS alphabetical tickers.
+        assert {i.ticker for i in sized} == set(sorted(tickers)[:MAX_RECOMMENDATIONS])
         assert sum(i.recommended_dollar_amount for i in sized) <= 900.0
 
     def test_few_candidates_returns_only_those(self):
@@ -578,6 +585,112 @@ class TestRoundingResidualDistribution:
         assert out_by["B"].recommended_dollar_amount is None
         assert out_by["C"].recommended_dollar_amount is None
 
+class TestSleeveRanking:
+    """Stage 2.9: top-N selection is explained by Intel conviction + evidence,
+    not by snapshot card order."""
+
+    def _ten_buy_mix(self):
+        # 10 BUY candidates with mixed conviction/evidence. The strongest five
+        # by (conviction, evidence) should win regardless of input order.
+        return [
+            _make_buy_item("AAA", conviction="LOW", evidence_band="THIN"),
+            _make_buy_item("HHI", conviction="HIGH", evidence_band="STRONG"),
+            _make_buy_item("MMM", conviction="MEDIUM", evidence_band="OK"),
+            _make_buy_item("HHJ", conviction="HIGH", evidence_band="STRONG"),
+            _make_buy_item("LLL", conviction="LOW", evidence_band="PARTIAL"),
+            _make_buy_item("HHK", conviction="HIGH", evidence_band="OK"),
+            _make_buy_item("MMN", conviction="MEDIUM", evidence_band="OK"),
+            _make_buy_item("HHL", conviction="HIGH", evidence_band="STRONG"),
+            _make_buy_item("MMO", conviction="MEDIUM", evidence_band="PARTIAL"),
+            _make_buy_item("HHM", conviction="HIGH", evidence_band="STRONG"),
+        ]
+
+    def _equal_bundle(self, tickers):
+        return _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={t: (0.0, 1.0 / len(tickers)) for t in tickers},
+        )
+
+    def test_top_five_picked_by_conviction_then_evidence(self):
+        items = self._ten_buy_mix()
+        bundle = self._equal_bundle([i.ticker for i in items])
+        out, _, _ = apply_new_cash_sleeve_sizing(bundle, items, 1500.0)
+        sized = {i.ticker for i in out if i.recommended_dollar_amount is not None}
+        # HIGH/STRONG (HHI, HHJ, HHL, HHM) all selected; fifth slot is the next
+        # strongest — HIGH/OK (HHK). No MEDIUM/LOW item beats a HIGH.
+        assert sized == {"HHI", "HHJ", "HHL", "HHM", "HHK"}
+
+    def test_top_five_stable_when_input_order_changes(self):
+        items_a = self._ten_buy_mix()
+        items_b = list(reversed(items_a))
+        bundle = self._equal_bundle([i.ticker for i in items_a])
+        out_a, _, _ = apply_new_cash_sleeve_sizing(bundle, items_a, 1500.0)
+        out_b, _, _ = apply_new_cash_sleeve_sizing(bundle, items_b, 1500.0)
+        picked_a = {i.ticker for i in out_a if i.recommended_dollar_amount is not None}
+        picked_b = {i.ticker for i in out_b if i.recommended_dollar_amount is not None}
+        assert picked_a == picked_b
+
+    def test_selection_reason_populated_for_selected_buys(self):
+        items = self._ten_buy_mix()
+        bundle = self._equal_bundle([i.ticker for i in items])
+        out, _, _ = apply_new_cash_sleeve_sizing(bundle, items, 1500.0)
+        for it in out:
+            if it.recommended_dollar_amount is not None:
+                assert it.selection_reason != "none"
+                # Plain English — no raw metric jargon / underscored keys.
+                assert "_" not in it.selection_reason
+                assert "Intel v3" in it.selection_reason
+            else:
+                assert it.selection_reason == "none"
+
+    def test_weak_stale_missing_never_promoted_over_strong(self):
+        # Build via build_deploy_plan so the translation suppression layer runs.
+        # 4 strong actionable BUYs + 4 suppressed BUYs (thin/stale/weak/blocked).
+        # All 4 strong items must be selected; no suppressed item is promoted.
+        from app.services.deploy.deploy_contracts import DeployActionSource as _ASrc
+        from app.services.deploy.deploy_contracts import DeployPlanInput as _Inp
+
+        def inp(t, conv, band, **flags):
+            return _Inp(
+                ticker=t,
+                intel_action="BUY",
+                intel_conviction=conv,
+                intel_evidence_band=band,
+                intel_snapshot_id="snap1",
+                intel_run_id="run1",
+                has_missing_evidence=flags.get("missing", False),
+                has_stale_evidence=flags.get("stale", False),
+                has_weak_evidence=flags.get("weak", False),
+                is_blocked=flags.get("blocked", False),
+                price_context_label=None,
+                action_source=_ASrc.INTEL_V3,
+            )
+
+        inputs = [
+            inp("WEAK", "LOW", "THIN", weak=True, missing=True),
+            inp("STRONG1", "HIGH", "STRONG"),
+            inp("STALE", "HIGH", "STRONG", stale=True),
+            inp("STRONG2", "HIGH", "STRONG"),
+            inp("MISSING", "MEDIUM", "THIN", missing=True),
+            inp("STRONG3", "HIGH", "OK"),
+            inp("BLOCKED", "HIGH", "STRONG", blocked=True),
+            inp("STRONG4", "MEDIUM", "OK"),
+        ]
+        bundle = _make_bundle(
+            portfolio_value=10_000.0,
+            tickers_current_and_target={i.ticker: (0.0, 1.0 / 8) for i in inputs},
+        )
+        plan = build_deploy_plan(inputs, sizing_bundle=bundle, cash_to_deploy=1500.0)
+        sized = {
+            i.ticker for i in plan.items
+            if i.recommended_dollar_amount is not None and i.intel_action == "BUY"
+        }
+        # All four non-suppressed BUYs are sized; suppressed tickers never appear.
+        assert {"STRONG1", "STRONG2", "STRONG3", "STRONG4"} <= sized
+        assert sized.isdisjoint({"WEAK", "STALE", "MISSING", "BLOCKED"})
+
+
+class TestSleeveZeroCashNoop:
     def test_zero_cash_distribution_is_noop(self):
         items = [_make_buy_item("A")]
         bundle = _make_bundle(10_000.0, {"A": (0.0, 1.0)})

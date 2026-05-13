@@ -19,12 +19,15 @@ import {
   buildDeployV3InitialActualDecisions,
   buildDeployV3ManualRow,
   buildDeployV3SessionKey,
+  classifyActualAction,
+  computeJournalTotals,
   getDeployV3LogSessionKey,
   isManualDecisionRow,
   isSessionKeyChanged,
   mapActionToActualDefault,
   shouldUpdateExistingLog,
 } from "@/lib/deploy-v3-decision-log";
+import type { ActualDecisionItem } from "@/lib/api";
 import type { DecisionMemoryLog } from "@/lib/api";
 import type { Step2Item, Step2Result } from "@/lib/deploy-v3-step2-mapper";
 
@@ -657,6 +660,162 @@ describe("Stage 2.7 patch: session-local actual decisions (no manual leak)", () 
     // Critically: when user is on the $1500 session, the previous $900 log must
     // NOT be the update target — that would overwrite it with $1500-session edits.
     expect(shouldUpdateExistingLog(previousLog, key1500)).toBe(false);
+  });
+});
+
+// ── Stage 2.8: Journal accounting helpers ───────────────────────────────────
+
+describe("classifyActualAction (Stage 2.8)", () => {
+  it("maps BOUGHT/PARTIAL/REPLACED → buy", () => {
+    expect(classifyActualAction("BOUGHT")).toBe("buy");
+    expect(classifyActualAction("PARTIAL")).toBe("buy");
+    expect(classifyActualAction("REPLACED")).toBe("buy");
+  });
+
+  it("maps TRIMMED/SOLD → trim_sell", () => {
+    expect(classifyActualAction("TRIMMED")).toBe("trim_sell");
+    expect(classifyActualAction("SOLD")).toBe("trim_sell");
+  });
+
+  it("maps SKIPPED/WATCHED/HELD → skipped (no journal effect)", () => {
+    expect(classifyActualAction("SKIPPED")).toBe("skipped");
+    expect(classifyActualAction("WATCHED")).toBe("skipped");
+    expect(classifyActualAction("HELD")).toBe("skipped");
+  });
+
+  it("unknown/missing actions → other", () => {
+    expect(classifyActualAction(undefined)).toBe("other");
+    expect(classifyActualAction("")).toBe("other");
+    expect(classifyActualAction("RANDOM")).toBe("other");
+  });
+});
+
+describe("computeJournalTotals (Stage 2.8)", () => {
+  function row(over: Partial<ActualDecisionItem>): ActualDecisionItem {
+    return { ticker: "X", actual_action: "BOUGHT", actual_amount: 0, ...over };
+  }
+
+  it("$900 plan + manual NVDA BUY $100 + TRIM does not produce negative reserve", () => {
+    // Acceptance scenario from the prompt: previously surfaced "Invested $1,186 / Reserved -$286".
+    const recommended = buildDeployV3InitialActualDecisions([
+      { ticker: "NFLX", action: "BUY", dollar_amount: 245, reason: "", final_actionability_status: "actionable_pending_tax" },
+      { ticker: "META", action: "BUY", dollar_amount: 229, reason: "", final_actionability_status: "actionable_pending_tax" },
+      { ticker: "GOOGL", action: "BUY", dollar_amount: 203, reason: "", final_actionability_status: "actionable_pending_tax" },
+      { ticker: "TSM", action: "BUY", dollar_amount: 160, reason: "", final_actionability_status: "actionable_pending_tax" },
+      { ticker: "CRM", action: "BUY", dollar_amount: 61, reason: "", final_actionability_status: "actionable_pending_tax" },
+    ]);
+    const manualBuy = buildDeployV3ManualRow("NVDA", "BUY", 100);
+    const manualTrim = buildDeployV3ManualRow("AAPL", "TRIM", 188);
+    const rows = [...recommended, manualBuy, manualTrim];
+
+    const totals = computeJournalTotals(rows, 900);
+    // BUY spend = recommended (898) + manual NVDA (100) = 998 — over plan by 98.
+    expect(totals.actualBuyTotal).toBe(998);
+    expect(totals.manualBuyTotal).toBe(100);
+    // TRIM is separate, NOT folded into BUY.
+    expect(totals.trimSellTotal).toBe(188);
+    // Over plan surfaces, no negative reserve.
+    expect(totals.overPlannedAmount).toBe(98);
+    expect(totals.unallocatedAmount).toBe(0);
+  });
+
+  it("skipped/watched rows do not count as invested", () => {
+    const rows: ActualDecisionItem[] = [
+      row({ ticker: "AAPL", actual_action: "BOUGHT", actual_amount: 500, recommended_action: "BUY", recommended_amount: 500 }),
+      row({ ticker: "MSFT", actual_action: "SKIPPED", actual_amount: 300, recommended_action: "BUY", recommended_amount: 300 }),
+      row({ ticker: "GOOG", actual_action: "WATCHED", actual_amount: 200, recommended_action: "BUY", recommended_amount: 200 }),
+      row({ ticker: "TSLA", actual_action: "HELD", actual_amount: 150, recommended_action: "BUY", recommended_amount: 150 }),
+    ];
+    const totals = computeJournalTotals(rows, 900);
+    expect(totals.actualBuyTotal).toBe(500);
+    expect(totals.skippedTotal).toBe(650);
+    expect(totals.unallocatedAmount).toBe(400);
+    expect(totals.overPlannedAmount).toBe(0);
+  });
+
+  it("manual BUY row is labelled and counted in manual + actual BUY totals", () => {
+    const rows: ActualDecisionItem[] = [
+      row({ ticker: "AAPL", actual_action: "BOUGHT", actual_amount: 600, recommended_action: "BUY", recommended_amount: 600 }),
+      buildDeployV3ManualRow("NVDA", "BUY", 100),
+    ];
+    expect(isManualDecisionRow(rows[1])).toBe(true);
+    const totals = computeJournalTotals(rows, 900);
+    expect(totals.actualBuyTotal).toBe(700);
+    expect(totals.manualBuyTotal).toBe(100);
+    expect(totals.unallocatedAmount).toBe(200);
+  });
+
+  it("under-plan BUYs surface unallocated, never negative reserve", () => {
+    const rows: ActualDecisionItem[] = [
+      row({ ticker: "AAPL", actual_action: "BOUGHT", actual_amount: 400, recommended_action: "BUY", recommended_amount: 500 }),
+    ];
+    const totals = computeJournalTotals(rows, 900);
+    expect(totals.actualBuyTotal).toBe(400);
+    expect(totals.unallocatedAmount).toBe(500);
+    expect(totals.overPlannedAmount).toBe(0);
+  });
+
+  it("recommendedBuyTotal sums only rows whose recommended_action is BUY", () => {
+    const rows: ActualDecisionItem[] = [
+      row({ ticker: "AAPL", actual_action: "BOUGHT", actual_amount: 500, recommended_action: "BUY", recommended_amount: 500 }),
+      row({ ticker: "MSFT", actual_action: "TRIMMED", actual_amount: 200, recommended_action: "TRIM", recommended_amount: 200 }),
+    ];
+    const totals = computeJournalTotals(rows, 500);
+    expect(totals.recommendedBuyTotal).toBe(500);
+    expect(totals.trimSellTotal).toBe(200);
+  });
+});
+
+// ── Stage 2.8: Deploy v3 evaluation compatibility ─────────────────────────────
+
+describe("Deploy v3 snapshot exposes normalized_tickers for evaluation (Stage 2.8)", () => {
+  it("BUY items are mirrored to normalized_tickers (amount, action, ticker) so existing backend evaluation works", () => {
+    const items = [
+      { ticker: "NFLX", action: "BUY" as const, dollar_amount: 245, reason: "", final_actionability_status: "actionable_pending_tax" as const },
+      { ticker: "META", action: "BUY" as const, dollar_amount: 229, reason: "", final_actionability_status: "actionable_pending_tax" as const },
+      { ticker: "AAPL", action: "TRIM" as const, dollar_amount: 100, reason: "", final_actionability_status: "actionable_pending_tax" as const },
+    ];
+    const snap = buildDeployV3DecisionSnapshot(
+      { state: "has_moves", items, exact_dollar_ready: true, amount_aware: true, cash_to_deploy: 900 },
+      { snapshot_id: "snap-x", run_id: "run-x", plan_status: "SCAFFOLD" },
+      { entered_amount: 900 },
+    );
+    const normalized = snap.normalized_tickers as Array<{ ticker: string; action: string; amount: number }>;
+    expect(normalized).toHaveLength(2);
+    expect(normalized.map((n) => n.ticker).sort()).toEqual(["META", "NFLX"]);
+    // TRIM rows must not inflate evaluation as if they were BUY investments.
+    expect(normalized.find((n) => n.ticker === "AAPL")).toBeUndefined();
+  });
+
+  it("no BUY items → normalized_tickers is empty (evaluation returns missing_price gracefully)", () => {
+    const snap = buildDeployV3DecisionSnapshot(
+      { state: "no_moves", items: [], exact_dollar_ready: true },
+      null,
+      { entered_amount: 0 },
+    );
+    expect((snap.normalized_tickers as unknown[]).length).toBe(0);
+  });
+});
+
+// ── Stage 2.8: History UI accounting wiring ───────────────────────────────────
+
+describe("DecisionHistoryEntry uses action-aware journal totals (Stage 2.8)", () => {
+  it("page imports computeJournalTotals/classifyActualAction and renders BUY spend separately from Trim/Sell", () => {
+    const fs = require("fs");
+    const path = require("path");
+    const pageSource: string = fs.readFileSync(
+      path.resolve(__dirname, "../app/dashboard/deposits/page.tsx"),
+      "utf8",
+    );
+    expect(pageSource).toContain("computeJournalTotals");
+    expect(pageSource).toContain("classifyActualAction");
+    expect(pageSource).toContain("v3-history-buy-total");
+    expect(pageSource).toContain("v3-history-trim-sell-total");
+    // No "Reserved" path that can show a negative value.
+    expect(pageSource).toContain("v3-history-over-planned");
+    expect(pageSource).toContain("v3-history-unallocated");
+    // The old single-aggregate "actualReserve" branch must be gone.
+    expect(pageSource).not.toContain("const actualReserve = totalDeposit > 0 ? totalDeposit - actualTotal : aiReserve");
   });
 });
 

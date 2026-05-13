@@ -1184,6 +1184,25 @@ export interface IntelV3Snapshot {
   diagnostics?: IntelV3SnapshotDiagnostics;
 }
 
+export type IntelV3RunMode =
+  | "FAST_CERTIFIED"
+  | "REFRESH_THEN_RUN"
+  | "PARTIAL_CERTIFIED"
+  | "BLOCKED_UNCERTIFIED";
+
+export type IntelV3TrustStatus = "trusted" | "partial_trust" | "uncertified";
+
+export interface IntelV3SourceFreshness {
+  state: "FRESH" | "STALE" | "HARD_STALE" | "MISSING" | "UNKNOWN";
+  is_critical: boolean;
+  fresh_count: number;
+  stale_count: number;
+  hard_stale_count: number;
+  missing_count: number;
+  oldest_age_hours: number | null;
+  newest_age_hours: number | null;
+}
+
 export interface IntelV3SnapshotDiagnostics {
   evidence_mode: string;
   attempted_llm_calls: number;
@@ -1203,6 +1222,28 @@ export interface IntelV3SnapshotDiagnostics {
   changed_decision_count: number;
   changed_decisions: Array<{ ticker: string; previous_action: string; current_action: string }>;
   unchanged_decision_count: number;
+  // Stage 3.0b — Evidence Refresh Orchestrator additions (optional for back-compat).
+  run_mode?: IntelV3RunMode;
+  trust_status?: IntelV3TrustStatus;
+  banner_copy?: string;
+  source_freshness?: Record<string, IntelV3SourceFreshness>;
+  stale_source_count?: number;
+  hard_stale_source_count?: number;
+  missing_source_count?: number;
+  refresh_targets?: string[];
+  blocked_sources?: string[];
+  refreshed_source_count?: number;
+  failed_refresh_count?: number;
+  attempted_provider_calls?: number;
+  successful_provider_calls?: number;
+  failed_provider_calls?: number;
+  successful_llm_calls?: number;
+  failed_llm_calls?: number;
+  refresh_duration_ms?: number;
+  analyst_refresh_supported?: boolean;
+  analyst_refresh_status?: string;
+  budget_exhausted?: boolean;
+  orchestrator_notes?: string[];
 }
 
 export interface IntelV3RunResult {

@@ -164,9 +164,44 @@ def build_diagnostics(
     evidence_stats: dict[str, Any],
     current_snapshot: dict[str, Any],
     previous_snapshot: Optional[dict[str, Any]],
+    refresh_diagnostics: Optional[dict[str, Any]] = None,
     now: Optional[datetime] = None,
 ) -> dict[str, Any]:
-    """Combine freshness metadata and decision diff into a single diagnostics dict."""
+    """Combine freshness metadata, decision diff, and refresh orchestrator state.
+
+    `refresh_diagnostics` is the dict produced by
+    `EvidenceRefreshOrchestrator.run().to_diagnostics_dict()`. When provided its
+    fields override the legacy `attempted_llm_calls` / `live_provider_calls`
+    placeholders (legacy=0) with the real counts from the orchestrator, and add
+    run_mode / source_freshness / refresh_counts to the snapshot.
+
+    When `refresh_diagnostics` is None the legacy diagnostics shape is preserved
+    so callers that haven't migrated still work.
+    """
     freshness = build_evidence_freshness(evidence_stats, now=now)
     diff = build_decision_diff(current_snapshot, previous_snapshot)
-    return {**freshness, **diff}
+    combined: dict[str, Any] = {**freshness, **diff}
+
+    if refresh_diagnostics:
+        # The orchestrator owns the truth for these fields once it has run.
+        # Map legacy aliases onto the new authoritative values so existing log
+        # parsers / tests still see `attempted_llm_calls` and
+        # `live_provider_calls` populated correctly.
+        combined.update(refresh_diagnostics)
+        combined["attempted_llm_calls"] = refresh_diagnostics.get(
+            "attempted_llm_calls", combined.get("attempted_llm_calls", 0)
+        )
+        # `live_provider_calls` is the legacy alias for successful provider
+        # calls — keep both keys in the diagnostics dict to avoid breaking
+        # earlier parsers.
+        combined["live_provider_calls"] = refresh_diagnostics.get(
+            "successful_provider_calls", combined.get("live_provider_calls", 0)
+        )
+        # The classic `evidence_mode` field becomes informative — when the
+        # orchestrator ran we set it to the post-refresh certified mode so
+        # downstream UI never reports "deterministic_policy_over_persisted_evidence"
+        # for a run that actually attempted refresh.
+        run_mode = refresh_diagnostics.get("run_mode")
+        if run_mode:
+            combined["evidence_mode"] = f"deterministic_policy_over_{run_mode.lower()}_evidence"
+    return combined

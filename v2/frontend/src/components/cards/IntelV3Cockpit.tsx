@@ -20,7 +20,12 @@ import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
 import { Spinner } from "@/components/ui/Spinner";
-import type { IntelV3HeldCard, IntelV3Action, IntelV3Snapshot } from "@/lib/api";
+import type {
+  IntelV3HeldCard,
+  IntelV3Action,
+  IntelV3Snapshot,
+  IntelV3RunMode,
+} from "@/lib/api";
 
 // LOCKED: Intel v3 visible filter contract is ALL/BUY/HOLD/TRIM/SELL only.
 // Radar labels (WATCH/AVOID) must never appear here.
@@ -67,6 +72,30 @@ function _formatAgeHours(hours: number | null | undefined): string | null {
   return `${(hours / 24).toFixed(1)} days`;
 }
 
+// Plain-English run-mode labels — Stage 3.0b banner contract.
+// No raw metric jargon. No diagnostic keys. No green/trusted unless
+// FAST_CERTIFIED or successful REFRESH_THEN_RUN.
+const RUN_MODE_LABEL: Record<IntelV3RunMode, string> = {
+  FAST_CERTIFIED:      "Fresh certified",
+  REFRESH_THEN_RUN:    "Refreshed stale evidence before running",
+  PARTIAL_CERTIFIED:   "Partial: some evidence stale or unavailable",
+  BLOCKED_UNCERTIFIED: "Blocked: current evidence unavailable",
+};
+
+function _runModeTone(runMode: IntelV3RunMode | undefined, trust: string | undefined) {
+  // Only show trusted/positive tone when fully certified or a successful refresh.
+  if (runMode === "FAST_CERTIFIED" || (runMode === "REFRESH_THEN_RUN" && trust === "trusted")) {
+    return "bg-green-500/10 border-green-500/30 text-green-400";
+  }
+  if (runMode === "PARTIAL_CERTIFIED") {
+    return "bg-amber-500/10 border-amber-500/30 text-amber-400";
+  }
+  if (runMode === "BLOCKED_UNCERTIFIED") {
+    return "bg-red-500/10 border-red-500/30 text-red-400";
+  }
+  return "bg-surface border-border text-text-muted";
+}
+
 function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
   const diag = snapshot.diagnostics;
   if (!diag) return null;
@@ -75,7 +104,7 @@ function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
   const changedPart = `Decisions changed: ${diag.changed_decision_count}.`;
   return (
     <p className="mt-1 text-[11px] text-text-muted">
-      Intel v3 refreshed deterministic policy using stored evidence. {oldestPart} {changedPart}
+      {oldestPart} {changedPart}
     </p>
   );
 }
@@ -92,23 +121,32 @@ function SnapshotBanner({
   runFailed?: boolean;
 }) {
   const date = new Date(snapshot.generated_at).toLocaleString();
+  const diag = snapshot.diagnostics;
+  const runMode = diag?.run_mode;
+  const trust = diag?.trust_status;
+  // Stage 3.0b: when run_mode is present, prefer the plain-English label.
+  // Otherwise fall back to the legacy stale/run-failed tone.
+  const tone = runMode
+    ? _runModeTone(runMode, trust)
+    : runFailed
+    ? "bg-red-500/10 border-red-500/30 text-red-400"
+    : isStale || warnings.length > 0
+    ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
+    : "bg-surface border-border text-text-muted";
+
+  const modeLabel = runMode ? RUN_MODE_LABEL[runMode] : null;
+  const headline = runFailed
+    ? "Last run failed — showing previous snapshot."
+    : modeLabel
+    ? `${modeLabel} — last updated ${date}.`
+    : isStale
+    ? `Data may be stale — last updated ${date}.`
+    : `Snapshot as of ${date}`;
+
   return (
-    <div className={cn(
-      "rounded-lg border px-3 py-2 text-xs",
-      runFailed
-        ? "bg-red-500/10 border-red-500/30 text-red-400"
-        : isStale || warnings.length > 0
-        ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
-        : "bg-surface border-border text-text-muted"
-    )}>
+    <div className={cn("rounded-lg border px-3 py-2 text-xs", tone)}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <span>
-          {runFailed
-            ? "Last run failed — showing previous snapshot."
-            : isStale
-            ? `Data may be stale — last updated ${date}.`
-            : `Snapshot as of ${date}`}
-        </span>
+        <span>{headline}</span>
         {warnings.map((w, i) => (
           <span key={i} className="text-amber-400">{w}</span>
         ))}

@@ -460,12 +460,18 @@ export function useIntelV3Snapshot(enabled = true) {
   });
 }
 
-/** Trigger an Intel v3 run. Refetches snapshot after completion. */
+/**
+ * Stage 3.3 — Enqueue an Intel v3 analyst refresh.
+ * POST /intel/v3/run returns a refresh-enqueue status, NOT a snapshot.
+ * On success, invalidates the snapshot query so the UI immediately re-fetches.
+ * The cockpit polls the snapshot until snapshot_source=worker_certified appears.
+ */
 export function useRunIntelV3() {
   const qc = useQueryClient();
   return useMutation<IntelV3RunResult>({
     mutationFn: api.intelV3.runV3,
     onSuccess: () => {
+      // Immediately refetch the snapshot (still shows old certified snapshot if any).
       qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
     },
   });

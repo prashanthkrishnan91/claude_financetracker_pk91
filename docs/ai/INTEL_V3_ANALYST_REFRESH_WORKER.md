@@ -142,8 +142,9 @@ empty queue.
 | Log key | Emitted by | Proves |
 |---|---|---|
 | `intel_v3.analyst_refresh_requested` | seam | request identified stale analyst evidence, zero in-request LLM calls |
-| `intel_v3.analyst_refresh_job_enqueued` | job store | durable job(s) created/touched (idempotent) |
+| `intel_v3.analyst_refresh_job_enqueued` | job store | durable job(s) `created`/`touched`/`made_due`/`reopened`; `failed_not_due_before`; `statuses_before`/`statuses_after`; `next_retry_min`/`max` |
 | `intel_v3.analyst_refresh_job_claimed` | job store | worker claimed a due job |
+| `full_portfolio_analyst_refresh.post_run_readback` | full-portfolio adapter | post-run readback: `agent_run_status` (completed/failed/no_data/raised), `insights_by_run_id`, `recs_by_run_id`, `resolved_ticker_count`, `missing_reason_breakdown`, `other_recent_run_ids` — pinpoints whether evidence is persisted-but-unreadable vs the orchestrator never persisting |
 | `intel_v3.analyst_refresh_worker_tickers_selected` | worker | owned tickers selected + prioritised |
 | `intel_v3.analyst_refresh_worker_ticker_succeeded` | worker | a ticker's evidence was refreshed + persisted |
 | `intel_v3.analyst_refresh_worker_ticker_failed` | worker | a ticker stayed stale + its next retry time |

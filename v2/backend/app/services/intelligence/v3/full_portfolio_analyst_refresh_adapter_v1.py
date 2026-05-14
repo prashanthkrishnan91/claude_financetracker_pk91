@@ -66,6 +66,21 @@ from .analyst_refresh_adapter_v1 import (
 logger = logging.getLogger(__name__)
 
 
+# ── Agent-run-outcome-aware failure reasons (Stage 3.2) ──────────────────────
+#
+# When the worker's post-run readback finds no durable rows, the generic
+# ``no_post_run_evidence`` hides WHY the orchestrator did not persist: did
+# ``orch.run()`` raise, return ``no_data`` (empty portfolio), end ``failed``, or
+# end ``completed`` and still write nothing? These reasons reconcile the
+# readback against the actual ``AgentPipelineResult`` so a single production log
+# line pinpoints the orchestrator stage that needs the durable fix — instead of
+# every non-success collapsing to one opaque bucket.
+REASON_AGENT_RUN_RAISED = "agent_run_raised"
+REASON_AGENT_RUN_FAILED = "agent_run_failed"
+REASON_AGENT_RUN_NO_DATA = "agent_run_no_data"
+REASON_AGENT_RUN_COMPLETED_NO_ROWS = "agent_run_completed_no_persisted_rows"
+
+
 # ── Budgets ───────────────────────────────────────────────────────────────────
 
 # Full-portfolio refresh defaults. Sized so a 34-position personal portfolio
@@ -353,11 +368,16 @@ async def default_full_portfolio_agent_orchestrator_backend(
         same full-portfolio LLM phase + persistence that recommendation_engine
         observes in production (recs=34 / cards=34 / insights=34 in ~5s).
       * The post-run read uses ``agent_run_id`` as the durable primary key.
+      * The orchestrator's run outcome (``AgentPipelineResult.status`` or the
+        raised exception) is captured and threaded into the readback so a
+        no-durable-rows ticker gets a SPECIFIC failure reason instead of the
+        opaque generic ``no_post_run_evidence``.
 
-    Returns ``{ticker: row | None}`` for every selected ticker; ``None`` only
-    when neither ``agent_insights`` nor ``recommendations`` returned any row
-    for this refresh's ``agent_run_id`` (and no post-``started_at`` fallback
-    row for the same ticker).
+    Returns ``{ticker: row}`` for every selected ticker — a verified row when
+    durable evidence exists, otherwise an explanatory row whose
+    ``failure_reason`` pinpoints the orchestrator stage (raised / failed /
+    no_data / completed-but-persisted-nothing). Never marks a no-rows ticker a
+    success.
     """
     # Local imports keep the v3 module graph free of agent-stack symbols at
     # import time and allow tests to stub this function out wholesale.
@@ -384,15 +404,29 @@ async def default_full_portfolio_agent_orchestrator_backend(
             # orchestrator runs its full-portfolio analyst phase + persistence.
         )
         run_id = await orch.create_run(tickers=list(selected_tickers))
+        # Capture the orchestrator's run outcome so the post-run readback can
+        # attribute a SPECIFIC failure reason when no durable rows appear —
+        # raised / failed / no_data / completed-but-persisted-nothing — instead
+        # of the opaque generic "no_post_run_evidence".
+        agent_run_status = "unknown"
+        agent_run_error: Optional[str] = None
+        agent_run_insight_count = 0
         try:
-            await orch.run(run_id)
+            result = await orch.run(run_id)
+            agent_run_status = str(getattr(result, "status", "unknown") or "unknown")
+            agent_run_insight_count = len(getattr(result, "insights", None) or [])
         except Exception as run_exc:
+            agent_run_status = "raised"
+            agent_run_error = f"{type(run_exc).__name__}: {run_exc}"[:200]
             logger.warning(
                 "full_portfolio_analyst_refresh.agent_run_failed user_id=%s run_id=%s err=%s",
                 user_id, run_id, run_exc,
             )
         return await _read_post_run_evidence(
             user_id, selected_tickers, run_id, started_at,
+            agent_run_status=agent_run_status,
+            agent_run_error=agent_run_error,
+            agent_run_insight_count=agent_run_insight_count,
         )
     finally:
         try:
@@ -406,6 +440,10 @@ async def _read_post_run_evidence(
     tickers: list[str],
     agent_run_id: str,
     started_at: datetime,
+    *,
+    agent_run_status: str = "unknown",
+    agent_run_error: Optional[str] = None,
+    agent_run_insight_count: int = 0,
 ) -> dict[str, Optional[dict[str, Any]]]:
     """Read per-ticker durable evidence for ``agent_run_id``.
 
@@ -428,11 +466,37 @@ async def _read_post_run_evidence(
     ticker filter is intentionally dropped: ``run_id`` / ``created_at`` already
     scope the result set to this run, and per-ticker mapping below is
     case-insensitive (``_index_latest`` upper-cases its keys).
+
+    ``agent_run_status`` / ``agent_run_error`` come from the just-finished
+    ``AgentPipelineResult`` (or the exception ``orch.run()`` raised). When the
+    readback finds no durable rows, this lets it attribute a SPECIFIC failure
+    reason — ``agent_run_raised`` / ``agent_run_failed`` / ``agent_run_no_data``
+    / ``agent_run_completed_no_persisted_rows`` — instead of the opaque generic
+    ``no_post_run_evidence``, so the orchestrator-side persistence root cause is
+    pinpointed from one production log line. It NEVER turns a no-rows ticker
+    into a success — verification still requires a real ``run_id``-matched row.
     """
     from ....database import get_supabase_client
 
     client = get_supabase_client()
     started_iso = started_at.isoformat()
+
+    def _no_durable_rows_reason() -> str:
+        """Specific reason for a ticker with no durable post-run evidence,
+        derived from the orchestrator's actual run outcome."""
+        if agent_run_status == "raised":
+            return f"{REASON_AGENT_RUN_RAISED}:{agent_run_error or 'unknown'}"
+        if agent_run_status == "failed":
+            return REASON_AGENT_RUN_FAILED
+        if agent_run_status == "no_data":
+            return REASON_AGENT_RUN_NO_DATA
+        if agent_run_status == "completed":
+            # The orchestrator ran end-to-end and reported completed, yet no
+            # agent_insights / recommendations row exists for this run_id —
+            # the persistence step (AgentOrchestrator._persist_sync) is the
+            # durable-fix target.
+            return REASON_AGENT_RUN_COMPLETED_NO_ROWS
+        return REASON_NO_POST_RUN_EVIDENCE
 
     def _read_insights() -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
         run_rows: list[dict[str, Any]] = []
@@ -574,9 +638,26 @@ async def _read_post_run_evidence(
             failure_reason = REASON_FALLBACK_VERDICT
 
         if insight is None and rec is None and not insight_err and not rec_err:
-            out[ticker] = None
-            missing_reason_counts[REASON_NO_POST_RUN_EVIDENCE] = (
-                missing_reason_counts.get(REASON_NO_POST_RUN_EVIDENCE, 0) + 1
+            # No durable post-run evidence for this ticker. Return an
+            # explanatory row (NOT None / NOT a success) carrying a SPECIFIC
+            # reason derived from the orchestrator's actual run outcome, so
+            # the worker log + missing-reason breakdown pinpoint whether the
+            # orchestrator raised, failed, returned no_data, or completed yet
+            # persisted nothing.
+            no_rows_reason = _no_durable_rows_reason()
+            out[ticker] = {
+                "agent_insight_created_at":  None,
+                "recommendation_created_at": None,
+                "used_fallback":             False,
+                "agent_run_id":              agent_run_id,
+                "insight_run_match":         False,
+                "rec_run_match":             False,
+                "insight_row_present":       False,
+                "rec_row_present":           False,
+                "failure_reason":            no_rows_reason,
+            }
+            missing_reason_counts[no_rows_reason] = (
+                missing_reason_counts.get(no_rows_reason, 0) + 1
             )
             continue
 
@@ -604,18 +685,30 @@ async def _read_post_run_evidence(
         if r.get("run_id") and str(r.get("run_id")) != str(agent_run_id)
     })
 
+    # "Resolved" = tickers that actually have a durable post-run row (insight
+    # or recommendation). Every out value is now an explanatory dict, so count
+    # real evidence presence rather than "is not None".
+    resolved_ticker_count = sum(
+        1 for v in out.values()
+        if isinstance(v, dict) and (
+            v.get("insight_row_present") or v.get("rec_row_present")
+        )
+    )
+
     logger.info(
         "full_portfolio_analyst_refresh.post_run_readback user_id=%s run_id=%s "
+        "agent_run_status=%s agent_run_insight_count=%d "
         "selected_ticker_count=%d insights_by_run_id=%d insights_by_created_at=%d "
         "recs_by_run_id=%d recs_by_created_at=%d resolved_ticker_count=%d "
         "missing_reason_breakdown=%s other_recent_run_ids=%s "
-        "insight_read_err=%s rec_read_err=%s",
-        user_id, agent_run_id, len(tickers),
+        "insight_read_err=%s rec_read_err=%s agent_run_error=%s",
+        user_id, agent_run_id, agent_run_status, agent_run_insight_count,
+        len(tickers),
         len(insight_run_rows), len(insight_ticker_rows),
         len(rec_run_rows), len(rec_ticker_rows),
-        sum(1 for v in out.values() if v is not None),
+        resolved_ticker_count,
         missing_reason_counts,
         ",".join(other_run_ids) if other_run_ids else "none",
-        insight_err, rec_err,
+        insight_err, rec_err, agent_run_error,
     )
     return out

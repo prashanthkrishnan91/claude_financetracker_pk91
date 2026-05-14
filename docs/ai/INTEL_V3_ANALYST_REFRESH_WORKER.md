@@ -85,20 +85,22 @@ python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint \
 ### Railway
 
 Run the worker as a **separate Railway service** in the same repo — do **not**
-change the existing web service. The web service keeps its current
-`v2/backend/railway.toml` start command (uvicorn) untouched.
+change the existing web service. Both services use the single shared
+`v2/backend/railway.toml` file:
 
-For the new worker service set the start command to:
+- **Main web service**: leave `PROCESS_TYPE` unset (empty string or not set). The
+  start command conditionally runs uvicorn.
+- **Worker service**: set `PROCESS_TYPE=worker` as an environment variable. The
+  start command conditionally runs
+  `python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop`.
 
-```
-python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop
-```
+The shared `railway.toml` uses a shell conditional (`if PROCESS_TYPE=worker...`)
+to branch at startup. Both services set `root = "v2/backend"` and share the same
+Supabase service-role key + provider/LLM env vars. The loop interval can be
+overridden with `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS` (default 900s).
 
 `v2/backend/Procfile` also carries a `worker:` process line documenting the same
-command. The worker reuses the same env vars as the web service (Supabase
-service-role key + provider/LLM keys) and the same Supabase client. The loop
-interval can be overridden with `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS`
-(default 900s).
+command for local development.
 
 The worker is disabled cleanly by `INTEL_V3_ANALYST_REFRESH_ENABLED=0` on the
 seam side (no jobs get enqueued); the worker process itself simply finds an

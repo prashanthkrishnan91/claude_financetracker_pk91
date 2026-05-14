@@ -561,6 +561,240 @@ class IntelV3Service:
             )
             raise
 
+    # ── Deterministic prewarm (Stage 3.2c) ───────────────────────────────────
+
+    async def run_prewarm_snapshot(self, *, prewarm_run_id: str) -> dict[str, Any]:
+        """Build and persist a snapshot from current persisted evidence. Zero LLM calls.
+
+        Mirrors the decision-build + persist steps of ``run_v3()`` but intentionally
+        skips ``_run_refresh_orchestrator``.  This means:
+          * No ``AnalystRefreshRequestSeam`` call → no ``analyst_refresh_jobs`` rows
+            inserted → no recursive worker trigger.
+          * No price-refresh provider calls.
+          * Only reads ``agent_insights`` / ``recommendations`` / ``positions`` and
+            runs the deterministic ``decide()`` kernel.
+
+        Emits structured logs:
+          analyst_refresh_snapshot_prewarm_started / _completed / _failed
+          (emitted by ``_trigger_snapshot_prewarm`` in the caller)
+          intel_v3_snapshot_created (standard snapshot log, with run_id=prewarm_run_id)
+        """
+        started_at = datetime.now(timezone.utc)
+
+        # Step 0: capture previous snapshot for decision-diff diagnostics.
+        previous_snapshot = await self.get_latest_snapshot()
+
+        # Step 1: load evidence — same read-only adapter as run_v3().
+        evidence_adapter = ReadOnlyEvidenceAdapter(user_id=self.user_id)
+        cards, evidence_stats = await evidence_adapter.load_cards()
+        logger.info(
+            "intel_v3_prewarm_evidence_source user_id=%s prewarm_run_id=%s "
+            "active_position_count=%d persisted_recommendation_count=%d "
+            "persisted_agent_insight_count=%d missing_evidence_count=%d",
+            self.user_id, prewarm_run_id,
+            evidence_stats.get("active_position_count", 0),
+            evidence_stats.get("persisted_recommendation_count", 0),
+            evidence_stats.get("persisted_agent_insight_count", 0),
+            evidence_stats.get("missing_evidence_count", 0),
+        )
+
+        # Step 2: portfolio weight map.
+        weight_map = await self._get_weight_map()
+
+        # Step 2b: SEC readiness (governance-gated; reuses same adapters as run_v3).
+        sec_readiness = await self._get_sec_readiness_for_adapters()
+
+        sec_gate_passed = False
+        if sec_readiness is not None:
+            settings = get_settings()
+            if getattr(settings, "intel_v3_sec_metric_truth_adapter_v1_enabled", False):
+                from .sec_metric_truth_adapter_v1 import check_governance_gate as _p11_gate
+                sec_gate_passed, _ = _p11_gate()
+
+        val_gate_passed = False
+        settings = get_settings()
+        if sec_readiness is not None and getattr(
+            settings, "intel_v3_valuation_context_adapter_v1_enabled", False
+        ):
+            from .valuation_context_adapter_v1 import check_governance_gate as _p13_gate
+            val_gate_passed, _ = _p13_gate()
+
+        # Step 3: build decisions (identical to run_v3 card loop).
+        decisions = []
+        card_metas = []
+
+        for card in cards:
+            ticker = card.ticker
+            category = card.category or "stock"
+            current_pct = weight_map.get(ticker.upper())
+
+            intel_read = getattr(card, "intel_read", None)
+            if isinstance(intel_read, str):
+                import json
+                try:
+                    intel_read = json.loads(intel_read)
+                except Exception:
+                    intel_read = None
+
+            thesis_v2 = getattr(card, "thesis_v2", None)
+            if isinstance(thesis_v2, str):
+                import json
+                try:
+                    thesis_v2 = json.loads(thesis_v2)
+                except Exception:
+                    thesis_v2 = None
+
+            analyst_risks = getattr(card, "analyst_risks", None)
+            if isinstance(analyst_risks, str):
+                import json
+                try:
+                    analyst_risks = json.loads(analyst_risks)
+                except Exception:
+                    analyst_risks = []
+
+            analyst_drivers = getattr(card, "analyst_drivers", None)
+            if isinstance(analyst_drivers, str):
+                import json
+                try:
+                    analyst_drivers = json.loads(analyst_drivers)
+                except Exception:
+                    analyst_drivers = []
+
+            suppression_reasons: dict = {}
+
+            inp, _truth_sums, _suppressed = build_truth_aware_decision_input(
+                ticker=ticker,
+                action=card.action,
+                analyst_action=getattr(card, "analyst_action", None),
+                conviction_level=getattr(card, "conviction_level", None),
+                technical_signal=getattr(card, "technical_signal", None),
+                risk_flag=getattr(card, "risk_flag", None),
+                analyst_risks=analyst_risks,
+                category=category,
+                data_quality_label=getattr(card, "data_quality_label", None),
+                intel_read=intel_read,
+                thesis_v2=thesis_v2,
+                analyst_used_fallback=getattr(card, "analyst_used_fallback", None),
+                primary_driver=getattr(card, "primary_driver", None),
+                risk_flag_text=getattr(card, "risk_flag", None),
+                action_reason=getattr(card, "action_reason", None),
+                analyst_drivers=analyst_drivers,
+                asset_type_hint=category,
+            )
+
+            if current_pct is not None:
+                fit = compute_portfolio_fit(
+                    ticker=ticker,
+                    category=category,
+                    current_pct=current_pct,
+                    suppression_reasons=suppression_reasons,
+                )
+                inp.portfolio_fit = fit
+
+            if sec_readiness is not None and sec_gate_passed:
+                from .sec_metric_truth_adapter_v1 import (
+                    build_sec_fundamentals_signal,
+                    apply_sec_fundamentals_to_decision_input,
+                )
+                sec_signal = build_sec_fundamentals_signal(
+                    ticker=ticker.upper(), readiness_result=sec_readiness,
+                )
+                apply_sec_fundamentals_to_decision_input(inp, sec_signal)
+
+            if sec_readiness is not None and val_gate_passed:
+                from .valuation_context_adapter_v1 import (
+                    build_valuation_context_signal,
+                    apply_valuation_context_to_decision_input,
+                )
+                val_signal = build_valuation_context_signal(
+                    ticker=ticker.upper(),
+                    category=category,
+                    sec_readiness=sec_readiness,
+                    has_market_price=ticker.upper() in weight_map,
+                )
+                apply_valuation_context_to_decision_input(inp, val_signal)
+
+            decision = decide(inp)
+            decisions.append(decision)
+            card_metas.append({
+                "ticker":      ticker,
+                "name":        card.name or ticker,
+                "category":    category,
+                "thesis_state": "intact",
+            })
+
+        # Step 4: build snapshot.
+        snapshot_payload = build_snapshot(
+            run_id=prewarm_run_id,
+            decisions=decisions,
+            card_metas=card_metas,
+            source_health={"status": "signals_from_existing_cards"},
+            is_stale=False,
+        )
+
+        # Step 4a: diagnostics.
+        diagnostics = build_diagnostics(
+            evidence_stats=evidence_stats,
+            current_snapshot=snapshot_payload,
+            previous_snapshot=previous_snapshot,
+            refresh_diagnostics=None,
+        )
+        snapshot_payload["diagnostics"] = diagnostics
+
+        # Step 4b: certify cards — fail-closed on hard violations.
+        held_cards = snapshot_payload.get("current_holdings", [])
+        cert = certify_snapshot_cards(held_cards)
+        hard_violation_count = cert["hard_violations"]
+        prefix_only_count = cert["ticker_prefix_only_reason_count"]
+        soft_violation_count = (
+            cert["generic_copy_count"]
+            + cert["duplicate_reason_count"]
+            + cert["repeated_skeleton_count"]
+            + prefix_only_count
+            + cert["weak_buy_rationale_count"]
+        )
+
+        if hard_violation_count > 0:
+            logger.error(
+                "intel_v3_prewarm_aborted_hard_violations user_id=%s prewarm_run_id=%s "
+                "hard_violations=%d",
+                self.user_id, prewarm_run_id, hard_violation_count,
+            )
+            raise ValueError(
+                f"Intel v3 prewarm aborted: {hard_violation_count} hard violation(s). "
+                "Snapshot not persisted."
+            )
+
+        if prefix_only_count > 0:
+            logger.warning(
+                "intel_v3_prewarm_soft_violation_skeleton user_id=%s prewarm_run_id=%s "
+                "ticker_prefix_only_reason_count=%d",
+                self.user_id, prewarm_run_id, prefix_only_count,
+            )
+            snapshot_payload["warnings"].append(
+                f"Ticker-prefix-only rationale detected on {prefix_only_count} card(s). "
+                "Evidence-aware rationale requires primary_driver fields from analyst."
+            )
+
+        # Step 5: persist.
+        await self._persist_snapshot(run_id=prewarm_run_id, payload=snapshot_payload)
+
+        duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        action_counts = snapshot_payload.get("action_counts", {})
+        logger.info(
+            "intel_v3_snapshot_created user_id=%s run_id=%s "
+            "snapshot_id=%s total_cards=%d action_counts=%s duration_ms=%d "
+            "llm_calls=0 hard_violations=0 soft_violations=%d source=prewarm",
+            self.user_id,
+            prewarm_run_id,
+            snapshot_payload.get("snapshot_id"),
+            len(held_cards),
+            action_counts,
+            duration_ms,
+            soft_violation_count,
+        )
+        return snapshot_payload
+
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     async def _run_refresh_orchestrator(
@@ -1051,3 +1285,32 @@ def _hash_payload(payload: dict) -> str:
     import hashlib, json
     raw = json.dumps(payload, sort_keys=True, default=str)
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
+
+
+# ── Stage 3.2c: deterministic snapshot prewarm (module-level entry point) ────
+
+async def prewarm_intel_v3_snapshot(
+    user_id: UUID,
+    *,
+    prewarm_run_id: str,
+) -> dict[str, Any]:
+    """Build and persist a deterministic Intel v3 snapshot from persisted evidence.
+
+    Called by the analyst refresh worker after successful evidence writeback
+    (``analyst_evidence_writer_v1``) so the user does not need a second Run
+    Intel click to consume the freshly written analyst rows.
+
+    Hard guarantees:
+      * Zero LLM calls — reads from ``agent_insights`` / ``recommendations``
+        only; runs the deterministic ``decide()`` kernel.
+      * Does NOT call ``_run_refresh_orchestrator`` — no
+        ``AnalystRefreshRequestSeam`` is invoked, no ``analyst_refresh_jobs``
+        rows are inserted, no recursive worker trigger is possible.
+      * Raises on hard certification violations (never persists a corrupt
+        snapshot); soft violations (ticker-prefix-only etc.) are logged but do
+        not block persistence when the rationale fields are genuinely present.
+      * Caller (``_trigger_snapshot_prewarm``) catches and logs any exception so
+        worker job accounting is unaffected by prewarm failures.
+    """
+    svc = IntelV3Service(user_id=user_id)
+    return await svc.run_prewarm_snapshot(prewarm_run_id=prewarm_run_id)

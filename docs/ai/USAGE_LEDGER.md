@@ -132,3 +132,4 @@ Use this ledger plus GitHub PR history to diagnose token burn:
 - High follow-up patches → unclear contracts or scope at PR time.
 - Recurring efficiency lessons → candidate for `docs/ai/MISS_LEDGER.md` promotion.
 | 2026-05-13 | 304 | p01 | unknown | n/a | unknown | unknown | unknown | unknown | ccusage | 110 | 37631 | 8117991 | 470732 | 8626464 | $7.9423955 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unknown | unknown | 0 | n/a |
+| 2026-05-14 | unknown | arch-memo-01 | audit | n/a | docs/architecture | unknown | claude-opus-4-7 | new-chat | ccusage | 1695 | 3859 | 1336063 | 241079 | 1582696 | $1.14597485 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, code exploration agents, architecture memo | 0 | delegated code mapping to parallel Explore agents to protect context |

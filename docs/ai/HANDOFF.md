@@ -1,6 +1,92 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-14 (post Stage 3.2 — Continuous Intelligence Plane v1: durable analyst evidence refresh worker)
+Last updated: 2026-05-14 (post Stage 3.2c — remove double-click Run Intel + fix analyst rationale field loss)
+
+## Purpose
+
+This file is **current operational state**, not a historical log. It is meant to be loaded into context every session, so it must stay compact. Do not append PR-by-PR history. When something changes, replace or summarize the affected section instead of adding new entries.
+
+## Current product stage
+
+- Roadmap stage: **Stage 3.2c merged** (Continuous Intelligence Plane: snapshot prewarm + rationale field preservation). Stage 2.9 complete; Stage 2 exit still pending. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts per visible Deploy v3 recommendation (default = recommended), per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows (e.g. NVDA BUY $100) clearly labelled as manual via `is_manual: true` on `ActualDecisionItem`. The Step 2 recommendation surface stays read-only. The primary Deploy UX now shows the most recent 10 decision logs below Step 3 using the existing `DecisionHistoryEntry` component (single definition; no parallel history surface). The v3 snapshot mirrors `session_key` and entered/deploy/reserve amounts into `decision_context` so existing fingerprint dedupe + history rendering work uniformly across legacy and v3 logs. Re-logging the same active plan still updates the latest matching log rather than creating duplicate spam. Plain-English clarity note added near Step 3: "These are Intel v3 planning recommendations, not broker-executed trades." No confidence engine, no new provider/market data, no Intel/Deploy sizing changes, no SQL. Frontend-only.
+- Active build queue item: **Stage 2 exit validation** — re-validate end-to-end in production with a real dollar amount in Step 1: Step 2 shows 3–5 amount-aware BUY recommendations totaling exactly cash_to_deploy when no guardrail prevents it (e.g. $1,500 = $1,500, not $1,498); Step 3 lets the user edit actual amounts and add manual rows; the decision log history shows BUY spend, manual BUY, and Trim/Sell separately (never negative reserve; "Over planned by $X" / "Unallocated $X" as appropriate); Evaluate button works or gracefully reports insufficient data. Stage 2 exit remains pending until: (1) amount-aware recommendations work, (2) editable actual logging works, (3) decision log history persists after refresh, (4) journal accounting/evaluate behavior is production-validated, (5) recommendation confidence/ranking explanation is reviewed in a later evidence-quality slice.
+- Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
+
+## Current architecture / runtime state
+
+- OS v4 is the canonical operating system. No v4.2 or v5 labels.
+- Visible decision authority is owned by the deterministic Intel v3 backend policy. LLMs / agents / research workers cannot own final visible action authority.
+- **Intel v3 is partially certified, not fully trusted.** Run Intel v3 invokes the Evidence Refresh Orchestrator (`evidence_refresh_orchestrator_v1.py`) before deterministic decide(). The orchestrator classifies each source against the SLA contract in `evidence_freshness_contract_v1.py`, refreshes stale price/market-value evidence under deterministic budgets, and stamps a `run_mode` in snapshot diagnostics (`FAST_CERTIFIED` / `REFRESH_THEN_RUN` / `PARTIAL_CERTIFIED` / `BLOCKED_UNCERTIFIED`). `decide()` keeps sole final-action authority — the refresh path only updates inputs. **Stage 3.1 decouples the synchronous Run Intel v3 path.** The HTTP request must return a trusted snapshot quickly (~5s target) and must NOT perform any analyst/LLM/full-portfolio research inside the click. `IntelV3Service._build_analyst_refresh_callable()` wires the non-LLM `AnalystRefreshRequestSeam` into the orchestrator's `analyst_refresh` injection point; when analyst evidence is stale the seam enqueues durable `analyst_refresh_jobs` rows (idempotent upsert) and returns honest deferred-ticker accounting so the run degrades to `PARTIAL_CERTIFIED` / `BLOCKED_UNCERTIFIED` — never a fake `FAST_CERTIFIED`. **Stage 3.2 background worker** (`analyst_refresh_worker_v1.AnalystRefreshWorker`, entrypoint `analyst_refresh_worker_entrypoint.py --loop`) consumes those jobs outside the HTTP request: claims due jobs → `FullPortfolioAnalystRefreshAdapter` → `AgentOrchestrator` → writes `agent_insights` / `recommendations` (with explicit writeback bridge `analyst_evidence_writer_v1` using a fresh Supabase client) → **Stage 3.2c prewarm**: after `insights_written > 0`, calls `prewarm_intel_v3_snapshot()` → `IntelV3Service.run_prewarm_snapshot()` (zero LLM calls, skips `_run_refresh_orchestrator` entirely) → builds + persists a fresh Intel v3 snapshot → `GET /intel/v3/snapshot` returns it without any second click. Analyst verdict fields (`primary_driver`, `risk_flag`, `action_reason`, `differentiation`, etc.) from `orch._verdicts` (live `AnalystVerdict` objects) are now passed directly to the writeback writer so the stored `analyst_verdict` JSON is identical to what `_persist_sync` would write. The ticker-prefix-only rationale block is cleared when real structured rationale fields exist.
+- For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
+- Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
+
+## Recent meaningful PRs
+
+Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-14 — **Stage 3.2c: Remove double-click Run Intel + fix analyst rationale field loss** — Two production root causes fixed. (1) **Double-click architecture**: worker wrote fresh `agent_insights`/`recommendations` but never built a snapshot; user had to click Run Intel a second time. Fix: after `insights_written > 0`, worker calls `_trigger_snapshot_prewarm()` → `prewarm_intel_v3_snapshot(user_id, prewarm_run_id)` → `IntelV3Service.run_prewarm_snapshot()`. Prewarm mirrors the `run_v3()` decision loop but intentionally skips `_run_refresh_orchestrator()` — no `AnalystRefreshRequestSeam`, no `analyst_refresh_jobs` rows inserted, no recursive trigger. Zero LLM calls. Persists an active snapshot so `GET /intel/v3/snapshot` returns fresh data immediately. (2) **Rationale field loss**: `_build_analyst_verdict_from_insight()` in `analyst_evidence_writer_v1` re-derived `primary_driver` from the first sentence of `investment_thesis` and set `action_reason=None` / `risk_flag=""` — because `TickerInsight` doesn't carry those fields. Fix: `default_full_portfolio_agent_orchestrator_backend` extracts `orch._verdicts` (live `AnalystVerdict` objects) after `orch.run()`, converts to dicts, passes as `verdicts=verdicts_dicts` to `write_analyst_evidence()`; `_build_analyst_verdict_from_insight(verdict_dict=...)` uses the full structured verdict directly when available. `primary_driver` / `risk_flag` / `action_reason` / `differentiation` / `why_this_matters` / `what_could_go_wrong` / `what_to_do_now` now survive end-to-end. Clears the ticker-prefix-only rationale block. Structured logs: `analyst_refresh_snapshot_prewarm_started/_completed/_failed` (with `prewarm_snapshot_id`, `prewarm_run_mode`, `prewarm_trust_status`, `prewarm_duration_ms`, `prewarm_error`) + `intel_v3_snapshot_created source=prewarm`. No SQL, no schema changes. 25 new acceptance tests; 169 existing tests pass.
+
+- 2026-05-14 — **Stage 3.2b + 3.2: Explicit analyst evidence writeback bridge + durable analyst refresh worker** — Stage 3.2b: `AgentOrchestrator._persist_sync` silently fails in Railway worker via thread isolation; `analyst_evidence_writer_v1.write_analyst_evidence()` is the explicit fallback using a fresh `get_supabase_client()`. Idempotent by `UNIQUE(run_id, ticker)`. Stage 3.2: background worker (`AnalystRefreshWorker`) + entrypoint (`--loop`, `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS` default 60s) claims `analyst_refresh_jobs` rows (SQL migration `018_analyst_refresh_jobs.sql` — apply manually), drives `FullPortfolioAnalystRefreshAdapter` outside the HTTP request. Seam also updated to idempotently enqueue durable jobs so each stale ticker gets a real consumer. Post-run readback fixed: drops fragile ticker-casing filter; scopes by `run_id`/`created_at`; maps case-insensitively. Worker never imports `decide()`. Structured logs: `analyst_evidence_writer_persisted_count`, `intel_v3.analyst_refresh_worker_run_summary`, `intel_v3.analyst_refresh_worker_loop_summary`.
+
+- 2026-05-14 — **Stages 3.0a–3.1: Evidence Refresh Orchestrator + analyst refresh-request seam** — Stage 3.0b: `evidence_refresh_orchestrator_v1.py` classifies per-source freshness, optionally refreshes stale price under deterministic budgets, stamps `run_mode`/`trust_status`. Stage 3.0c: `FullPortfolioAnalystRefreshAdapter` replaces 6-ticker cap; runs AgentOrchestrator unscoped; post-refresh re-read of cards. Stage 3.1: `AnalystRefreshRequestSeam` decouples the synchronous HTTP path from LLM work. `IntelV3Service._build_analyst_refresh_callable()` wires the seam. Frontend amber banner for `refresh_requested` state (`analystRefreshRequestNote()` in `lib/intel-v3-banner.ts`).
+
+- 2026-05-13 — **Stages 2.5A–2.9: Deploy v3 pipeline** — Amount-aware Deploy v3 (new-cash sleeve sizing, certified sizing source adapter, readiness diagnostic, target-allocation + policy bridges, editable execution journal, decision-log history, journal accounting, rounding residual fix, sleeve ranking by Intel conviction). Full details in `docs/product/DECISION_LOG.md`.
+
+- 2026-05-10 — Repo cleanup: removed legacy Streamlit v1 app and added repo hygiene tooling. Full backend suite stabilized at 3,926 passed / 0 failed (before Stage 3 additions).
+
+## Active invariants / safety packs to remember
+
+Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own the rules. The packs themselves are the source of truth — do not paste their contents elsewhere:
+
+- Deterministic Decision Authority Pack
+- Valuation Safety Pack
+- Data Truth / Evidence Suppression Pack
+- Deploy/Watchtower Boundary Pack
+- Backend-only Scaffold Pack / No Visible Behavior Change Pack / Test Tier Pack (cross-cutting)
+
+## Known risks / unresolved issues
+
+- Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
+- Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
+- Watchtower trigger model is still scoped but unbuilt; no live alerts.
+- Research artifact UX is intentionally deferred until decision/action loop is stable.
+
+## Next recommended step
+
+**Production validation of Stage 3.2c snapshot prewarm.** The full expected flow is now:
+
+1. Click Run Intel once (evidence stale) → job enqueued, BLOCKED_UNCERTIFIED snapshot persisted
+2. Worker picks up jobs within ~60s (check Railway: `intel_v3.analyst_refresh_worker_run_summary`)
+3. Worker writes evidence: `analyst_evidence_writer_persisted_count=N` with `verdicts_available=N`
+4. Worker prewarms snapshot: `analyst_refresh_snapshot_prewarm_completed prewarm_snapshot_id=... prewarm_run_mode=... prewarm_trust_status=...`
+5. Refresh UI / `GET /intel/v3/snapshot` — no second Run Intel click needed
+6. Check `intel_v3_snapshot_created source=prewarm` in logs
+7. Verify no ticker-prefix-only warning in the new snapshot (check `ticker_prefix_only_reason_count=0`)
+
+**Prerequisite (if not yet applied):** Apply `v2/database/018_analyst_refresh_jobs.sql` in Supabase SQL Editor. Ensure the Railway worker service is running with `PROCESS_TYPE=worker` and `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS=60`. See `docs/ai/INTEL_V3_ANALYST_REFRESH_WORKER.md` for log keys.
+
+**Stage 2 exit validation (re-run).** Open the Deploy page in production, enter $900 in Step 1, confirm Step 2 shows 3–5 amount-aware BUY recommendations, edit one row's actual amount, add a manual NVDA BUY $100, save, refresh, and confirm both rows persist. Confirm decision log history shows BUY spend, manual BUY, and Trim/Sell separately. Repeat with $1,500 and confirm selected BUY recommendations total exactly $1,500. Stage 2 exit remains pending on all five gates listed in Active build queue item above.
+
+Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels. Parked under Build Queue → Design Pause Candidates. Must not be auto-promoted into Now by routine queue updates.
+
+## Handoff maintenance rule
+
+- This file is current state only. It is not an append-only log.
+- Keep under ~250–500 lines. If it grows past that, **compact before adding** — summarize older sections, do not extend them.
+- Every meaningful PR may update this file, but by **replacing or summarizing**, never by appending.
+- Move durable historical detail to `docs/ai/MISS_LEDGER.md` (workflow/process misses) or `docs/product/DECISION_LOG.md` (product decisions). Do not preserve old noise just because it exists.
+- Do not create new archive files for routine PRs. An archive is justified only when current-state value is being replaced and the original detail is still useful elsewhere.
+- `CLAUDE.md`, `docs/ai/AI_REPO_OPERATING_SYSTEM.md`, and `docs/ai/PROMPT_LIBRARY.md` enforce this rule.
+
+## Repo hygiene rule (per-PR)
+
+Every meaningful PR must explicitly answer: **"Did this make any source files or tests obsolete?"**
+
+- If yes: delete or rewrite them in the same PR, **or** add a tracked follow-up entry with a one-line reason.
+- Run `python3 scripts/repo_hygiene/audit_repo_hygiene.py` before opening the PR. Treat the report as a merge-gate aid, not mandatory CI.
+- Rules, allowlist conventions, and test-retirement criteria live in `docs/ai/REPO_HYGIENE.md`.
+- `v2/progress_log.md` follows the convention at the top of that file: ~150–250 lines, current state only, no PR-by-PR append.
+
 
 ## Purpose
 

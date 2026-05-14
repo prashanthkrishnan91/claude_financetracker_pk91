@@ -280,6 +280,7 @@ class AgentOrchestrator:
         finnhub_key: str = "",
         polygon_key: str = "",
         force_recompute: bool = False,
+        analyst_refresh_tickers: Optional[set[str]] = None,
     ):
         self.user_id = user_id
         self.deposit_amount = deposit_amount
@@ -291,6 +292,15 @@ class AgentOrchestrator:
         self.db = get_supabase_client()
         # When True, skip TTL-based verdict reuse and rerun all per-ticker LLM calls.
         self.force_recompute = force_recompute
+        # Stage 3.0b.6 analyst-refresh scope filter: when set, the per-ticker
+        # analyst phase only LLM-calls for tickers in this set, and the
+        # persist phase only writes new agent_insights / recommendations rows
+        # for these tickers (other tickers' existing rows are left untouched,
+        # not expired). None preserves the historical full-portfolio behavior.
+        self._analyst_refresh_tickers: Optional[set[str]] = (
+            {t.upper() for t in analyst_refresh_tickers}
+            if analyst_refresh_tickers else None
+        )
         # Hard guarantee: exactly one LLM call per orchestrator run.
         self._llm_call_count = 0
         # Reliability flags — read by run() for logging and run-record metadata.
@@ -1595,6 +1605,14 @@ class AgentOrchestrator:
             )
 
         tickers_needing_llm = [t for t in all_tickers if t not in cached_verdicts]
+        # Stage 3.0b.6 — analyst-refresh scope: when caller restricts the LLM
+        # set, drop everything outside that scope from this run. Non-scope
+        # tickers stay on whatever cached verdict they already have (or no
+        # verdict at all); _persist_sync also honors the scope filter so we
+        # don't expire other tickers' active recommendations.
+        if self._analyst_refresh_tickers is not None:
+            scope = self._analyst_refresh_tickers
+            tickers_needing_llm = [t for t in tickers_needing_llm if t.upper() in scope]
         skipped_fresh = len(cached_verdicts)
         self._analyst_stage_stats["skipped_fresh_verdicts"] += skipped_fresh
         self._analyst_stage_stats["reused_cached_cards"] += skipped_fresh
@@ -1821,8 +1839,19 @@ class AgentOrchestrator:
                     what_changed_map[ticker] = diff
 
         verdicts = getattr(self, "_verdicts", {}) or {}
+        # Stage 3.0b.6 — when an analyst-refresh scope is active, restrict
+        # all persist writes (agent_insights + recommendations) to that
+        # subset. Non-scope tickers keep their existing rows untouched and
+        # are NOT expired by the cleanup step below; the refresh is honest
+        # about not touching their analyst evidence this run.
+        scope = self._analyst_refresh_tickers
+        def _in_scope(ticker: str) -> bool:
+            return scope is None or (ticker or "").upper() in scope
+
         insight_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
+            if not _in_scope(insight.ticker):
+                continue
             row = insight.to_insight_row(run_id=state.run_id, user_id=state.user_id)
             wc = what_changed_map.get(insight.ticker)
             if wc:
@@ -1896,6 +1925,8 @@ class AgentOrchestrator:
 
         rec_rows: list[dict[str, Any]] = []
         for insight in state.insights.values():
+            if not _in_scope(insight.ticker):
+                continue
             action = insight.suggested_action or "HOLD"
             reasoning = insight.investment_thesis or f"{action} signal from portfolio agent."
             # Guarantee one recommendation row per ticker — the UI contract
@@ -1929,20 +1960,33 @@ class AgentOrchestrator:
                 )
 
         try:
-            self._db("recommendations.expire.active_run_mismatch", lambda: self.db.table("recommendations").update({
-                "is_active": False,
-                "resolution": "expired",
-                "resolved_at": now,
-            }).eq("user_id", state.user_id).eq("is_active", True).neq(
-                "agent_run_id", state.run_id
-            ).execute())
-            self._db("recommendations.expire.null_agent_run", lambda: self.db.table("recommendations").update({
-                "is_active": False,
-                "resolution": "expired",
-                "resolved_at": now,
-            }).eq("user_id", state.user_id).eq("is_active", True).filter(
-                "agent_run_id", "is", "null"
-            ).execute())
+            if scope is None:
+                # Full-portfolio run: expire any active rec not from this run.
+                self._db("recommendations.expire.active_run_mismatch", lambda: self.db.table("recommendations").update({
+                    "is_active": False,
+                    "resolution": "expired",
+                    "resolved_at": now,
+                }).eq("user_id", state.user_id).eq("is_active", True).neq(
+                    "agent_run_id", state.run_id
+                ).execute())
+                self._db("recommendations.expire.null_agent_run", lambda: self.db.table("recommendations").update({
+                    "is_active": False,
+                    "resolution": "expired",
+                    "resolved_at": now,
+                }).eq("user_id", state.user_id).eq("is_active", True).filter(
+                    "agent_run_id", "is", "null"
+                ).execute())
+            elif rec_rows:
+                # Scoped analyst-refresh run: only expire prior active recs
+                # for the scoped tickers. Other tickers' active recs survive.
+                scoped_tickers = [r["ticker"] for r in rec_rows]
+                self._db("recommendations.expire.scoped_run_mismatch", lambda: self.db.table("recommendations").update({
+                    "is_active": False,
+                    "resolution": "expired",
+                    "resolved_at": now,
+                }).eq("user_id", state.user_id).eq("is_active", True).in_(
+                    "ticker", scoped_tickers
+                ).neq("agent_run_id", state.run_id).execute())
         except Exception as exc:
             logger.warning("Failed to expire old recommendations: %s", exc)
         finally:

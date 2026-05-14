@@ -1216,6 +1216,10 @@ export interface IntelV3SnapshotDiagnostics {
   max_agent_insight_age_hours: number | null;
   oldest_source_timestamp: string | null;
   newest_source_timestamp: string | null;
+  // Plain-English per-source age summary (Stage 3.0b.6). Backend-built so the
+  // banner never has to guess which source's age applies; reports both
+  // recommendation and analyst evidence ages separately.
+  banner_age_summary?: string;
   previous_snapshot_id: string | null;
   previous_action_counts: Record<string, number> | null;
   current_action_counts: Record<string, number>;
@@ -1242,6 +1246,20 @@ export interface IntelV3SnapshotDiagnostics {
   refresh_duration_ms?: number;
   analyst_refresh_supported?: boolean;
   analyst_refresh_status?: string;
+  // Stage 3.0b.6 — per-ticker analyst refresh accounting (optional fields).
+  analyst_refresh_per_ticker?: Array<{
+    ticker: string;
+    success: boolean;
+    refreshed_recommendation_at?: string | null;
+    refreshed_agent_insight_at?: string | null;
+    error_reason?: string | null;
+    llm_call_count?: number;
+    llm_success_count?: number;
+  }>;
+  analyst_refresh_selected_tickers?: string[];
+  analyst_refresh_deferred_tickers?: string[];
+  analyst_refresh_successful_tickers?: string[];
+  analyst_refresh_failed_tickers?: string[];
   budget_exhausted?: boolean;
   orchestrator_notes?: string[];
 }

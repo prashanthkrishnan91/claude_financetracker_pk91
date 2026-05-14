@@ -95,6 +95,8 @@ from app.services.intelligence.v3.certified_intel_run_contract_v1 import (
     FAIL_NO_ACTIVE_RECOMMENDATION,
     FAIL_MISSING_AGENT_RUN_ID,
     FAIL_NO_MATCHING_AGENT_INSIGHT,
+    FAIL_AGENT_RUN_MISSING,
+    FAIL_AGENT_RUN_NOT_COMPLETED,
     FAIL_MISSING_PRIMARY_DRIVER,
     FAIL_MISSING_ACTION_REASON,
     FAIL_MISSING_RISK_FLAG,
@@ -224,6 +226,56 @@ async def test_missing_matching_agent_insight_fails():
     assert FAIL_NO_MATCHING_AGENT_INSIGHT in [
         r["reason"] for r in result.failed_tickers_with_reasons
     ]
+
+
+# ── Test 5b: agent_runs row missing entirely → fails with agent_run_missing ───
+
+@pytest.mark.asyncio
+async def test_missing_agent_run_row_fails():
+    """Insight exists and recommendation has agent_run_id, but agent_runs table
+    has no matching row. Must fail with FAIL_AGENT_RUN_MISSING, not pass."""
+    tickers = ["AAPL"]
+    recs = [
+        {"ticker": "AAPL", "action": "BUY", "agent_run_id": AGENT_RUN_ID,
+         "created_at": FRESH_REC_AT, "is_active": True}
+    ]
+    insights = [
+        {"ticker": "AAPL", "run_id": AGENT_RUN_ID,
+         "created_at": FRESH_INSIGHT_AT, "analyst_verdict": _fresh_verdict("AAPL")}
+    ]
+    # agent_runs table returns nothing for this agent_run_id
+    client = _make_client(tickers=tickers, recs=recs, insights=insights, agent_runs=[])
+    result = await check_certified_intel_run_contract(
+        user_id=USER_ID, client=client, now=NOW,
+    )
+    assert result.certified is False
+    reasons = [r["reason"] for r in result.failed_tickers_with_reasons]
+    assert FAIL_AGENT_RUN_MISSING in reasons, f"Expected agent_run_missing, got {reasons}"
+
+
+# ── Test 5c: agent_run row exists but status != completed → still fails ────────
+
+@pytest.mark.asyncio
+async def test_non_completed_agent_run_status_fails():
+    """agent_runs row exists with status='running' — must fail with agent_run_not_completed."""
+    tickers = ["AAPL"]
+    recs = [
+        {"ticker": "AAPL", "action": "BUY", "agent_run_id": AGENT_RUN_ID,
+         "created_at": FRESH_REC_AT, "is_active": True}
+    ]
+    insights = [
+        {"ticker": "AAPL", "run_id": AGENT_RUN_ID,
+         "created_at": FRESH_INSIGHT_AT, "analyst_verdict": _fresh_verdict("AAPL")}
+    ]
+    client = _make_client(tickers=tickers, recs=recs, insights=insights, agent_runs=[
+        {"id": AGENT_RUN_ID, "status": "running", "finished_at": None}
+    ])
+    result = await check_certified_intel_run_contract(
+        user_id=USER_ID, client=client, now=NOW,
+    )
+    assert result.certified is False
+    reasons = [r["reason"] for r in result.failed_tickers_with_reasons]
+    assert FAIL_AGENT_RUN_NOT_COMPLETED in reasons, f"Expected agent_run_not_completed, got {reasons}"
 
 
 # ── Test 6a: missing primary_driver → fails ───────────────────────────────────

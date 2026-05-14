@@ -226,4 +226,15 @@ describe("buildBannerState — tone and copy", () => {
     const banner = buildBannerState(snap, false);
     expect(banner.tone).not.toBe("green");
   });
+
+  it("certified_current detail does not claim agents ran for this request", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, false);
+    // Must not imply the current click/request triggered the agent run
+    expect(banner.detail?.toLowerCase()).not.toContain("agents ran for this request");
+    expect(banner.detail?.toLowerCase()).not.toContain("yes — background worker");
+    // Must still mention how the analysis was produced
+    expect(banner.detail?.toLowerCase()).toContain("background worker");
+    expect(banner.detail?.toLowerCase()).toContain("certified");
+  });
 });

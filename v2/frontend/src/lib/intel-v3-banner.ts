@@ -111,9 +111,8 @@ export function buildBannerState(
         headline: "Certified Current",
         detail: [
           `Coverage: ${certCount}/${totalCount} certified.`,
-          latestRunAt ? `Latest analyst run: ${latestRunAt}.` : null,
-          "Agents ran for this request: Yes — background worker.",
-          "This click used LLMs: No — background worker handles analysis.",
+          latestRunAt ? `Latest certified analyst run: ${latestRunAt}.` : null,
+          "Certified by: background worker (no LLM calls on page load).",
           `Snapshot source: worker certified.`,
         ].filter(Boolean).join(" "),
         tone: "green",

@@ -42,6 +42,7 @@ AGENT_INSIGHT_FRESH_HOURS = 48.0
 FAIL_NO_ACTIVE_RECOMMENDATION = "no_active_recommendation"
 FAIL_MISSING_AGENT_RUN_ID = "recommendation_missing_agent_run_id"
 FAIL_NO_MATCHING_AGENT_INSIGHT = "no_matching_agent_insight_for_run_id"
+FAIL_AGENT_RUN_MISSING = "agent_run_missing"
 FAIL_AGENT_RUN_NOT_COMPLETED = "agent_run_not_completed"
 FAIL_MISSING_PRIMARY_DRIVER = "missing_primary_driver"
 FAIL_MISSING_ACTION_REASON = "missing_action_reason"
@@ -369,9 +370,27 @@ async def check_certified_intel_run_contract(
         if insight_created_at and (latest_agent_run_at is None or insight_created_at > latest_agent_run_at):
             latest_agent_run_at = insight_created_at
 
-        # Check 4: agent_run status = completed
-        agent_run_status = agent_run_status_by_id.get(agent_run_id_str, "unknown")
-        if agent_run_status != "completed" and agent_run_status != "unknown":
+        # Check 4: agent_run row exists AND status == "completed"
+        if agent_run_id_str not in agent_run_status_by_id:
+            # No matching row in agent_runs — fail with explicit missing reason
+            per_ticker_results.append(TickerCertificationResult(
+                ticker=ticker, certified=False,
+                failure_reason=FAIL_AGENT_RUN_MISSING,
+                agent_run_id=agent_run_id_str,
+                recommendation_created_at=rec_created_at,
+                agent_insight_created_at=insight_created_at,
+                agent_run_status=None,
+            ))
+            failed_tickers.append(ticker)
+            failed_tickers_with_reasons.append({
+                "ticker": ticker,
+                "reason": FAIL_AGENT_RUN_MISSING,
+                "agent_run_id": agent_run_id_str,
+            })
+            continue
+
+        agent_run_status = agent_run_status_by_id[agent_run_id_str]
+        if agent_run_status != "completed":
             per_ticker_results.append(TickerCertificationResult(
                 ticker=ticker, certified=False,
                 failure_reason=FAIL_AGENT_RUN_NOT_COMPLETED,

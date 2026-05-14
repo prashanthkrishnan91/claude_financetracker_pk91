@@ -48,6 +48,11 @@ from app.services.intelligence.v3.analyst_refresh_request_seam_v1 import (
     AnalystRefreshRequestSeam,
 )
 from app.services.intelligence.v3.analyst_refresh_worker_v1 import AnalystRefreshWorker
+from app.services.intelligence.v3.full_portfolio_analyst_refresh_adapter_v1 import (
+    FullPortfolioAnalystRefreshAdapter,
+    FullPortfolioAnalystRefreshBudget,
+    _read_post_run_evidence,
+)
 from app.services.intelligence.v3.evidence_freshness_contract_v1 import (
     RUN_MODE_BLOCKED_UNCERTIFIED,
     RUN_MODE_FAST_CERTIFIED,
@@ -108,6 +113,10 @@ class _FakeQuery:
         self._filters.append(("in", col, list(vals)))
         return self
 
+    def gte(self, col, val):
+        self._filters.append(("gte", col, val))
+        return self
+
     def order(self, col, desc=False):
         self._order_col = col
         return self
@@ -121,6 +130,8 @@ class _FakeQuery:
             if kind == "eq" and rv != val:
                 return False
             if kind == "in" and rv not in val:
+                return False
+            if kind == "gte" and not (rv is not None and rv >= val):
                 return False
         return True
 
@@ -695,3 +706,184 @@ class TestRunV3StaysFastAndEnqueues:
         seam = AnalystRefreshRequestSeam(user_id=uuid.UUID(USER_A))
         result = asyncio.run(seam(["AAPL"], started_at=_now()))
         assert result.to_dict()["durable_jobs_requested"] == 0
+
+
+# ── 7. Worker post-run readback contract (production blocker fix) ────────────
+#
+# Root cause of the production blocker: AgentOrchestrator persists
+# agent_insights/recommendations with the ticker AS STORED in `positions`
+# (no casing normalisation), but the worker's readback filtered every query
+# with `.in_("ticker", <UPPER-cased worker tickers>)`. When the persisted
+# casing differed, the server-side filter excluded every row → the worker
+# saw `no_post_run_evidence` for all 34 tickers even though the orchestrator
+# had persisted them. The fix drops the ticker filter and relies on the
+# durable key (run_id + user_id) + case-insensitive per-ticker mapping.
+
+
+def _seed_agent_evidence(
+    fake: _FakeSupabase,
+    *,
+    user_id: str,
+    run_id: str,
+    tickers,
+    created_at: str,
+    used_fallback: bool = False,
+    with_recs: bool = True,
+    ticker_case=str.lower,
+):
+    """Seed agent_insights / recommendations rows the way AgentOrchestrator
+    persists them — ticker stored verbatim (here: a casing that differs from
+    the worker's UPPER-cased request)."""
+    insights = fake.store.setdefault("agent_insights", [])
+    recs = fake.store.setdefault("recommendations", [])
+    for t in tickers:
+        insights.append({
+            "id": str(uuid.uuid4()),
+            "user_id": str(user_id),
+            "run_id": run_id,
+            "ticker": ticker_case(t),
+            "created_at": created_at,
+            "analyst_verdict": {"action": "BUY", "used_fallback": used_fallback},
+        })
+        if with_recs:
+            recs.append({
+                "id": str(uuid.uuid4()),
+                "user_id": str(user_id),
+                "agent_run_id": run_id,
+                "ticker": ticker_case(t),
+                "created_at": created_at,
+                "is_active": True,
+            })
+
+
+class TestPostRunEvidenceReadback:
+    def test_readback_finds_lowercase_persisted_rows_for_uppercase_request(self):
+        """The fix: persisted ticker casing != request casing must still
+        resolve, because run_id (not the ticker string) is the durable key."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        created = (_now() + timedelta(seconds=30)).isoformat()
+        _seed_agent_evidence(
+            fake, user_id=USER_A, run_id=run_id, tickers=["AAPL", "NVDA"],
+            created_at=created, ticker_case=str.lower,  # persisted lower-case
+        )
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL", "NVDA"], run_id, _now(),
+            ))
+        assert set(out.keys()) == {"AAPL", "NVDA"}
+        for t in ("AAPL", "NVDA"):
+            assert out[t] is not None, f"{t} should resolve despite casing"
+            assert out[t]["insight_run_match"] is True
+            assert out[t]["rec_run_match"] is True
+            assert out[t]["used_fallback"] is False
+            assert out[t]["failure_reason"] is None
+
+    def test_readback_returns_none_when_no_durable_rows_written(self):
+        """Honest failure preserved: a run that persisted nothing still yields
+        no_post_run_evidence — the fix does not fabricate success."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL", "NVDA"], run_id, _now(),
+            ))
+        assert out == {"AAPL": None, "NVDA": None}
+
+    def test_readback_does_not_treat_other_run_id_rows_as_a_run_match(self):
+        """Rows persisted under a different run id must NOT count as a verified
+        refresh for this run — insight_run_match stays False (no fabrication)."""
+        fake = _FakeSupabase()
+        this_run = str(uuid.uuid4())
+        other_run = str(uuid.uuid4())
+        created = (_now() + timedelta(seconds=30)).isoformat()
+        _seed_agent_evidence(
+            fake, user_id=USER_A, run_id=other_run, tickers=["AAPL"],
+            created_at=created, ticker_case=str.lower,
+        )
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], this_run, _now(),
+            ))
+        assert out["AAPL"] is not None
+        assert out["AAPL"]["insight_run_match"] is False
+        assert out["AAPL"]["failure_reason"] == "persistence_missing"
+
+    def test_readback_maps_uppercase_persisted_rows_too(self):
+        """Casing-agnostic both ways: upper-case persisted rows also resolve."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        created = (_now() + timedelta(seconds=30)).isoformat()
+        _seed_agent_evidence(
+            fake, user_id=USER_A, run_id=run_id, tickers=["AAPL"],
+            created_at=created, ticker_case=str.upper,
+        )
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], run_id, _now(),
+            ))
+        assert out["AAPL"]["insight_run_match"] is True
+
+
+class TestWorkerProducesSuccessfulPersistedTicker:
+    def test_worker_marks_ticker_succeeded_when_backend_persists_rows(self):
+        """End-to-end: jobs enqueued → worker claims → FullPortfolioAnalystRefresh
+        Adapter runs a backend that persists rows (lower-cased ticker) and
+        verifies them via the real readback → jobs marked succeeded."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL", "NVDA"], now=_now())
+
+        async def _run_backend(user_id, selected_tickers, started_at):
+            # Simulate AgentOrchestrator persisting per-ticker rows with a
+            # casing that differs from the worker's UPPER-cased request.
+            run_id = str(uuid.uuid4())
+            created = (started_at + timedelta(seconds=10)).isoformat()
+            _seed_agent_evidence(
+                fake, user_id=user_id, run_id=run_id, tickers=selected_tickers,
+                created_at=created, ticker_case=str.lower,
+            )
+            with patch("app.database.get_supabase_client", return_value=fake):
+                return await _read_post_run_evidence(
+                    user_id, selected_tickers, run_id, started_at,
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid, run_backend=_run_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(client=fake, adapter_factory=_factory)
+        result = asyncio.run(worker.run_once(now=_now()))
+
+        assert result.persisted_ticker_success_count == 2
+        assert set(result.succeeded_tickers) == {"AAPL", "NVDA"}
+        assert result.failed_tickers == []
+        assert all(r["status"] == JOB_SUCCEEDED for r in fake.rows())
+
+    def test_worker_keeps_jobs_failed_when_backend_persists_nothing(self):
+        """No durable rows written → no_post_run_evidence → jobs stay failed,
+        never fabricated as succeeded."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+
+        async def _run_backend(user_id, selected_tickers, started_at):
+            run_id = str(uuid.uuid4())  # run happens, but persists nothing
+            with patch("app.database.get_supabase_client", return_value=fake):
+                return await _read_post_run_evidence(
+                    user_id, selected_tickers, run_id, started_at,
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid, run_backend=_run_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(client=fake, adapter_factory=_factory)
+        result = asyncio.run(worker.run_once(now=_now()))
+
+        assert result.persisted_ticker_success_count == 0
+        assert result.succeeded_tickers == []
+        assert fake.rows()[0]["status"] == JOB_FAILED
+        assert fake.rows()[0]["next_retry_at"] is not None

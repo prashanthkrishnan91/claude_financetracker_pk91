@@ -409,10 +409,25 @@ async def _read_post_run_evidence(
 ) -> dict[str, Optional[dict[str, Any]]]:
     """Read per-ticker durable evidence for ``agent_run_id``.
 
-    Verification primary key: ``agent_insights.run_id`` /
-    ``recommendations.agent_run_id`` must equal the just-created
-    ``agent_run_id`` for a ticker to count as refreshed. Timestamp matching
-    is a sanity check, not the primary signal.
+    Persistence contract (``AgentOrchestrator._persist_sync`` +
+    ``TickerInsight.to_insight_row``):
+      * ``agent_insights.run_id``        == the agent run id
+      * ``recommendations.agent_run_id`` == the agent run id
+      * ``*.user_id``                    == ``str(user_id)``
+      * ``*.ticker``                     == the position's ticker AS STORED.
+        The orchestrator does NOT normalise ticker casing — it persists
+        ``context["portfolio"]`` tickers verbatim, which may be upper / lower /
+        mixed case.
+
+    The durable verification key is therefore ``run_id`` + ``user_id`` — NOT
+    the request's ticker strings. A previous version of this readback also
+    filtered ``.in_("ticker", tickers)`` with the worker's UPPER-cased ticker
+    list; whenever the persisted ticker casing differed, that server-side
+    filter silently excluded every row and produced ``no_post_run_evidence``
+    for every ticker even though the orchestrator had persisted them. The
+    ticker filter is intentionally dropped: ``run_id`` / ``created_at`` already
+    scope the result set to this run, and per-ticker mapping below is
+    case-insensitive (``_index_latest`` upper-cases its keys).
     """
     from ....database import get_supabase_client
 
@@ -429,7 +444,6 @@ async def _read_post_run_evidence(
                 .select("ticker,created_at,run_id,analyst_verdict")
                 .eq("user_id", str(user_id))
                 .eq("run_id", agent_run_id)
-                .in_("ticker", list(tickers))
                 .execute()
             )
             run_rows = res.data or []
@@ -440,7 +454,6 @@ async def _read_post_run_evidence(
                     .select("ticker,created_at,run_id")
                     .eq("user_id", str(user_id))
                     .eq("run_id", agent_run_id)
-                    .in_("ticker", list(tickers))
                     .execute()
                 )
                 run_rows = res.data or []
@@ -456,7 +469,6 @@ async def _read_post_run_evidence(
                 client.table("agent_insights")
                 .select("ticker,created_at,run_id,analyst_verdict")
                 .eq("user_id", str(user_id))
-                .in_("ticker", list(tickers))
                 .gte("created_at", started_iso)
                 .execute()
             )
@@ -467,7 +479,6 @@ async def _read_post_run_evidence(
                     client.table("agent_insights")
                     .select("ticker,created_at,run_id")
                     .eq("user_id", str(user_id))
-                    .in_("ticker", list(tickers))
                     .gte("created_at", started_iso)
                     .execute()
                 )
@@ -486,7 +497,6 @@ async def _read_post_run_evidence(
                 .select("ticker,created_at,agent_run_id,is_active")
                 .eq("user_id", str(user_id))
                 .eq("agent_run_id", agent_run_id)
-                .in_("ticker", list(tickers))
                 .execute()
             )
             run_rows = res.data or []
@@ -502,7 +512,6 @@ async def _read_post_run_evidence(
                 client.table("recommendations")
                 .select("ticker,created_at,agent_run_id,is_active")
                 .eq("user_id", str(user_id))
-                .in_("ticker", list(tickers))
                 .gte("created_at", started_iso)
                 .execute()
             )
@@ -533,6 +542,7 @@ async def _read_post_run_evidence(
     rec_by_ts = _index_latest(rec_ticker_rows)
 
     out: dict[str, Optional[dict[str, Any]]] = {}
+    missing_reason_counts: dict[str, int] = {}
     for ticker in tickers:
         up = ticker.upper()
         insight_run = insight_by_run.get(up)
@@ -565,6 +575,9 @@ async def _read_post_run_evidence(
 
         if insight is None and rec is None and not insight_err and not rec_err:
             out[ticker] = None
+            missing_reason_counts[REASON_NO_POST_RUN_EVIDENCE] = (
+                missing_reason_counts.get(REASON_NO_POST_RUN_EVIDENCE, 0) + 1
+            )
             continue
 
         out[ticker] = {
@@ -578,4 +591,31 @@ async def _read_post_run_evidence(
             "rec_row_present":           rec_present,
             "failure_reason":            failure_reason,
         }
+        breakdown_key = failure_reason or "ok"
+        missing_reason_counts[breakdown_key] = (
+            missing_reason_counts.get(breakdown_key, 0) + 1
+        )
+
+    # Strong diagnostic: rows persisted under a *different* recent run_id point
+    # at a run-id mismatch rather than a non-persisting orchestrator.
+    other_run_ids = sorted({
+        str(r.get("run_id"))
+        for r in insight_ticker_rows
+        if r.get("run_id") and str(r.get("run_id")) != str(agent_run_id)
+    })
+
+    logger.info(
+        "full_portfolio_analyst_refresh.post_run_readback user_id=%s run_id=%s "
+        "selected_ticker_count=%d insights_by_run_id=%d insights_by_created_at=%d "
+        "recs_by_run_id=%d recs_by_created_at=%d resolved_ticker_count=%d "
+        "missing_reason_breakdown=%s other_recent_run_ids=%s "
+        "insight_read_err=%s rec_read_err=%s",
+        user_id, agent_run_id, len(tickers),
+        len(insight_run_rows), len(insight_ticker_rows),
+        len(rec_run_rows), len(rec_ticker_rows),
+        sum(1 for v in out.values() if v is not None),
+        missing_reason_counts,
+        ",".join(other_run_ids) if other_run_ids else "none",
+        insight_err, rec_err,
+    )
     return out

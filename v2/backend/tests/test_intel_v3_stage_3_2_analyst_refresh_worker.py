@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.intelligence.v3.analyst_refresh_adapter_v1 import (
+    REASON_NO_POST_RUN_EVIDENCE,
     STATUS_FAILED,
     STATUS_PARTIAL_SUCCESS,
     STATUS_SUCCEEDED,
@@ -36,6 +37,7 @@ from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
     JOB_FAILED,
     JOB_PENDING,
     JOB_SUCCEEDED,
+    STALE_CLAIM_TIMEOUT_SECONDS,
     AnalystRefreshJob,
     claim_due_jobs,
     compute_next_retry_at,
@@ -55,9 +57,16 @@ from app.services.intelligence.v3.analyst_refresh_worker_entrypoint import (
 )
 from app.services.intelligence.v3.analyst_refresh_worker_v1 import AnalystRefreshWorker
 from app.services.intelligence.v3.full_portfolio_analyst_refresh_adapter_v1 import (
+    REASON_AGENT_RUN_COMPLETED_NO_ROWS,
+    REASON_AGENT_RUN_FAILED,
+    REASON_AGENT_RUN_NO_DATA,
+    REASON_AGENT_RUN_RAISED,
     FullPortfolioAnalystRefreshAdapter,
     FullPortfolioAnalystRefreshBudget,
     _read_post_run_evidence,
+)
+from app.services.intelligence.v3.read_only_evidence_adapter import (
+    ReadOnlyEvidenceAdapter,
 )
 from app.services.intelligence.v3.evidence_freshness_contract_v1 import (
     RUN_MODE_BLOCKED_UNCERTIFIED,
@@ -273,12 +282,16 @@ class TestEnqueueIdempotency:
         assert len(fake.rows()) == 1
         assert fake.rows()[0]["status"] == JOB_PENDING
 
-    def test_claimed_duplicate_click_touches_and_does_not_disrupt_inflight(self):
-        """A re-click on a claimed (in-flight) job must not duplicate it or
-        knock it out of the claimed state a worker is mid-processing."""
+    def test_claimed_in_flight_not_stolen_before_timeout(self):
+        """A re-click on a freshly-claimed (in-flight) job must not duplicate it
+        or knock it out of the claimed state a worker is mid-processing."""
         fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        fake.rows()[0].update({"status": JOB_CLAIMED, "attempts": 1})
+        # Claimed 30s ago — well within the stale-claim timeout.
+        fake.rows()[0].update({
+            "status": JOB_CLAIMED, "attempts": 1,
+            "claimed_at": (_now() - timedelta(seconds=30)).isoformat(),
+        })
         second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
         assert second.touched_count == 1
         assert second.reopened_count == 0
@@ -287,22 +300,70 @@ class TestEnqueueIdempotency:
         assert row["status"] == JOB_CLAIMED  # in-flight claim untouched
         assert row["attempts"] == 1
 
-    def test_failed_retryable_duplicate_click_touches_and_preserves_backoff(self):
-        """A re-click on a failed-but-retryable job must not wipe its backoff
-        timer or attempt counter."""
+    def test_stale_claimed_row_recovered_after_timeout(self):
+        """A re-click on a long-abandoned claim (worker crashed/hung) recovers
+        it: past the stale-claim timeout it is reopened to pending."""
         fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        future_retry = (_now() + timedelta(hours=5)).isoformat()
-        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 3,
-                               "max_attempts": 5, "next_retry_at": future_retry})
+        # Claimed well past the stale-claim timeout — the claiming worker is gone.
+        stale_at = (
+            _now() - timedelta(seconds=STALE_CLAIM_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+        fake.rows()[0].update({
+            "status": JOB_CLAIMED, "attempts": 1, "claimed_at": stale_at,
+        })
         second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        assert second.touched_count == 1
-        assert second.reopened_count == 0
-        row = fake.rows()[0]
-        assert row["status"] == JOB_FAILED       # not reset
-        assert row["attempts"] == 3              # not reset
-        assert row["next_retry_at"] == future_retry  # backoff preserved
+        assert second.reopened_count == 1
+        assert second.touched_count == 0
         assert len(fake.rows()) == 1
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING
+        # The recovered job is claimable on the next worker poll.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
+
+    def test_failed_retryable_explicit_refresh_makes_it_claimable_now(self):
+        """PRODUCTION BLOCKER FIX: a failed job with a future worker-backoff
+        next_retry_at must NOT be ignored after an explicit user-triggered
+        refresh. The explicit enqueue makes it due now (status→pending,
+        next_retry_at→now) while preserving its remaining attempt budget."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        future_retry = (_now() + timedelta(minutes=27)).isoformat()
+        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 3,
+                               "max_attempts": 5, "next_retry_at": future_retry,
+                               "last_error": "boom"})
+        # Before the explicit refresh: not retry-due, worker would skip it.
+        assert claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now()) == []
+
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.made_due_count == 1
+        assert second.reopened_count == 0
+        assert second.touched_count == 0
+        assert len(fake.rows()) == 1
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING        # now claimable
+        assert row["attempts"] == 3                # retry budget PRESERVED, not reset
+        assert row["next_retry_at"] == _now().isoformat()  # due now, not the future backoff
+        # And the worker claims it on its very next poll.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
+        assert claimed[0].attempts == 4            # claim increments from 3 → 4
+
+    def test_worker_internal_backoff_preserved_when_no_explicit_enqueue(self):
+        """Without an explicit enqueue, a worker-internal mark_job_failed sets a
+        future next_retry_at and claim_due_jobs honours that backoff window."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        # Worker's automatic retry path — no enqueue happens here.
+        next_retry = mark_job_failed(fake, claimed[0], error="llm timeout", now=_now())
+        assert next_retry is not None
+        row = fake.rows()[0]
+        assert row["status"] == JOB_FAILED
+        assert row["next_retry_at"] == next_retry          # backoff preserved
+        # The worker correctly skips it until the backoff window elapses.
+        assert claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now()) == []
 
     def test_succeeded_job_is_reopened_for_same_window_requeue_when_still_stale(self):
         """A succeeded job must not silently block a same-window requeue: the
@@ -815,16 +876,90 @@ class TestPostRunEvidenceReadback:
             assert out[t]["used_fallback"] is False
             assert out[t]["failure_reason"] is None
 
-    def test_readback_returns_none_when_no_durable_rows_written(self):
-        """Honest failure preserved: a run that persisted nothing still yields
-        no_post_run_evidence — the fix does not fabricate success."""
+    def test_readback_no_durable_rows_is_an_honest_failure_not_a_success(self):
+        """A run that persisted nothing yields a non-success explanatory row for
+        every ticker — never fabricated as a refresh. With no agent-run outcome
+        supplied the reason is the generic no_post_run_evidence."""
         fake = _FakeSupabase()
         run_id = str(uuid.uuid4())
         with patch("app.database.get_supabase_client", return_value=fake):
             out = asyncio.run(_read_post_run_evidence(
                 uuid.UUID(USER_A), ["AAPL", "NVDA"], run_id, _now(),
             ))
-        assert out == {"AAPL": None, "NVDA": None}
+        for t in ("AAPL", "NVDA"):
+            assert out[t] is not None
+            assert out[t]["insight_run_match"] is False
+            assert out[t]["rec_run_match"] is False
+            assert out[t]["insight_row_present"] is False
+            assert out[t]["failure_reason"] == REASON_NO_POST_RUN_EVIDENCE
+
+    def test_readback_attributes_completed_run_that_persisted_nothing(self):
+        """OBSERVED PRODUCTION STATE: orch.run() completed but wrote no
+        agent_insights / recommendations rows. The readback must attribute the
+        SPECIFIC reason (agent_run_completed_no_persisted_rows) — not the opaque
+        generic — and must NOT mark the ticker a success."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL", "NVDA"], run_id, _now(),
+                agent_run_status="completed", agent_run_insight_count=0,
+            ))
+        for t in ("AAPL", "NVDA"):
+            assert out[t]["insight_run_match"] is False  # not a success
+            assert out[t]["failure_reason"] == REASON_AGENT_RUN_COMPLETED_NO_ROWS
+
+    def test_readback_attributes_failed_agent_run(self):
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], run_id, _now(),
+                agent_run_status="failed",
+            ))
+        assert out["AAPL"]["failure_reason"] == REASON_AGENT_RUN_FAILED
+        assert out["AAPL"]["insight_run_match"] is False
+
+    def test_readback_attributes_no_data_agent_run(self):
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], run_id, _now(),
+                agent_run_status="no_data",
+            ))
+        assert out["AAPL"]["failure_reason"] == REASON_AGENT_RUN_NO_DATA
+
+    def test_readback_attributes_raised_agent_run(self):
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], run_id, _now(),
+                agent_run_status="raised", agent_run_error="KeyError: 'ticker'",
+            ))
+        reason = out["AAPL"]["failure_reason"]
+        assert reason.startswith(REASON_AGENT_RUN_RAISED)
+        assert "KeyError" in reason
+        assert out["AAPL"]["insight_run_match"] is False
+
+    def test_readback_with_real_rows_ignores_agent_run_status(self):
+        """When durable rows DO exist, a verified success is returned regardless
+        of the agent_run_status hint — the hint only explains the no-rows case."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        created = (_now() + timedelta(seconds=30)).isoformat()
+        _seed_agent_evidence(
+            fake, user_id=USER_A, run_id=run_id, tickers=["AAPL"],
+            created_at=created, ticker_case=str.lower,
+        )
+        with patch("app.database.get_supabase_client", return_value=fake):
+            out = asyncio.run(_read_post_run_evidence(
+                uuid.UUID(USER_A), ["AAPL"], run_id, _now(),
+                agent_run_status="completed", agent_run_insight_count=1,
+            ))
+        assert out["AAPL"]["insight_run_match"] is True
+        assert out["AAPL"]["failure_reason"] is None
 
     def test_readback_does_not_treat_other_run_id_rows_as_a_run_match(self):
         """Rows persisted under a different run id must NOT count as a verified
@@ -923,3 +1058,115 @@ class TestWorkerProducesSuccessfulPersistedTicker:
         assert result.succeeded_tickers == []
         assert fake.rows()[0]["status"] == JOB_FAILED
         assert fake.rows()[0]["next_retry_at"] is not None
+
+    def test_adapter_surfaces_specific_reason_for_completed_run_with_no_rows(self):
+        """OBSERVED PRODUCTION STATE: the orchestrator run COMPLETES but writes
+        no agent_insights / recommendations rows. The adapter must report each
+        ticker failed with the SPECIFIC reason — not the opaque generic — so the
+        next production log pinpoints the orchestrator persistence step."""
+        fake = _FakeSupabase()
+
+        async def _run_backend(user_id, selected_tickers, started_at):
+            # orch.run() returned status="completed" but persisted nothing.
+            with patch("app.database.get_supabase_client", return_value=fake):
+                return await _read_post_run_evidence(
+                    user_id, selected_tickers, str(uuid.uuid4()), started_at,
+                    agent_run_status="completed", agent_run_insight_count=0,
+                )
+
+        adapter = FullPortfolioAnalystRefreshAdapter(
+            user_id=uuid.UUID(USER_A), run_backend=_run_backend,
+            budget=FullPortfolioAnalystRefreshBudget(),
+        )
+        result = asyncio.run(adapter(["AAPL", "NVDA"], started_at=_now()))
+        assert result.status == STATUS_FAILED
+        assert result.successful_llm_calls == 0
+        reasons = {o.ticker: o.error_reason for o in result.per_ticker}
+        assert reasons == {
+            "AAPL": REASON_AGENT_RUN_COMPLETED_NO_ROWS,
+            "NVDA": REASON_AGENT_RUN_COMPLETED_NO_ROWS,
+        }
+
+    def test_worker_logs_specific_reason_when_orchestrator_persists_nothing(self, caplog):
+        """End-to-end: a completed-but-non-persisting orchestrator run leaves the
+        durable jobs failed AND the worker's per-ticker failure log carries the
+        specific agent_run_completed_no_persisted_rows reason."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+
+        async def _run_backend(user_id, selected_tickers, started_at):
+            with patch("app.database.get_supabase_client", return_value=fake):
+                return await _read_post_run_evidence(
+                    user_id, selected_tickers, str(uuid.uuid4()), started_at,
+                    agent_run_status="completed",
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid, run_backend=_run_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(client=fake, adapter_factory=_factory)
+        with caplog.at_level("INFO"):
+            result = asyncio.run(worker.run_once(now=_now()))
+
+        assert result.succeeded_tickers == []
+        assert fake.rows()[0]["status"] == JOB_FAILED
+        assert any(
+            "analyst_refresh_worker_ticker_failed" in r.message
+            and REASON_AGENT_RUN_COMPLETED_NO_ROWS in r.message
+            for r in caplog.records
+        )
+
+
+# ── 9. Intel v3 certified read path can read worker-written rows as fresh ────
+
+
+class TestIntelV3ReadOnlyEvidenceReadsFreshRows:
+    def test_read_only_adapter_reads_freshly_written_rows_as_fresh(self):
+        """The Intel v3 certified read path (ReadOnlyEvidenceAdapter) must be
+        able to read the recommendations / agent_insights rows the worker run
+        writes — and surface their fresh timestamps — so a later Run Intel v3
+        sees the refreshed evidence and can move out of BLOCKED_UNCERTIFIED."""
+        fake = _FakeSupabase()
+        fresh = _now().isoformat()
+        run_id = str(uuid.uuid4())
+        # positions
+        fake.store["positions"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "ticker": "AAPL",
+             "name": "Apple", "category": "stock"},
+        ]
+        # a completed agent run, finished now
+        fake.store["agent_runs"] = [
+            {"id": run_id, "user_id": USER_A, "status": "completed",
+             "finished_at": fresh, "allocation": {}},
+        ]
+        # recommendations + agent_insights written by that run, fresh
+        fake.store["recommendations"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "ticker": "AAPL",
+             "action": "HOLD", "technical_signal": None, "conviction_score": 0.5,
+             "agent_run_id": run_id, "is_active": True, "created_at": fresh},
+        ]
+        fake.store["agent_insights"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "run_id": run_id,
+             "ticker": "AAPL", "created_at": fresh,
+             "analyst_verdict": {"action": "HOLD", "used_fallback": False},
+             "analyst_confidence": 0.5},
+        ]
+
+        with patch(
+            "app.services.intelligence.v3.read_only_evidence_adapter."
+            "get_supabase_client",
+            return_value=fake,
+        ):
+            adapter = ReadOnlyEvidenceAdapter(user_id=uuid.UUID(USER_A))
+            cards, stats = asyncio.run(adapter.load_cards())
+
+        assert [c.ticker for c in cards] == ["AAPL"]
+        assert stats["persisted_recommendation_count"] == 1
+        assert stats["persisted_agent_insight_count"] == 1
+        # The fresh timestamps are surfaced for the freshness diagnostics, so a
+        # later Run Intel v3 classifies this evidence FRESH.
+        assert stats["recommendation_timestamps"] == [fresh]
+        assert stats["agent_insight_run_timestamps"] == [fresh]

@@ -26,6 +26,11 @@ analyst_refresh_worker_v1  (separate process — Railway worker service / manual
   worker refreshes **evidence only** and never imports the decision policy.
 - Failed tickers stay `failed` with an exponential-backoff retry — no fabricated
   freshness.
+- **The worker is polling, not event-driven.** Clicking Run Intel v3
+  enqueues / touches durable jobs but does NOT wake the worker — the worker
+  picks them up on its next poll. The loop interval (`INTEL_V3_ANALYST_REFRESH_
+  WORKER_INTERVAL_SECONDS`, default **60s**) is therefore the production-
+  validation visibility knob.
 
 ## Supabase SQL — required, manual
 
@@ -78,9 +83,17 @@ Logs one `intel_v3.analyst_refresh_worker_run_summary` line and exits 0.
 
 ```bash
 cd v2/backend
+# Polls every INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS (default 60s).
+python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop
+# Or override the interval explicitly (CLI flag wins over the env var):
 python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint \
-    --loop --interval-seconds 900
+    --loop --interval-seconds 60
 ```
+
+Each loop pass logs an `intel_v3.analyst_refresh_worker_loop_summary` line with
+`mode=loop interval_seconds=… next_poll_at=… claimed_job_count=… selected_ticker_count=…
+succeeded_count=… failed_count=…` so a poll that found `claimed_job_count=0` is
+visibly distinct from one that drained jobs.
 
 ### Railway
 
@@ -96,8 +109,17 @@ change the existing web service. Both services use the single shared
 
 The shared `railway.toml` uses a shell conditional (`if PROCESS_TYPE=worker...`)
 to branch at startup. Both services set `root = "v2/backend"` and share the same
-Supabase service-role key + provider/LLM env vars. The loop interval can be
-overridden with `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS` (default 900s).
+Supabase service-role key + provider/LLM env vars. The loop interval is
+controlled by `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS` (**default
+60s**); invalid / missing / non-positive values fall back to the 60s default.
+
+**Production validation:** the worker is polling, not event-driven — a Run
+Intel v3 click enqueues / touches jobs but does **not** wake the worker. During
+validation, set `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS=60` on the
+worker service so an enqueue is consumed within ~a minute and the
+`analyst_refresh_worker_loop_summary` log moves promptly from
+`claimed_job_count=0` to a non-zero drain. Raise the interval for steady-state
+once behaviour is confirmed.
 
 `v2/backend/Procfile` also carries a `worker:` process line documenting the same
 command for local development.
@@ -117,6 +139,7 @@ empty queue.
 | `intel_v3.analyst_refresh_worker_ticker_succeeded` | worker | a ticker's evidence was refreshed + persisted |
 | `intel_v3.analyst_refresh_worker_ticker_failed` | worker | a ticker stayed stale + its next retry time |
 | `intel_v3.analyst_refresh_worker_run_summary` | worker | claimed / selected / succeeded / failed / LLM-call counts / duration |
+| `intel_v3.analyst_refresh_worker_loop_summary` | entrypoint | per-poll: `interval_seconds` / `next_poll_at` / claimed / selected / succeeded / failed — distinguishes an idle poll from a drain |
 
 ### Production validation gate
 

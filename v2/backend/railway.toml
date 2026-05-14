@@ -1,9 +1,7 @@
 [build]
-builder = "RAILPACK"
+builder = "nixpacks"
 
 [deploy]
-startCommand = "uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips='*'"
-healthcheckPath = "/health"
-healthcheckTimeout = 30
+startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

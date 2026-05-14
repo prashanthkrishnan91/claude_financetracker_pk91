@@ -434,6 +434,10 @@ class IntelV3Service:
                 snapshot_payload["warnings"].append(
                     f"Generic copy detected on {len(spam_tickers)} card(s)."
                 )
+            # Full list of tickers with ticker-prefix-only rationale — used for
+            # rationale repair enqueue below (fresh-but-uncertifiable recovery).
+            _prefix_only_tickers: list[str] = cert.get("ticker_prefix_spam_tickers", [])
+
             if prefix_only_count > 0:
                 prefix_examples = cert.get("examples", {}).get("ticker_prefix_only")
                 skeleton_examples = cert.get("examples", {}).get("repeated_skeleton")
@@ -451,6 +455,19 @@ class IntelV3Service:
 
             # Step 5: persist snapshot — only reached when hard_violation_count == 0.
             await self._persist_snapshot(run_id=run_id, payload=snapshot_payload)
+
+            # Step 5b: enqueue rationale repair jobs when ticker-prefix-only rationale
+            # is detected. Evidence timestamps are "fresh" so stale-age detection never
+            # fires for these tickers, but the analyst_verdict rows are uncertifiable
+            # (primary_driver/action_reason/risk_flag missing — written by PR #319's
+            # lossy writeback). Enqueueing here forces the worker to rewrite them using
+            # the PR #320 structured-verdict path on next poll.
+            if _prefix_only_tickers:
+                await self._enqueue_rationale_repair(
+                    run_id=run_id,
+                    tickers=_prefix_only_tickers,
+                    started_at=started_at,
+                )
 
             duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
             action_counts = snapshot_payload.get("action_counts", {})
@@ -1028,6 +1045,48 @@ class IntelV3Service:
             self.user_id, type(seam).__name__,
         )
         return seam
+
+    async def _enqueue_rationale_repair(
+        self,
+        *,
+        run_id: str,
+        tickers: list[str],
+        started_at: datetime,
+    ) -> None:
+        """Enqueue analyst refresh jobs for tickers with ticker-prefix-only rationale.
+
+        Called when ``certify_snapshot_cards()`` detects ``ticker_prefix_only_reason_count > 0``
+        on evidence that is fresh-by-timestamp but uncertifiable (lossy analyst_verdict
+        fields from pre-PR-320 writeback). Stale-age detection never fires for these
+        tickers, so this is the only path that ensures the worker rewrites them.
+
+        Uses ``enqueue_refresh_jobs()`` directly — no seam, no orchestrator, no LLM.
+        The enqueue is idempotent: existing pending/failed jobs are touched/made-due;
+        succeeded jobs are reopened. Never raises — DB failure degrades to a warning.
+        """
+        from .analyst_refresh_job_store_v1 import enqueue_refresh_jobs as _enqueue
+        try:
+            result = await asyncio.to_thread(
+                _enqueue,
+                self.client,
+                user_id=self.user_id,
+                tickers=tickers,
+                now=started_at,
+            )
+            logger.info(
+                "intel_v3_rationale_repair_enqueued user_id=%s run_id=%s "
+                "reason=rationale_repair_required affected_tickers=%s "
+                "jobs_created=%d jobs_touched=%d jobs_made_due=%d jobs_reopened=%d",
+                self.user_id, run_id, tickers,
+                result.created_count, result.touched_count,
+                result.made_due_count, result.reopened_count,
+            )
+        except Exception as exc:
+            logger.warning(
+                "intel_v3_rationale_repair_enqueue_failed user_id=%s run_id=%s "
+                "tickers=%s err=%s",
+                self.user_id, run_id, tickers, exc,
+            )
 
     async def _get_latest_portfolio_snapshot_meta(self) -> dict[str, Any]:
         """Fetch the latest portfolio_snapshots row's snapshot_at + per-position certified_at list."""

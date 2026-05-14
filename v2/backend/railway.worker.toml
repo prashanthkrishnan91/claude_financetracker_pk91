@@ -1,7 +1,7 @@
 # v2/backend/railway.worker.toml
 
 [build]
-builder = "nixpacks"
+builder = "RAILPACK"
 
 [deploy]
 startCommand = "python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop"

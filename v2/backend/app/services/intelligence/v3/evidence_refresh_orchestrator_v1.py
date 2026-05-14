@@ -126,6 +126,9 @@ class RefreshResult:
     refresh_duration_ms: int
     analyst_refresh_supported: bool
     analyst_refresh_status: str       # "not_supported_v1" / "skipped_budget" / "succeeded"
+    analyst_per_ticker: list[dict[str, Any]]
+    analyst_selected_tickers: list[str]
+    analyst_deferred_tickers: list[str]
     budget_exhausted: bool
     notes: list[str]
 
@@ -182,6 +185,17 @@ class RefreshResult:
             "refresh_duration_ms":         self.refresh_duration_ms,
             "analyst_refresh_supported":   self.analyst_refresh_supported,
             "analyst_refresh_status":      self.analyst_refresh_status,
+            "analyst_refresh_per_ticker":  list(self.analyst_per_ticker),
+            "analyst_refresh_selected_tickers": list(self.analyst_selected_tickers),
+            "analyst_refresh_deferred_tickers": list(self.analyst_deferred_tickers),
+            "analyst_refresh_successful_tickers": [
+                o["ticker"] for o in self.analyst_per_ticker
+                if o.get("success") is True
+            ],
+            "analyst_refresh_failed_tickers": [
+                o["ticker"] for o in self.analyst_per_ticker
+                if o.get("success") is False
+            ],
             "budget_exhausted":            self.budget_exhausted,
             "orchestrator_notes":          list(self.notes),
             # §3 north-star — provider registry visibility.
@@ -201,6 +215,10 @@ class OrchestratorInputs:
       - market_value_certified_at: list of per-position market_value_certified_at
       - tickers: tickers to refresh prices for
       - research_artifact_timestamps: list of expires_at or created_at (optional)
+      - per_ticker_evidence: optional per-ticker analyst-evidence hints for the
+        analyst refresh adapter (prior action, weight, age). Built from existing
+        ``recommendations`` rows + portfolio snapshot weights; degrades to
+        empty when unavailable.
     """
     evidence_stats: dict[str, Any]
     portfolio_snapshot_at: Optional[str]
@@ -208,6 +226,7 @@ class OrchestratorInputs:
     tickers: list[str]
     research_artifact_timestamps: list[str]
     now: datetime
+    per_ticker_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 # Refresh callable signatures — the orchestrator accepts these as injectables so
@@ -334,7 +353,7 @@ class EvidenceRefreshOrchestrator:
                 blocked_sources=[],
                 refreshed_source_count=0,
                 failed_refresh_count=0,
-                analyst_refresh_supported=False,
+                analyst_refresh_supported=self._analyst_refresh is not None,
                 analyst_refresh_status="not_attempted_fast_certified",
                 started=started,
             )
@@ -411,7 +430,15 @@ class EvidenceRefreshOrchestrator:
         elif wants_price and self._price_refresh is None:
             self.notes.append("price_refresh_unavailable_no_callable")
 
-        # --- Analyst / LLM refresh -- v1 boundary (do not pretend) ------------
+        # --- Analyst / LLM refresh ---------------------------------------------
+        # The orchestrator delegates to an injected adapter callable. The
+        # adapter owns priority sorting, per-ticker budget enforcement, and
+        # per-ticker accounting; we record what it reports without inventing
+        # freshness for tickers the adapter says failed.
+        analyst_per_ticker: list[dict[str, Any]] = []
+        analyst_deferred_tickers: list[str] = []
+        analyst_selected_tickers: list[str] = []
+        analyst_successful_tickers: list[str] = []
         wants_analyst = any(
             src in refresh_targets
             for src in (SOURCE_AGENT_INSIGHTS, SOURCE_RECOMMENDATIONS)
@@ -421,9 +448,6 @@ class EvidenceRefreshOrchestrator:
             self.notes.append("analyst_refresh_not_supported_v1")
             # NOTE: We do not increment attempted_llm_calls — we never tried.
         elif wants_analyst and self._analyst_refresh is not None:
-            # Reserved for a future slice. The injection point exists so a
-            # later PR can wire a narrow analyst adapter without touching the
-            # orchestrator core.
             if self.budget.llm_budget_remaining() <= 0:
                 analyst_status = "skipped_budget"
                 self.notes.append("analyst_refresh_skipped_budget")
@@ -431,22 +455,48 @@ class EvidenceRefreshOrchestrator:
                 analyst_status = "skipped_timeout"
                 self.notes.append("analyst_refresh_skipped_timeout")
             else:
-                try:
-                    self.budget.attempted_llm_calls += 1
-                    await self._analyst_refresh(self.inputs.tickers)  # type: ignore[arg-type]
-                    self.budget.successful_llm_calls += 1
-                    analyst_status = "succeeded"
-                    refreshed_sources.add(SOURCE_AGENT_INSIGHTS)
-                    refreshed_sources.add(SOURCE_RECOMMENDATIONS)
-                except Exception as exc:
-                    self.budget.failed_llm_calls += 1
-                    analyst_status = f"failed:{type(exc).__name__}"
-                    failed_sources.add(SOURCE_AGENT_INSIGHTS)
-                    failed_sources.add(SOURCE_RECOMMENDATIONS)
-                    logger.warning(
-                        "evidence_refresh.analyst_refresh_failed user_id=%s error=%s",
-                        self.user_id, exc,
+                analyst_result = await self._invoke_analyst_refresh(
+                    refresh_targets=refresh_targets,
+                    before_states=before_states,
+                )
+                if analyst_result is None:
+                    analyst_status = "failed:invocation"
+                else:
+                    analyst_status = analyst_result.get("status", "failed")
+                    analyst_per_ticker = list(analyst_result.get("per_ticker") or [])
+                    analyst_deferred_tickers = list(
+                        analyst_result.get("deferred_tickers") or []
                     )
+                    analyst_selected_tickers = list(
+                        analyst_result.get("selected_tickers") or []
+                    )
+                    analyst_successful_tickers = [
+                        o["ticker"] for o in analyst_per_ticker
+                        if o.get("success") is True
+                    ]
+                    # Honest LLM accounting from adapter result.
+                    self.budget.attempted_llm_calls += int(
+                        analyst_result.get("attempted_llm_calls", 0)
+                    )
+                    self.budget.successful_llm_calls += int(
+                        analyst_result.get("successful_llm_calls", 0)
+                    )
+                    self.budget.failed_llm_calls += int(
+                        analyst_result.get("failed_llm_calls", 0)
+                    )
+                    if analyst_successful_tickers:
+                        # At least one ticker actually refreshed — the source
+                        # class produced some refreshed evidence. Mixed
+                        # success/failure is honest via refresh_failed_count.
+                        refreshed_sources.add(SOURCE_AGENT_INSIGHTS)
+                        refreshed_sources.add(SOURCE_RECOMMENDATIONS)
+                    if any(
+                        not o.get("success") for o in analyst_per_ticker
+                    ) or analyst_deferred_tickers:
+                        failed_sources.add(SOURCE_AGENT_INSIGHTS)
+                        failed_sources.add(SOURCE_RECOMMENDATIONS)
+                    for note in analyst_result.get("notes") or []:
+                        self.notes.append(str(note))
         else:
             analyst_status = "not_attempted"
 
@@ -454,6 +504,7 @@ class EvidenceRefreshOrchestrator:
         after_inputs = self._post_refresh_inputs(
             refreshed_sources=refreshed_sources,
             successful_tickers=successful_tickers,
+            analyst_successful_tickers=analyst_successful_tickers,
         )
         after_states = build_source_states(after_inputs)
         post_decision = classify_run_mode(
@@ -474,8 +525,128 @@ class EvidenceRefreshOrchestrator:
             failed_refresh_count=len(failed_sources),
             analyst_refresh_supported=self._analyst_refresh is not None,
             analyst_refresh_status=analyst_status,
+            analyst_per_ticker=analyst_per_ticker,
+            analyst_selected_tickers=analyst_selected_tickers,
+            analyst_deferred_tickers=analyst_deferred_tickers,
             started=started,
         )
+
+    async def _invoke_analyst_refresh(
+        self,
+        *,
+        refresh_targets: list[str],
+        before_states: dict[str, SourceFreshnessState],
+    ) -> Optional[dict[str, Any]]:
+        """Build stale ticker list + priority hints, then call the adapter.
+
+        The adapter owns subset selection, priority ordering, and budget
+        enforcement. The orchestrator simply provides:
+          - The full list of tickers whose analyst evidence is stale/missing.
+          - Priority hints derived from existing repo state (action / weight /
+            age) sourced from ``inputs.per_ticker_evidence``.
+
+        Returns the adapter's `to_dict()` payload, or None on hard failure.
+        """
+        try:
+            # Lazy import keeps the freshness contract import graph clean.
+            from .analyst_refresh_adapter_v1 import (
+                TickerPriorityHint,
+            )
+        except Exception as exc:
+            logger.warning(
+                "evidence_refresh.analyst_adapter_import_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+            return None
+
+        # Build the stale ticker list from per-ticker analyst evidence age. If
+        # the caller provided per-ticker evidence, use ticker-level age. Else
+        # fall back to "every active ticker is stale" when source-level
+        # classification flagged analyst evidence stale.
+        stale_tickers: list[str] = []
+        hints: list = []
+        per_ticker_ev = list(self.inputs.per_ticker_evidence or [])
+        rec_state = before_states.get(SOURCE_RECOMMENDATIONS)
+        ai_state = before_states.get(SOURCE_AGENT_INSIGHTS)
+        # Source-level age fallback (max of recommendation vs agent insight).
+        src_max_age = max(
+            (rec_state.oldest_age_hours if rec_state else 0.0) or 0.0,
+            (ai_state.oldest_age_hours if ai_state else 0.0) or 0.0,
+        )
+
+        if per_ticker_ev:
+            for row in per_ticker_ev:
+                ticker = str(row.get("ticker") or "").upper()
+                if not ticker:
+                    continue
+                age = row.get("evidence_age_hours")
+                # A ticker is "stale" when its evidence age exceeds the
+                # AGENT_INSIGHTS fresh window (24-48h). When age is unknown,
+                # default to stale (most conservative).
+                if age is None or age > 48.0:
+                    stale_tickers.append(ticker)
+                    hints.append(TickerPriorityHint(
+                        ticker=ticker,
+                        prior_action=row.get("prior_action"),
+                        weight_pct=row.get("weight_pct"),
+                        evidence_age_hours=age,
+                    ))
+        elif src_max_age and (
+            (SOURCE_AGENT_INSIGHTS in refresh_targets)
+            or (SOURCE_RECOMMENDATIONS in refresh_targets)
+        ):
+            # No per-ticker hints — fall back to the orchestrator ticker list.
+            for ticker in self.inputs.tickers or []:
+                up = (ticker or "").upper()
+                if not up:
+                    continue
+                stale_tickers.append(up)
+                hints.append(TickerPriorityHint(
+                    ticker=up,
+                    evidence_age_hours=src_max_age,
+                ))
+
+        if not stale_tickers:
+            return {
+                "status": "no_stale",
+                "selected_tickers": [],
+                "deferred_tickers": [],
+                "per_ticker": [],
+                "attempted_llm_calls": 0,
+                "successful_llm_calls": 0,
+                "failed_llm_calls": 0,
+                "notes": ["analyst_refresh_no_stale_tickers"],
+            }
+
+        try:
+            result = await self._analyst_refresh(  # type: ignore[misc]
+                stale_tickers,
+                priority_hints=hints,
+                started_at=self.inputs.now,
+            )
+        except TypeError:
+            # Backward-compat path for adapters that don't accept kwargs.
+            try:
+                result = await self._analyst_refresh(stale_tickers)  # type: ignore[misc]
+            except Exception as exc:
+                logger.warning(
+                    "evidence_refresh.analyst_refresh_failed user_id=%s err=%s",
+                    self.user_id, exc,
+                )
+                return None
+        except Exception as exc:
+            logger.warning(
+                "evidence_refresh.analyst_refresh_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+            return None
+
+        # Adapter may return a dataclass or a dict. Normalize.
+        if hasattr(result, "to_dict"):
+            return result.to_dict()
+        if isinstance(result, dict):
+            return result
+        return None
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
@@ -484,6 +655,7 @@ class EvidenceRefreshOrchestrator:
         *,
         refreshed_sources: set[str],
         successful_tickers: list[str],
+        analyst_successful_tickers: Optional[list[str]] = None,
     ) -> OrchestratorInputs:
         """Return a fresh OrchestratorInputs reflecting which sources we refreshed.
 
@@ -497,6 +669,14 @@ class EvidenceRefreshOrchestrator:
         positions refreshed; mixed-success runs preserve the original
         snapshot timestamp so the portfolio_snapshot source class still
         reflects the pre-refresh truth.
+
+        Analyst rule: when the analyst adapter reported per-ticker success,
+        only those tickers' recommendation / agent_insight timestamps get
+        rewritten to `now`. Per-ticker evidence rows for un-refreshed
+        tickers keep their original age. Source-aggregate timestamp lists
+        in `evidence_stats` are only rewritten when EVERY persisted analyst
+        timestamp's matching ticker actually refreshed — partial refresh
+        keeps the source-aggregate honest.
         """
         now_iso = self.inputs.now.isoformat()
 
@@ -541,16 +721,88 @@ class EvidenceRefreshOrchestrator:
             portfolio_snapshot_at = now_iso
 
         evidence_stats = dict(self.inputs.evidence_stats or {})
-        # Analyst refresh is not wired in v1; this branch only fires when a
-        # future injected analyst_refresh succeeded.
-        if SOURCE_AGENT_INSIGHTS in refreshed_sources:
+        per_ticker_ev = list(self.inputs.per_ticker_evidence or [])
+        analyst_set = {t.upper() for t in (analyst_successful_tickers or [])}
+
+        # Per-ticker truth: rewrite only the rows whose ticker actually
+        # refreshed. Per-ticker entries for non-refreshed tickers keep their
+        # original ages so downstream classification still sees them stale.
+        if per_ticker_ev and analyst_set:
+            new_per_ticker_ev: list[dict[str, Any]] = []
+            for row in per_ticker_ev:
+                up = str(row.get("ticker") or "").upper()
+                if up in analyst_set:
+                    new_row = dict(row)
+                    new_row["evidence_age_hours"] = 0.0
+                    new_row["last_refreshed_at"] = now_iso
+                    new_per_ticker_ev.append(new_row)
+                else:
+                    new_per_ticker_ev.append(row)
+        else:
+            new_per_ticker_ev = per_ticker_ev
+
+        # Source-aggregate timestamps: rewrite ONLY when every active position
+        # ticker refreshed. Partial refresh preserves the original mix so the
+        # SourceFreshnessState aggregate honestly reports the worst observed
+        # bucket. This is the "no fabricated freshness" rule for the analyst
+        # source class.
+        all_attempted_tickers = [r.get("ticker") for r in per_ticker_ev]
+        all_attempted_set = {
+            (t or "").upper() for t in all_attempted_tickers if t
+        }
+        all_analyst_refreshed = (
+            bool(analyst_set)
+            and bool(all_attempted_set)
+            and all_attempted_set.issubset(analyst_set)
+        )
+
+        if SOURCE_AGENT_INSIGHTS in refreshed_sources and all_analyst_refreshed:
             evidence_stats["agent_insight_run_timestamps"] = [
                 now_iso for _ in (evidence_stats.get("agent_insight_run_timestamps") or [])
             ]
-        if SOURCE_RECOMMENDATIONS in refreshed_sources:
+        if SOURCE_RECOMMENDATIONS in refreshed_sources and all_analyst_refreshed:
             evidence_stats["recommendation_timestamps"] = [
                 now_iso for _ in (evidence_stats.get("recommendation_timestamps") or [])
             ]
+        # Partial-success analyst refresh: only the refreshed subset's ages
+        # collapse to "now" in the source-aggregate timestamp lists; other
+        # entries keep their original timestamps to preserve aggregate honesty.
+        if (
+            SOURCE_AGENT_INSIGHTS in refreshed_sources
+            and analyst_set
+            and not all_analyst_refreshed
+            and per_ticker_ev
+            and evidence_stats.get("agent_insight_run_timestamps")
+        ):
+            new_list: list[str] = []
+            original = list(evidence_stats.get("agent_insight_run_timestamps") or [])
+            for idx, row in enumerate(per_ticker_ev):
+                up = str(row.get("ticker") or "").upper()
+                original_ts = original[idx] if idx < len(original) else None
+                if up in analyst_set:
+                    new_list.append(now_iso)
+                elif original_ts is not None:
+                    new_list.append(original_ts)
+            if new_list:
+                evidence_stats["agent_insight_run_timestamps"] = new_list
+        if (
+            SOURCE_RECOMMENDATIONS in refreshed_sources
+            and analyst_set
+            and not all_analyst_refreshed
+            and per_ticker_ev
+            and evidence_stats.get("recommendation_timestamps")
+        ):
+            new_list = []
+            original = list(evidence_stats.get("recommendation_timestamps") or [])
+            for idx, row in enumerate(per_ticker_ev):
+                up = str(row.get("ticker") or "").upper()
+                original_ts = original[idx] if idx < len(original) else None
+                if up in analyst_set:
+                    new_list.append(now_iso)
+                elif original_ts is not None:
+                    new_list.append(original_ts)
+            if new_list:
+                evidence_stats["recommendation_timestamps"] = new_list
 
         return OrchestratorInputs(
             evidence_stats=evidence_stats,
@@ -559,6 +811,7 @@ class EvidenceRefreshOrchestrator:
             tickers=tickers,
             research_artifact_timestamps=list(self.inputs.research_artifact_timestamps or []),
             now=self.inputs.now,
+            per_ticker_evidence=new_per_ticker_ev,
         )
 
     def _finalize(
@@ -575,6 +828,9 @@ class EvidenceRefreshOrchestrator:
         analyst_refresh_supported: bool,
         analyst_refresh_status: str,
         started: float,
+        analyst_per_ticker: Optional[list[dict[str, Any]]] = None,
+        analyst_selected_tickers: Optional[list[str]] = None,
+        analyst_deferred_tickers: Optional[list[str]] = None,
     ) -> RefreshResult:
         duration_ms = int((time.monotonic() - started) * 1000)
         budget_exhausted = (
@@ -601,6 +857,9 @@ class EvidenceRefreshOrchestrator:
             refresh_duration_ms=duration_ms,
             analyst_refresh_supported=analyst_refresh_supported,
             analyst_refresh_status=analyst_refresh_status,
+            analyst_per_ticker=list(analyst_per_ticker or []),
+            analyst_selected_tickers=list(analyst_selected_tickers or []),
+            analyst_deferred_tickers=list(analyst_deferred_tickers or []),
             budget_exhausted=budget_exhausted,
             notes=list(self.notes),
         )

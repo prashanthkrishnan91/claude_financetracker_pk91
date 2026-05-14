@@ -39,6 +39,11 @@ from .evidence_refresh_orchestrator_v1 import (
     OrchestratorInputs,
     RefreshBudget,
 )
+from .analyst_refresh_adapter_v1 import (
+    AnalystRefreshAdapter,
+    AnalystRefreshBudget,
+    default_agent_orchestrator_backend,
+)
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
@@ -46,11 +51,23 @@ from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
+# Stage 3.0b.6 — analyst-refresh adapter opt-in. Defaults to enabled so the
+# Run Intel v3 path can refresh stale analyst evidence under budget. Set to
+# "0" / "false" to disable temporarily (e.g. while debugging an LLM provider).
+_ANALYST_REFRESH_FLAG_ENV = "INTEL_V3_ANALYST_REFRESH_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
+_FALSY = {"0", "false", "no", "off"}
 
 
 def is_intel_v3_enabled() -> bool:
     return os.getenv(_FLAG_ENV, "").strip().lower() in _TRUTHY
+
+
+def is_analyst_refresh_enabled() -> bool:
+    raw = os.getenv(_ANALYST_REFRESH_FLAG_ENV, "").strip().lower()
+    if raw in _FALSY:
+        return False
+    return True  # default-on; explicit FALSY required to disable
 
 
 class IntelV3Service:
@@ -526,6 +543,9 @@ class IntelV3Service:
             now = datetime.now(timezone.utc)
             snap_meta = await self._get_latest_portfolio_snapshot_meta()
             tickers = await self._get_active_tickers()
+            per_ticker_evidence = await self._get_per_ticker_analyst_evidence(
+                tickers, now=now,
+            )
 
             inputs = OrchestratorInputs(
                 evidence_stats=evidence_stats,
@@ -534,16 +554,18 @@ class IntelV3Service:
                 tickers=tickers,
                 research_artifact_timestamps=[],  # v1: not yet read; explicit empty
                 now=now,
+                per_ticker_evidence=per_ticker_evidence,
             )
 
             # Build a price-refresh callable bound to the existing price engine.
             price_refresh = self._build_price_refresh_callable()
+            analyst_refresh = self._build_analyst_refresh_callable()
 
             orchestrator = EvidenceRefreshOrchestrator(
                 user_id=self.user_id,
                 inputs=inputs,
                 price_refresh=price_refresh,
-                analyst_refresh=None,  # v1: analyst refresh not wired
+                analyst_refresh=analyst_refresh,
                 budget=RefreshBudget(),
             )
             return await orchestrator.run()
@@ -553,6 +575,174 @@ class IntelV3Service:
                 self.user_id, run_id, exc,
             )
             return None
+
+    async def _get_per_ticker_analyst_evidence(
+        self,
+        tickers: list[str],
+        *,
+        now: datetime,
+    ) -> list[dict[str, Any]]:
+        """Fetch per-ticker prior action + portfolio weight + evidence age.
+
+        Reads ``recommendations`` (latest active per ticker) for prior action +
+        created_at, and the latest portfolio snapshot for market-value weights.
+        Returns a list of dicts the adapter ranks. Failures degrade to an
+        empty list — the orchestrator falls back to source-level ticker scope.
+        """
+        if not tickers:
+            return []
+
+        rec_rows: list[dict[str, Any]] = []
+        insight_rows: list[dict[str, Any]] = []
+
+        def _fetch_recs():
+            return (
+                self.client.table("recommendations")
+                .select("ticker,action,created_at,is_active")
+                .eq("user_id", str(self.user_id))
+                .in_("ticker", list(tickers))
+                .order("created_at", desc=True)
+                .execute()
+            )
+
+        def _fetch_insights():
+            return (
+                self.client.table("agent_insights")
+                .select("ticker,created_at")
+                .eq("user_id", str(self.user_id))
+                .in_("ticker", list(tickers))
+                .order("created_at", desc=True)
+                .execute()
+            )
+
+        try:
+            res = await asyncio.to_thread(_fetch_recs)
+            rec_rows = res.data or []
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.per_ticker_recs_fetch_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+        try:
+            res = await asyncio.to_thread(_fetch_insights)
+            insight_rows = res.data or []
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.per_ticker_insights_fetch_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+
+        latest_rec_by_ticker: dict[str, dict[str, Any]] = {}
+        for row in rec_rows:
+            t = (row.get("ticker") or "").upper()
+            if not t or t in latest_rec_by_ticker:
+                continue
+            latest_rec_by_ticker[t] = row
+
+        latest_insight_by_ticker: dict[str, dict[str, Any]] = {}
+        for row in insight_rows:
+            t = (row.get("ticker") or "").upper()
+            if not t or t in latest_insight_by_ticker:
+                continue
+            latest_insight_by_ticker[t] = row
+
+        # Build weights from the latest portfolio snapshot. Best-effort.
+        weight_pcts: dict[str, float] = {}
+        try:
+            snap_res = await asyncio.to_thread(
+                lambda: self.client.table("portfolio_snapshots")
+                .select("positions_data")
+                .eq("user_id", str(self.user_id))
+                .order("snapshot_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = snap_res.data or []
+            if rows:
+                positions = (rows[0] or {}).get("positions_data") or []
+                values: dict[str, float] = {}
+                total = 0.0
+                for pos in positions:
+                    if not isinstance(pos, dict):
+                        continue
+                    t = (pos.get("ticker") or "").upper()
+                    mv = pos.get("market_value") or pos.get("market_value_usd") or 0.0
+                    try:
+                        mv = float(mv)
+                    except (TypeError, ValueError):
+                        mv = 0.0
+                    if t and mv > 0:
+                        values[t] = mv
+                        total += mv
+                if total > 0:
+                    for t, v in values.items():
+                        weight_pcts[t] = round((v / total) * 100.0, 2)
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.per_ticker_weights_fetch_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+
+        def _age_hours(iso: Any) -> float | None:
+            if not iso or not isinstance(iso, str):
+                return None
+            try:
+                dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return round((now - dt).total_seconds() / 3600.0, 2)
+
+        out: list[dict[str, Any]] = []
+        for ticker in tickers:
+            up = (ticker or "").upper()
+            if not up:
+                continue
+            rec = latest_rec_by_ticker.get(up)
+            insight = latest_insight_by_ticker.get(up)
+            prior_action = (rec or {}).get("action")
+            rec_age = _age_hours((rec or {}).get("created_at"))
+            insight_age = _age_hours((insight or {}).get("created_at"))
+            # Worst-of age: the older of the two source timestamps drives the
+            # ticker's analyst-evidence staleness for ranking + classification.
+            if rec_age is None and insight_age is None:
+                age = None
+            elif rec_age is None:
+                age = insight_age
+            elif insight_age is None:
+                age = rec_age
+            else:
+                age = max(rec_age, insight_age)
+            out.append({
+                "ticker":              up,
+                "prior_action":        prior_action,
+                "weight_pct":          weight_pcts.get(up),
+                "evidence_age_hours":  age,
+            })
+        return out
+
+    def _build_analyst_refresh_callable(self):
+        """Return the analyst-refresh callable for the orchestrator (or None).
+
+        v1 wires an ``AnalystRefreshAdapter`` over the existing
+        ``AgentOrchestrator``. Disabled by setting INTEL_V3_ANALYST_REFRESH_ENABLED=0.
+        """
+        if not is_analyst_refresh_enabled():
+            return None
+        try:
+            adapter = AnalystRefreshAdapter(
+                user_id=self.user_id,
+                run_backend=default_agent_orchestrator_backend,
+                budget=AnalystRefreshBudget(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "intel_v3.analyst_adapter_build_failed user_id=%s err=%s",
+                self.user_id, exc,
+            )
+            return None
+        return adapter
 
     async def _get_latest_portfolio_snapshot_meta(self) -> dict[str, Any]:
         """Fetch the latest portfolio_snapshots row's snapshot_at + per-position certified_at list."""

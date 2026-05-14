@@ -12,6 +12,11 @@ Timestamps are sourced from the evidence adapter stats:
 
 If a timestamp is unavailable, the relevant field returns None rather than a guess.
 Stale threshold: 72 hours (conservative; documented here as the single source of truth).
+
+Stage 3.0b.6: the banner age summary now reports recommendation evidence and
+agent-insight evidence separately so the UI never claims "Oldest evidence: 8d"
+when agent insight evidence is actually ~12d stale. The plain-English summary
+is built here so the frontend never has to guess which age applies.
 """
 from __future__ import annotations
 
@@ -93,7 +98,41 @@ def build_evidence_freshness(
         "max_agent_insight_age_hours": max_agent_insight_age_hours,
         "oldest_source_timestamp": oldest_source_timestamp,
         "newest_source_timestamp": newest_source_timestamp,
+        # Plain-English per-source age summary (Stage 3.0b.6). Single source
+        # of truth for the banner line — both ages reported separately when
+        # either is available; "Evidence age: unknown." when both are None.
+        "banner_age_summary": _format_banner_age_summary(
+            max_recommendation_age_hours,
+            max_agent_insight_age_hours,
+        ),
     }
+
+
+def _format_banner_age_summary(
+    max_recommendation_age_hours: Optional[float],
+    max_agent_insight_age_hours: Optional[float],
+) -> str:
+    """Plain-English age summary for both analyst sources.
+
+    Examples (per task brief):
+      - "Analyst evidence: 12.0 days old. Recommendation evidence: 8.0 days old."
+      - "Recommendation evidence: 8.0 days old."  (analyst age missing)
+      - "Evidence age: unknown."                  (both ages missing)
+    """
+    if max_recommendation_age_hours is None and max_agent_insight_age_hours is None:
+        return "Evidence age: unknown."
+    parts: list[str] = []
+    if max_agent_insight_age_hours is not None:
+        parts.append(f"Analyst evidence: {_human_age(max_agent_insight_age_hours)} old.")
+    if max_recommendation_age_hours is not None:
+        parts.append(f"Recommendation evidence: {_human_age(max_recommendation_age_hours)} old.")
+    return " ".join(parts)
+
+
+def _human_age(hours: float) -> str:
+    if hours < 24.0:
+        return f"{hours:.1f}h"
+    return f"{hours / 24.0:.1f} days"
 
 
 def build_decision_diff(

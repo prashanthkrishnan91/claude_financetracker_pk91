@@ -96,15 +96,34 @@ function _runModeTone(runMode: IntelV3RunMode | undefined, trust: string | undef
   return "bg-surface border-border text-text-muted";
 }
 
+function _buildAgeSummary(
+  recAgeHours: number | null | undefined,
+  insightAgeHours: number | null | undefined,
+): string {
+  // Mirror the backend's banner_age_summary: report both sources separately
+  // so the banner never claims "Oldest evidence: 8d" when analyst evidence
+  // is actually 12d stale. Backend supplies the canonical string when present;
+  // this is the compatibility fallback for older snapshots.
+  if (recAgeHours == null && insightAgeHours == null) return "Evidence age: unknown.";
+  const parts: string[] = [];
+  if (insightAgeHours != null) {
+    parts.push(`Analyst evidence: ${_formatAgeHours(insightAgeHours)} old.`);
+  }
+  if (recAgeHours != null) {
+    parts.push(`Recommendation evidence: ${_formatAgeHours(recAgeHours)} old.`);
+  }
+  return parts.join(" ");
+}
+
 function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
   const diag = snapshot.diagnostics;
   if (!diag) return null;
-  const ageStr = _formatAgeHours(diag.max_recommendation_age_hours ?? diag.max_agent_insight_age_hours);
-  const oldestPart = ageStr ? `Oldest evidence: ${ageStr}.` : "Evidence age: unknown.";
+  const summary = diag.banner_age_summary
+    ?? _buildAgeSummary(diag.max_recommendation_age_hours, diag.max_agent_insight_age_hours);
   const changedPart = `Decisions changed: ${diag.changed_decision_count}.`;
   return (
     <p className="mt-1 text-[11px] text-text-muted">
-      {oldestPart} {changedPart}
+      {summary} {changedPart}
     </p>
   );
 }

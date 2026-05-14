@@ -6,9 +6,10 @@ Covers:
     DB row state.
   * Production-stale 34-ticker portfolio refreshes via the new adapter and
     moves the orchestrator's run mode to ``REFRESH_THEN_RUN`` / trusted.
-  * ``IntelV3Service._build_analyst_refresh_callable`` defaults to the
-    full-portfolio adapter; ``INTEL_V3_ANALYST_REFRESH_MODE=budgeted_subset``
-    falls back to the legacy Stage 3.0b.6 adapter.
+  * (Stage 3.1) ``IntelV3Service._build_analyst_refresh_callable`` no longer
+    wires this LLM adapter into the synchronous path — it returns the non-LLM
+    ``AnalystRefreshRequestSeam``. This adapter is retained in-repo for a
+    future background Intelligence Plane and is still exercised directly here.
   * ``IntelV3Service.run_v3()`` re-reads evidence after a successful analyst
     refresh so deterministic decisions consume the refreshed rows, not the
     pre-refresh snapshot.
@@ -502,7 +503,13 @@ class TestOrchestratorIntegration:
         assert result.failed_llm_calls == 2
 
 
-# ── 5. IntelV3Service adapter selection (default + override) ────────────────
+# ── 5. IntelV3Service analyst-refresh wiring (Stage 3.1) ────────────────────
+#
+# Stage 3.1 decouples the synchronous Run Intel v3 path: it no longer wires the
+# LLM analyst adapters into the HTTP request. ``_build_analyst_refresh_callable``
+# now returns the non-LLM ``AnalystRefreshRequestSeam``. The LLM adapters tested
+# in sections 1-4 / 7 above remain in the repo for a future background plane —
+# they are simply no longer wired into the synchronous service path.
 
 class TestServiceAdapterSelection(unittest.TestCase):
     def _build_service(self):
@@ -512,45 +519,22 @@ class TestServiceAdapterSelection(unittest.TestCase):
         service.client = MagicMock()
         return service
 
-    def test_default_mode_is_full_portfolio(self):
-        from app.services.intelligence.v3.intel_v3_service import analyst_refresh_mode
-        # Ensure the env knob is unset for this assertion.
-        prior = os.environ.pop("INTEL_V3_ANALYST_REFRESH_MODE", None)
-        try:
-            assert analyst_refresh_mode() == "full_portfolio"
-        finally:
-            if prior is not None:
-                os.environ["INTEL_V3_ANALYST_REFRESH_MODE"] = prior
-
-    def test_default_adapter_is_full_portfolio_adapter(self):
-        prior = os.environ.pop("INTEL_V3_ANALYST_REFRESH_MODE", None)
-        try:
-            service = self._build_service()
-            adapter = service._build_analyst_refresh_callable()
-            assert isinstance(adapter, FullPortfolioAnalystRefreshAdapter)
-        finally:
-            if prior is not None:
-                os.environ["INTEL_V3_ANALYST_REFRESH_MODE"] = prior
-
-    def test_budgeted_subset_mode_uses_legacy_six_ticker_adapter(self):
-        from app.services.intelligence.v3.analyst_refresh_adapter_v1 import (
-            AnalystRefreshAdapter,
+    def test_default_callable_is_the_non_llm_request_seam(self):
+        from app.services.intelligence.v3.analyst_refresh_request_seam_v1 import (
+            AnalystRefreshRequestSeam,
         )
-        os.environ["INTEL_V3_ANALYST_REFRESH_MODE"] = "budgeted_subset"
-        try:
-            service = self._build_service()
-            adapter = service._build_analyst_refresh_callable()
-            assert isinstance(adapter, AnalystRefreshAdapter)
-            assert not isinstance(adapter, FullPortfolioAnalystRefreshAdapter)
-        finally:
-            os.environ.pop("INTEL_V3_ANALYST_REFRESH_MODE", None)
+        service = self._build_service()
+        seam = service._build_analyst_refresh_callable()
+        assert isinstance(seam, AnalystRefreshRequestSeam)
+        # The synchronous path must not wire an LLM adapter.
+        assert not isinstance(seam, FullPortfolioAnalystRefreshAdapter)
 
     def test_disabling_analyst_refresh_returns_none(self):
         os.environ["INTEL_V3_ANALYST_REFRESH_ENABLED"] = "0"
         try:
             service = self._build_service()
-            adapter = service._build_analyst_refresh_callable()
-            assert adapter is None
+            seam = service._build_analyst_refresh_callable()
+            assert seam is None
         finally:
             os.environ.pop("INTEL_V3_ANALYST_REFRESH_ENABLED", None)
 

@@ -39,16 +39,7 @@ from .evidence_refresh_orchestrator_v1 import (
     OrchestratorInputs,
     RefreshBudget,
 )
-from .analyst_refresh_adapter_v1 import (
-    AnalystRefreshAdapter,
-    AnalystRefreshBudget,
-    default_agent_orchestrator_backend,
-)
-from .full_portfolio_analyst_refresh_adapter_v1 import (
-    FullPortfolioAnalystRefreshAdapter,
-    FullPortfolioAnalystRefreshBudget,
-    default_full_portfolio_agent_orchestrator_backend,
-)
+from .analyst_refresh_request_seam_v1 import AnalystRefreshRequestSeam
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
@@ -56,19 +47,12 @@ from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
-# Stage 3.0b.6 — analyst-refresh adapter opt-in. Defaults to enabled so the
-# Run Intel v3 path can refresh stale analyst evidence under budget. Set to
-# "0" / "false" to disable temporarily (e.g. while debugging an LLM provider).
+# Stage 3.1 — analyst refresh-request seam opt-in. Defaults to enabled so the
+# synchronous Run Intel v3 path records when stale analyst evidence needs a
+# refresh. The seam does NO LLM work — it only records the request. Set to
+# "0" / "false" to disable the seam entirely (the run still degrades honestly
+# to PARTIAL_CERTIFIED / BLOCKED_UNCERTIFIED on stale analyst evidence).
 _ANALYST_REFRESH_FLAG_ENV = "INTEL_V3_ANALYST_REFRESH_ENABLED"
-# Stage 3.0c — full-portfolio analyst refresh mode. Defaults to
-# ``full_portfolio`` so Run Intel v3 refreshes every stale active position via
-# the existing AgentOrchestrator full-portfolio LLM pass (verified in
-# production: 34 tickers, 35 LLM calls, ~5s). Setting this to
-# ``budgeted_subset`` falls back to the Stage 3.0b.6 6-ticker emergency
-# adapter for explicit cost-capping.
-_ANALYST_REFRESH_MODE_ENV = "INTEL_V3_ANALYST_REFRESH_MODE"
-_REFRESH_MODE_FULL_PORTFOLIO = "full_portfolio"
-_REFRESH_MODE_BUDGETED_SUBSET = "budgeted_subset"
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
 
@@ -82,20 +66,6 @@ def is_analyst_refresh_enabled() -> bool:
     if raw in _FALSY:
         return False
     return True  # default-on; explicit FALSY required to disable
-
-
-def analyst_refresh_mode() -> str:
-    """Return the active analyst-refresh adapter mode.
-
-    Default = ``full_portfolio`` (Stage 3.0c). The legacy 6-ticker budgeted
-    adapter is reachable via ``INTEL_V3_ANALYST_REFRESH_MODE=budgeted_subset``
-    for explicit emergency cost-capping; it is NOT the default behavior for
-    Run Intel v3 on an owned portfolio.
-    """
-    raw = os.getenv(_ANALYST_REFRESH_MODE_ENV, "").strip().lower()
-    if raw == _REFRESH_MODE_BUDGETED_SUBSET:
-        return _REFRESH_MODE_BUDGETED_SUBSET
-    return _REFRESH_MODE_FULL_PORTFOLIO
 
 
 class IntelV3Service:
@@ -206,13 +176,16 @@ class IntelV3Service:
                 evidence_adapter=evidence_adapter,
             )
 
-            # Stage 3.0c — when the refresh persisted at least one fresh
-            # analyst row to durable storage, re-read cards + evidence stats
-            # so the deterministic decide() below sees the refreshed evidence
-            # (recommendations.action / agent_insights.analyst_verdict) instead
-            # of the pre-refresh snapshot loaded in Step 1. Without this
-            # re-read, decisions are built from stale rows even when the
-            # AgentOrchestrator just wrote new ones.
+            # Post-refresh re-read guard: if any refresh path persisted a fresh
+            # analyst row to durable storage, re-read cards + evidence stats so
+            # the deterministic decide() below sees the refreshed rows instead
+            # of the pre-refresh snapshot loaded in Step 1.
+            #
+            # Stage 3.1: the synchronous path wires only the non-LLM analyst
+            # refresh-request seam, which never reports successful tickers, so
+            # this branch is dormant in-request — it stays as a forward-compat
+            # guard for a future background Intelligence Plane that does
+            # persist analyst rows. The synchronous request never blocks on it.
             refresh_diag_dict = (
                 refresh_result.to_diagnostics_dict() if refresh_result else {}
             )
@@ -604,8 +577,9 @@ class IntelV3Service:
         and the snapshot still persists with diagnostics reflecting truth.
 
         ``evidence_adapter`` is accepted for backward compatibility with the
-        run_v3() call site; the orchestrator itself does not need it (the
-        refresh adapters persist their own writes via AgentOrchestrator).
+        run_v3() call site; the orchestrator itself does not need it. Stage 3.1
+        wires the non-LLM analyst refresh-request seam here, plus the Tier-0
+        price refresh callable — no analyst/LLM research runs in-request.
         """
         try:
             now = datetime.now(timezone.utc)
@@ -791,41 +765,31 @@ class IntelV3Service:
         return out
 
     def _build_analyst_refresh_callable(self):
-        """Return the analyst-refresh callable for the orchestrator (or None).
+        """Return the analyst refresh-request seam for the orchestrator (or None).
 
-        Stage 3.0c default: ``FullPortfolioAnalystRefreshAdapter`` over an
-        unscoped ``AgentOrchestrator``. The Stage 3.0b.6 6-ticker
-        ``AnalystRefreshAdapter`` is retained as the
-        ``INTEL_V3_ANALYST_REFRESH_MODE=budgeted_subset`` emergency mode.
+        Stage 3.1: the synchronous Run Intel v3 HTTP request must NOT perform
+        any analyst / LLM / full-portfolio research inside the click. It wires
+        the non-LLM ``AnalystRefreshRequestSeam``, which records that stale
+        analyst evidence needs a refresh and returns honest deferred-ticker
+        accounting so the run mode degrades to PARTIAL_CERTIFIED /
+        BLOCKED_UNCERTIFIED rather than a fake FAST_CERTIFIED.
+
+        The LLM adapters (``AnalystRefreshAdapter`` /
+        ``FullPortfolioAnalystRefreshAdapter``) are retained in the repo for a
+        future continuous/background Intelligence Plane but are deliberately
+        no longer wired into this synchronous path.
+
         Disabled entirely by setting ``INTEL_V3_ANALYST_REFRESH_ENABLED=0``.
         """
         if not is_analyst_refresh_enabled():
             return None
-        mode = analyst_refresh_mode()
-        try:
-            if mode == _REFRESH_MODE_BUDGETED_SUBSET:
-                adapter = AnalystRefreshAdapter(
-                    user_id=self.user_id,
-                    run_backend=default_agent_orchestrator_backend,
-                    budget=AnalystRefreshBudget(),
-                )
-            else:
-                adapter = FullPortfolioAnalystRefreshAdapter(
-                    user_id=self.user_id,
-                    run_backend=default_full_portfolio_agent_orchestrator_backend,
-                    budget=FullPortfolioAnalystRefreshBudget(),
-                )
-        except Exception as exc:
-            logger.warning(
-                "intel_v3.analyst_adapter_build_failed user_id=%s mode=%s err=%s",
-                self.user_id, mode, exc,
-            )
-            return None
+        seam = AnalystRefreshRequestSeam(user_id=self.user_id)
         logger.info(
-            "intel_v3.analyst_adapter_built user_id=%s mode=%s adapter=%s",
-            self.user_id, mode, type(adapter).__name__,
+            "intel_v3.analyst_refresh_seam_wired user_id=%s seam=%s "
+            "in_request_llm_refresh=false",
+            self.user_id, type(seam).__name__,
         )
-        return adapter
+        return seam
 
     async def _get_latest_portfolio_snapshot_meta(self) -> dict[str, Any]:
         """Fetch the latest portfolio_snapshots row's snapshot_at + per-position certified_at list."""
@@ -887,6 +851,12 @@ class IntelV3Service:
         provider registry diagnostics separately surface which paid providers
         are env-disabled.
 
+        Coalescing/dedupe: ``PriceService.fetch_prices`` already routes every
+        ticker through ``_fetch_one`` → a per-ticker async lock, so concurrent
+        callers for the same ticker collapse to one upstream call. The Tier-0
+        price refresh here additionally dedupes the input ticker list before
+        the call so a duplicate ticker never spawns a redundant fetch task.
+
         Returns None only when the module fails to import (e.g. missing
         dependency in a stripped environment); the orchestrator then records
         the refresh path as unavailable rather than calling into nothing.
@@ -900,6 +870,16 @@ class IntelV3Service:
             return None
 
         async def _refresh(tickers: list[str]) -> dict[str, Any]:
+            # Dedupe before the call — duplicate tickers route through the same
+            # per-ticker coalescing lock anyway, but dropping them here avoids
+            # spawning redundant fetch tasks under the orchestrator's budget.
+            deduped: list[str] = []
+            seen: set[str] = set()
+            for t in tickers or []:
+                key = str(t or "").upper()
+                if key and key not in seen:
+                    seen.add(key)
+                    deduped.append(t)
             svc = _PriceEngine(
                 finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
                 alpaca_key=getattr(settings, "alpaca_api_key", "") or "",
@@ -907,7 +887,7 @@ class IntelV3Service:
                 polygon_key=getattr(settings, "polygon_api_key", "") or "",
             )
             try:
-                return await svc.fetch_prices(tickers)
+                return await svc.fetch_prices(deduped)
             finally:
                 try:
                     await svc.close()

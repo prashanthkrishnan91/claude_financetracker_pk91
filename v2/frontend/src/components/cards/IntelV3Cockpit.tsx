@@ -17,6 +17,7 @@
 import { useState } from "react";
 import { cn } from "@/lib/utils";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
+import { analystRefreshRequestNote } from "@/lib/intel-v3-banner";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
 import { Spinner } from "@/components/ui/Spinner";
@@ -128,6 +129,14 @@ function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
   );
 }
 
+// Stage 3.1 — honest analyst refresh-request note (pure helper lives in
+// @/lib/intel-v3-banner so it stays unit-testable without the component tree).
+function AnalystRefreshRequestLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
+  const note = analystRefreshRequestNote(snapshot.diagnostics);
+  if (!note) return null;
+  return <p className="mt-1 text-[11px] text-amber-400">{note}</p>;
+}
+
 function SnapshotBanner({
   snapshot,
   isStale,
@@ -171,6 +180,7 @@ function SnapshotBanner({
         ))}
       </div>
       <FreshnessLine snapshot={snapshot} />
+      <AnalystRefreshRequestLine snapshot={snapshot} />
     </div>
   );
 }

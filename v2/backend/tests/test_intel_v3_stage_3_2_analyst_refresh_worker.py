@@ -36,6 +36,7 @@ from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
     JOB_FAILED,
     JOB_PENDING,
     JOB_SUCCEEDED,
+    STALE_CLAIM_TIMEOUT_SECONDS,
     AnalystRefreshJob,
     claim_due_jobs,
     compute_next_retry_at,
@@ -273,12 +274,16 @@ class TestEnqueueIdempotency:
         assert len(fake.rows()) == 1
         assert fake.rows()[0]["status"] == JOB_PENDING
 
-    def test_claimed_duplicate_click_touches_and_does_not_disrupt_inflight(self):
-        """A re-click on a claimed (in-flight) job must not duplicate it or
-        knock it out of the claimed state a worker is mid-processing."""
+    def test_claimed_in_flight_not_stolen_before_timeout(self):
+        """A re-click on a freshly-claimed (in-flight) job must not duplicate it
+        or knock it out of the claimed state a worker is mid-processing."""
         fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        fake.rows()[0].update({"status": JOB_CLAIMED, "attempts": 1})
+        # Claimed 30s ago — well within the stale-claim timeout.
+        fake.rows()[0].update({
+            "status": JOB_CLAIMED, "attempts": 1,
+            "claimed_at": (_now() - timedelta(seconds=30)).isoformat(),
+        })
         second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
         assert second.touched_count == 1
         assert second.reopened_count == 0
@@ -287,22 +292,70 @@ class TestEnqueueIdempotency:
         assert row["status"] == JOB_CLAIMED  # in-flight claim untouched
         assert row["attempts"] == 1
 
-    def test_failed_retryable_duplicate_click_touches_and_preserves_backoff(self):
-        """A re-click on a failed-but-retryable job must not wipe its backoff
-        timer or attempt counter."""
+    def test_stale_claimed_row_recovered_after_timeout(self):
+        """A re-click on a long-abandoned claim (worker crashed/hung) recovers
+        it: past the stale-claim timeout it is reopened to pending."""
         fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        future_retry = (_now() + timedelta(hours=5)).isoformat()
-        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 3,
-                               "max_attempts": 5, "next_retry_at": future_retry})
+        # Claimed well past the stale-claim timeout — the claiming worker is gone.
+        stale_at = (
+            _now() - timedelta(seconds=STALE_CLAIM_TIMEOUT_SECONDS + 60)
+        ).isoformat()
+        fake.rows()[0].update({
+            "status": JOB_CLAIMED, "attempts": 1, "claimed_at": stale_at,
+        })
         second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        assert second.touched_count == 1
-        assert second.reopened_count == 0
-        row = fake.rows()[0]
-        assert row["status"] == JOB_FAILED       # not reset
-        assert row["attempts"] == 3              # not reset
-        assert row["next_retry_at"] == future_retry  # backoff preserved
+        assert second.reopened_count == 1
+        assert second.touched_count == 0
         assert len(fake.rows()) == 1
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING
+        # The recovered job is claimable on the next worker poll.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
+
+    def test_failed_retryable_explicit_refresh_makes_it_claimable_now(self):
+        """PRODUCTION BLOCKER FIX: a failed job with a future worker-backoff
+        next_retry_at must NOT be ignored after an explicit user-triggered
+        refresh. The explicit enqueue makes it due now (status→pending,
+        next_retry_at→now) while preserving its remaining attempt budget."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        future_retry = (_now() + timedelta(minutes=27)).isoformat()
+        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 3,
+                               "max_attempts": 5, "next_retry_at": future_retry,
+                               "last_error": "boom"})
+        # Before the explicit refresh: not retry-due, worker would skip it.
+        assert claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now()) == []
+
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.made_due_count == 1
+        assert second.reopened_count == 0
+        assert second.touched_count == 0
+        assert len(fake.rows()) == 1
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING        # now claimable
+        assert row["attempts"] == 3                # retry budget PRESERVED, not reset
+        assert row["next_retry_at"] == _now().isoformat()  # due now, not the future backoff
+        # And the worker claims it on its very next poll.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
+        assert claimed[0].attempts == 4            # claim increments from 3 → 4
+
+    def test_worker_internal_backoff_preserved_when_no_explicit_enqueue(self):
+        """Without an explicit enqueue, a worker-internal mark_job_failed sets a
+        future next_retry_at and claim_due_jobs honours that backoff window."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        # Worker's automatic retry path — no enqueue happens here.
+        next_retry = mark_job_failed(fake, claimed[0], error="llm timeout", now=_now())
+        assert next_retry is not None
+        row = fake.rows()[0]
+        assert row["status"] == JOB_FAILED
+        assert row["next_retry_at"] == next_retry          # backoff preserved
+        # The worker correctly skips it until the backoff window elapses.
+        assert claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now()) == []
 
     def test_succeeded_job_is_reopened_for_same_window_requeue_when_still_stale(self):
         """A succeeded job must not silently block a same-window requeue: the

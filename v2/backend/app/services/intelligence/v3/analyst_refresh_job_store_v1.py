@@ -8,12 +8,13 @@ layer: a thin, SQL-backed access layer over the ``analyst_refresh_jobs`` table
 
 Responsibilities:
   * ``enqueue_refresh_jobs`` — idempotently upsert one durable job per
-    (user, ticker, window). Repeated Run Intel v3 clicks inside the same window
-    touch a non-terminal row instead of creating a duplicate, and *reopen* a
-    terminal/dead row (succeeded, or failed-and-exhausted) when the ticker is
-    still stale — so a legitimate same-window retry is never silently
-    suppressed and the row count per key stays exactly one. See
-    ``enqueue_refresh_jobs`` for the full per-state contract.
+    (user, ticker, window) on an explicit user-triggered Run Intel v3. Repeated
+    clicks inside the same window never duplicate a row; an existing row is
+    touched (pending / in-flight claimed), *made due now* (failed with attempts
+    remaining — the user asked for a refresh, so the worker-backoff timer no
+    longer blocks it), or *reopened* (succeeded, failed-and-exhausted, or a
+    stale abandoned claim). The row count per key always stays exactly one.
+    See ``enqueue_refresh_jobs`` for the full per-state contract.
   * ``claim_due_jobs`` — atomically claim pending/failed jobs whose retry time
     has arrived, so the worker can refresh them outside the HTTP request.
   * ``mark_job_succeeded`` / ``mark_job_failed`` — record per-ticker outcome.
@@ -56,6 +57,13 @@ DEFAULT_MAX_ATTEMPTS = 5
 # enqueue time so it is due immediately.
 _RETRY_BASE_MINUTES = 15
 _RETRY_MAX_MINUTES = 24 * 60
+
+# A `claimed` row whose claim is older than this is treated as abandoned (the
+# worker that claimed it crashed or hung). An explicit refresh request recovers
+# such a row; in-flight claims younger than this are never stolen. Comfortably
+# above the worker's max single-pass runtime (AnalystRefreshWorker default
+# 240s, full-portfolio adapter budget 180s).
+STALE_CLAIM_TIMEOUT_SECONDS = 600
 
 
 # ── Window + retry helpers ────────────────────────────────────────────────────
@@ -137,23 +145,33 @@ class AnalystRefreshJob:
 class EnqueueResult:
     """Outcome of one ``enqueue_refresh_jobs`` call.
 
-    ``created`` — a brand-new pending row was inserted.
-    ``touched``  — an existing non-terminal row (pending / claimed / retryable
-                   failed) was left in place, only its ``requested_at`` bumped.
-    ``reopened`` — an existing terminal/dead row (succeeded, or failed with
-                   attempts exhausted) was reset to pending because the ticker
-                   is *still* stale and legitimately needs another refresh.
+    ``created``   — a brand-new pending row was inserted.
+    ``touched``   — an existing already-claimable ``pending`` row, or an
+                    in-flight ``claimed`` row, was left in place (only
+                    ``requested_at`` bumped).
+    ``made_due``  — an existing ``failed`` row with attempts still remaining was
+                    made claimable now (status→pending, ``next_retry_at``→now)
+                    while its attempt budget is preserved. The user explicitly
+                    asked for a refresh, so the worker-backoff timer no longer
+                    blocks it.
+    ``reopened``  — an existing terminal/dead/abandoned row (succeeded, failed
+                    with attempts exhausted, or a stale ``claimed`` row past the
+                    stale-claim timeout) was reset to a fresh pending state.
     """
     requested_tickers: list[str] = field(default_factory=list)
     created_count: int = 0
     touched_count: int = 0
+    made_due_count: int = 0
     reopened_count: int = 0
     error: Optional[str] = None
 
     @property
     def durable_job_count(self) -> int:
         """Tickers that now have exactly one durable, claimable-or-in-flight job row."""
-        return self.created_count + self.touched_count + self.reopened_count
+        return (
+            self.created_count + self.touched_count
+            + self.made_due_count + self.reopened_count
+        )
 
 
 # ── Enqueue (idempotent) ──────────────────────────────────────────────────────
@@ -171,28 +189,36 @@ def enqueue_refresh_jobs(
 
     Idempotency is a read-then-write keyed on ``(user_id, ticker,
     refresh_window)`` (unique index is the race backstop) so there is always
-    exactly one row per key — never a duplicate. Per-state behaviour for an
-    existing same-window row:
+    exactly one row per key — never a duplicate.
 
-      * ``pending`` / ``claimed`` — *touched* (``requested_at`` bumped only).
-        A re-click must not disrupt an in-flight claim.
-      * ``failed`` with attempts remaining — *touched* only. A re-click must
-        not wipe the exponential-backoff timer or the attempt counter.
-      * ``succeeded`` — *reopened* to pending. The seam only enqueues tickers
-        the orchestrator still classifies stale/HARD_STALE, so a same-window
-        re-request for an already-"succeeded" ticker means the prior refresh
-        did not actually clear the staleness — a fresh attempt is legitimate
-        and must not be silently suppressed.
-      * ``failed`` with attempts exhausted — *reopened* to pending (attempts
-        reset). An exhausted job must not permanently suppress a later
-        legitimate retry while the evidence is still stale; the worker would
-        otherwise skip it forever.
+    ``enqueue_refresh_jobs`` is only ever called from the Stage 3.1 refresh
+    seam on an **explicit user-triggered Run Intel v3** when analyst evidence is
+    stale/HARD_STALE. It is NOT the worker's internal retry path (that is
+    ``mark_job_failed`` → exponential backoff). So an existing row's
+    worker-backoff timer must NOT block a refresh the user explicitly asked for
+    *now*. Per-state behaviour for an existing same-window row:
 
-    Reopening rewrites the existing row in place (status→pending, attempts→0,
-    next_retry_at→now, last_error/completed_at cleared) — still one row per key.
+      * ``pending`` — *touched* (``requested_at`` bumped). Already claimable.
+      * ``claimed`` — *touched* if the claim is in-flight (``claimed_at`` within
+        ``STALE_CLAIM_TIMEOUT_SECONDS``); *reopened* if the claim is stale
+        (older than the timeout — the claiming worker crashed/hung).
+      * ``failed`` with attempts remaining — *made due now*: status→pending,
+        ``next_retry_at``→now, ``last_error``/``completed_at`` cleared, but the
+        attempt counter is **preserved**. The worker-backoff timer set by
+        ``mark_job_failed`` governs the worker's own automatic retries; an
+        explicit user refresh overrides it — otherwise the user clicks Run
+        Intel and nothing happens until the backoff window elapses.
+      * ``failed`` with attempts exhausted — *reopened*: status→pending,
+        attempts reset to 0. An exhausted job must not permanently suppress a
+        later legitimate retry while the evidence is still stale.
+      * ``succeeded`` — *reopened*. The seam only enqueues tickers still
+        classified stale/HARD_STALE, so a same-window re-request for an
+        already-"succeeded" ticker means the prior refresh did not clear the
+        staleness — a fresh attempt is legitimate.
 
-    Never raises — a DB failure degrades to an ``EnqueueResult`` with ``error``
-    set so the synchronous Run Intel v3 request stays fast and resilient.
+    Every branch keeps exactly one row per key (in-place UPDATE / single
+    INSERT). Never raises — a DB failure degrades to an ``EnqueueResult`` with
+    ``error`` set so the synchronous Run Intel v3 request stays fast.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -211,11 +237,12 @@ def enqueue_refresh_jobs(
     if not requested:
         return EnqueueResult(requested_tickers=[])
 
-    # Read existing rows for this window so we touch / reopen instead of duplicate.
+    # Read existing rows for this window so we touch / make-due / reopen
+    # instead of duplicating.
     try:
         existing_res = (
             client.table(TABLE)
-            .select("id,ticker,status,attempts,max_attempts")
+            .select("id,ticker,status,attempts,max_attempts,next_retry_at,claimed_at")
             .eq("user_id", str(user_id))
             .eq("refresh_window", window)
             .in_("ticker", requested)
@@ -232,41 +259,83 @@ def enqueue_refresh_jobs(
     existing_by_ticker = {
         str(r.get("ticker") or "").upper(): r for r in existing_rows
     }
+    # An explicit refresh recovers a `claimed` row only once its claim is older
+    # than the stale-claim timeout — in-flight claims are never stolen.
+    stale_claim_cutoff = now - timedelta(seconds=STALE_CLAIM_TIMEOUT_SECONDS)
 
     to_insert: list[dict[str, Any]] = []
     touched_ids: list[str] = []
-    reopened_ids: list[str] = []
+    made_due_ids: list[str] = []     # failed, attempts remaining → claimable now
+    reopened_ids: list[str] = []     # succeeded / failed-exhausted / stale-claimed
+    reopened_failed_count = 0
+    failed_not_due_count = 0
+    statuses_before: dict[str, int] = {}
+    # (final_status, final_next_retry_iso) per requested ticker — for diagnostics.
+    final_states: list[tuple[str, Optional[str]]] = []
+
     for t in requested:
         existing = existing_by_ticker.get(t)
-        if existing is not None:
-            status = str(existing.get("status") or "")
-            attempts = int(existing.get("attempts") or 0)
-            max_attempts = int(existing.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
-            exhausted_failed = status == JOB_FAILED and attempts >= max_attempts
-            if status == JOB_SUCCEEDED or exhausted_failed:
-                # Terminal / dead row, but the ticker is still stale — reopen
-                # it in place so the durable job is claimable again.
-                reopened_ids.append(str(existing.get("id")))
-            else:
-                # pending / claimed / retryable-failed — touch only; never
-                # disrupt an in-flight claim or a failed job's backoff.
-                touched_ids.append(str(existing.get("id")))
+        if existing is None:
+            hint = hints_by_ticker.get(t) or {}
+            to_insert.append({
+                "user_id": str(user_id),
+                "ticker": t,
+                "refresh_window": window,
+                "status": JOB_PENDING,
+                "attempts": 0,
+                "prior_action": hint.get("prior_action"),
+                "weight_pct": hint.get("weight_pct"),
+                "evidence_age_hours_at_request": hint.get("evidence_age_hours"),
+                "requested_at": now_iso,
+                # New pending jobs are due for the worker immediately.
+                "next_retry_at": now_iso,
+                "updated_at": now_iso,
+            })
+            final_states.append((JOB_PENDING, now_iso))
             continue
-        hint = hints_by_ticker.get(t) or {}
-        to_insert.append({
-            "user_id": str(user_id),
-            "ticker": t,
-            "refresh_window": window,
-            "status": JOB_PENDING,
-            "attempts": 0,
-            "prior_action": hint.get("prior_action"),
-            "weight_pct": hint.get("weight_pct"),
-            "evidence_age_hours_at_request": hint.get("evidence_age_hours"),
-            "requested_at": now_iso,
-            # Pending jobs are due for the worker immediately.
-            "next_retry_at": now_iso,
-            "updated_at": now_iso,
-        })
+
+        status = str(existing.get("status") or "")
+        attempts = int(existing.get("attempts") or 0)
+        max_attempts = int(existing.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        job_id = str(existing.get("id"))
+        statuses_before[status] = statuses_before.get(status, 0) + 1
+
+        if status == JOB_PENDING:
+            touched_ids.append(job_id)
+            final_states.append((JOB_PENDING, existing.get("next_retry_at")))
+        elif status == JOB_CLAIMED:
+            claimed_at = existing.get("claimed_at")
+            if claimed_at and _iso_lte(claimed_at, stale_claim_cutoff):
+                # Abandoned claim (worker crashed/hung) — recover it.
+                reopened_ids.append(job_id)
+                final_states.append((JOB_PENDING, now_iso))
+            else:
+                # In-flight claim within the timeout — never steal it.
+                touched_ids.append(job_id)
+                final_states.append((JOB_CLAIMED, existing.get("next_retry_at")))
+        elif status == JOB_FAILED:
+            next_retry = existing.get("next_retry_at")
+            if next_retry is not None and not _iso_lte(next_retry, now):
+                failed_not_due_count += 1
+            if attempts >= max_attempts:
+                # Exhausted — reopen with a fresh attempt budget.
+                reopened_ids.append(job_id)
+                reopened_failed_count += 1
+                final_states.append((JOB_PENDING, now_iso))
+            else:
+                # Attempts remaining: the user explicitly asked for a refresh
+                # now, so make the job claimable on the next worker poll while
+                # preserving its remaining attempt budget. The worker-backoff
+                # timer set by mark_job_failed governs automatic retries only.
+                made_due_ids.append(job_id)
+                final_states.append((JOB_PENDING, now_iso))
+        elif status == JOB_SUCCEEDED:
+            reopened_ids.append(job_id)
+            final_states.append((JOB_PENDING, now_iso))
+        else:
+            # Unknown status — be conservative, just touch.
+            touched_ids.append(job_id)
+            final_states.append((status, existing.get("next_retry_at")))
 
     error: Optional[str] = None
     created = 0
@@ -283,8 +352,8 @@ def enqueue_refresh_jobs(
                 user_id, window, exc,
             )
 
-    # Touch existing rows — bump requested_at only. Never reset status/attempts:
-    # a re-click must not wipe a failed job's backoff or an in-flight claim.
+    # Touch — bump requested_at only. Pending stays claimable; an in-flight
+    # claim is left untouched so the worker mid-processing it is not disrupted.
     for job_id in touched_ids:
         try:
             (
@@ -299,8 +368,32 @@ def enqueue_refresh_jobs(
                 job_id, exc,
             )
 
-    # Reopen terminal / dead rows in place — the ticker is still stale, so the
-    # durable job becomes claimable again. Still exactly one row per key.
+    # Make due — a failed-but-not-exhausted row the user explicitly asked to
+    # refresh: status→pending + next_retry_at→now so the next worker poll
+    # claims it, attempts PRESERVED so the retry budget is not silently reset.
+    for job_id in made_due_ids:
+        try:
+            (
+                client.table(TABLE)
+                .update({
+                    "status": JOB_PENDING,
+                    "next_retry_at": now_iso,
+                    "last_error": None,
+                    "completed_at": None,
+                    "requested_at": now_iso,
+                    "updated_at": now_iso,
+                })
+                .eq("id", job_id)
+                .execute()
+            )
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.analyst_refresh_job_make_due_failed job_id=%s err=%s",
+                job_id, exc,
+            )
+
+    # Reopen terminal / dead / abandoned rows in place — fresh pending state
+    # with a reset attempt budget. Still exactly one row per key.
     for job_id in reopened_ids:
         try:
             (
@@ -323,16 +416,28 @@ def enqueue_refresh_jobs(
                 job_id, exc,
             )
 
+    statuses_after: dict[str, int] = {}
+    for final_status, _ in final_states:
+        statuses_after[final_status] = statuses_after.get(final_status, 0) + 1
+    next_retry_values = sorted(nr for _, nr in final_states if nr)
+    next_retry_min = next_retry_values[0] if next_retry_values else None
+    next_retry_max = next_retry_values[-1] if next_retry_values else None
+
     logger.info(
-        "intel_v3.analyst_refresh_job_enqueued user_id=%s window=%s "
-        "requested=%d created=%d touched=%d reopened=%d tickers=%s",
+        "intel_v3.analyst_refresh_job_enqueued user_id=%s window=%s requested=%d "
+        "created=%d touched=%d made_due=%d reopened=%d reopened_failed=%d "
+        "failed_not_due_before=%d statuses_before=%s statuses_after=%s "
+        "next_retry_min=%s next_retry_max=%s tickers=%s",
         user_id, window, len(requested), created, len(touched_ids),
-        len(reopened_ids), ",".join(requested),
+        len(made_due_ids), len(reopened_ids), reopened_failed_count,
+        failed_not_due_count, statuses_before, statuses_after,
+        next_retry_min, next_retry_max, ",".join(requested),
     )
     return EnqueueResult(
         requested_tickers=requested,
         created_count=created,
         touched_count=len(touched_ids),
+        made_due_count=len(made_due_ids),
         reopened_count=len(reopened_ids),
         error=error,
     )

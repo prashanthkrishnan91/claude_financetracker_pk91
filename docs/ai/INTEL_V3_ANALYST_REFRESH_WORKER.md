@@ -49,22 +49,31 @@ SELECT * FROM public.analyst_refresh_jobs LIMIT 1;   -- 0 rows is fine
 
 The idempotency key is `(user_id, ticker, refresh_window)` where `refresh_window`
 is a per-UTC-day bucket. The enqueue path (`enqueue_refresh_jobs`) is idempotent
-and always leaves **exactly one row per key** — never a duplicate. Per-state
-behaviour for an existing same-window row:
+and always leaves **exactly one row per key** — never a duplicate.
+
+`enqueue_refresh_jobs` is only ever called from the Stage 3.1 seam on an
+**explicit user-triggered Run Intel v3** (the worker's own automatic retries go
+through `mark_job_failed` → exponential backoff, never through enqueue). So an
+existing row's worker-backoff timer must not block a refresh the user
+explicitly asked for *now*. Per-state behaviour for an existing same-window row:
 
 | Existing row state | Re-click behaviour | Why |
 |---|---|---|
-| `pending` | touched (`requested_at` bumped) | already queued — nothing to do |
-| `claimed` | touched only | a worker is mid-processing — must not be disrupted |
-| `failed`, attempts remaining | touched only | preserve the exponential-backoff timer + attempt counter |
-| `succeeded` | **reopened** → `pending`, attempts reset | the seam only re-enqueues tickers still classified stale/HARD_STALE, so a same-window re-request means the prior refresh did not clear the staleness — a fresh attempt is legitimate |
+| `pending` | touched (`requested_at` bumped) | already claimable — nothing to do |
+| `claimed`, claim in-flight (`claimed_at` within `STALE_CLAIM_TIMEOUT_SECONDS`, 600s) | touched only | a worker is mid-processing — must not be stolen |
+| `claimed`, claim stale (older than 600s) | **reopened** → `pending`, attempts reset | the claiming worker crashed/hung — recover the abandoned job |
+| `failed`, attempts remaining | **made due now** → `status=pending`, `next_retry_at=now`, **attempts preserved** | the user explicitly asked for a refresh now; the worker-backoff timer governs *automatic* retries only and must not make an explicit request wait |
 | `failed`, attempts exhausted | **reopened** → `pending`, attempts reset | an exhausted job must not permanently suppress a later legitimate retry while the evidence is still stale |
+| `succeeded` | **reopened** → `pending`, attempts reset | the seam only re-enqueues tickers still classified stale/HARD_STALE, so a same-window re-request means the prior refresh did not clear the staleness |
 
-This is the simplest durable fix for the v1 daily-window key: the window keeps
-casual repeated clicks cheap, but a terminal/dead row is never a permanent
-suppressor — the seam's own "still stale" classification is the gate that
-decides whether a reopen happens at all. No analyst/LLM work runs in the
-request; reopening is a single in-place `UPDATE`.
+Every branch is a single in-place `UPDATE` (or one `INSERT` for a brand-new
+ticker) — still exactly one row per key, and no analyst/LLM work runs in the
+request. The key distinction: **explicit user refresh = make claimable now;
+worker-internal retry = honour the exponential backoff.** Diagnostics for every
+enqueue are logged on `intel_v3.analyst_refresh_job_enqueued`
+(`created` / `touched` / `made_due` / `reopened` / `reopened_failed` /
+`failed_not_due_before` / `statuses_before` / `statuses_after` /
+`next_retry_min` / `next_retry_max`).
 
 ## Running the worker
 

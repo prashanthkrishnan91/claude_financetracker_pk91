@@ -425,7 +425,26 @@ async def default_full_portfolio_agent_orchestrator_backend(
                 user_id, run_id, run_exc,
             )
 
-        # Explicit writeback bridge (Stage 3.2b).
+        # Extract live AnalystVerdict objects from the orchestrator (Stage 3.2c).
+        # ``orch._verdicts`` is populated during the per-ticker LLM analyst phase and
+        # holds the full structured verdict (primary_driver / risk_flag / action_reason /
+        # differentiation etc.) that ``_persist_sync`` would have written to
+        # agent_insights.analyst_verdict.  We convert to dicts here so the explicit
+        # writeback writer can store the identical shape, preserving all rationale
+        # fields and avoiding the ticker-prefix-only rationale block that fires when
+        # primary_driver is re-derived from the first sentence of investment_thesis.
+        verdicts_raw = getattr(orch, "_verdicts", None) or {}
+        verdicts_dicts: dict[str, Any] = {}
+        for tk, v in verdicts_raw.items():
+            tk_upper = (tk or "").upper()
+            if not tk_upper:
+                continue
+            if hasattr(v, "to_dict"):
+                verdicts_dicts[tk_upper] = v.to_dict()
+            elif isinstance(v, dict):
+                verdicts_dicts[tk_upper] = v
+
+        # Explicit writeback bridge (Stage 3.2b + Stage 3.2c rationale fix).
         #
         # AgentOrchestrator._persist_sync runs via asyncio.to_thread(self._persist_sync,
         # state) using the orchestrator's instance-level self.db client.  In the Railway
@@ -437,6 +456,9 @@ async def default_full_portfolio_agent_orchestrator_backend(
         # working _read_post_run_evidence readback — to guarantee durable writes even
         # when the orchestrator's instance client fails in the worker context.
         # Idempotent: skips rows that already exist (for when _persist_sync succeeded).
+        # verdicts_dicts carries the live AnalystVerdict payload so primary_driver /
+        # risk_flag / action_reason are written faithfully rather than re-derived.
+        write_result = None
         if agent_run_status == "completed" and result_insights:
             from .analyst_evidence_writer_v1 import write_analyst_evidence
             write_result = await write_analyst_evidence(
@@ -444,11 +466,13 @@ async def default_full_portfolio_agent_orchestrator_backend(
                 agent_run_id=run_id,
                 insights=result_insights,
                 started_at=started_at,
+                verdicts=verdicts_dicts or None,
             )
             logger.info(
                 "analyst_evidence_writer_persisted_count=%d user_id=%s run_id=%s "
                 "insights_written=%d recs_written=%d "
-                "already_present_insights=%d already_present_recs=%d write_error=%s",
+                "already_present_insights=%d already_present_recs=%d write_error=%s "
+                "verdicts_available=%d",
                 write_result.persisted_count,
                 user_id,
                 run_id,
@@ -457,6 +481,23 @@ async def default_full_portfolio_agent_orchestrator_backend(
                 write_result.insights_already_present,
                 write_result.recommendations_already_present,
                 write_result.write_error,
+                len(verdicts_dicts),
+            )
+
+        # Stage 3.2c — deterministic snapshot prewarm after successful writeback.
+        #
+        # When the explicit writer persisted fresh evidence rows (insights_written > 0),
+        # trigger a deterministic Intel v3 snapshot from the newly written evidence so
+        # the user does not need to click Run Intel a second time.  The prewarm:
+        #   * Makes zero LLM calls.
+        #   * Does NOT enqueue another analyst refresh job.
+        #   * Does NOT block or fail the worker if it errors — logged separately.
+        #   * Persists an active snapshot if certification succeeds (or partial/blocked
+        #     snapshot if honest constraints remain), which GET /intel/v3/snapshot returns.
+        if write_result is not None and write_result.insights_written > 0:
+            await _trigger_snapshot_prewarm(
+                user_id=user_id,
+                worker_run_id=run_id,
             )
 
         return await _read_post_run_evidence(
@@ -749,3 +790,58 @@ async def _read_post_run_evidence(
         insight_err, rec_err, agent_run_error,
     )
     return out
+
+
+# ── Stage 3.2c: deterministic snapshot prewarm ───────────────────────────────
+
+async def _trigger_snapshot_prewarm(
+    *,
+    user_id: UUID,
+    worker_run_id: str,
+) -> None:
+    """Trigger a deterministic Intel v3 snapshot from freshly written evidence.
+
+    Called after ``write_analyst_evidence`` persists new rows
+    (``insights_written > 0``) so the user does not need a second Run Intel
+    click to see a fresh snapshot.
+
+    Guarantees:
+      * Zero LLM calls — the prewarm only reads persisted evidence and runs
+        the deterministic ``decide()`` kernel.
+      * Does NOT enqueue another analyst refresh job — the prewarm path skips
+        ``_run_refresh_orchestrator`` entirely, so no ``AnalystRefreshRequestSeam``
+        is called and no ``analyst_refresh_jobs`` rows are inserted.
+      * Does not block or fail the worker on error — failures are logged as
+        ``analyst_refresh_snapshot_prewarm_failed`` and swallowed so the worker
+        job outcome (succeeded/failed per ticker) is unaffected.
+    """
+    import time as _time
+    from .intel_v3_service import prewarm_intel_v3_snapshot
+
+    prewarm_started = _time.monotonic()
+    logger.info(
+        "analyst_refresh_snapshot_prewarm_started user_id=%s worker_run_id=%s",
+        user_id, worker_run_id,
+    )
+    try:
+        snapshot = await prewarm_intel_v3_snapshot(user_id, prewarm_run_id=worker_run_id)
+        duration_ms = int((_time.monotonic() - prewarm_started) * 1000)
+        diag = snapshot.get("diagnostics") or {}
+        logger.info(
+            "analyst_refresh_snapshot_prewarm_completed user_id=%s worker_run_id=%s "
+            "prewarm_snapshot_id=%s prewarm_run_mode=%s prewarm_trust_status=%s "
+            "prewarm_duration_ms=%d",
+            user_id,
+            worker_run_id,
+            snapshot.get("snapshot_id"),
+            diag.get("run_mode"),
+            diag.get("trust_status"),
+            duration_ms,
+        )
+    except Exception as exc:
+        duration_ms = int((_time.monotonic() - prewarm_started) * 1000)
+        logger.warning(
+            "analyst_refresh_snapshot_prewarm_failed user_id=%s worker_run_id=%s "
+            "prewarm_error=%s prewarm_duration_ms=%d",
+            user_id, worker_run_id, exc, duration_ms,
+        )

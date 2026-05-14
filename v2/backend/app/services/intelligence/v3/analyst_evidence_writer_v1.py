@@ -90,14 +90,32 @@ def _round_score(v: Optional[float]) -> Optional[float]:
     return round(v, 2) if v is not None else None
 
 
-def _build_analyst_verdict_from_insight(insight: Any) -> dict[str, Any]:
-    """Construct a minimal ``analyst_verdict`` dict from ``TickerInsight`` fields.
+def _build_analyst_verdict_from_insight(
+    insight: Any,
+    *,
+    verdict_dict: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    """Build ``analyst_verdict`` from the live ``AnalystVerdict`` dict when available.
 
-    ``used_fallback=False`` is correct: the orchestrator's LLM phase completed
-    and produced real insights — the only failure was the silent DB-write loss
-    in ``_persist_sync``.  We map available ``TickerInsight`` fields; no fields
-    are invented.
+    When ``verdict_dict`` is provided (the ``AnalystVerdict.to_dict()`` from the
+    LLM run), use it directly so ``primary_driver`` / ``risk_flag`` /
+    ``action_reason`` / ``differentiation`` and all other structured fields are
+    preserved faithfully — identical to what ``AgentOrchestrator._persist_sync``
+    would have written had the DB client not failed.
+
+    Falls back to deriving ``primary_driver`` from ``TickerInsight.investment_thesis``
+    only when the real verdict is unavailable (e.g. the orchestrator did not
+    populate ``_verdicts`` for this ticker or the caller did not pass one).
     """
+    if verdict_dict is not None and isinstance(verdict_dict, dict):
+        out = dict(verdict_dict)
+        # Stamp the write path so readers can distinguish explicit-writeback rows
+        # from rows the orchestrator's own persist step wrote.
+        out["analysis_source"] = out.get("analysis_source") or "explicit_writeback"
+        # used_fallback stays as-is from the verdict: the LLM DID run.
+        return out
+
+    # ── Fallback: derive from TickerInsight only (verdict unavailable) ────────
     action = (getattr(insight, "suggested_action", None) or "HOLD").upper()
     conviction_score = getattr(insight, "conviction_score", None)
     investment_thesis = getattr(insight, "investment_thesis", None) or ""
@@ -136,6 +154,7 @@ def _write_sync(
     insights: list[Any],
     *,
     now_iso: str,
+    verdicts: Optional[dict[str, Any]] = None,
 ) -> AnalystEvidenceWriteResult:
     """Write missing ``agent_insights`` and ``recommendations`` rows.
 
@@ -202,7 +221,10 @@ def _write_sync(
             "suggested_action": (
                 getattr(insight, "suggested_action", None) or "HOLD"
             ).upper(),
-            "analyst_verdict": _build_analyst_verdict_from_insight(insight),
+            "analyst_verdict": _build_analyst_verdict_from_insight(
+                insight,
+                verdict_dict=(verdicts or {}).get(ticker.upper()),
+            ),
             "analyst_confidence": _round_score(
                 getattr(insight, "conviction_score", None)
             ),
@@ -319,12 +341,21 @@ async def write_analyst_evidence(
     agent_run_id: str,
     insights: list[Any],
     started_at: Optional[datetime] = None,
+    verdicts: Optional[dict[str, Any]] = None,
 ) -> AnalystEvidenceWriteResult:
     """Write durable analyst evidence rows for a completed agent run.
 
     Called when ``orch.run()`` returned ``status="completed"`` with non-empty
     insights but ``_persist_sync`` may have failed silently.  Uses a fresh DB
     client, not the orchestrator's instance client.
+
+    ``verdicts`` — optional dict of ticker (upper-cased) → ``AnalystVerdict.to_dict()``
+    output from the just-finished orchestrator run.  When provided, the writer
+    stores the full structured verdict (``primary_driver`` / ``risk_flag`` /
+    ``action_reason`` / ``differentiation`` etc.) instead of re-deriving a
+    minimal version from ``TickerInsight`` fields.  This is the root fix for
+    the ticker-prefix-only rationale block: the live LLM verdict fields are
+    preserved faithfully, identical to what ``_persist_sync`` would have written.
 
     Only writes rows for insights in the provided list — no fabrication.
     Idempotent: safe to call for the same ``agent_run_id`` when some or all
@@ -340,6 +371,7 @@ async def write_analyst_evidence(
             agent_run_id,
             list(insights),
             now_iso=now_iso,
+            verdicts=verdicts,
         )
     except Exception as exc:
         logger.warning(

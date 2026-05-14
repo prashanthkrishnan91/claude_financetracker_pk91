@@ -12,20 +12,24 @@ callable contract, but does **zero** LLM / provider work. When analyst evidence
 (``recommendations`` / ``agent_insights``) is stale, the seam:
 
   * records / logs that an analyst refresh is *required* for the affected
-    tickers, and
+    tickers,
+  * (Stage 3.2) idempotently enqueues a durable ``analyst_refresh_jobs`` row
+    per stale ticker when a Supabase client is wired, so a background worker
+    can consume the request outside the click — repeated clicks never spawn
+    duplicate jobs, and
   * returns an honest result the orchestrator consumes: no tickers refreshed,
     the stale tickers reported as ``deferred`` (so the run mode degrades to
     PARTIAL_CERTIFIED / BLOCKED_UNCERTIFIED, never fake FAST_CERTIFIED),
     ``attempted_llm_calls = 0``.
 
 What this seam is NOT:
-  * It is not a background worker or scheduler. It does not run a job and does
-    not claim one is running. A future continuous Intelligence Plane PR will
-    consume these requests.
-  * It does not widen ``decide()`` authority. Deterministic policy still owns
-    the visible Buy/Hold/Trim/Sell action.
+  * It is not a background worker or scheduler. It enqueues a durable job but
+    does not run it; ``analyst_refresh_worker_v1`` consumes the queue.
+  * It does not widen deterministic decision authority. Deterministic policy
+    still owns the visible Buy/Hold/Trim/Sell action.
   * It does not write ``intel_v3_snapshots`` and does not touch Deploy /
-    Watchtower / broker / tax / DB schemas.
+    Watchtower / broker / tax. The only DB write is the idempotent
+    ``analyst_refresh_jobs`` upsert (a fast queue insert, not LLM work).
 
 The LLM adapters (``AnalystRefreshAdapter`` / ``FullPortfolioAnalystRefreshAdapter``)
 are retained in the repo for that future background plane — they are simply no
@@ -68,6 +72,11 @@ class AnalystRefreshRequestResult:
     successful_llm_calls: int = 0
     failed_llm_calls: int = 0
 
+    # Stage 3.2 — count of stale tickers that now have a durable refresh job
+    # row. 0 means no durable queue was wired (the seam only logged); a
+    # non-zero count is the honest basis for "queued/requested" language.
+    durable_jobs_requested: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
@@ -81,6 +90,7 @@ class AnalystRefreshRequestResult:
             "attempted_llm_calls": self.attempted_llm_calls,
             "successful_llm_calls": self.successful_llm_calls,
             "failed_llm_calls": self.failed_llm_calls,
+            "durable_jobs_requested": self.durable_jobs_requested,
             "notes": list(self.notes),
         }
 
@@ -95,8 +105,20 @@ class AnalystRefreshRequestSeam:
             -> AnalystRefreshRequestResult
     """
 
-    def __init__(self, *, user_id: UUID):
+    def __init__(
+        self,
+        *,
+        user_id: UUID,
+        client: Optional[Any] = None,
+        enqueue_jobs: bool = True,
+    ):
         self.user_id = user_id
+        # Supabase client. When wired (the synchronous Run Intel v3 path passes
+        # it), the seam idempotently enqueues a durable ``analyst_refresh_jobs``
+        # row per stale ticker. When None (e.g. orchestrator unit tests), the
+        # seam falls back to log-only behaviour.
+        self.client = client
+        self.enqueue_jobs = enqueue_jobs
 
     async def __call__(
         self,
@@ -120,9 +142,7 @@ class AnalystRefreshRequestSeam:
                 notes=["analyst_refresh_request_seam_no_stale_tickers"],
             )
 
-        # Record the request. This is the seam's only side effect — a log line.
-        # It does NOT enqueue a durable job; a future Intelligence Plane PR owns
-        # consumption. The log is the honest, auditable record that the
+        # Record the request — the honest, auditable log line that the
         # synchronous request identified stale analyst evidence and declined to
         # run an in-request LLM refresh.
         logger.info(
@@ -133,8 +153,46 @@ class AnalystRefreshRequestSeam:
             ",".join(requested),
         )
 
+        notes = ["analyst_refresh_requested_not_run_in_request"]
+        durable_jobs_requested = 0
+
+        # Stage 3.2 — connect the seam to the durable mechanism. This is a fast
+        # idempotent queue upsert (NOT LLM/analyst work), so it stays within the
+        # "no analyst/LLM refresh inside the Run Intel v3 request" contract.
+        if self.client is not None and self.enqueue_jobs:
+            from .analyst_refresh_job_store_v1 import enqueue_refresh_jobs
+
+            hints_by_ticker: dict[str, dict[str, Any]] = {}
+            for hint in priority_hints or []:
+                ht = str(getattr(hint, "ticker", "") or "").upper()
+                if not ht:
+                    continue
+                hints_by_ticker[ht] = {
+                    "prior_action": getattr(hint, "prior_action", None),
+                    "weight_pct": getattr(hint, "weight_pct", None),
+                    "evidence_age_hours": getattr(hint, "evidence_age_hours", None),
+                }
+
+            enqueue_result = enqueue_refresh_jobs(
+                self.client,
+                user_id=self.user_id,
+                tickers=requested,
+                hints_by_ticker=hints_by_ticker,
+                now=started_at,
+            )
+            if enqueue_result.error:
+                notes.append(
+                    f"analyst_refresh_job_enqueue_error:{enqueue_result.error[:80]}"
+                )
+            else:
+                durable_jobs_requested = enqueue_result.durable_job_count
+                notes.append(
+                    f"analyst_refresh_jobs_enqueued:{durable_jobs_requested}"
+                )
+
         return AnalystRefreshRequestResult(
             status=STATUS_REFRESH_REQUESTED,
             requested_tickers=requested,
-            notes=["analyst_refresh_requested_not_run_in_request"],
+            durable_jobs_requested=durable_jobs_requested,
+            notes=notes,
         )

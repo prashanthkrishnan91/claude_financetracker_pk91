@@ -774,16 +774,20 @@ class IntelV3Service:
         accounting so the run mode degrades to PARTIAL_CERTIFIED /
         BLOCKED_UNCERTIFIED rather than a fake FAST_CERTIFIED.
 
+        Stage 3.2: the seam is given the Supabase client so it idempotently
+        enqueues a durable ``analyst_refresh_jobs`` row per stale ticker. That
+        is a fast queue upsert, not LLM/analyst work — the background
+        ``analyst_refresh_worker_v1`` consumes the queue outside this request.
+
         The LLM adapters (``AnalystRefreshAdapter`` /
-        ``FullPortfolioAnalystRefreshAdapter``) are retained in the repo for a
-        future continuous/background Intelligence Plane but are deliberately
-        no longer wired into this synchronous path.
+        ``FullPortfolioAnalystRefreshAdapter``) are driven by that background
+        worker, never wired into this synchronous path.
 
         Disabled entirely by setting ``INTEL_V3_ANALYST_REFRESH_ENABLED=0``.
         """
         if not is_analyst_refresh_enabled():
             return None
-        seam = AnalystRefreshRequestSeam(user_id=self.user_id)
+        seam = AnalystRefreshRequestSeam(user_id=self.user_id, client=self.client)
         logger.info(
             "intel_v3.analyst_refresh_seam_wired user_id=%s seam=%s "
             "in_request_llm_refresh=false",

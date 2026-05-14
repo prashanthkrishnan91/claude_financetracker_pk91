@@ -56,6 +56,26 @@ STATUS_SUCCEEDED = "succeeded"
 STATUS_FAILED = "failed"
 
 
+# ── Per-ticker failure-reason taxonomy ────────────────────────────────────────
+
+# Explicit reasons so production logs make the next failure self-explaining.
+# Production observed: 6 LLM calls, 0 success — but AgentOrchestrator produced
+# valid analyst output. Root cause: read-back filtered by `created_at >= started_at`
+# only, which is fragile when server-side timestamps don't round-trip cleanly
+# from the captured Python `datetime`. The fix: verify by the real
+# ``run_id`` / ``agent_run_id`` columns first, with timestamp as a secondary
+# sanity check.
+REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN = "no_agent_insight_row_for_run"
+REASON_NO_RECOMMENDATION_ROW_FOR_RUN = "no_recommendation_row_for_run"
+REASON_FALLBACK_VERDICT = "fallback_verdict"
+REASON_TIMESTAMP_BEFORE_STARTED_AT = "timestamp_before_started_at"
+REASON_PERSISTENCE_MISSING = "persistence_missing"
+REASON_READ_QUERY_FAILED = "read_query_failed"
+REASON_NO_POST_RUN_EVIDENCE = "no_post_run_evidence"
+REASON_USED_FALLBACK_VERDICT = "used_fallback_verdict"  # legacy alias
+REASON_BACKEND_TIMEOUT = "analyst_refresh_timeout"
+
+
 # ── Priority ordering ─────────────────────────────────────────────────────────
 
 # Lower number wins. BUY/TRIM beat HOLD/SELL/UNKNOWN — these are the actionable
@@ -372,7 +392,7 @@ class AnalystRefreshAdapter:
                 per_ticker.append(TickerRefreshOutcome(
                     ticker=ticker,
                     success=False,
-                    error_reason="no_post_run_evidence",
+                    error_reason=REASON_NO_POST_RUN_EVIDENCE,
                     llm_call_count=1,
                     llm_success_count=0,
                 ))
@@ -381,10 +401,72 @@ class AnalystRefreshAdapter:
             rec_ts = row.get("recommendation_created_at")
             insight_ts = row.get("agent_insight_created_at")
             used_fallback = bool(row.get("used_fallback", False))
+            # New durable signals — primary key is the actual run_id /
+            # agent_run_id of the row, not a timestamp filter. Backends that
+            # don't yet supply these flags fall back to the old timestamp-only
+            # rule so the public adapter contract stays stable for tests.
+            insight_run_match = bool(row.get("insight_run_match"))
+            rec_run_match = bool(row.get("rec_run_match"))
+            insight_present = bool(row.get("insight_row_present"))
+            rec_present = bool(row.get("rec_row_present"))
+            backend_reason = row.get("failure_reason")
+            backend_provides_run_signals = (
+                "insight_run_match" in row or "rec_run_match" in row
+            )
 
-            # Per-ticker honesty: success requires at least one fresh row
-            # whose created_at is post-started_at AND the verdict is not a
-            # fallback. Anything else stays stamped as not-refreshed.
+            if backend_provides_run_signals:
+                # New verification rule (production-validated 2026-05-14).
+                # A ticker only succeeds when:
+                #   * A row written by the current agent_run exists in
+                #     agent_insights (matched by run_id), AND
+                #   * The verdict is not a fallback / insufficient-data verdict.
+                # Recommendations row is verified too but absence of the rec
+                # row alone (when the insight row is real and non-fallback)
+                # is not a hard fail — the recommendation may have already
+                # been written by an earlier batch / future contract change.
+                # Timestamp comparison is kept as a secondary sanity check.
+                if used_fallback:
+                    failed += 1
+                    per_ticker.append(TickerRefreshOutcome(
+                        ticker=ticker,
+                        success=False,
+                        error_reason=REASON_FALLBACK_VERDICT,
+                        llm_call_count=1,
+                        llm_success_count=0,
+                    ))
+                    continue
+                if not insight_run_match:
+                    if not insight_present:
+                        reason = REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
+                    else:
+                        # Row exists for the ticker, but not for THIS run —
+                        # likely the persist phase silently dropped it.
+                        reason = REASON_PERSISTENCE_MISSING
+                    failed += 1
+                    per_ticker.append(TickerRefreshOutcome(
+                        ticker=ticker,
+                        success=False,
+                        error_reason=backend_reason or reason,
+                        llm_call_count=1,
+                        llm_success_count=0,
+                    ))
+                    continue
+                # Insight row exists for this run and is not a fallback —
+                # this is a real refresh. Stamp freshness from the actual
+                # row's created_at (durable evidence), not "now()".
+                successful += 1
+                per_ticker.append(TickerRefreshOutcome(
+                    ticker=ticker,
+                    success=True,
+                    refreshed_recommendation_at=rec_ts if (rec_run_match or _is_post(rec_ts, started_at)) else None,
+                    refreshed_agent_insight_at=insight_ts,
+                    llm_call_count=1,
+                    llm_success_count=1,
+                ))
+                continue
+
+            # Legacy timestamp-only path (kept for back-compat with tests
+            # that stub the backend without the new run-id signals).
             rec_fresh = _is_post(rec_ts, started_at)
             insight_fresh = _is_post(insight_ts, started_at)
             ok = (rec_fresh or insight_fresh) and not used_fallback
@@ -400,14 +482,16 @@ class AnalystRefreshAdapter:
                 ))
             else:
                 failed += 1
-                reason = (
-                    "used_fallback_verdict" if used_fallback
-                    else "no_fresh_row_post_started_at"
-                )
+                if used_fallback:
+                    reason = REASON_FALLBACK_VERDICT
+                elif (rec_ts or insight_ts):
+                    reason = REASON_TIMESTAMP_BEFORE_STARTED_AT
+                else:
+                    reason = REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
                 per_ticker.append(TickerRefreshOutcome(
                     ticker=ticker,
                     success=False,
-                    error_reason=reason,
+                    error_reason=backend_reason or reason,
                     llm_call_count=1,
                     llm_success_count=0,
                 ))
@@ -513,70 +597,186 @@ async def _read_post_run_evidence(
 ) -> dict[str, Optional[dict[str, Any]]]:
     """Read per-ticker evidence rows produced by ``agent_run_id``.
 
-    Reads are scoped to this user_id and to rows whose ``created_at`` is on or
-    after ``started_at``. This is the deterministic boundary that prevents
-    counting older stale rows as "fresh".
+    Verification primary key: ``agent_insights.run_id`` and
+    ``recommendations.agent_run_id`` MUST equal the just-created
+    ``agent_run_id``. A timestamp filter is kept as a secondary sanity check
+    so production logs surface the right failure reason when Supabase /
+    server time round-trips differ from the Python-captured ``started_at``.
+
+    Returns ``{ticker: {recommendation_created_at, agent_insight_created_at,
+    used_fallback, agent_run_id, insight_run_match, rec_run_match,
+    insight_row_present, rec_row_present, failure_reason}}`` for every
+    requested ticker; ``None`` only when neither table returned any row for
+    that ticker (the strongest "nothing was persisted" signal).
     """
     from ....database import get_supabase_client
 
     client = get_supabase_client()
     started_iso = started_at.isoformat()
 
-    def _read_rows(table: str) -> list[dict[str, Any]]:
+    def _read_insights() -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+        """Read agent_insights rows two ways: by run_id (primary), and by
+        ticker+timestamp (sanity). Returns (run_rows, ticker_rows, error)."""
+        run_rows: list[dict[str, Any]] = []
+        ticker_rows: list[dict[str, Any]] = []
+        err: Optional[str] = None
+        # Primary: scope to this run's id. Most durable signal.
         try:
             res = (
-                client.table(table)
-                .select("ticker,created_at,analyst_verdict")
-                if table == "agent_insights"
-                else client.table(table).select("ticker,created_at,is_active,agent_run_id")
+                client.table("agent_insights")
+                .select("ticker,created_at,run_id,analyst_verdict")
+                .eq("user_id", str(user_id))
+                .eq("run_id", agent_run_id)
+                .in_("ticker", list(tickers))
+                .execute()
             )
-            res = res.eq("user_id", str(user_id)).in_("ticker", list(tickers)).gte("created_at", started_iso).execute()
-            return res.data or []
+            run_rows = res.data or []
+        except Exception as exc:
+            # Schema may not include analyst_verdict (older deployments).
+            try:
+                res = (
+                    client.table("agent_insights")
+                    .select("ticker,created_at,run_id")
+                    .eq("user_id", str(user_id))
+                    .eq("run_id", agent_run_id)
+                    .in_("ticker", list(tickers))
+                    .execute()
+                )
+                run_rows = res.data or []
+            except Exception as exc2:
+                err = f"agent_insights_read_failed:{type(exc2).__name__}"
+                logger.warning(
+                    "analyst_refresh_adapter.insights_read_failed user_id=%s run_id=%s err=%s",
+                    user_id, agent_run_id, exc2,
+                )
+        # Sanity: any post-started_at rows for these tickers (catches the
+        # rare case where run_id wasn't written for some reason).
+        try:
+            res = (
+                client.table("agent_insights")
+                .select("ticker,created_at,run_id,analyst_verdict")
+                .eq("user_id", str(user_id))
+                .in_("ticker", list(tickers))
+                .gte("created_at", started_iso)
+                .execute()
+            )
+            ticker_rows = res.data or []
         except Exception:
             try:
-                # Fallback when analyst_verdict column is missing.
-                res = client.table(table).select("ticker,created_at").eq("user_id", str(user_id)).in_("ticker", list(tickers)).gte("created_at", started_iso).execute()
-                return res.data or []
-            except Exception as exc:
-                logger.warning(
-                    "analyst_refresh_adapter.read_failed table=%s err=%s",
-                    table, exc,
+                res = (
+                    client.table("agent_insights")
+                    .select("ticker,created_at,run_id")
+                    .eq("user_id", str(user_id))
+                    .in_("ticker", list(tickers))
+                    .gte("created_at", started_iso)
+                    .execute()
                 )
-                return []
+                ticker_rows = res.data or []
+            except Exception:
+                # Non-fatal; primary path is the run_id query.
+                pass
+        return run_rows, ticker_rows, err
 
-    insight_rows = await asyncio.to_thread(_read_rows, "agent_insights")
-    rec_rows = await asyncio.to_thread(_read_rows, "recommendations")
+    def _read_recs() -> tuple[list[dict[str, Any]], list[dict[str, Any]], Optional[str]]:
+        run_rows: list[dict[str, Any]] = []
+        ticker_rows: list[dict[str, Any]] = []
+        err: Optional[str] = None
+        try:
+            res = (
+                client.table("recommendations")
+                .select("ticker,created_at,agent_run_id,is_active")
+                .eq("user_id", str(user_id))
+                .eq("agent_run_id", agent_run_id)
+                .in_("ticker", list(tickers))
+                .execute()
+            )
+            run_rows = res.data or []
+        except Exception as exc:
+            err = f"recommendations_read_failed:{type(exc).__name__}"
+            logger.warning(
+                "analyst_refresh_adapter.recs_read_failed user_id=%s run_id=%s err=%s",
+                user_id, agent_run_id, exc,
+            )
+        try:
+            res = (
+                client.table("recommendations")
+                .select("ticker,created_at,agent_run_id,is_active")
+                .eq("user_id", str(user_id))
+                .in_("ticker", list(tickers))
+                .gte("created_at", started_iso)
+                .execute()
+            )
+            ticker_rows = res.data or []
+        except Exception:
+            pass
+        return run_rows, ticker_rows, err
 
-    insight_by_ticker: dict[str, dict[str, Any]] = {}
-    for row in insight_rows:
-        t = (row.get("ticker") or "").upper()
-        if not t:
-            continue
-        if t not in insight_by_ticker or (row.get("created_at") or "") > (insight_by_ticker[t].get("created_at") or ""):
-            insight_by_ticker[t] = row
+    insight_run_rows, insight_ticker_rows, insight_err = await asyncio.to_thread(_read_insights)
+    rec_run_rows, rec_ticker_rows, rec_err = await asyncio.to_thread(_read_recs)
 
-    rec_by_ticker: dict[str, dict[str, Any]] = {}
-    for row in rec_rows:
-        t = (row.get("ticker") or "").upper()
-        if not t:
-            continue
-        if t not in rec_by_ticker or (row.get("created_at") or "") > (rec_by_ticker[t].get("created_at") or ""):
-            rec_by_ticker[t] = row
+    def _index_latest(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        out: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            t = (row.get("ticker") or "").upper()
+            if not t:
+                continue
+            if t not in out or (row.get("created_at") or "") > (out[t].get("created_at") or ""):
+                out[t] = row
+        return out
+
+    insight_by_run = _index_latest(insight_run_rows)
+    insight_by_ts = _index_latest(insight_ticker_rows)
+    rec_by_run = _index_latest(rec_run_rows)
+    rec_by_ts = _index_latest(rec_ticker_rows)
 
     out: dict[str, Optional[dict[str, Any]]] = {}
     for ticker in tickers:
         up = ticker.upper()
-        insight = insight_by_ticker.get(up)
-        rec = rec_by_ticker.get(up)
-        if insight is None and rec is None:
-            out[ticker] = None
-            continue
+        insight_run = insight_by_run.get(up)
+        insight_ts_row = insight_by_ts.get(up)
+        rec_run = rec_by_run.get(up)
+        rec_ts_row = rec_by_ts.get(up)
+
+        insight_present = bool(insight_run or insight_ts_row)
+        rec_present = bool(rec_run or rec_ts_row)
+
+        insight = insight_run or insight_ts_row
+        rec = rec_run or rec_ts_row
+
+        # Verdict-fallback detection. agent_insights.analyst_verdict is a
+        # JSONB column; older deployments may not have it, in which case we
+        # treat the row as non-fallback (the run still wrote a row, which is
+        # the durable evidence the contract requires).
         verdict = (insight or {}).get("analyst_verdict") if isinstance(insight, dict) else None
         used_fallback = bool(isinstance(verdict, dict) and verdict.get("used_fallback"))
+
+        failure_reason: Optional[str] = None
+        if insight_err and not insight_present:
+            failure_reason = REASON_READ_QUERY_FAILED
+        elif rec_err and not rec_present and not insight_present:
+            failure_reason = REASON_READ_QUERY_FAILED
+        elif not insight_present and not rec_present:
+            failure_reason = REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
+        elif insight_run is None and insight_ts_row is not None:
+            # We saw a fresh-by-timestamp row, but the run_id didn't match.
+            # That's the production failure mode this patch addresses.
+            failure_reason = REASON_PERSISTENCE_MISSING
+        elif used_fallback:
+            failure_reason = REASON_FALLBACK_VERDICT
+
+        if insight is None and rec is None and not insight_err and not rec_err:
+            out[ticker] = None
+            continue
+
         out[ticker] = {
-            "agent_insight_created_at": (insight or {}).get("created_at"),
+            "agent_insight_created_at":  (insight or {}).get("created_at"),
             "recommendation_created_at": (rec or {}).get("created_at"),
-            "used_fallback": used_fallback,
-            "agent_run_id": agent_run_id,
+            "used_fallback":             used_fallback,
+            "agent_run_id":              agent_run_id,
+            "insight_run_match":         insight_run is not None,
+            "rec_run_match":             rec_run is not None,
+            "insight_row_present":       insight_present,
+            "rec_row_present":           rec_present,
+            "failure_reason":            failure_reason,
         }
     return out

@@ -3,21 +3,25 @@
 /**
  * IntelV3Cockpit — Premium held-position intelligence cockpit.
  *
- * Reads ONLY from v3 snapshot (IntelV3Snapshot). Never reads legacy recommendation cards.
- * When v3 flag is enabled:
- *   - Page load: reads latest snapshot (zero LLM calls).
- *   - Run Intel v3: builds decisions from existing signals, creates new snapshot.
- *   - Failed run: keeps last valid snapshot with failure banner.
- *   - No snapshot: shows clear empty state with "Run Intel v3" CTA.
+ * Stage 3.3 — all-or-nothing certified intelligence run contract.
+ *
+ * Green state (Certified Current) is only shown when:
+ *   - snapshot_source === "worker_certified"
+ *   - certified_holding_count === total_holding_count
+ *   - No pending refresh is in progress
+ *
+ * Run Intel v3 button enqueues a background worker run — it does NOT
+ * immediately show green. The cockpit polls GET /intel/v3/snapshot every
+ * 15 seconds after a click until the snapshot becomes worker_certified.
  *
  * LOCKED filter contract: ALL / BUY / HOLD / TRIM / SELL only.
  * No posture labels. No radar labels in held cards. No raw metric keys.
  */
 
-import { useState } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
-import { analystRefreshRequestNote } from "@/lib/intel-v3-banner";
+import { buildBannerState } from "@/lib/intel-v3-banner";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
 import { Spinner } from "@/components/ui/Spinner";
@@ -25,12 +29,10 @@ import type {
   IntelV3HeldCard,
   IntelV3Action,
   IntelV3Snapshot,
-  IntelV3RunMode,
+  IntelV3RunResult,
 } from "@/lib/api";
 
 // LOCKED: Intel v3 visible filter contract is ALL/BUY/HOLD/TRIM/SELL only.
-// Radar labels (WATCH/AVOID) must never appear here.
-// New visible buckets require a spec change.
 const INTEL_V3_FILTERS = [
   { key: "ALL",  label: "All",  color: "bg-surface-elevated text-text-primary" },
   { key: "BUY",  label: "Buy",  color: "bg-green-500/10 text-green-400 border-green-500/30" },
@@ -40,6 +42,11 @@ const INTEL_V3_FILTERS = [
 ] as const;
 
 type FilterKey = "ALL" | IntelV3Action;
+
+// Polling interval while a refresh is in progress (15 seconds)
+const REFRESH_POLL_INTERVAL_MS = 15_000;
+// Stop polling after this many minutes if worker hasn't completed
+const REFRESH_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -67,120 +74,82 @@ function CommandCenter({ snapshot }: { snapshot: IntelV3Snapshot }) {
   );
 }
 
-function _formatAgeHours(hours: number | null | undefined): string | null {
-  if (hours == null) return null;
-  if (hours < 24) return `${hours.toFixed(1)}h`;
-  return `${(hours / 24).toFixed(1)} days`;
-}
+function ProvenanceRow({ snapshot }: { snapshot: IntelV3Snapshot }) {
+  const cert = snapshot.certification_summary;
+  const certCount = snapshot.certified_holding_count ?? cert?.certified_holding_count;
+  const totalCount = snapshot.total_holding_count ?? cert?.total_holding_count;
+  const latestRunAt = cert?.latest_agent_run_at
+    ? new Date(cert.latest_agent_run_at).toLocaleString()
+    : null;
+  const runIds = cert?.agent_run_ids_used ?? [];
+  const failedTickers = snapshot.failed_tickers_in_certification ?? [];
 
-// Plain-English run-mode labels — Stage 3.0b banner contract.
-// No raw metric jargon. No diagnostic keys. No green/trusted unless
-// FAST_CERTIFIED or successful REFRESH_THEN_RUN.
-const RUN_MODE_LABEL: Record<IntelV3RunMode, string> = {
-  FAST_CERTIFIED:      "Fresh certified",
-  REFRESH_THEN_RUN:    "Refreshed stale evidence before running",
-  PARTIAL_CERTIFIED:   "Partial: some evidence stale or unavailable",
-  BLOCKED_UNCERTIFIED: "Blocked: current evidence unavailable",
-};
-
-function _runModeTone(runMode: IntelV3RunMode | undefined, trust: string | undefined) {
-  // Only show trusted/positive tone when fully certified or a successful refresh.
-  if (runMode === "FAST_CERTIFIED" || (runMode === "REFRESH_THEN_RUN" && trust === "trusted")) {
-    return "bg-green-500/10 border-green-500/30 text-green-400";
-  }
-  if (runMode === "PARTIAL_CERTIFIED") {
-    return "bg-amber-500/10 border-amber-500/30 text-amber-400";
-  }
-  if (runMode === "BLOCKED_UNCERTIFIED") {
-    return "bg-red-500/10 border-red-500/30 text-red-400";
-  }
-  return "bg-surface border-border text-text-muted";
-}
-
-function _buildAgeSummary(
-  recAgeHours: number | null | undefined,
-  insightAgeHours: number | null | undefined,
-): string {
-  // Mirror the backend's banner_age_summary: report both sources separately
-  // so the banner never claims "Oldest evidence: 8d" when analyst evidence
-  // is actually 12d stale. Backend supplies the canonical string when present;
-  // this is the compatibility fallback for older snapshots.
-  if (recAgeHours == null && insightAgeHours == null) return "Evidence age: unknown.";
-  const parts: string[] = [];
-  if (insightAgeHours != null) {
-    parts.push(`Analyst evidence: ${_formatAgeHours(insightAgeHours)} old.`);
-  }
-  if (recAgeHours != null) {
-    parts.push(`Recommendation evidence: ${_formatAgeHours(recAgeHours)} old.`);
-  }
-  return parts.join(" ");
-}
-
-function FreshnessLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
-  const diag = snapshot.diagnostics;
-  if (!diag) return null;
-  const summary = diag.banner_age_summary
-    ?? _buildAgeSummary(diag.max_recommendation_age_hours, diag.max_agent_insight_age_hours);
-  const changedPart = `Decisions changed: ${diag.changed_decision_count}.`;
   return (
-    <p className="mt-1 text-[11px] text-text-muted">
-      {summary} {changedPart}
-    </p>
+    <div className="mt-2 space-y-0.5 text-[11px] text-text-muted">
+      {certCount !== undefined && totalCount !== undefined && (
+        <p>Coverage: {certCount}/{totalCount} certified.</p>
+      )}
+      {latestRunAt && <p>Latest analyst run: {latestRunAt}.</p>}
+      {runIds.length > 0 && (
+        <p>Agent run IDs: {runIds.slice(0, 2).join(", ")}{runIds.length > 2 ? ` +${runIds.length - 2} more` : ""}.</p>
+      )}
+      <p>
+        Snapshot source:{" "}
+        <span className="font-medium">
+          {snapshot.snapshot_source === "worker_certified"
+            ? "worker certified"
+            : snapshot.snapshot_source === "certification_failed"
+            ? "certification failed"
+            : snapshot.snapshot_source ?? "unknown"}
+        </span>
+        .
+      </p>
+      <p>Agents ran for this click: No — background worker handles analysis.</p>
+      <p>This click used LLMs: No — background worker handles analysis.</p>
+      {failedTickers.length > 0 && (
+        <p className="text-red-400">
+          Failed tickers: {failedTickers.slice(0, 5).join(", ")}
+          {failedTickers.length > 5 ? ` +${failedTickers.length - 5} more` : ""}.
+        </p>
+      )}
+    </div>
   );
-}
-
-// Stage 3.1 — honest analyst refresh-request note (pure helper lives in
-// @/lib/intel-v3-banner so it stays unit-testable without the component tree).
-function AnalystRefreshRequestLine({ snapshot }: { snapshot: IntelV3Snapshot }) {
-  const note = analystRefreshRequestNote(snapshot.diagnostics);
-  if (!note) return null;
-  return <p className="mt-1 text-[11px] text-amber-400">{note}</p>;
 }
 
 function SnapshotBanner({
   snapshot,
-  isStale,
-  warnings,
-  runFailed,
+  isRefreshing,
+  lastRunResult,
 }: {
-  snapshot: IntelV3Snapshot;
-  isStale: boolean;
-  warnings: string[];
-  runFailed?: boolean;
+  snapshot: IntelV3Snapshot | null;
+  isRefreshing: boolean;
+  lastRunResult?: IntelV3RunResult | null;
 }) {
-  const date = new Date(snapshot.generated_at).toLocaleString();
-  const diag = snapshot.diagnostics;
-  const runMode = diag?.run_mode;
-  const trust = diag?.trust_status;
-  // Stage 3.0b: when run_mode is present, prefer the plain-English label.
-  // Otherwise fall back to the legacy stale/run-failed tone.
-  const tone = runMode
-    ? _runModeTone(runMode, trust)
-    : runFailed
-    ? "bg-red-500/10 border-red-500/30 text-red-400"
-    : isStale || warnings.length > 0
-    ? "bg-amber-500/10 border-amber-500/30 text-amber-400"
-    : "bg-surface border-border text-text-muted";
+  const bannerState = buildBannerState(snapshot, isRefreshing, lastRunResult);
 
-  const modeLabel = runMode ? RUN_MODE_LABEL[runMode] : null;
-  const headline = runFailed
-    ? "Last run failed — showing previous snapshot."
-    : modeLabel
-    ? `${modeLabel} — last updated ${date}.`
-    : isStale
-    ? `Data may be stale — last updated ${date}.`
-    : `Snapshot as of ${date}`;
+  const toneClass = {
+    green: "bg-green-500/10 border-green-500/30 text-green-400",
+    amber: "bg-amber-500/10 border-amber-500/30 text-amber-400",
+    red:   "bg-red-500/10 border-red-500/30 text-red-400",
+    grey:  "bg-surface border-border text-text-muted",
+  }[bannerState.tone];
 
   return (
-    <div className={cn("rounded-lg border px-3 py-2 text-xs", tone)}>
+    <div className={cn("rounded-lg border px-3 py-2 text-xs", toneClass)}>
       <div className="flex items-center justify-between gap-2 flex-wrap">
-        <span>{headline}</span>
-        {warnings.map((w, i) => (
-          <span key={i} className="text-amber-400">{w}</span>
-        ))}
+        <span className="font-semibold">{bannerState.headline}</span>
+        {isRefreshing && (
+          <span className="flex items-center gap-1 text-text-muted">
+            <Spinner className="h-3 w-3" /> checking every 15s
+          </span>
+        )}
       </div>
-      <FreshnessLine snapshot={snapshot} />
-      <AnalystRefreshRequestLine snapshot={snapshot} />
+      {bannerState.detail && (
+        <p className="mt-1 text-[11px] opacity-80">{bannerState.detail}</p>
+      )}
+      {bannerState.showProvenance && snapshot && (
+        <ProvenanceRow snapshot={snapshot} />
+      )}
     </div>
   );
 }
@@ -231,9 +200,9 @@ function EmptySnapshotState({ onRun, isRunning }: { onRun: () => void; isRunning
     <div className="flex flex-col items-center justify-center py-16 gap-4">
       <div className="text-text-muted text-center space-y-2">
         <p className="text-base font-medium text-text-primary">No Intel v3 snapshot yet</p>
-        <p className="text-sm">Run Intel v3 to build your first decision snapshot.</p>
+        <p className="text-sm">Run Intel v3 to start a background analyst run for all holdings.</p>
         <p className="text-xs text-text-muted">
-          The analysis uses your existing holdings and signals — no AI calls on page load.
+          The background worker will run LLM analysis and publish a certified snapshot automatically.
         </p>
       </div>
       <button
@@ -242,7 +211,7 @@ function EmptySnapshotState({ onRun, isRunning }: { onRun: () => void; isRunning
         className="px-4 py-2 rounded-lg bg-accent text-background text-sm font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 flex items-center gap-2"
       >
         {isRunning ? <Spinner className="h-4 w-4" /> : null}
-        {isRunning ? "Building Intel…" : "Run Intel v3"}
+        {isRunning ? "Enqueueing refresh…" : "Run Intel v3"}
       </button>
     </div>
   );
@@ -254,31 +223,108 @@ function EmptySnapshotState({ onRun, isRunning }: { onRun: () => void; isRunning
 export function IntelV3Cockpit() {
   const [filter, setFilter] = useState<FilterKey>("ALL");
   const [selectedCard, setSelectedCard] = useState<IntelV3HeldCard | null>(null);
-  const [runFailed, setRunFailed] = useState(false);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [lastRunResult, setLastRunResult] = useState<IntelV3RunResult | null>(null);
 
-  const { data: snapshot, isLoading, error } = useIntelV3Snapshot();
+  const refreshStartedAt = useRef<number | null>(null);
+  const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  const { data: snapshot, isLoading, refetch: refetchSnapshot } = useIntelV3Snapshot();
   const runMutation = useRunIntelV3();
 
+  // Poll the snapshot every 15s while a refresh is in progress.
+  // Stop when:
+  //   a) snapshot_source === "worker_certified" and certified_holding_count === total_holding_count
+  //   b) snapshot_source === "certification_failed" (worker completed but failed)
+  //   c) Timeout exceeded (5 minutes)
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current) {
+      clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+    setIsRefreshing(false);
+    refreshStartedAt.current = null;
+  }, []);
+
+  const startPolling = useCallback(() => {
+    if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    refreshStartedAt.current = Date.now();
+    setIsRefreshing(true);
+
+    pollTimerRef.current = setInterval(async () => {
+      // Check timeout
+      const elapsed = Date.now() - (refreshStartedAt.current ?? Date.now());
+      if (elapsed > REFRESH_POLL_TIMEOUT_MS) {
+        stopPolling();
+        return;
+      }
+
+      const result = await refetchSnapshot();
+      const snap = result.data;
+
+      if (!snap) return;
+
+      const isCertified =
+        snap.snapshot_source === "worker_certified" &&
+        typeof snap.certified_holding_count === "number" &&
+        typeof snap.total_holding_count === "number" &&
+        snap.total_holding_count > 0 &&
+        snap.certified_holding_count === snap.total_holding_count;
+
+      const isCertificationFailed = snap.snapshot_source === "certification_failed";
+
+      if (isCertified || isCertificationFailed) {
+        stopPolling();
+      }
+    }, REFRESH_POLL_INTERVAL_MS);
+  }, [refetchSnapshot, stopPolling]);
+
+  // Clean up timer on unmount
+  useEffect(() => {
+    return () => {
+      if (pollTimerRef.current) clearInterval(pollTimerRef.current);
+    };
+  }, []);
+
+  // When the snapshot becomes certified while polling, stop polling
+  useEffect(() => {
+    if (!isRefreshing || !snapshot) return;
+    const isCertified =
+      snapshot.snapshot_source === "worker_certified" &&
+      typeof snapshot.certified_holding_count === "number" &&
+      typeof snapshot.total_holding_count === "number" &&
+      snapshot.total_holding_count > 0 &&
+      snapshot.certified_holding_count === snapshot.total_holding_count;
+    const isCertificationFailed = snapshot.snapshot_source === "certification_failed";
+    if (isCertified || isCertificationFailed) {
+      stopPolling();
+    }
+  }, [snapshot, isRefreshing, stopPolling]);
+
   const handleRun = () => {
-    setRunFailed(false);
     runMutation.mutate(undefined, {
-      onError: () => setRunFailed(true),
+      onSuccess: (result) => {
+        setLastRunResult(result);
+        // Start polling — worker will certify in background
+        startPolling();
+      },
+      onError: () => {
+        setIsRefreshing(false);
+      },
     });
   };
 
-  // Filter cards — counts come from snapshot, not recomputed.
+  const isButtonDisabled = runMutation.isPending;
+
   const allCards = snapshot?.current_holdings ?? [];
   const filteredCards = filter === "ALL"
     ? allCards
     : allCards.filter((c) => c.action === filter);
 
-  // Build counts from snapshot action_counts (same source as cards).
   const counts: Record<string, number> = {
     ALL: allCards.length,
     ...(snapshot?.action_counts ?? {}),
   };
-
-  const isRunning = runMutation.isPending;
 
   if (isLoading) {
     return (
@@ -288,9 +334,24 @@ export function IntelV3Cockpit() {
     );
   }
 
-  // No snapshot yet — show empty state.
-  if (!snapshot && !isLoading) {
-    return <EmptySnapshotState onRun={handleRun} isRunning={isRunning} />;
+  if (!snapshot && !isLoading && !isRefreshing) {
+    return <EmptySnapshotState onRun={handleRun} isRunning={runMutation.isPending} />;
+  }
+
+  if (!snapshot && isRefreshing) {
+    return (
+      <div className="space-y-5">
+        <SnapshotBanner
+          snapshot={null}
+          isRefreshing={isRefreshing}
+          lastRunResult={lastRunResult}
+        />
+        <div className="flex items-center justify-center py-12 gap-3 text-text-muted">
+          <Spinner className="h-5 w-5" />
+          <span className="text-sm">Analyst worker is running. Results will appear here automatically.</span>
+        </div>
+      </div>
+    );
   }
 
   if (!snapshot) return null;
@@ -303,18 +364,17 @@ export function IntelV3Cockpit() {
         <div className="flex-1">
           <SnapshotBanner
             snapshot={snapshot}
-            isStale={snapshot.is_stale}
-            warnings={snapshot.warnings}
-            runFailed={runFailed}
+            isRefreshing={isRefreshing}
+            lastRunResult={lastRunResult}
           />
         </div>
         <button
           onClick={handleRun}
-          disabled={isRunning}
+          disabled={isButtonDisabled}
           className="shrink-0 px-3 py-1.5 rounded-md bg-accent text-background text-xs font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 flex items-center gap-1.5"
         >
-          {isRunning ? <Spinner className="h-3 w-3" /> : null}
-          {isRunning ? "Running…" : "Run Intel v3"}
+          {isButtonDisabled ? <Spinner className="h-3 w-3" /> : null}
+          {isButtonDisabled ? "Enqueueing…" : "Run Intel v3"}
         </button>
       </div>
 

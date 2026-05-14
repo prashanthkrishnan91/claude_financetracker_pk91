@@ -61,35 +61,48 @@ async def get_latest_v3_snapshot(
 
 @router.post("/run", status_code=status.HTTP_202_ACCEPTED)
 async def run_intel_v3(
-    background_tasks: BackgroundTasks,
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Trigger an Intel v3 decision run.
+    """Enqueue a full Intel v3 analyst refresh for all active holdings.
 
-    Runs the v3 decision kernel on existing signals (no new LLM calls).
-    Creates one immutable snapshot and makes it the active snapshot.
-    Returns immediately; the snapshot is available at GET /snapshot after completion.
+    Stage 3.3 — all-or-nothing certified intelligence run contract.
 
-    Note: Currently synchronous for portfolios ≤ ~50 tickers.
-    For async behavior, the run will be backgrounded and status polled.
+    The Run Intel v3 button now means "start a new certified intelligence run,"
+    not "rebuild from whatever persisted evidence exists." This endpoint:
+
+      1. Enqueues a durable ``analyst_refresh_jobs`` row for EVERY active
+         holding (idempotent — repeated clicks do not create duplicate jobs).
+      2. Returns ``status=refresh_requested`` or ``refresh_in_progress``.
+      3. Does NOT build a snapshot, does NOT run any LLM analysis in-request.
+
+    The background worker (``AnalystRefreshWorker``) will:
+      * Claim the enqueued jobs.
+      * Run LLM analysis for all active holdings.
+      * Write durable ``agent_insights`` and ``recommendations`` rows.
+      * Validate the full ``CertifiedIntelRunContract`` (all holdings must pass).
+      * If the contract passes: publish ``snapshot_source=worker_certified``.
+      * If the contract fails: publish ``snapshot_source=certification_failed``
+        with the specific failed tickers and reasons.
+
+    The UI should:
+      * Immediately show "Refreshing Analyst Intelligence" (or
+        "Latest Certified Snapshot Available — New Refresh Running").
+      * Poll ``GET /intel/v3/snapshot`` until the snapshot changes to
+        ``snapshot_source=worker_certified`` and
+        ``certified_holding_count == total_holding_count``.
+      * Show green ONLY when both conditions are met.
     """
     _check_flag()
 
     service = IntelV3Service(user_id=user.id)
     try:
-        snapshot = await service.run_v3()
-        return {
-            "status":      "completed",
-            "snapshot_id": snapshot.get("snapshot_id"),
-            "run_id":      snapshot.get("run_id"),
-            "total_cards": len(snapshot.get("current_holdings", [])),
-            "action_counts": snapshot.get("action_counts", {}),
-        }
+        result = await service.enqueue_run_v3()
+        return result
     except Exception as exc:
-        logger.error("intel_v3.run_failed user_id=%s error=%s", user.id, exc)
+        logger.error("intel_v3.enqueue_run_failed user_id=%s error=%s", user.id, exc)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Intel v3 run failed: {exc}",
+            detail=f"Intel v3 enqueue failed: {exc}",
         )
 
 

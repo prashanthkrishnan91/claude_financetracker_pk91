@@ -1,12 +1,11 @@
 /**
- * Intel v3 trust-banner copy contract — Stage 3.1.
+ * Intel v3 trust-banner contract — Stage 3.3.
  *
- * Verifies the honest banner copy for fresh vs stale / refresh-requested
- * states. The refresh-requested copy must never claim a background job is
- * running or that the user must wait for a synchronous analyst run.
+ * Covers deriveIntelV3UIStatus and buildBannerState (all-or-nothing certified
+ * intelligence run contract), plus legacy analystRefreshRequestNote tests.
  */
-import { analystRefreshRequestNote } from "@/lib/intel-v3-banner";
-import type { IntelV3SnapshotDiagnostics } from "@/lib/api";
+import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState } from "@/lib/intel-v3-banner";
+import type { IntelV3Snapshot, IntelV3SnapshotDiagnostics } from "@/lib/api";
 
 function makeDiag(
   overrides: Partial<IntelV3SnapshotDiagnostics> = {},
@@ -112,5 +111,119 @@ describe("Intel v3 banner — blocked / uncertified state", () => {
       analyst_refresh_status: "succeeded",
     });
     expect(analystRefreshRequestNote(diag)).toBeNull();
+  });
+});
+
+// ── Stage 3.3: deriveIntelV3UIStatus ─────────────────────────────────────────
+
+function makeCertifiedSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot {
+  return {
+    snapshot_source: "worker_certified",
+    certified_holding_count: 3,
+    total_holding_count: 3,
+    failed_tickers_in_certification: [],
+    ...overrides,
+  } as unknown as IntelV3Snapshot;
+}
+
+describe("deriveIntelV3UIStatus — certified_current", () => {
+  it("returns certified_current when worker_certified and counts match and not refreshing", () => {
+    const snap = makeCertifiedSnapshot();
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("certified_current");
+  });
+
+  it("green only if certified_holding_count === total_holding_count", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 2, total_holding_count: 3 });
+    expect(deriveIntelV3UIStatus(snap, false)).not.toBe("certified_current");
+  });
+
+  it("green requires snapshot_source === worker_certified", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    expect(deriveIntelV3UIStatus(snap, false)).not.toBe("certified_current");
+  });
+
+  it("green requires total_holding_count > 0", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 0, total_holding_count: 0 });
+    expect(deriveIntelV3UIStatus(snap, false)).not.toBe("certified_current");
+  });
+});
+
+describe("deriveIntelV3UIStatus — refreshing states", () => {
+  it("returns latest_certified_new_refresh_running when certified and isRefreshing", () => {
+    const snap = makeCertifiedSnapshot();
+    expect(deriveIntelV3UIStatus(snap, true)).toBe("latest_certified_new_refresh_running");
+  });
+
+  it("returns refreshing_analyst_intelligence when no snapshot and isRefreshing", () => {
+    expect(deriveIntelV3UIStatus(null, true)).toBe("refreshing_analyst_intelligence");
+  });
+
+  it("returns refreshing when uncertified snapshot exists and isRefreshing", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    expect(deriveIntelV3UIStatus(snap, true)).toBe("refreshing_analyst_intelligence");
+  });
+});
+
+describe("deriveIntelV3UIStatus — unavailable states", () => {
+  it("returns unavailable_evidence_incomplete when no snapshot and not refreshing", () => {
+    expect(deriveIntelV3UIStatus(null, false)).toBe("unavailable_evidence_incomplete");
+  });
+
+  it("returns blocked_certification_failed when snapshot_source is certification_failed", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "certification_failed" } as any);
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("blocked_certification_failed");
+  });
+
+  it("returns unavailable_evidence_incomplete for http_request snapshot without enqueued run", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("unavailable_evidence_incomplete");
+  });
+});
+
+// ── Stage 3.3: buildBannerState tone rules ────────────────────────────────────
+
+describe("buildBannerState — tone and copy", () => {
+  it("certified_current uses green tone", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, false);
+    expect(banner.tone).toBe("green");
+    expect(banner.status).toBe("certified_current");
+  });
+
+  it("refreshing_analyst_intelligence uses grey tone", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.tone).toBe("grey");
+    expect(banner.showProvenance).toBe(false);
+  });
+
+  it("latest_certified_new_refresh_running uses amber tone", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, true);
+    expect(banner.tone).toBe("amber");
+    expect(banner.showProvenance).toBe(true);
+  });
+
+  it("blocked_certification_failed uses red tone", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "certification_failed" } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.tone).toBe("red");
+  });
+
+  it("unavailable_evidence_incomplete uses grey tone", () => {
+    const banner = buildBannerState(null, false);
+    expect(banner.tone).toBe("grey");
+  });
+
+  it("certified_current detail mentions worker and coverage", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, false);
+    expect(banner.detail).toContain("3/3");
+    expect(banner.detail?.toLowerCase()).toContain("worker");
+  });
+
+  it("green banner never shows when http_request snapshot present", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.tone).not.toBe("green");
   });
 });

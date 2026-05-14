@@ -1182,6 +1182,24 @@ export interface IntelV3Snapshot {
   warnings: string[];
   legacy_path_used: false;
   diagnostics?: IntelV3SnapshotDiagnostics;
+  // Stage 3.3 — provenance fields (set by worker prewarm, absent on HTTP-built snapshots)
+  snapshot_source?: "worker_certified" | "http_request" | "certification_failed" | "prewarm";
+  agents_ran_via_worker?: boolean;
+  agents_ran_for_this_click?: string;
+  this_click_used_llm?: boolean;
+  certified_holding_count?: number;
+  total_holding_count?: number;
+  failed_tickers_in_certification?: string[];
+  certification_summary?: {
+    certified: boolean;
+    certified_holding_count: number;
+    total_holding_count: number;
+    failed_holding_count: number;
+    latest_agent_run_at: string | null;
+    latest_recommendation_at: string | null;
+    agent_run_ids_used: string[];
+    certification_errors: string[];
+  };
 }
 
 export type IntelV3RunMode =
@@ -1264,8 +1282,26 @@ export interface IntelV3SnapshotDiagnostics {
   orchestrator_notes?: string[];
 }
 
+/**
+ * Stage 3.3 — Run Intel v3 enqueue result.
+ * POST /intel/v3/run now returns a refresh-enqueue status, NOT a snapshot.
+ * The UI should poll GET /intel/v3/snapshot until snapshot_source=worker_certified.
+ */
 export interface IntelV3RunResult {
-  status: "completed" | "running" | "failed";
+  status:
+    | "refresh_requested"
+    | "refresh_in_progress"
+    | "no_active_holdings"
+    | "enqueue_failed"
+    | "completed"   // legacy — may appear if backend version mismatch
+    | "running"
+    | "failed";
+  queued_ticker_count?: number;
+  total_holding_count?: number;
+  existing_certified_snapshot_id?: string | null;
+  existing_certified_snapshot?: boolean;
+  message?: string;
+  // Legacy fields — kept for back-compat if old backend serves them
   snapshot_id?: string;
   run_id?: string;
   total_cards?: number;

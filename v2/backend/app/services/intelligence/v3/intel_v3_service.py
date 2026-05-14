@@ -578,6 +578,135 @@ class IntelV3Service:
             )
             raise
 
+    # ── Run Intel v3 enqueue (Stage 3.3 — all-or-nothing contract) ──────────
+
+    async def enqueue_run_v3(self) -> dict[str, Any]:
+        """Enqueue a full analyst refresh for all active holdings.
+
+        This is the only action the Run Intel v3 button performs:
+          1. Fetches all active tickers.
+          2. Enqueues a durable ``analyst_refresh_jobs`` row per ticker via
+             ``enqueue_refresh_jobs`` — idempotent, fast, no LLM work.
+          3. Returns a status dict that the UI uses to show a "refresh in
+             progress" state while the background worker processes the jobs.
+
+        Explicitly does NOT:
+          * Build or return a snapshot.
+          * Run any analyst / LLM work in-request.
+          * Mark any evidence as fresh or green.
+
+        After this call the UI should:
+          * Show "Refreshing Analyst Intelligence" (or "Latest Certified
+            Snapshot Available — New Refresh Running" if a certified snapshot
+            already exists).
+          * Poll GET /intel/v3/snapshot until ``snapshot_source=worker_certified``
+            appears, then show the certified state.
+
+        Emits ``intel_v3_run_request_received`` and ``intel_v3_full_refresh_enqueued``.
+        """
+        import asyncio as _asyncio
+        from .analyst_refresh_job_store_v1 import enqueue_refresh_jobs
+
+        started_at = datetime.now(timezone.utc)
+
+        logger.info(
+            "intel_v3_run_request_received user_id=%s",
+            self.user_id,
+        )
+
+        # Fetch active tickers
+        tickers = await self._get_active_tickers()
+        total_holding_count = len(tickers)
+
+        if not tickers:
+            logger.warning(
+                "intel_v3_full_refresh_enqueued user_id=%s "
+                "status=no_active_holdings queued_ticker_count=0",
+                self.user_id,
+            )
+            return {
+                "status": "no_active_holdings",
+                "queued_ticker_count": 0,
+                "total_holding_count": 0,
+                "existing_certified_snapshot_id": None,
+                "existing_certified_snapshot": False,
+                "message": "No active holdings found. Add positions before running Intel v3.",
+            }
+
+        # Check whether a certified snapshot already exists (to guide UI copy)
+        latest_snapshot = await self.get_latest_snapshot()
+        existing_certified = (
+            isinstance(latest_snapshot, dict)
+            and latest_snapshot.get("snapshot_source") == "worker_certified"
+        )
+        existing_certified_snapshot_id = (
+            latest_snapshot.get("snapshot_id") if latest_snapshot else None
+        )
+
+        # Enqueue refresh for every active ticker
+        try:
+            enqueue_result = await _asyncio.to_thread(
+                enqueue_refresh_jobs,
+                self.client,
+                user_id=self.user_id,
+                tickers=tickers,
+                now=started_at,
+            )
+            queued_count = (
+                enqueue_result.created_count
+                + enqueue_result.touched_count
+                + enqueue_result.made_due_count
+                + enqueue_result.reopened_count
+            )
+        except Exception as exc:
+            logger.error(
+                "intel_v3_full_refresh_enqueued user_id=%s "
+                "status=enqueue_failed error=%s",
+                self.user_id, exc,
+            )
+            return {
+                "status": "enqueue_failed",
+                "queued_ticker_count": 0,
+                "total_holding_count": total_holding_count,
+                "existing_certified_snapshot_id": existing_certified_snapshot_id,
+                "existing_certified_snapshot": existing_certified,
+                "message": f"Failed to enqueue refresh: {exc}",
+            }
+
+        # Determine whether there are already in-progress claimed jobs
+        # (a previous click may still be running). We don't block on it — just
+        # inform the UI whether this is a brand-new request or a re-attach.
+        status = "refresh_in_progress" if (enqueue_result.touched_count > 0 and enqueue_result.created_count == 0) else "refresh_requested"
+
+        logger.info(
+            "intel_v3_full_refresh_enqueued user_id=%s "
+            "status=%s queued_ticker_count=%d total_holding_count=%d "
+            "created=%d touched=%d made_due=%d reopened=%d "
+            "existing_certified_snapshot=%s existing_certified_snapshot_id=%s",
+            self.user_id,
+            status,
+            queued_count,
+            total_holding_count,
+            enqueue_result.created_count,
+            enqueue_result.touched_count,
+            enqueue_result.made_due_count,
+            enqueue_result.reopened_count,
+            existing_certified,
+            existing_certified_snapshot_id,
+        )
+
+        return {
+            "status": status,
+            "queued_ticker_count": queued_count,
+            "total_holding_count": total_holding_count,
+            "existing_certified_snapshot_id": existing_certified_snapshot_id,
+            "existing_certified_snapshot": existing_certified,
+            "message": (
+                f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
+                "Background worker will run LLM analysis and publish a certified snapshot."
+            ),
+        }
+
     # ── Deterministic prewarm (Stage 3.2c) ───────────────────────────────────
 
     async def run_prewarm_snapshot(self, *, prewarm_run_id: str) -> dict[str, Any]:
@@ -793,7 +922,86 @@ class IntelV3Service:
                 "Evidence-aware rationale requires primary_driver fields from analyst."
             )
 
-        # Step 5: persist.
+        # Step 5: run the all-or-nothing CertifiedIntelRunContract (Stage 3.3).
+        # A prewarm snapshot is only published as "worker_certified" when every
+        # active holding passes the full evidence contract. Partial coverage,
+        # stale evidence, template rationale, or DB read failures produce a
+        # "certification_failed" snapshot — persisted for honest UI display but
+        # never shown as green.
+        from .certified_intel_run_contract_v1 import check_certified_intel_run_contract
+        try:
+            contract = await check_certified_intel_run_contract(
+                user_id=self.user_id,
+                client=self.client,
+                now=started_at,
+            )
+        except Exception as exc:
+            logger.error(
+                "intel_v3_prewarm_contract_check_failed user_id=%s prewarm_run_id=%s err=%s",
+                self.user_id, prewarm_run_id, exc,
+            )
+            contract = None
+
+        contract_dict = contract.to_dict() if contract else {}
+        contract_certified = bool(contract and contract.certified)
+
+        if contract_certified:
+            snapshot_source = "worker_certified"
+            logger.info(
+                "intel_v3_worker_certified_snapshot_published user_id=%s "
+                "prewarm_run_id=%s snapshot_id=%s "
+                "total_holding_count=%d certified_holding_count=%d "
+                "failed_holding_count=0 failed_tickers=none "
+                "latest_agent_run_at=%s latest_recommendation_at=%s "
+                "agent_run_ids=%s",
+                self.user_id,
+                prewarm_run_id,
+                snapshot_payload.get("snapshot_id"),
+                contract_dict.get("total_holding_count", 0),
+                contract_dict.get("certified_holding_count", 0),
+                contract_dict.get("latest_agent_run_at"),
+                contract_dict.get("latest_recommendation_at"),
+                ",".join(contract_dict.get("agent_run_ids_used") or []) or "none",
+            )
+        else:
+            snapshot_source = "certification_failed"
+            failed_tickers_list = contract_dict.get("failed_tickers") or []
+            logger.warning(
+                "intel_v3_worker_certified_snapshot_rejected user_id=%s "
+                "prewarm_run_id=%s snapshot_id=%s "
+                "total_holding_count=%d certified_holding_count=%d "
+                "failed_holding_count=%d failed_tickers=%s "
+                "certification_errors=%s",
+                self.user_id,
+                prewarm_run_id,
+                snapshot_payload.get("snapshot_id"),
+                contract_dict.get("total_holding_count", 0),
+                contract_dict.get("certified_holding_count", 0),
+                contract_dict.get("failed_holding_count", 0),
+                ",".join(failed_tickers_list[:10]) if failed_tickers_list else "none",
+                ",".join(contract_dict.get("certification_errors") or []) or "none",
+            )
+
+        # Embed provenance fields into snapshot payload before persisting.
+        snapshot_payload["snapshot_source"] = snapshot_source
+        snapshot_payload["agents_ran_via_worker"] = True
+        snapshot_payload["this_click_used_llm"] = False
+        snapshot_payload["agents_ran_for_this_click"] = "No — background worker handles analysis"
+        snapshot_payload["certified_holding_count"] = contract_dict.get("certified_holding_count", 0)
+        snapshot_payload["total_holding_count"] = contract_dict.get("total_holding_count", 0)
+        snapshot_payload["failed_tickers_in_certification"] = contract_dict.get("failed_tickers") or []
+        snapshot_payload["certification_summary"] = {
+            "certified": contract_certified,
+            "certified_holding_count": contract_dict.get("certified_holding_count", 0),
+            "total_holding_count": contract_dict.get("total_holding_count", 0),
+            "failed_holding_count": contract_dict.get("failed_holding_count", 0),
+            "latest_agent_run_at": contract_dict.get("latest_agent_run_at"),
+            "latest_recommendation_at": contract_dict.get("latest_recommendation_at"),
+            "agent_run_ids_used": contract_dict.get("agent_run_ids_used") or [],
+            "certification_errors": contract_dict.get("certification_errors") or [],
+        }
+
+        # Step 6: persist.
         await self._persist_snapshot(run_id=prewarm_run_id, payload=snapshot_payload)
 
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
@@ -801,7 +1009,8 @@ class IntelV3Service:
         logger.info(
             "intel_v3_snapshot_created user_id=%s run_id=%s "
             "snapshot_id=%s total_cards=%d action_counts=%s duration_ms=%d "
-            "llm_calls=0 hard_violations=0 soft_violations=%d source=prewarm",
+            "llm_calls=0 hard_violations=0 soft_violations=%d source=%s "
+            "contract_certified=%s certified_holding_count=%d total_holding_count=%d",
             self.user_id,
             prewarm_run_id,
             snapshot_payload.get("snapshot_id"),
@@ -809,6 +1018,30 @@ class IntelV3Service:
             action_counts,
             duration_ms,
             soft_violation_count,
+            snapshot_source,
+            contract_certified,
+            contract_dict.get("certified_holding_count", 0),
+            contract_dict.get("total_holding_count", 0),
+        )
+        logger.info(
+            "intel_v3_ui_status_summary user_id=%s prewarm_run_id=%s "
+            "snapshot_source=%s certified=%s "
+            "total_holding_count=%d certified_holding_count=%d "
+            "failed_holding_count=%d "
+            "worker_jobs_enqueued_count=unknown worker_jobs_claimed_count=unknown "
+            "attempted_llm_calls=0 persisted_ticker_success_count=unknown "
+            "latest_agent_run_at=%s latest_recommendation_at=%s "
+            "user_visible_status=%s",
+            self.user_id,
+            prewarm_run_id,
+            snapshot_source,
+            contract_certified,
+            contract_dict.get("total_holding_count", 0),
+            contract_dict.get("certified_holding_count", 0),
+            contract_dict.get("failed_holding_count", 0),
+            contract_dict.get("latest_agent_run_at"),
+            contract_dict.get("latest_recommendation_at"),
+            "Certified Current" if contract_certified else "Intel Blocked — Certification Failed",
         )
         return snapshot_payload
 

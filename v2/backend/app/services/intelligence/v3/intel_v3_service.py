@@ -44,6 +44,11 @@ from .analyst_refresh_adapter_v1 import (
     AnalystRefreshBudget,
     default_agent_orchestrator_backend,
 )
+from .full_portfolio_analyst_refresh_adapter_v1 import (
+    FullPortfolioAnalystRefreshAdapter,
+    FullPortfolioAnalystRefreshBudget,
+    default_full_portfolio_agent_orchestrator_backend,
+)
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
@@ -55,6 +60,15 @@ _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
 # Run Intel v3 path can refresh stale analyst evidence under budget. Set to
 # "0" / "false" to disable temporarily (e.g. while debugging an LLM provider).
 _ANALYST_REFRESH_FLAG_ENV = "INTEL_V3_ANALYST_REFRESH_ENABLED"
+# Stage 3.0c — full-portfolio analyst refresh mode. Defaults to
+# ``full_portfolio`` so Run Intel v3 refreshes every stale active position via
+# the existing AgentOrchestrator full-portfolio LLM pass (verified in
+# production: 34 tickers, 35 LLM calls, ~5s). Setting this to
+# ``budgeted_subset`` falls back to the Stage 3.0b.6 6-ticker emergency
+# adapter for explicit cost-capping.
+_ANALYST_REFRESH_MODE_ENV = "INTEL_V3_ANALYST_REFRESH_MODE"
+_REFRESH_MODE_FULL_PORTFOLIO = "full_portfolio"
+_REFRESH_MODE_BUDGETED_SUBSET = "budgeted_subset"
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
 
@@ -68,6 +82,20 @@ def is_analyst_refresh_enabled() -> bool:
     if raw in _FALSY:
         return False
     return True  # default-on; explicit FALSY required to disable
+
+
+def analyst_refresh_mode() -> str:
+    """Return the active analyst-refresh adapter mode.
+
+    Default = ``full_portfolio`` (Stage 3.0c). The legacy 6-ticker budgeted
+    adapter is reachable via ``INTEL_V3_ANALYST_REFRESH_MODE=budgeted_subset``
+    for explicit emergency cost-capping; it is NOT the default behavior for
+    Run Intel v3 on an owned portfolio.
+    """
+    raw = os.getenv(_ANALYST_REFRESH_MODE_ENV, "").strip().lower()
+    if raw == _REFRESH_MODE_BUDGETED_SUBSET:
+        return _REFRESH_MODE_BUDGETED_SUBSET
+    return _REFRESH_MODE_FULL_PORTFOLIO
 
 
 class IntelV3Service:
@@ -175,7 +203,42 @@ class IntelV3Service:
             refresh_result = await self._run_refresh_orchestrator(
                 run_id=run_id,
                 evidence_stats=evidence_stats,
+                evidence_adapter=evidence_adapter,
             )
+
+            # Stage 3.0c — when the refresh persisted at least one fresh
+            # analyst row to durable storage, re-read cards + evidence stats
+            # so the deterministic decide() below sees the refreshed evidence
+            # (recommendations.action / agent_insights.analyst_verdict) instead
+            # of the pre-refresh snapshot loaded in Step 1. Without this
+            # re-read, decisions are built from stale rows even when the
+            # AgentOrchestrator just wrote new ones.
+            refresh_diag_dict = (
+                refresh_result.to_diagnostics_dict() if refresh_result else {}
+            )
+            analyst_successful = list(
+                refresh_diag_dict.get("analyst_refresh_successful_tickers") or []
+            )
+            if analyst_successful:
+                try:
+                    cards_post, evidence_stats_post = await evidence_adapter.load_cards()
+                    cards = cards_post
+                    evidence_stats = evidence_stats_post
+                    logger.info(
+                        "intel_v3.post_refresh_reread user_id=%s run_id=%s "
+                        "refreshed_tickers=%d persisted_recommendation_count=%d "
+                        "persisted_agent_insight_count=%d",
+                        self.user_id, run_id,
+                        len(analyst_successful),
+                        evidence_stats.get("persisted_recommendation_count", 0),
+                        evidence_stats.get("persisted_agent_insight_count", 0),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "intel_v3.post_refresh_reread_failed user_id=%s run_id=%s "
+                        "err=%s",
+                        self.user_id, run_id, exc,
+                    )
 
             # If refresh succeeded for price evidence, the underlying portfolio
             # snapshot still holds yesterday's market_value_certified_at — but
@@ -532,12 +595,17 @@ class IntelV3Service:
         *,
         run_id: str,
         evidence_stats: dict[str, Any],
+        evidence_adapter: Optional[ReadOnlyEvidenceAdapter] = None,
     ):
         """Build OrchestratorInputs from existing state and run the orchestrator.
 
         Returns None on hard failure (orchestrator never raises into the run).
         Failures degrade gracefully — run_mode stays the last classified value
         and the snapshot still persists with diagnostics reflecting truth.
+
+        ``evidence_adapter`` is accepted for backward compatibility with the
+        run_v3() call site; the orchestrator itself does not need it (the
+        refresh adapters persist their own writes via AgentOrchestrator).
         """
         try:
             now = datetime.now(timezone.utc)
@@ -725,23 +793,38 @@ class IntelV3Service:
     def _build_analyst_refresh_callable(self):
         """Return the analyst-refresh callable for the orchestrator (or None).
 
-        v1 wires an ``AnalystRefreshAdapter`` over the existing
-        ``AgentOrchestrator``. Disabled by setting INTEL_V3_ANALYST_REFRESH_ENABLED=0.
+        Stage 3.0c default: ``FullPortfolioAnalystRefreshAdapter`` over an
+        unscoped ``AgentOrchestrator``. The Stage 3.0b.6 6-ticker
+        ``AnalystRefreshAdapter`` is retained as the
+        ``INTEL_V3_ANALYST_REFRESH_MODE=budgeted_subset`` emergency mode.
+        Disabled entirely by setting ``INTEL_V3_ANALYST_REFRESH_ENABLED=0``.
         """
         if not is_analyst_refresh_enabled():
             return None
+        mode = analyst_refresh_mode()
         try:
-            adapter = AnalystRefreshAdapter(
-                user_id=self.user_id,
-                run_backend=default_agent_orchestrator_backend,
-                budget=AnalystRefreshBudget(),
-            )
+            if mode == _REFRESH_MODE_BUDGETED_SUBSET:
+                adapter = AnalystRefreshAdapter(
+                    user_id=self.user_id,
+                    run_backend=default_agent_orchestrator_backend,
+                    budget=AnalystRefreshBudget(),
+                )
+            else:
+                adapter = FullPortfolioAnalystRefreshAdapter(
+                    user_id=self.user_id,
+                    run_backend=default_full_portfolio_agent_orchestrator_backend,
+                    budget=FullPortfolioAnalystRefreshBudget(),
+                )
         except Exception as exc:
             logger.warning(
-                "intel_v3.analyst_adapter_build_failed user_id=%s err=%s",
-                self.user_id, exc,
+                "intel_v3.analyst_adapter_build_failed user_id=%s mode=%s err=%s",
+                self.user_id, mode, exc,
             )
             return None
+        logger.info(
+            "intel_v3.analyst_adapter_built user_id=%s mode=%s adapter=%s",
+            self.user_id, mode, type(adapter).__name__,
+        )
         return adapter
 
     async def _get_latest_portfolio_snapshot_meta(self) -> dict[str, Any]:

@@ -606,30 +606,32 @@ class IntelV3Service:
     def _build_price_refresh_callable(self):
         """Return an async callable (tickers -> dict) that drives PriceService.fetch_prices.
 
-        Returns None when env keys are missing so the orchestrator can record
-        the refresh path as unavailable rather than calling into broken
-        providers and inflating failed_provider_calls.
+        PriceService supports keyless yfinance (stocks/ETFs) and CoinGecko
+        (crypto) — paid-tier keys (Alpaca / Finnhub / Polygon) are *optional*
+        accelerators, not requirements. We always return a callable when the
+        module imports cleanly; the orchestrator's budget caps and per-ticker
+        failure accounting handle any provider degradation honestly. The
+        provider registry diagnostics separately surface which paid providers
+        are env-disabled.
+
+        Returns None only when the module fails to import (e.g. missing
+        dependency in a stripped environment); the orchestrator then records
+        the refresh path as unavailable rather than calling into nothing.
         """
         try:
-            from ..price_engine import PriceService as _PriceEngine
+            # NOTE: intel_v3_service lives at `app.services.intelligence.v3`;
+            # price_engine lives at `app.services.price_engine` — three dots.
+            from ...price_engine import PriceService as _PriceEngine
             settings = get_settings()
         except Exception:
             return None
 
-        keys_present = any([
-            getattr(settings, "alpaca_api_key", None),
-            getattr(settings, "finnhub_api_key", None),
-            getattr(settings, "polygon_api_key", None),
-        ])
-        if not keys_present:
-            return None
-
         async def _refresh(tickers: list[str]) -> dict[str, Any]:
             svc = _PriceEngine(
-                finnhub_key=settings.finnhub_api_key or "",
-                alpaca_key=settings.alpaca_api_key or "",
-                alpaca_secret=settings.alpaca_secret_key or "",
-                polygon_key=settings.polygon_api_key or "",
+                finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
+                alpaca_key=getattr(settings, "alpaca_api_key", "") or "",
+                alpaca_secret=getattr(settings, "alpaca_secret_key", "") or "",
+                polygon_key=getattr(settings, "polygon_api_key", "") or "",
             )
             try:
                 return await svc.fetch_prices(tickers)

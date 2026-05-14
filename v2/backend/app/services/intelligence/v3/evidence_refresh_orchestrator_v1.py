@@ -343,6 +343,10 @@ class EvidenceRefreshOrchestrator:
         refresh_targets = list(decision.refresh_targets)
         refreshed_sources: set[str] = set()
         failed_sources: set[str] = set()
+        # Per-ticker outcome of any price refresh in this run. Only tickers
+        # that appear in successful_tickers get a fresh certified_at stamp.
+        successful_tickers: list[str] = []
+        failed_tickers: list[str] = []
         analyst_status = "not_supported_v1"
 
         # --- Price refresh ---------------------------------------------------
@@ -364,24 +368,28 @@ class EvidenceRefreshOrchestrator:
                 allowed = min(len(tickers), self.budget.provider_budget_remaining())
                 attempt_tickers = tickers[:allowed]
                 self.budget.attempted_provider_calls += len(attempt_tickers)
-                price_succeeded = False
                 try:
                     price_results = await asyncio.wait_for(
                         self._price_refresh(attempt_tickers),
                         timeout=max(0.1, min(self.budget.time_remaining(), 10.0)),
                     )
-                    successes, failures = _count_price_results(price_results, attempt_tickers)
-                    self.budget.successful_provider_calls += successes
-                    self.budget.failed_provider_calls += failures
-                    price_succeeded = successes > 0
-                    if failures > 0:
+                    successful_tickers, failed_tickers = _split_price_results(
+                        price_results, attempt_tickers,
+                    )
+                    self.budget.successful_provider_calls += len(successful_tickers)
+                    self.budget.failed_provider_calls += len(failed_tickers)
+                    if failed_tickers:
                         self.notes.append(
-                            f"price_refresh_partial_failure_{failures}_of_{len(attempt_tickers)}"
+                            f"price_refresh_partial_failure_{len(failed_tickers)}_of_{len(attempt_tickers)}"
                         )
                 except asyncio.TimeoutError:
+                    failed_tickers = list(attempt_tickers)
+                    successful_tickers = []
                     self.budget.failed_provider_calls += len(attempt_tickers)
                     self.notes.append("price_refresh_timeout")
                 except Exception as exc:
+                    failed_tickers = list(attempt_tickers)
+                    successful_tickers = []
                     self.budget.failed_provider_calls += len(attempt_tickers)
                     self.notes.append(f"price_refresh_error:{type(exc).__name__}")
                     logger.warning(
@@ -389,13 +397,16 @@ class EvidenceRefreshOrchestrator:
                         self.user_id, exc,
                     )
 
-                if price_succeeded:
+                # Refresh-source accounting is honest about mixed outcomes:
+                # any successful ticker means the source class produced some
+                # refreshed evidence; any failed ticker means the source
+                # class also has unresolved failures. Both can be true at
+                # once, which is exactly what classify_run_mode reads via
+                # refresh_failed_count to degrade to PARTIAL_CERTIFIED.
+                if successful_tickers:
                     refreshed_sources.add(SOURCE_PRICE_LATEST)
                     refreshed_sources.add(SOURCE_PRICE_HISTORY)
-                    # If we refreshed prices we re-certify the snapshot as of now;
-                    # the IntelV3Service writes a refreshed timestamp into the
-                    # OrchestratorInputs (see post_refresh_inputs() below).
-                else:
+                if failed_tickers:
                     failed_sources.add(SOURCE_PRICE_LATEST)
         elif wants_price and self._price_refresh is None:
             self.notes.append("price_refresh_unavailable_no_callable")
@@ -440,7 +451,10 @@ class EvidenceRefreshOrchestrator:
             analyst_status = "not_attempted"
 
         # --- Re-classify after refresh ---------------------------------------
-        after_inputs = self._post_refresh_inputs(refreshed_sources)
+        after_inputs = self._post_refresh_inputs(
+            refreshed_sources=refreshed_sources,
+            successful_tickers=successful_tickers,
+        )
         after_states = build_source_states(after_inputs)
         post_decision = classify_run_mode(
             after_states,
@@ -465,23 +479,70 @@ class EvidenceRefreshOrchestrator:
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
-    def _post_refresh_inputs(self, refreshed_sources: set[str]) -> OrchestratorInputs:
+    def _post_refresh_inputs(
+        self,
+        *,
+        refreshed_sources: set[str],
+        successful_tickers: list[str],
+    ) -> OrchestratorInputs:
         """Return a fresh OrchestratorInputs reflecting which sources we refreshed.
 
-        For successfully refreshed sources we stamp `now` as the certified_at —
-        this is the only place fresh timestamps are created, and only after a
-        real refresh call returned success. No fabricated freshness elsewhere.
+        Per-ticker honesty rule: market_value_certified_at is rewritten to
+        `now` ONLY for tickers that appear in `successful_tickers`. Tickers
+        that did not refresh (or were not attempted) keep their original
+        timestamp from `self.inputs.market_value_certified_ats`. Missing
+        positional entries stay missing — no fabricated freshness.
+
+        `portfolio_snapshot_at` is only bumped when ALL attempted-ticker
+        positions refreshed; mixed-success runs preserve the original
+        snapshot timestamp so the portfolio_snapshot source class still
+        reflects the pre-refresh truth.
         """
         now_iso = self.inputs.now.isoformat()
 
-        market_value_certified_ats = list(self.inputs.market_value_certified_ats or [])
+        original_ats: list[str] = list(self.inputs.market_value_certified_ats or [])
+        tickers: list[str] = list(self.inputs.tickers or [])
+        successful_set = set(successful_tickers or [])
+
+        # Build new market_value_certified_ats list aligned to tickers. When
+        # the original list is positionally aligned, preserve original entries
+        # for non-successful tickers. When original is shorter than tickers,
+        # missing positions stay missing rather than being filled.
+        new_ats: list[str] = []
+        for idx, ticker in enumerate(tickers):
+            original = original_ats[idx] if idx < len(original_ats) else None
+            if ticker in successful_set:
+                new_ats.append(now_iso)
+            elif original is not None:
+                new_ats.append(original)
+            # else: leave the slot out — caller's tickers had no matching ts.
+
+        # When original list was provided without a parallel tickers list
+        # (e.g. legacy callers passed only certified_ats), still preserve it
+        # for non-successful entries so we don't silently shrink the list.
+        if not tickers:
+            new_ats = list(original_ats)
+
+        # portfolio_snapshot_at: only bump when every attempted ticker
+        # succeeded AND we actually attempted at least one. Otherwise the
+        # original snapshot timestamp survives untouched.
         portfolio_snapshot_at = self.inputs.portfolio_snapshot_at
-        if SOURCE_PRICE_LATEST in refreshed_sources or SOURCE_PRICE_HISTORY in refreshed_sources:
-            # Bump certified_at for the tickers we refreshed (one entry per ticker).
-            market_value_certified_ats = [now_iso for _ in (self.inputs.tickers or [])]
+        attempted_any = (
+            SOURCE_PRICE_LATEST in refreshed_sources
+            or SOURCE_PRICE_HISTORY in refreshed_sources
+        )
+        all_attempted_succeeded = (
+            attempted_any
+            and len(successful_set) > 0
+            and tickers
+            and all(t in successful_set for t in tickers)
+        )
+        if all_attempted_succeeded:
             portfolio_snapshot_at = now_iso
 
         evidence_stats = dict(self.inputs.evidence_stats or {})
+        # Analyst refresh is not wired in v1; this branch only fires when a
+        # future injected analyst_refresh succeeded.
         if SOURCE_AGENT_INSIGHTS in refreshed_sources:
             evidence_stats["agent_insight_run_timestamps"] = [
                 now_iso for _ in (evidence_stats.get("agent_insight_run_timestamps") or [])
@@ -494,8 +555,8 @@ class EvidenceRefreshOrchestrator:
         return OrchestratorInputs(
             evidence_stats=evidence_stats,
             portfolio_snapshot_at=portfolio_snapshot_at,
-            market_value_certified_ats=market_value_certified_ats,
-            tickers=list(self.inputs.tickers or []),
+            market_value_certified_ats=new_ats,
+            tickers=tickers,
             research_artifact_timestamps=list(self.inputs.research_artifact_timestamps or []),
             now=self.inputs.now,
         )
@@ -547,31 +608,33 @@ class EvidenceRefreshOrchestrator:
 
 # ── Result counting for price provider ────────────────────────────────────────
 
-def _count_price_results(
+def _split_price_results(
     price_results: Any,
     attempted: list[str],
-) -> tuple[int, int]:
-    """Count successes/failures from a `PriceService.fetch_prices()` style dict.
+) -> tuple[list[str], list[str]]:
+    """Split a `PriceService.fetch_prices()` style result dict by ticker outcome.
 
-    Accepts: dict[ticker, PriceResult-like or error str].
-      - A "successful" result has truthy `is_valid` and not `is_stale`.
-      - Anything else is a failure for refresh-accounting purposes.
+    Returns `(successful_tickers, failed_tickers)` — each attempted ticker
+    appears in exactly one list. A ticker is "successful" only when its result
+    has truthy `is_valid` and falsy `is_stale`. Anything else (missing key,
+    invalid, stale, error) is a failure for refresh-accounting purposes.
 
-    Tests pass plain dicts shaped like {ticker: {"is_valid": True, "is_stale": False}}.
+    Per-ticker resolution is required because partial refresh must not stamp
+    fresh certified_at for tickers that did not actually refresh.
     """
+    successful: list[str] = []
+    failed: list[str] = []
     if not isinstance(price_results, dict):
-        return 0, len(attempted)
-    successes = 0
-    failures = 0
+        return [], list(attempted)
     for t in attempted:
         res = price_results.get(t)
         if res is None:
-            failures += 1
+            failed.append(t)
             continue
         is_valid = bool(getattr(res, "is_valid", None) if not isinstance(res, dict) else res.get("is_valid"))
         is_stale = bool(getattr(res, "is_stale", None) if not isinstance(res, dict) else res.get("is_stale"))
         if is_valid and not is_stale:
-            successes += 1
+            successful.append(t)
         else:
-            failures += 1
-    return successes, failures
+            failed.append(t)
+    return successful, failed

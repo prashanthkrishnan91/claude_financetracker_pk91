@@ -538,3 +538,187 @@ class TestSnapshotDiagnosticsIntegration:
         assert combined["evidence_mode"] == "deterministic_policy_over_persisted_evidence"
         assert combined["attempted_llm_calls"] == 0
         assert combined["live_provider_calls"] == 0
+
+
+# ── Patch tests: partial price refresh + keyless callable + import smoke ─────
+
+class TestPartialPriceRefreshHonesty:
+    """Stage 3.0b v1 patch — no fake market freshness on partial success."""
+
+    def _stale_price_inputs(self, now=None):
+        now = now or _now()
+        # Three tickers, all with stale price evidence (1h old, > 15m fresh window).
+        return OrchestratorInputs(
+            evidence_stats={
+                "recommendation_timestamps":     [_iso_ago(1.0, now)] * 3,
+                "agent_insight_run_timestamps":  [_iso_ago(1.5, now)] * 3,
+                "active_position_count":         3,
+                "persisted_recommendation_count": 3,
+                "persisted_agent_insight_count":  3,
+            },
+            portfolio_snapshot_at=_iso_ago(1.0, now),
+            market_value_certified_ats=[
+                _iso_ago(1.0, now),  # AAPL — will refresh successfully
+                _iso_ago(1.0, now),  # NVDA — will refresh successfully
+                _iso_ago(1.0, now),  # XYZ  — will fail to refresh
+            ],
+            tickers=["AAPL", "NVDA", "XYZ"],
+            research_artifact_timestamps=[],
+            now=now,
+        )
+
+    @pytest.mark.asyncio
+    async def test_partial_success_only_refreshes_successful_tickers(self):
+        """Failed ticker keeps original stale timestamp; successful ones bump to now."""
+        now = _now()
+        inputs = self._stale_price_inputs(now)
+        original_xyz_ts = inputs.market_value_certified_ats[2]
+        original_aapl_ts = inputs.market_value_certified_ats[0]
+
+        async def _refresh(tickers):
+            # AAPL + NVDA refresh; XYZ comes back invalid.
+            return {
+                "AAPL": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "NVDA": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "XYZ":  {"is_valid": False, "is_stale": False, "source": "none", "error": "no source"},
+            }
+
+        orch = EvidenceRefreshOrchestrator(
+            user_id=uuid4(), inputs=inputs, price_refresh=_refresh,
+        )
+        result = await orch.run()
+
+        # The successful tickers' positions were stamped to now; XYZ kept its
+        # original stale timestamp. We assert via the post-refresh classifier
+        # by reconstructing post-refresh inputs the same way the orchestrator
+        # did, then inspecting the per-source state.
+        post = orch._post_refresh_inputs(
+            refreshed_sources={"price_latest", "price_history"},
+            successful_tickers=["AAPL", "NVDA"],
+        )
+        # AAPL + NVDA → now; XYZ → original.
+        assert post.market_value_certified_ats[0] == now.isoformat()
+        assert post.market_value_certified_ats[1] == now.isoformat()
+        assert post.market_value_certified_ats[2] == original_xyz_ts
+        # And XYZ's original timestamp is genuinely stale (1h vs 15m SLA).
+        assert original_xyz_ts == original_aapl_ts  # both started stale
+
+    @pytest.mark.asyncio
+    async def test_partial_success_increments_failed_provider_calls(self):
+        async def _refresh(tickers):
+            return {
+                "AAPL": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "NVDA": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "XYZ":  {"is_valid": False, "is_stale": False, "source": "none", "error": "rate limit"},
+            }
+        orch = EvidenceRefreshOrchestrator(
+            user_id=uuid4(), inputs=self._stale_price_inputs(), price_refresh=_refresh,
+        )
+        result = await orch.run()
+
+        assert result.attempted_provider_calls == 3
+        assert result.successful_provider_calls == 2
+        assert result.failed_provider_calls == 1
+        assert result.failed_refresh_count >= 1
+        # `price_refresh_partial_failure_…` lands in notes.
+        assert any("price_refresh_partial_failure" in n for n in result.notes)
+
+    @pytest.mark.asyncio
+    async def test_partial_success_does_not_become_trusted(self):
+        """Mixed outcomes must not show trust=trusted nor mode=FAST_CERTIFIED."""
+        async def _refresh(tickers):
+            return {
+                "AAPL": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "NVDA": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "XYZ":  {"is_valid": False, "is_stale": False, "source": "none"},
+            }
+        orch = EvidenceRefreshOrchestrator(
+            user_id=uuid4(), inputs=self._stale_price_inputs(), price_refresh=_refresh,
+        )
+        result = await orch.run()
+        assert result.run_mode != RUN_MODE_FAST_CERTIFIED
+        # Refresh produced some successes and some failures → PARTIAL_CERTIFIED.
+        assert result.run_mode == RUN_MODE_PARTIAL_CERTIFIED
+        assert result.trust_status != TRUST_TRUSTED
+
+    @pytest.mark.asyncio
+    async def test_partial_success_diagnostics_surface_mixed_state(self):
+        async def _refresh(tickers):
+            return {
+                "AAPL": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "NVDA": {"is_valid": True,  "is_stale": False, "source": "alpaca"},
+                "XYZ":  {"is_valid": False, "is_stale": False, "source": "none"},
+            }
+        orch = EvidenceRefreshOrchestrator(
+            user_id=uuid4(), inputs=self._stale_price_inputs(), price_refresh=_refresh,
+        )
+        result = await orch.run()
+        d = result.to_diagnostics_dict()
+        # Diagnostics expose the partial failure honestly.
+        assert d["failed_refresh_count"] >= 1
+        assert d["successful_provider_calls"] == 2
+        assert d["failed_provider_calls"] == 1
+        # price_latest source is no longer fully fresh — at least one ticker stale.
+        price_state = d["source_freshness"]["price_latest"]
+        assert price_state["stale_count"] >= 1
+        # Banner does not promise certified.
+        assert "Fresh certified" not in d["banner_copy"]
+
+    @pytest.mark.asyncio
+    async def test_full_failure_keeps_all_original_timestamps(self):
+        original = self._stale_price_inputs()
+        original_ats = list(original.market_value_certified_ats)
+
+        async def _refresh(tickers):
+            return {t: {"is_valid": False, "is_stale": True, "source": "cache"} for t in tickers}
+
+        orch = EvidenceRefreshOrchestrator(
+            user_id=uuid4(), inputs=original, price_refresh=_refresh,
+        )
+        result = await orch.run()
+        # No tickers succeeded — post-refresh inputs preserve all originals.
+        post = orch._post_refresh_inputs(refreshed_sources=set(), successful_tickers=[])
+        assert post.market_value_certified_ats == original_ats
+        assert post.portfolio_snapshot_at == original.portfolio_snapshot_at
+        # Counts are honest.
+        assert result.failed_provider_calls == 3
+        assert result.successful_provider_calls == 0
+
+
+class TestKeylessPriceRefreshCallable:
+    """The price refresh callable must work without paid-tier API keys."""
+
+    def test_callable_returned_without_paid_keys(self, monkeypatch):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+        # Clear any paid-tier keys from the environment.
+        for var in ("ALPACA_API_KEY", "ALPACA_SECRET_KEY", "FINNHUB_API_KEY", "POLYGON_API_KEY"):
+            monkeypatch.delenv(var, raising=False)
+        svc = IntelV3Service(user_id=uuid4())
+        callable_ = svc._build_price_refresh_callable()
+        # Keyless yfinance + CoinGecko are still available — callable must exist.
+        assert callable_ is not None
+        assert callable(callable_)
+
+    def test_callable_returned_with_partial_keys(self, monkeypatch):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+        monkeypatch.setenv("ALPACA_API_KEY", "x")
+        monkeypatch.delenv("FINNHUB_API_KEY", raising=False)
+        monkeypatch.delenv("POLYGON_API_KEY", raising=False)
+        svc = IntelV3Service(user_id=uuid4())
+        assert svc._build_price_refresh_callable() is not None
+
+
+class TestPriceEngineImportPath:
+    """Smoke test: _build_price_refresh_callable resolves the real module."""
+
+    def test_real_price_engine_imports_via_orchestrator_helper(self):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+        svc = IntelV3Service(user_id=uuid4())
+        # The callable returned must be backed by the canonical PriceService
+        # at app.services.price_engine. If the import path were wrong this
+        # would return None.
+        cb = svc._build_price_refresh_callable()
+        assert cb is not None
+        # And the canonical module path itself imports cleanly.
+        from app.services.price_engine import PriceService as _PriceEngine
+        assert _PriceEngine is not None

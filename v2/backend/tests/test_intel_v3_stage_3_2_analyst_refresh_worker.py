@@ -139,10 +139,16 @@ class _FakeQuery:
     def limit(self, _n):
         return self
 
+    def neq(self, col, val):
+        self._filters.append(("neq", col, val))
+        return self
+
     def _match(self, row) -> bool:
         for kind, col, val in self._filters:
             rv = row.get(col)
             if kind == "eq" and rv != val:
+                return False
+            if kind == "neq" and rv == val:
                 return False
             if kind == "in" and rv not in val:
                 return False
@@ -1170,3 +1176,550 @@ class TestIntelV3ReadOnlyEvidenceReadsFreshRows:
         # later Run Intel v3 classifies this evidence FRESH.
         assert stats["recommendation_timestamps"] == [fresh]
         assert stats["agent_insight_run_timestamps"] == [fresh]
+
+
+# ── 10. Explicit analyst evidence writeback (Stage 3.2b) ─────────────────────
+#
+# Production evidence (post PR #318):
+#   agent_run_status=completed  agent_run_insight_count=34
+#   insights_by_run_id=0  recs_by_run_id=0
+#   missing_reason_breakdown={'agent_run_completed_no_persisted_rows': 34}
+#
+# Root cause: AgentOrchestrator._persist_sync runs via
+# asyncio.to_thread(self._persist_sync, state) using the orchestrator's
+# instance-level self.db client.  In the Railway worker that client silently
+# fails inside the thread; the exception is caught at orchestrator.run():567,
+# so run() returns completed with 34 insights in memory but zero DB rows.
+#
+# Fix: explicit AnalystEvidenceWriter called after orch.run() returns completed,
+# using a fresh get_supabase_client() — same pattern as the working readback.
+
+
+from app.services.intelligence.v3.analyst_evidence_writer_v1 import (
+    AnalystEvidenceWriteResult,
+    _build_analyst_verdict_from_insight,
+    _derive_conviction_level,
+    write_analyst_evidence,
+)
+from app.services.agents.state import TickerInsight
+from app.services.agents.orchestrator import AgentPipelineResult
+
+
+def _make_insight(
+    ticker: str,
+    action: str = "HOLD",
+    conviction: float = 0.5,
+    thesis: str = "Hold for now.",
+) -> TickerInsight:
+    return TickerInsight(
+        ticker=ticker,
+        suggested_action=action,
+        conviction_score=conviction,
+        investment_thesis=thesis,
+        sentiment_score=0.1,
+        sentiment_label="neutral",
+        technical_signal="HOLD",
+        technical_summary="stable",
+        fundamental_score=0.2,
+        fundamental_summary="solid",
+        suggested_allocation=0.0,
+    )
+
+
+def _patch_writer_client(fake_client):
+    """Context manager: patch get_supabase_client inside the evidence writer."""
+    return patch(
+        "app.services.intelligence.v3.analyst_evidence_writer_v1."
+        "get_supabase_client",
+        return_value=fake_client,
+    )
+
+
+class TestDeriveConvictionLevel:
+    def test_high(self):
+        assert _derive_conviction_level(0.8) == "HIGH"
+
+    def test_medium(self):
+        assert _derive_conviction_level(0.5) == "MEDIUM"
+
+    def test_low(self):
+        assert _derive_conviction_level(0.2) == "LOW"
+
+    def test_none_is_low(self):
+        assert _derive_conviction_level(None) == "LOW"
+
+
+class TestBuildAnalystVerdictFromInsight:
+    def test_used_fallback_is_always_false(self):
+        """used_fallback=False is correct: the LLM ran; only _persist_sync failed."""
+        insight = _make_insight("AAPL", action="BUY", conviction=0.75, thesis="Strong momentum.")
+        verdict = _build_analyst_verdict_from_insight(insight)
+        assert verdict["used_fallback"] is False
+
+    def test_action_matches_suggested_action(self):
+        insight = _make_insight("NVDA", action="TRIM")
+        verdict = _build_analyst_verdict_from_insight(insight)
+        assert verdict["action"] == "TRIM"
+
+    def test_conviction_level_derived_from_score(self):
+        insight = _make_insight("MSFT", conviction=0.8)
+        verdict = _build_analyst_verdict_from_insight(insight)
+        assert verdict["conviction_level"] == "HIGH"
+
+    def test_primary_driver_from_first_sentence(self):
+        insight = _make_insight("GOOG", thesis="Strong growth. More detail.")
+        verdict = _build_analyst_verdict_from_insight(insight)
+        assert verdict["primary_driver"] == "Strong growth"
+
+    def test_analysis_source_is_explicit_writeback(self):
+        verdict = _build_analyst_verdict_from_insight(_make_insight("T"))
+        assert verdict["analysis_source"] == "explicit_writeback"
+
+
+class TestWriteAnalystEvidenceUnit:
+    """Direct unit tests of write_analyst_evidence using the in-memory fake."""
+
+    def test_writes_insights_and_recs_when_db_empty(self):
+        """Reproduces production state: DB has zero rows for run_id → writer writes them."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        insights = [
+            _make_insight("AAPL", action="BUY"),
+            _make_insight("NVDA", action="HOLD"),
+        ]
+        with _patch_writer_client(fake):
+            result: AnalystEvidenceWriteResult = asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=_now(),
+                )
+            )
+
+        assert result.insights_written == 2
+        assert result.recommendations_written == 2
+        assert result.insights_already_present == 0
+        assert result.recommendations_already_present == 0
+        assert result.write_error is None
+        assert result.persisted_count == 4
+
+        ai_rows = fake.store.get("agent_insights", [])
+        assert len(ai_rows) == 2
+        tickers = {r["ticker"] for r in ai_rows}
+        assert tickers == {"AAPL", "NVDA"}
+        for row in ai_rows:
+            assert row["run_id"] == run_id
+            assert row["user_id"] == USER_A
+            assert isinstance(row["analyst_verdict"], dict)
+            assert row["analyst_verdict"]["used_fallback"] is False
+
+        rec_rows = fake.store.get("recommendations", [])
+        assert len(rec_rows) == 2
+        for row in rec_rows:
+            assert row["agent_run_id"] == run_id
+            assert row["is_active"] is True
+            assert row["detail"]  # not empty
+
+    def test_idempotent_same_run_id_ticker_no_duplicate(self):
+        """Re-calling writer for same run_id/ticker skips existing rows."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        insights = [_make_insight("AAPL")]
+
+        with _patch_writer_client(fake):
+            r1 = asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=_now(),
+                )
+            )
+            # Second call with same run_id — must be a no-op.
+            r2 = asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=_now(),
+                )
+            )
+
+        assert r1.insights_written == 1
+        assert r2.insights_written == 0
+        assert r2.insights_already_present == 1
+        assert r2.recommendations_already_present == 1
+        # Only one row per ticker — no duplicates.
+        assert len(fake.store.get("agent_insights", [])) == 1
+        assert len(fake.store.get("recommendations", [])) == 1
+
+    def test_skipped_when_no_insights(self):
+        fake = _FakeSupabase()
+        with _patch_writer_client(fake):
+            result = asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=str(uuid.uuid4()),
+                    insights=[],
+                    started_at=_now(),
+                )
+            )
+        assert result.insights_written == 0
+        assert result.recommendations_written == 0
+        assert result.persisted_count == 0
+
+    def test_writes_only_missing_tickers_partial_legacy_persist(self):
+        """When legacy persist partially succeeded (some tickers already written),
+        the explicit writer only fills the missing ones."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        # Simulate: legacy persist already wrote AAPL but not NVDA.
+        fake.store["agent_insights"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "run_id": run_id,
+             "ticker": "AAPL", "created_at": _now().isoformat()},
+        ]
+        insights = [_make_insight("AAPL"), _make_insight("NVDA")]
+        with _patch_writer_client(fake):
+            result = asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=_now(),
+                )
+            )
+        # Only NVDA should be written.
+        assert result.insights_written == 1
+        assert result.insights_already_present == 1
+        ai_new = [
+            r for r in fake.store.get("agent_insights", [])
+            if r.get("ticker") == "NVDA"
+        ]
+        assert len(ai_new) == 1
+
+    def test_expires_old_active_recs_after_writing(self):
+        """After writing new recs, old active recs for other runs are expired."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        old_run_id = str(uuid.uuid4())
+        # Seed an old active recommendation for a different run.
+        fake.store["recommendations"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "ticker": "AAPL",
+             "action": "HOLD", "detail": "old",
+             "agent_run_id": old_run_id, "is_active": True,
+             "created_at": _iso_ago(48)},
+        ]
+        insights = [_make_insight("AAPL", action="BUY")]
+        with _patch_writer_client(fake):
+            asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=_now(),
+                )
+            )
+        recs = fake.store.get("recommendations", [])
+        new_recs = [r for r in recs if r.get("agent_run_id") == run_id]
+        old_recs = [r for r in recs if r.get("agent_run_id") == old_run_id]
+        assert len(new_recs) == 1
+        assert new_recs[0]["is_active"] is True
+        assert len(old_recs) == 1
+        assert old_recs[0]["is_active"] is False
+        assert old_recs[0]["resolution"] == "expired"
+
+    def test_analyst_verdict_fields_mapped_from_ticker_insight(self):
+        """Verdict fields are mapped from real TickerInsight data — no fabrication."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        insight = _make_insight("MSFT", action="BUY", conviction=0.8, thesis="Cloud growth drives revenue.")
+        with _patch_writer_client(fake):
+            asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=[insight],
+                    started_at=_now(),
+                )
+            )
+        ai_rows = fake.store.get("agent_insights", [])
+        assert len(ai_rows) == 1
+        verdict = ai_rows[0]["analyst_verdict"]
+        assert verdict["action"] == "BUY"
+        assert verdict["conviction_level"] == "HIGH"
+        assert "Cloud growth" in (verdict.get("primary_driver") or "")
+        assert verdict["used_fallback"] is False
+        assert verdict["analysis_source"] == "explicit_writeback"
+
+
+class TestExplicitWritebackIntegrationWithBackend:
+    """Integration: write_analyst_evidence + _read_post_run_evidence together
+    produce a successful readback from a zero-rows-but-completed-run state.
+
+    These tests use custom backends (not the real default backend with its lazy
+    imports) to cleanly exercise the write-then-read contract without needing to
+    mock AgentOrchestrator / PriceService / get_settings.
+    """
+
+    @pytest.mark.asyncio
+    async def test_write_then_readback_succeeds_from_zero_rows_state(self):
+        """Reproduces the production fix contract:
+          1. DB has zero rows for run_id (legacy _persist_sync silently failed).
+          2. write_analyst_evidence() writes durable rows.
+          3. _read_post_run_evidence() finds them and reports insight_run_match=True.
+        """
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        selected = ["AAPL", "NVDA", "MSFT"]
+        started_at = _now()
+        insights = [_make_insight(t) for t in selected]
+
+        # Pre-condition: zero rows (simulates legacy _persist_sync silent failure).
+        assert fake.store.get("agent_insights", []) == []
+
+        # Step 2: explicit writeback.
+        with _patch_writer_client(fake):
+            write_result = await write_analyst_evidence(
+                user_id=uuid.UUID(USER_A),
+                agent_run_id=run_id,
+                insights=insights,
+                started_at=started_at,
+            )
+        assert write_result.insights_written == 3
+        assert write_result.write_error is None
+
+        # Step 3: readback — must find the rows.
+        with patch("app.database.get_supabase_client", return_value=fake):
+            readback = await _read_post_run_evidence(
+                uuid.UUID(USER_A), selected, run_id, started_at,
+                agent_run_status="completed",
+                agent_run_insight_count=3,
+            )
+
+        for ticker in selected:
+            row = readback[ticker]
+            assert row["insight_row_present"] is True, f"{ticker} not found"
+            assert row["insight_run_match"] is True, f"{ticker} run_id mismatch"
+            assert row["used_fallback"] is False
+
+    @pytest.mark.asyncio
+    async def test_worker_marks_succeeded_using_explicit_writeback_backend(self, caplog):
+        """End-to-end worker test: custom backend performs explicit write+readback
+        → readback finds rows → worker marks job succeeded."""
+        fake_db = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        insights = [_make_insight("AAPL", action="BUY", conviction=0.7)]
+
+        # Seed one pending job.
+        fake_db.store[TABLE] = [{
+            "id": str(uuid.uuid4()),
+            "user_id": USER_A,
+            "ticker": "AAPL",
+            "status": JOB_PENDING,
+            "refresh_window": default_refresh_window(_now()),
+            "attempts": 0,
+            "next_retry_at": _now().isoformat(),
+            "requested_at": _iso_ago(2),
+            "prior_action": "HOLD",
+            "weight_pct": 5.0,
+            "evidence_age_hours_at_request": 200.0,
+        }]
+
+        async def _explicit_writeback_backend(uid, tickers, started):
+            """Simulates: orch completed with insights, legacy persist silent-failed,
+            explicit writer runs, readback verifies the rows."""
+            with _patch_writer_client(fake_db):
+                await write_analyst_evidence(
+                    user_id=uid,
+                    agent_run_id=run_id,
+                    insights=insights,
+                    started_at=started,
+                )
+            with patch("app.database.get_supabase_client", return_value=fake_db):
+                return await _read_post_run_evidence(
+                    uid, tickers, run_id, started,
+                    agent_run_status="completed",
+                    agent_run_insight_count=len(insights),
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid,
+                run_backend=_explicit_writeback_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        with caplog.at_level("INFO"):
+            worker = AnalystRefreshWorker(client=fake_db, adapter_factory=_factory)
+            result = await worker.run_once(now=_now())
+
+        assert result.succeeded_tickers == ["AAPL"], (
+            f"Expected AAPL succeeded but got: succeeded={result.succeeded_tickers} "
+            f"failed={result.failed_tickers}"
+        )
+        assert result.persisted_ticker_success_count == 1
+        assert fake_db.store.get(TABLE, [])[0]["status"] == JOB_SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_no_write_when_insights_empty_run_not_completed(self):
+        """When orch.run() raises (no insights), the explicit writer writes nothing
+        and the job fails honestly with agent_run_raised reason."""
+        fake_db = _FakeSupabase()
+        fake_db.store[TABLE] = [{
+            "id": str(uuid.uuid4()),
+            "user_id": USER_A,
+            "ticker": "AAPL",
+            "status": JOB_PENDING,
+            "refresh_window": default_refresh_window(_now()),
+            "attempts": 0,
+            "next_retry_at": _now().isoformat(),
+            "requested_at": _iso_ago(2),
+            "prior_action": "HOLD",
+            "weight_pct": 5.0,
+            "evidence_age_hours_at_request": 200.0,
+        }]
+
+        async def _raised_backend(uid, tickers, started):
+            """Simulates: orch.run() raised — no insights, no writeback."""
+            with _patch_writer_client(fake_db):
+                await write_analyst_evidence(
+                    user_id=uid, agent_run_id=str(uuid.uuid4()),
+                    insights=[],  # empty — orch raised
+                    started_at=started,
+                )
+            with patch("app.database.get_supabase_client", return_value=fake_db):
+                return await _read_post_run_evidence(
+                    uid, tickers, str(uuid.uuid4()), started,
+                    agent_run_status="raised",
+                    agent_run_error="RuntimeError: llm failure",
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid,
+                run_backend=_raised_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(client=fake_db, adapter_factory=_factory)
+        result = await worker.run_once(now=_now())
+
+        assert result.succeeded_tickers == []
+        assert result.persisted_ticker_success_count == 0
+        assert fake_db.store.get(TABLE, [])[0]["status"] == JOB_FAILED
+        assert fake_db.store.get("agent_insights", []) == []
+
+
+class TestReadOnlyEvidenceAdapterReadsExplicitlyWrittenRows:
+    """ReadOnlyEvidenceAdapter can read explicitly-written rows as fresh evidence."""
+
+    def test_explicitly_written_rows_appear_as_fresh_analyst_evidence(self):
+        """After write_analyst_evidence() writes rows, ReadOnlyEvidenceAdapter
+        loads them as valid cards with a fresh recommendation_timestamp."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        fresh = _now().isoformat()
+
+        # Seed the agent_runs row (created by orch.create_run / orch.run).
+        fake.store["agent_runs"] = [
+            {"id": run_id, "user_id": USER_A, "status": "completed",
+             "finished_at": fresh, "allocation": {}},
+        ]
+        fake.store["positions"] = [
+            {"id": str(uuid.uuid4()), "user_id": USER_A, "ticker": "AAPL",
+             "name": "Apple", "category": "stock"},
+        ]
+
+        # Write rows via the explicit writer.
+        insight = _make_insight("AAPL", action="BUY", conviction=0.75)
+        with _patch_writer_client(fake):
+            asyncio.run(
+                write_analyst_evidence(
+                    user_id=uuid.UUID(USER_A),
+                    agent_run_id=run_id,
+                    insights=[insight],
+                    started_at=_now(),
+                )
+            )
+
+        # Now ReadOnlyEvidenceAdapter must find them.
+        with patch(
+            "app.services.intelligence.v3.read_only_evidence_adapter.get_supabase_client",
+            return_value=fake,
+        ):
+            adapter = ReadOnlyEvidenceAdapter(user_id=uuid.UUID(USER_A))
+            cards, stats = asyncio.run(adapter.load_cards())
+
+        assert len(cards) == 1
+        assert cards[0].ticker == "AAPL"
+        assert stats["persisted_recommendation_count"] == 1
+        assert stats["persisted_agent_insight_count"] == 1
+        # Recommendation timestamp surfaced so freshness diagnostics work.
+        assert len(stats["recommendation_timestamps"]) == 1
+
+
+class TestJobsFailHonestlyWhenWritebackFails:
+    """When both legacy persist AND explicit writeback fail, jobs stay failed."""
+
+    @pytest.mark.asyncio
+    async def test_no_fabricated_success_when_writeback_raises(self):
+        """If write_analyst_evidence itself raises, the worker must not mark
+        the job succeeded — honest failure with retry.
+
+        Uses a custom backend (same pattern as TestExplicitWritebackIntegrationWithBackend)
+        to avoid patching lazy imports inside default_full_portfolio_agent_orchestrator_backend.
+        The backend simulates: orch.run() completed, both legacy persist and explicit writeback
+        raised, so DB has zero rows → _read_post_run_evidence returns no evidence → job fails.
+        """
+
+        fake_db = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        # No rows written anywhere — both persist paths fail.
+
+        fake_db.store[TABLE] = [{
+            "id": str(uuid.uuid4()),
+            "user_id": USER_A,
+            "ticker": "AAPL",
+            "status": JOB_PENDING,
+            "refresh_window": default_refresh_window(_now()),
+            "attempts": 0,
+            "next_retry_at": _now().isoformat(),
+            "requested_at": _iso_ago(2),
+            "prior_action": "HOLD",
+            "weight_pct": 5.0,
+            "evidence_age_hours_at_request": 200.0,
+        }]
+
+        async def _both_paths_failed_backend(uid, tickers, started):
+            """Simulates: orch returned completed+insights, but BOTH persist paths
+            raised. DB has zero rows. Readback finds nothing → honest failure."""
+            # explicit writeback raises (simulates DB write failure)
+            try:
+                raise RuntimeError("simulated DB write failure")
+            except RuntimeError:
+                pass  # writeback error swallowed — same as the AnalystEvidenceWriteResult path
+
+            # readback finds zero rows (neither legacy nor explicit writer succeeded)
+            with patch("app.database.get_supabase_client", return_value=fake_db):
+                return await _read_post_run_evidence(
+                    uid, tickers, run_id, started,
+                    agent_run_status="completed",
+                    agent_run_insight_count=1,
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid,
+                run_backend=_both_paths_failed_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(client=fake_db, adapter_factory=_factory)
+        result = await worker.run_once(now=_now())
+
+        # Must have failed honestly — no fabricated success.
+        assert result.succeeded_tickers == []
+        assert result.persisted_ticker_success_count == 0
+        job_rows = fake_db.store.get(TABLE, [])
+        assert job_rows[0]["status"] == JOB_FAILED

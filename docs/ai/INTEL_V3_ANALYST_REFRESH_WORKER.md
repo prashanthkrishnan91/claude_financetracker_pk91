@@ -40,6 +40,27 @@ Verify after applying:
 SELECT * FROM public.analyst_refresh_jobs LIMIT 1;   -- 0 rows is fine
 ```
 
+## Idempotency & window semantics (Stage 3.2 v1)
+
+The idempotency key is `(user_id, ticker, refresh_window)` where `refresh_window`
+is a per-UTC-day bucket. The enqueue path (`enqueue_refresh_jobs`) is idempotent
+and always leaves **exactly one row per key** — never a duplicate. Per-state
+behaviour for an existing same-window row:
+
+| Existing row state | Re-click behaviour | Why |
+|---|---|---|
+| `pending` | touched (`requested_at` bumped) | already queued — nothing to do |
+| `claimed` | touched only | a worker is mid-processing — must not be disrupted |
+| `failed`, attempts remaining | touched only | preserve the exponential-backoff timer + attempt counter |
+| `succeeded` | **reopened** → `pending`, attempts reset | the seam only re-enqueues tickers still classified stale/HARD_STALE, so a same-window re-request means the prior refresh did not clear the staleness — a fresh attempt is legitimate |
+| `failed`, attempts exhausted | **reopened** → `pending`, attempts reset | an exhausted job must not permanently suppress a later legitimate retry while the evidence is still stale |
+
+This is the simplest durable fix for the v1 daily-window key: the window keeps
+casual repeated clicks cheap, but a terminal/dead row is never a permanent
+suppressor — the seam's own "still stale" classification is the gate that
+decides whether a reopen happens at all. No analyst/LLM work runs in the
+request; reopening is a single in-place `UPDATE`.
+
 ## Running the worker
 
 The entrypoint is `app.services.intelligence.v3.analyst_refresh_worker_entrypoint`.

@@ -245,17 +245,90 @@ class TestEnqueueIdempotency:
         assert result.requested_tickers == ["AAPL", "NVDA"]
         assert len(fake.rows()) == 2
 
-    def test_enqueue_touch_preserves_failed_status_and_attempts(self):
-        """A re-click must not wipe a failed job's backoff / attempt counter."""
+    def test_pending_duplicate_click_touches_in_place(self):
+        """A re-click on a pending job touches it — no duplicate, no reset."""
         fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
-        row = fake.rows()[0]
-        row.update({"status": JOB_FAILED, "attempts": 3,
-                    "next_retry_at": _iso_ago(-5)})  # retry 5h in the future
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.created_count == 0
+        assert second.touched_count == 1
+        assert second.reopened_count == 0
+        assert len(fake.rows()) == 1
+        assert fake.rows()[0]["status"] == JOB_PENDING
+
+    def test_claimed_duplicate_click_touches_and_does_not_disrupt_inflight(self):
+        """A re-click on a claimed (in-flight) job must not duplicate it or
+        knock it out of the claimed state a worker is mid-processing."""
+        fake = _FakeSupabase()
         enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        fake.rows()[0].update({"status": JOB_CLAIMED, "attempts": 1})
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.touched_count == 1
+        assert second.reopened_count == 0
+        assert len(fake.rows()) == 1
         row = fake.rows()[0]
-        assert row["status"] == JOB_FAILED
-        assert row["attempts"] == 3  # not reset
+        assert row["status"] == JOB_CLAIMED  # in-flight claim untouched
+        assert row["attempts"] == 1
+
+    def test_failed_retryable_duplicate_click_touches_and_preserves_backoff(self):
+        """A re-click on a failed-but-retryable job must not wipe its backoff
+        timer or attempt counter."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        future_retry = (_now() + timedelta(hours=5)).isoformat()
+        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 3,
+                               "max_attempts": 5, "next_retry_at": future_retry})
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.touched_count == 1
+        assert second.reopened_count == 0
+        row = fake.rows()[0]
+        assert row["status"] == JOB_FAILED       # not reset
+        assert row["attempts"] == 3              # not reset
+        assert row["next_retry_at"] == future_retry  # backoff preserved
+        assert len(fake.rows()) == 1
+
+    def test_succeeded_job_is_reopened_for_same_window_requeue_when_still_stale(self):
+        """A succeeded job must not silently block a same-window requeue: the
+        seam only re-enqueues tickers still classified stale/HARD_STALE, so a
+        legitimate fresh attempt is reopened in place (no duplicate row)."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        fake.rows()[0].update({"status": JOB_SUCCEEDED, "attempts": 1,
+                               "completed_at": _now().isoformat(),
+                               "next_retry_at": None})
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.reopened_count == 1
+        assert second.created_count == 0
+        assert len(fake.rows()) == 1            # still exactly one row per key
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING     # claimable again
+        assert row["attempts"] == 0             # fresh attempt budget
+        assert row["next_retry_at"] is not None  # due immediately
+        assert row["completed_at"] is None
+        # And the worker can now claim it.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
+
+    def test_exhausted_failed_job_is_reopened_for_same_window_when_still_stale(self):
+        """An attempt-exhausted failed job must not permanently suppress a
+        later legitimate retry while the evidence is still stale."""
+        fake = _FakeSupabase()
+        enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        fake.rows()[0].update({"status": JOB_FAILED, "attempts": 5,
+                               "max_attempts": 5, "next_retry_at": None,
+                               "last_error": "boom"})
+        # Sanity: while exhausted it is NOT claimable.
+        assert claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now()) == []
+        second = enqueue_refresh_jobs(fake, user_id=USER_A, tickers=["AAPL"], now=_now())
+        assert second.reopened_count == 1
+        assert len(fake.rows()) == 1            # still exactly one row per key
+        row = fake.rows()[0]
+        assert row["status"] == JOB_PENDING
+        assert row["attempts"] == 0             # attempt budget reset
+        assert row["last_error"] is None
+        # And the worker can claim it again.
+        claimed = claim_due_jobs(fake, worker_run_id=uuid.uuid4(), now=_now())
+        assert {j.ticker for j in claimed} == {"AAPL"}
 
     def test_enqueue_never_raises_on_db_failure(self):
         broken = MagicMock()

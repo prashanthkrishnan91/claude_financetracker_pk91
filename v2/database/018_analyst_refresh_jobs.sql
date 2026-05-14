@@ -24,8 +24,14 @@ CREATE TABLE IF NOT EXISTS public.analyst_refresh_jobs (
     id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id                       UUID NOT NULL,
     ticker                        TEXT NOT NULL,
-    -- Idempotency window: repeated Run Intel v3 clicks for the same
-    -- user/ticker inside the same window collapse onto a single row.
+    -- Idempotency window (per-UTC-day key): repeated Run Intel v3 clicks for
+    -- the same user/ticker inside the same window collapse onto a single row.
+    -- The application enqueue is idempotent per (user_id, ticker,
+    -- refresh_window): a non-terminal row (pending/claimed/retryable-failed)
+    -- is left in place; a terminal/dead row (succeeded, or failed with
+    -- attempts exhausted) is REOPENED in place to pending when the ticker is
+    -- still stale — so a legitimate same-window retry is never silently
+    -- suppressed, while the row count per key stays exactly one.
     refresh_window                TEXT NOT NULL,
     status                        TEXT NOT NULL DEFAULT 'pending',  -- pending|claimed|succeeded|failed
     attempts                      INTEGER NOT NULL DEFAULT 0,

@@ -9,7 +9,11 @@ layer: a thin, SQL-backed access layer over the ``analyst_refresh_jobs`` table
 Responsibilities:
   * ``enqueue_refresh_jobs`` — idempotently upsert one durable job per
     (user, ticker, window). Repeated Run Intel v3 clicks inside the same window
-    touch the existing row instead of creating a duplicate.
+    touch a non-terminal row instead of creating a duplicate, and *reopen* a
+    terminal/dead row (succeeded, or failed-and-exhausted) when the ticker is
+    still stale — so a legitimate same-window retry is never silently
+    suppressed and the row count per key stays exactly one. See
+    ``enqueue_refresh_jobs`` for the full per-state contract.
   * ``claim_due_jobs`` — atomically claim pending/failed jobs whose retry time
     has arrived, so the worker can refresh them outside the HTTP request.
   * ``mark_job_succeeded`` / ``mark_job_failed`` — record per-ticker outcome.
@@ -131,16 +135,25 @@ class AnalystRefreshJob:
 
 @dataclass
 class EnqueueResult:
-    """Outcome of one ``enqueue_refresh_jobs`` call."""
+    """Outcome of one ``enqueue_refresh_jobs`` call.
+
+    ``created`` — a brand-new pending row was inserted.
+    ``touched``  — an existing non-terminal row (pending / claimed / retryable
+                   failed) was left in place, only its ``requested_at`` bumped.
+    ``reopened`` — an existing terminal/dead row (succeeded, or failed with
+                   attempts exhausted) was reset to pending because the ticker
+                   is *still* stale and legitimately needs another refresh.
+    """
     requested_tickers: list[str] = field(default_factory=list)
     created_count: int = 0
     touched_count: int = 0
+    reopened_count: int = 0
     error: Optional[str] = None
 
     @property
     def durable_job_count(self) -> int:
-        """Tickers that now have exactly one durable job row (created + touched)."""
-        return self.created_count + self.touched_count
+        """Tickers that now have exactly one durable, claimable-or-in-flight job row."""
+        return self.created_count + self.touched_count + self.reopened_count
 
 
 # ── Enqueue (idempotent) ──────────────────────────────────────────────────────
@@ -156,11 +169,27 @@ def enqueue_refresh_jobs(
 ) -> EnqueueResult:
     """Idempotently upsert one durable refresh job per (user, ticker, window).
 
-    Idempotency is enforced by a read-then-write: existing rows for the window
-    are *touched* (``requested_at`` bumped) rather than re-inserted, so repeated
-    clicks never create duplicates and never reset the retry/attempt counters.
-    The unique index ``(user_id, ticker, refresh_window)`` is the durable
-    backstop if two enqueues race.
+    Idempotency is a read-then-write keyed on ``(user_id, ticker,
+    refresh_window)`` (unique index is the race backstop) so there is always
+    exactly one row per key — never a duplicate. Per-state behaviour for an
+    existing same-window row:
+
+      * ``pending`` / ``claimed`` — *touched* (``requested_at`` bumped only).
+        A re-click must not disrupt an in-flight claim.
+      * ``failed`` with attempts remaining — *touched* only. A re-click must
+        not wipe the exponential-backoff timer or the attempt counter.
+      * ``succeeded`` — *reopened* to pending. The seam only enqueues tickers
+        the orchestrator still classifies stale/HARD_STALE, so a same-window
+        re-request for an already-"succeeded" ticker means the prior refresh
+        did not actually clear the staleness — a fresh attempt is legitimate
+        and must not be silently suppressed.
+      * ``failed`` with attempts exhausted — *reopened* to pending (attempts
+        reset). An exhausted job must not permanently suppress a later
+        legitimate retry while the evidence is still stale; the worker would
+        otherwise skip it forever.
+
+    Reopening rewrites the existing row in place (status→pending, attempts→0,
+    next_retry_at→now, last_error/completed_at cleared) — still one row per key.
 
     Never raises — a DB failure degrades to an ``EnqueueResult`` with ``error``
     set so the synchronous Run Intel v3 request stays fast and resilient.
@@ -182,11 +211,11 @@ def enqueue_refresh_jobs(
     if not requested:
         return EnqueueResult(requested_tickers=[])
 
-    # Read existing rows for this window so we touch instead of duplicate.
+    # Read existing rows for this window so we touch / reopen instead of duplicate.
     try:
         existing_res = (
             client.table(TABLE)
-            .select("id,ticker,status,attempts")
+            .select("id,ticker,status,attempts,max_attempts")
             .eq("user_id", str(user_id))
             .eq("refresh_window", window)
             .in_("ticker", requested)
@@ -206,9 +235,22 @@ def enqueue_refresh_jobs(
 
     to_insert: list[dict[str, Any]] = []
     touched_ids: list[str] = []
+    reopened_ids: list[str] = []
     for t in requested:
-        if t in existing_by_ticker:
-            touched_ids.append(str(existing_by_ticker[t].get("id")))
+        existing = existing_by_ticker.get(t)
+        if existing is not None:
+            status = str(existing.get("status") or "")
+            attempts = int(existing.get("attempts") or 0)
+            max_attempts = int(existing.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+            exhausted_failed = status == JOB_FAILED and attempts >= max_attempts
+            if status == JOB_SUCCEEDED or exhausted_failed:
+                # Terminal / dead row, but the ticker is still stale — reopen
+                # it in place so the durable job is claimable again.
+                reopened_ids.append(str(existing.get("id")))
+            else:
+                # pending / claimed / retryable-failed — touch only; never
+                # disrupt an in-flight claim or a failed job's backoff.
+                touched_ids.append(str(existing.get("id")))
             continue
         hint = hints_by_ticker.get(t) or {}
         to_insert.append({
@@ -257,16 +299,41 @@ def enqueue_refresh_jobs(
                 job_id, exc,
             )
 
+    # Reopen terminal / dead rows in place — the ticker is still stale, so the
+    # durable job becomes claimable again. Still exactly one row per key.
+    for job_id in reopened_ids:
+        try:
+            (
+                client.table(TABLE)
+                .update({
+                    "status": JOB_PENDING,
+                    "attempts": 0,
+                    "next_retry_at": now_iso,
+                    "last_error": None,
+                    "completed_at": None,
+                    "requested_at": now_iso,
+                    "updated_at": now_iso,
+                })
+                .eq("id", job_id)
+                .execute()
+            )
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.analyst_refresh_job_reopen_failed job_id=%s err=%s",
+                job_id, exc,
+            )
+
     logger.info(
         "intel_v3.analyst_refresh_job_enqueued user_id=%s window=%s "
-        "requested=%d created=%d touched=%d tickers=%s",
+        "requested=%d created=%d touched=%d reopened=%d tickers=%s",
         user_id, window, len(requested), created, len(touched_ids),
-        ",".join(requested),
+        len(reopened_ids), ",".join(requested),
     )
     return EnqueueResult(
         requested_tickers=requested,
         created_count=created,
         touched_count=len(touched_ids),
+        reopened_count=len(reopened_ids),
         error=error,
     )
 

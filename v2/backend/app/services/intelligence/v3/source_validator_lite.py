@@ -460,6 +460,7 @@ def certify_snapshot_cards(
         "duplicate_reason_count":          duplicate_reason_count,
         "repeated_skeleton_count":         repeated_skeleton_count,
         "ticker_prefix_only_reason_count": ticker_prefix_only_reason_count,
+        "ticker_prefix_spam_tickers":      ticker_prefix_spam,
         "weak_buy_rationale_count":        weak_buy_rationale_count,
         "action_conflict_count":           action_conflict_count,
         "raw_metric_key_count":            raw_metric_key_count,

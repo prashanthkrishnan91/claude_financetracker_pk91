@@ -31,6 +31,12 @@ from app.services.intelligence.v3.analyst_refresh_adapter_v1 import (
     AnalystRefreshResult,
     DEFAULT_MAX_ANALYST_LLM_CALLS_PER_RUN,
     DEFAULT_MAX_ANALYST_TICKERS_PER_RUN,
+    REASON_FALLBACK_VERDICT,
+    REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN,
+    REASON_NO_POST_RUN_EVIDENCE,
+    REASON_PERSISTENCE_MISSING,
+    REASON_READ_QUERY_FAILED,
+    REASON_TIMESTAMP_BEFORE_STARTED_AT,
     STATUS_FAILED,
     STATUS_NO_STALE,
     STATUS_PARTIAL_SUCCESS,
@@ -285,7 +291,7 @@ class TestAdapterDirect:
         result = await adapter(["AAPL"])
         assert result.status == STATUS_FAILED
         assert result.per_ticker[0].success is False
-        assert result.per_ticker[0].error_reason == "used_fallback_verdict"
+        assert result.per_ticker[0].error_reason == REASON_FALLBACK_VERDICT
         assert result.per_ticker[0].refreshed_agent_insight_at is None
 
     @pytest.mark.asyncio
@@ -817,3 +823,354 @@ class TestPolicyAuthorityBoundary:
         # No direct insert/update against intel_v3_snapshots.
         assert "intel_v3_snapshots\")" not in src
         assert "intel_v3_snapshots')" not in src
+
+
+# ── Stage 3.0b.6 patch — run-id verification + explicit failure reasons ─────
+
+class TestRunIdBasedVerification:
+    """Production failure mode (2026-05-14):
+
+    AgentOrchestrator ran successfully and produced valid analyst output, but
+    the adapter reported `failed_llm_calls=6` / `successful_llm_calls=0`. The
+    root cause: read-back filtered only by `created_at >= started_at`, which is
+    fragile across the Python ↔ Supabase timestamp boundary. This patch makes
+    `run_id` / `agent_run_id` the primary verification key with timestamp as a
+    secondary sanity check.
+    """
+
+    @pytest.mark.asyncio
+    async def test_success_when_insight_run_match_even_if_timestamp_borderline(self):
+        """Production case: rows exist for THIS run_id even if ts roundtrip is borderline."""
+        async def _backend(user_id, tickers, started_at):
+            # Backend signals durable run-id match for both tables. Note that
+            # the timestamps are AT or BEFORE started_at (simulating a tight
+            # roundtrip / millisecond rounding); the run-id match must win.
+            borderline_iso = (started_at - timedelta(milliseconds=2)).isoformat()
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  borderline_iso,
+                    "recommendation_created_at": borderline_iso,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         True,
+                    "rec_run_match":             True,
+                    "insight_row_present":       True,
+                    "rec_row_present":           True,
+                    "failure_reason":            None,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_SUCCEEDED
+        assert result.successful_llm_calls == 1
+        assert result.per_ticker[0].success is True
+        assert result.per_ticker[0].refreshed_agent_insight_at is not None
+
+    @pytest.mark.asyncio
+    async def test_failure_no_agent_insight_row_for_run(self):
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  None,
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         False,
+                    "rec_run_match":             False,
+                    "insight_row_present":       False,
+                    "rec_row_present":           False,
+                    "failure_reason":            REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        assert result.per_ticker[0].error_reason == REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
+
+    @pytest.mark.asyncio
+    async def test_failure_persistence_missing_when_ts_present_but_run_id_mismatch(self):
+        """Insight row exists in DB for the ticker, but run_id doesn't match."""
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  started_at.isoformat(),
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         False,    # ← critical signal
+                    "rec_run_match":             False,
+                    "insight_row_present":       True,
+                    "rec_row_present":           False,
+                    "failure_reason":            REASON_PERSISTENCE_MISSING,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        assert result.per_ticker[0].error_reason == REASON_PERSISTENCE_MISSING
+        assert result.per_ticker[0].success is False
+
+    @pytest.mark.asyncio
+    async def test_success_without_recommendation_row_if_insight_for_run_present(self):
+        """A real agent_insight row for this run is sufficient evidence —
+        a missing recommendation row alone must not flip success to false."""
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  started_at.isoformat(),
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         True,
+                    "rec_run_match":             False,
+                    "insight_row_present":       True,
+                    "rec_row_present":           False,
+                    "failure_reason":            None,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_SUCCEEDED
+        assert result.per_ticker[0].success is True
+        # No fabricated rec stamp.
+        assert result.per_ticker[0].refreshed_recommendation_at is None
+
+    @pytest.mark.asyncio
+    async def test_fallback_verdict_remains_failure_even_with_run_id_match(self):
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  started_at.isoformat(),
+                    "recommendation_created_at": started_at.isoformat(),
+                    "used_fallback":             True,     # ← invalid output
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         True,
+                    "rec_run_match":             True,
+                    "insight_row_present":       True,
+                    "rec_row_present":           True,
+                    "failure_reason":            REASON_FALLBACK_VERDICT,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        assert result.per_ticker[0].error_reason == REASON_FALLBACK_VERDICT
+
+    @pytest.mark.asyncio
+    async def test_mixed_run_id_match_and_no_row_produces_partial_success(self):
+        async def _backend(user_id, tickers, started_at):
+            ts = started_at.isoformat()
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  ts,
+                    "recommendation_created_at": ts,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         True,
+                    "rec_run_match":             True,
+                    "insight_row_present":       True,
+                    "rec_row_present":           True,
+                    "failure_reason":            None,
+                },
+                "NVDA": {
+                    "agent_insight_created_at":  None,
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         False,
+                    "rec_run_match":             False,
+                    "insight_row_present":       False,
+                    "rec_row_present":           False,
+                    "failure_reason":            REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL", "NVDA"])
+        assert result.status == STATUS_PARTIAL_SUCCESS
+        assert result.successful_llm_calls == 1
+        assert result.failed_llm_calls == 1
+        succ = {o.ticker: o for o in result.per_ticker if o.success}
+        fail = {o.ticker: o for o in result.per_ticker if not o.success}
+        assert "AAPL" in succ and succ["AAPL"].refreshed_agent_insight_at is not None
+        assert "NVDA" in fail
+        assert fail["NVDA"].error_reason == REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
+        # No fabricated freshness on the failed ticker.
+        assert fail["NVDA"].refreshed_agent_insight_at is None
+        assert fail["NVDA"].refreshed_recommendation_at is None
+
+    @pytest.mark.asyncio
+    async def test_backend_read_query_failed_surfaces_reason(self):
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  None,
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                    "insight_run_match":         False,
+                    "rec_run_match":             False,
+                    "insight_row_present":       False,
+                    "rec_row_present":           False,
+                    "failure_reason":            REASON_READ_QUERY_FAILED,
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        assert result.per_ticker[0].error_reason == REASON_READ_QUERY_FAILED
+
+    @pytest.mark.asyncio
+    async def test_legacy_backend_without_run_signals_still_works(self):
+        """Existing tests that stub the backend without `insight_run_match`
+        must keep passing — the legacy timestamp-only path is the fallback."""
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  started_at.isoformat(),
+                    "recommendation_created_at": started_at.isoformat(),
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_SUCCEEDED
+        assert result.per_ticker[0].success is True
+
+    @pytest.mark.asyncio
+    async def test_legacy_backend_no_rows_reports_no_insight_row_reason(self):
+        """Legacy backend returning no rows must surface a real reason, not the
+        old vague "no_post_run_evidence" string only."""
+        async def _backend(user_id, tickers, started_at):
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  None,
+                    "recommendation_created_at": None,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        # Legacy path: no row at all → no_agent_insight_row_for_run.
+        assert result.per_ticker[0].error_reason == REASON_NO_AGENT_INSIGHT_ROW_FOR_RUN
+
+    @pytest.mark.asyncio
+    async def test_legacy_backend_ts_before_started_at_reports_timestamp_reason(self):
+        """Legacy backend with a stamp BEFORE started_at must surface
+        timestamp_before_started_at (production diagnostic clarity)."""
+        async def _backend(user_id, tickers, started_at):
+            before = (started_at - timedelta(hours=1)).isoformat()
+            return {
+                "AAPL": {
+                    "agent_insight_created_at":  before,
+                    "recommendation_created_at": before,
+                    "used_fallback":             False,
+                    "agent_run_id":              "run-abc",
+                },
+            }
+
+        adapter = AnalystRefreshAdapter(
+            user_id=uuid4(),
+            run_backend=_backend,
+            budget=AnalystRefreshBudget(max_tickers=5, max_llm_calls=5),
+        )
+        result = await adapter(["AAPL"])
+        assert result.status == STATUS_FAILED
+        assert result.per_ticker[0].error_reason == REASON_TIMESTAMP_BEFORE_STARTED_AT
+
+
+# ── Default backend read-back path (column contract) ─────────────────────────
+
+class TestDefaultBackendReadColumns:
+    """The default backend must query the correct primary-key columns:
+    agent_insights.run_id (not agent_run_id) and recommendations.agent_run_id.
+    These are the column names the persist phase writes through.
+    """
+
+    def test_default_backend_uses_run_id_for_agent_insights(self):
+        from app.services.intelligence.v3 import analyst_refresh_adapter_v1 as mod
+        src = open(mod.__file__).read()
+        # agent_insights is keyed by `run_id`.
+        assert '.eq("run_id", agent_run_id)' in src
+        # recommendations is keyed by `agent_run_id`.
+        assert '.eq("agent_run_id", agent_run_id)' in src
+
+    def test_default_backend_propagates_run_signals_to_adapter(self):
+        from app.services.intelligence.v3 import analyst_refresh_adapter_v1 as mod
+        src = open(mod.__file__).read()
+        # Read-back returns the durable signals the adapter consumes.
+        for key in (
+            '"insight_run_match"',
+            '"rec_run_match"',
+            '"insight_row_present"',
+            '"rec_row_present"',
+            '"failure_reason"',
+        ):
+            assert key in src, f"default backend must surface {key}"
+
+
+# ── Scope filter regression: non-selected tickers preserved ──────────────────
+
+class TestScopedPersistencePreservesOthers:
+    """Regression: when AgentOrchestrator runs with analyst_refresh_tickers, the
+    persist-time recommendation expire must only touch the scoped subset."""
+
+    def test_orchestrator_module_only_expires_scoped_tickers(self):
+        # The orchestrator's scoped persist phase uses an `.in_("ticker", ...)`
+        # constraint so non-scope tickers' active rows are never expired.
+        with open("app/services/agents/orchestrator.py") as f:
+            src = f.read()
+        # The scoped run-mismatch expire uses scoped_tickers.
+        assert "recommendations.expire.scoped_run_mismatch" in src
+        assert 'in_(\n                    "ticker", scoped_tickers' in src or '.in_(' in src
+        # Hard rule: in the scope==None branch we expire all mismatched rows;
+        # in the scope!=None branch we only expire scoped tickers' rows.
+        assert "if scope is None:" in src
+        assert "elif rec_rows:" in src

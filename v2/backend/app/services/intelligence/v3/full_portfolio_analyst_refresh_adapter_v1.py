@@ -411,10 +411,12 @@ async def default_full_portfolio_agent_orchestrator_backend(
         agent_run_status = "unknown"
         agent_run_error: Optional[str] = None
         agent_run_insight_count = 0
+        result_insights: list[Any] = []
         try:
             result = await orch.run(run_id)
             agent_run_status = str(getattr(result, "status", "unknown") or "unknown")
-            agent_run_insight_count = len(getattr(result, "insights", None) or [])
+            result_insights = list(getattr(result, "insights", None) or [])
+            agent_run_insight_count = len(result_insights)
         except Exception as run_exc:
             agent_run_status = "raised"
             agent_run_error = f"{type(run_exc).__name__}: {run_exc}"[:200]
@@ -422,6 +424,41 @@ async def default_full_portfolio_agent_orchestrator_backend(
                 "full_portfolio_analyst_refresh.agent_run_failed user_id=%s run_id=%s err=%s",
                 user_id, run_id, run_exc,
             )
+
+        # Explicit writeback bridge (Stage 3.2b).
+        #
+        # AgentOrchestrator._persist_sync runs via asyncio.to_thread(self._persist_sync,
+        # state) using the orchestrator's instance-level self.db client.  In the Railway
+        # worker process that client silently fails inside the thread — the exception is
+        # caught by orchestrator.run():567–575, so run() returns completed with insights
+        # in memory but zero DB rows (production evidence: agent_run_completed_no_persisted_rows=34).
+        #
+        # This writer uses a fresh get_supabase_client() — the same pattern as the
+        # working _read_post_run_evidence readback — to guarantee durable writes even
+        # when the orchestrator's instance client fails in the worker context.
+        # Idempotent: skips rows that already exist (for when _persist_sync succeeded).
+        if agent_run_status == "completed" and result_insights:
+            from .analyst_evidence_writer_v1 import write_analyst_evidence
+            write_result = await write_analyst_evidence(
+                user_id=user_id,
+                agent_run_id=run_id,
+                insights=result_insights,
+                started_at=started_at,
+            )
+            logger.info(
+                "analyst_evidence_writer_persisted_count=%d user_id=%s run_id=%s "
+                "insights_written=%d recs_written=%d "
+                "already_present_insights=%d already_present_recs=%d write_error=%s",
+                write_result.persisted_count,
+                user_id,
+                run_id,
+                write_result.insights_written,
+                write_result.recommendations_written,
+                write_result.insights_already_present,
+                write_result.recommendations_already_present,
+                write_result.write_error,
+            )
+
         return await _read_post_run_evidence(
             user_id, selected_tickers, run_id, started_at,
             agent_run_status=agent_run_status,

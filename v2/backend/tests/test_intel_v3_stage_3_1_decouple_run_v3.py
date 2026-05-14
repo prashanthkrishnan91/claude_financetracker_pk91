@@ -248,8 +248,14 @@ def _run_v3_with_evidence(*, analyst_age_hours: float, cards):
 
     Uses the real ``_run_refresh_orchestrator`` + real refresh-request seam;
     only DB-bound helpers and price import are patched out.
+
+    Evidence ages are anchored to the *real* wall clock (not the fixed
+    ``_now()``), because ``_run_refresh_orchestrator`` builds its own
+    ``datetime.now()`` — anchoring the patched evidence to a fixed timestamp
+    made price/snapshot freshness drift STALE as real time advanced past
+    ``_now()``, flaking the run-mode assertions.
     """
-    now = _now()
+    now = datetime.now(timezone.utc)
     service = _build_service()
     tickers = [c.ticker for c in cards]
     evidence_stats = {

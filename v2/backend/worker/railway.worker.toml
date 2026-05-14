@@ -1,9 +1,0 @@
-# v2/backend/railway.worker.toml
-
-[build]
-builder = "RAILPACK"
-
-[deploy]
-startCommand = "python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop"
-restartPolicyType = "on_failure"
-restartPolicyMaxRetries = 3

@@ -17,6 +17,7 @@ Contract under test:
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,11 @@ from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
 from app.services.intelligence.v3.analyst_refresh_request_seam_v1 import (
     STATUS_REFRESH_REQUESTED,
     AnalystRefreshRequestSeam,
+)
+from app.services.intelligence.v3.analyst_refresh_worker_entrypoint import (
+    DEFAULT_INTERVAL_SECONDS,
+    _INTERVAL_ENV,
+    _resolve_interval_seconds,
 )
 from app.services.intelligence.v3.analyst_refresh_worker_v1 import AnalystRefreshWorker
 from app.services.intelligence.v3.full_portfolio_analyst_refresh_adapter_v1 import (
@@ -706,6 +712,36 @@ class TestRunV3StaysFastAndEnqueues:
         seam = AnalystRefreshRequestSeam(user_id=uuid.UUID(USER_A))
         result = asyncio.run(seam(["AAPL"], started_at=_now()))
         assert result.to_dict()["durable_jobs_requested"] == 0
+
+
+# ── 8. Worker entrypoint loop-interval resolution (operability) ──────────────
+#
+# The worker is polling, not event-driven: Run Intel v3 enqueues/touches jobs
+# but does not wake the worker. The loop interval is the validation-visibility
+# knob — env-var configurable, with a safe 60s default.
+
+
+class TestWorkerEntrypointInterval:
+    def test_default_interval_is_sixty_seconds(self):
+        assert DEFAULT_INTERVAL_SECONDS == 60.0
+
+    def test_env_var_overrides_interval(self):
+        with patch.dict(os.environ, {_INTERVAL_ENV: "30"}, clear=False):
+            assert _resolve_interval_seconds() == 30.0
+
+    def test_missing_env_uses_safe_default(self):
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(_INTERVAL_ENV, None)
+            assert _resolve_interval_seconds() == DEFAULT_INTERVAL_SECONDS
+
+    def test_invalid_env_uses_safe_default(self):
+        with patch.dict(os.environ, {_INTERVAL_ENV: "not-a-number"}, clear=False):
+            assert _resolve_interval_seconds() == DEFAULT_INTERVAL_SECONDS
+
+    def test_non_positive_env_uses_safe_default(self):
+        for bad in ("0", "-5", "  "):
+            with patch.dict(os.environ, {_INTERVAL_ENV: bad}, clear=False):
+                assert _resolve_interval_seconds() == DEFAULT_INTERVAL_SECONDS
 
 
 # ── 7. Worker post-run readback contract (production blocker fix) ────────────

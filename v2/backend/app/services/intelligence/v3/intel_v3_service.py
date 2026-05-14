@@ -34,6 +34,11 @@ from ....config import get_settings
 from ....database import get_supabase_client
 from .decision_policy_v1 import decide
 from .existing_signal_adapter import build_truth_aware_decision_input
+from .evidence_refresh_orchestrator_v1 import (
+    EvidenceRefreshOrchestrator,
+    OrchestratorInputs,
+    RefreshBudget,
+)
 from .read_only_evidence_adapter import ReadOnlyEvidenceAdapter
 from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
@@ -143,6 +148,25 @@ class IntelV3Service:
                 evidence_stats.get("missing_evidence_count", 0),
                 evidence_stats.get("stale_or_missing_source_count", 0),
             )
+
+            # Step 1b: Evidence Refresh Orchestrator (Stage 3.0b v1).
+            # Classifies per-source freshness, optionally refreshes stale price
+            # evidence under deterministic budgets, and produces the run_mode +
+            # source_freshness diagnostics that downstream banner/UI consumes.
+            # Final decision authority stays with decide(); the orchestrator
+            # only refreshes inputs.
+            refresh_result = await self._run_refresh_orchestrator(
+                run_id=run_id,
+                evidence_stats=evidence_stats,
+            )
+
+            # If refresh succeeded for price evidence, the underlying portfolio
+            # snapshot still holds yesterday's market_value_certified_at — but
+            # the orchestrator already re-classified post-refresh and the
+            # diagnostics surface the certified state. The weight map below is
+            # built from the latest persisted snapshot; this PR does not yet
+            # rewrite the portfolio snapshot itself (avoiding extra DB writes
+            # in v1). Read-side weight inputs are unchanged.
 
             # Step 2: get portfolio positions for governor weights.
             weight_map = await self._get_weight_map()
@@ -303,10 +327,14 @@ class IntelV3Service:
             )
 
             # Step 4a: compute freshness + decision-diff diagnostics and embed.
+            refresh_diag = (
+                refresh_result.to_diagnostics_dict() if refresh_result else None
+            )
             diagnostics = build_diagnostics(
                 evidence_stats=evidence_stats,
                 current_snapshot=snapshot_payload,
                 previous_snapshot=previous_snapshot,
+                refresh_diagnostics=refresh_diag,
             )
             snapshot_payload["diagnostics"] = diagnostics
 
@@ -404,15 +432,21 @@ class IntelV3Service:
             _diag = diagnostics
             logger.info(
                 "intel_v3_freshness_summary user_id=%s snapshot_id=%s run_id=%s "
-                "evidence_mode=%s action_counts=%s "
+                "evidence_mode=%s run_mode=%s trust_status=%s action_counts=%s "
                 "max_recommendation_age_hours=%s max_agent_insight_age_hours=%s "
                 "stale_evidence_count=%d missing_evidence_count=%d "
                 "changed_decision_count=%d previous_snapshot_id=%s "
-                "attempted_llm_calls=0 live_provider_calls=0",
+                "attempted_provider_calls=%d successful_provider_calls=%d failed_provider_calls=%d "
+                "attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d "
+                "refreshed_source_count=%d failed_refresh_count=%d "
+                "analyst_refresh_supported=%s analyst_refresh_status=%s "
+                "budget_exhausted=%s",
                 self.user_id,
                 snapshot_id,
                 run_id,
                 _diag.get("evidence_mode"),
+                _diag.get("run_mode"),
+                _diag.get("trust_status"),
                 action_counts,
                 _diag.get("max_recommendation_age_hours"),
                 _diag.get("max_agent_insight_age_hours"),
@@ -420,6 +454,17 @@ class IntelV3Service:
                 _diag.get("missing_evidence_count", 0),
                 _diag.get("changed_decision_count", 0),
                 _diag.get("previous_snapshot_id"),
+                _diag.get("attempted_provider_calls", 0),
+                _diag.get("successful_provider_calls", 0),
+                _diag.get("failed_provider_calls", 0),
+                _diag.get("attempted_llm_calls", 0),
+                _diag.get("successful_llm_calls", 0),
+                _diag.get("failed_llm_calls", 0),
+                _diag.get("refreshed_source_count", 0),
+                _diag.get("failed_refresh_count", 0),
+                _diag.get("analyst_refresh_supported", False),
+                _diag.get("analyst_refresh_status", "not_attempted"),
+                _diag.get("budget_exhausted", False),
             )
 
             # Certification summary — validates the v3 snapshot path after every run.
@@ -464,6 +509,139 @@ class IntelV3Service:
             raise
 
     # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _run_refresh_orchestrator(
+        self,
+        *,
+        run_id: str,
+        evidence_stats: dict[str, Any],
+    ):
+        """Build OrchestratorInputs from existing state and run the orchestrator.
+
+        Returns None on hard failure (orchestrator never raises into the run).
+        Failures degrade gracefully — run_mode stays the last classified value
+        and the snapshot still persists with diagnostics reflecting truth.
+        """
+        try:
+            now = datetime.now(timezone.utc)
+            snap_meta = await self._get_latest_portfolio_snapshot_meta()
+            tickers = await self._get_active_tickers()
+
+            inputs = OrchestratorInputs(
+                evidence_stats=evidence_stats,
+                portfolio_snapshot_at=snap_meta.get("snapshot_at"),
+                market_value_certified_ats=snap_meta.get("market_value_certified_ats", []),
+                tickers=tickers,
+                research_artifact_timestamps=[],  # v1: not yet read; explicit empty
+                now=now,
+            )
+
+            # Build a price-refresh callable bound to the existing price engine.
+            price_refresh = self._build_price_refresh_callable()
+
+            orchestrator = EvidenceRefreshOrchestrator(
+                user_id=self.user_id,
+                inputs=inputs,
+                price_refresh=price_refresh,
+                analyst_refresh=None,  # v1: analyst refresh not wired
+                budget=RefreshBudget(),
+            )
+            return await orchestrator.run()
+        except Exception as exc:
+            logger.warning(
+                "intel_v3.refresh_orchestrator_failed user_id=%s run_id=%s error=%s",
+                self.user_id, run_id, exc,
+            )
+            return None
+
+    async def _get_latest_portfolio_snapshot_meta(self) -> dict[str, Any]:
+        """Fetch the latest portfolio_snapshots row's snapshot_at + per-position certified_at list."""
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table("portfolio_snapshots")
+                .select("snapshot_at,positions_data")
+                .eq("user_id", str(self.user_id))
+                .order("snapshot_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            rows = result.data or []
+            if not rows:
+                return {"snapshot_at": None, "market_value_certified_ats": []}
+            row = rows[0] or {}
+            certified: list[str] = []
+            for pos in (row.get("positions_data") or []):
+                if isinstance(pos, dict):
+                    cert = pos.get("market_value_certified_at")
+                    if cert:
+                        certified.append(str(cert))
+            return {
+                "snapshot_at": row.get("snapshot_at"),
+                "market_value_certified_ats": certified,
+            }
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.portfolio_snapshot_meta_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return {"snapshot_at": None, "market_value_certified_ats": []}
+
+    async def _get_active_tickers(self) -> list[str]:
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table("positions")
+                .select("ticker")
+                .eq("user_id", str(self.user_id))
+                .execute()
+            )
+            tickers: list[str] = []
+            for row in (result.data or []):
+                t = row.get("ticker") if isinstance(row, dict) else None
+                if t and t not in tickers:
+                    tickers.append(str(t))
+            return tickers
+        except Exception:
+            return []
+
+    def _build_price_refresh_callable(self):
+        """Return an async callable (tickers -> dict) that drives PriceService.fetch_prices.
+
+        PriceService supports keyless yfinance (stocks/ETFs) and CoinGecko
+        (crypto) — paid-tier keys (Alpaca / Finnhub / Polygon) are *optional*
+        accelerators, not requirements. We always return a callable when the
+        module imports cleanly; the orchestrator's budget caps and per-ticker
+        failure accounting handle any provider degradation honestly. The
+        provider registry diagnostics separately surface which paid providers
+        are env-disabled.
+
+        Returns None only when the module fails to import (e.g. missing
+        dependency in a stripped environment); the orchestrator then records
+        the refresh path as unavailable rather than calling into nothing.
+        """
+        try:
+            # NOTE: intel_v3_service lives at `app.services.intelligence.v3`;
+            # price_engine lives at `app.services.price_engine` — three dots.
+            from ...price_engine import PriceService as _PriceEngine
+            settings = get_settings()
+        except Exception:
+            return None
+
+        async def _refresh(tickers: list[str]) -> dict[str, Any]:
+            svc = _PriceEngine(
+                finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
+                alpaca_key=getattr(settings, "alpaca_api_key", "") or "",
+                alpaca_secret=getattr(settings, "alpaca_secret_key", "") or "",
+                polygon_key=getattr(settings, "polygon_api_key", "") or "",
+            )
+            try:
+                return await svc.fetch_prices(tickers)
+            finally:
+                try:
+                    await svc.close()
+                except Exception:
+                    pass
+
+        return _refresh
 
     async def _get_weight_map(self) -> dict[str, float]:
         """Fetch current positions and build ticker→weight_pct map."""

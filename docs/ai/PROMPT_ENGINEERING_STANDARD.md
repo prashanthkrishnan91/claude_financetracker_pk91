@@ -40,7 +40,7 @@ When to stop instead of expanding scope.
 - `<runtime_evidence>` — Railway / Supabase / snapshot evidence.
 - `<ui_budget>` — phase, max files, primary surfaces, forbidden surfaces (only for UI work).
 - `<sql_manual_actions>` — when SQL or manual deploy/Supabase actions are required.
-- `<examples>` — only when they reduce ambiguity (expected JSON shape, accepted/rejected claim example, before/after UI behavior).
+- `<examples>` — only when they reduce ambiguity.
 
 ## What this standard explicitly removes
 
@@ -54,8 +54,6 @@ A prompt is **not required** to include and should usually omit:
 - exhaustive read-first file lists (read anchors only)
 - severity ladder explanation (ISSUE_SEVERITY_ROUTING.md owns it)
 - learning protocol prose (OS_LEARNING_PROTOCOL.md owns it)
-
-If any of those genuinely apply to the slice, name the relevant doc — do not paste it.
 
 ## Safe for blind copy/paste — redefined
 
@@ -73,67 +71,6 @@ A prompt is safe for blind copy/paste when it is:
 - A longer prompt must justify why the repeated context cannot be moved into a safety pack, archetype, or repo-native doc.
 - A prompt that is mostly repeated workflow/process language **fails the gate** and must be rewritten.
 
-## Examples
-
-### Bad (bloated) prompt pattern
-
-```
-Repo: <repo>
-Roadmap stage: <stage>
-Build queue item: <item>
-Source-of-truth files: <12 files>
-[full feature contract template]
-[full success criteria template]
-[full golden scenarios block]
-[paste of all OS skills]
-[paste of all reviewer agents]
-[paste of all repo invariants — deterministic backend policy, plain-English UI, valuation rules, suppression rules ...]
-[paste of all do-nots — no auto-trading, no broker execution, no shadow labels ...]
-[paste of full PR summary template]
-[paste of full tool-failure taxonomy]
-[paste of full validation expectations]
-```
-
-Result: ~3,000 words, prompt is mostly repeated rules, Claude over-guards and produces a tiny patch.
-
-### Good (compressed) prompt pattern
-
-```
-<task_delta>
-Add a deterministic Buy/Hold/Trim/Sell ladder for Intel v3 large-cap policy when valuation pack is satisfied. Backend-only; visible action contract unchanged.
-</task_delta>
-
-<repo_context>
-Roadmap: Intel v3 / build queue: "deterministic ladder v1". See docs/product/BUILD_QUEUE.md.
-</repo_context>
-
-<safety_packs>
-Deterministic Decision Authority Pack, Valuation Safety Pack, Backend-only Scaffold Pack, Test Tier Pack.
-</safety_packs>
-
-<build_archetype>
-capability-slice
-</build_archetype>
-
-<acceptance_evidence>
-Intel v3 contract bundle (Tier 1) green. Snapshot endpoint shape unchanged. New ladder reflected in policy decision log row for the test fixtures.
-</acceptance_evidence>
-
-<stop_condition>
-Do not change visible UI copy or visible decision authority. Do not add LLM input. If valuation rules conflict with existing policy, stop and propose a split.
-</stop_condition>
-```
-
-Result: ~180 words, every line carries the task delta, packs and archetype carry the rest.
-
-### When a longer prompt is justified
-
-- A Sev 1 runtime bug that requires Railway log excerpts and Supabase row evidence inline.
-- A migration with manual-action steps that must be inline in the prompt.
-- A first-time pipeline seam where the contract must be sketched in the prompt because no contract doc exists yet.
-
-In these cases the **extra** content is data/evidence, not repeated workflow rules.
-
 ## Coverage-first review prompts
 
 For audits / reviews:
@@ -150,4 +87,14 @@ For Level 2/3 features, produce or verify the feature contract and capability-sl
 
 ## Finance-specific prompt note
 
-When a slice touches decisions, snapshots, valuation, evidence, or visible Finance UI, name the relevant safety pack(s) from `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section). The pack owns the rules — the prompt does not need to re-state "deterministic backend policy owns visible decisions", "no price target / fair value / intrinsic value", "plain-English UI", "suppress on missing/stale/weak data", or "forbid auto-trading / broker execution".
+When a slice touches decisions, snapshots, valuation, evidence, or visible Finance UI, name the relevant safety pack(s) from `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section). The pack owns the rules — the prompt does not need to re-state them.
+
+## Required usage footer for non-trivial prompts
+
+Add this block verbatim at the end of any non-trivial Finance implementation prompt:
+
+```
+Usage ledger: If tooling exists, save a baseline before work; before opening/updating the PR, append one sanitized row to docs/ai/USAGE_LEDGER.md with the actual PR number if available, prompt ID, phase, model, chat strategy, repo area, main drivers, waste classification, follow-up count, and delta fields when available. If tooling is unavailable, still append a manual row with those metadata fields and mark token/delta fields unavailable. Do not claim usage is tracked unless docs/ai/USAGE_LEDGER.md is actually changed in the PR. Keep raw .ai/usage files uncommitted.
+
+Usage discipline: Keep discovery narrow; do not run broad repo scans, parallel agents, or full suites unless focused validation fails or this prompt explicitly asks for them.
+```

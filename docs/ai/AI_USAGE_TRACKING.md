@@ -12,6 +12,17 @@ No product code is touched. All raw data is gitignored and stays local.
 
 **PR usage notes in the PR body are not sufficient for workflow audits.** They are too lossy once the PR is merged. The committed ledger (`docs/ai/USAGE_LEDGER.md`) is the durable audit source.
 
+## Ledger claim enforcement
+
+The readiness checker (`scripts/workflow/ai_pr_readiness_check.py`) enforces that PR body usage claims match committed ledger state:
+
+- If a PR body says "usage tracked", "usage ledger updated", or "see usage ledger" but `docs/ai/USAGE_LEDGER.md` did not change in the PR, the checker hard-fails.
+- If `docs/ai/USAGE_LEDGER.md` is unchanged and usage is not explicitly marked unavailable with a reason, Level 1+ PRs hard-fail.
+- If tooling is unavailable, a manual row is still required in `docs/ai/USAGE_LEDGER.md` with metadata fields filled and token/delta fields marked `unavailable`.
+- Exact per-prompt deltas require saving a baseline before work. If the baseline was missed, mark delta fields `unavailable` honestly — do not fabricate values.
+- Same-chat continuation must be reflected in the ledger row with `chat: same-chat`.
+- The readiness check runs in CI (`.github/workflows/ai-pr-readiness.yml`) and locally via `python3 scripts/workflow/ai_pr_readiness_check.py`.
+
 ## Quick start (manual — preferred)
 
 ```bash
@@ -25,13 +36,11 @@ bash scripts/ai/usage_snapshot.sh \
   --model <model> --repo-area "area/stage" \
   --main-drivers "anchor reads" --follow-up-patches 0 \
   --waste-classification none \
-  --efficiency-lesson "narrow reads" \
   --delta-from-baseline .ai/usage/baseline-before-pr<N>.json \
   --append-ledger
 ```
 
 Copy the printed `**Usage note:**` line into the PR body's **AI usage note** field.
-Copy or confirm the `| ledger row |` was appended to `docs/ai/USAGE_LEDGER.md`.
 
 This script is **not run automatically**. No network calls or package execution happen unless you invoke it.
 
@@ -39,11 +48,11 @@ This script is **not run automatically**. No network calls or package execution 
 
 | Flag | Description |
 |---|---|
-| `--pr <number-or-url>` | PR number or URL (used in ledger row) |
-| `--prompt-id <id>` | Short prompt identifier within this PR (e.g. `p01`, `audit-01`) |
+| `--pr <number-or-url>` | PR number or URL |
+| `--prompt-id <id>` | Short prompt identifier (e.g. `p01`, `audit-01`) |
 | `--phase <phase>` | `initial`, `follow-up`, `audit`, `merge-gate`, `backfill`, or `unknown` |
 | `--linked-pr <number>` | For follow-up patches: the original PR number |
-| `--session-url <url>` | Claude session URL (used in ledger row) |
+| `--session-url <url>` | Claude session URL |
 | `--model <name>` | Model name (e.g. `claude-sonnet-4-6`) |
 | `--chat-strategy <value>` | `same-chat`, `new-chat`, or `unknown` |
 | `--repo-area <text>` | Repo area / stage (e.g. `workflow/docs`) |
@@ -56,27 +65,13 @@ This script is **not run automatically**. No network calls or package execution 
 | `--delta-from-baseline <path>` | Compute per-prompt token/cost deltas from a saved baseline file |
 | `--help` | Print usage |
 
-## How it works
-
-1. Calls `npx ccusage@latest session --json` to read session token/cost data from the local Claude usage database (`~/.claude/`).
-2. Normalizes all known ccusage JSON shapes (`{sessions:[...],totals:{...}}`, `{data:[...],summary:{...}}`, single session object, bare array) using jq `norm_obj` / `sum_arr` functions so token fields are always extracted correctly.
-3. Captures repo, branch, timestamp, and `git diff --stat` for context.
-4. Writes a raw JSON snapshot to `.ai/usage/` using `jq -n --arg` (preferred) or `python3` env-var pass (fallback). If neither is available, snapshot writing is skipped and the usage note still prints.
-5. When `--save-baseline <name>` is passed, saves the normalized totals to `.ai/usage/baseline-<name>.json` for later delta computation.
-6. When `--delta-from-baseline <path>` is passed, computes per-prompt token/cost deltas (current minus baseline) for the six delta columns.
-7. Prints a compact human-readable usage note to stdout for pasting into the PR body.
-8. Prints a sanitized 26-column Markdown ledger row for pasting into (or appending to) `docs/ai/USAGE_LEDGER.md`.
-9. When `--append-ledger` is passed, appends the ledger row directly to `docs/ai/USAGE_LEDGER.md`.
-
-**JSON is never built by raw string interpolation** — values are passed as typed arguments to `jq` or as environment variables to `python3`.
-
 ## Fallback behaviour (fails soft)
 
 | Missing tool | Behaviour |
 |---|---|
 | `npx` / Node not installed | `ccusage` skipped; source reported as `unavailable` |
 | `ccusage session` returns no data | Source reported as `unavailable`; fallback hints printed |
-| `jq` not installed | Falls back to `python3` for snapshot writing; delta/normalization unavailable |
+| `jq` not installed | Falls back to `python3`; delta/normalization unavailable |
 | `jq` and `python3` both absent | Snapshot writing skipped; usage note and ledger row still printed |
 | `.ai/usage/` not writable | Snapshot write silently skipped; note still printed |
 | `docs/ai/USAGE_LEDGER.md` not found | `--append-ledger` warns and skips; row still printed to stdout |
@@ -87,38 +82,10 @@ Fallback options when ccusage is unavailable:
 - Estimate from task scope (small/medium/large) as `source: manual`.
 - Token fields in the ledger row will show `unavailable` — that is acceptable.
 
-## Backfill
-
-When you have recent Claude sessions without committed ledger rows:
-
-```bash
-bash scripts/ai/backfill_usage_ledger.sh --since YYYY-MM-DD
-```
-
-Prints 26-column candidate rows with `phase=backfill`, `unknown` PR mapping, and `unavailable` deltas. Use `--append-ledger` to append them.
-Never guess PR numbers — mark unknown ones as `unknown`.
-
-## Optional Stop hook (explicit opt-in only)
-
-The repo's `.claude/settings.json` includes a `Stop` hook entry that runs `usage_snapshot.sh` **only** when `AI_USAGE_SNAPSHOT_ON_STOP=1` is set in your local environment. By default it is a no-op.
-
-To enable automatic capture at session end:
-```bash
-export AI_USAGE_SNAPSHOT_ON_STOP=1   # add to your ~/.zshrc or ~/.bashrc
-```
-
-The hook:
-- Writes to `.ai/usage/` only (gitignored)
-- Does **not** add context to the Claude conversation
-- Does **not** block the session
-- Is completely silent if the env var is absent
-
-To disable the hook entry entirely, remove the `usage_snapshot` command from `.claude/settings.json`.
-
 ## Limitations
 
 - `ccusage` reads the local Claude usage DB (`~/.claude/`). Not available in CI, web-only Claude sessions, or machines without Claude Code CLI.
-- Delta columns require running `--save-baseline` before and `--delta-from-baseline` after each prompt. Baselines are gitignored and local only.
+- Delta columns require running `--save-baseline` before and `--delta-from-baseline` after each prompt.
 - Cost figures from ccusage reflect API-level pricing and may differ from subscription billing.
 - Raw snapshots are never committed. `.ai/usage/` is gitignored.
 
@@ -130,8 +97,3 @@ main drivers: [e.g. large context reads, many tool calls];
 justified: yes/partially/no;
 next efficiency improvement: [e.g. narrow anchor reads, skip redundant tool calls]
 ```
-
-**Usage level guide:**
-- Low — routine small patch, few tool calls, short context
-- Medium — multi-file change, several discovery reads, moderate tool calls
-- High — broad discovery, large diffs, many iterations

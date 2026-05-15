@@ -608,3 +608,72 @@ def mark_job_failed(
         )
         return None
     return next_retry
+
+
+# ── Observable job counts ─────────────────────────────────────────────────────
+
+def count_due_jobs(
+    client: Any,
+    *,
+    now: Optional[datetime] = None,
+) -> dict[str, int]:
+    """Count claimable jobs without claiming them.
+
+    Returns a breakdown useful for production monitoring:
+      pending            — pending jobs due now (ready to claim).
+      failed_retryable   — failed jobs with attempts remaining, due now.
+      failed_not_yet_due — failed jobs with attempts remaining but in backoff.
+      failed_terminal    — failed jobs with exhausted attempt budget (permanently
+                           blocked; never re-claimed by the worker).
+      total_due          — pending + failed_retryable (claimable right now).
+
+    Never raises — DB failure returns all-zero counts so the caller's log is
+    degraded but the worker run is not interrupted.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+
+    zero: dict[str, int] = {
+        "pending": 0,
+        "failed_retryable": 0,
+        "failed_not_yet_due": 0,
+        "failed_terminal": 0,
+        "total_due": 0,
+    }
+    try:
+        res = (
+            client.table(TABLE)
+            .select("status,attempts,max_attempts,next_retry_at")
+            .in_("status", list(CLAIMABLE_STATUSES))
+            .execute()
+        )
+        rows = _rows(res)
+    except Exception as exc:
+        logger.warning(
+            "intel_v3.analyst_refresh_job_count_due_failed err=%s", exc,
+        )
+        return zero
+
+    counts = dict(zero)
+    for row in rows:
+        status = str(row.get("status") or "")
+        attempts = int(row.get("attempts") or 0)
+        max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        next_retry = row.get("next_retry_at")
+
+        if status == JOB_FAILED and attempts >= max_attempts:
+            counts["failed_terminal"] += 1
+            continue
+
+        due_now = next_retry is None or _iso_lte(next_retry, now)
+        if status == JOB_PENDING:
+            counts["pending"] += 1
+        elif status == JOB_FAILED:
+            if due_now:
+                counts["failed_retryable"] += 1
+            else:
+                counts["failed_not_yet_due"] += 1
+
+    counts["total_due"] = counts["pending"] + counts["failed_retryable"]
+    return counts

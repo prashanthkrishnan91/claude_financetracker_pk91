@@ -123,7 +123,7 @@ export function buildBannerState(
       return {
         status,
         headline: "Refreshing Analyst Intelligence",
-        detail: "Background worker is running LLM analysis. This may take up to 60 seconds. Results will appear automatically.",
+        detail: "Background worker is running LLM analysis for all holdings. Results will appear automatically when certification completes.",
         tone: "grey",
         showProvenance: false,
       };

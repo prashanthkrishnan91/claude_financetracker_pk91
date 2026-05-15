@@ -180,6 +180,83 @@ describe("deriveIntelV3UIStatus — unavailable states", () => {
   });
 });
 
+// ── Build 1.5: sub-10s UX contract tests ─────────────────────────────────────
+
+describe("Build 1.5 — sub-10s UX: latest_certified_new_refresh_running", () => {
+  it("shows amber banner when certified snapshot exists and refresh is running", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, true);
+    expect(banner.status).toBe("latest_certified_new_refresh_running");
+    expect(banner.tone).toBe("amber");
+    expect(banner.headline).toContain("Latest Certified Snapshot Available");
+    expect(banner.showProvenance).toBe(true);
+  });
+
+  it("shows certified snapshot data in amber banner (not blank)", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 34, total_holding_count: 34 });
+    const banner = buildBannerState(snap, true);
+    expect(banner.detail).toContain("34/34");
+  });
+
+  it("amber banner does not claim the new refresh is already certified", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, true);
+    expect(banner.headline).not.toContain("Certified Current");
+    expect(banner.tone).not.toBe("green");
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: refreshing with no prior snapshot", () => {
+  it("shows grey banner when no snapshot and refresh is running", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.status).toBe("refreshing_analyst_intelligence");
+    expect(banner.tone).toBe("grey");
+  });
+
+  it("grey refreshing banner does not claim '60 seconds'", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.detail).not.toContain("60 seconds");
+    expect(banner.detail).not.toContain("60");
+  });
+
+  it("grey refreshing banner does not show provenance (no certified snapshot)", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.showProvenance).toBe(false);
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: no green without certified snapshot", () => {
+  it("uncertified snapshot during refresh does not show green", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    const banner = buildBannerState(snap, true);
+    expect(banner.tone).not.toBe("green");
+  });
+
+  it("partial coverage during refresh does not show green", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 10, total_holding_count: 34 });
+    const banner = buildBannerState(snap, true);
+    expect(banner.tone).not.toBe("green");
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: certification failure state", () => {
+  it("certification_failed snapshot shows red even while refresh is running", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "certification_failed" } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.status).toBe("blocked_certification_failed");
+    expect(banner.tone).toBe("red");
+  });
+
+  it("certification_failed snapshot is visible (not suppressed)", () => {
+    const snap = makeCertifiedSnapshot({
+      snapshot_source: "certification_failed",
+      failed_tickers_in_certification: ["AAPL"],
+    } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.detail).toBeTruthy();
+  });
+});
+
 // ── Stage 3.3: buildBannerState tone rules ────────────────────────────────────
 
 describe("buildBannerState — tone and copy", () => {

@@ -40,7 +40,9 @@ import asyncio
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 logger = logging.getLogger("intel_v3.analyst_refresh_worker_entrypoint")
 
@@ -49,6 +51,13 @@ logger = logging.getLogger("intel_v3.analyst_refresh_worker_entrypoint")
 # rather than after the previous 15-minute default.
 _INTERVAL_ENV = "INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS"
 DEFAULT_INTERVAL_SECONDS = 60.0
+
+# Drain loop guardrails — when jobs remain after a batch the worker may
+# continue draining immediately without sleeping for the full poll interval.
+# These caps prevent runaway LLM calls while eliminating artificial 60-second
+# gaps between immediately-due batches.
+MAX_DRAIN_BATCHES_PER_CYCLE = 8   # 8 × 10 tickers = 80 max per cycle (>34 portfolio)
+MAX_DRAIN_RUNTIME_SECONDS_PER_CYCLE = 300.0  # 5-minute wall-clock cap per drain cycle
 
 
 def _resolve_interval_seconds() -> float:
@@ -80,6 +89,50 @@ def _resolve_interval_seconds() -> float:
     return val
 
 
+async def _drain_cycle(
+    worker: Any,
+    *,
+    max_batches: int,
+    max_runtime_seconds: float,
+    now: "datetime | None" = None,
+) -> "tuple[list, int, bool]":
+    """Run multiple worker batches in one cycle without sleeping between them.
+
+    Returns (results_list, total_duration_ms, idle_delay_skipped).
+    idle_delay_skipped=True means at least one inter-batch sleep was skipped
+    because jobs remained and budget allowed immediate continuation.
+
+    Guardrails:
+      - max_batches: hard cap on LLM batch invocations per cycle.
+      - max_runtime_seconds: wall-clock cap; stops draining if exceeded.
+    Certification/prewarm is handled inside worker.run_once() — this function
+    does not weaken that contract.
+    """
+    results = []
+    idle_delay_skipped = False
+    cycle_start = time.monotonic()
+
+    for _ in range(max_batches):
+        result = await worker.run_once(now=now)
+        results.append(result)
+
+        elapsed = time.monotonic() - cycle_start
+        if not result.run_resumable:
+            break
+        if elapsed >= max_runtime_seconds:
+            logger.info(
+                "intel_v3.analyst_refresh_worker_drain_cycle_runtime_cap_reached "
+                "elapsed_seconds=%.1f max_runtime_seconds=%s batches_so_far=%d",
+                elapsed, max_runtime_seconds, len(results),
+            )
+            break
+        # Jobs remain and budget allows — skip the poll-interval sleep
+        idle_delay_skipped = True
+
+    duration_ms = int((time.monotonic() - cycle_start) * 1000)
+    return results, duration_ms, idle_delay_skipped
+
+
 async def _run(*, loop: bool, interval_seconds: float) -> int:
     # Imported lazily so importing this module (e.g. in tests) does not require
     # a configured Supabase client.
@@ -99,25 +152,56 @@ async def _run(*, loop: bool, interval_seconds: float) -> int:
 
     logger.info(
         "intel_v3.analyst_refresh_worker_entrypoint mode=loop interval_seconds=%s "
+        "max_drain_batches_per_cycle=%d max_drain_runtime_seconds=%s "
         "polling=true note=run_intel_enqueues_jobs_but_does_not_wake_worker",
         interval_seconds,
+        MAX_DRAIN_BATCHES_PER_CYCLE,
+        MAX_DRAIN_RUNTIME_SECONDS_PER_CYCLE,
     )
     while True:
         try:
-            result = await worker.run_once()
+            drain_results, drain_duration_ms, idle_delay_skipped = await _drain_cycle(
+                worker,
+                max_batches=MAX_DRAIN_BATCHES_PER_CYCLE,
+                max_runtime_seconds=MAX_DRAIN_RUNTIME_SECONDS_PER_CYCLE,
+            )
+            batches_drained = len(drain_results)
+            last = drain_results[-1] if drain_results else None
+            total_succeeded = sum(len(r.succeeded_tickers) for r in drain_results)
+            total_failed = sum(len(r.failed_tickers) for r in drain_results)
+            total_attempted_llm = sum(r.attempted_llm_calls for r in drain_results)
+            total_successful_llm = sum(r.successful_llm_calls for r in drain_results)
+            total_failed_llm = sum(r.failed_llm_calls for r in drain_results)
+            run_resumable_after_cycle = last.run_resumable if last else False
+
             next_poll_at = (
                 datetime.now(timezone.utc) + timedelta(seconds=interval_seconds)
             ).isoformat()
+            # time_to_worker_certified_snapshot_ms: when run_resumable_after_cycle
+            # is False, all batches drained and prewarm was attempted this cycle.
+            # The drain_duration_ms covers worker cycle time (excludes initial
+            # poll-interval sleep before the worker woke).
+            time_to_certified_ms = drain_duration_ms if not run_resumable_after_cycle else -1
             logger.info(
-                "intel_v3.analyst_refresh_worker_loop_summary mode=loop "
-                "interval_seconds=%s next_poll_at=%s claimed_job_count=%d "
-                "selected_ticker_count=%d succeeded_count=%d failed_count=%d",
-                interval_seconds,
+                "intel_v3.analyst_refresh_worker_drain_cycle_summary "
+                "worker_batches_drained=%d worker_drain_total_duration_ms=%d "
+                "worker_idle_delay_skipped=%s run_resumable_after_cycle=%s "
+                "total_succeeded=%d total_failed=%d "
+                "attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d "
+                "time_to_worker_certified_snapshot_ms=%d "
+                "next_poll_at=%s interval_seconds=%s",
+                batches_drained,
+                drain_duration_ms,
+                idle_delay_skipped,
+                run_resumable_after_cycle,
+                total_succeeded,
+                total_failed,
+                total_attempted_llm,
+                total_successful_llm,
+                total_failed_llm,
+                time_to_certified_ms,
                 next_poll_at,
-                result.claimed_job_count,
-                len(result.selected_tickers),
-                len(result.succeeded_tickers),
-                len(result.failed_tickers),
+                interval_seconds,
             )
         except Exception as exc:  # never let one bad pass kill the loop
             logger.exception(

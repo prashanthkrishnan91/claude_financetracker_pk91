@@ -13,6 +13,10 @@ REQUIRED_FILES = [
     ".claude/hooks/ai_os_advisory.py",
     "docs/ai/AI_REPO_OPERATING_SYSTEM.md",
     "docs/ai/USAGE_LEDGER.md",
+    "scripts/workflow/ai_pr_readiness_check.py",
+    ".github/workflows/ai-pr-readiness.yml",
+    "docs/ai/DANGEROUS_ACTION_GUARD.md",
+    ".claude/hooks/dangerous_action_guard.sh",
 ]
 
 PR_TEMPLATE_REQUIRED_STRINGS = [
@@ -20,14 +24,15 @@ PR_TEMPLATE_REQUIRED_STRINGS = [
     "## Severity",
     "## Validation",
     "## AI usage note",
+    "## AI PR readiness",
     "## Self-audit",
-    "Usage ledger updated",
+    "Usage ledger row",
     "Waste classification",
 ]
 
 PR_TEMPLATE_REQUIRED_SELF_AUDIT = [
     "Repository PR template used exactly: Yes/No",
-    "Scope stayed workflow-only (no product code): Yes/No",
+    "Scope stayed within requested files/behavior: Yes/No",
 ]
 
 USAGE_LEDGER_ANCHORS = ["Prompt ID", "Phase", "Linked PR", "Δ total", "Waste"]
@@ -37,6 +42,18 @@ SNAPSHOT_SCRIPT_ANCHORS = [
     "--prompt-id",
     "--phase",
     "--delta-from-baseline",
+]
+
+PROMPT_USAGE_FOOTER_ANCHORS = [
+    "Usage ledger: If tooling exists",
+    "Usage discipline: Keep discovery narrow",
+]
+
+CLAUDE_MD_READINESS_ANCHOR = "ai_pr_readiness_check.py"
+
+USAGE_TRACKING_ENFORCEMENT_ANCHORS = [
+    "Ledger claim enforcement",
+    "ai_pr_readiness_check.py",
 ]
 
 ENV_DENY_RULES = ["Read(./.env)", "Read(./.env.*)"]
@@ -67,7 +84,7 @@ def main() -> int:
             fail(f"PR template missing required anchor: {needle}")
             failed = True
     if not failed:
-        ok("PR template anchors + AI usage note + ledger updated + waste classification present")
+        ok("PR template anchors present (including AI PR readiness and updated self-audit)")
 
     settings = json.loads((ROOT / ".claude/settings.json").read_text(encoding="utf-8"))
     deny = settings.get("permissions", {}).get("deny", [])
@@ -92,7 +109,6 @@ def main() -> int:
     else:
         ok("advisory hook safety invariant check skipped (hook not configured)")
 
-    # Usage ledger structural checks
     tracking_path = ROOT / "docs/ai/AI_USAGE_TRACKING.md"
     if not tracking_path.exists():
         fail("docs/ai/AI_USAGE_TRACKING.md missing")
@@ -100,12 +116,16 @@ def main() -> int:
     else:
         tracking_text = tracking_path.read_text(encoding="utf-8")
         if "USAGE_LEDGER.md" not in tracking_text:
-            fail("docs/ai/AI_USAGE_TRACKING.md does not document USAGE_LEDGER.md (two-layer model missing)")
+            fail("docs/ai/AI_USAGE_TRACKING.md does not document USAGE_LEDGER.md")
             failed = True
         else:
-            ok("AI_USAGE_TRACKING.md documents USAGE_LEDGER.md")
+            for anchor in USAGE_TRACKING_ENFORCEMENT_ANCHORS:
+                if anchor not in tracking_text:
+                    fail(f"docs/ai/AI_USAGE_TRACKING.md missing enforcement anchor: {anchor}")
+                    failed = True
+            if not failed:
+                ok("AI_USAGE_TRACKING.md documents USAGE_LEDGER.md with ledger claim enforcement")
 
-    # Usage ledger column checks (26-column patch)
     ledger_path = ROOT / "docs/ai/USAGE_LEDGER.md"
     if ledger_path.exists():
         ledger_text = ledger_path.read_text(encoding="utf-8")
@@ -142,6 +162,47 @@ def main() -> int:
             failed = True
         else:
             ok(".gitignore excludes .ai/usage/")
+
+    claude_path = ROOT / "CLAUDE.md"
+    if not claude_path.exists():
+        fail("CLAUDE.md missing")
+        failed = True
+    else:
+        claude_text = claude_path.read_text(encoding="utf-8")
+        if CLAUDE_MD_READINESS_ANCHOR not in claude_text:
+            fail(f"CLAUDE.md does not reference readiness checker ({CLAUDE_MD_READINESS_ANCHOR})")
+            failed = True
+        else:
+            ok("CLAUDE.md references ai_pr_readiness_check.py")
+
+    for path_str in ["docs/ai/PROMPT_ENGINEERING_STANDARD.md", "docs/ai/PROMPT_LIBRARY.md"]:
+        path = ROOT / path_str
+        if path.exists():
+            text = path.read_text(encoding="utf-8")
+            for anchor in PROMPT_USAGE_FOOTER_ANCHORS:
+                if anchor not in text:
+                    fail(f"{path_str} missing usage footer anchor: {anchor}")
+                    failed = True
+            if not failed:
+                ok(f"{path_str} contains required usage footer anchors")
+
+    hook = ROOT / ".claude/hooks/ai_pr_readiness_stop.sh"
+    gate_doc = ROOT / "docs/ai/AI_PR_READINESS_GATE.md"
+    if not hook.exists() and not gate_doc.exists():
+        fail("Neither ai_pr_readiness_stop.sh nor AI_PR_READINESS_GATE.md found")
+        failed = True
+    else:
+        found = hook.name if hook.exists() else gate_doc.name
+        ok(f"Readiness gate hook/doc present: {found}")
+
+    danger_hook_path = ROOT / ".claude/hooks/dangerous_action_guard.sh"
+    if danger_hook_path.exists():
+        hook_text = danger_hook_path.read_text(encoding="utf-8")
+        if "DANGEROUS_ACTION_GUARD" not in hook_text:
+            fail("dangerous_action_guard.sh does not reference DANGEROUS_ACTION_GUARD env var")
+            failed = True
+        else:
+            ok("dangerous_action_guard.sh references DANGEROUS_ACTION_GUARD env var")
 
     return 1 if failed else 0
 

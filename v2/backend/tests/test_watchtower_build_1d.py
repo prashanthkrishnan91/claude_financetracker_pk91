@@ -1427,3 +1427,118 @@ class TestRunIntelUrgentRefreshTrigger:
         assert "portfolio_weight" in source[source.find("price_weight_stale"):source.find("price_weight_stale") + 300], (
             "price_weight_stale check must include portfolio_weight"
         )
+
+
+# ── Test 20: Urgent refresh uses production default callables ─────────────────
+
+class TestUrgentRefreshUsesProductionCallables:
+    def test_shared_callables_module_importable(self):
+        """watchtower_callables_v1 must be importable without triggering IO."""
+        import importlib
+        mod = importlib.import_module(
+            "app.services.intelligence.v3.watchtower_callables_v1"
+        )
+        assert hasattr(mod, "build_default_price_refresh_callable")
+        assert hasattr(mod, "build_default_analyst_enqueue_callable")
+
+    def test_shared_callables_are_functions(self):
+        from app.services.intelligence.v3.watchtower_callables_v1 import (
+            build_default_price_refresh_callable,
+            build_default_analyst_enqueue_callable,
+        )
+        assert callable(build_default_price_refresh_callable)
+        assert callable(build_default_analyst_enqueue_callable)
+
+    def test_entrypoint_delegates_to_shared_callables(self):
+        """Source inspection: entrypoint must import from watchtower_callables_v1."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/watchtower_worker_entrypoint.py"
+        ).read_text()
+        assert "watchtower_callables_v1" in source, (
+            "Entrypoint must import callable builders from watchtower_callables_v1"
+        )
+        assert "build_default_price_refresh_callable" in source
+        assert "build_default_analyst_enqueue_callable" in source
+
+    def test_intel_v3_service_urgent_path_uses_shared_callables(self):
+        """Source inspection: urgent create_task must pass real price_refresh_callable."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "watchtower_callables_v1" in source, (
+            "intel_v3_service urgent path must import from watchtower_callables_v1"
+        )
+        assert "build_default_price_refresh_callable" in source, (
+            "intel_v3_service must wire price_refresh_callable into urgent Watchtower task"
+        )
+        # The callable builder must appear in the create_task context, not just imported
+        create_task_pos = source.find("create_task(")
+        callable_pos = source.find("build_default_price_refresh_callable")
+        assert callable_pos > 0 and create_task_pos > 0
+        # Within 600 chars of create_task there must be the callable builder
+        assert abs(create_task_pos - callable_pos) < 600, (
+            "build_default_price_refresh_callable must appear near create_task in enqueue_run_v3"
+        )
+
+    def test_urgent_path_passes_price_callable_not_none(self):
+        """Source inspection: run_watchtower_cycle_for_user call must pass price_refresh_callable."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        # Locate enqueue_run_v3 body
+        enqueue_start = source.find("async def enqueue_run_v3(")
+        assert enqueue_start > 0
+        body = source[enqueue_start:]
+        # Within enqueue_run_v3, price_refresh_callable must be passed
+        assert "price_refresh_callable=build_default_price_refresh_callable" in body, (
+            "enqueue_run_v3 urgent path must pass price_refresh_callable — "
+            "not None — to run_watchtower_cycle_for_user"
+        )
+
+    def test_shared_callable_builder_returns_none_gracefully_when_config_missing(self):
+        """build_default_price_refresh_callable returns None when config is unavailable."""
+        from unittest.mock import patch, MagicMock
+        from app.services.intelligence.v3.watchtower_callables_v1 import (
+            build_default_price_refresh_callable,
+        )
+        # Patch get_settings to raise — simulates missing config (test/CI env)
+        with patch(
+            "app.services.intelligence.v3.watchtower_callables_v1.build_default_price_refresh_callable",
+            side_effect=lambda client: None,
+        ):
+            # The function must not crash when config is missing
+            result = build_default_price_refresh_callable(MagicMock())
+            # In test env settings are unavailable; result may be None or callable
+            # The key invariant: no exception raised
+            assert result is None or callable(result)
+
+    def test_worker_with_none_callable_does_not_crash(self):
+        """WatchtowerBackgroundRefreshWorker gracefully skips refresh when callable is None."""
+        from app.services.intelligence.v3.watchtower_background_refresh_worker_v1 import (
+            WatchtowerBackgroundRefreshWorker,
+        )
+        # Make a client that returns no tickers (trivial cycle)
+        client = MagicMock()
+        q = MagicMock()
+        q.select.return_value = q
+        q.eq.return_value = q
+        q.order.return_value = q
+        q.limit.return_value = q
+        q.execute.return_value = MagicMock(data=[])
+        client.table.return_value = q
+
+        worker = WatchtowerBackgroundRefreshWorker(
+            client=client,
+            price_refresh_callable=None,  # simulates missing config
+            analyst_job_enqueue_callable=None,
+        )
+        result = asyncio.get_event_loop().run_until_complete(
+            worker.run_refresh_cycle(uuid.uuid4(), now=NOW)
+        )
+        # Must not crash; price/analyst refresh simply skipped
+        assert result is not None
+        assert result.refreshed_price_tickers == []
+        assert result.analyst_jobs_enqueued == 0

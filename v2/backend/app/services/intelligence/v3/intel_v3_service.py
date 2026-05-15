@@ -703,10 +703,20 @@ class IntelV3Service:
                     from .watchtower_background_refresh_worker_v1 import (
                         run_watchtower_cycle_for_user,
                     )
+                    from .watchtower_callables_v1 import (
+                        build_default_price_refresh_callable,
+                        build_default_analyst_enqueue_callable,
+                    )
                     _asyncio.create_task(
                         run_watchtower_cycle_for_user(
                             self.user_id,
                             self.client,
+                            price_refresh_callable=build_default_price_refresh_callable(
+                                self.client
+                            ),
+                            analyst_job_enqueue_callable=build_default_analyst_enqueue_callable(
+                                self.client
+                            ),
                         )
                     )
                     urgent_refresh_triggered = True

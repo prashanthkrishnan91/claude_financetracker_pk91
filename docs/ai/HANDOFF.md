@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 1D patch 2 — Deploy strict freshness, position cert-tied freshness, price snapshot writer, urgent refresh trigger)
+Last updated: 2026-05-15 (post Build 1D patch 3 — urgent Watchtower refresh wired to production price/analyst callables)
 
 ## Purpose
 
@@ -23,6 +23,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-15 — **Build 1D patch 3: urgent Watchtower refresh wired to production callables** — Root cause: `run_watchtower_cycle_for_user` in `enqueue_run_v3` passed no `price_refresh_callable`, so the urgent path collected freshness records but never actually refreshed or persisted prices. Fix: extracted `build_default_price_refresh_callable` and `build_default_analyst_enqueue_callable` into new `watchtower_callables_v1.py` (shared, no IO, no side effects at import). `watchtower_worker_entrypoint.py` now delegates to the shared module. `enqueue_run_v3` urgent `create_task` now passes both builders. 7 new tests (88 total, all pass). Key invariant: `price_refresh_callable` is never None in the urgent path.
 
 - 2026-05-15 — **Build 1D patch 2: Deploy strict freshness, price snapshot writer, urgent refresh** — Four remaining pre-merge blockers fixed: (1) **Deploy gate requires FRESH (not AGING)**: `is_deploy_eligible_strict()` added — requires FRESHNESS_FRESH only for deploy-critical types; `build_evidence_record()` now uses `is_deploy_eligible_strict`. A 7-min-old price (Deploy AGING) is now deploy_eligible=False. (2) **Position deploy SLA tightened to 5 min**: `DEPLOY_SLA_CONFIG[POSITION].fresh_seconds=300` — position freshness now tied to price certification cycle; `watchtower_evidence_collector_v1` uses `price_certs.get(t) or snap_at` for position evidence. (3) **Watchtower price refresh now durable**: new `watchtower_price_snapshot_writer_v1.py` — `persist_watchtower_price_snapshot()` reads positions, writes a new `portfolio_snapshots` row with `market_value_certified_at=now` for succeeded tickers, carries forward old values (without cert stamp) for failed tickers. Background worker calls writer after each price refresh. (4) **Run Intel triggers urgent price refresh**: `enqueue_run_v3()` fires `asyncio.create_task(run_watchtower_cycle_for_user(...))` when gate reports price/weight stale; `urgent_refresh_triggered` in response. (5) 22 new tests (81 total, all pass). Key rule: never set `market_value_certified_at` for tickers where price refresh failed.
 

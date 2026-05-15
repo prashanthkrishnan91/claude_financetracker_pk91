@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 1 — Intel v3 durable resumable analyst refresh worker)
+Last updated: 2026-05-15 (post Build 1D patch 3 — urgent Watchtower refresh wired to production price/analyst callables)
 
 ## Purpose
 
@@ -23,6 +23,14 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-15 — **Build 1D patch 3: urgent Watchtower refresh wired to production callables** — Root cause: `run_watchtower_cycle_for_user` in `enqueue_run_v3` passed no `price_refresh_callable`, so the urgent path collected freshness records but never actually refreshed or persisted prices. Fix: extracted `build_default_price_refresh_callable` and `build_default_analyst_enqueue_callable` into new `watchtower_callables_v1.py` (shared, no IO, no side effects at import). `watchtower_worker_entrypoint.py` now delegates to the shared module. `enqueue_run_v3` urgent `create_task` now passes both builders. 7 new tests (88 total, all pass). Key invariant: `price_refresh_callable` is never None in the urgent path.
+
+- 2026-05-15 — **Build 1D patch 2: Deploy strict freshness, price snapshot writer, urgent refresh** — Four remaining pre-merge blockers fixed: (1) **Deploy gate requires FRESH (not AGING)**: `is_deploy_eligible_strict()` added — requires FRESHNESS_FRESH only for deploy-critical types; `build_evidence_record()` now uses `is_deploy_eligible_strict`. A 7-min-old price (Deploy AGING) is now deploy_eligible=False. (2) **Position deploy SLA tightened to 5 min**: `DEPLOY_SLA_CONFIG[POSITION].fresh_seconds=300` — position freshness now tied to price certification cycle; `watchtower_evidence_collector_v1` uses `price_certs.get(t) or snap_at` for position evidence. (3) **Watchtower price refresh now durable**: new `watchtower_price_snapshot_writer_v1.py` — `persist_watchtower_price_snapshot()` reads positions, writes a new `portfolio_snapshots` row with `market_value_certified_at=now` for succeeded tickers, carries forward old values (without cert stamp) for failed tickers. Background worker calls writer after each price refresh. (4) **Run Intel triggers urgent price refresh**: `enqueue_run_v3()` fires `asyncio.create_task(run_watchtower_cycle_for_user(...))` when gate reports price/weight stale; `urgent_refresh_triggered` in response. (5) 22 new tests (81 total, all pass). Key rule: never set `market_value_certified_at` for tickers where price refresh failed.
+
+- 2026-05-15 — **Build 1D patch 1: Watchtower production-usable, gate-first enqueue, strict Deploy SLAs** — Five pre-merge blockers fixed: (1) `DEPLOY_SLA_CONFIG` added to freshness ledger — price/portfolio_weight deploy-fresh now 5 min; `classify_deploy_freshness_status()` uses these stricter thresholds; `build_evidence_record()` computes `deploy_eligible` from Deploy SLA. (2) Gate-first enqueue: `enqueue_run_v3()` runs fast freshness gate BEFORE enqueuing; `_stale_analyst_tickers_from_gate()` extracts only stale/missing analyst tickers. (3) Portfolio weight same Deploy SLA as price. (4) `watchtower_worker_entrypoint.py` created — `--loop`, `INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS` env (default 60s), production callables wired. (5) 20 new tests (59 total). Key logs: `intel_v3_full_refresh_enqueued stale_analyst_count=N gate_succeeded=true/false`.
+
+- 2026-05-15 — **Build 1D: Watchtower Fresh Evidence Foundation** — New modules: `watchtower_freshness_ledger_v1.py`, `watchtower_refresh_planner_v1.py`, `watchtower_evidence_collector_v1.py`, `watchtower_deploy_gate_v1.py`, `intel_v3_fast_freshness_gate_v1.py`, `watchtower_background_refresh_worker_v1.py`. `enqueue_run_v3()` returns `freshness_gate` in response. 39 new tests. No SQL, no schema changes. Certification contract unchanged.
 
 - 2026-05-15 — **Build 1.5 (merged PR #328): Intel v3 sub-10-second user-facing experience + pre-merge patch** — Root cause of multi-minute UX: worker loop ran ONE batch per 60-second sleep. With 34 tickers / 10 per batch = 4 batches × 60s gap = minutes. Fix: (1) `_drain_cycle()` added to entrypoint — runs multiple batches in one cycle when `run_resumable=True` and budget allows (max 8 batches / 300s wall cap); (2) drain cycle stops immediately when `claimed_job_count=0` + `run_resumable=True` (retry backoff — nothing to do, don't spin); (3) `intel_v3.analyst_refresh_worker_drain_cycle_summary` log emits `worker_batches_drained`, `worker_drain_total_duration_ms`, `worker_idle_delay_skipped`, `time_to_worker_certified_snapshot_ms`; (4) backoff stop log: `intel_v3.analyst_refresh_worker_drain_cycle_stopped reason=backoff_or_no_due_jobs`; (5) `get_latest_snapshot()` emits `snapshot_response_ms`; (6) `enqueue_run_v3()` emits `run_click_response_ms`, `certified_snapshot_available_on_click`, `refresh_jobs_pending_count`, `refresh_jobs_remaining_count`; (7) banner `refreshing_analyst_intelligence` copy updated (removed false "60 seconds" claim); (8) `IntelV3Cockpit.tsx` polling guard: `stopPolling()` only fires when `new Date(snap.generated_at).getTime() > refreshStartedAt.current` — amber banner no longer collapses on pre-click certified snapshot. Build 1 trust guarantees intact: prewarm deferred until all jobs drained, certification contract unchanged, no fake freshness. 14 backend tests + 39 frontend banner tests. No SQL, no schema changes, no certification weakening.
 
@@ -58,6 +66,22 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
+
+**Build 1D now mergeable.** All five pre-merge blockers for PR #331 are resolved. Merge PR #331 before proceeding to Build 2.
+
+**Build 2: Evidence-grade certification and publish contract.** Now that the Watchtower foundation is production-ready, Build 2 can:
+  1. Wire `WatchtowerRefreshPlan.deploy_blockers` into the certified snapshot publish gate — only publish `worker_certified` when all deploy-critical evidence is fresh.
+  2. Add per-type freshness to `CertifiedIntelRunContractResult` so the contract checks price/position/weight freshness, not just analyst evidence.
+  3. Wire the Watchtower background refresh worker into a separate Railway process.
+  4. Expose deploy gate status in the API response for the Deploy page.
+
+Key logs to confirm Build 1D gate is running in production:
+  - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`
+  - `watchtower_price_snapshot_writer.snapshot_written user_id=... certified=N carried=N`
+  - `intel_v3_urgent_watchtower_refresh_triggered user_id=... deploy_blockers=[price]`
+  - Check that `gate_check_ms` stays under 500ms.
+
+**Previous production validation steps (still apply):**
 
 **Production validation of Build 1.5 sub-10s UX + drain cycle.** Re-run the Run Intel v3 button. Key log signals:
 

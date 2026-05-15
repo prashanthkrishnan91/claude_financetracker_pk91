@@ -652,71 +652,176 @@ class IntelV3Service:
             latest_snapshot.get("snapshot_id") if latest_snapshot else None
         )
 
-        # Enqueue refresh for every active ticker
+        # Fast freshness gate runs FIRST — determines which analyst slices are
+        # actually stale. Only those tickers get enqueued. This prevents the
+        # Run Intel button from blindly reopening all 34 analyst jobs on every
+        # click when analyst evidence is already fresh.
+        freshness_gate_summary: dict[str, Any] = {}
+        stale_analyst_tickers: list[str] = list(tickers)  # safe fallback: all
+        gate_succeeded = False
         try:
-            enqueue_result = await _asyncio.to_thread(
-                enqueue_refresh_jobs,
+            from .intel_v3_fast_freshness_gate_v1 import run_fast_freshness_gate
+            gate_result = await run_fast_freshness_gate(
+                self.user_id,
                 self.client,
-                user_id=self.user_id,
-                tickers=tickers,
                 now=started_at,
+                existing_certified_snapshot_id=existing_certified_snapshot_id,
+                has_pending_worker_jobs=False,  # unknown pre-enqueue; set after
+                total_holdings=total_holding_count,
             )
-            queued_count = (
-                enqueue_result.created_count
-                + enqueue_result.touched_count
-                + enqueue_result.made_due_count
-                + enqueue_result.reopened_count
-            )
-        except Exception as exc:
-            logger.error(
-                "intel_v3_full_refresh_enqueued user_id=%s "
-                "status=enqueue_failed error=%s",
-                self.user_id, exc,
-            )
-            return {
-                "status": "enqueue_failed",
-                "queued_ticker_count": 0,
-                "total_holding_count": total_holding_count,
-                "existing_certified_snapshot_id": existing_certified_snapshot_id,
-                "existing_certified_snapshot": existing_certified,
-                "message": f"Failed to enqueue refresh: {exc}",
+            stale_analyst_tickers = _stale_analyst_tickers_from_gate(gate_result)
+            gate_succeeded = True
+            freshness_gate_summary = {
+                "intel_status":                  gate_result.intel_status,
+                "deploy_status":                 gate_result.deploy_status,
+                "deploy_blockers":               gate_result.deploy_blockers,
+                "urgent_refresh_count":          gate_result.refresh_plan.urgent_refresh_count,
+                "gate_check_ms":                 gate_result.gate_check_ms,
+                "stale_analyst_tickers_count":   len(stale_analyst_tickers),
+                "total_holding_count":           total_holding_count,
             }
+        except Exception as _gate_exc:
+            logger.warning(
+                "intel_v3_fast_freshness_gate_failed user_id=%s error=%s — "
+                "falling back to full-ticker enqueue",
+                self.user_id, _gate_exc,
+            )
+            # gate_succeeded remains False; stale_analyst_tickers = all tickers
 
-        # Determine whether there are already in-progress claimed jobs
-        # (a previous click may still be running). We don't block on it — just
-        # inform the UI whether this is a brand-new request or a re-attach.
-        status = "refresh_in_progress" if (enqueue_result.touched_count > 0 and enqueue_result.created_count == 0) else "refresh_requested"
+        # When gate shows price/weight is stale, fire an urgent Watchtower price refresh
+        # as a fire-and-forget background task. This does not block the enqueue response.
+        urgent_refresh_triggered = False
+        if gate_succeeded:
+            deploy_blockers = getattr(
+                getattr(gate_result, "refresh_plan", None), "deploy_blockers", ()
+            ) or gate_result.deploy_blockers
+            price_weight_stale = any(
+                b in ("price", "portfolio_weight") for b in (deploy_blockers or [])
+            )
+            if price_weight_stale:
+                try:
+                    from .watchtower_background_refresh_worker_v1 import (
+                        run_watchtower_cycle_for_user,
+                    )
+                    from .watchtower_callables_v1 import (
+                        build_default_price_refresh_callable,
+                        build_default_analyst_enqueue_callable,
+                    )
+                    _asyncio.create_task(
+                        run_watchtower_cycle_for_user(
+                            self.user_id,
+                            self.client,
+                            price_refresh_callable=build_default_price_refresh_callable(
+                                self.client
+                            ),
+                            analyst_job_enqueue_callable=build_default_analyst_enqueue_callable(
+                                self.client
+                            ),
+                        )
+                    )
+                    urgent_refresh_triggered = True
+                    logger.info(
+                        "intel_v3_urgent_watchtower_refresh_triggered user_id=%s "
+                        "deploy_blockers=%s",
+                        self.user_id, list(deploy_blockers or []),
+                    )
+                except Exception as _wt_exc:
+                    logger.warning(
+                        "intel_v3_urgent_watchtower_refresh_trigger_failed user_id=%s "
+                        "error=%s",
+                        self.user_id, _wt_exc,
+                    )
+
+        # Enqueue analyst refresh only for tickers with stale/missing analyst evidence.
+        # When gate succeeded and no tickers are stale, queued_count=0 (refresh not needed).
+        # When gate failed, we fall back to enqueuing all tickers (safe degradation).
+        enqueue_tickers = stale_analyst_tickers
+        queued_count = 0
+        enqueue_result_created = 0
+        enqueue_result_touched = 0
+        enqueue_result_made_due = 0
+        enqueue_result_reopened = 0
+
+        if enqueue_tickers:
+            try:
+                enqueue_result = await _asyncio.to_thread(
+                    enqueue_refresh_jobs,
+                    self.client,
+                    user_id=self.user_id,
+                    tickers=enqueue_tickers,
+                    now=started_at,
+                )
+                queued_count = (
+                    enqueue_result.created_count
+                    + enqueue_result.touched_count
+                    + enqueue_result.made_due_count
+                    + enqueue_result.reopened_count
+                )
+                enqueue_result_created = enqueue_result.created_count
+                enqueue_result_touched = enqueue_result.touched_count
+                enqueue_result_made_due = enqueue_result.made_due_count
+                enqueue_result_reopened = enqueue_result.reopened_count
+            except Exception as exc:
+                logger.error(
+                    "intel_v3_full_refresh_enqueued user_id=%s "
+                    "status=enqueue_failed error=%s",
+                    self.user_id, exc,
+                )
+                return {
+                    "status": "enqueue_failed",
+                    "queued_ticker_count": 0,
+                    "total_holding_count": total_holding_count,
+                    "existing_certified_snapshot_id": existing_certified_snapshot_id,
+                    "existing_certified_snapshot": existing_certified,
+                    "freshness_gate": freshness_gate_summary,
+                    "message": f"Failed to enqueue refresh: {exc}",
+                }
+
+        # Determine status. When gate determined analyst evidence is current
+        # (0 stale tickers), the response status reflects that.
+        if gate_succeeded and not stale_analyst_tickers:
+            status = "analyst_evidence_current"
+        elif enqueue_result_touched > 0 and enqueue_result_created == 0:
+            status = "refresh_in_progress"
+        else:
+            status = "refresh_requested"
 
         run_click_response_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
         refresh_jobs_pending_count = queued_count
-        refresh_jobs_remaining_count = queued_count  # all just enqueued, none consumed yet
+        refresh_jobs_remaining_count = queued_count
 
         logger.info(
             "intel_v3_full_refresh_enqueued user_id=%s "
-            "status=%s queued_ticker_count=%d total_holding_count=%d "
+            "status=%s queued_ticker_count=%d stale_analyst_count=%d total_holding_count=%d "
             "created=%d touched=%d made_due=%d reopened=%d "
             "existing_certified_snapshot=%s existing_certified_snapshot_id=%s "
             "run_click_response_ms=%d certified_snapshot_available_on_click=%s "
-            "refresh_jobs_pending_count=%d refresh_jobs_remaining_count=%d",
+            "refresh_jobs_pending_count=%d gate_succeeded=%s",
             self.user_id,
             status,
             queued_count,
+            len(stale_analyst_tickers),
             total_holding_count,
-            enqueue_result.created_count,
-            enqueue_result.touched_count,
-            enqueue_result.made_due_count,
-            enqueue_result.reopened_count,
+            enqueue_result_created,
+            enqueue_result_touched,
+            enqueue_result_made_due,
+            enqueue_result_reopened,
             existing_certified,
             existing_certified_snapshot_id,
             run_click_response_ms,
             existing_certified,
             refresh_jobs_pending_count,
-            refresh_jobs_remaining_count,
+            gate_succeeded,
         )
+
+        # Update gate summary with post-enqueue state
+        if freshness_gate_summary:
+            freshness_gate_summary["has_pending_worker_jobs"] = (queued_count > 0)
 
         return {
             "status": status,
             "queued_ticker_count": queued_count,
+            "stale_analyst_ticker_count": len(stale_analyst_tickers),
             "total_holding_count": total_holding_count,
             "existing_certified_snapshot_id": existing_certified_snapshot_id,
             "existing_certified_snapshot": existing_certified,
@@ -724,9 +829,13 @@ class IntelV3Service:
             "certified_snapshot_available_on_click": existing_certified,
             "refresh_jobs_pending_count": refresh_jobs_pending_count,
             "refresh_jobs_remaining_count": refresh_jobs_remaining_count,
+            "freshness_gate": freshness_gate_summary,
+            "urgent_refresh_triggered": urgent_refresh_triggered,
             "message": (
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."
+                if queued_count > 0
+                else "Analyst evidence is current — no refresh needed."
             ),
         }
 
@@ -1593,6 +1702,27 @@ class IntelV3Service:
         except Exception as exc:
             logger.warning("intel_v3.get_run_by_id_failed run_id=%s error=%s", run_id, exc)
             return None
+
+
+def _stale_analyst_tickers_from_gate(gate_result: Any) -> list[str]:
+    """Extract tickers with stale/missing analyst LLM evidence from gate result.
+
+    Used by enqueue_run_v3 to only enqueue analyst refresh jobs for tickers
+    where EVIDENCE_TYPE_ANALYST_LLM is not fresh/aging. Tickers with fresh
+    analyst evidence are not re-enqueued, preventing a blind 34-ticker refresh
+    on every Run Intel click.
+    """
+    from .watchtower_freshness_ledger_v1 import (
+        EVIDENCE_TYPE_ANALYST_LLM,
+        FRESHNESS_FRESH,
+        FRESHNESS_AGING,
+    )
+    stale: list[str] = []
+    for rec in getattr(gate_result, "evidence_records", []):
+        if rec.evidence_type == EVIDENCE_TYPE_ANALYST_LLM and rec.ticker:
+            if rec.freshness_status not in (FRESHNESS_FRESH, FRESHNESS_AGING):
+                stale.append(rec.ticker)
+    return stale
 
 
 def _hash_payload(payload: dict) -> str:

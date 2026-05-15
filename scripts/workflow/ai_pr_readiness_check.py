@@ -68,7 +68,7 @@ PRODUCT_CODE_RE = re.compile(
 )
 
 WORKFLOW_ONLY_RE = re.compile(
-    r"^(docs/|scripts/|\.github/|\.claude/|CLAUDE\.md$)",
+    r"^(docs/|\.github/|\.claude/|CLAUDE\.md$|scripts/)",
     re.IGNORECASE,
 )
 
@@ -80,6 +80,12 @@ DEPENDENCY_RE = re.compile(
 
 ENV_FILE_RE = re.compile(r"^\.env$|^\.env\.", re.IGNORECASE)
 UI_FILE_RE = re.compile(r"\.(tsx|jsx|html|css|vue)$", re.IGNORECASE)
+
+# Sections/phrases that appear in the PR template but are not product-level runtime claims.
+RUNTIME_TEMPLATE_ONLY_RE = re.compile(
+    r"runtime.{0,30}validation.{0,30}note|runtime.{0,30}n/a|no\s+runtime\s+or\s+design",
+    re.IGNORECASE,
+)
 
 
 def _run(cmd: List[str]) -> Optional[str]:
@@ -208,6 +214,7 @@ class Checker:
         p = Path(LEDGER_PATH)
         self.ledger_text = p.read_text(encoding="utf-8", errors="replace") if p.exists() else None
 
+    # A — Usage ledger enforcement
     def check_ledger(self) -> None:
         lchanged = ledger_changed(self.files)
         needs_ledger = self.level >= 1 or (
@@ -242,6 +249,7 @@ class Checker:
                     "Fill model, chat strategy, main drivers, waste classification if available."
                 )
 
+    # B — PR body required sections
     def check_sections(self) -> None:
         if not self.body:
             self._warn("No PR body provided — skipping section checks.")
@@ -250,6 +258,7 @@ class Checker:
             if sec.lower() not in self.body.lower():
                 self._fail(f"PR body missing required section/anchor: '{sec}'")
 
+    # C — Usage metadata fields
     def check_metadata(self) -> None:
         if not self.body:
             return
@@ -258,6 +267,7 @@ class Checker:
             if field.lower() not in bl:
                 self._warn(f"PR body missing usage metadata field: '{field}'")
 
+    # D — Scope and validation
     def check_scope(self) -> None:
         if not self.body:
             return
@@ -273,8 +283,17 @@ class Checker:
             if not re.search(r"because|reason|justif", bl):
                 self._warn("Full test suite claimed — include justification for why broader tier was needed.")
 
+    # E — Runtime/production fix gate
     def check_runtime(self) -> None:
         if not self.body or not RUNTIME_RE.search(self.body):
+            return
+        # Workflow-only PRs are exempt: the PR template contains the word "runtime" in a section
+        # header ("Runtime/design validation note") which should not trigger this gate.
+        if self.files is not None and is_workflow_only(self.files):
+            return
+        # Also skip if the only runtime mentions are template-placeholder phrases.
+        body_stripped = RUNTIME_TEMPLATE_ONLY_RE.sub("", self.body)
+        if not RUNTIME_RE.search(body_stripped):
             return
         bl = self.body.lower()
         has_evidence = any(k in bl for k in (
@@ -290,6 +309,7 @@ class Checker:
             if not any(k in bl for k in ("root cause", "exact boundary", "failure seam", "failing seam")):
                 self._warn("PR may describe symptom patching — ensure root cause / failure-seam evidence is present.")
 
+    # F — Design transformation gate
     def check_design(self) -> None:
         if not self.body:
             return
@@ -309,6 +329,7 @@ class Checker:
             if not any(k in bl for k in ("accessibility", "reduced-motion", "contrast")):
                 self._warn("PR adds motion/gradients/glass — include reduced-motion/accessibility/contrast note.")
 
+    # G — Same-chat / context budget
     def check_same_chat(self) -> None:
         if not self.body:
             return
@@ -323,6 +344,7 @@ class Checker:
         if re.search(r"new.*slice|different.*feature|unrelated", bl):
             self._warn("Same-chat possibly used for new unrelated slice — fresh chat is default for new PRs.")
 
+    # H — Patch exhaustion
     def check_patch_exhaustion(self) -> None:
         if not self.body:
             return
@@ -344,6 +366,7 @@ class Checker:
                     "Follow-up count 2 — include a fresh-chat escalation or full-plumbing analysis note."
                 )
 
+    # I — Model routing / reviewer gate
     def check_model_routing(self) -> None:
         if not self.body:
             return
@@ -363,6 +386,7 @@ class Checker:
         if "opus" in bl and not re.search(r"architecture|root.cause|complex", bl):
             self._warn("Opus used without architecture/root-cause justification — Sonnet is the default.")
 
+    # J — Subagent discipline
     def check_subagents(self) -> None:
         if not self.body:
             return
@@ -375,6 +399,7 @@ class Checker:
             if self.level <= 1:
                 self._warn("Subagent fan-out mentioned for Level 1 work — prefer single-agent.")
 
+    # K — Test discipline
     def check_tests(self) -> None:
         if not self.body:
             return
@@ -388,6 +413,7 @@ class Checker:
             if not any(k in bl for k in ("screenshot", "visual", "manual ui")):
                 self._warn("UI files changed — include screenshot, visual, or manual UI validation note.")
 
+    # L — CLAUDE.md context-debt gate
     def check_claude_md(self) -> None:
         p = Path("CLAUDE.md")
         if not p.exists():
@@ -403,12 +429,14 @@ class Checker:
             else:
                 self._warn(f"CLAUDE.md is {lines} lines (over 200-line budget). Compact when next touched.")
 
+    # M — Safety hook documented
     def check_safety_hook(self) -> None:
         gate_doc = Path("docs/ai/AI_PR_READINESS_GATE.md")
         hook = Path(".claude/hooks/ai_pr_readiness_stop.sh")
         if gate_doc.exists() and not hook.exists():
             self._warn("AI_PR_READINESS_GATE.md exists but .claude/hooks/ai_pr_readiness_stop.sh not found.")
 
+    # N — Dependency/migration/env changes
     def check_deps(self) -> None:
         if self.files is None or not self.body:
             return
@@ -427,6 +455,7 @@ class Checker:
                 if "rollback" not in bl:
                     self._warn("Migration/SQL file changed — include a rollback plan.")
 
+    # O — PR size budget
     def check_size(self) -> None:
         if self.files is None:
             return

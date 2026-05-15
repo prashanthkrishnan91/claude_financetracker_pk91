@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 1 — Intel v3 durable resumable analyst refresh worker)
+Last updated: 2026-05-15 (post Build 1D — Watchtower Fresh Evidence Foundation)
 
 ## Purpose
 
@@ -23,6 +23,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-15 — **Build 1D: Watchtower Fresh Evidence Foundation** — Builds the evidence freshness backbone for Intel v3 and future Deploy. New modules: `watchtower_freshness_ledger_v1.py` (10 evidence types, configurable SLAs, EvidenceRecord dataclass, deploy/decision eligibility per type), `watchtower_refresh_planner_v1.py` (WatchtowerRefreshPlan with fresh/stale/missing counts, deploy_blockers, intel_blockers, refresh jobs sorted by priority: urgent/normal/background), `watchtower_evidence_collector_v1.py` (reads portfolio_snapshots, positions, recommendations, agent_insights, intel_v3_snapshots — no new tables), `watchtower_deploy_gate_v1.py` (strict: price/position/portfolio_weight stale → deploy_blocked; analyst_llm stale → informational only), `intel_v3_fast_freshness_gate_v1.py` (click-time gate, sub-200ms, emits `intel_v3_fast_freshness_gate_summary` log), `watchtower_background_refresh_worker_v1.py` (priority-based refresh cycle: price first, analyst deferred to existing worker, in-progress dedup). `enqueue_run_v3()` now calls fast freshness gate and returns `freshness_gate` in response. 39 new tests: all pass. No SQL migration needed (reads existing tables). Certification contract unchanged. Pre-existing pydantic_settings failures in environment are not caused by this PR.
 
 - 2026-05-15 — **Build 1.5 (merged PR #328): Intel v3 sub-10-second user-facing experience + pre-merge patch** — Root cause of multi-minute UX: worker loop ran ONE batch per 60-second sleep. With 34 tickers / 10 per batch = 4 batches × 60s gap = minutes. Fix: (1) `_drain_cycle()` added to entrypoint — runs multiple batches in one cycle when `run_resumable=True` and budget allows (max 8 batches / 300s wall cap); (2) drain cycle stops immediately when `claimed_job_count=0` + `run_resumable=True` (retry backoff — nothing to do, don't spin); (3) `intel_v3.analyst_refresh_worker_drain_cycle_summary` log emits `worker_batches_drained`, `worker_drain_total_duration_ms`, `worker_idle_delay_skipped`, `time_to_worker_certified_snapshot_ms`; (4) backoff stop log: `intel_v3.analyst_refresh_worker_drain_cycle_stopped reason=backoff_or_no_due_jobs`; (5) `get_latest_snapshot()` emits `snapshot_response_ms`; (6) `enqueue_run_v3()` emits `run_click_response_ms`, `certified_snapshot_available_on_click`, `refresh_jobs_pending_count`, `refresh_jobs_remaining_count`; (7) banner `refreshing_analyst_intelligence` copy updated (removed false "60 seconds" claim); (8) `IntelV3Cockpit.tsx` polling guard: `stopPolling()` only fires when `new Date(snap.generated_at).getTime() > refreshStartedAt.current` — amber banner no longer collapses on pre-click certified snapshot. Build 1 trust guarantees intact: prewarm deferred until all jobs drained, certification contract unchanged, no fake freshness. 14 backend tests + 39 frontend banner tests. No SQL, no schema changes, no certification weakening.
 
@@ -58,6 +60,19 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
+
+**Build 2: Evidence-grade certification and publish contract.** Now that the Watchtower Fresh Evidence Foundation is in place, Build 2 can:
+  1. Wire `WatchtowerRefreshPlan.deploy_blockers` into the certified snapshot publish gate — only publish `worker_certified` when all deploy-critical evidence is fresh.
+  2. Add per-type freshness completeness to `CertifiedIntelRunContractResult` so the contract checks price/position/weight freshness, not just analyst evidence.
+  3. Wire the Watchtower background refresh worker into a separate Railway process (alongside or replacing the analyst_refresh_worker entrypoint) that polls and refreshes stale price slices on schedule.
+  4. Expose deploy gate status in the API response for the Deploy page.
+
+Key logs to confirm Build 1D gate is running in production:
+  - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N` — confirm gate runs at click time.
+  - `watchtower_freshness_summary user_id=... fresh_by_type=... stale_by_type=...` — confirm freshness visibility.
+  - Check that `gate_check_ms` stays under 500ms.
+
+**Previous production validation steps (still apply):**
 
 **Production validation of Build 1.5 sub-10s UX + drain cycle.** Re-run the Run Intel v3 button. Key log signals:
 

@@ -714,6 +714,33 @@ class IntelV3Service:
             refresh_jobs_remaining_count,
         )
 
+        # Fast freshness gate — classify evidence state at click time.
+        # Non-blocking: gate failure never prevents the enqueue response.
+        # Does NOT run full 34-ticker IO — reads existing indexed DB tables only.
+        freshness_gate_summary: dict[str, Any] = {}
+        try:
+            from .intel_v3_fast_freshness_gate_v1 import run_fast_freshness_gate
+            gate_result = await run_fast_freshness_gate(
+                self.user_id,
+                self.client,
+                now=started_at,
+                existing_certified_snapshot_id=existing_certified_snapshot_id,
+                has_pending_worker_jobs=(queued_count > 0),
+                total_holdings=total_holding_count,
+            )
+            freshness_gate_summary = {
+                "intel_status":          gate_result.intel_status,
+                "deploy_status":         gate_result.deploy_status,
+                "deploy_blockers":       gate_result.deploy_blockers,
+                "urgent_refresh_count":  gate_result.refresh_plan.urgent_refresh_count,
+                "gate_check_ms":         gate_result.gate_check_ms,
+            }
+        except Exception as _gate_exc:
+            logger.warning(
+                "intel_v3_fast_freshness_gate_failed user_id=%s error=%s",
+                self.user_id, _gate_exc,
+            )
+
         return {
             "status": status,
             "queued_ticker_count": queued_count,
@@ -724,6 +751,7 @@ class IntelV3Service:
             "certified_snapshot_available_on_click": existing_certified,
             "refresh_jobs_pending_count": refresh_jobs_pending_count,
             "refresh_jobs_remaining_count": refresh_jobs_remaining_count,
+            "freshness_gate": freshness_gate_summary,
             "message": (
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."

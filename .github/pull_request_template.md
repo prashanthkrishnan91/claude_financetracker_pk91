@@ -41,7 +41,7 @@ Run `bash scripts/ai/usage_snapshot.sh --pr <number> --model <model> --repo-area
 
 ## AI PR readiness
 - Readiness check: pass / pass-with-known-gaps / not run
-- Usage ledger row: committed / unavailable — [reason]
+- Usage ledger row: committed / not required — Level 0 docs-only reason / blocked — explain why
 - Prompt ID / phase:
 - Model:
 - Chat strategy: new-chat / same-chat

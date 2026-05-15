@@ -226,21 +226,45 @@ class Checker:
     # A — Usage ledger enforcement
     def check_ledger(self) -> None:
         lchanged = ledger_changed(self.files)
-        needs_ledger = self.level >= 1 or (
+        is_level_1_plus = self.level >= 1
+        is_docs_only = self.files is not None and is_workflow_only(self.files)
+
+        # Determine if ledger row is required.
+        # Level 1+ always requires ledger (no exception for "unavailable").
+        # Level 0 docs-only PRs may skip ledger only with explicit --allow-no-ledger.
+        # Product PRs (even Level 0) require ledger.
+        needs_ledger = is_level_1_plus or (
             self.files is not None
             and (is_product_pr(self.files) or not is_workflow_only(self.files))
         )
+
         if needs_ledger and not self.allow_no_ledger:
-            if self.files is not None and not lchanged and not says_unavailable(self.body):
-                self._fail(
-                    f"{LEDGER_PATH} not changed and usage not marked unavailable. "
-                    "Commit a ledger row or add 'Usage ledger row: unavailable — <reason>'."
-                )
-            elif self.files is None:
-                self._warn(
-                    f"Cannot verify {LEDGER_PATH} was updated (git unavailable). "
-                    "Ensure a row is committed or usage is explicitly unavailable."
-                )
+            # Level 1+ PRs: ledger row is mandatory (unavailable does NOT bypass this).
+            if is_level_1_plus:
+                if self.files is not None and not lchanged:
+                    self._fail(
+                        f"Level {self.level} PR requires {LEDGER_PATH} changed. "
+                        "Commit a manual ledger row with metadata fields and mark token/delta fields unavailable if needed. "
+                        "Usage unavailable does not waive the ledger row requirement."
+                    )
+                elif self.files is None:
+                    self._warn(
+                        f"Cannot verify {LEDGER_PATH} was updated (git unavailable). "
+                        f"Level {self.level} requires a committed row."
+                    )
+            # Level 0 product/mixed PRs: ledger row required unless marked unavailable.
+            else:
+                if self.files is not None and not lchanged and not says_unavailable(self.body):
+                    self._fail(
+                        f"{LEDGER_PATH} not changed and usage not marked unavailable. "
+                        "Commit a ledger row or add 'Usage unavailable — <reason>'."
+                    )
+                elif self.files is None:
+                    self._warn(
+                        f"Cannot verify {LEDGER_PATH} was updated (git unavailable). "
+                        "Ensure a row is committed or usage is explicitly unavailable."
+                    )
+
         if claims_usage(self.body) and self.files is not None and not lchanged:
             self._fail(
                 f"PR body claims usage is tracked but {LEDGER_PATH} was not changed. "
@@ -613,8 +637,65 @@ def run_self_tests() -> int:
     eq("env_template_re_sample", bool(ENV_TEMPLATE_RE.search(".env.sample")), True)
     eq("env_template_re_dist", bool(ENV_TEMPLATE_RE.search(".env.dist")), True)
     eq("env_template_re_non_env", bool(ENV_TEMPLATE_RE.search("config.py")), False)
+
+    # Level 1+ ledger enforcement tests
+    print("\n  === Ledger enforcement (strict for Level 1+) ===")
+
+    # Test: Level 1 + usage unavailable + no ledger = FAIL
+    c = Checker(level=1, body="## Summary\nLevel: 1\nUsage unavailable — no ccusage", allow_no_ledger=False, warn_only=False)
+    c.files = ["src/app.tsx"]
+    c.ledger_text = ""
+    c.check_ledger()
+    if c.fails:
+        print("  pass: Level 1 + usage unavailable + no ledger = hard fail")
+    else:
+        print(f"  FAIL: Level 1 + usage unavailable + no ledger should fail; got passes={not c.fails}")
+        errors += 1
+
+    # Test: Level 1 + usage unavailable + ledger changed = PASS (no fail)
+    c2 = Checker(level=1, body="## Summary\nLevel: 1\nUsage unavailable — no ccusage", allow_no_ledger=False, warn_only=False)
+    c2.files = ["src/app.tsx", "docs/ai/USAGE_LEDGER.md"]
+    c2.ledger_text = "| PR | Prompt | Phase | Model |\n|---|---|---|---|\n| #123 | p01 | initial | sonnet | unavailable | unavailable |"
+    c2.check_ledger()
+    if not c2.fails:
+        print("  pass: Level 1 + usage unavailable + ledger changed = pass")
+    else:
+        print(f"  FAIL: Level 1 + usage unavailable + ledger changed should pass; got fails={c2.fails}")
+        errors += 1
+
+    # Test: Level 0 docs-only + usage unavailable + no ledger = PASS/WARN
+    c3 = Checker(level=0, body="## Summary\nLevel: 0\nUsage unavailable — docs only", allow_no_ledger=False, warn_only=False)
+    c3.files = ["docs/ai/HANDOFF.md"]
+    c3.ledger_text = ""
+    c3.check_ledger()
+    if not c3.fails:
+        print("  pass: Level 0 docs-only + usage unavailable + no ledger = no hard fail")
+    else:
+        print(f"  FAIL: Level 0 docs-only + usage unavailable + no ledger should not hard-fail; got fails={c3.fails}")
+        errors += 1
+
+    # Test: PR claims usage tracked + no ledger change = FAIL
+    c4 = Checker(body="## Summary\nUsage tracked: yes\nUsage ledger row: committed", allow_no_ledger=False, warn_only=False)
+    c4.files = ["src/app.tsx"]
+    c4.check_ledger()
+    if c4.fails:
+        print("  pass: PR claims usage tracked + no ledger change = hard fail")
+    else:
+        print(f"  FAIL: PR claims usage tracked + no ledger change should fail; got passes={not c4.fails}")
+        errors += 1
+
+    # Test: PR claims usage tracked + ledger changed = PASS (no fail)
+    c5 = Checker(body="## Summary\nUsage tracked: yes\nUsage ledger row: committed", allow_no_ledger=False, warn_only=False)
+    c5.files = ["src/app.tsx", "docs/ai/USAGE_LEDGER.md"]
+    c5.check_ledger()
+    if not c5.fails:
+        print("  pass: PR claims usage tracked + ledger changed = pass")
+    else:
+        print(f"  FAIL: PR claims usage tracked + ledger changed should pass; got fails={c5.fails}")
+        errors += 1
+
     if errors == 0:
-        print("All self-tests passed.")
+        print("\nAll self-tests passed.")
     return errors
 
 

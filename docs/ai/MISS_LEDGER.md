@@ -21,6 +21,23 @@ Follow-up needed:
 
 ---
 
+### 2026-05-15 — OS v4 AI PR Readiness Gate treated usage-unavailable too broadly
+
+Repo: claude_financetracker_pk91 / cross-repo pattern
+Area: Workflow enforcement / ledger compliance
+Severity: Level 2 workflow enforcement gap
+Miss: The initial S-grade readiness gate (ai_pr_readiness_check.py) allowed Level 1+ PRs to skip the `docs/ai/USAGE_LEDGER.md` row entirely by claiming "usage unavailable — <reason>". This made the ledger audit trail incomplete: PRs without ccusage/tooling could omit evidence entirely instead of committing a sanitized row with metadata and unavailable token/delta fields.
+Impact: Incomplete ledger trail for Level 1+ PRs; audit loss when tooling was unavailable.
+What caught it: V4.1 patch OS review.
+Root cause: "Usage unavailable" was conflated with "ledger row unavailable". The intent was to mark token-value fields unavailable, not to waive the ledger row requirement for Level 1+.
+What should catch it next time: Strict enforcement in ai_pr_readiness_check.py; Level 1+ always requires ledger row; Level 0 docs-only may skip; unavailable applies only to token/delta fields, not the row itself.
+One-off or repeated: One-off enforcement gap; promoted to strict rule.
+Promotion target: ai_pr_readiness_check.py (check_ledger), AI_USAGE_TRACKING.md, AI_PR_READINESS_GATE.md.
+Action taken: Tightened ai_pr_readiness_check.py to enforce ledger row for Level 1+ regardless of tooling availability; updated docs to clarify "unavailable" scope; added self-tests; updated PR template.
+Follow-up needed: No.
+
+---
+
 ### 2026-05-15 — AI PR Readiness Gate failed on UI PR missing design scope + reviewer markers
 
 Repo: claude_financetracker_pk91

@@ -34,7 +34,7 @@ python3 scripts/workflow/ai_pr_readiness_check.py --self-test
 ## Hard failures vs warnings
 
 **Hard failures** (exit 1) — must be fixed before opening/updating the PR:
-- Level 1+ PR does not change `USAGE_LEDGER.md` and does not mark usage unavailable
+- Level 1+ PR does not change `USAGE_LEDGER.md` (ledger row is mandatory regardless of tooling availability)
 - PR body claims usage tracking but `USAGE_LEDGER.md` was not changed
 - Production/runtime PR lacks failure-seam evidence
 - Design overhaul PR missing scope classification
@@ -54,7 +54,14 @@ python3 scripts/workflow/ai_pr_readiness_check.py --self-test
 
 ## Usage ledger enforcement
 
-The key invariant: **PR body usage claims must match committed ledger state.**
+The key invariant: **Level 1+ PRs always require a committed ledger row in `USAGE_LEDGER.md`.** "Usage unavailable" does not waive the ledger row requirement. It may only be used to mark specific token/delta fields as unavailable.
+
+**Level 1+ PRs:** Ledger row mandatory.
+- If ccusage/tooling is unavailable, commit a manual row with all metadata fields (Prompt ID, Phase, Model, Chat strategy, Main drivers, Waste classification, Follow-up count) filled. Mark only token count and delta columns `unavailable`.
+
+**Level 0 docs-only PRs:** Ledger row optional.
+- May skip the row entirely if no code/product changes.
+- If tooling unavailable, mark it explicitly in PR body.
 
 Usage claim patterns that the checker detects (and will hard-fail if ledger is not updated):
 - `Usage ledger row: committed`
@@ -64,8 +71,6 @@ Usage claim patterns that the checker detects (and will hard-fail if ledger is n
 - `see docs/ai/USAGE_LEDGER.md`
 - `see usage ledger`
 - `ledger row: committed`
-
-If tooling is unavailable: manual row still required with metadata; token/delta fields marked unavailable.
 
 ## Context / same-chat rules
 
@@ -108,7 +113,10 @@ The hook never auto-commits, never blocks coding, and never exposes `.ai/usage` 
 ## What to do when it fails
 
 1. Read the specific failure message.
-2. Ledger failures: run `bash scripts/ai/usage_snapshot.sh --append-ledger ...` or add a manual row to `docs/ai/USAGE_LEDGER.md`.
+2. Ledger failures (Level 1+ only):
+   - If ccusage is available: run `bash scripts/ai/usage_snapshot.sh --append-ledger ...`
+   - If ccusage is unavailable: manually add a row to `docs/ai/USAGE_LEDGER.md` with metadata fields (Prompt ID, Phase, Model, Chat strategy, Main drivers, Waste classification, Follow-up count) and mark token/delta fields `unavailable`.
+   - Level 0 docs-only PRs may skip ledger, but must document why in PR body.
 3. Missing PR body sections: fill the `## AI PR readiness` block in the PR body.
 4. Runtime/design failures: add the required evidence or classification to the PR body.
 5. Re-run the checker to confirm all hard failures are resolved.

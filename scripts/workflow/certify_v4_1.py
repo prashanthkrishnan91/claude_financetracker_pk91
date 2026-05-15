@@ -15,6 +15,8 @@ REQUIRED_FILES = [
     "docs/ai/USAGE_LEDGER.md",
     "scripts/workflow/ai_pr_readiness_check.py",
     ".github/workflows/ai-pr-readiness.yml",
+    "docs/ai/DANGEROUS_ACTION_GUARD.md",
+    ".claude/hooks/dangerous_action_guard.sh",
 ]
 
 PR_TEMPLATE_REQUIRED_STRINGS = [
@@ -192,6 +194,15 @@ def main() -> int:
     else:
         found = hook.name if hook.exists() else gate_doc.name
         ok(f"Readiness gate hook/doc present: {found}")
+
+    danger_hook_path = ROOT / ".claude/hooks/dangerous_action_guard.sh"
+    if danger_hook_path.exists():
+        hook_text = danger_hook_path.read_text(encoding="utf-8")
+        if "DANGEROUS_ACTION_GUARD" not in hook_text:
+            fail("dangerous_action_guard.sh does not reference DANGEROUS_ACTION_GUARD env var")
+            failed = True
+        else:
+            ok("dangerous_action_guard.sh references DANGEROUS_ACTION_GUARD env var")
 
     return 1 if failed else 0
 

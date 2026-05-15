@@ -11,6 +11,7 @@ Pure function-factory module — no IO, no side effects at import time.
 """
 from __future__ import annotations
 
+import uuid as _uuid_mod
 from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import UUID
@@ -77,3 +78,22 @@ def build_default_analyst_enqueue_callable(client: Any) -> Any:
         )
 
     return _enqueue
+
+
+def build_default_intel_republish_callable(client: Any) -> Any:
+    """Return a coroutine callable that deterministically rebuilds the Intel v3 snapshot.
+
+    Wraps IntelV3Service.run_prewarm_snapshot() — zero LLM calls, no analyst jobs.
+    Called after Watchtower price refresh to republish the Intel snapshot with
+    fresh evidence. Accepts user_id; triggers the all-or-nothing certification contract.
+
+    The callable is injected into compare_and_republish() to preserve the Watchtower
+    worker boundary (this module may import IntelV3Service; the worker may not).
+    """
+    async def _republish(user_id: UUID) -> Any:
+        from .intel_v3_service import IntelV3Service
+        svc = IntelV3Service(user_id=user_id)
+        prewarm_run_id = str(_uuid_mod.uuid4())
+        return await svc.run_prewarm_snapshot(prewarm_run_id=prewarm_run_id)
+
+    return _republish

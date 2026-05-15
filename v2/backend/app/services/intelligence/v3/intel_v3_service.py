@@ -113,18 +113,35 @@ class IntelV3Service:
             total = sum(action_counts.values()) if action_counts else 0
             snapshot_source = payload.get("snapshot_source", "unknown")
 
+            # Build 2: embed evidence_freshness_state so callers can show honest
+            # state without separate round-trips. Does NOT modify the persisted payload.
+            generated_at = payload.get("generated_at")
+            try:
+                from .watchtower_intel_republisher_v1 import get_evidence_freshness_state
+                evidence_freshness_state = await get_evidence_freshness_state(
+                    self.user_id,
+                    self.client,
+                    intel_snapshot_generated_at=generated_at,
+                )
+            except Exception:
+                evidence_freshness_state = "certified_current"
+
+            response_payload = dict(payload)
+            response_payload["evidence_freshness_state"] = evidence_freshness_state
+
             logger.info(
                 "intel_v3_snapshot_response_summary user_id=%s result=found "
                 "snapshot_id=%s total_cards=%d action_counts=%s "
-                "snapshot_source=%s snapshot_response_ms=%d",
+                "snapshot_source=%s evidence_freshness_state=%s snapshot_response_ms=%d",
                 self.user_id,
                 snapshot_id,
                 total,
                 action_counts,
                 snapshot_source,
+                evidence_freshness_state,
                 snapshot_response_ms,
             )
-            return payload
+            return response_payload
         except Exception as exc:
             logger.warning(
                 "intel_v3_snapshot_response_summary user_id=%s result=error error=%s",

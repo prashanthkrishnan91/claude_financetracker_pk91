@@ -273,7 +273,14 @@ export function IntelV3Cockpit() {
 
       const isCertificationFailed = snap.snapshot_source === "certification_failed";
 
-      if (isCertified || isCertificationFailed) {
+      // Only stop polling when the snapshot is strictly newer than the click that
+      // started this refresh session. Without this guard we would stop on the OLD
+      // certified snapshot that was already present before the user clicked Run.
+      const isNewerThanClick =
+        refreshStartedAt.current !== null &&
+        new Date(snap.generated_at).getTime() > refreshStartedAt.current;
+
+      if ((isCertified || isCertificationFailed) && isNewerThanClick) {
         stopPolling();
       }
     }, REFRESH_POLL_INTERVAL_MS);
@@ -286,7 +293,10 @@ export function IntelV3Cockpit() {
     };
   }, []);
 
-  // When the snapshot becomes certified while polling, stop polling
+  // When the snapshot becomes certified while polling, stop polling.
+  // Guard: only stop when the snapshot was generated AFTER the click that
+  // started this session — otherwise we stop immediately on the pre-existing
+  // certified snapshot and the amber "refresh running" banner never shows.
   useEffect(() => {
     if (!isRefreshing || !snapshot) return;
     const isCertified =
@@ -296,7 +306,10 @@ export function IntelV3Cockpit() {
       snapshot.total_holding_count > 0 &&
       snapshot.certified_holding_count === snapshot.total_holding_count;
     const isCertificationFailed = snapshot.snapshot_source === "certification_failed";
-    if (isCertified || isCertificationFailed) {
+    const isNewerThanClick =
+      refreshStartedAt.current !== null &&
+      new Date(snapshot.generated_at).getTime() > refreshStartedAt.current;
+    if ((isCertified || isCertificationFailed) && isNewerThanClick) {
       stopPolling();
     }
   }, [snapshot, isRefreshing, stopPolling]);

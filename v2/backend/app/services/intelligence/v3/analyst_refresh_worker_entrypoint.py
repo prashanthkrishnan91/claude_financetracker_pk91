@@ -119,6 +119,17 @@ async def _drain_cycle(
         elapsed = time.monotonic() - cycle_start
         if not result.run_resumable:
             break
+        if result.claimed_job_count == 0:
+            # run_resumable=True but no jobs were claimed — all remaining jobs are
+            # in retry backoff and not yet due. Stop draining; the next poll cycle
+            # will pick them up when their backoff expires. Do NOT set
+            # idle_delay_skipped — we did not make meaningful progress this batch.
+            logger.info(
+                "intel_v3.analyst_refresh_worker_drain_cycle_stopped "
+                "reason=backoff_or_no_due_jobs run_resumable=%s batches_so_far=%d",
+                result.run_resumable, len(results),
+            )
+            break
         if elapsed >= max_runtime_seconds:
             logger.info(
                 "intel_v3.analyst_refresh_worker_drain_cycle_runtime_cap_reached "

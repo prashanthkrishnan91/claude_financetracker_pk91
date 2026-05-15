@@ -270,6 +270,45 @@ class TestDrainCycleMultiBatch:
         assert results[0].claimed_job_count == 0
         assert idle_delay_skipped is False
 
+    @pytest.mark.asyncio
+    async def test_drain_cycle_stops_on_backoff_no_claimed_jobs(self):
+        """Drain cycle stops after one call when claimed_job_count=0 and run_resumable=True.
+
+        When all remaining jobs are in retry backoff (not yet due), run_once returns
+        run_resumable=True but claimed_job_count=0.  The drain cycle must NOT spin
+        through up to max_batches doing nothing — that wastes CPU and could trigger
+        rate limits when the remaining jobs are deferred by exponential backoff.
+        idle_delay_skipped must stay False because no meaningful progress was made.
+        """
+        backoff_result = WorkerRunResult(worker_run_id="backoff-run-001")
+        backoff_result.run_resumable = True
+        backoff_result.claimed_job_count = 0
+
+        call_count = [0]
+
+        async def _fake_run_once(*, now=None):
+            call_count[0] += 1
+            return backoff_result
+
+        mock_worker = MagicMock()
+        mock_worker.run_once = _fake_run_once
+
+        results, _, idle_delay_skipped = await _drain_cycle(
+            mock_worker,
+            max_batches=MAX_DRAIN_BATCHES_PER_CYCLE,
+            max_runtime_seconds=MAX_DRAIN_RUNTIME_SECONDS_PER_CYCLE,
+            now=_now(),
+        )
+
+        assert call_count[0] == 1, (
+            f"Drain must stop after 1 call when claimed=0; got {call_count[0]} — "
+            "spinning on backoff wastes CPU without making progress"
+        )
+        assert idle_delay_skipped is False, (
+            "idle_delay_skipped must stay False when no jobs were actually claimed"
+        )
+        assert len(results) == 1
+
 
 # ── 2. Drain cycle guardrails ─────────────────────────────────────────────────
 

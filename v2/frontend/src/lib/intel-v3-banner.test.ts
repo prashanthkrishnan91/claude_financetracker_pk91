@@ -257,6 +257,41 @@ describe("Build 1.5 — sub-10s UX: certification failure state", () => {
   });
 });
 
+// ── Build 1.5: polling session correctness contract ──────────────────────────
+// The component guards stopPolling() with isNewerThanClick — a snapshot
+// generated before the user clicked Run must NOT stop polling.  These tests
+// verify the banner-state machine half of that contract: isRefreshing=true
+// keeps the banner amber regardless of the snapshot's certified status.
+
+describe("Build 1.5 — polling session correctness: amber persists for pre-click snapshot", () => {
+  it("amber banner persists when a pre-click certified snapshot is present while isRefreshing", () => {
+    // User clicks Run while a worker_certified snapshot already exists.
+    // isRefreshing=true → banner must stay amber until a NEWER snapshot arrives.
+    const preClickSnap = makeCertifiedSnapshot({ certified_holding_count: 5, total_holding_count: 5 });
+    const banner = buildBannerState(preClickSnap, true);
+    expect(banner.status).toBe("latest_certified_new_refresh_running");
+    expect(banner.tone).toBe("amber");
+    expect(banner.tone).not.toBe("green");
+  });
+
+  it("green banner appears only after polling stops (isRefreshing=false)", () => {
+    // Simulates: new certified snapshot arrived; component set isRefreshing=false.
+    const postWorkerSnap = makeCertifiedSnapshot({ certified_holding_count: 5, total_holding_count: 5 });
+    const banner = buildBannerState(postWorkerSnap, false);
+    expect(banner.status).toBe("certified_current");
+    expect(banner.tone).toBe("green");
+  });
+
+  it("same certified snapshot produces amber while isRefreshing, green after", () => {
+    // Banner tone is gated by isRefreshing — the snapshot itself is identical.
+    // Only the component's isRefreshing=false (triggered by a newer certified
+    // snapshot passing isNewerThanClick) transitions the UI to green.
+    const snap = makeCertifiedSnapshot();
+    expect(buildBannerState(snap, true).tone).toBe("amber");
+    expect(buildBannerState(snap, false).tone).toBe("green");
+  });
+});
+
 // ── Stage 3.3: buildBannerState tone rules ────────────────────────────────────
 
 describe("buildBannerState — tone and copy", () => {

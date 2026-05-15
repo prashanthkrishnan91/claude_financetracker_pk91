@@ -21,6 +21,23 @@ Follow-up needed:
 
 ---
 
+### 2026-05-15 — AI PR Readiness Gate failed on UI PR missing design scope + reviewer markers
+
+Repo: claude_financetracker_pk91
+Area: PR authoring / readiness gate compliance
+Severity: Level 1 workflow miss
+Miss: PR #328 (Build 1.5) changed `.tsx` UI files but the PR body omitted two markers the readiness gate requires when UI files are present: (1) a design scope classification (`foundation-only` / `visible adoption` / `polish`) and (2) a reviewer note (`no reviewer — <reason>`). Gate failed twice — once on initial PR, once after the patch commit — requiring a third trigger commit to clear.
+Impact: Two wasted CI cycles; delayed merge by one session.
+What caught it: AI PR Readiness Check CI gate.
+Root cause: PR body was authored before running the gate locally with `--base-ref origin/main`. Local run (without `--base-ref`) skips git-diff-dependent checks. The design-scope and reviewer checks only fire when the gate has real file-list context.
+What should catch it next time: Always run `python3 scripts/workflow/ai_pr_readiness_check.py --base-ref origin/main` before pushing to a PR branch when UI files (`.tsx`, `.ts`, `.css`) are changed. The `--base-ref` flag is required for full file-list checks.
+One-off or repeated: One-off for now; watch for recurrence on UI PRs.
+Promotion target: PROMPT_LIBRARY.md UI-PR checklist (add "run readiness gate with --base-ref"), not CLAUDE.md (too specific).
+Action taken: Added miss ledger entry. PROMPT_LIBRARY.md update deferred — add if pattern repeats.
+Follow-up needed: No.
+
+---
+
 ### 2026-05-15 — Usage-ledger instruction repeatedly omitted from generated prompts
 
 Repo: cross-repo

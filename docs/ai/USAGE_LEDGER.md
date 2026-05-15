@@ -110,3 +110,4 @@ Use this ledger plus GitHub PR history to diagnose token burn:
 - High input tokens, low output → over-broad discovery reads.
 - High follow-up patches → unclear contracts or scope at PR time.
 - Recurring efficiency lessons → candidate for `docs/ai/MISS_LEDGER.md` promotion.
+

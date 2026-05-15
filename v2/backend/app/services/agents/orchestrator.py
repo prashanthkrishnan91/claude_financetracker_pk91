@@ -1706,11 +1706,20 @@ class AgentOrchestrator:
             "analyst_stage.output.normalized tickers=%d actions=%s fallback_rate=%.2f",
             len(verdicts), action_counts, failure_rate,
         )
+        # When analyst_refresh_tickers scopes this run to a bounded batch, report
+        # eligible_tickers as the scoped count so production logs reflect the
+        # actual analysis boundary — not the full portfolio size.
+        scope = self._analyst_refresh_tickers
+        eligible_count = (
+            sum(1 for t in all_tickers if t.upper() in scope)
+            if scope is not None
+            else len(snapshots)
+        )
         logger.info(
             "analyst_stage.summary eligible_tickers=%d reused_nonfallback_cards=%d "
             "reused_fallback_cards=%d freshly_generated_cards=%d degraded_cards=%d "
             "skipped_fresh_verdicts=%d force_recompute=%s",
-            len(snapshots),
+            eligible_count,
             reused_nonfallback_cards,
             reused_fallback_cards,
             freshly_generated_cards,

@@ -155,6 +155,7 @@ def _write_sync(
     *,
     now_iso: str,
     verdicts: Optional[dict[str, Any]] = None,
+    scoped_tickers: Optional[list[str]] = None,
 ) -> AnalystEvidenceWriteResult:
     """Write missing ``agent_insights`` and ``recommendations`` rows.
 
@@ -312,18 +313,20 @@ def _write_sync(
                 result.write_error = f"rec_insert:{type(exc).__name__}"
 
     # ── Step 5: expire old active recommendations not from this run ───────────
-    # Only when we wrote new rows — a full-portfolio run should have exactly
-    # one set of active recs.  Skipped when nothing was written to avoid
-    # modifying DB state for a no-op pass.
+    # Only when we wrote new rows — skipped on a no-op pass to avoid touching
+    # DB state.  When scoped_tickers is provided (bounded batch run), only
+    # expire prior active recs for those tickers; other tickers' existing
+    # recommendations are left untouched so their certification evidence survives.
     if result.recommendations_written > 0:
         try:
-            client.table("recommendations").update({
+            q = client.table("recommendations").update({
                 "is_active": False,
                 "resolution": "expired",
                 "resolved_at": now_iso,
-            }).eq("user_id", user_str).eq(
-                "is_active", True
-            ).neq("agent_run_id", agent_run_id).execute()
+            }).eq("user_id", user_str).eq("is_active", True)
+            if scoped_tickers:
+                q = q.in_("ticker", list(scoped_tickers))
+            q.neq("agent_run_id", agent_run_id).execute()
         except Exception as exc:
             logger.warning(
                 "analyst_evidence_writer.expire_failed user_id=%s run_id=%s err=%s",
@@ -342,6 +345,7 @@ async def write_analyst_evidence(
     insights: list[Any],
     started_at: Optional[datetime] = None,
     verdicts: Optional[dict[str, Any]] = None,
+    scoped_tickers: Optional[list[str]] = None,
 ) -> AnalystEvidenceWriteResult:
     """Write durable analyst evidence rows for a completed agent run.
 
@@ -353,9 +357,13 @@ async def write_analyst_evidence(
     output from the just-finished orchestrator run.  When provided, the writer
     stores the full structured verdict (``primary_driver`` / ``risk_flag`` /
     ``action_reason`` / ``differentiation`` etc.) instead of re-deriving a
-    minimal version from ``TickerInsight`` fields.  This is the root fix for
-    the ticker-prefix-only rationale block: the live LLM verdict fields are
-    preserved faithfully, identical to what ``_persist_sync`` would have written.
+    minimal version from ``TickerInsight`` fields.
+
+    ``scoped_tickers`` — when provided (bounded batch worker run), rec expiry in
+    Step 5 is limited to those tickers only.  Other tickers' active recommendations
+    are left untouched so their certification evidence survives the partial pass.
+    For a full-portfolio run (``scoped_tickers=None``), the legacy behaviour is
+    preserved: all active recs not from this run are expired.
 
     Only writes rows for insights in the provided list — no fabrication.
     Idempotent: safe to call for the same ``agent_run_id`` when some or all
@@ -372,6 +380,7 @@ async def write_analyst_evidence(
             list(insights),
             now_iso=now_iso,
             verdicts=verdicts,
+            scoped_tickers=scoped_tickers,
         )
     except Exception as exc:
         logger.warning(

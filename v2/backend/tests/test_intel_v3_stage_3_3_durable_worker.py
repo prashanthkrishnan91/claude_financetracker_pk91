@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from app.services.intelligence.v3.analyst_evidence_writer_v1 import (
     write_analyst_evidence,
@@ -1191,33 +1191,60 @@ class TestAnalystBatchingEndToEnd:
 
     @pytest.mark.asyncio
     async def test_certification_not_published_until_all_34_pass(self):
-        """Worker does not write a certified snapshot until all 34 holdings complete."""
+        """Prewarm is not triggered on partial passes; fires exactly once on the final pass."""
         fake = _FakeSupabase()
         all_tickers = [f"T{i:02d}" for i in range(34)]
         adapter = _FakeAnalystAdapter()  # all succeed
         _enqueue_tickers(fake, all_tickers)
 
         worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        prewarm_call_count = [0]
 
-        # First 3 passes — jobs remain for later passes
-        for _ in range(3):
-            r = await worker.run_once(now=_now())
-            if r.claimed_job_count > 0:
-                # Certification snapshot must not be written mid-way
-                # (the worker in tests uses _FakeAnalystAdapter which never
-                # triggers prewarm, but the job store must not be drained)
-                pending_or_retryable = r.remaining_pending_or_retryable
-                if pending_or_retryable > 0:
-                    assert "intel_v3_snapshots" not in fake.store or not fake.store.get("intel_v3_snapshots"), (
-                        "Snapshot must not be written while jobs remain pending."
+        async def _counting_prewarm(**_kw):
+            prewarm_call_count[0] += 1
+
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            side_effect=_counting_prewarm,
+        ):
+            # First 3 passes — jobs remain; prewarm must not be triggered
+            for _ in range(3):
+                r = await worker.run_once(now=_now())
+                if r.claimed_job_count > 0 and r.remaining_pending_or_retryable > 0:
+                    assert prewarm_call_count[0] == 0, (
+                        "Prewarm must not fire while refresh jobs remain pending."
                     )
 
-        # Final pass — drain remaining jobs
-        r4 = await worker.run_once(now=_now())
+            # Final pass — drains last 4 jobs; prewarm must fire exactly once
+            r4 = await worker.run_once(now=_now())
+
         all_succeeded = {r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED}
         assert len(all_succeeded) == 34
-        # run_resumable=False after all 34 complete
-        assert r4.run_resumable is False or r4.claimed_job_count == 0
+        assert r4.run_resumable is False
+        assert prewarm_call_count[0] == 1, (
+            f"Prewarm must be triggered exactly once after all 34 jobs complete, "
+            f"got {prewarm_call_count[0]} call(s)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_early_prewarm_guard_partial_batch_does_not_trigger_prewarm(self):
+        """After first of 4 passes (10/34 tickers), prewarm must not be triggered."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # all succeed
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert result.remaining_pending_or_retryable >= 24
+        assert result.run_resumable is True
+        mock_prewarm.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_backend_scoped_to_selected_batch_via_custom_backend(self):
@@ -1298,4 +1325,172 @@ class TestAnalystBatchingEndToEnd:
         expected = {t.upper() for t in batch_tickers}
         assert received == expected, (
             f"Backend received {received}; expected {expected}"
+        )
+
+
+# ── Test 11: Early prewarm guard — worker-level prewarm gate ─────────────────
+
+
+class TestEarlyPrewarmGuard:
+    """Prewarm runs only after the full refresh job set is drained — never after a partial batch.
+
+    These tests cover the pre-merge blocker fix: prewarm is moved from the
+    per-batch adapter backend to the worker, gated on run_resumable=False.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_batch_does_not_trigger_prewarm(self):
+        """After first of 4 passes (10/34 tickers), prewarm must not be triggered."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert result.remaining_pending_or_retryable >= 24
+        assert result.run_resumable is True
+        mock_prewarm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_final_batch_triggers_prewarm_exactly_once(self):
+        """Single-pass run drains all jobs; prewarm fires exactly once."""
+        fake = _FakeSupabase()
+        tickers = ["AAPL", "NVDA", "MSFT"]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 3
+        assert result.run_resumable is False
+        assert result.remaining_pending_or_retryable == 0
+        mock_prewarm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_all_jobs_failed_terminally_no_prewarm(self):
+        """When all jobs fail terminally (no successes), prewarm must not fire even with run_resumable=False."""
+        fake = _FakeSupabase()
+        tickers = ["AAPL"]
+        now = _now()
+        _enqueue_tickers(fake, tickers, now=now)
+
+        # Set to max_attempts - 1 so the next failure exhausts the budget
+        fake.rows()[0]["attempts"] = DEFAULT_MAX_ATTEMPTS - 1
+        fake.rows()[0]["max_attempts"] = DEFAULT_MAX_ATTEMPTS
+
+        # Adapter always fails
+        adapter = _FakeAnalystAdapter(call_outcomes=[set()])
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=now)
+
+        assert "AAPL" in result.failed_terminal_tickers
+        assert result.run_resumable is False
+        # No successes → no prewarm, even though run_resumable=False
+        mock_prewarm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prewarm_deferred_log_emitted_when_jobs_remain(self, caplog):
+        """When prewarm is deferred because jobs remain, the structured log is emitted."""
+        import logging
+
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(20)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=5)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ):
+            with caplog.at_level(
+                logging.INFO,
+                logger="app.services.intelligence.v3.analyst_refresh_worker_v1",
+            ):
+                result = await worker.run_once(now=_now())
+
+        assert result.run_resumable is True
+        deferred_lines = [
+            r for r in caplog.records
+            if "analyst_refresh_worker_prewarm_deferred" in r.getMessage()
+            and "reason=jobs_remain" in r.getMessage()
+        ]
+        assert deferred_lines, (
+            "Expected intel_v3.analyst_refresh_worker_prewarm_deferred reason=jobs_remain "
+            "log when prewarm is skipped because jobs remain."
+        )
+
+    @pytest.mark.asyncio
+    async def test_regression_previous_fresh_rows_do_not_trigger_early_prewarm(self):
+        """Regression: existing fresh rows for non-batch tickers must not cause prewarm after first batch.
+
+        This is the exact scenario of the pre-merge blocker: batch 1 writes 10
+        new rows; the remaining 24 tickers have fresh rows from a prior run.
+        Without the fix, the per-batch prewarm call in the adapter would fire
+        after batch 1, and the certification contract (checking ALL positions)
+        could pass if the 24 non-batch tickers all have fresh rows.
+
+        With the fix, prewarm is deferred until run_resumable=False.
+        """
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        # Pre-seed fresh agent_insights for the non-batch tickers (simulating a prior run)
+        now = _now()
+        old_run_id = str(uuid.uuid4())
+        non_batch_tickers = all_tickers[10:]
+        for t in non_batch_tickers:
+            fake.store.setdefault("agent_insights", []).append({
+                "ticker": t,
+                "user_id": USER_A,
+                "created_at": now.isoformat(),
+                "run_id": old_run_id,
+            })
+            fake.store.setdefault("recommendations", []).append({
+                "ticker": t,
+                "user_id": USER_A,
+                "is_active": True,
+                "agent_run_id": old_run_id,
+                "action": "HOLD",
+                "created_at": now.isoformat(),
+            })
+
+        prewarm_calls: list[dict] = []
+
+        async def _recording_prewarm(**kwargs):
+            prewarm_calls.append(dict(kwargs))
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            side_effect=_recording_prewarm,
+        ):
+            # First pass: claims 10 tickers, 24 remain pending
+            r1 = await worker.run_once(now=now)
+
+        assert r1.claimed_job_count == 10
+        assert r1.remaining_pending_or_retryable >= 24
+        assert r1.run_resumable is True
+        assert len(prewarm_calls) == 0, (
+            f"Prewarm must NOT fire after first batch even when non-batch tickers have "
+            f"fresh rows from a prior run. Got {len(prewarm_calls)} call(s): {prewarm_calls}"
         )

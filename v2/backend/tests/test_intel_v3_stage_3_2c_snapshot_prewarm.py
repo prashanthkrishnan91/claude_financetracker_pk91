@@ -204,7 +204,7 @@ class TestWriteAnalystEvidenceVerdictsParam(unittest.IsolatedAsyncioTestCase):
 
         captured: dict[str, Any] = {}
 
-        def _fake_write_sync(uid, rid, ins, *, now_iso, verdicts=None):
+        def _fake_write_sync(uid, rid, ins, *, now_iso, verdicts=None, scoped_tickers=None):
             captured["verdicts"] = verdicts
             from app.services.intelligence.v3.analyst_evidence_writer_v1 import (
                 AnalystEvidenceWriteResult,
@@ -236,7 +236,7 @@ class TestWriteAnalystEvidenceVerdictsParam(unittest.IsolatedAsyncioTestCase):
 
         captured: dict[str, Any] = {}
 
-        def _fake_write_sync(uid, rid, ins, *, now_iso, verdicts=None):
+        def _fake_write_sync(uid, rid, ins, *, now_iso, verdicts=None, scoped_tickers=None):
             captured["verdicts"] = verdicts
             from app.services.intelligence.v3.analyst_evidence_writer_v1 import (
                 AnalystEvidenceWriteResult,

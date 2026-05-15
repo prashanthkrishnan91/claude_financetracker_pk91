@@ -64,6 +64,7 @@ from .full_portfolio_analyst_refresh_adapter_v1 import (
     FullPortfolioAnalystRefreshAdapter,
     FullPortfolioAnalystRefreshBudget,
     default_full_portfolio_agent_orchestrator_backend,
+    trigger_snapshot_prewarm,
 )
 
 logger = logging.getLogger(__name__)
@@ -248,6 +249,7 @@ class AnalystRefreshWorker:
         for job in claimed:
             jobs_by_user.setdefault(job.user_id, []).append(job)
 
+        users_with_successes: set[str] = set()
         for user_id, jobs in jobs_by_user.items():
             elapsed = time.monotonic() - started
             if elapsed >= self.max_runtime_seconds:
@@ -276,9 +278,12 @@ class AnalystRefreshWorker:
                     )
                 result.notes.append("worker_runtime_budget_exhausted")
                 continue
+            succeeded_before = len(result.succeeded_tickers)
             await self._refresh_user_jobs(
                 user_id, jobs, now=now, result=result, worker_run_id=worker_run_id,
             )
+            if len(result.succeeded_tickers) > succeeded_before:
+                users_with_successes.add(user_id)
 
         # Post-run backlog: unclaimed pending jobs (not processed in this bounded
         # pass) + retryable failures waiting on backoff. count_due_jobs again
@@ -292,6 +297,28 @@ class AnalystRefreshWorker:
         )
         result.remaining_pending_or_retryable = remaining_actionable
         result.run_resumable = remaining_actionable > 0
+
+        # Trigger prewarm only when the full refresh job set is drained.
+        # During a multi-batch refresh (e.g. 34 holdings / batch_size=10),
+        # prewarm must run only on the final pass when no pending or retryable
+        # jobs remain — never after an intermediate batch, even when that batch
+        # successfully wrote new evidence.  Triggering prewarm early could
+        # publish worker_certified because the certification contract checks ALL
+        # active positions, and the remaining tickers may have fresh rows from a
+        # previous run.
+        if not result.run_resumable and users_with_successes:
+            for uid_str in users_with_successes:
+                await trigger_snapshot_prewarm(
+                    user_id=UUID(uid_str),
+                    worker_run_id=result.worker_run_id,
+                )
+        elif users_with_successes:
+            logger.info(
+                "intel_v3.analyst_refresh_worker_prewarm_deferred "
+                "worker_run_id=%s remaining_pending_or_retryable=%d reason=jobs_remain",
+                result.worker_run_id,
+                result.remaining_pending_or_retryable,
+            )
 
         result.duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(

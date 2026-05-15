@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 2 — evidence-grade certification + publish contract)
+Last updated: 2026-05-15 (post Build 2 + patch PR #333 — 4 production blockers fixed)
 
 ## Purpose
 
@@ -22,14 +22,18 @@ New module: `watchtower_intel_republisher_v1.py`
 - `PUBLISH_*` constants: `certified_current` | `rebuilt_and_published` | `republish_pending` | `certification_blocked` | `no_snapshot_exists`
 
 Extended modules:
-- `watchtower_callables_v1.py` — adds `build_default_intel_republish_callable()`, which wraps `IntelV3Service.run_prewarm_snapshot()` (deferred import preserves Watchtower worker boundary).
-- `watchtower_background_refresh_worker_v1.py` — `WatchtowerBackgroundRefreshWorker` now accepts `intel_republish_callable`. After `persist_watchtower_price_snapshot()` succeeds, calls `compare_and_republish()`. `WatchtowerRefreshCycleResult` carries `intel_republish_result` dict. `run_watchtower_cycle_for_user()` now passes the callable through.
+- `watchtower_callables_v1.py` — adds `build_default_intel_republish_callable()`, which wraps `IntelV3Service.run_prewarm_snapshot(skip_persist_on_fail=True)` (deferred import preserves boundary; `skip_persist_on_fail=True` prevents failed Watchtower-triggered rebuilds from overwriting a prior `worker_certified` snapshot).
+- `watchtower_background_refresh_worker_v1.py` — `WatchtowerBackgroundRefreshWorker` now accepts `intel_republish_callable`. After `persist_watchtower_price_snapshot()` succeeds, calls `compare_and_republish()`. `WatchtowerRefreshCycleResult` carries `intel_republish_result` dict.
 - `watchtower_worker_entrypoint.py` — wires `build_default_intel_republish_callable()` in the background loop.
-- `intel_v3_service.py` — `get_latest_snapshot()` now embeds `evidence_freshness_state` in the API response (reads latest `portfolio_snapshots.snapshot_at`, compares to Intel snapshot `generated_at`, adds `certified_current` or `republish_pending` to the returned payload — non-mutating copy). Structured log updated to include `evidence_freshness_state=%s`.
+- `intel_v3_service.py` — `get_latest_snapshot()` embeds `evidence_freshness_state` in the API response (non-mutating copy). `enqueue_run_v3()` urgent path now passes `intel_republish_callable` into `run_watchtower_cycle_for_user()`. `run_prewarm_snapshot()` has `skip_persist_on_fail=False` param — when `True` and certification fails, skips `_persist_snapshot()` to preserve the prior `worker_certified` active snapshot.
+
+**compare_and_republish() result semantics (post-patch):** After calling `intel_republish_callable(user_id)`, inspects `returned_payload["snapshot_source"]`. Only `"worker_certified"` → `PUBLISH_REBUILT_AND_PUBLISHED`; `"certification_failed"` or any other value → `PUBLISH_CERTIFICATION_BLOCKED` with source in error field.
+
+**get_evidence_freshness_state() error behavior (post-patch):** DB errors return `PUBLISH_REPUBLISH_PENDING` (honest non-green) — not `certified_current`. The portfolio snapshot DB call is inlined (not delegated to the error-swallowing helper) so errors propagate correctly.
 
 Boundary preserved: `watchtower_background_refresh_worker_v1.py` does NOT import `decide()`. The republish callable is injected, built by `watchtower_callables_v1.py`.
 
-28 new tests (`test_watchtower_build_2.py`). 91 Build 1D tests still pass.
+43 tests in `test_watchtower_build_2.py` (28 Build 2 + 15 patch). 91 Build 1D tests still pass.
 
 Key structured logs to confirm in production:
 - `watchtower_intel_republisher.publish_decision user_id=... publish_status=rebuilt_and_published evidence_newer_than_certified_snapshot=True analyst_jobs_queued=0`
@@ -93,9 +97,9 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Build 2 complete.** PR open on branch `claude/review-documentation-0tqEa`. Merge after review.
+**Build 2 + patch complete.** PR #333 merged.
 
-**Next: Build 3 — Intelligence quality GO/NO-GO audit.** Before any intelligence quality changes, run an evidence-quality audit: (1) Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; (2) Check that `run_prewarm_snapshot` certification contract passes (all analyst evidence SLAs still met — recommendation ≤24h, agent_insight ≤48h); (3) Decide GO/NO-GO on intelligence-quality improvements (analyst evidence quality, primary_driver depth, rationale completeness).
+**Next: Build 3 — Intelligence quality GO/NO-GO audit.** Before any intelligence quality changes, run an evidence-quality audit: (1) Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; (2) Confirm `compare_and_republish` logs show `publish_status=rebuilt_and_published` and `analyst_jobs_queued=0` after a price refresh cycle; (3) Check that `run_prewarm_snapshot` certification contract passes (all analyst evidence SLAs still met — recommendation ≤24h, agent_insight ≤48h); (4) Decide GO/NO-GO on intelligence-quality improvements (analyst evidence quality, primary_driver depth, rationale completeness).
 
 Key logs to confirm Build 1D gate is running in production:
   - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`

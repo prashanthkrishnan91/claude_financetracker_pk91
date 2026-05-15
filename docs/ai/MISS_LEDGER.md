@@ -21,6 +21,23 @@ Follow-up needed:
 
 ---
 
+### 2026-05-15 — Error-swallowing helper masked honest failure state in get_evidence_freshness_state
+
+Repo: claude_financetracker_pk91
+Area: backend/intel-v3, watchtower
+Severity: Level 1 — caught by test run before merge
+Miss: `get_evidence_freshness_state` delegated its DB query to `_fetch_latest_portfolio_snapshot`, which has an internal try/except that swallows all exceptions and returns `None`. The outer try/except in `get_evidence_freshness_state` therefore never fired, and DB errors silently presented as "no portfolio snapshot" → `certified_current` (false-green state). The intent was the opposite: errors should return the honest non-green `republish_pending`.
+Impact: In production, a DB read failure during the freshness check would silently tell the API the snapshot is current, hiding the problem from the caller.
+What caught it: First test run — `test_returns_republish_pending_on_db_error` asserted `PUBLISH_REPUBLISH_PENDING` but got `PUBLISH_CERTIFIED_CURRENT`.
+Root cause: Reusing an error-swallowing helper in a context that requires honest error propagation. The helper was designed for `compare_and_republish` (which has its own outer error boundary) but was copy-reused in `get_evidence_freshness_state` without recognizing the different error-handling contract.
+What should catch it next time: When a function's contract distinguishes "no data" from "error", do not delegate to a helper that collapses both to `None`. Inline the DB call so errors propagate to the caller's error boundary.
+One-off or repeated: One-off.
+Promotion target: None yet.
+Action taken: Inlined the `asyncio.to_thread` portfolio snapshot query directly in `get_evidence_freshness_state` so DB exceptions reach the outer `except` and return `PUBLISH_REPUBLISH_PENDING`.
+Follow-up needed: No.
+
+---
+
 ### 2026-05-15 — OS v4 AI PR Readiness Gate treated usage-unavailable too broadly
 
 Repo: claude_financetracker_pk91 / cross-repo pattern

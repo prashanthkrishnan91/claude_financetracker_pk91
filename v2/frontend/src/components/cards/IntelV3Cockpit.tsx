@@ -21,7 +21,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
-import { buildBannerState } from "@/lib/intel-v3-banner";
+import { buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
 import { Spinner } from "@/components/ui/Spinner";
@@ -74,49 +74,7 @@ function CommandCenter({ snapshot }: { snapshot: IntelV3Snapshot }) {
   );
 }
 
-function ProvenanceRow({ snapshot }: { snapshot: IntelV3Snapshot }) {
-  const cert = snapshot.certification_summary;
-  const certCount = snapshot.certified_holding_count ?? cert?.certified_holding_count;
-  const totalCount = snapshot.total_holding_count ?? cert?.total_holding_count;
-  const latestRunAt = cert?.latest_agent_run_at
-    ? new Date(cert.latest_agent_run_at).toLocaleString()
-    : null;
-  const runIds = cert?.agent_run_ids_used ?? [];
-  const failedTickers = snapshot.failed_tickers_in_certification ?? [];
-
-  return (
-    <div className="mt-2 space-y-0.5 text-[11px] text-text-muted">
-      {certCount !== undefined && totalCount !== undefined && (
-        <p>Coverage: {certCount}/{totalCount} certified.</p>
-      )}
-      {latestRunAt && <p>Latest analyst run: {latestRunAt}.</p>}
-      {runIds.length > 0 && (
-        <p>Agent run IDs: {runIds.slice(0, 2).join(", ")}{runIds.length > 2 ? ` +${runIds.length - 2} more` : ""}.</p>
-      )}
-      <p>
-        Snapshot source:{" "}
-        <span className="font-medium">
-          {snapshot.snapshot_source === "worker_certified"
-            ? "worker certified"
-            : snapshot.snapshot_source === "certification_failed"
-            ? "certification failed"
-            : snapshot.snapshot_source ?? "unknown"}
-        </span>
-        .
-      </p>
-      <p>Agents ran for this click: No — background worker handles analysis.</p>
-      <p>This click used LLMs: No — background worker handles analysis.</p>
-      {failedTickers.length > 0 && (
-        <p className="text-red-400">
-          Failed tickers: {failedTickers.slice(0, 5).join(", ")}
-          {failedTickers.length > 5 ? ` +${failedTickers.length - 5} more` : ""}.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function SnapshotBanner({
+function IntelStatusArea({
   snapshot,
   isRefreshing,
   lastRunResult,
@@ -125,30 +83,72 @@ function SnapshotBanner({
   isRefreshing: boolean;
   lastRunResult?: IntelV3RunResult | null;
 }) {
+  const [diagOpen, setDiagOpen] = useState(false);
+  const pillState = buildStatusPillState(snapshot, isRefreshing, lastRunResult);
   const bannerState = buildBannerState(snapshot, isRefreshing, lastRunResult);
 
-  const toneClass = {
-    green: "bg-green-500/10 border-green-500/30 text-green-400",
-    amber: "bg-amber-500/10 border-amber-500/30 text-amber-400",
-    red:   "bg-red-500/10 border-red-500/30 text-red-400",
-    grey:  "bg-surface border-border text-text-muted",
-  }[bannerState.tone];
+  const pillClass = {
+    green: "bg-green-500/15 text-green-400 border-green-500/30",
+    amber: "bg-amber-500/15 text-amber-400 border-amber-500/30",
+    red:   "bg-red-500/15 text-red-400 border-red-500/30",
+    grey:  "bg-surface-elevated text-text-muted border-border",
+  }[pillState.tone];
+
+  const cert = snapshot?.certification_summary;
+  const certCount = snapshot?.certified_holding_count ?? cert?.certified_holding_count;
+  const totalCount = snapshot?.total_holding_count ?? cert?.total_holding_count;
+  const latestRunAt = cert?.latest_agent_run_at
+    ? new Date(cert.latest_agent_run_at).toLocaleString()
+    : null;
+  const runIds = cert?.agent_run_ids_used ?? [];
+  const failedTickers = snapshot?.failed_tickers_in_certification ?? [];
 
   return (
-    <div className={cn("rounded-lg border px-3 py-2 text-xs", toneClass)}>
-      <div className="flex items-center justify-between gap-2 flex-wrap">
-        <span className="font-semibold">{bannerState.headline}</span>
-        {isRefreshing && (
-          <span className="flex items-center gap-1 text-text-muted">
-            <Spinner className="h-3 w-3" /> checking every 15s
-          </span>
-        )}
+    <div className="rounded-lg border border-border bg-surface px-3 py-2.5 text-xs space-y-1.5">
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className="text-[11px] font-semibold text-text-muted uppercase tracking-wide">
+          Portfolio Intelligence
+        </span>
+        <span className={cn("rounded-full border px-2 py-0.5 text-[11px] font-semibold", pillClass)}>
+          {pillState.pill}
+        </span>
+        {isRefreshing && <Spinner className="h-3 w-3 text-text-muted" />}
       </div>
-      {bannerState.detail && (
-        <p className="mt-1 text-[11px] opacity-80">{bannerState.detail}</p>
-      )}
-      {bannerState.showProvenance && snapshot && (
-        <ProvenanceRow snapshot={snapshot} />
+      <p className="text-[11px] text-text-secondary">{pillState.line}</p>
+      <button
+        onClick={() => setDiagOpen((v) => !v)}
+        className="text-[10px] text-text-muted hover:text-text-primary transition-colors"
+      >
+        {diagOpen ? "▲ Hide diagnostics" : "▼ Diagnostics"}
+      </button>
+      {diagOpen && (
+        <div className="mt-1 pt-1.5 border-t border-border space-y-0.5 text-[11px] text-text-muted">
+          <p className="font-medium text-text-secondary">{bannerState.headline}</p>
+          {bannerState.detail && <p className="opacity-80">{bannerState.detail}</p>}
+          {certCount !== undefined && totalCount !== undefined && (
+            <p>Coverage: {certCount}/{totalCount} certified.</p>
+          )}
+          {latestRunAt && <p>Latest analyst run: {latestRunAt}.</p>}
+          {runIds.length > 0 && (
+            <p>Agent run IDs: {runIds.slice(0, 2).join(", ")}{runIds.length > 2 ? ` +${runIds.length - 2} more` : ""}.</p>
+          )}
+          <p>
+            Snapshot source:{" "}
+            <span className="font-medium">
+              {snapshot?.snapshot_source === "worker_certified"
+                ? "worker certified"
+                : snapshot?.snapshot_source === "certification_failed"
+                ? "certification failed"
+                : snapshot?.snapshot_source ?? "none"}
+            </span>.
+          </p>
+          {failedTickers.length > 0 && (
+            <p className="text-red-400">
+              Failed: {failedTickers.slice(0, 5).join(", ")}
+              {failedTickers.length > 5 ? ` +${failedTickers.length - 5} more` : ""}.
+            </p>
+          )}
+        </div>
       )}
     </div>
   );
@@ -199,11 +199,8 @@ function EmptySnapshotState({ onRun, isRunning }: { onRun: () => void; isRunning
   return (
     <div className="flex flex-col items-center justify-center py-16 gap-4">
       <div className="text-text-muted text-center space-y-2">
-        <p className="text-base font-medium text-text-primary">No Intel v3 snapshot yet</p>
-        <p className="text-sm">Run Intel v3 to start a background analyst run for all holdings.</p>
-        <p className="text-xs text-text-muted">
-          The background worker will run LLM analysis and publish a certified snapshot automatically.
-        </p>
+        <p className="text-base font-medium text-text-primary">No portfolio intelligence yet</p>
+        <p className="text-sm">Run Intel to generate recommendations for your holdings.</p>
       </div>
       <button
         onClick={onRun}
@@ -211,7 +208,7 @@ function EmptySnapshotState({ onRun, isRunning }: { onRun: () => void; isRunning
         className="px-4 py-2 rounded-lg bg-accent text-background text-sm font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 flex items-center gap-2"
       >
         {isRunning ? <Spinner className="h-4 w-4" /> : null}
-        {isRunning ? "Enqueueing refresh…" : "Run Intel v3"}
+        {isRunning ? "Starting…" : "Run Intel"}
       </button>
     </div>
   );
@@ -354,14 +351,14 @@ export function IntelV3Cockpit() {
   if (!snapshot && isRefreshing) {
     return (
       <div className="space-y-5">
-        <SnapshotBanner
+        <IntelStatusArea
           snapshot={null}
           isRefreshing={isRefreshing}
           lastRunResult={lastRunResult}
         />
         <div className="flex items-center justify-center py-12 gap-3 text-text-muted">
           <Spinner className="h-5 w-5" />
-          <span className="text-sm">Analyst worker is running. Results will appear here automatically.</span>
+          <span className="text-sm">Portfolio intelligence is updating. Results will appear here automatically.</span>
         </div>
       </div>
     );
@@ -372,10 +369,10 @@ export function IntelV3Cockpit() {
   return (
     <div className="space-y-5">
 
-      {/* Snapshot banner + run button row */}
+      {/* Status area + run button row */}
       <div className="flex items-start gap-3 flex-wrap">
         <div className="flex-1">
-          <SnapshotBanner
+          <IntelStatusArea
             snapshot={snapshot}
             isRefreshing={isRefreshing}
             lastRunResult={lastRunResult}
@@ -387,7 +384,7 @@ export function IntelV3Cockpit() {
           className="shrink-0 px-3 py-1.5 rounded-md bg-accent text-background text-xs font-semibold hover:bg-accent-hover transition-colors disabled:opacity-50 flex items-center gap-1.5"
         >
           {isButtonDisabled ? <Spinner className="h-3 w-3" /> : null}
-          {isButtonDisabled ? "Enqueueing…" : "Run Intel v3"}
+          {isButtonDisabled ? "Updating…" : "Run Intel"}
         </button>
       </div>
 

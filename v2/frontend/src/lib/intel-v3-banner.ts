@@ -181,6 +181,61 @@ export function buildBannerState(
   }
 }
 
+// ── User-facing status pill (Build 2.5) ──────────────────────────────────────
+
+export type IntelUserPill = "Ready" | "Updating" | "Needs Research" | "Blocked";
+
+export interface IntelStatusPillState {
+  pill: IntelUserPill;
+  line: string;
+  tone: "green" | "amber" | "red" | "grey";
+}
+
+/**
+ * Maps the 6 internal UI states to 4 plain-English user-facing statuses.
+ * buildBannerState() remains for the diagnostics drawer; this drives the
+ * compact status area shown by default.
+ */
+export function buildStatusPillState(
+  snapshot: IntelV3Snapshot | null | undefined,
+  isRefreshing: boolean,
+  lastRunResult?: IntelV3RunResult | null,
+): IntelStatusPillState {
+  const status = deriveIntelV3UIStatus(snapshot, isRefreshing, lastRunResult);
+
+  switch (status) {
+    case "certified_current": {
+      const ts = snapshot?.generated_at ? new Date(snapshot.generated_at) : null;
+      const today = ts ? ts.toDateString() === new Date().toDateString() : false;
+      const timeStr = ts
+        ? ts.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        : null;
+      const line = timeStr
+        ? today
+          ? `Updated today at ${timeStr}.`
+          : `Updated ${ts!.toLocaleDateString()} at ${timeStr}.`
+        : "Up to date.";
+      return { pill: "Ready", line, tone: "green" };
+    }
+
+    case "latest_certified_new_refresh_running":
+      return { pill: "Updating", line: "Refreshing portfolio intelligence…", tone: "amber" };
+
+    case "refreshing_analyst_intelligence":
+      return { pill: "Updating", line: "Refreshing portfolio intelligence…", tone: "grey" };
+
+    case "unavailable_refresh_failed":
+      return { pill: "Needs Research", line: "Last refresh failed. Run Intel to retry.", tone: "red" };
+
+    case "blocked_certification_failed":
+      return { pill: "Blocked", line: "Some holdings couldn't be certified. Run Intel to retry.", tone: "red" };
+
+    case "unavailable_evidence_incomplete":
+    default:
+      return { pill: "Needs Research", line: "Research is stale. Run Intel to refresh recommendations.", tone: "grey" };
+  }
+}
+
 // ── Legacy compat: analyst refresh-request note ───────────────────────────────
 
 /**

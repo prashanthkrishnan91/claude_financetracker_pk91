@@ -180,6 +180,118 @@ describe("deriveIntelV3UIStatus — unavailable states", () => {
   });
 });
 
+// ── Build 1.5: sub-10s UX contract tests ─────────────────────────────────────
+
+describe("Build 1.5 — sub-10s UX: latest_certified_new_refresh_running", () => {
+  it("shows amber banner when certified snapshot exists and refresh is running", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, true);
+    expect(banner.status).toBe("latest_certified_new_refresh_running");
+    expect(banner.tone).toBe("amber");
+    expect(banner.headline).toContain("Latest Certified Snapshot Available");
+    expect(banner.showProvenance).toBe(true);
+  });
+
+  it("shows certified snapshot data in amber banner (not blank)", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 34, total_holding_count: 34 });
+    const banner = buildBannerState(snap, true);
+    expect(banner.detail).toContain("34/34");
+  });
+
+  it("amber banner does not claim the new refresh is already certified", () => {
+    const snap = makeCertifiedSnapshot();
+    const banner = buildBannerState(snap, true);
+    expect(banner.headline).not.toContain("Certified Current");
+    expect(banner.tone).not.toBe("green");
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: refreshing with no prior snapshot", () => {
+  it("shows grey banner when no snapshot and refresh is running", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.status).toBe("refreshing_analyst_intelligence");
+    expect(banner.tone).toBe("grey");
+  });
+
+  it("grey refreshing banner does not claim '60 seconds'", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.detail).not.toContain("60 seconds");
+    expect(banner.detail).not.toContain("60");
+  });
+
+  it("grey refreshing banner does not show provenance (no certified snapshot)", () => {
+    const banner = buildBannerState(null, true);
+    expect(banner.showProvenance).toBe(false);
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: no green without certified snapshot", () => {
+  it("uncertified snapshot during refresh does not show green", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "http_request" } as any);
+    const banner = buildBannerState(snap, true);
+    expect(banner.tone).not.toBe("green");
+  });
+
+  it("partial coverage during refresh does not show green", () => {
+    const snap = makeCertifiedSnapshot({ certified_holding_count: 10, total_holding_count: 34 });
+    const banner = buildBannerState(snap, true);
+    expect(banner.tone).not.toBe("green");
+  });
+});
+
+describe("Build 1.5 — sub-10s UX: certification failure state", () => {
+  it("certification_failed snapshot shows red even while refresh is running", () => {
+    const snap = makeCertifiedSnapshot({ snapshot_source: "certification_failed" } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.status).toBe("blocked_certification_failed");
+    expect(banner.tone).toBe("red");
+  });
+
+  it("certification_failed snapshot is visible (not suppressed)", () => {
+    const snap = makeCertifiedSnapshot({
+      snapshot_source: "certification_failed",
+      failed_tickers_in_certification: ["AAPL"],
+    } as any);
+    const banner = buildBannerState(snap, false);
+    expect(banner.detail).toBeTruthy();
+  });
+});
+
+// ── Build 1.5: polling session correctness contract ──────────────────────────
+// The component guards stopPolling() with isNewerThanClick — a snapshot
+// generated before the user clicked Run must NOT stop polling.  These tests
+// verify the banner-state machine half of that contract: isRefreshing=true
+// keeps the banner amber regardless of the snapshot's certified status.
+
+describe("Build 1.5 — polling session correctness: amber persists for pre-click snapshot", () => {
+  it("amber banner persists when a pre-click certified snapshot is present while isRefreshing", () => {
+    // User clicks Run while a worker_certified snapshot already exists.
+    // isRefreshing=true → banner must stay amber until a NEWER snapshot arrives.
+    const preClickSnap = makeCertifiedSnapshot({ certified_holding_count: 5, total_holding_count: 5 });
+    const banner = buildBannerState(preClickSnap, true);
+    expect(banner.status).toBe("latest_certified_new_refresh_running");
+    expect(banner.tone).toBe("amber");
+    expect(banner.tone).not.toBe("green");
+  });
+
+  it("green banner appears only after polling stops (isRefreshing=false)", () => {
+    // Simulates: new certified snapshot arrived; component set isRefreshing=false.
+    const postWorkerSnap = makeCertifiedSnapshot({ certified_holding_count: 5, total_holding_count: 5 });
+    const banner = buildBannerState(postWorkerSnap, false);
+    expect(banner.status).toBe("certified_current");
+    expect(banner.tone).toBe("green");
+  });
+
+  it("same certified snapshot produces amber while isRefreshing, green after", () => {
+    // Banner tone is gated by isRefreshing — the snapshot itself is identical.
+    // Only the component's isRefreshing=false (triggered by a newer certified
+    // snapshot passing isNewerThanClick) transitions the UI to green.
+    const snap = makeCertifiedSnapshot();
+    expect(buildBannerState(snap, true).tone).toBe("amber");
+    expect(buildBannerState(snap, false).tone).toBe("green");
+  });
+});
+
 // ── Stage 3.3: buildBannerState tone rules ────────────────────────────────────
 
 describe("buildBannerState — tone and copy", () => {

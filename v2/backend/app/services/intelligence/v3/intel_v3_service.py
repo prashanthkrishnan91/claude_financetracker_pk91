@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -82,8 +83,9 @@ class IntelV3Service:
 
         Zero LLM calls. Zero provider calls.
         Returns None if no snapshot exists yet.
-        Emits intel_v3_snapshot_response_summary log.
+        Emits intel_v3_snapshot_response_summary log with snapshot_response_ms.
         """
+        _t0 = time.monotonic()
         try:
             result = await asyncio.to_thread(
                 lambda: self.client.table("intel_v3_snapshots")
@@ -95,10 +97,13 @@ class IntelV3Service:
                 .execute()
             )
             rows = result.data or []
+            snapshot_response_ms = int((time.monotonic() - _t0) * 1000)
             if not rows:
                 logger.info(
-                    "intel_v3_snapshot_response_summary user_id=%s result=no_snapshot",
+                    "intel_v3_snapshot_response_summary user_id=%s result=no_snapshot "
+                    "snapshot_response_ms=%d",
                     self.user_id,
+                    snapshot_response_ms,
                 )
                 return None
 
@@ -106,14 +111,18 @@ class IntelV3Service:
             snapshot_id = payload.get("snapshot_id") or rows[0].get("id")
             action_counts = payload.get("action_counts", {})
             total = sum(action_counts.values()) if action_counts else 0
+            snapshot_source = payload.get("snapshot_source", "unknown")
 
             logger.info(
                 "intel_v3_snapshot_response_summary user_id=%s result=found "
-                "snapshot_id=%s total_cards=%d action_counts=%s",
+                "snapshot_id=%s total_cards=%d action_counts=%s "
+                "snapshot_source=%s snapshot_response_ms=%d",
                 self.user_id,
                 snapshot_id,
                 total,
                 action_counts,
+                snapshot_source,
+                snapshot_response_ms,
             )
             return payload
         except Exception as exc:
@@ -678,11 +687,17 @@ class IntelV3Service:
         # inform the UI whether this is a brand-new request or a re-attach.
         status = "refresh_in_progress" if (enqueue_result.touched_count > 0 and enqueue_result.created_count == 0) else "refresh_requested"
 
+        run_click_response_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
+        refresh_jobs_pending_count = queued_count
+        refresh_jobs_remaining_count = queued_count  # all just enqueued, none consumed yet
+
         logger.info(
             "intel_v3_full_refresh_enqueued user_id=%s "
             "status=%s queued_ticker_count=%d total_holding_count=%d "
             "created=%d touched=%d made_due=%d reopened=%d "
-            "existing_certified_snapshot=%s existing_certified_snapshot_id=%s",
+            "existing_certified_snapshot=%s existing_certified_snapshot_id=%s "
+            "run_click_response_ms=%d certified_snapshot_available_on_click=%s "
+            "refresh_jobs_pending_count=%d refresh_jobs_remaining_count=%d",
             self.user_id,
             status,
             queued_count,
@@ -693,6 +708,10 @@ class IntelV3Service:
             enqueue_result.reopened_count,
             existing_certified,
             existing_certified_snapshot_id,
+            run_click_response_ms,
+            existing_certified,
+            refresh_jobs_pending_count,
+            refresh_jobs_remaining_count,
         )
 
         return {
@@ -701,6 +720,10 @@ class IntelV3Service:
             "total_holding_count": total_holding_count,
             "existing_certified_snapshot_id": existing_certified_snapshot_id,
             "existing_certified_snapshot": existing_certified,
+            "run_click_response_ms": run_click_response_ms,
+            "certified_snapshot_available_on_click": existing_certified,
+            "refresh_jobs_pending_count": refresh_jobs_pending_count,
+            "refresh_jobs_remaining_count": refresh_jobs_remaining_count,
             "message": (
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."

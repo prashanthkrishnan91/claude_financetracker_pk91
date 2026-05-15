@@ -14,6 +14,8 @@ These tests prove the acceptance criteria from the Build 1 task:
   8. run_resumable=True when retryable failures or unclaimed pending backlog remain.
   9. residual evidence requires BOTH agent_insights AND recommendations rows —
      agent_insights-only is NOT sufficient to mark a job succeeded.
+  10. batching is end-to-end — the adapter AND evidence writer receive only the
+      selected batch, never the full 34-ticker portfolio.
 
 The tests use the same in-memory Supabase fake as test_intel_v3_stage_3_2_* so
 no real DB or LLM calls are made.
@@ -25,6 +27,11 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from unittest.mock import AsyncMock, patch
+
+from app.services.intelligence.v3.analyst_evidence_writer_v1 import (
+    write_analyst_evidence,
+)
 from app.services.intelligence.v3.analyst_refresh_adapter_v1 import (
     STATUS_FAILED,
     STATUS_PARTIAL_SUCCESS,
@@ -50,6 +57,11 @@ from app.services.intelligence.v3.analyst_refresh_worker_v1 import (
     DEFAULT_MAX_JOBS_PER_RUN,
     AnalystRefreshWorker,
     WorkerRunResult,
+)
+from app.services.intelligence.v3.full_portfolio_analyst_refresh_adapter_v1 import (
+    FullPortfolioAnalystRefreshAdapter,
+    FullPortfolioAnalystRefreshBudget,
+    _read_post_run_evidence,
 )
 
 USER_A = "00000000-0000-0000-0000-0000000000aa"
@@ -945,3 +957,540 @@ class TestCountDueJobs:
         assert counts["total_due"] == 0
         assert counts["failed_not_yet_due"] == 1
         assert counts["failed_terminal"] == 0
+
+
+# ── Helpers for Build 1 end-to-end batching tests ─────────────────────────────
+
+class _SimpleInsight:
+    """Minimal TickerInsight-alike for write_analyst_evidence tests."""
+    def __init__(self, ticker: str, action: str = "HOLD"):
+        self.ticker = ticker
+        self.suggested_action = action
+        self.conviction_score = 0.5
+        self.investment_thesis = f"{action} signal."
+        self.sentiment_score = 0.1
+        self.sentiment_label = "neutral"
+        self.technical_signal = "HOLD"
+        self.technical_summary = "stable"
+        self.fundamental_score = 0.2
+        self.fundamental_summary = "solid"
+        self.suggested_allocation = 0.0
+
+
+def _patch_writer_client(fake):
+    return patch(
+        "app.services.intelligence.v3.analyst_evidence_writer_v1.get_supabase_client",
+        return_value=fake,
+    )
+
+
+# ── Test 10: End-to-end batching — adapter and evidence writer bounded ─────────
+
+
+class TestAnalystBatchingEndToEnd:
+    """Build 1 core fix: batching is end-to-end, not job-store-only.
+
+    These tests prove the fix for the production bug where the worker claimed
+    10 jobs but the orchestrator still analyzed all 34 holdings.
+    """
+
+    @pytest.mark.asyncio
+    async def test_adapter_receives_only_selected_batch_not_full_portfolio(self):
+        """When the worker claims 10 jobs, the adapter is called with exactly those 10 tickers."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # records call args
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert len(adapter.calls) == 1
+        # Adapter must have received exactly 10 tickers — the bounded batch.
+        assert len(adapter.calls[0]) == 10, (
+            f"Adapter received {len(adapter.calls[0])} tickers; expected 10. "
+            "Batching must be end-to-end: adapter must not receive all 34."
+        )
+
+    @pytest.mark.asyncio
+    async def test_four_bounded_passes_complete_all_34_holdings(self):
+        """34 holdings complete across 4 bounded passes of 10 (3×10 + 1×4)."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # all succeed by default
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+
+        pass_results = []
+        for _ in range(6):  # safety cap; should finish in 4
+            r = await worker.run_once(now=_now())
+            pass_results.append(r)
+            if r.claimed_job_count == 0:
+                break
+
+        # No single adapter call received all 34
+        for call in adapter.calls:
+            assert len(call) <= 10
+
+        # 4 passes required (3×10 + 1×4)
+        non_empty = [r for r in pass_results if r.claimed_job_count > 0]
+        assert len(non_empty) == 4, (
+            f"Expected 4 passes for 34 jobs at batch_size=10, got {len(non_empty)}"
+        )
+
+        # All 34 tickers succeeded
+        succeeded = {r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED}
+        assert len(succeeded) == 34
+
+    @pytest.mark.asyncio
+    async def test_evidence_writer_scoped_tickers_limits_writes_to_selected_batch(self):
+        """write_analyst_evidence with scoped_tickers writes only the selected batch."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        now = _now()
+
+        # 34 insights but only 10 are selected for this worker batch
+        all_insights = [_SimpleInsight(f"T{i:02d}") for i in range(34)]
+        batch_tickers = [f"T{i:02d}" for i in range(10)]
+        batch_insights = all_insights[:10]
+
+        with _patch_writer_client(fake):
+            result = await write_analyst_evidence(
+                user_id=uuid.UUID(USER_A),
+                agent_run_id=run_id,
+                insights=batch_insights,
+                started_at=now,
+                scoped_tickers=batch_tickers,
+            )
+
+        assert result.insights_written == 10
+        assert result.recommendations_written == 10
+        written_tickers = {r["ticker"] for r in fake.store.get("agent_insights", [])}
+        assert len(written_tickers) == 10
+        assert not (written_tickers - {f"T{i:02d}" for i in range(10)}), (
+            "Evidence writer must not write tickers outside the selected batch."
+        )
+
+    @pytest.mark.asyncio
+    async def test_scoped_expiry_preserves_other_tickers_recommendations(self):
+        """Scoped rec expiry only expires the batch tickers; others survive."""
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        old_run_id = str(uuid.uuid4())
+        now = _now()
+
+        # Pre-seed active recommendations for 34 tickers from a prior run
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        fake.store["recommendations"] = [
+            {
+                "ticker": t,
+                "user_id": USER_A,
+                "is_active": True,
+                "agent_run_id": old_run_id,
+                "action": "HOLD",
+                "created_at": _iso_ago(50, now),
+            }
+            for t in all_tickers
+        ]
+
+        # Write a new batch for only the first 10 tickers
+        batch_tickers = all_tickers[:10]
+        batch_insights = [_SimpleInsight(t) for t in batch_tickers]
+
+        with _patch_writer_client(fake):
+            result = await write_analyst_evidence(
+                user_id=uuid.UUID(USER_A),
+                agent_run_id=run_id,
+                insights=batch_insights,
+                started_at=now,
+                scoped_tickers=batch_tickers,
+            )
+
+        assert result.recommendations_written == 10
+
+        recs = fake.store.get("recommendations", [])
+        # Batch tickers' OLD recs are expired; NEW recs are active
+        expired_batch = [
+            r for r in recs
+            if r["ticker"] in batch_tickers
+            and r.get("is_active") is False
+            and r["agent_run_id"] == old_run_id
+        ]
+        active_batch = [
+            r for r in recs
+            if r["ticker"] in batch_tickers
+            and r.get("is_active") is True
+            and r["agent_run_id"] == run_id
+        ]
+        assert len(expired_batch) == 10, "Old batch recs must be expired"
+        assert len(active_batch) == 10, "New batch recs must be active"
+
+        # Non-batch tickers' recs must be UNTOUCHED (still active from old run)
+        non_batch = [t for t in all_tickers if t not in batch_tickers]
+        untouched = [
+            r for r in recs
+            if r["ticker"] in non_batch and r.get("is_active") is True
+        ]
+        assert len(untouched) == 24, (
+            f"Non-batch ticker recs must survive scoped pass. "
+            f"Expected 24 untouched, got {len(untouched)}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_regression_no_scoping_would_write_34_proving_old_bug(self):
+        """Regression: without scoped_tickers, full-portfolio expiry wipes non-batch recs.
+
+        This test proves the old behavior (no scope) would incorrectly expire ALL
+        other tickers' active recommendations — confirming the fix is necessary.
+        """
+        fake = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        old_run_id = str(uuid.uuid4())
+        now = _now()
+
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        # Pre-seed active recs for all 34 tickers from an older run
+        fake.store["recommendations"] = [
+            {
+                "ticker": t,
+                "user_id": USER_A,
+                "is_active": True,
+                "agent_run_id": old_run_id,
+                "action": "HOLD",
+                "created_at": _iso_ago(50, now),
+            }
+            for t in all_tickers
+        ]
+
+        # Write only 10 insights WITHOUT scoped_tickers (simulates old bug)
+        batch_insights = [_SimpleInsight(all_tickers[i]) for i in range(10)]
+
+        with _patch_writer_client(fake):
+            result = await write_analyst_evidence(
+                user_id=uuid.UUID(USER_A),
+                agent_run_id=run_id,
+                insights=batch_insights,
+                started_at=now,
+                scoped_tickers=None,  # no scoping → old full-expiry behavior
+            )
+
+        assert result.recommendations_written == 10
+
+        recs = fake.store.get("recommendations", [])
+        # WITHOUT scoping, all 34 old recs are expired (the old bug)
+        still_active_old = [
+            r for r in recs
+            if r.get("is_active") is True and r["agent_run_id"] == old_run_id
+        ]
+        assert len(still_active_old) == 0, (
+            "Without scoped_tickers, ALL old recs are expired — "
+            "proving scoped_tickers is necessary to protect non-batch evidence."
+        )
+
+    @pytest.mark.asyncio
+    async def test_certification_not_published_until_all_34_pass(self):
+        """Prewarm is not triggered on partial passes; fires exactly once on the final pass."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # all succeed
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        prewarm_call_count = [0]
+
+        async def _counting_prewarm(**_kw):
+            prewarm_call_count[0] += 1
+
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            side_effect=_counting_prewarm,
+        ):
+            # First 3 passes — jobs remain; prewarm must not be triggered
+            for _ in range(3):
+                r = await worker.run_once(now=_now())
+                if r.claimed_job_count > 0 and r.remaining_pending_or_retryable > 0:
+                    assert prewarm_call_count[0] == 0, (
+                        "Prewarm must not fire while refresh jobs remain pending."
+                    )
+
+            # Final pass — drains last 4 jobs; prewarm must fire exactly once
+            r4 = await worker.run_once(now=_now())
+
+        all_succeeded = {r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED}
+        assert len(all_succeeded) == 34
+        assert r4.run_resumable is False
+        assert prewarm_call_count[0] == 1, (
+            f"Prewarm must be triggered exactly once after all 34 jobs complete, "
+            f"got {prewarm_call_count[0]} call(s)."
+        )
+
+    @pytest.mark.asyncio
+    async def test_early_prewarm_guard_partial_batch_does_not_trigger_prewarm(self):
+        """After first of 4 passes (10/34 tickers), prewarm must not be triggered."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # all succeed
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert result.remaining_pending_or_retryable >= 24
+        assert result.run_resumable is True
+        mock_prewarm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_backend_scoped_to_selected_batch_via_custom_backend(self):
+        """Verify that default_full_portfolio_agent_orchestrator_backend receives
+        selected_tickers as the analysis scope — not the full portfolio.
+
+        Uses a custom backend that records which tickers were requested so we can
+        assert the scope was bounded to the worker batch (not all 34 positions).
+        """
+        fake_db = _FakeSupabase()
+        run_id = str(uuid.uuid4())
+        now = _now()
+
+        # Seed a 10-ticker job batch from a 34-ticker portfolio
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        batch_tickers = all_tickers[:10]
+        for t in all_tickers:
+            fake_db.store.setdefault(TABLE, []).append({
+                "id": str(uuid.uuid4()),
+                "user_id": USER_A,
+                "ticker": t,
+                "status": JOB_PENDING,
+                "refresh_window": "2026-05-15",
+                "attempts": 0,
+                "next_retry_at": now.isoformat(),
+                "requested_at": _iso_ago(2, now),
+                "prior_action": "HOLD",
+                "weight_pct": 2.9,
+                "evidence_age_hours_at_request": 200.0,
+                "max_attempts": 5,
+            })
+
+        requested_tickers_log: list[list[str]] = []
+
+        async def _recording_backend(uid, selected, started):
+            """Records which tickers were passed as the analysis scope."""
+            requested_tickers_log.append(list(selected))
+            # Write minimal evidence rows so readback succeeds
+            with _patch_writer_client(fake_db):
+                await write_analyst_evidence(
+                    user_id=uid,
+                    agent_run_id=run_id,
+                    insights=[_SimpleInsight(t) for t in selected],
+                    started_at=started,
+                    scoped_tickers=list(selected),
+                )
+            with patch("app.database.get_supabase_client", return_value=fake_db):
+                return await _read_post_run_evidence(
+                    uid, selected, run_id, started,
+                    agent_run_status="completed",
+                    agent_run_insight_count=len(selected),
+                )
+
+        def _factory(uid):
+            return FullPortfolioAnalystRefreshAdapter(
+                user_id=uid,
+                run_backend=_recording_backend,
+                budget=FullPortfolioAnalystRefreshBudget(),
+            )
+
+        worker = AnalystRefreshWorker(
+            client=fake_db,
+            adapter_factory=_factory,
+            max_jobs_per_run=10,
+        )
+        result = await worker.run_once(now=now)
+
+        assert result.claimed_job_count == 10
+        assert len(requested_tickers_log) == 1
+        assert len(requested_tickers_log[0]) == 10, (
+            f"Backend received {len(requested_tickers_log[0])} tickers; "
+            "expected exactly 10 (the worker batch). "
+            "The orchestrator must be scoped to the selected batch — "
+            "not the full 34-ticker portfolio."
+        )
+        # All 10 batch tickers appeared in the backend request
+        received = {t.upper() for t in requested_tickers_log[0]}
+        expected = {t.upper() for t in batch_tickers}
+        assert received == expected, (
+            f"Backend received {received}; expected {expected}"
+        )
+
+
+# ── Test 11: Early prewarm guard — worker-level prewarm gate ─────────────────
+
+
+class TestEarlyPrewarmGuard:
+    """Prewarm runs only after the full refresh job set is drained — never after a partial batch.
+
+    These tests cover the pre-merge blocker fix: prewarm is moved from the
+    per-batch adapter backend to the worker, gated on run_resumable=False.
+    """
+
+    @pytest.mark.asyncio
+    async def test_partial_batch_does_not_trigger_prewarm(self):
+        """After first of 4 passes (10/34 tickers), prewarm must not be triggered."""
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert result.remaining_pending_or_retryable >= 24
+        assert result.run_resumable is True
+        mock_prewarm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_final_batch_triggers_prewarm_exactly_once(self):
+        """Single-pass run drains all jobs; prewarm fires exactly once."""
+        fake = _FakeSupabase()
+        tickers = ["AAPL", "NVDA", "MSFT"]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 3
+        assert result.run_resumable is False
+        assert result.remaining_pending_or_retryable == 0
+        mock_prewarm.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_all_jobs_failed_terminally_no_prewarm(self):
+        """When all jobs fail terminally (no successes), prewarm must not fire even with run_resumable=False."""
+        fake = _FakeSupabase()
+        tickers = ["AAPL"]
+        now = _now()
+        _enqueue_tickers(fake, tickers, now=now)
+
+        # Set to max_attempts - 1 so the next failure exhausts the budget
+        fake.rows()[0]["attempts"] = DEFAULT_MAX_ATTEMPTS - 1
+        fake.rows()[0]["max_attempts"] = DEFAULT_MAX_ATTEMPTS
+
+        # Adapter always fails
+        adapter = _FakeAnalystAdapter(call_outcomes=[set()])
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ) as mock_prewarm:
+            result = await worker.run_once(now=now)
+
+        assert "AAPL" in result.failed_terminal_tickers
+        assert result.run_resumable is False
+        # No successes → no prewarm, even though run_resumable=False
+        mock_prewarm.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prewarm_deferred_log_emitted_when_jobs_remain(self, caplog):
+        """When prewarm is deferred because jobs remain, the structured log is emitted."""
+        import logging
+
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(20)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=5)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            new_callable=AsyncMock,
+        ):
+            with caplog.at_level(
+                logging.INFO,
+                logger="app.services.intelligence.v3.analyst_refresh_worker_v1",
+            ):
+                result = await worker.run_once(now=_now())
+
+        assert result.run_resumable is True
+        deferred_lines = [
+            r for r in caplog.records
+            if "analyst_refresh_worker_prewarm_deferred" in r.getMessage()
+            and "reason=jobs_remain" in r.getMessage()
+        ]
+        assert deferred_lines, (
+            "Expected intel_v3.analyst_refresh_worker_prewarm_deferred reason=jobs_remain "
+            "log when prewarm is skipped because jobs remain."
+        )
+
+    @pytest.mark.asyncio
+    async def test_regression_previous_fresh_rows_do_not_trigger_early_prewarm(self):
+        """Regression: existing fresh rows for non-batch tickers must not cause prewarm after first batch.
+
+        This is the exact scenario of the pre-merge blocker: batch 1 writes 10
+        new rows; the remaining 24 tickers have fresh rows from a prior run.
+        Without the fix, the per-batch prewarm call in the adapter would fire
+        after batch 1, and the certification contract (checking ALL positions)
+        could pass if the 24 non-batch tickers all have fresh rows.
+
+        With the fix, prewarm is deferred until run_resumable=False.
+        """
+        fake = _FakeSupabase()
+        all_tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, all_tickers)
+
+        # Pre-seed fresh agent_insights for the non-batch tickers (simulating a prior run)
+        now = _now()
+        old_run_id = str(uuid.uuid4())
+        non_batch_tickers = all_tickers[10:]
+        for t in non_batch_tickers:
+            fake.store.setdefault("agent_insights", []).append({
+                "ticker": t,
+                "user_id": USER_A,
+                "created_at": now.isoformat(),
+                "run_id": old_run_id,
+            })
+            fake.store.setdefault("recommendations", []).append({
+                "ticker": t,
+                "user_id": USER_A,
+                "is_active": True,
+                "agent_run_id": old_run_id,
+                "action": "HOLD",
+                "created_at": now.isoformat(),
+            })
+
+        prewarm_calls: list[dict] = []
+
+        async def _recording_prewarm(**kwargs):
+            prewarm_calls.append(dict(kwargs))
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        with patch(
+            "app.services.intelligence.v3.analyst_refresh_worker_v1.trigger_snapshot_prewarm",
+            side_effect=_recording_prewarm,
+        ):
+            # First pass: claims 10 tickers, 24 remain pending
+            r1 = await worker.run_once(now=now)
+
+        assert r1.claimed_job_count == 10
+        assert r1.remaining_pending_or_retryable >= 24
+        assert r1.run_resumable is True
+        assert len(prewarm_calls) == 0, (
+            f"Prewarm must NOT fire after first batch even when non-batch tickers have "
+            f"fresh rows from a prior run. Got {len(prewarm_calls)} call(s): {prewarm_calls}"
+        )

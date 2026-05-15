@@ -400,8 +400,9 @@ async def default_full_portfolio_agent_orchestrator_backend(
             finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
             polygon_key=getattr(settings, "polygon_api_key", "") or "",
             force_recompute=True,
-            # NOTE: analyst_refresh_tickers intentionally omitted so the
-            # orchestrator runs its full-portfolio analyst phase + persistence.
+            # Scope the orchestrator's analyst + persist phases to the selected
+            # batch only.  Non-scope tickers keep their existing rows untouched.
+            analyst_refresh_tickers=set(selected_tickers),
         )
         run_id = await orch.create_run(tickers=list(selected_tickers))
         # Capture the orchestrator's run outcome so the post-run readback can
@@ -461,18 +462,28 @@ async def default_full_portfolio_agent_orchestrator_backend(
         write_result = None
         if agent_run_status == "completed" and result_insights:
             from .analyst_evidence_writer_v1 import write_analyst_evidence
+            # Filter insights to the selected batch only.  AgentPipelineResult.insights
+            # contains all positions from state.insights (the full portfolio), but
+            # analyst_refresh_tickers scoped the LLM + _persist_sync to the selected
+            # batch.  Only those tickers have fresh LLM-backed evidence in this run.
+            selected_upper = {t.upper() for t in selected_tickers}
+            result_insights_scoped = [
+                ins for ins in result_insights
+                if (getattr(ins, "ticker", None) or "").upper() in selected_upper
+            ]
             write_result = await write_analyst_evidence(
                 user_id=user_id,
                 agent_run_id=run_id,
-                insights=result_insights,
+                insights=result_insights_scoped,
                 started_at=started_at,
                 verdicts=verdicts_dicts or None,
+                scoped_tickers=list(selected_tickers),
             )
             logger.info(
                 "analyst_evidence_writer_persisted_count=%d user_id=%s run_id=%s "
                 "insights_written=%d recs_written=%d "
                 "already_present_insights=%d already_present_recs=%d write_error=%s "
-                "verdicts_available=%d",
+                "verdicts_available=%d selected_ticker_count=%d",
                 write_result.persisted_count,
                 user_id,
                 run_id,
@@ -482,23 +493,14 @@ async def default_full_portfolio_agent_orchestrator_backend(
                 write_result.recommendations_already_present,
                 write_result.write_error,
                 len(verdicts_dicts),
+                len(selected_tickers),
             )
 
-        # Stage 3.2c — deterministic snapshot prewarm after successful writeback.
-        #
-        # When the explicit writer persisted fresh evidence rows (insights_written > 0),
-        # trigger a deterministic Intel v3 snapshot from the newly written evidence so
-        # the user does not need to click Run Intel a second time.  The prewarm:
-        #   * Makes zero LLM calls.
-        #   * Does NOT enqueue another analyst refresh job.
-        #   * Does NOT block or fail the worker if it errors — logged separately.
-        #   * Persists an active snapshot if certification succeeds (or partial/blocked
-        #     snapshot if honest constraints remain), which GET /intel/v3/snapshot returns.
-        if write_result is not None and write_result.insights_written > 0:
-            await _trigger_snapshot_prewarm(
-                user_id=user_id,
-                worker_run_id=run_id,
-            )
+        # Snapshot prewarm is deferred to the worker level (analyst_refresh_worker_v1).
+        # The worker triggers prewarm only after the full refresh job set is drained
+        # (run_resumable=False), not after every partial batch.  Calling prewarm here
+        # (per-batch) allowed worker_certified to be published mid-refresh when the
+        # remaining tickers had fresh rows from a previous run — the pre-merge blocker.
 
         return await _read_post_run_evidence(
             user_id, selected_tickers, run_id, started_at,
@@ -794,16 +796,17 @@ async def _read_post_run_evidence(
 
 # ── Stage 3.2c: deterministic snapshot prewarm ───────────────────────────────
 
-async def _trigger_snapshot_prewarm(
+async def trigger_snapshot_prewarm(
     *,
     user_id: UUID,
     worker_run_id: str,
 ) -> None:
     """Trigger a deterministic Intel v3 snapshot from freshly written evidence.
 
-    Called after ``write_analyst_evidence`` persists new rows
-    (``insights_written > 0``) so the user does not need a second Run Intel
-    click to see a fresh snapshot.
+    Called by ``AnalystRefreshWorker.run_once`` when ``run_resumable=False``
+    (all pending refresh jobs drained) — never after a partial batch.  Calling
+    prewarm after every batch would allow ``worker_certified`` to be published
+    mid-refresh when remaining tickers have fresh rows from a previous run.
 
     Guarantees:
       * Zero LLM calls — the prewarm only reads persisted evidence and runs
@@ -816,7 +819,6 @@ async def _trigger_snapshot_prewarm(
         job outcome (succeeded/failed per ticker) is unaffected.
     """
     import time as _time
-    from .intel_v3_service import prewarm_intel_v3_snapshot
 
     prewarm_started = _time.monotonic()
     logger.info(
@@ -824,6 +826,7 @@ async def _trigger_snapshot_prewarm(
         user_id, worker_run_id,
     )
     try:
+        from .intel_v3_service import prewarm_intel_v3_snapshot
         snapshot = await prewarm_intel_v3_snapshot(user_id, prewarm_run_id=worker_run_id)
         duration_ms = int((_time.monotonic() - prewarm_started) * 1000)
         diag = snapshot.get("diagnostics") or {}
@@ -845,3 +848,8 @@ async def _trigger_snapshot_prewarm(
             "prewarm_error=%s prewarm_duration_ms=%d",
             user_id, worker_run_id, exc, duration_ms,
         )
+
+
+# Backward-compat alias for tests and any existing code that references the
+# private name.  New call sites should use ``trigger_snapshot_prewarm``.
+_trigger_snapshot_prewarm = trigger_snapshot_prewarm

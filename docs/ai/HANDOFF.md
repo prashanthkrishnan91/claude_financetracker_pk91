@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 1D patch 3 — urgent Watchtower refresh wired to production price/analyst callables)
+Last updated: 2026-05-15 (post Build 2 — evidence-grade certification + publish contract)
 
 ## Purpose
 
@@ -11,6 +11,30 @@ This file is **current operational state**, not a historical log. It is meant to
 - Roadmap stage: **Stage 3.3 merged** (All-or-nothing certified intelligence run contract). Stage 3.2c complete. Stage 2 exit still pending. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts per visible Deploy v3 recommendation (default = recommended), per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows (e.g. NVDA BUY $100) clearly labelled as manual via `is_manual: true` on `ActualDecisionItem`. The Step 2 recommendation surface stays read-only. The primary Deploy UX now shows the most recent 10 decision logs below Step 3 using the existing `DecisionHistoryEntry` component (single definition; no parallel history surface). The v3 snapshot mirrors `session_key` and entered/deploy/reserve amounts into `decision_context` so existing fingerprint dedupe + history rendering work uniformly across legacy and v3 logs. Re-logging the same active plan still updates the latest matching log rather than creating duplicate spam. Plain-English clarity note added near Step 3: "These are Intel v3 planning recommendations, not broker-executed trades." No confidence engine, no new provider/market data, no Intel/Deploy sizing changes, no SQL. Frontend-only.
 - Active build queue item: **Stage 2 exit validation** — re-validate end-to-end in production with a real dollar amount in Step 1: Step 2 shows 3–5 amount-aware BUY recommendations totaling exactly cash_to_deploy when no guardrail prevents it (e.g. $1,500 = $1,500, not $1,498); Step 3 lets the user edit actual amounts and add manual rows; the decision log history shows BUY spend, manual BUY, and Trim/Sell separately (never negative reserve; "Over planned by $X" / "Unallocated $X" as appropriate); Evaluate button works or gracefully reports insufficient data. Stage 2 exit remains pending until: (1) amount-aware recommendations work, (2) editable actual logging works, (3) decision log history persists after refresh, (4) journal accounting/evaluate behavior is production-validated, (5) recommendation confidence/ranking explanation is reviewed in a later evidence-quality slice.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
+
+## Current architecture — Build 2 additions
+
+**Build 2: Evidence-grade certification + publish contract** (PR #pending). After Watchtower writes fresh price evidence to `portfolio_snapshots`, the visible Intel v3 snapshot is now automatically re-certified from that evidence without analyst LLM jobs.
+
+New module: `watchtower_intel_republisher_v1.py`
+- `compare_and_republish(user_id, client, *, intel_republish_callable)` — compares `intel_v3_snapshots.payload.generated_at` vs `portfolio_snapshots.snapshot_at`. If evidence is newer (>10s threshold), calls `intel_republish_callable(user_id)` which wraps `IntelV3Service.run_prewarm_snapshot()`. Zero LLM calls; analyst_jobs_queued=0 always.
+- `get_evidence_freshness_state(user_id, client, *, intel_snapshot_generated_at)` — lightweight comparison for API response embedding.
+- `PUBLISH_*` constants: `certified_current` | `rebuilt_and_published` | `republish_pending` | `certification_blocked` | `no_snapshot_exists`
+
+Extended modules:
+- `watchtower_callables_v1.py` — adds `build_default_intel_republish_callable()`, which wraps `IntelV3Service.run_prewarm_snapshot()` (deferred import preserves Watchtower worker boundary).
+- `watchtower_background_refresh_worker_v1.py` — `WatchtowerBackgroundRefreshWorker` now accepts `intel_republish_callable`. After `persist_watchtower_price_snapshot()` succeeds, calls `compare_and_republish()`. `WatchtowerRefreshCycleResult` carries `intel_republish_result` dict. `run_watchtower_cycle_for_user()` now passes the callable through.
+- `watchtower_worker_entrypoint.py` — wires `build_default_intel_republish_callable()` in the background loop.
+- `intel_v3_service.py` — `get_latest_snapshot()` now embeds `evidence_freshness_state` in the API response (reads latest `portfolio_snapshots.snapshot_at`, compares to Intel snapshot `generated_at`, adds `certified_current` or `republish_pending` to the returned payload — non-mutating copy). Structured log updated to include `evidence_freshness_state=%s`.
+
+Boundary preserved: `watchtower_background_refresh_worker_v1.py` does NOT import `decide()`. The republish callable is injected, built by `watchtower_callables_v1.py`.
+
+28 new tests (`test_watchtower_build_2.py`). 91 Build 1D tests still pass.
+
+Key structured logs to confirm in production:
+- `watchtower_intel_republisher.publish_decision user_id=... publish_status=rebuilt_and_published evidence_newer_than_certified_snapshot=True analyst_jobs_queued=0`
+- `intel_v3_snapshot_response_summary ... evidence_freshness_state=certified_current` (after republish completes)
+- `intel_v3_worker_certified_snapshot_published` (from `run_prewarm_snapshot` inside the callable)
 
 ## Current architecture / runtime state
 
@@ -23,6 +47,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-15 — **Build 2: Evidence-grade certification + publish contract** — New `watchtower_intel_republisher_v1.py` wires Watchtower evidence freshness → Intel v3 snapshot re-certification. After Watchtower writes fresh `portfolio_snapshots`, `compare_and_republish()` compares timestamps and triggers `IntelV3Service.run_prewarm_snapshot()` (zero LLM calls, all-or-nothing contract re-checked). `get_latest_snapshot()` now embeds `evidence_freshness_state` (`certified_current` | `republish_pending`) in every API response. Worker boundary preserved — no `decide()` import in Watchtower worker. `build_default_intel_republish_callable()` in `watchtower_callables_v1.py` is the boundary-clean wiring. 28 new tests + 91 Build 1D tests green. No SQL.
 
 - 2026-05-15 — **Build 1D patch 3: urgent Watchtower refresh wired to production callables** — Root cause: `run_watchtower_cycle_for_user` in `enqueue_run_v3` passed no `price_refresh_callable`, so the urgent path collected freshness records but never actually refreshed or persisted prices. Fix: extracted `build_default_price_refresh_callable` and `build_default_analyst_enqueue_callable` into new `watchtower_callables_v1.py` (shared, no IO, no side effects at import). `watchtower_worker_entrypoint.py` now delegates to the shared module. `enqueue_run_v3` urgent `create_task` now passes both builders. 7 new tests (88 total, all pass). Key invariant: `price_refresh_callable` is never None in the urgent path.
 
@@ -67,13 +93,9 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Build 1D now mergeable.** All five pre-merge blockers for PR #331 are resolved. Merge PR #331 before proceeding to Build 2.
+**Build 2 complete.** PR open on branch `claude/review-documentation-0tqEa`. Merge after review.
 
-**Build 2: Evidence-grade certification and publish contract.** Now that the Watchtower foundation is production-ready, Build 2 can:
-  1. Wire `WatchtowerRefreshPlan.deploy_blockers` into the certified snapshot publish gate — only publish `worker_certified` when all deploy-critical evidence is fresh.
-  2. Add per-type freshness to `CertifiedIntelRunContractResult` so the contract checks price/position/weight freshness, not just analyst evidence.
-  3. Wire the Watchtower background refresh worker into a separate Railway process.
-  4. Expose deploy gate status in the API response for the Deploy page.
+**Next: Build 3 — Intelligence quality GO/NO-GO audit.** Before any intelligence quality changes, run an evidence-quality audit: (1) Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; (2) Check that `run_prewarm_snapshot` certification contract passes (all analyst evidence SLAs still met — recommendation ≤24h, agent_insight ≤48h); (3) Decide GO/NO-GO on intelligence-quality improvements (analyst evidence quality, primary_driver depth, rationale completeness).
 
 Key logs to confirm Build 1D gate is running in production:
   - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`

@@ -72,17 +72,19 @@ class WatchtowerRefreshCycleResult:
     deploy_eligible_after: bool = False
     intel_eligible_after: bool = False
     evidence_summary: dict[str, Any] = field(default_factory=dict)
+    intel_republish_result: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "refreshed_price_tickers":  self.refreshed_price_tickers,
-            "failed_price_tickers":     self.failed_price_tickers,
-            "analyst_jobs_enqueued":    self.analyst_jobs_enqueued,
+            "refreshed_price_tickers":   self.refreshed_price_tickers,
+            "failed_price_tickers":      self.failed_price_tickers,
+            "analyst_jobs_enqueued":     self.analyst_jobs_enqueued,
             "position_staleness_logged": self.position_staleness_logged,
-            "cycle_duration_ms":        self.cycle_duration_ms,
-            "deploy_eligible_after":    self.deploy_eligible_after,
-            "intel_eligible_after":     self.intel_eligible_after,
-            "evidence_summary":         self.evidence_summary,
+            "cycle_duration_ms":         self.cycle_duration_ms,
+            "deploy_eligible_after":     self.deploy_eligible_after,
+            "intel_eligible_after":      self.intel_eligible_after,
+            "evidence_summary":          self.evidence_summary,
+            "intel_republish_result":    self.intel_republish_result,
         }
 
 
@@ -106,12 +108,14 @@ class WatchtowerBackgroundRefreshWorker:
         *,
         price_refresh_callable: Optional[Callable] = None,
         analyst_job_enqueue_callable: Optional[Callable] = None,
+        intel_republish_callable: Optional[Callable] = None,
         max_cycle_seconds: float = DEFAULT_MAX_CYCLE_SECONDS,
         max_price_tickers_per_cycle: int = DEFAULT_MAX_PRICE_TICKERS_PER_CYCLE,
     ):
         self.client = client
         self._price_refresh = price_refresh_callable
         self._analyst_enqueue = analyst_job_enqueue_callable
+        self._intel_republish = intel_republish_callable
         self._max_cycle_seconds = max_cycle_seconds
         self._max_price_tickers_per_cycle = max_price_tickers_per_cycle
         self._in_progress: set[tuple[str, str]] = set()  # (user_id_str, evidence_type)
@@ -211,6 +215,28 @@ class WatchtowerBackgroundRefreshWorker:
                                         persist_res.certified_ticker_count,
                                         persist_res.carried_ticker_count,
                                     )
+                                    # Build 2: evidence-grade certification + publish contract.
+                                    # After a durable Watchtower price snapshot is written,
+                                    # compare evidence timestamps against the current Intel
+                                    # snapshot and trigger a deterministic rebuild if fresh
+                                    # evidence postdates the certified snapshot.
+                                    # analyst_jobs_queued stays 0 — no LLM calls for price-only refresh.
+                                    try:
+                                        from .watchtower_intel_republisher_v1 import (
+                                            compare_and_republish,
+                                        )
+                                        republish_res = await compare_and_republish(
+                                            user_id,
+                                            self.client,
+                                            intel_republish_callable=self._intel_republish,
+                                        )
+                                        result.intel_republish_result = republish_res.to_dict()
+                                    except Exception as republish_exc:
+                                        logger.warning(
+                                            "watchtower_evidence_updated user_id=%s "
+                                            "action=intel_republish_error error=%s",
+                                            user_id, republish_exc,
+                                        )
                                 else:
                                     logger.warning(
                                         "watchtower_evidence_updated user_id=%s evidence_type=%s "
@@ -334,6 +360,7 @@ async def run_watchtower_cycle_for_user(
     *,
     price_refresh_callable: Optional[Callable] = None,
     analyst_job_enqueue_callable: Optional[Callable] = None,
+    intel_republish_callable: Optional[Callable] = None,
     now: Optional[datetime] = None,
 ) -> WatchtowerRefreshCycleResult:
     """Convenience entry point: run one Watchtower cycle for a single user."""
@@ -341,6 +368,7 @@ async def run_watchtower_cycle_for_user(
         client=client,
         price_refresh_callable=price_refresh_callable,
         analyst_job_enqueue_callable=analyst_job_enqueue_callable,
+        intel_republish_callable=intel_republish_callable,
     )
     return await worker.run_refresh_cycle(user_id, now=now)
 

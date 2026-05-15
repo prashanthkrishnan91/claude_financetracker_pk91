@@ -113,18 +113,35 @@ class IntelV3Service:
             total = sum(action_counts.values()) if action_counts else 0
             snapshot_source = payload.get("snapshot_source", "unknown")
 
+            # Build 2: embed evidence_freshness_state so callers can show honest
+            # state without separate round-trips. Does NOT modify the persisted payload.
+            generated_at = payload.get("generated_at")
+            try:
+                from .watchtower_intel_republisher_v1 import get_evidence_freshness_state
+                evidence_freshness_state = await get_evidence_freshness_state(
+                    self.user_id,
+                    self.client,
+                    intel_snapshot_generated_at=generated_at,
+                )
+            except Exception:
+                evidence_freshness_state = "certified_current"
+
+            response_payload = dict(payload)
+            response_payload["evidence_freshness_state"] = evidence_freshness_state
+
             logger.info(
                 "intel_v3_snapshot_response_summary user_id=%s result=found "
                 "snapshot_id=%s total_cards=%d action_counts=%s "
-                "snapshot_source=%s snapshot_response_ms=%d",
+                "snapshot_source=%s evidence_freshness_state=%s snapshot_response_ms=%d",
                 self.user_id,
                 snapshot_id,
                 total,
                 action_counts,
                 snapshot_source,
+                evidence_freshness_state,
                 snapshot_response_ms,
             )
-            return payload
+            return response_payload
         except Exception as exc:
             logger.warning(
                 "intel_v3_snapshot_response_summary user_id=%s result=error error=%s",
@@ -706,6 +723,7 @@ class IntelV3Service:
                     from .watchtower_callables_v1 import (
                         build_default_price_refresh_callable,
                         build_default_analyst_enqueue_callable,
+                        build_default_intel_republish_callable,
                     )
                     _asyncio.create_task(
                         run_watchtower_cycle_for_user(
@@ -715,6 +733,9 @@ class IntelV3Service:
                                 self.client
                             ),
                             analyst_job_enqueue_callable=build_default_analyst_enqueue_callable(
+                                self.client
+                            ),
+                            intel_republish_callable=build_default_intel_republish_callable(
                                 self.client
                             ),
                         )
@@ -841,7 +862,7 @@ class IntelV3Service:
 
     # ── Deterministic prewarm (Stage 3.2c) ───────────────────────────────────
 
-    async def run_prewarm_snapshot(self, *, prewarm_run_id: str) -> dict[str, Any]:
+    async def run_prewarm_snapshot(self, *, prewarm_run_id: str, skip_persist_on_fail: bool = False) -> dict[str, Any]:
         """Build and persist a snapshot from current persisted evidence. Zero LLM calls.
 
         Mirrors the decision-build + persist steps of ``run_v3()`` but intentionally
@@ -1134,6 +1155,16 @@ class IntelV3Service:
         }
 
         # Step 6: persist.
+        # When skip_persist_on_fail=True (Watchtower-triggered republish), a failed
+        # certification must NOT overwrite the previous worker_certified snapshot.
+        if skip_persist_on_fail and not contract_certified:
+            logger.info(
+                "intel_v3_prewarm_skip_persist_on_fail user_id=%s run_id=%s "
+                "snapshot_source=%s — preserving previous worker_certified snapshot",
+                self.user_id, prewarm_run_id,
+                snapshot_payload.get("snapshot_source"),
+            )
+            return snapshot_payload
         await self._persist_snapshot(run_id=prewarm_run_id, payload=snapshot_payload)
 
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)

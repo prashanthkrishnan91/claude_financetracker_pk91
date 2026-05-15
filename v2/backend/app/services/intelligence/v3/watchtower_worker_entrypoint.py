@@ -74,6 +74,12 @@ def _build_default_analyst_enqueue_callable(client: Any) -> Any:
     return build_default_analyst_enqueue_callable(client)
 
 
+def _build_default_intel_republish_callable(client: Any) -> Any:
+    """Delegate to shared watchtower_callables_v1."""
+    from .watchtower_callables_v1 import build_default_intel_republish_callable
+    return build_default_intel_republish_callable(client)
+
+
 async def _fetch_active_user_ids(client: Any) -> list[UUID]:
     """Fetch distinct user IDs with active position rows."""
     import asyncio as _asyncio
@@ -105,6 +111,7 @@ async def _run_cycle_for_all_users(client: Any) -> dict[str, Any]:
 
     price_refresh = _build_default_price_refresh_callable(client)
     analyst_enqueue = _build_default_analyst_enqueue_callable(client)
+    intel_republish = _build_default_intel_republish_callable(client)
 
     user_ids = await _fetch_active_user_ids(client)
     succeeded = 0
@@ -116,6 +123,7 @@ async def _run_cycle_for_all_users(client: Any) -> dict[str, Any]:
                 client=client,
                 price_refresh_callable=price_refresh,
                 analyst_job_enqueue_callable=analyst_enqueue,
+                intel_republish_callable=intel_republish,
             )
             await worker.run_refresh_cycle(user_id)
             succeeded += 1

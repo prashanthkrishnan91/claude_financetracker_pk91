@@ -4,7 +4,7 @@
  * Covers deriveIntelV3UIStatus and buildBannerState (all-or-nothing certified
  * intelligence run contract), plus legacy analystRefreshRequestNote tests.
  */
-import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState } from "@/lib/intel-v3-banner";
+import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
 import type { IntelV3Snapshot, IntelV3SnapshotDiagnostics } from "@/lib/api";
 
 function makeDiag(
@@ -348,5 +348,49 @@ describe("buildBannerState — tone and copy", () => {
     // Must still mention how the analysis was produced
     expect(banner.detail?.toLowerCase()).toContain("background worker");
     expect(banner.detail?.toLowerCase()).toContain("certified");
+  });
+});
+
+// ── Build 2: evidence_freshness_state contract ────────────────────────────────
+
+describe("Build 2 — evidence_freshness_state status mapping", () => {
+  it("worker_certified + 34/34 + certified_current => Ready pill", () => {
+    const snap = makeCertifiedSnapshot({
+      certified_holding_count: 34,
+      total_holding_count: 34,
+      evidence_freshness_state: "certified_current",
+    } as any);
+    expect(buildStatusPillState(snap, false).pill).toBe("Ready");
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("certified_current");
+  });
+
+  it("worker_certified + 34/34 + republish_pending => Updating pill, not Ready", () => {
+    const snap = makeCertifiedSnapshot({
+      certified_holding_count: 34,
+      total_holding_count: 34,
+      evidence_freshness_state: "republish_pending",
+    } as any);
+    expect(buildStatusPillState(snap, false).pill).toBe("Updating");
+    expect(deriveIntelV3UIStatus(snap, false)).not.toBe("certified_current");
+  });
+
+  it("worker_certified + 34/34 + certification_blocked => Blocked pill", () => {
+    const snap = makeCertifiedSnapshot({
+      certified_holding_count: 34,
+      total_holding_count: 34,
+      evidence_freshness_state: "certification_blocked",
+    } as any);
+    expect(buildStatusPillState(snap, false).pill).toBe("Blocked");
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("blocked_certification_failed");
+  });
+
+  it("legacy worker_certified with missing evidence_freshness_state => Ready (backward compat)", () => {
+    const snap = makeCertifiedSnapshot({
+      certified_holding_count: 3,
+      total_holding_count: 3,
+      // evidence_freshness_state absent
+    } as any);
+    expect(buildStatusPillState(snap, false).pill).toBe("Ready");
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("certified_current");
   });
 });

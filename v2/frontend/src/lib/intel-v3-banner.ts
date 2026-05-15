@@ -47,13 +47,30 @@ export function deriveIntelV3UIStatus(
   lastRunResult?: IntelV3RunResult | null,
 ): IntelV3UIStatus {
   const hasSnapshot = !!snapshot;
+  const freshness = snapshot?.evidence_freshness_state;
+
+  // evidence_freshness_state overrides take priority when present.
+  // Handle them before the isRefreshing check so they are not masked.
+  if (!isRefreshing && freshness === "republish_pending") {
+    return "refreshing_analyst_intelligence";
+  }
+  if (!isRefreshing && freshness === "no_snapshot_exists") {
+    return "unavailable_evidence_incomplete";
+  }
+  if (!isRefreshing && freshness === "certification_blocked") {
+    return "blocked_certification_failed";
+  }
+
   const isCertified =
     hasSnapshot &&
     snapshot!.snapshot_source === "worker_certified" &&
     typeof snapshot!.certified_holding_count === "number" &&
     typeof snapshot!.total_holding_count === "number" &&
     snapshot!.total_holding_count > 0 &&
-    snapshot!.certified_holding_count === snapshot!.total_holding_count;
+    snapshot!.certified_holding_count === snapshot!.total_holding_count &&
+    // Block Ready when evidence is not yet current (Build 2 freshness contract)
+    freshness !== "republish_pending" &&
+    freshness !== "certification_blocked";
 
   const isCertificationFailed =
     hasSnapshot && snapshot!.snapshot_source === "certification_failed";
@@ -77,8 +94,7 @@ export function deriveIntelV3UIStatus(
     return "blocked_certification_failed";
   }
 
-  // Snapshot exists but is from HTTP path (no worker certification) or
-  // is certification_failed. Show evidence incomplete until worker certifies.
+  // Snapshot exists but not worker-certified or evidence not current.
   const runEnqueued = lastRunResult?.status === "refresh_requested" ||
     lastRunResult?.status === "refresh_in_progress";
   if (runEnqueued) {

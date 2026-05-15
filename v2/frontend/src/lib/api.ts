@@ -1200,6 +1200,14 @@ export interface IntelV3Snapshot {
     agent_run_ids_used: string[];
     certification_errors: string[];
   };
+  // Build 2 — evidence freshness state from watchtower republisher
+  evidence_freshness_state?:
+    | "certified_current"
+    | "republish_pending"
+    | "certification_blocked"
+    | "rebuilt_and_published"
+    | "no_snapshot_exists"
+    | string;
 }
 
 export type IntelV3RunMode =

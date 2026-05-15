@@ -47,13 +47,30 @@ export function deriveIntelV3UIStatus(
   lastRunResult?: IntelV3RunResult | null,
 ): IntelV3UIStatus {
   const hasSnapshot = !!snapshot;
+  const freshness = snapshot?.evidence_freshness_state;
+
+  // evidence_freshness_state overrides take priority when present.
+  // Handle them before the isRefreshing check so they are not masked.
+  if (!isRefreshing && freshness === "republish_pending") {
+    return "refreshing_analyst_intelligence";
+  }
+  if (!isRefreshing && freshness === "no_snapshot_exists") {
+    return "unavailable_evidence_incomplete";
+  }
+  if (!isRefreshing && freshness === "certification_blocked") {
+    return "blocked_certification_failed";
+  }
+
   const isCertified =
     hasSnapshot &&
     snapshot!.snapshot_source === "worker_certified" &&
     typeof snapshot!.certified_holding_count === "number" &&
     typeof snapshot!.total_holding_count === "number" &&
     snapshot!.total_holding_count > 0 &&
-    snapshot!.certified_holding_count === snapshot!.total_holding_count;
+    snapshot!.certified_holding_count === snapshot!.total_holding_count &&
+    // Block Ready when evidence is not yet current (Build 2 freshness contract)
+    freshness !== "republish_pending" &&
+    freshness !== "certification_blocked";
 
   const isCertificationFailed =
     hasSnapshot && snapshot!.snapshot_source === "certification_failed";
@@ -77,8 +94,7 @@ export function deriveIntelV3UIStatus(
     return "blocked_certification_failed";
   }
 
-  // Snapshot exists but is from HTTP path (no worker certification) or
-  // is certification_failed. Show evidence incomplete until worker certifies.
+  // Snapshot exists but not worker-certified or evidence not current.
   const runEnqueued = lastRunResult?.status === "refresh_requested" ||
     lastRunResult?.status === "refresh_in_progress";
   if (runEnqueued) {
@@ -178,6 +194,61 @@ export function buildBannerState(
         showProvenance: true,
       };
     }
+  }
+}
+
+// ── User-facing status pill (Build 2.5) ──────────────────────────────────────
+
+export type IntelUserPill = "Ready" | "Updating" | "Needs Research" | "Blocked";
+
+export interface IntelStatusPillState {
+  pill: IntelUserPill;
+  line: string;
+  tone: "green" | "amber" | "red" | "grey";
+}
+
+/**
+ * Maps the 6 internal UI states to 4 plain-English user-facing statuses.
+ * buildBannerState() remains for the diagnostics drawer; this drives the
+ * compact status area shown by default.
+ */
+export function buildStatusPillState(
+  snapshot: IntelV3Snapshot | null | undefined,
+  isRefreshing: boolean,
+  lastRunResult?: IntelV3RunResult | null,
+): IntelStatusPillState {
+  const status = deriveIntelV3UIStatus(snapshot, isRefreshing, lastRunResult);
+
+  switch (status) {
+    case "certified_current": {
+      const ts = snapshot?.generated_at ? new Date(snapshot.generated_at) : null;
+      const today = ts ? ts.toDateString() === new Date().toDateString() : false;
+      const timeStr = ts
+        ? ts.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+        : null;
+      const line = timeStr
+        ? today
+          ? `Updated today at ${timeStr}.`
+          : `Updated ${ts!.toLocaleDateString()} at ${timeStr}.`
+        : "Up to date.";
+      return { pill: "Ready", line, tone: "green" };
+    }
+
+    case "latest_certified_new_refresh_running":
+      return { pill: "Updating", line: "Refreshing portfolio intelligence…", tone: "amber" };
+
+    case "refreshing_analyst_intelligence":
+      return { pill: "Updating", line: "Refreshing portfolio intelligence…", tone: "grey" };
+
+    case "unavailable_refresh_failed":
+      return { pill: "Needs Research", line: "Last refresh failed. Run Intel to retry.", tone: "red" };
+
+    case "blocked_certification_failed":
+      return { pill: "Blocked", line: "Some holdings couldn't be certified. Run Intel to retry.", tone: "red" };
+
+    case "unavailable_evidence_incomplete":
+    default:
+      return { pill: "Needs Research", line: "Research is stale. Run Intel to refresh recommendations.", tone: "grey" };
   }
 }
 

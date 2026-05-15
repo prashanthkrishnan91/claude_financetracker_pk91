@@ -189,6 +189,40 @@ class WatchtowerBackgroundRefreshWorker:
                             "action=refresh_complete succeeded=%d failed=%d",
                             user_id, EVIDENCE_TYPE_PRICE, len(succeeded), len(failed),
                         )
+                        # Persist refreshed prices so evidence collector reads fresh evidence.
+                        # Only write when at least one ticker succeeded — no point writing
+                        # an all-failed snapshot (it just carries forward old values).
+                        if price_result and succeeded:
+                            try:
+                                from .watchtower_price_snapshot_writer_v1 import (
+                                    persist_watchtower_price_snapshot,
+                                )
+                                persist_res = await persist_watchtower_price_snapshot(
+                                    user_id,
+                                    self.client,
+                                    price_results=price_result,
+                                    now=now,
+                                )
+                                if persist_res.persisted:
+                                    logger.info(
+                                        "watchtower_evidence_updated user_id=%s evidence_type=%s "
+                                        "action=snapshot_persisted certified=%d carried=%d",
+                                        user_id, EVIDENCE_TYPE_PRICE,
+                                        persist_res.certified_ticker_count,
+                                        persist_res.carried_ticker_count,
+                                    )
+                                else:
+                                    logger.warning(
+                                        "watchtower_evidence_updated user_id=%s evidence_type=%s "
+                                        "action=snapshot_persist_failed error=%s",
+                                        user_id, EVIDENCE_TYPE_PRICE, persist_res.error,
+                                    )
+                            except Exception as persist_exc:
+                                logger.warning(
+                                    "watchtower_evidence_updated user_id=%s evidence_type=%s "
+                                    "action=snapshot_persist_error error=%s",
+                                    user_id, EVIDENCE_TYPE_PRICE, persist_exc,
+                                )
                     except Exception as exc:
                         result.failed_price_tickers = capped
                         logger.warning(

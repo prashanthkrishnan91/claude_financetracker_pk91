@@ -175,10 +175,13 @@ DEPLOY_SLA_CONFIG: dict[str, EvidenceSLA] = {
         aging_seconds=900,      # 15 min (same as Intel fresh_seconds)
         stale_seconds=1_800,    # 30 min
     ),
+    # Position deploy-fresh requires a recently-written Watchtower snapshot (5 min).
+    # Watchtower writes a new portfolio_snapshots row after each price refresh cycle,
+    # so position freshness tracks price verification — stale price → stale position.
     EVIDENCE_TYPE_POSITION: EvidenceSLA(
-        fresh_seconds=86_400,   # 24 h — same as Intel; user-imported data
-        aging_seconds=172_800,  # 48 h
-        stale_seconds=604_800,  # 7 d
+        fresh_seconds=300,      # 5 min — must match latest price refresh cycle
+        aging_seconds=900,      # 15 min
+        stale_seconds=1_800,    # 30 min
     ),
     EVIDENCE_TYPE_PORTFOLIO_WEIGHT: EvidenceSLA(
         fresh_seconds=300,      # 5 min — derived from price; same threshold
@@ -360,6 +363,28 @@ def is_deploy_eligible_for_type(
     return False, reason
 
 
+def is_deploy_eligible_strict(
+    evidence_type: str,
+    freshness_status: str,
+) -> tuple[bool, Optional[str]]:
+    """Return (deploy_eligible, reason) requiring FRESH only for deploy-critical types.
+
+    Stricter than is_deploy_eligible_for_type: AGING is not sufficient.
+    Dollar deployment plans require FRESH evidence — a 7-min-old price (Deploy AGING)
+    is too old to size a position. Only FRESH (≤5 min by Deploy SLA) passes.
+    Non-deploy-critical types are never blocked.
+    """
+    if evidence_type not in DEPLOY_CRITICAL_TYPES:
+        return True, None
+    if freshness_status == FRESHNESS_FRESH:
+        return True, None
+    reason = (
+        f"{evidence_type} is {freshness_status} — deploy requires FRESH evidence "
+        f"(AGING not sufficient for dollar deployment)"
+    )
+    return False, reason
+
+
 def is_decision_eligible_for_type(
     evidence_type: str,
     freshness_status: str,
@@ -410,7 +435,7 @@ def build_evidence_record(
         now=now,
         last_error=last_error,
     )
-    deploy_elig, deploy_reason = is_deploy_eligible_for_type(evidence_type, deploy_freshness)
+    deploy_elig, deploy_reason = is_deploy_eligible_strict(evidence_type, deploy_freshness)
     decision_elig, decision_reason = is_decision_eligible_for_type(evidence_type, freshness_status)
     reason = deploy_reason or decision_reason
 

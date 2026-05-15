@@ -114,19 +114,21 @@ async def collect_evidence_records(
         ))
 
     # ── Position evidence ─────────────────────────────────────────────────────
-    # Positions are user-imported. Use the portfolio_snapshot.snapshot_at as the
-    # "position last known" timestamp — that's when positions were last verified.
+    # Position deploy-freshness is tied to price certification, not snapshot_at.
+    # After a Watchtower price refresh, market_value_certified_at is written per
+    # position. A position is deploy-fresh only when its price was recently verified.
     for ticker in (tickers or []):
         t = (ticker or "").upper()
         if not t:
             continue
+        pos_verified_at = price_certs.get(t) or snap_at
         records.append(build_evidence_record(
             evidence_type=EVIDENCE_TYPE_POSITION,
             ticker=t,
             scope="ticker",
-            as_of=snap_at,
-            collected_at=snap_at,
-            source="portfolio_snapshots.snapshot_at",
+            as_of=pos_verified_at,
+            collected_at=pos_verified_at,
+            source="portfolio_snapshots.market_value_certified_at",
             now=now,
         ))
 

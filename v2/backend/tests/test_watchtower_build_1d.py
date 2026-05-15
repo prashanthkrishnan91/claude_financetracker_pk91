@@ -1040,3 +1040,390 @@ def _make_fake_client(
 
     client.table.side_effect = _table
     return client
+
+
+# ── Test 16: Deploy strict freshness (FRESH only, not AGING) ─────────────────
+
+class TestDeployStrictFreshness:
+    def test_7min_old_price_is_deploy_aging_not_fresh(self):
+        """7-minute-old price: Deploy AGING (5min < 7min < 15min) → deploy_eligible=False."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            classify_deploy_freshness_status, FRESHNESS_AGING,
+        )
+        ts = NOW - timedelta(minutes=7)
+        status = classify_deploy_freshness_status(
+            evidence_type=EVIDENCE_TYPE_PRICE, as_of=ts, collected_at=ts, now=NOW,
+        )
+        assert status == FRESHNESS_AGING
+
+    def test_7min_old_price_blocks_deploy_via_build_evidence_record(self):
+        """build_evidence_record must set deploy_eligible=False for 7-min-old price."""
+        ts = NOW - timedelta(minutes=7)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        # Intel: FRESH (7min < 15min fresh_seconds)
+        assert rec.freshness_status == FRESHNESS_FRESH
+        # Deploy: blocked because 7min > Deploy fresh=5min (AGING not sufficient)
+        assert not rec.deploy_eligible, (
+            "7-min-old price must be deploy_eligible=False — AGING is not sufficient "
+            "for dollar deployment under strict Deploy SLA"
+        )
+
+    def test_7min_old_portfolio_weight_blocks_deploy(self):
+        """7-minute-old portfolio_weight: Deploy AGING → deploy_eligible=False."""
+        ts = NOW - timedelta(minutes=7)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PORTFOLIO_WEIGHT,
+            ticker=None,
+            scope="portfolio",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        assert not rec.deploy_eligible, (
+            "7-min-old portfolio_weight must block deploy — weight is derived from stale price"
+        )
+
+    def test_3min_old_price_passes_deploy_strict(self):
+        """3-minute-old price: Deploy FRESH → deploy_eligible=True."""
+        ts = NOW - timedelta(minutes=3)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        assert rec.freshness_status == FRESHNESS_FRESH
+        assert rec.deploy_eligible
+
+    def test_24h_old_position_without_cert_blocks_deploy(self):
+        """24h-old position (old snap_at, no price cert) must be STALE by 300s deploy SLA."""
+        ts = NOW - timedelta(hours=24)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_POSITION,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        assert not rec.deploy_eligible, (
+            "24h-old position must block deploy under 300s Deploy SLA"
+        )
+
+    def test_3min_old_position_with_cert_is_deploy_eligible(self):
+        """Position with a 3-min-old price cert is deploy-eligible."""
+        ts = NOW - timedelta(minutes=3)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_POSITION,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        assert rec.deploy_eligible, (
+            "Position with 3-min-old price cert must be deploy-eligible"
+        )
+
+    def test_is_deploy_eligible_strict_requires_fresh_not_aging(self):
+        """is_deploy_eligible_strict: AGING must return False for deploy-critical types."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            is_deploy_eligible_strict,
+        )
+        for etype in (EVIDENCE_TYPE_PRICE, EVIDENCE_TYPE_POSITION, EVIDENCE_TYPE_PORTFOLIO_WEIGHT):
+            eligible, reason = is_deploy_eligible_strict(etype, FRESHNESS_AGING)
+            assert not eligible, f"{etype} AGING must not be deploy_eligible_strict"
+            assert reason is not None
+            assert "FRESH" in reason or "not sufficient" in reason.lower()
+
+    def test_is_deploy_eligible_strict_fresh_passes(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            is_deploy_eligible_strict,
+        )
+        for etype in (EVIDENCE_TYPE_PRICE, EVIDENCE_TYPE_POSITION, EVIDENCE_TYPE_PORTFOLIO_WEIGHT):
+            eligible, _ = is_deploy_eligible_strict(etype, FRESHNESS_FRESH)
+            assert eligible, f"{etype} FRESH must pass is_deploy_eligible_strict"
+
+    def test_is_deploy_eligible_strict_non_critical_always_passes(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            is_deploy_eligible_strict,
+        )
+        for etype in (EVIDENCE_TYPE_ANALYST_LLM, EVIDENCE_TYPE_RECOMMENDATION):
+            for status in (FRESHNESS_FRESH, FRESHNESS_AGING, FRESHNESS_STALE, FRESHNESS_MISSING):
+                eligible, _ = is_deploy_eligible_strict(etype, status)
+                assert eligible, f"Non-critical {etype} must always pass strict gate"
+
+    def test_position_deploy_sla_is_300s(self):
+        """DEPLOY_SLA_CONFIG for POSITION must be 300s — 24h is too loose for dollar deploy."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import DEPLOY_SLA_CONFIG
+        assert DEPLOY_SLA_CONFIG[EVIDENCE_TYPE_POSITION].fresh_seconds == 300, (
+            "Position deploy-fresh threshold must be 300s to tie freshness to Watchtower cycle"
+        )
+
+    def test_aging_price_is_deploy_ineligible_via_is_deploy_eligible_for_type(self):
+        """Existing is_deploy_eligible_for_type still allows AGING (backward compat for tests)."""
+        eligible, _ = is_deploy_eligible_for_type(EVIDENCE_TYPE_PRICE, FRESHNESS_AGING)
+        assert eligible, (
+            "is_deploy_eligible_for_type (permissive) should still allow AGING — "
+            "strict gate is in is_deploy_eligible_strict and build_evidence_record"
+        )
+
+
+# ── Test 17: Watchtower price snapshot writer ─────────────────────────────────
+
+class TestWatchtowerPriceSnapshotWriter:
+    def _make_price_result(self, mid_price: float = 150.0, source: str = "finnhub"):
+        """Build a minimal PriceResult-like object."""
+        from unittest.mock import MagicMock
+        pr = MagicMock()
+        pr.mid_price = mid_price
+        pr.source = source
+        pr.is_valid = lambda: mid_price > 0
+        pr.is_stale = lambda: source.startswith(("cache", "institution"))
+        return pr
+
+    def _make_writer_client(
+        self,
+        *,
+        tickers: list[str],
+        shares: float = 10.0,
+        avg_cost: float = 100.0,
+        prev_positions_data: Optional[list] = None,
+    ) -> MagicMock:
+        client = MagicMock()
+
+        pos_rows = [
+            {"ticker": t, "shares": shares, "avg_cost": avg_cost}
+            for t in tickers
+        ]
+        prev_snap = prev_positions_data or []
+
+        def _table(name: str):
+            q = MagicMock()
+            q.select.return_value = q
+            q.eq.return_value = q
+            q.order.return_value = q
+            q.limit.return_value = q
+            q.insert.return_value = q
+
+            if name == "positions":
+                q.execute.return_value = MagicMock(data=pos_rows)
+            elif name == "portfolio_snapshots":
+                q.execute.return_value = MagicMock(
+                    data=[{"positions_data": prev_snap}] if prev_snap else []
+                )
+                # insert returns a new row with an id
+                q.insert.return_value = MagicMock(
+                    execute=lambda: MagicMock(data=[{"id": "snap-test-1"}])
+                )
+            else:
+                q.execute.return_value = MagicMock(data=[])
+            return q
+
+        client.table.side_effect = _table
+        return client
+
+    def test_persist_returns_result(self):
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        client = self._make_writer_client(tickers=["AAPL"])
+        pr = {"AAPL": self._make_price_result()}
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(
+                uuid.uuid4(), client, price_results=pr, now=NOW,
+            )
+        )
+        assert result is not None
+        assert result.persisted
+
+    def test_succeeded_ticker_is_certified(self):
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL", "MSFT"])
+        pr = {
+            "AAPL": self._make_price_result(mid_price=150.0),
+            "MSFT": None,  # failed
+        }
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(uid, client, price_results=pr, now=NOW)
+        )
+        assert result.certified_ticker_count == 1
+        assert result.carried_ticker_count == 1
+
+    def test_failed_provider_does_not_certify(self):
+        """When price_results is empty (all failed), no tickers get certified."""
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL"])
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(uid, client, price_results={}, now=NOW)
+        )
+        # Should still write a snapshot (snap_at = now for freshness tracking)
+        # but no tickers certified
+        assert result.certified_ticker_count == 0
+        assert result.carried_ticker_count == 1
+
+    def test_stale_price_result_not_certified(self):
+        """A price result with is_stale()=True must not get market_value_certified_at."""
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL"])
+        stale_pr = self._make_price_result(mid_price=150.0, source="cache/5min")
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(
+                uid, client, price_results={"AAPL": stale_pr}, now=NOW,
+            )
+        )
+        assert result.certified_ticker_count == 0
+        assert result.carried_ticker_count == 1
+
+    def test_no_positions_returns_error(self):
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        client = MagicMock()
+        q = MagicMock()
+        q.select.return_value = q
+        q.eq.return_value = q
+        q.order.return_value = q
+        q.limit.return_value = q
+        q.execute.return_value = MagicMock(data=[])
+        client.table.return_value = q
+
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(
+                uuid.uuid4(), client, price_results={}, now=NOW,
+            )
+        )
+        assert not result.persisted
+        assert result.error == "no_positions"
+
+    def test_writer_module_importable(self):
+        import importlib
+        mod = importlib.import_module(
+            "app.services.intelligence.v3.watchtower_price_snapshot_writer_v1"
+        )
+        assert hasattr(mod, "persist_watchtower_price_snapshot")
+        assert hasattr(mod, "PersistResult")
+
+
+# ── Test 18: Evidence collector uses price certs for position freshness ───────
+
+class TestPositionFreshnessUsesPriceCert:
+    def test_position_evidence_source_is_market_value_certified_at(self):
+        """Evidence collector must use market_value_certified_at for position freshness."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/watchtower_evidence_collector_v1.py"
+        ).read_text()
+        # Position evidence must reference price_certs, not just snap_at
+        assert "price_certs" in source, "Position evidence must use price_certs"
+        pos_block = source[source.find("Position evidence"):]
+        assert "market_value_certified_at" in pos_block[:800], (
+            "Position evidence source must reference market_value_certified_at"
+        )
+
+    def test_position_freshness_tied_to_price_cert(self):
+        """Position with fresh price cert (3min) is deploy-eligible; 24h snap_at is ignored."""
+        client = _make_fake_client(
+            tickers=["AAPL"],
+            snap_at=NOW - timedelta(hours=24),  # old snapshot
+            rec_at=NOW - timedelta(hours=1),
+            insight_at=NOW - timedelta(hours=1),
+            positions=[{
+                "ticker": "AAPL",
+                "market_value": 1500.0,
+                "market_value_certified_at": (NOW - timedelta(minutes=3)).isoformat(),
+            }],
+        )
+        records = asyncio.get_event_loop().run_until_complete(
+            __import__(
+                "app.services.intelligence.v3.watchtower_evidence_collector_v1",
+                fromlist=["collect_evidence_records"],
+            ).collect_evidence_records(uuid.uuid4(), client, now=NOW)
+        )
+        pos_recs = [r for r in records if r.evidence_type == EVIDENCE_TYPE_POSITION]
+        assert pos_recs, "No POSITION records found"
+        # Position with 3-min cert should be deploy-eligible
+        assert pos_recs[0].deploy_eligible, (
+            "Position with 3-min price cert must be deploy-eligible even if snap_at is 24h old"
+        )
+
+    def test_position_with_24h_cert_is_deploy_blocked(self):
+        """Position cert 24h old: deploy blocked by 300s Deploy SLA."""
+        client = _make_fake_client(
+            tickers=["AAPL"],
+            snap_at=NOW - timedelta(hours=24),
+            rec_at=NOW - timedelta(hours=1),
+            insight_at=NOW - timedelta(hours=1),
+            positions=[{
+                "ticker": "AAPL",
+                "market_value": 1500.0,
+                "market_value_certified_at": (NOW - timedelta(hours=24)).isoformat(),
+            }],
+        )
+        from app.services.intelligence.v3.watchtower_evidence_collector_v1 import (
+            collect_evidence_records,
+        )
+        records = asyncio.get_event_loop().run_until_complete(
+            collect_evidence_records(uuid.uuid4(), client, now=NOW)
+        )
+        pos_recs = [r for r in records if r.evidence_type == EVIDENCE_TYPE_POSITION]
+        assert pos_recs, "No POSITION records found"
+        assert not pos_recs[0].deploy_eligible, (
+            "Position with 24h cert must be deploy-blocked under 300s Deploy SLA"
+        )
+
+
+# ── Test 19: Run Intel triggers urgent refresh when price/weight stale ────────
+
+class TestRunIntelUrgentRefreshTrigger:
+    def test_intel_v3_service_source_has_urgent_refresh_trigger(self):
+        """Source inspection: intel_v3_service must trigger Watchtower on stale price/weight."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "urgent_refresh_triggered" in source, (
+            "enqueue_run_v3 must track urgent_refresh_triggered in response"
+        )
+        assert "run_watchtower_cycle_for_user" in source, (
+            "enqueue_run_v3 must call run_watchtower_cycle_for_user when price/weight stale"
+        )
+        assert "create_task" in source, (
+            "Urgent Watchtower refresh must use asyncio.create_task (fire-and-forget)"
+        )
+
+    def test_intel_v3_service_source_has_deploy_blocker_check(self):
+        """Source inspection: must check price/portfolio_weight in deploy_blockers."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "price_weight_stale" in source, (
+            "enqueue_run_v3 must compute price_weight_stale from deploy_blockers"
+        )
+        assert "portfolio_weight" in source[source.find("price_weight_stale"):source.find("price_weight_stale") + 300], (
+            "price_weight_stale check must include portfolio_weight"
+        )

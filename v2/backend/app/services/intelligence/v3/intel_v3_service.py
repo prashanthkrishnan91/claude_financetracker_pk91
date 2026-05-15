@@ -688,6 +688,40 @@ class IntelV3Service:
             )
             # gate_succeeded remains False; stale_analyst_tickers = all tickers
 
+        # When gate shows price/weight is stale, fire an urgent Watchtower price refresh
+        # as a fire-and-forget background task. This does not block the enqueue response.
+        urgent_refresh_triggered = False
+        if gate_succeeded:
+            deploy_blockers = getattr(
+                getattr(gate_result, "refresh_plan", None), "deploy_blockers", ()
+            ) or gate_result.deploy_blockers
+            price_weight_stale = any(
+                b in ("price", "portfolio_weight") for b in (deploy_blockers or [])
+            )
+            if price_weight_stale:
+                try:
+                    from .watchtower_background_refresh_worker_v1 import (
+                        run_watchtower_cycle_for_user,
+                    )
+                    _asyncio.create_task(
+                        run_watchtower_cycle_for_user(
+                            self.user_id,
+                            self.client,
+                        )
+                    )
+                    urgent_refresh_triggered = True
+                    logger.info(
+                        "intel_v3_urgent_watchtower_refresh_triggered user_id=%s "
+                        "deploy_blockers=%s",
+                        self.user_id, list(deploy_blockers or []),
+                    )
+                except Exception as _wt_exc:
+                    logger.warning(
+                        "intel_v3_urgent_watchtower_refresh_trigger_failed user_id=%s "
+                        "error=%s",
+                        self.user_id, _wt_exc,
+                    )
+
         # Enqueue analyst refresh only for tickers with stale/missing analyst evidence.
         # When gate succeeded and no tickers are stale, queued_count=0 (refresh not needed).
         # When gate failed, we fall back to enqueuing all tickers (safe degradation).
@@ -786,6 +820,7 @@ class IntelV3Service:
             "refresh_jobs_pending_count": refresh_jobs_pending_count,
             "refresh_jobs_remaining_count": refresh_jobs_remaining_count,
             "freshness_gate": freshness_gate_summary,
+            "urgent_refresh_triggered": urgent_refresh_triggered,
             "message": (
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."

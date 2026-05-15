@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-15 (post Build 1D patch — Watchtower production-usable, gate-first enqueue, strict Deploy SLAs)
+Last updated: 2026-05-15 (post Build 1D patch 2 — Deploy strict freshness, position cert-tied freshness, price snapshot writer, urgent refresh trigger)
 
 ## Purpose
 
@@ -24,7 +24,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
 
-- 2026-05-15 — **Build 1D patch: Watchtower production-usable, gate-first enqueue, strict Deploy SLAs** — Five pre-merge blockers fixed: (1) **Deploy SLAs tightened**: `DEPLOY_SLA_CONFIG` added to freshness ledger — price/portfolio_weight deploy-fresh now 5 min (was 15 min / 24 h); `classify_deploy_freshness_status()` uses these stricter thresholds; `build_evidence_record()` now computes `deploy_eligible` from Deploy SLA (not Intel SLA). (2) **Gate-first enqueue**: `enqueue_run_v3()` now runs fast freshness gate BEFORE enqueuing analyst jobs; `_stale_analyst_tickers_from_gate()` extracts only tickers with stale/missing analyst_llm evidence; only those tickers are enqueued (not all 34); gate failure safely falls back to full-ticker enqueue. Response includes `stale_analyst_ticker_count`. Status `"analyst_evidence_current"` returned when gate determines 0 stale tickers. (3) **Portfolio weight Deploy dependency**: same Deploy SLA as price (both 5 min) — weight is derived from the same portfolio snapshot so they expire together. (4) **Production-runnable entrypoint**: `watchtower_worker_entrypoint.py` created — mirrors `analyst_refresh_worker_entrypoint.py` pattern; `--loop`, `INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS` env (default 60s), `_build_default_price_refresh_callable()` (PriceService), `_build_default_analyst_enqueue_callable()` (enqueue_refresh_jobs), `_fetch_active_user_ids()` from positions table, `main()`. No injected callables needed to run. (5) 20 new tests (59 total, all pass). Key logs: `intel_v3_full_refresh_enqueued stale_analyst_count=N gate_succeeded=true/false`.
+- 2026-05-15 — **Build 1D patch 2: Deploy strict freshness, price snapshot writer, urgent refresh** — Four remaining pre-merge blockers fixed: (1) **Deploy gate requires FRESH (not AGING)**: `is_deploy_eligible_strict()` added — requires FRESHNESS_FRESH only for deploy-critical types; `build_evidence_record()` now uses `is_deploy_eligible_strict`. A 7-min-old price (Deploy AGING) is now deploy_eligible=False. (2) **Position deploy SLA tightened to 5 min**: `DEPLOY_SLA_CONFIG[POSITION].fresh_seconds=300` — position freshness now tied to price certification cycle; `watchtower_evidence_collector_v1` uses `price_certs.get(t) or snap_at` for position evidence. (3) **Watchtower price refresh now durable**: new `watchtower_price_snapshot_writer_v1.py` — `persist_watchtower_price_snapshot()` reads positions, writes a new `portfolio_snapshots` row with `market_value_certified_at=now` for succeeded tickers, carries forward old values (without cert stamp) for failed tickers. Background worker calls writer after each price refresh. (4) **Run Intel triggers urgent price refresh**: `enqueue_run_v3()` fires `asyncio.create_task(run_watchtower_cycle_for_user(...))` when gate reports price/weight stale; `urgent_refresh_triggered` in response. (5) 22 new tests (81 total, all pass). Key rule: never set `market_value_certified_at` for tickers where price refresh failed.
+
+- 2026-05-15 — **Build 1D patch 1: Watchtower production-usable, gate-first enqueue, strict Deploy SLAs** — Five pre-merge blockers fixed: (1) `DEPLOY_SLA_CONFIG` added to freshness ledger — price/portfolio_weight deploy-fresh now 5 min; `classify_deploy_freshness_status()` uses these stricter thresholds; `build_evidence_record()` computes `deploy_eligible` from Deploy SLA. (2) Gate-first enqueue: `enqueue_run_v3()` runs fast freshness gate BEFORE enqueuing; `_stale_analyst_tickers_from_gate()` extracts only stale/missing analyst tickers. (3) Portfolio weight same Deploy SLA as price. (4) `watchtower_worker_entrypoint.py` created — `--loop`, `INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS` env (default 60s), production callables wired. (5) 20 new tests (59 total). Key logs: `intel_v3_full_refresh_enqueued stale_analyst_count=N gate_succeeded=true/false`.
 
 - 2026-05-15 — **Build 1D: Watchtower Fresh Evidence Foundation** — New modules: `watchtower_freshness_ledger_v1.py`, `watchtower_refresh_planner_v1.py`, `watchtower_evidence_collector_v1.py`, `watchtower_deploy_gate_v1.py`, `intel_v3_fast_freshness_gate_v1.py`, `watchtower_background_refresh_worker_v1.py`. `enqueue_run_v3()` returns `freshness_gate` in response. 39 new tests. No SQL, no schema changes. Certification contract unchanged.
 
@@ -63,15 +65,18 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Build 2: Evidence-grade certification and publish contract.** Now that the Watchtower Fresh Evidence Foundation is in place, Build 2 can:
+**Build 1D now mergeable.** All five pre-merge blockers for PR #331 are resolved. Merge PR #331 before proceeding to Build 2.
+
+**Build 2: Evidence-grade certification and publish contract.** Now that the Watchtower foundation is production-ready, Build 2 can:
   1. Wire `WatchtowerRefreshPlan.deploy_blockers` into the certified snapshot publish gate — only publish `worker_certified` when all deploy-critical evidence is fresh.
-  2. Add per-type freshness completeness to `CertifiedIntelRunContractResult` so the contract checks price/position/weight freshness, not just analyst evidence.
-  3. Wire the Watchtower background refresh worker into a separate Railway process (alongside or replacing the analyst_refresh_worker entrypoint) that polls and refreshes stale price slices on schedule.
+  2. Add per-type freshness to `CertifiedIntelRunContractResult` so the contract checks price/position/weight freshness, not just analyst evidence.
+  3. Wire the Watchtower background refresh worker into a separate Railway process.
   4. Expose deploy gate status in the API response for the Deploy page.
 
 Key logs to confirm Build 1D gate is running in production:
-  - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N` — confirm gate runs at click time.
-  - `watchtower_freshness_summary user_id=... fresh_by_type=... stale_by_type=...` — confirm freshness visibility.
+  - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`
+  - `watchtower_price_snapshot_writer.snapshot_written user_id=... certified=N carried=N`
+  - `intel_v3_urgent_watchtower_refresh_triggered user_id=... deploy_blockers=[price]`
   - Check that `gate_check_ms` stays under 500ms.
 
 **Previous production validation steps (still apply):**

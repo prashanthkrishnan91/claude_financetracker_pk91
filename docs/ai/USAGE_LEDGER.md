@@ -61,68 +61,39 @@ PR usage notes in the PR body are not sufficient for workflow audits — they ar
 | Date | PR | Prompt ID | Phase | Linked PR | Repo area | Session | Model | Chat | Source | Input tok | Output tok | Cache read | Cache creation | Total tok | Est. cost | Δ input | Δ output | Δ cache read | Δ cache creation | Δ total | Δ cost | Waste | Main drivers | Follow-up patches | Efficiency lesson |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | YYYY-MM-DD | #000 | p01 | initial | n/a | workflow/docs | unknown | claude-sonnet-4-6 | same-chat | manual | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | template row — replace with real data | 0 | n/a |
+| 2026-05-13 | 304 | p01 | unknown | n/a | unknown | unknown | unknown | unknown | ccusage | 110 | 37631 | 8117991 | 470732 | 8626464 | $7.9423955 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unknown | unknown | 0 | n/a |
+| 2026-05-14 | unknown | arch-memo-01 | audit | n/a | docs/architecture | unknown | claude-opus-4-7 | new-chat | ccusage | 1695 | 3859 | 1336063 | 241079 | 1582696 | $1.14597485 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, code exploration agents, architecture memo | 0 | delegated code mapping to parallel Explore agents to protect context |
+| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | new-chat | ccusage | 22681 | 55704 | 10383036 | 203484 | 10664905 | $7.969297999999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, code exploration, seam + tests | 0 | narrow anchor reads; surgical seam swap |
+| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | new-chat | ccusage | 82 | 79379 | 7578574 | 234815 | 7892850 | $7.2417657500000026 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, Stage 3.2 worker + job store + migration + tests | 0 | reused existing full-portfolio adapter; in-memory fake supabase for job-store tests |
+| 2026-05-14 | 314 | p02 | follow-up | 314 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 130 | 108662 | 13209385 | 737719 | 14055896 | $13.93263625 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | terminal-state reopen logic, idempotency tests, Stage 3.1 test fragility fix | 1 | anchor patched evidence ages to the real clock when the code under test uses datetime.now() |
+| 2026-05-14 | unknown | p01 | initial | n/a | workflow/railway | unknown | claude-haiku-4-5-20251001 | new-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | single shared railway.toml with shell conditional on PROCESS_TYPE | 0 | narrow single-file fix; minimal scope |
+| 2026-05-14 | 314 | p03 | follow-up | 314 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 188 | 163333 | 22119761 | 1108834 | 23392116 | $22.074357999999997 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | trace AgentOrchestrator persistence contract, fix worker readback ticker-casing mismatch, diagnostics + tests | 2 | readback verification must key on the durable id (run_id), never on request-side string equality like ticker casing |
+| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 262 | 195535 | 36695823 | 1575948 | 38467568 | $33.0872715 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | worker loop interval env config + default 60s + loop-summary log + tests/docs | 0 | ship operability knobs (poll interval, per-poll log) with the worker, not after production confusion |
+| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 328 | 240320 | 51508180 | 2063698 | 53812526 | $44.661842499999985 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | failed-job retry handoff fix: explicit-refresh make-due + stale-claim recovery + diagnostics + tests | 0 | an explicit user action must override internal backoff timers; separate explicit-refresh paths from automatic-retry paths |
+| 2026-05-14 | 318 | p02 | follow-up | 318 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 416 | 297235 | 75120914 | 2145570 | 77564135 | $58.40322449999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | durable persistence/readback attribution: capture AgentPipelineResult outcome, specific no-rows reasons, Intel v3 read-path test | 0 | when a shared upstream path fails opaquely, instrument precise failure attribution at the consumer boundary instead of blind-patching the shared code |
+| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-sonnet-4-6 | new-chat | ccusage | 77 | 61400 | 6785534 | 210492 | 7057503 | $3.746236199999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | explicit writeback bridge: analyst_evidence_writer_v1 + wire into default backend + 74 tests | 0 | use fresh get_supabase_client() instead of the orchestrator instance client for writeback |
+| 2026-05-14 | 324 | p02 | follow-up | 324 | backend/intel-v3,frontend/intel-v3 | unknown | claude-sonnet-4-6 | same-chat | ccusage | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | Stage 3.3 patch: FAIL_AGENT_RUN_MISSING constant + tighten Check 4 (unknown → fail), banner wording fix (remove 'Agents ran for this request'), 2 new contract tests, 1 new banner test | 1 | missing agent_runs row must fail certification explicitly — unknown status must not silently pass |
+| 2026-05-15 | pending-pr | initial | initial | n/a | workflow/scripts,docs,ci | unknown | claude-sonnet-4-6 | new-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads (CLAUDE.md, certify, PR template, usage tracking, prompt docs, MISS_LEDGER, hooks); ai_pr_readiness_check.py + CI workflow + hook + command + doc updates | 0 | structural enforcement in scripts/CI removes prompt-level workflow repetition |
 
 ## Adding a row for the current PR
 
-### Coarse mode (session totals only)
-
 ```bash
 bash scripts/ai/usage_snapshot.sh \
-  --pr <PR-number> \
-  --prompt-id p01 \
-  --phase initial \
-  --model <model-name> \
-  --chat-strategy same-chat \
+  --pr <PR-number> --prompt-id p01 --phase initial \
+  --model <model-name> --chat-strategy same-chat \
   --repo-area "workflow/docs" \
   --main-drivers "anchor reads, file writes" \
-  --follow-up-patches 0 \
-  --waste-classification none \
-  --efficiency-lesson "narrow anchor reads next time" \
+  --follow-up-patches 0 --waste-classification none \
   --append-ledger
 ```
-
-### Per-prompt delta mode (recommended)
-
-```bash
-# a) Before starting Claude work — save a baseline:
-bash scripts/ai/usage_snapshot.sh --save-baseline before-pr123
-
-# b) After Claude completes the prompt — capture snapshot with delta:
-bash scripts/ai/usage_snapshot.sh \
-  --pr 123 \
-  --prompt-id p01 \
-  --phase initial \
-  --model claude-sonnet-4-6 \
-  --chat-strategy same-chat \
-  --repo-area "workflow/docs" \
-  --waste-classification none \
-  --delta-from-baseline .ai/usage/baseline-before-pr123.json \
-  --append-ledger
-
-# c) For a follow-up patch on the same PR:
-bash scripts/ai/usage_snapshot.sh --save-baseline before-pr123-p02
-bash scripts/ai/usage_snapshot.sh \
-  --pr 123 \
-  --prompt-id p02 \
-  --phase follow-up \
-  --linked-pr 123 \
-  --waste-classification preventable-follow-up \
-  --delta-from-baseline .ai/usage/baseline-before-pr123-p02.json \
-  --append-ledger
-```
-
-If ccusage is unavailable, token fields show `unavailable` — that is acceptable. Accurate unknowns are better than false values.
 
 ## Backfilling prior sessions
-
-When exact PR mapping is unknown:
 
 ```bash
 bash scripts/ai/backfill_usage_ledger.sh --since YYYY-MM-DD
 ```
 
-Prints 26-column candidate rows with `phase=backfill`, `unknown` PR mapping, and `unavailable` deltas. Append only with `--append-ledger`.
-Do not guess PR numbers — mark as `unknown`.
+Never guess PR numbers — mark unknown ones as `unknown`.
 
 ## Audit guidance
 
@@ -131,15 +102,3 @@ Use this ledger plus GitHub PR history to diagnose token burn:
 - High input tokens, low output → over-broad discovery reads.
 - High follow-up patches → unclear contracts or scope at PR time.
 - Recurring efficiency lessons → candidate for `docs/ai/MISS_LEDGER.md` promotion.
-| 2026-05-13 | 304 | p01 | unknown | n/a | unknown | unknown | unknown | unknown | ccusage | 110 | 37631 | 8117991 | 470732 | 8626464 | $7.9423955 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unknown | unknown | 0 | n/a |
-| 2026-05-14 | unknown | arch-memo-01 | audit | n/a | docs/architecture | unknown | claude-opus-4-7 | new-chat | ccusage | 1695 | 3859 | 1336063 | 241079 | 1582696 | $1.14597485 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, code exploration agents, architecture memo | 0 | delegated code mapping to parallel Explore agents to protect context |
-| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | new-chat | ccusage | 22681 | 55704 | 10383036 | 203484 | 10664905 | $7.969297999999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, code exploration, seam + tests | 0 | narrow anchor reads; surgical seam swap |
-| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | new-chat | ccusage | 82 | 79379 | 7578574 | 234815 | 7892850 | $7.2417657500000026 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | anchor reads, Stage 3.2 worker + job store + migration + tests | 0 | reused existing full-portfolio adapter; in-memory fake supabase for job-store tests |
-| 2026-05-14 | 314 | p02 | follow-up | 314 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 130 | 108662 | 13209385 | 737719 | 14055896 | $13.93263625 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | terminal-state reopen logic, idempotency tests, Stage 3.1 test fragility fix | 1 | anchor patched evidence ages to the real clock when the code under test uses datetime.now() |
-| 2026-05-14 | unknown | p01 | initial | n/a | workflow/railway | unknown | claude-haiku-4-5-20251001 | new-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | single shared railway.toml with shell conditional on PROCESS_TYPE | 0 | narrow single-file fix; minimal scope |
-| 2026-05-14 | 314 | p03 | follow-up | 314 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 188 | 163333 | 22119761 | 1108834 | 23392116 | $22.074357999999997 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | trace AgentOrchestrator persistence contract, fix worker readback ticker-casing mismatch, diagnostics + tests | 2 | readback verification must key on the durable id (run_id), never on request-side string equality like ticker casing |
-| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 262 | 195535 | 36695823 | 1575948 | 38467568 | $33.0872715 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | worker loop interval env config + default 60s + loop-summary log + tests/docs | 0 | ship operability knobs (poll interval, per-poll log) with the worker, not after production confusion |
-| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 328 | 240320 | 51508180 | 2063698 | 53812526 | $44.661842499999985 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | failed-job retry handoff fix: explicit-refresh make-due + stale-claim recovery + diagnostics + tests | 0 | an explicit user action must override internal backoff timers; separate explicit-refresh paths from automatic-retry paths |
-| 2026-05-14 | 318 | p02 | follow-up | 318 | backend/intel-v3 | unknown | claude-opus-4-7 | same-chat | ccusage | 416 | 297235 | 75120914 | 2145570 | 77564135 | $58.40322449999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | durable persistence/readback attribution: capture AgentPipelineResult outcome, specific no-rows reasons, Intel v3 read-path test | 0 | when a shared upstream path fails opaquely, instrument precise failure attribution at the consumer boundary instead of blind-patching the shared code |
-| 2026-05-14 | unknown | p01 | initial | n/a | backend/intel-v3 | unknown | claude-sonnet-4-6 | new-chat | ccusage | 77 | 61400 | 6785534 | 210492 | 7057503 | $3.746236199999999 | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | explicit writeback bridge: analyst_evidence_writer_v1 + wire into default backend + 74 tests | 0 | use fresh get_supabase_client() instead of the orchestrator instance client for writeback |
-| 2026-05-14 | 324 | p02 | follow-up | 324 | backend/intel-v3,frontend/intel-v3 | unknown | claude-sonnet-4-6 | same-chat | ccusage | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | Stage 3.3 patch: FAIL_AGENT_RUN_MISSING constant + tighten Check 4 (unknown → fail), banner wording fix (remove 'Agents ran for this request'), 2 new contract tests, 1 new banner test | 1 | missing agent_runs row must fail certification explicitly — unknown status must not silently pass |

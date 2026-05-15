@@ -723,6 +723,7 @@ class IntelV3Service:
                     from .watchtower_callables_v1 import (
                         build_default_price_refresh_callable,
                         build_default_analyst_enqueue_callable,
+                        build_default_intel_republish_callable,
                     )
                     _asyncio.create_task(
                         run_watchtower_cycle_for_user(
@@ -732,6 +733,9 @@ class IntelV3Service:
                                 self.client
                             ),
                             analyst_job_enqueue_callable=build_default_analyst_enqueue_callable(
+                                self.client
+                            ),
+                            intel_republish_callable=build_default_intel_republish_callable(
                                 self.client
                             ),
                         )
@@ -858,7 +862,7 @@ class IntelV3Service:
 
     # ── Deterministic prewarm (Stage 3.2c) ───────────────────────────────────
 
-    async def run_prewarm_snapshot(self, *, prewarm_run_id: str) -> dict[str, Any]:
+    async def run_prewarm_snapshot(self, *, prewarm_run_id: str, skip_persist_on_fail: bool = False) -> dict[str, Any]:
         """Build and persist a snapshot from current persisted evidence. Zero LLM calls.
 
         Mirrors the decision-build + persist steps of ``run_v3()`` but intentionally
@@ -1151,6 +1155,16 @@ class IntelV3Service:
         }
 
         # Step 6: persist.
+        # When skip_persist_on_fail=True (Watchtower-triggered republish), a failed
+        # certification must NOT overwrite the previous worker_certified snapshot.
+        if skip_persist_on_fail and not contract_certified:
+            logger.info(
+                "intel_v3_prewarm_skip_persist_on_fail user_id=%s run_id=%s "
+                "snapshot_source=%s — preserving previous worker_certified snapshot",
+                self.user_id, prewarm_run_id,
+                snapshot_payload.get("snapshot_source"),
+            )
+            return snapshot_payload
         await self._persist_snapshot(run_id=prewarm_run_id, payload=snapshot_payload)
 
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)

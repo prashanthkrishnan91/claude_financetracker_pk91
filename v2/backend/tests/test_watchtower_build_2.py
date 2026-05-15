@@ -329,8 +329,8 @@ class TestGetEvidenceFreshnessState:
         assert state == PUBLISH_CERTIFIED_CURRENT
 
     @pytest.mark.asyncio
-    async def test_returns_certified_current_on_db_error(self):
-        """DB errors are caught; function returns certified_current (safe fallback)."""
+    async def test_returns_republish_pending_on_db_error(self):
+        """DB errors must return republish_pending — not certified_current (honest failure state)."""
         client = MagicMock()
         client.table.side_effect = RuntimeError("db down")
 
@@ -338,7 +338,7 @@ class TestGetEvidenceFreshnessState:
             USER_ID, client, intel_snapshot_generated_at="2026-05-15T10:00:00+00:00"
         )
 
-        assert state == PUBLISH_CERTIFIED_CURRENT
+        assert state == PUBLISH_REPUBLISH_PENDING
 
 
 # ── Worker integration tests ───────────────────────────────────────────────────
@@ -514,3 +514,149 @@ class TestAnalystEvidenceCurrent:
         )
 
         assert result.analyst_jobs_queued == 0
+
+
+# ── Patch blocker tests ───────────────────────────────────────────────────────
+
+class TestPatchBlocker1UrgentRepublishCallable:
+    """Blocker 1: enqueue_run_v3 urgent path must wire intel_republish_callable."""
+
+    def test_enqueue_run_v3_urgent_path_imports_republish_callable(self):
+        """Source: enqueue_run_v3 urgent path imports build_default_intel_republish_callable."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "build_default_intel_republish_callable" in source, (
+            "enqueue_run_v3 urgent path must import build_default_intel_republish_callable "
+            "to wire the republish callable into the Watchtower cycle"
+        )
+
+    def test_enqueue_run_v3_urgent_path_passes_republish_callable(self):
+        """Source: run_watchtower_cycle_for_user call includes intel_republish_callable=."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "intel_republish_callable=build_default_intel_republish_callable" in source, (
+            "urgent Watchtower cycle must receive intel_republish_callable; "
+            "without it compare_and_republish is a no-op"
+        )
+
+
+class TestPatchBlocker2RepublishResultInspection:
+    """Blocker 2: compare_and_republish must inspect snapshot_source before claiming rebuilt_and_published."""
+
+    @pytest.mark.asyncio
+    async def test_callable_returns_non_certified_gives_certification_blocked(self):
+        """If republish callable returns certification_failed snapshot, status=certification_blocked."""
+        intel_ts = "2026-05-15T10:00:00+00:00"
+        port_ts = "2026-05-15T11:00:00+00:00"
+        client = _make_client(
+            intel_snapshot_generated_at=intel_ts,
+            portfolio_snapshot_at=port_ts,
+        )
+        non_certified_callable = AsyncMock(
+            return_value={"snapshot_source": "certification_failed"}
+        )
+
+        result = await compare_and_republish(
+            USER_ID, client, intel_republish_callable=non_certified_callable
+        )
+
+        assert result.publish_status == PUBLISH_CERTIFICATION_BLOCKED
+        assert result.error is not None
+        assert "snapshot_source" in result.error
+
+    @pytest.mark.asyncio
+    async def test_callable_returns_worker_certified_gives_rebuilt_and_published(self):
+        """If callable returns worker_certified snapshot, status=rebuilt_and_published."""
+        intel_ts = "2026-05-15T10:00:00+00:00"
+        port_ts = "2026-05-15T11:00:00+00:00"
+        client = _make_client(
+            intel_snapshot_generated_at=intel_ts,
+            portfolio_snapshot_at=port_ts,
+        )
+        certified_callable = AsyncMock(
+            return_value={"snapshot_source": "worker_certified"}
+        )
+
+        result = await compare_and_republish(
+            USER_ID, client, intel_republish_callable=certified_callable
+        )
+
+        assert result.publish_status == PUBLISH_REBUILT_AND_PUBLISHED
+
+    @pytest.mark.asyncio
+    async def test_callable_returns_none_gives_certification_blocked(self):
+        """If callable returns None (unexpected), status=certification_blocked."""
+        intel_ts = "2026-05-15T10:00:00+00:00"
+        port_ts = "2026-05-15T11:00:00+00:00"
+        client = _make_client(
+            intel_snapshot_generated_at=intel_ts,
+            portfolio_snapshot_at=port_ts,
+        )
+        none_callable = AsyncMock(return_value=None)
+
+        result = await compare_and_republish(
+            USER_ID, client, intel_republish_callable=none_callable
+        )
+
+        assert result.publish_status == PUBLISH_CERTIFICATION_BLOCKED
+
+
+class TestPatchBlocker3SkipPersistOnFail:
+    """Blocker 3: failed Watchtower-triggered republish must not replace previous worker_certified snapshot."""
+
+    def test_run_prewarm_snapshot_has_skip_persist_on_fail_param(self):
+        """Source: run_prewarm_snapshot signature includes skip_persist_on_fail parameter."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "skip_persist_on_fail" in source, (
+            "run_prewarm_snapshot must accept skip_persist_on_fail=False parameter "
+            "to preserve previous worker_certified snapshot on certification failure"
+        )
+
+    def test_callables_passes_skip_persist_on_fail_true(self):
+        """Source: build_default_intel_republish_callable passes skip_persist_on_fail=True."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/watchtower_callables_v1.py"
+        ).read_text()
+        assert "skip_persist_on_fail=True" in source, (
+            "Watchtower callable must pass skip_persist_on_fail=True to run_prewarm_snapshot "
+            "so failed certification never overwrites a previous worker_certified snapshot"
+        )
+
+    def test_prewarm_guards_persist_on_skip_persist_on_fail(self):
+        """Source: run_prewarm_snapshot guards persist step when skip_persist_on_fail and not certified."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "skip_persist_on_fail and not contract_certified" in source, (
+            "run_prewarm_snapshot must skip _persist_snapshot when "
+            "skip_persist_on_fail=True and contract_certified is False"
+        )
+
+
+class TestPatchBlocker4HonestErrorState:
+    """Blocker 4: get_evidence_freshness_state must not return certified_current on errors."""
+
+    def test_source_error_path_returns_republish_pending(self):
+        """Source: exception handler in get_evidence_freshness_state returns PUBLISH_REPUBLISH_PENDING."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/watchtower_intel_republisher_v1.py"
+        ).read_text()
+        # Find the get_evidence_freshness_state function
+        fn_start = source.find("async def get_evidence_freshness_state")
+        fn_end = source.find("\nasync def ", fn_start + 1)
+        fn_source = source[fn_start:fn_end if fn_end > 0 else fn_start + 2000]
+        # Verify the exception handler returns PUBLISH_REPUBLISH_PENDING, not PUBLISH_CERTIFIED_CURRENT
+        assert "return PUBLISH_REPUBLISH_PENDING" in fn_source, (
+            "get_evidence_freshness_state exception handler must return PUBLISH_REPUBLISH_PENDING "
+            "not PUBLISH_CERTIFIED_CURRENT — errors must not silently report a green state"
+        )

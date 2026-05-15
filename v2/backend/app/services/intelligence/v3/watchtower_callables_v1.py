@@ -94,6 +94,9 @@ def build_default_intel_republish_callable(client: Any) -> Any:
         from .intel_v3_service import IntelV3Service
         svc = IntelV3Service(user_id=user_id)
         prewarm_run_id = str(_uuid_mod.uuid4())
-        return await svc.run_prewarm_snapshot(prewarm_run_id=prewarm_run_id)
+        return await svc.run_prewarm_snapshot(
+            prewarm_run_id=prewarm_run_id,
+            skip_persist_on_fail=True,
+        )
 
     return _republish

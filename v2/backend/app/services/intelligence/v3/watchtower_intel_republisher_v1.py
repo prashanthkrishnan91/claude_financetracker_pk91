@@ -149,8 +149,23 @@ async def compare_and_republish(
             return result
 
         try:
-            await intel_republish_callable(user_id)
-            result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+            returned_payload = await intel_republish_callable(user_id)
+            snapshot_source = None
+            if isinstance(returned_payload, dict):
+                snapshot_source = returned_payload.get("snapshot_source")
+            if snapshot_source == "worker_certified":
+                result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+            else:
+                result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+                result.error = (
+                    f"republish ran but snapshot_source={snapshot_source!r}; "
+                    "certification contract not satisfied"
+                )
+                logger.warning(
+                    "watchtower_intel_republisher.republish_not_certified user_id=%s "
+                    "snapshot_source=%s",
+                    user_id, snapshot_source,
+                )
         except Exception as exc:
             result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
             result.error = str(exc)
@@ -184,7 +199,20 @@ async def get_evidence_freshness_state(
     embed honest freshness state in the API response without triggering republish.
     """
     try:
-        evidence_row = await _fetch_latest_portfolio_snapshot(user_id, client)
+        # Inline the DB call (not via _fetch_latest_portfolio_snapshot) so that
+        # DB errors propagate to the except block below and return an honest
+        # non-green state instead of being swallowed as "no data".
+        row = await asyncio.to_thread(
+            lambda: client.table("portfolio_snapshots")
+            .select("id,snapshot_at")
+            .eq("user_id", str(user_id))
+            .order("snapshot_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = row.data or []
+        evidence_row = rows[0] if rows else None
+
         if evidence_row is None:
             return PUBLISH_CERTIFIED_CURRENT
 
@@ -205,7 +233,7 @@ async def get_evidence_freshness_state(
             "user_id=%s error=%s",
             user_id, exc,
         )
-        return PUBLISH_CERTIFIED_CURRENT
+        return PUBLISH_REPUBLISH_PENDING
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

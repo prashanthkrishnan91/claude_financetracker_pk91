@@ -1327,6 +1327,74 @@ class TestWatchtowerPriceSnapshotWriter:
         assert hasattr(mod, "persist_watchtower_price_snapshot")
         assert hasattr(mod, "PersistResult")
 
+    # ── Property-style PriceResult regression (production bug: 'bool' object not callable) ──
+
+    def _make_property_price_result(self, mid_price: float = 150.0, source: str = "finnhub"):
+        """PriceResult-like object with @property-style is_valid / is_stale (not callable)."""
+        class _PropPR:
+            def __init__(self, mp, src):
+                self.mid_price = mp
+                self.source = src
+
+            @property
+            def is_valid(self):
+                return self.mid_price > 0
+
+            @property
+            def is_stale(self):
+                return self.source.startswith(("cache", "institution"))
+
+        return _PropPR(mid_price, source)
+
+    def test_property_price_result_certifies_successfully(self):
+        """Real PriceResult with @property is_valid/is_stale must not raise 'bool not callable'."""
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL"])
+        pr = {"AAPL": self._make_property_price_result(mid_price=150.0)}
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(uid, client, price_results=pr, now=NOW)
+        )
+        assert result.persisted, f"Expected persisted=True, got error={result.error}"
+        assert result.certified_ticker_count == 1
+        assert result.carried_ticker_count == 0
+
+    def test_property_stale_price_result_not_certified(self):
+        """Property-style stale PriceResult must carry forward, not certify."""
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL"])
+        stale_pr = self._make_property_price_result(mid_price=150.0, source="cache/5min")
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(
+                uid, client, price_results={"AAPL": stale_pr}, now=NOW
+            )
+        )
+        assert result.certified_ticker_count == 0
+        assert result.carried_ticker_count == 1
+
+    def test_property_failed_ticker_no_certified_at(self):
+        """Mix of succeeded/failed: failed ticker must not receive market_value_certified_at."""
+        from app.services.intelligence.v3.watchtower_price_snapshot_writer_v1 import (
+            persist_watchtower_price_snapshot,
+        )
+        uid = uuid.uuid4()
+        client = self._make_writer_client(tickers=["AAPL", "MSFT"])
+        pr = {
+            "AAPL": self._make_property_price_result(mid_price=150.0),
+            # MSFT absent → failed
+        }
+        result = asyncio.get_event_loop().run_until_complete(
+            persist_watchtower_price_snapshot(uid, client, price_results=pr, now=NOW)
+        )
+        assert result.persisted
+        assert result.certified_ticker_count == 1
+        assert result.carried_ticker_count == 1
+
 
 # ── Test 18: Evidence collector uses price certs for position freshness ───────
 

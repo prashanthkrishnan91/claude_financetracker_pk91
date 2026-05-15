@@ -81,6 +81,7 @@ PR usage notes in the PR body are not sufficient for workflow audits — they ar
 | 2026-05-15 | 331 | p02 | follow-up | 331 | backend/intel-v3,watchtower | unknown | claude-sonnet-4-6 | same-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | Deploy SLA tightening, gate-first enqueue restructure, production entrypoint, 20 new tests | 0 | separate Intel SLAs from Deploy SLAs at ledger level so deploy gate can be independently strict |
 | 2026-05-15 | 331 | p03 | follow-up | 331 | backend/intel-v3,watchtower | unknown | claude-sonnet-4-6 | same-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | deploy strict gate (FRESH only), position cert-tied SLA, price snapshot writer, urgent refresh trigger, 22 new tests (81 total) | 0 | is_deploy_eligible_strict gates AGING out; market_value_certified_at never propagated for failed price tickers |
 | 2026-05-15 | 331 | p04 | follow-up | 331 | backend/intel-v3,watchtower | unknown | claude-sonnet-4-6 | same-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | necessary-follow-up | shared watchtower_callables_v1 module, wire price_refresh_callable into urgent create_task, 7 new tests (88 total) | 0 | urgent fire-and-forget task must receive real callable builders, not defaults-to-None |
+| 2026-05-15 | #332 | p01 | initial | n/a | backend/intel-v3,watchtower | https://claude.ai/code/session_011GGJ1tDGEpqwyVj6X6tBc3 | claude-sonnet-4-6 | new-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | root cause: is_valid/is_stale called as () instead of property read; _resolve_bool helper; 3 regression tests; 91 total pass | 0 | test with both property-style and callable-style mocks before pushing snapshot writer changes |
 
 ## Adding a row for the current PR
 
@@ -109,3 +110,4 @@ Use this ledger plus GitHub PR history to diagnose token burn:
 - High input tokens, low output → over-broad discovery reads.
 - High follow-up patches → unclear contracts or scope at PR time.
 - Recurring efficiency lessons → candidate for `docs/ai/MISS_LEDGER.md` promotion.
+

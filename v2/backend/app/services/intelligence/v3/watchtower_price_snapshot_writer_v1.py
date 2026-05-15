@@ -28,6 +28,11 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 
+def _resolve_bool(val: Any) -> bool:
+    """Support both @property-style booleans and legacy callable-style checks."""
+    return val() if callable(val) else bool(val)
+
+
 @dataclass
 class PersistResult:
     """Result of one watchtower price snapshot persist call."""
@@ -141,8 +146,8 @@ async def persist_watchtower_price_snapshot(
 
             if (
                 price_res is not None
-                and getattr(price_res, "is_valid", lambda: False)()
-                and not getattr(price_res, "is_stale", lambda: False)()
+                and _resolve_bool(getattr(price_res, "is_valid", False))
+                and not _resolve_bool(getattr(price_res, "is_stale", True))
             ):
                 # Fresh price: compute and certify
                 mid = float(getattr(price_res, "mid_price", 0) or 0)
@@ -208,8 +213,8 @@ async def persist_watchtower_price_snapshot(
     except Exception as exc:
         result.error = str(exc)
         logger.warning(
-            "watchtower_price_snapshot_writer.failed user_id=%s error=%s",
-            user_id, exc,
+            "watchtower_price_snapshot_writer.failed user_id=%s error_class=%s error=%s",
+            user_id, type(exc).__name__, exc,
         )
 
     return result

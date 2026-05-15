@@ -2,25 +2,26 @@
 
 These tests prove the acceptance criteria from the Build 1 task:
 
-  1. 34 jobs can be processed across multiple bounded worker iterations.
+  1. 34 jobs can be processed across multiple BOUNDED worker iterations where
+     each pass claims at most DEFAULT_MAX_JOBS_PER_RUN tickers. No single
+     adapter call ever receives all 34 tickers.
   2. timeout after partial work does not terminal-fail all remaining jobs.
   3. retryable provider overload does not publish a certified snapshot.
   4. completed per-ticker results persist and are not redone unnecessarily.
   5. failed terminal ticker blocks certification instead of green/current UI.
   6. existing certified snapshot remains available while a new refresh runs.
   7. structured log contains all required fields.
-  8. run_resumable=True when retryable failures remain.
+  8. run_resumable=True when retryable failures or unclaimed pending backlog remain.
+  9. residual evidence requires BOTH agent_insights AND recommendations rows —
+     agent_insights-only is NOT sufficient to mark a job succeeded.
 
 The tests use the same in-memory Supabase fake as test_intel_v3_stage_3_2_* so
 no real DB or LLM calls are made.
 """
 from __future__ import annotations
 
-import asyncio
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -46,6 +47,7 @@ from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
     mark_job_succeeded,
 )
 from app.services.intelligence.v3.analyst_refresh_worker_v1 import (
+    DEFAULT_MAX_JOBS_PER_RUN,
     AnalystRefreshWorker,
     WorkerRunResult,
 )
@@ -270,64 +272,88 @@ def _make_worker(fake, adapter, **kwargs) -> AnalystRefreshWorker:
     )
 
 
-# ── Test 1: 34 jobs processed across multiple bounded worker iterations ───────
+# ── Test 1: Bounded batch execution — 34 jobs require multiple worker passes ───
 
 
-class TestMultipleIterationCompletion:
-    """34 jobs can be completed across two bounded worker iterations."""
+class TestBoundedBatchExecution:
+    """Worker batch size is bounded; 34 jobs require multiple run_once() calls."""
 
     @pytest.mark.asyncio
-    async def test_34_jobs_complete_in_two_iterations(self):
-        """Iteration 1 succeeds for first 17 tickers; iteration 2 completes the rest."""
+    async def test_each_adapter_call_receives_at_most_batch_size_tickers(self):
+        """Each adapter call receives ≤ DEFAULT_MAX_JOBS_PER_RUN tickers, never all 34."""
         fake = _FakeSupabase()
         tickers = [f"T{i:02d}" for i in range(34)]
-        first_batch = {t.upper() for t in tickers[:17]}
-        second_batch = {t.upper() for t in tickers[17:]}
-
-        # Adapter: call 1 → first 17 succeed; call 2 → all succeed
-        adapter = _FakeAnalystAdapter(call_outcomes=[first_batch, {"__all__"}])
+        adapter = _FakeAnalystAdapter()  # all succeed by default
         _enqueue_tickers(fake, tickers)
 
-        worker = _make_worker(fake, adapter)
+        worker = _make_worker(fake, adapter)  # uses DEFAULT_MAX_JOBS_PER_RUN=10
 
-        # Iteration 1
-        now1 = _now()
-        result1 = await worker.run_once(now=now1)
+        # Drive until all jobs are done (safety cap at 10 iterations)
+        for _ in range(10):
+            result = await worker.run_once(now=_now())
+            if result.claimed_job_count == 0:
+                break
 
-        assert len(result1.succeeded_tickers) == 17
-        assert len(result1.failed_retryable_tickers) == 17
-        assert len(result1.failed_terminal_tickers) == 0
-        assert result1.run_resumable is True
+        # Every adapter call received at most DEFAULT_MAX_JOBS_PER_RUN tickers
+        for call in adapter.calls:
+            assert len(call) <= DEFAULT_MAX_JOBS_PER_RUN, (
+                f"Adapter received {len(call)} tickers; expected ≤ {DEFAULT_MAX_JOBS_PER_RUN}. "
+                "Worker batch must be bounded."
+            )
 
-        # Succeeded jobs are NOT re-claimed on the next iteration.
-        succeeded_after_iter1 = {
-            r["ticker"]
-            for r in fake.rows()
-            if r.get("status") == JOB_SUCCEEDED
-        }
-        assert len(succeeded_after_iter1) == 17
+        # Adapter was called multiple times (never a single 34-ticker call)
+        assert len(adapter.calls) > 1, (
+            "Expected multiple adapter calls for 34 jobs with bounded batch size, "
+            f"but adapter was called only {len(adapter.calls)} time(s)."
+        )
 
-        # Advance time past the 15-minute backoff for the failed batch
-        now2 = _now() + timedelta(minutes=20)
-        result2 = await worker.run_once(now=now2)
-
-        assert len(result2.succeeded_tickers) == 17
-        assert len(result2.failed_retryable_tickers) == 0
-
-        # All 34 tickers are now succeeded
-        final_succeeded = {
-            r["ticker"]
-            for r in fake.rows()
-            if r.get("status") == JOB_SUCCEEDED
-        }
+        # All 34 tickers eventually succeeded
+        final_succeeded = {r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED}
         assert len(final_succeeded) == 34
+
+    @pytest.mark.asyncio
+    async def test_run_resumable_true_while_unclaimed_pending_backlog_remains(self):
+        """run_resumable=True after first batch even when all claimed jobs succeeded, because unclaimed pending jobs remain."""
+        fake = _FakeSupabase()
+        tickers = [f"T{i:02d}" for i in range(34)]
+        adapter = _FakeAnalystAdapter()  # all succeed
+        _enqueue_tickers(fake, tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 10
+        assert len(result.succeeded_tickers) == 10
+        assert len(result.failed_retryable_tickers) == 0
+
+        # 24 unclaimed pending jobs remain → run must be resumable
+        assert result.run_resumable is True, (
+            "run_resumable must be True when unclaimed pending backlog remains, "
+            "even if all claimed jobs in this pass succeeded."
+        )
+        assert result.remaining_pending_or_retryable >= 24
+
+    @pytest.mark.asyncio
+    async def test_run_resumable_false_only_when_no_backlog_remains(self):
+        """run_resumable=False only on the final pass when all jobs are done."""
+        fake = _FakeSupabase()
+        tickers = [f"T{i:02d}" for i in range(4)]  # small enough for one pass
+        adapter = _FakeAnalystAdapter()
+        _enqueue_tickers(fake, tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 4
+        assert len(result.succeeded_tickers) == 4
+        assert result.run_resumable is False
+        assert result.remaining_pending_or_retryable == 0
 
     @pytest.mark.asyncio
     async def test_succeeded_jobs_never_reclaimed(self):
         """Tickers marked succeeded in iteration 1 are not claimed in iteration 2."""
         fake = _FakeSupabase()
         tickers = ["AAPL", "NVDA", "MSFT"]
-        # First call: all succeed
         adapter = _FakeAnalystAdapter(call_outcomes=[{"__all__"}])
         _enqueue_tickers(fake, tickers)
 
@@ -340,7 +366,74 @@ class TestMultipleIterationCompletion:
         assert len(adapter.calls) == 1  # adapter called only once
 
 
-# ── Test 2: Timeout does not terminal-fail remaining jobs ─────────────────────
+# ── Test 2: Multi-iteration via retry mechanism (explicit large batch) ─────────
+
+
+class TestMultipleIterationCompletion:
+    """34 jobs can be completed across two bounded worker iterations via retry."""
+
+    @pytest.mark.asyncio
+    async def test_34_jobs_complete_via_retry_across_two_iterations(self):
+        """Iteration 1 succeeds for first 17 tickers; iteration 2 completes the rest via retry."""
+        fake = _FakeSupabase()
+        tickers = [f"T{i:02d}" for i in range(34)]
+        first_batch = {t.upper() for t in tickers[:17]}
+
+        # Adapter: call 1 → first 17 succeed; subsequent calls → all succeed
+        adapter = _FakeAnalystAdapter(call_outcomes=[first_batch, {"__all__"}])
+        _enqueue_tickers(fake, tickers)
+
+        # Use explicit large batch so all 34 are claimed at once (tests retry, not bounding)
+        worker = _make_worker(fake, adapter, max_jobs_per_run=34)
+
+        now1 = _now()
+        result1 = await worker.run_once(now=now1)
+
+        assert len(result1.succeeded_tickers) == 17
+        assert len(result1.failed_retryable_tickers) == 17
+        assert len(result1.failed_terminal_tickers) == 0
+        assert result1.run_resumable is True
+
+        succeeded_after_iter1 = {
+            r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED
+        }
+        assert len(succeeded_after_iter1) == 17
+
+        # Advance past 15-minute backoff for the failed batch
+        now2 = _now() + timedelta(minutes=20)
+        result2 = await worker.run_once(now=now2)
+
+        assert len(result2.succeeded_tickers) == 17
+        assert len(result2.failed_retryable_tickers) == 0
+
+        final_succeeded = {
+            r["ticker"] for r in fake.rows() if r.get("status") == JOB_SUCCEEDED
+        }
+        assert len(final_succeeded) == 34
+
+    @pytest.mark.asyncio
+    async def test_failed_retryable_reclaimed_but_succeeded_not(self):
+        """Only failed-retryable tickers are re-claimed in the next pass."""
+        fake = _FakeSupabase()
+        tickers = ["AAPL", "NVDA", "MSFT"]
+        # AAPL succeeds; NVDA, MSFT fail retryably
+        adapter = _FakeAnalystAdapter(call_outcomes=[{"AAPL"}, {"__all__"}])
+        _enqueue_tickers(fake, tickers)
+
+        worker = _make_worker(fake, adapter, max_jobs_per_run=10)
+        result1 = await worker.run_once(now=_now())
+
+        assert "AAPL" in result1.succeeded_tickers
+        assert len(result1.failed_retryable_tickers) == 2
+
+        # Second pass (after backoff window)
+        result2 = await worker.run_once(now=_now() + timedelta(minutes=20))
+        # Only NVDA and MSFT were re-claimed (AAPL stays succeeded)
+        assert result2.claimed_job_count == 2
+        assert len(result2.succeeded_tickers) == 2
+
+
+# ── Test 3: Timeout retryability ──────────────────────────────────────────────
 
 
 class TestTimeoutRetryability:
@@ -367,13 +460,8 @@ class TestTimeoutRetryability:
         """Jobs timed-out in iteration 1 are successfully processed in iteration 2."""
         fake = _FakeSupabase()
         tickers = ["AAPL", "NVDA"]
-        # Iteration 1: timeout. Iteration 2: all succeed.
-        adapter = _FakeAnalystAdapter(
-            call_outcomes=[set()],  # first call timeout
-            timeout=False,
-        )
-        # Patch the first call to timeout, second to succeed
         call_count = [0]
+
         async def _controlled_adapter(t, *, priority_hints=None, started_at=None):
             call_count[0] += 1
             if call_count[0] == 1:
@@ -415,29 +503,34 @@ class TestTimeoutRetryability:
             client=fake,
             adapter_factory=lambda uid: _ControlledAdapter(),
         )
-        # Iteration 1: timeout
         result1 = await worker.run_once(now=_now())
         assert result1.claimed_job_count == len(tickers)
         assert len(result1.failed_retryable_tickers) == len(tickers)
 
-        # Advance past 15-min backoff
         result2 = await worker.run_once(now=_now() + timedelta(minutes=20))
         assert len(result2.succeeded_tickers) == len(tickers)
         assert len(result2.failed_retryable_tickers) == 0
 
     @pytest.mark.asyncio
     async def test_timeout_with_residual_evidence_marks_those_succeeded(self):
-        """After timeout, tickers with fresh agent_insights in DB are marked succeeded."""
+        """After timeout, tickers with BOTH fresh agent_insights and recommendations are marked succeeded."""
         fake = _FakeSupabase()
         now = _now()
         tickers = ["AAPL", "NVDA", "MSFT"]
 
-        # Pre-populate agent_insights as if AAPL's write completed before timeout
+        # Pre-populate BOTH agent_insights AND recommendations for AAPL.
+        # Both rows are required — insight-only is insufficient (see next test).
         fake.store.setdefault("agent_insights", []).append({
             "ticker": "AAPL",
             "user_id": USER_A,
             "created_at": now.isoformat(),
-            "run_id": "some-run",
+            "run_id": "residual-run",
+        })
+        fake.store.setdefault("recommendations", []).append({
+            "ticker": "AAPL",
+            "user_id": USER_A,
+            "created_at": now.isoformat(),
+            "agent_run_id": "residual-run",
         })
 
         adapter = _FakeAnalystAdapter(timeout=True)
@@ -446,14 +539,47 @@ class TestTimeoutRetryability:
         worker = _make_worker(fake, adapter)
         result = await worker.run_once(now=now)
 
-        # AAPL has residual evidence — should be succeeded
+        # AAPL has both rows → succeeded
         assert "AAPL" in result.succeeded_tickers
-        # NVDA and MSFT have no residual evidence — retryable
+        # NVDA and MSFT have no residual evidence → retryable
         assert "NVDA" in result.failed_retryable_tickers or "NVDA" in result.failed_tickers
         assert "MSFT" in result.failed_retryable_tickers or "MSFT" in result.failed_tickers
         # AAPL job is marked succeeded in DB
         aapl_row = next(r for r in fake.rows() if r["ticker"] == "AAPL")
         assert aapl_row["status"] == JOB_SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_residual_evidence_requires_both_insight_and_recommendation(self):
+        """agent_insights-only (without matching recommendation) is not sufficient to mark a job succeeded."""
+        fake = _FakeSupabase()
+        now = _now()
+        tickers = ["AAPL"]
+
+        # Only agent_insights present — deliberately NO recommendations row.
+        # This simulates a partial write where the insight committed but the
+        # recommendation write was cancelled before completing.
+        fake.store.setdefault("agent_insights", []).append({
+            "ticker": "AAPL",
+            "user_id": USER_A,
+            "created_at": now.isoformat(),
+            "run_id": "partial-run",
+        })
+        # No recommendations row — worker should NOT mark AAPL succeeded.
+
+        adapter = _FakeAnalystAdapter(timeout=True)
+        _enqueue_tickers(fake, tickers, now=now)
+
+        worker = _make_worker(fake, adapter)
+        result = await worker.run_once(now=now)
+
+        # agent_insights-only is insufficient — AAPL must NOT be succeeded
+        assert "AAPL" not in result.succeeded_tickers, (
+            "AAPL should not be marked succeeded from agent_insights alone. "
+            "Downstream certification requires both insight and recommendation rows."
+        )
+        assert "AAPL" in result.failed_retryable_tickers or "AAPL" in result.failed_tickers
+        aapl_row = next(r for r in fake.rows() if r["ticker"] == "AAPL")
+        assert aapl_row["status"] == JOB_FAILED
 
     @pytest.mark.asyncio
     async def test_max_attempts_exhaustion_marks_terminal(self):
@@ -462,16 +588,13 @@ class TestTimeoutRetryability:
         tickers = ["AAPL"]
         _enqueue_tickers(fake, tickers)
 
-        # Exhaust all attempts by calling mark_job_failed repeatedly
         now = _now()
         jobs = claim_due_jobs(fake, worker_run_id="wid-1", now=now, limit=10)
         assert len(jobs) == 1
         job = jobs[0]
 
-        # Simulate attempts: claim increments to 1, then fail 4 more times
         for i in range(DEFAULT_MAX_ATTEMPTS - 1):
             mark_job_failed(fake, job, error="overload", now=now + timedelta(hours=i))
-            # Reclaim with incremented attempts
             fake.rows()[0]["status"] = JOB_PENDING
             fake.rows()[0]["next_retry_at"] = now.isoformat()
             fake.rows()[0]["attempts"] = i + 2
@@ -480,14 +603,13 @@ class TestTimeoutRetryability:
             if jobs:
                 job = jobs[0]
 
-        # One final failure that exhausts the budget
         mark_job_failed(fake, job, error="overload", now=now)
         final_row = fake.rows()[0]
         assert final_row["status"] == JOB_FAILED
         assert final_row["next_retry_at"] is None  # exhausted = no retry scheduled
 
 
-# ── Test 3: Provider overload (retryable) does not publish certified snapshot ─
+# ── Test 4: Provider overload (retryable) does not publish certified snapshot ──
 
 
 class TestProviderOverloadNoCertification:
@@ -499,19 +621,14 @@ class TestProviderOverloadNoCertification:
         fake = _FakeSupabase()
         tickers = ["AAPL", "NVDA"]
 
-        # All tickers fail with provider_overloaded
         adapter = _FakeAnalystAdapter(call_outcomes=[set()])
         _enqueue_tickers(fake, tickers)
 
         worker = _make_worker(fake, adapter)
         result = await worker.run_once(now=_now())
 
-        # No tickers succeeded
         assert len(result.succeeded_tickers) == 0
         assert len(result.failed_retryable_tickers) == len(tickers)
-
-        # No intel_v3_snapshots row was published (worker doesn't publish snapshots
-        # — that's the prewarm step which only runs after successful writes)
         assert "intel_v3_snapshots" not in fake.store or not fake.store["intel_v3_snapshots"]
 
     @pytest.mark.asyncio
@@ -519,7 +636,6 @@ class TestProviderOverloadNoCertification:
         """Partial success (only some tickers refreshed) does not yield certified green."""
         fake = _FakeSupabase()
         tickers = ["AAPL", "NVDA", "MSFT"]
-        # Only AAPL succeeds
         adapter = _FakeAnalystAdapter(call_outcomes=[{"AAPL"}])
         _enqueue_tickers(fake, tickers)
 
@@ -528,11 +644,10 @@ class TestProviderOverloadNoCertification:
 
         assert len(result.succeeded_tickers) == 1
         assert len(result.failed_retryable_tickers) == 2
-        # No certified snapshot published
         assert not fake.store.get("intel_v3_snapshots")
 
 
-# ── Test 4: Completed per-ticker results not redone unnecessarily ─────────────
+# ── Test 5: Completed per-ticker results not redone unnecessarily ─────────────
 
 
 class TestCompletedResultsNotRedone:
@@ -549,38 +664,14 @@ class TestCompletedResultsNotRedone:
         worker = _make_worker(fake, adapter)
         await worker.run_once(now=_now())
 
-        # All 3 succeeded. Verify claim status.
         assert all(r["status"] == JOB_SUCCEEDED for r in fake.rows())
 
-        # Second pass claims nothing
         result2 = await worker.run_once(now=_now())
         assert result2.claimed_job_count == 0
         assert len(adapter.calls) == 1  # adapter was not called again
 
-    @pytest.mark.asyncio
-    async def test_failed_retryable_reclaimed_but_succeeded_not(self):
-        """Only the failed-retryable tickers are re-claimed in the next pass."""
-        fake = _FakeSupabase()
-        tickers = ["AAPL", "NVDA", "MSFT"]
-        # AAPL succeeds; NVDA, MSFT fail
-        adapter = _FakeAnalystAdapter(call_outcomes=[{"AAPL"}, {"__all__"}])
-        _enqueue_tickers(fake, tickers)
 
-        worker = _make_worker(fake, adapter)
-        result1 = await worker.run_once(now=_now())
-
-        assert "AAPL" in result1.succeeded_tickers
-        assert len(result1.failed_retryable_tickers) == 2
-
-        # Second pass (after backoff window)
-        result2 = await worker.run_once(now=_now() + timedelta(minutes=20))
-        # Only NVDA and MSFT were re-claimed (AAPL stays succeeded)
-        assert result2.claimed_job_count == 2
-        assert result2.claimed_job_count < 3  # AAPL not re-claimed
-        assert len(result2.succeeded_tickers) == 2
-
-
-# ── Test 5: Terminal failed ticker blocks certification ───────────────────────
+# ── Test 6: Terminal failed ticker blocks certification ───────────────────────
 
 
 class TestTerminalFailureBlocksCertification:
@@ -593,18 +684,15 @@ class TestTerminalFailureBlocksCertification:
         tickers = ["AAPL"]
         now = _now()
 
-        # Enqueue and pre-exhaust attempts by manipulating the DB row
         _enqueue_tickers(fake, tickers, now=now)
-        # Set attempts to max_attempts - 1; claim will increment to max
+        # Set attempts to max_attempts - 1; claim increments to max
         fake.rows()[0]["attempts"] = DEFAULT_MAX_ATTEMPTS - 1
         fake.rows()[0]["max_attempts"] = DEFAULT_MAX_ATTEMPTS
 
-        # Adapter fails
         adapter = _FakeAnalystAdapter(call_outcomes=[set()])
         worker = _make_worker(fake, adapter)
         result = await worker.run_once(now=now)
 
-        # Claim incremented attempts to DEFAULT_MAX_ATTEMPTS → terminal on fail
         assert "AAPL" in result.failed_terminal_tickers
         assert "AAPL" not in result.failed_retryable_tickers
         assert result.run_resumable is False
@@ -617,7 +705,6 @@ class TestTerminalFailureBlocksCertification:
         now = _now()
         _enqueue_tickers(fake, tickers, now=now)
 
-        # Exhaust all attempts
         fake.rows()[0]["attempts"] = DEFAULT_MAX_ATTEMPTS
         fake.rows()[0]["status"] = JOB_FAILED
         fake.rows()[0]["next_retry_at"] = None
@@ -625,11 +712,10 @@ class TestTerminalFailureBlocksCertification:
         worker = _make_worker(fake, _FakeAnalystAdapter())
         result = await worker.run_once(now=now)
 
-        # Exhausted job is not claimable
         assert result.claimed_job_count == 0
 
 
-# ── Test 6: Existing certified snapshot remains available during refresh ───────
+# ── Test 7: Existing certified snapshot remains available during refresh ───────
 
 
 class TestCertifiedSnapshotAvailableDuringRefresh:
@@ -638,17 +724,14 @@ class TestCertifiedSnapshotAvailableDuringRefresh:
     def test_enqueue_does_not_remove_existing_certified_snapshot(self):
         """Enqueueing new jobs does not touch intel_v3_snapshots table."""
         fake = _FakeSupabase()
-        # Pre-populate a certified snapshot
         fake.store["intel_v3_snapshots"] = [
             {"id": "snap-1", "is_active": True, "snapshot_source": "worker_certified"}
         ]
 
-        # Enqueue new refresh jobs
         enqueue_refresh_jobs(
             fake, user_id=USER_A, tickers=["AAPL", "NVDA"], now=_now(),
         )
 
-        # Snapshot must still be there
         snaps = fake.store.get("intel_v3_snapshots", [])
         assert len(snaps) == 1
         assert snaps[0]["snapshot_source"] == "worker_certified"
@@ -661,7 +744,7 @@ class TestCertifiedSnapshotAvailableDuringRefresh:
             {"id": "snap-1", "is_active": True, "snapshot_source": "worker_certified"}
         ]
         tickers = ["AAPL", "NVDA"]
-        adapter = _FakeAnalystAdapter(call_outcomes=[set()])  # all fail
+        adapter = _FakeAnalystAdapter(call_outcomes=[set()])
         _enqueue_tickers(fake, tickers)
 
         worker = _make_worker(fake, adapter)
@@ -673,7 +756,7 @@ class TestCertifiedSnapshotAvailableDuringRefresh:
         assert snaps[0]["snapshot_source"] == "worker_certified"
 
 
-# ── Test 7: Structured log contains all required fields ──────────────────────
+# ── Test 8: Structured log contains all required fields ──────────────────────
 
 
 class TestStructuredLogFields:
@@ -743,7 +826,7 @@ class TestStructuredLogFields:
             assert frag in msg, f"Missing field in run_summary log: {frag!r}"
 
 
-# ── Test 8: run_resumable=True when retryable failures remain ─────────────────
+# ── Test 9: run_resumable correctly reflects all resumability conditions ───────
 
 
 class TestRunResumable:
@@ -751,9 +834,10 @@ class TestRunResumable:
 
     @pytest.mark.asyncio
     async def test_run_resumable_true_when_retryable_failures(self):
+        """run_resumable=True when current pass had retryable failures."""
         fake = _FakeSupabase()
         tickers = ["AAPL", "NVDA"]
-        adapter = _FakeAnalystAdapter(call_outcomes=[set()])  # all fail first call
+        adapter = _FakeAnalystAdapter(call_outcomes=[set()])
         _enqueue_tickers(fake, tickers)
 
         worker = _make_worker(fake, adapter)
@@ -763,7 +847,27 @@ class TestRunResumable:
         assert result.run_resumable is True
 
     @pytest.mark.asyncio
+    async def test_run_resumable_true_when_unclaimed_backlog_even_if_no_failures(self):
+        """run_resumable=True when unclaimed pending backlog exists, even with zero failures in this pass."""
+        fake = _FakeSupabase()
+        tickers = [f"T{i:02d}" for i in range(20)]
+        adapter = _FakeAnalystAdapter()  # all succeed
+        _enqueue_tickers(fake, tickers)
+
+        # Batch size 5 → claims 5, 15 remain pending
+        worker = _make_worker(fake, adapter, max_jobs_per_run=5)
+        result = await worker.run_once(now=_now())
+
+        assert result.claimed_job_count == 5
+        assert len(result.succeeded_tickers) == 5
+        assert len(result.failed_retryable_tickers) == 0
+        # 15 unclaimed pending → must be resumable
+        assert result.run_resumable is True
+        assert result.remaining_pending_or_retryable >= 15
+
+    @pytest.mark.asyncio
     async def test_run_resumable_false_when_no_retryable_remain(self):
+        """run_resumable=False when all claimed jobs succeeded and no backlog remains."""
         fake = _FakeSupabase()
         tickers = ["AAPL"]
         adapter = _FakeAnalystAdapter(call_outcomes=[{"__all__"}])
@@ -778,6 +882,7 @@ class TestRunResumable:
 
     @pytest.mark.asyncio
     async def test_run_resumable_false_when_no_jobs(self):
+        """run_resumable=False when there are no jobs at all."""
         fake = _FakeSupabase()
         worker = _make_worker(fake, _FakeAnalystAdapter())
         result = await worker.run_once(now=_now())
@@ -808,7 +913,6 @@ class TestCountDueJobs:
     def test_exhausted_jobs_counted_as_terminal(self):
         fake = _FakeSupabase()
         _enqueue_tickers(fake, ["AAPL"])
-        # Mark exhausted
         fake.rows()[0]["status"] = JOB_FAILED
         fake.rows()[0]["attempts"] = DEFAULT_MAX_ATTEMPTS
         fake.rows()[0]["next_retry_at"] = None

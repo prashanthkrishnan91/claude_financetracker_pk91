@@ -74,7 +74,12 @@ logger = logging.getLogger(__name__)
 # Upper safety limits for one worker pass. The adapter enforces its own
 # per-call LLM/ticker budget; these cap how much one run claims + how long it
 # may take before releasing remaining work back for a later pass.
-DEFAULT_MAX_JOBS_PER_RUN = 60
+#
+# 10 tickers per pass ensures a 34-holding portfolio completes across 4 bounded
+# worker iterations rather than in one fragile all-or-nothing LLM call.
+# Production evidence: 35 LLM calls complete in ~5s, so 10 tickers ≈ 1-2s per
+# pass — well within the 240s runtime budget.
+DEFAULT_MAX_JOBS_PER_RUN = 10
 DEFAULT_MAX_RUNTIME_SECONDS = 240.0
 
 
@@ -275,9 +280,18 @@ class AnalystRefreshWorker:
                 user_id, jobs, now=now, result=result, worker_run_id=worker_run_id,
             )
 
-        # Remaining = retryable failures from this run that future polls can pick up.
-        result.remaining_pending_or_retryable = len(result.failed_retryable_tickers)
-        result.run_resumable = result.remaining_pending_or_retryable > 0
+        # Post-run backlog: unclaimed pending jobs (not processed in this bounded
+        # pass) + retryable failures waiting on backoff. count_due_jobs again
+        # reflects the post-outcome state so run_resumable is True whenever any
+        # future worker pass can make progress — not just when this pass had
+        # retryable failures.
+        post_run_counts = count_due_jobs(self.client, now=now)
+        remaining_actionable = (
+            post_run_counts.get("total_due", 0)          # immediately claimable
+            + post_run_counts.get("failed_not_yet_due", 0)  # in backoff, future pass
+        )
+        result.remaining_pending_or_retryable = remaining_actionable
+        result.run_resumable = remaining_actionable > 0
 
         result.duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
@@ -477,41 +491,87 @@ class AnalystRefreshWorker:
         tickers: list[str],
         started_at: datetime,
     ) -> set[str]:
-        """After a timeout, check which tickers have fresh evidence in the DB.
+        """After a timeout, check which tickers have durable evidence in the DB.
 
         When asyncio.wait_for() cancels the backend coroutine, DB writes that
         ran inside asyncio.to_thread() may still complete in their OS threads.
         This query surfaces tickers whose evidence was committed before or
-        shortly after the cancellation so they can be marked succeeded instead
-        of retried unnecessarily.
+        shortly after the cancellation.
 
-        Returns the subset of ``tickers`` (upper-cased) that have a fresh
-        ``agent_insights`` row with ``created_at >= started_at``. Returns an
-        empty set on DB failure — the caller falls back to marking all as failed.
+        Evidence requirement: BOTH a fresh ``agent_insights`` row AND a fresh
+        ``recommendations`` row must be present for the same ticker/user since
+        ``started_at``. An ``agent_insights``-only row is logged as diagnostic
+        but is NOT sufficient to mark the job succeeded — the downstream
+        certification contract requires both rows to exist per holding.
+
+        Returns the confirmed subset (upper-cased) or empty set on DB failure.
         """
         started_iso = started_at.isoformat()
         upper_tickers = {t.upper() for t in tickers}
         try:
-            res = await asyncio.to_thread(
+            insights_res = await asyncio.to_thread(
                 lambda: self.client.table("agent_insights")
-                .select("ticker")
+                .select("ticker,run_id")
                 .eq("user_id", user_id)
                 .gte("created_at", started_iso)
                 .execute()
             )
-            rows = _rows_from_result(res)
-            found = {
-                str(r.get("ticker") or "").upper()
-                for r in rows
-                if str(r.get("ticker") or "").upper() in upper_tickers
-            }
-            if found:
+            insight_rows = _rows_from_result(insights_res)
+            insight_by_ticker: dict[str, str] = {}
+            for r in insight_rows:
+                tk = str(r.get("ticker") or "").upper()
+                if tk in upper_tickers:
+                    insight_by_ticker[tk] = str(r.get("run_id") or "")
+
+            if not insight_by_ticker:
+                return set()
+
+            recs_res = await asyncio.to_thread(
+                lambda: self.client.table("recommendations")
+                .select("ticker,agent_run_id")
+                .eq("user_id", user_id)
+                .gte("created_at", started_iso)
+                .execute()
+            )
+            rec_rows = _rows_from_result(recs_res)
+            rec_by_ticker: dict[str, str] = {}
+            for r in rec_rows:
+                tk = str(r.get("ticker") or "").upper()
+                if tk in upper_tickers:
+                    rec_by_ticker[tk] = str(r.get("agent_run_id") or "")
+
+            confirmed: set[str] = set()
+            insight_only: set[str] = set()
+            for ticker, insight_run_id in insight_by_ticker.items():
+                rec_run_id = rec_by_ticker.get(ticker)
+                if rec_run_id is None:
+                    # agent_insights present but no recommendation — insufficient.
+                    insight_only.add(ticker)
+                    continue
+                # Both present; if run_ids are non-empty they must match.
+                if insight_run_id and rec_run_id and insight_run_id != rec_run_id:
+                    logger.info(
+                        "intel_v3.analyst_refresh_worker_residual_check_run_id_mismatch "
+                        "user_id=%s ticker=%s insight_run=%s rec_run=%s",
+                        user_id, ticker, insight_run_id, rec_run_id,
+                    )
+                    insight_only.add(ticker)
+                    continue
+                confirmed.add(ticker)
+
+            if insight_only:
+                logger.info(
+                    "intel_v3.analyst_refresh_worker_residual_check_diagnostic_only "
+                    "user_id=%s insight_only_tickers=%s reason=no_matching_recommendation",
+                    user_id, ",".join(sorted(insight_only)),
+                )
+            if confirmed:
                 logger.info(
                     "intel_v3.analyst_refresh_worker_residual_check user_id=%s "
                     "residual_tickers=%s",
-                    user_id, ",".join(sorted(found)),
+                    user_id, ",".join(sorted(confirmed)),
                 )
-            return found
+            return confirmed
         except Exception as exc:
             logger.warning(
                 "intel_v3.analyst_refresh_worker_residual_check_failed "

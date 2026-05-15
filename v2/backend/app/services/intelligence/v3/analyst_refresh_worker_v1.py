@@ -5,6 +5,17 @@ path: stale owned-position analyst evidence is *requested* for refresh, never
 refreshed inside the click. Stage 3.2 adds the real background plane that
 consumes those durable requests.
 
+Build 1 (durable resumable execution) adds:
+  * Per-ticker retryable vs terminal failure distinction so one wall-clock
+    timeout never blanket-terminal-fails all 34 tickers.
+  * Post-timeout residual evidence check: after a timeout the worker queries
+    the DB for any evidence committed before the cancellation propagated and
+    marks those tickers succeeded rather than re-processing them needlessly.
+  * Expanded structured log (jobs_due / failed_retryable / failed_terminal /
+    timed_out_before_completion / remaining_pending_or_retryable / run_resumable)
+    so production validation can answer exactly whether the worker is
+    progressing, retrying, blocked, or certified.
+
 This worker:
   1. Claims due ``analyst_refresh_jobs`` rows (owned-position analyst refresh
      jobs the Stage 3.1 seam enqueued) under budget + runtime caps.
@@ -18,6 +29,8 @@ This worker:
   4. Records per-ticker outcome: successful tickers' jobs are marked succeeded;
      failed tickers' jobs stay ``failed`` with an exponential-backoff retry —
      never a fabricated success, so failed refreshes do not fabricate freshness.
+  5. After a timeout, performs a supplemental DB check for any evidence committed
+     before the cancellation, so tickers that actually succeeded are not retried.
 
 Hard boundary: this module must NOT import the deterministic Intel v3 decision
 policy. The worker refreshes analyst *evidence* only. Visible Buy/Hold/Trim/Sell
@@ -26,6 +39,7 @@ this with a backend test that greps this module.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -34,10 +48,15 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 from uuid import UUID
 
-from .analyst_refresh_adapter_v1 import TickerPriorityHint, prioritize_stale_tickers
+from .analyst_refresh_adapter_v1 import (
+    STATUS_SKIPPED_TIMEOUT,
+    TickerPriorityHint,
+    prioritize_stale_tickers,
+)
 from .analyst_refresh_job_store_v1 import (
     AnalystRefreshJob,
     claim_due_jobs,
+    count_due_jobs,
     mark_job_failed,
     mark_job_succeeded,
 )
@@ -55,7 +74,12 @@ logger = logging.getLogger(__name__)
 # Upper safety limits for one worker pass. The adapter enforces its own
 # per-call LLM/ticker budget; these cap how much one run claims + how long it
 # may take before releasing remaining work back for a later pass.
-DEFAULT_MAX_JOBS_PER_RUN = 60
+#
+# 10 tickers per pass ensures a 34-holding portfolio completes across 4 bounded
+# worker iterations rather than in one fragile all-or-nothing LLM call.
+# Production evidence: 35 LLM calls complete in ~5s, so 10 tickers ≈ 1-2s per
+# pass — well within the 240s runtime budget.
+DEFAULT_MAX_JOBS_PER_RUN = 10
 DEFAULT_MAX_RUNTIME_SECONDS = 240.0
 
 
@@ -83,30 +107,57 @@ def _default_adapter_factory(user_id: UUID) -> FullPortfolioAnalystRefreshAdapte
 
 @dataclass
 class WorkerRunResult:
-    """Observable outcome of one ``run_once`` pass."""
+    """Observable outcome of one ``run_once`` pass.
+
+    Fields added in Build 1 (durable resumable execution):
+      jobs_due                 — claimable jobs counted before claiming, so
+                                 production logs show portfolio-level backlog.
+      failed_retryable_tickers — failed tickers still within their attempt
+                                 budget; will be retried in a later poll.
+      failed_terminal_tickers  — failed tickers whose attempt budget is
+                                 exhausted; permanently block certification.
+      timed_out_before_completion — True when the worker's own runtime budget
+                                 ran out before all users were processed.
+      remaining_pending_or_retryable — retryable failures from this run that
+                                 will be picked up in a later iteration.
+      run_resumable            — True when retryable failures remain and more
+                                 worker iterations can make progress.
+    """
     worker_run_id: str
     claimed_job_count: int = 0
+    jobs_due: int = 0
     selected_tickers: list[str] = field(default_factory=list)
     succeeded_tickers: list[str] = field(default_factory=list)
     failed_tickers: list[str] = field(default_factory=list)
+    failed_retryable_tickers: list[str] = field(default_factory=list)
+    failed_terminal_tickers: list[str] = field(default_factory=list)
     attempted_llm_calls: int = 0
     successful_llm_calls: int = 0
     failed_llm_calls: int = 0
     persisted_ticker_success_count: int = 0
+    timed_out_before_completion: bool = False
+    remaining_pending_or_retryable: int = 0
+    run_resumable: bool = True
     duration_ms: int = 0
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "worker_run_id": self.worker_run_id,
+            "jobs_due": self.jobs_due,
             "claimed_job_count": self.claimed_job_count,
             "selected_tickers": list(self.selected_tickers),
             "succeeded_tickers": list(self.succeeded_tickers),
             "failed_tickers": list(self.failed_tickers),
+            "failed_retryable_tickers": list(self.failed_retryable_tickers),
+            "failed_terminal_tickers": list(self.failed_terminal_tickers),
             "attempted_llm_calls": self.attempted_llm_calls,
             "successful_llm_calls": self.successful_llm_calls,
             "failed_llm_calls": self.failed_llm_calls,
             "persisted_ticker_success_count": self.persisted_ticker_success_count,
+            "timed_out_before_completion": self.timed_out_before_completion,
+            "remaining_pending_or_retryable": self.remaining_pending_or_retryable,
+            "run_resumable": self.run_resumable,
             "duration_ms": self.duration_ms,
             "notes": list(self.notes),
         }
@@ -117,6 +168,12 @@ def _failure_reason_for(per_ticker: list[dict[str, Any]], ticker: str) -> Option
         if str(outcome.get("ticker") or "").upper() == ticker:
             return outcome.get("error_reason")
     return None
+
+
+def _rows_from_result(res: Any) -> list[dict[str, Any]]:
+    """Extract row list from a Supabase result — safe against mocked clients."""
+    data = getattr(res, "data", None)
+    return data if isinstance(data, list) else []
 
 
 # ── Worker ────────────────────────────────────────────────────────────────────
@@ -154,6 +211,10 @@ class AnalystRefreshWorker:
         started = time.monotonic()
         result = WorkerRunResult(worker_run_id=worker_run_id)
 
+        # Count claimable jobs before claiming so the log reports full backlog.
+        due_counts = count_due_jobs(self.client, now=now)
+        result.jobs_due = due_counts.get("total_due", 0)
+
         claimed = claim_due_jobs(
             self.client,
             worker_run_id=worker_run_id,
@@ -163,13 +224,21 @@ class AnalystRefreshWorker:
         result.claimed_job_count = len(claimed)
 
         if not claimed:
+            result.run_resumable = due_counts.get("failed_not_yet_due", 0) > 0
             result.duration_ms = int((time.monotonic() - started) * 1000)
             logger.info(
                 "intel_v3.analyst_refresh_worker_run_summary worker_run_id=%s "
-                "claimed=0 selected=0 succeeded=0 failed=0 attempted_llm_calls=0 "
-                "successful_llm_calls=0 failed_llm_calls=0 "
-                "persisted_ticker_success_count=0 duration_ms=%d",
-                worker_run_id, result.duration_ms,
+                "jobs_due=%d claimed=0 selected=0 succeeded=0 "
+                "failed_retryable=0 failed_terminal=0 "
+                "attempted_llm_calls=0 successful_llm_calls=0 failed_llm_calls=0 "
+                "persisted_ticker_success_count=0 "
+                "timed_out_before_completion=False "
+                "remaining_pending_or_retryable=0 run_resumable=%s "
+                "duration_ms=%d notes=none",
+                worker_run_id,
+                result.jobs_due,
+                result.run_resumable,
+                result.duration_ms,
             )
             return result
 
@@ -185,18 +254,25 @@ class AnalystRefreshWorker:
                 # Out of runtime budget — release this user's claimed jobs back
                 # to a retryable failed state. No fabricated freshness: these
                 # tickers stay stale until a later worker pass.
+                result.timed_out_before_completion = True
                 for job in jobs:
                     next_retry = mark_job_failed(
                         self.client, job,
                         error="worker_runtime_budget_exhausted", now=now,
                     )
                     result.failed_tickers.append(job.ticker)
+                    exhausted = job.attempts >= job.max_attempts
+                    if exhausted:
+                        result.failed_terminal_tickers.append(job.ticker)
+                    else:
+                        result.failed_retryable_tickers.append(job.ticker)
                     logger.info(
                         "intel_v3.analyst_refresh_worker_ticker_failed "
                         "worker_run_id=%s user_id=%s ticker=%s "
                         "reason=worker_runtime_budget_exhausted next_retry_at=%s "
-                        "attempts=%d",
+                        "attempts=%d terminal=%s",
                         worker_run_id, user_id, job.ticker, next_retry, job.attempts,
+                        exhausted,
                     )
                 result.notes.append("worker_runtime_budget_exhausted")
                 continue
@@ -204,21 +280,43 @@ class AnalystRefreshWorker:
                 user_id, jobs, now=now, result=result, worker_run_id=worker_run_id,
             )
 
+        # Post-run backlog: unclaimed pending jobs (not processed in this bounded
+        # pass) + retryable failures waiting on backoff. count_due_jobs again
+        # reflects the post-outcome state so run_resumable is True whenever any
+        # future worker pass can make progress — not just when this pass had
+        # retryable failures.
+        post_run_counts = count_due_jobs(self.client, now=now)
+        remaining_actionable = (
+            post_run_counts.get("total_due", 0)          # immediately claimable
+            + post_run_counts.get("failed_not_yet_due", 0)  # in backoff, future pass
+        )
+        result.remaining_pending_or_retryable = remaining_actionable
+        result.run_resumable = remaining_actionable > 0
+
         result.duration_ms = int((time.monotonic() - started) * 1000)
         logger.info(
             "intel_v3.analyst_refresh_worker_run_summary worker_run_id=%s "
-            "claimed=%d selected=%d succeeded=%d failed=%d "
+            "jobs_due=%d claimed=%d selected=%d succeeded=%d "
+            "failed_retryable=%d failed_terminal=%d "
             "attempted_llm_calls=%d successful_llm_calls=%d failed_llm_calls=%d "
-            "persisted_ticker_success_count=%d duration_ms=%d notes=%s",
+            "persisted_ticker_success_count=%d "
+            "timed_out_before_completion=%s "
+            "remaining_pending_or_retryable=%d run_resumable=%s "
+            "duration_ms=%d notes=%s",
             worker_run_id,
+            result.jobs_due,
             result.claimed_job_count,
             len(result.selected_tickers),
             len(result.succeeded_tickers),
-            len(result.failed_tickers),
+            len(result.failed_retryable_tickers),
+            len(result.failed_terminal_tickers),
             result.attempted_llm_calls,
             result.successful_llm_calls,
             result.failed_llm_calls,
             result.persisted_ticker_success_count,
+            result.timed_out_before_completion,
+            result.remaining_pending_or_retryable,
+            result.run_resumable,
             result.duration_ms,
             ",".join(result.notes) if result.notes else "none",
         )
@@ -303,6 +401,28 @@ class AnalystRefreshWorker:
         }
         refresh_status = refresh_dict.get("status") or "unknown"
 
+        # Post-timeout residual evidence check.
+        #
+        # When asyncio.wait_for() cancels the backend coroutine on timeout, any
+        # asyncio.to_thread() DB writes inside it may still complete in their
+        # OS threads. Evidence committed before cancellation propagated would
+        # otherwise be re-processed on the next retry. Check the DB for any
+        # agent_insights rows written since the run started, and mark those
+        # tickers as succeeded so they are not retried unnecessarily. This is
+        # the core "resumable" fix: partial evidence is not discarded on timeout.
+        is_timeout = refresh_status == STATUS_SKIPPED_TIMEOUT
+        if is_timeout and not success_set:
+            residual = await self._check_residual_evidence(
+                user_id=user_id,
+                tickers=list(job_by_ticker.keys()),
+                started_at=now,
+            )
+            if residual:
+                success_set = residual
+                result.notes.append(
+                    f"post_timeout_residual_evidence_found_{len(residual)}"
+                )
+
         # Partial success persists per ticker. A ticker only counts as a real
         # refresh when the adapter verified it from durable DB rows.
         for ticker, job in job_by_ticker.items():
@@ -324,10 +444,17 @@ class AnalystRefreshWorker:
                     self.client, job, error=str(reason), now=now,
                 )
                 result.failed_tickers.append(ticker)
+                exhausted = job.attempts >= job.max_attempts
+                if exhausted:
+                    result.failed_terminal_tickers.append(ticker)
+                else:
+                    result.failed_retryable_tickers.append(ticker)
                 logger.info(
                     "intel_v3.analyst_refresh_worker_ticker_failed worker_run_id=%s "
-                    "user_id=%s ticker=%s reason=%s next_retry_at=%s attempts=%d",
-                    worker_run_id, user_id, ticker, reason, next_retry, job.attempts,
+                    "user_id=%s ticker=%s reason=%s next_retry_at=%s "
+                    "attempts=%d terminal=%s",
+                    worker_run_id, user_id, ticker, reason, next_retry,
+                    job.attempts, exhausted,
                 )
 
     def _fail_all(
@@ -344,8 +471,111 @@ class AnalystRefreshWorker:
         for job in jobs:
             next_retry = mark_job_failed(self.client, job, error=error, now=now)
             result.failed_tickers.append(job.ticker)
+            exhausted = job.attempts >= job.max_attempts
+            if exhausted:
+                result.failed_terminal_tickers.append(job.ticker)
+            else:
+                result.failed_retryable_tickers.append(job.ticker)
             logger.info(
                 "intel_v3.analyst_refresh_worker_ticker_failed worker_run_id=%s "
-                "user_id=%s ticker=%s reason=%s next_retry_at=%s attempts=%d",
-                worker_run_id, user_id, job.ticker, error, next_retry, job.attempts,
+                "user_id=%s ticker=%s reason=%s next_retry_at=%s "
+                "attempts=%d terminal=%s",
+                worker_run_id, user_id, job.ticker, error, next_retry,
+                job.attempts, exhausted,
             )
+
+    async def _check_residual_evidence(
+        self,
+        *,
+        user_id: str,
+        tickers: list[str],
+        started_at: datetime,
+    ) -> set[str]:
+        """After a timeout, check which tickers have durable evidence in the DB.
+
+        When asyncio.wait_for() cancels the backend coroutine, DB writes that
+        ran inside asyncio.to_thread() may still complete in their OS threads.
+        This query surfaces tickers whose evidence was committed before or
+        shortly after the cancellation.
+
+        Evidence requirement: BOTH a fresh ``agent_insights`` row AND a fresh
+        ``recommendations`` row must be present for the same ticker/user since
+        ``started_at``. An ``agent_insights``-only row is logged as diagnostic
+        but is NOT sufficient to mark the job succeeded — the downstream
+        certification contract requires both rows to exist per holding.
+
+        Returns the confirmed subset (upper-cased) or empty set on DB failure.
+        """
+        started_iso = started_at.isoformat()
+        upper_tickers = {t.upper() for t in tickers}
+        try:
+            insights_res = await asyncio.to_thread(
+                lambda: self.client.table("agent_insights")
+                .select("ticker,run_id")
+                .eq("user_id", user_id)
+                .gte("created_at", started_iso)
+                .execute()
+            )
+            insight_rows = _rows_from_result(insights_res)
+            insight_by_ticker: dict[str, str] = {}
+            for r in insight_rows:
+                tk = str(r.get("ticker") or "").upper()
+                if tk in upper_tickers:
+                    insight_by_ticker[tk] = str(r.get("run_id") or "")
+
+            if not insight_by_ticker:
+                return set()
+
+            recs_res = await asyncio.to_thread(
+                lambda: self.client.table("recommendations")
+                .select("ticker,agent_run_id")
+                .eq("user_id", user_id)
+                .gte("created_at", started_iso)
+                .execute()
+            )
+            rec_rows = _rows_from_result(recs_res)
+            rec_by_ticker: dict[str, str] = {}
+            for r in rec_rows:
+                tk = str(r.get("ticker") or "").upper()
+                if tk in upper_tickers:
+                    rec_by_ticker[tk] = str(r.get("agent_run_id") or "")
+
+            confirmed: set[str] = set()
+            insight_only: set[str] = set()
+            for ticker, insight_run_id in insight_by_ticker.items():
+                rec_run_id = rec_by_ticker.get(ticker)
+                if rec_run_id is None:
+                    # agent_insights present but no recommendation — insufficient.
+                    insight_only.add(ticker)
+                    continue
+                # Both present; if run_ids are non-empty they must match.
+                if insight_run_id and rec_run_id and insight_run_id != rec_run_id:
+                    logger.info(
+                        "intel_v3.analyst_refresh_worker_residual_check_run_id_mismatch "
+                        "user_id=%s ticker=%s insight_run=%s rec_run=%s",
+                        user_id, ticker, insight_run_id, rec_run_id,
+                    )
+                    insight_only.add(ticker)
+                    continue
+                confirmed.add(ticker)
+
+            if insight_only:
+                logger.info(
+                    "intel_v3.analyst_refresh_worker_residual_check_diagnostic_only "
+                    "user_id=%s insight_only_tickers=%s reason=no_matching_recommendation",
+                    user_id, ",".join(sorted(insight_only)),
+                )
+            if confirmed:
+                logger.info(
+                    "intel_v3.analyst_refresh_worker_residual_check user_id=%s "
+                    "residual_tickers=%s",
+                    user_id, ",".join(sorted(confirmed)),
+                )
+            return confirmed
+        except Exception as exc:
+            logger.warning(
+                "intel_v3.analyst_refresh_worker_residual_check_failed "
+                "user_id=%s err=%s",
+                user_id, exc,
+            )
+            return set()

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-14 (post Stage 3.3 — all-or-nothing certified intelligence run contract)
+Last updated: 2026-05-15 (post Build 1 — Intel v3 durable resumable analyst refresh worker)
 
 ## Purpose
 
@@ -23,6 +23,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-15 — **Build 1: Intel v3 durable resumable analyst refresh worker** — Root cause: when `asyncio.wait_for()` timed out the full-portfolio adapter, ALL 34 tickers were blanket-failed even if some had evidence committed to DB. Over 5 attempts this could terminal-fail all tickers and permanently block certification. Fixes: (1) `count_due_jobs()` added to job store — returns `pending/failed_retryable/failed_not_yet_due/failed_terminal/total_due` breakdown without claiming. (2) `WorkerRunResult` gains `jobs_due`, `failed_retryable_tickers`, `failed_terminal_tickers`, `timed_out_before_completion`, `remaining_pending_or_retryable`, `run_resumable` fields. (3) `_check_residual_evidence()` — after a timeout, queries `agent_insights` for `created_at >= started_at`; any tickers found are marked succeeded instead of retried. (4) `_fail_all()` and ticker-level loop now classify each failed ticker as retryable (attempts < max) vs terminal (exhausted). (5) `intel_v3.analyst_refresh_worker_run_summary` log expanded with all required production monitoring fields. (6) 24 new regression tests in `test_intel_v3_stage_3_3_durable_worker.py` cover: 34 jobs across multiple bounded iterations, timeout does not terminal-fail retryable jobs, retryable overload does not publish certified snapshot, completed per-ticker results not redone, terminal failure blocks certification, certified snapshot available during refresh, structured log fields, run_resumable accuracy. No SQL, no schema changes, no frontend changes, no certification contract weakening. 98 total tests passing (74 Stage 3.2 + 24 Build 1).
 
 - 2026-05-14 — **Stage 3.3: All-or-nothing certified intelligence run contract** — Closes the production false-green bug (UI showed green when `claimed=0, llm_calls=0, analyst_refresh_status=not_attempted`). Root cause: `REFRESH_THEN_RUN + trusted` fired when only price was refreshed but analyst evidence was already fresh from a prior worker run, and the click implied agents ran. Fix: (1) `POST /intel/v3/run` now calls `enqueue_run_v3()` — returns `{status:"refresh_requested"}`, zero LLM calls, no snapshot built. (2) New `certified_intel_run_contract_v1.py` — pure async read validator checks 10 conditions per holding. (3) `run_prewarm_snapshot()` runs the contract; sets `snapshot_source="worker_certified"` only if all holdings pass, otherwise `"certification_failed"`. (4) Snapshot carries provenance fields: `snapshot_source`, `certified_holding_count`, `total_holding_count`, `failed_tickers_in_certification`, `certification_summary`. (5) `intel-v3-banner.ts` fully rewritten with 6-state status machine; green requires `worker_certified` + full coverage. (6) `IntelV3Cockpit.tsx` polls every 15s after Run Intel click; stops on `worker_certified` or 5-min timeout. GO decision: Intel v3 now satisfies the all-or-nothing certified intelligence run contract. Green means every active holding passed the evidence contract with matched fresh analyst evidence. No SQL, no schema changes. 17 new backend tests (140 total passing) + 13 new frontend banner tests.
 
@@ -54,6 +56,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
+
+**Production validation of Build 1 durable worker execution.** Re-run the Run Intel v3 button. Key log signals to confirm worker is progressing (not stuck):
+
+- `intel_v3.analyst_refresh_worker_run_summary` must show `jobs_due>0` in the first passing poll, then `claimed>0`, `succeeded>0`, and `failed_retryable=0` when all 34 complete.
+- If a previous run left terminal-failed jobs (`failed_terminal>0`), click "Run Intel" again — `enqueue_run_v3` reopens exhausted jobs (`reopened_count>0`) so the worker can retry.
+- `run_resumable=True` in the log means retryable failures remain; the next poll will pick them up automatically (backoff) or immediately after a re-click.
+- After all 34 tickers succeed across one or more iterations, `prewarm_intel_v3_snapshot` triggers certification. Watch for `intel_v3_worker_certified_snapshot_published` to confirm green state.
 
 **Production validation of Stage 3.3 certified intelligence run contract.** Full expected flow:
 

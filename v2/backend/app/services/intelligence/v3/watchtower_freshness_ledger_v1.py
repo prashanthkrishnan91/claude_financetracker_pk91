@@ -95,7 +95,7 @@ class EvidenceSLA:
 
 
 FRESHNESS_SLA_CONFIG: dict[str, EvidenceSLA] = {
-    # Strictest — must know current dollar value every 15 minutes
+    # Intel analysis — 15 min is sufficient for explanation/recommendation display
     EVIDENCE_TYPE_PRICE: EvidenceSLA(
         fresh_seconds=900,      # 15 min
         aging_seconds=3_600,    # 1 h
@@ -154,6 +154,36 @@ FRESHNESS_SLA_CONFIG: dict[str, EvidenceSLA] = {
         fresh_seconds=14_400,   # 4 h
         aging_seconds=86_400,   # 24 h
         stale_seconds=604_800,  # 7 d
+    ),
+}
+
+
+# ── Deploy SLA constants (stricter than Intel SLAs for price/weights) ────────
+#
+# Deploy-critical types require near-real-time freshness before any dollar
+# deployment plan is generated. Separate from Intel SLAs, which govern when
+# evidence is "current enough" for analysis and explanation display.
+#
+# PRICE deploy-fresh: 5 min — a 7-minute-old price is too old for dollar sizing.
+# PORTFOLIO_WEIGHT deploy-fresh: same as price — weights are derived from
+#   market values in the same portfolio snapshot; stale price → stale weight.
+# POSITION: same as Intel SLA — user-imported data; 24 h is appropriate.
+
+DEPLOY_SLA_CONFIG: dict[str, EvidenceSLA] = {
+    EVIDENCE_TYPE_PRICE: EvidenceSLA(
+        fresh_seconds=300,      # 5 min
+        aging_seconds=900,      # 15 min (same as Intel fresh_seconds)
+        stale_seconds=1_800,    # 30 min
+    ),
+    EVIDENCE_TYPE_POSITION: EvidenceSLA(
+        fresh_seconds=86_400,   # 24 h — same as Intel; user-imported data
+        aging_seconds=172_800,  # 48 h
+        stale_seconds=604_800,  # 7 d
+    ),
+    EVIDENCE_TYPE_PORTFOLIO_WEIGHT: EvidenceSLA(
+        fresh_seconds=300,      # 5 min — derived from price; same threshold
+        aging_seconds=900,      # 15 min
+        stale_seconds=1_800,    # 30 min
     ),
 }
 
@@ -268,6 +298,50 @@ def classify_freshness_status(
     return FRESHNESS_STALE  # beyond stale_seconds → still STALE (not MISSING; data exists)
 
 
+def classify_deploy_freshness_status(
+    *,
+    evidence_type: str,
+    as_of: Optional[datetime],
+    collected_at: Optional[datetime],
+    now: datetime,
+    last_error: Optional[str] = None,
+) -> str:
+    """Classify freshness status using Deploy SLAs for deploy-critical types.
+
+    For non-deploy-critical types, falls back to the standard Intel SLA.
+    Deploy SLAs are stricter: price/portfolio_weight require <5 min freshness
+    before any dollar deployment plan is generated.
+    """
+    if evidence_type not in DEPLOY_CRITICAL_TYPES:
+        return classify_freshness_status(
+            evidence_type=evidence_type,
+            as_of=as_of,
+            collected_at=collected_at,
+            now=now,
+            last_error=last_error,
+        )
+
+    if last_error and not collected_at and not as_of:
+        return FRESHNESS_FAILED
+
+    ref = collected_at or as_of
+    if ref is None:
+        return FRESHNESS_MISSING
+
+    sla = DEPLOY_SLA_CONFIG.get(evidence_type) or FRESHNESS_SLA_CONFIG.get(evidence_type)
+    if sla is None:
+        return FRESHNESS_MISSING
+
+    age_seconds = (now - ref).total_seconds()
+    if age_seconds < 0:
+        return FRESHNESS_FRESH
+    if age_seconds <= sla.fresh_seconds:
+        return FRESHNESS_FRESH
+    if age_seconds <= sla.aging_seconds:
+        return FRESHNESS_AGING
+    return FRESHNESS_STALE
+
+
 def is_deploy_eligible_for_type(
     evidence_type: str,
     freshness_status: str,
@@ -326,7 +400,17 @@ def build_evidence_record(
         now=now,
         last_error=last_error,
     )
-    deploy_elig, deploy_reason = is_deploy_eligible_for_type(evidence_type, freshness_status)
+    # Deploy eligibility uses stricter Deploy SLAs for deploy-critical types.
+    # freshness_status (Intel SLA) is kept for analysis/display; deploy_eligible
+    # uses the separate Deploy SLA so dollar-deployment gates are independently strict.
+    deploy_freshness = classify_deploy_freshness_status(
+        evidence_type=evidence_type,
+        as_of=as_of,
+        collected_at=collected_at,
+        now=now,
+        last_error=last_error,
+    )
+    deploy_elig, deploy_reason = is_deploy_eligible_for_type(evidence_type, deploy_freshness)
     decision_elig, decision_reason = is_decision_eligible_for_type(evidence_type, freshness_status)
     reason = deploy_reason or decision_reason
 

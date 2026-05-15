@@ -657,6 +657,321 @@ class TestNoDeployOutputWhenStale:
         assert EVIDENCE_TYPE_PRICE in gate.summary.lower() or "price" in gate.summary.lower()
 
 
+# ── Test 13: Deploy SLA is stricter than Intel SLA ────────────────────────────
+
+class TestDeploySLAStricterThanIntelSLA:
+    def test_deploy_sla_config_exists(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            DEPLOY_SLA_CONFIG,
+            EVIDENCE_TYPE_PRICE,
+            EVIDENCE_TYPE_PORTFOLIO_WEIGHT,
+        )
+        assert EVIDENCE_TYPE_PRICE in DEPLOY_SLA_CONFIG
+        assert EVIDENCE_TYPE_PORTFOLIO_WEIGHT in DEPLOY_SLA_CONFIG
+
+    def test_price_deploy_fresh_threshold_is_5min(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            DEPLOY_SLA_CONFIG, EVIDENCE_TYPE_PRICE,
+        )
+        assert DEPLOY_SLA_CONFIG[EVIDENCE_TYPE_PRICE].fresh_seconds == 300, (
+            "Price deploy-fresh threshold must be 5 min (300s) — 15-min Intel SLA "
+            "is too loose for dollar Deploy"
+        )
+
+    def test_portfolio_weight_deploy_fresh_threshold_equals_price(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            DEPLOY_SLA_CONFIG,
+            EVIDENCE_TYPE_PRICE,
+            EVIDENCE_TYPE_PORTFOLIO_WEIGHT,
+        )
+        assert (
+            DEPLOY_SLA_CONFIG[EVIDENCE_TYPE_PORTFOLIO_WEIGHT].fresh_seconds
+            == DEPLOY_SLA_CONFIG[EVIDENCE_TYPE_PRICE].fresh_seconds
+        ), "portfolio_weight deploy SLA must match price — weights are derived from price"
+
+    def test_classify_deploy_freshness_status_exists(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            classify_deploy_freshness_status,
+        )
+        assert callable(classify_deploy_freshness_status)
+
+    def test_20min_old_price_is_intel_aging_but_deploy_stale(self):
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_PRICE,
+            FRESHNESS_AGING,
+            FRESHNESS_STALE,
+            classify_freshness_status,
+            classify_deploy_freshness_status,
+        )
+        # 20-minute-old price: AGING by Intel SLA (fresh=15min, aging=60min),
+        # STALE by Deploy SLA (fresh=5min, aging=15min — 20min > Deploy aging)
+        ts = NOW - timedelta(minutes=20)
+        intel_status = classify_freshness_status(
+            evidence_type=EVIDENCE_TYPE_PRICE, as_of=ts, collected_at=ts, now=NOW,
+        )
+        deploy_status = classify_deploy_freshness_status(
+            evidence_type=EVIDENCE_TYPE_PRICE, as_of=ts, collected_at=ts, now=NOW,
+        )
+        assert intel_status == FRESHNESS_AGING, f"Expected AGING (Intel), got {intel_status}"
+        assert deploy_status == FRESHNESS_STALE, f"Expected STALE (Deploy), got {deploy_status}"
+
+    def test_build_evidence_record_uses_deploy_sla_for_deploy_eligible(self):
+        # A 20-minute-old price is AGING by Intel SLA (fresh=15min, aging=60min)
+        # but deploy_eligible=False because deploy SLA aging=15min (20min > 15min).
+        ts = NOW - timedelta(minutes=20)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        # Intel freshness_status is AGING (uses Intel SLA)
+        assert rec.freshness_status == FRESHNESS_AGING
+        # deploy_eligible is False (uses Deploy SLA, which classifies 20min as STALE)
+        assert not rec.deploy_eligible, (
+            "20-min-old price must be deploy_eligible=False under 5-min/15-min Deploy SLA"
+        )
+
+    def test_3min_old_price_is_deploy_eligible(self):
+        # A 3-minute-old price is FRESH by both Intel and Deploy SLAs
+        ts = NOW - timedelta(minutes=3)
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=ts,
+            collected_at=ts,
+            source="test",
+            now=NOW,
+        )
+        assert rec.freshness_status == FRESHNESS_FRESH
+        assert rec.deploy_eligible
+
+    def test_stale_price_makes_portfolio_weight_deploy_ineligible(self):
+        # Stale price (>30min old) → price STALE by deploy SLA
+        # Portfolio weight from same snapshot → also deploy-ineligible
+        stale_ts = NOW - timedelta(hours=2)
+        price_rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL",
+            scope="ticker",
+            as_of=stale_ts,
+            collected_at=stale_ts,
+            source="test",
+            now=NOW,
+        )
+        weight_rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_PORTFOLIO_WEIGHT,
+            ticker=None,
+            scope="portfolio",
+            as_of=stale_ts,
+            collected_at=stale_ts,
+            source="test",
+            now=NOW,
+        )
+        assert not price_rec.deploy_eligible, "Stale price must not be deploy_eligible"
+        assert not weight_rec.deploy_eligible, (
+            "portfolio_weight from same stale snapshot must not be deploy_eligible"
+        )
+        gate = check_deploy_gate([price_rec, weight_rec])
+        assert not gate.deploy_eligible
+        assert EVIDENCE_TYPE_PRICE in gate.blockers
+        assert EVIDENCE_TYPE_PORTFOLIO_WEIGHT in gate.blockers
+
+    def test_non_deploy_critical_type_not_affected_by_deploy_sla(self):
+        # Analyst LLM is not deploy-critical; its freshness uses Intel SLA unchanged
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            classify_deploy_freshness_status,
+            classify_freshness_status,
+        )
+        ts = NOW - timedelta(hours=1)
+        intel = classify_freshness_status(
+            evidence_type=EVIDENCE_TYPE_ANALYST_LLM, as_of=ts, collected_at=ts, now=NOW,
+        )
+        deploy = classify_deploy_freshness_status(
+            evidence_type=EVIDENCE_TYPE_ANALYST_LLM, as_of=ts, collected_at=ts, now=NOW,
+        )
+        assert intel == deploy, "Non-deploy-critical types must use Intel SLA in both paths"
+
+
+# ── Test 14: Selective analyst enqueue (gate-first) ───────────────────────────
+
+class TestSelectiveAnalystEnqueue:
+    def test_stale_analyst_tickers_logic_extracts_only_stale(self):
+        """Logic of _stale_analyst_tickers_from_gate: must not include fresh/aging."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EvidenceRecord, FRESHNESS_SLA_CONFIG,
+            FRESHNESS_FRESH, FRESHNESS_STALE, FRESHNESS_MISSING,
+            FRESHNESS_AGING,
+            EVIDENCE_TYPE_ANALYST_LLM,
+        )
+
+        stale_ts = NOW - timedelta(days=10)
+        fresh_ts = NOW - timedelta(hours=1)
+
+        fresh_rec = EvidenceRecord(
+            evidence_type=EVIDENCE_TYPE_ANALYST_LLM,
+            ticker="AAPL", scope="ticker",
+            as_of=fresh_ts, collected_at=fresh_ts, source="test",
+            freshness_status=FRESHNESS_FRESH,
+            freshness_sla_seconds=FRESHNESS_SLA_CONFIG[EVIDENCE_TYPE_ANALYST_LLM].fresh_seconds,
+            deploy_eligible=True, decision_eligible=True, reason=None,
+        )
+        stale_rec = EvidenceRecord(
+            evidence_type=EVIDENCE_TYPE_ANALYST_LLM,
+            ticker="MSFT", scope="ticker",
+            as_of=stale_ts, collected_at=stale_ts, source="test",
+            freshness_status=FRESHNESS_STALE,
+            freshness_sla_seconds=FRESHNESS_SLA_CONFIG[EVIDENCE_TYPE_ANALYST_LLM].fresh_seconds,
+            deploy_eligible=True, decision_eligible=False, reason="stale",
+        )
+        missing_rec = EvidenceRecord(
+            evidence_type=EVIDENCE_TYPE_ANALYST_LLM,
+            ticker="GOOG", scope="ticker",
+            as_of=None, collected_at=None, source="test",
+            freshness_status=FRESHNESS_MISSING,
+            freshness_sla_seconds=0,
+            deploy_eligible=True, decision_eligible=False, reason="missing",
+        )
+
+        # Reproduce the filtering logic inline (avoids pydantic_settings import)
+        stale = [
+            rec.ticker
+            for rec in [fresh_rec, stale_rec, missing_rec]
+            if rec.evidence_type == EVIDENCE_TYPE_ANALYST_LLM
+            and rec.ticker
+            and rec.freshness_status not in (FRESHNESS_FRESH, FRESHNESS_AGING)
+        ]
+        assert "AAPL" not in stale, "Fresh analyst ticker must not be enqueued"
+        assert "MSFT" in stale, "Stale analyst ticker must be enqueued"
+        assert "GOOG" in stale, "Missing analyst ticker must be enqueued"
+
+    def test_stale_analyst_tickers_logic_ignores_non_analyst_records(self):
+        """Only EVIDENCE_TYPE_ANALYST_LLM records feed the enqueue list."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EvidenceRecord, FRESHNESS_SLA_CONFIG,
+            FRESHNESS_STALE, FRESHNESS_FRESH, FRESHNESS_AGING,
+            EVIDENCE_TYPE_PRICE, EVIDENCE_TYPE_ANALYST_LLM,
+        )
+        stale_price_rec = EvidenceRecord(
+            evidence_type=EVIDENCE_TYPE_PRICE,
+            ticker="AAPL", scope="ticker",
+            as_of=None, collected_at=None, source="test",
+            freshness_status=FRESHNESS_STALE,
+            freshness_sla_seconds=FRESHNESS_SLA_CONFIG[EVIDENCE_TYPE_PRICE].fresh_seconds,
+            deploy_eligible=False, decision_eligible=True, reason="stale",
+        )
+
+        stale = [
+            rec.ticker
+            for rec in [stale_price_rec]
+            if rec.evidence_type == EVIDENCE_TYPE_ANALYST_LLM
+            and rec.ticker
+            and rec.freshness_status not in (FRESHNESS_FRESH, FRESHNESS_AGING)
+        ]
+        assert stale == [], "Non-analyst records must not appear in stale analyst list"
+
+    def test_intel_v3_service_source_has_gate_first_pattern(self):
+        """Source inspection: fast freshness gate must appear before enqueue_refresh_jobs."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        gate_pos = source.find("run_fast_freshness_gate")
+        enqueue_pos = source.find("enqueue_refresh_jobs(")
+        assert gate_pos > 0, "run_fast_freshness_gate must be present in intel_v3_service"
+        assert enqueue_pos > 0, "enqueue_refresh_jobs must be present in intel_v3_service"
+        # Within enqueue_run_v3, gate appears before the enqueue call
+        enqueue_run_v3_start = source.find("async def enqueue_run_v3(")
+        assert enqueue_run_v3_start > 0
+        run_v3_body = source[enqueue_run_v3_start:]
+        gate_pos_in_body = run_v3_body.find("run_fast_freshness_gate")
+        enqueue_pos_in_body = run_v3_body.find("enqueue_refresh_jobs(")
+        assert gate_pos_in_body < enqueue_pos_in_body, (
+            "Fast freshness gate must run BEFORE enqueue_refresh_jobs in enqueue_run_v3()"
+        )
+
+    def test_intel_v3_service_source_has_selective_enqueue(self):
+        """Source inspection: selective enqueue pattern must be present."""
+        import pathlib
+        source = pathlib.Path(
+            "app/services/intelligence/v3/intel_v3_service.py"
+        ).read_text()
+        assert "_stale_analyst_tickers_from_gate" in source, (
+            "Selective enqueue helper must be wired in intel_v3_service"
+        )
+        assert "stale_analyst_ticker" in source, (
+            "Stale analyst ticker count must be tracked in enqueue_run_v3 response"
+        )
+
+
+# ── Test 15: Watchtower entrypoint is importable with production defaults ──────
+
+class TestWatchtowerEntrypointImportable:
+    def test_entrypoint_module_importable(self):
+        """Entrypoint module must be importable without triggering DB connections."""
+        import importlib
+        mod = importlib.import_module(
+            "app.services.intelligence.v3.watchtower_worker_entrypoint"
+        )
+        assert mod is not None
+
+    def test_entrypoint_has_default_interval(self):
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import (
+            DEFAULT_INTERVAL_SECONDS,
+        )
+        assert DEFAULT_INTERVAL_SECONDS > 0
+        assert DEFAULT_INTERVAL_SECONDS == 60.0
+
+    def test_entrypoint_has_interval_env_var(self):
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import _INTERVAL_ENV
+        assert "WATCHTOWER" in _INTERVAL_ENV
+
+    def test_entrypoint_has_main_function(self):
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import main
+        assert callable(main)
+
+    def test_entrypoint_has_production_callables(self):
+        """Entrypoint must define default price and analyst enqueue callables."""
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import (
+            _build_default_price_refresh_callable,
+            _build_default_analyst_enqueue_callable,
+        )
+        assert callable(_build_default_price_refresh_callable)
+        assert callable(_build_default_analyst_enqueue_callable)
+
+    def test_entrypoint_resolve_interval_uses_default_when_env_unset(self):
+        """_resolve_interval_seconds must return the default when env var is unset."""
+        import os
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import (
+            _resolve_interval_seconds,
+            DEFAULT_INTERVAL_SECONDS,
+            _INTERVAL_ENV,
+        )
+        original = os.environ.pop(_INTERVAL_ENV, None)
+        try:
+            result = _resolve_interval_seconds()
+            assert result == DEFAULT_INTERVAL_SECONDS
+        finally:
+            if original is not None:
+                os.environ[_INTERVAL_ENV] = original
+
+    def test_entrypoint_resolve_interval_uses_env_when_set(self):
+        import os
+        from app.services.intelligence.v3.watchtower_worker_entrypoint import (
+            _resolve_interval_seconds, _INTERVAL_ENV,
+        )
+        os.environ[_INTERVAL_ENV] = "120"
+        try:
+            result = _resolve_interval_seconds()
+            assert result == 120.0
+        finally:
+            del os.environ[_INTERVAL_ENV]
+
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _make_fake_client(

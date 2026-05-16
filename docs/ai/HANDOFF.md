@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Build 3 PR 3B — analyst_verdict trusted-signal mapping)
+Last updated: 2026-05-16 (Stage 3A — Action Feedback Foundation v1)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3.3 merged** (All-or-nothing certified intelligence run contract). Stage 3.2c complete. **Stage 2 exit production-passed.** $900 and $1,500 Deploy flows validated: BUY sizing totals matched planning cash when guardrails allowed; Step 3 actual logging, manual rows, and history/accounting worked; Evaluate captured a recent baseline and rendered older comparison correctly. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts, per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows via `is_manual: true`. The Step 2 recommendation surface stays read-only. Decision log history (latest 10 deduped logs) shows below Step 3; re-logging the same active plan updates the matching log rather than duplicating.
-- Active build queue item: **Build 3 PR 3B** — trusted-signal mapping from real `analyst_verdict` fields. `ReadOnlyEvidenceAdapter.load_cards()` now synthesizes a minimal `intel_read`-compatible structure from `primary_driver`, `action_reason`, and `key_drivers` instead of defaulting every card to `data_quality_label="MEDIUM"` (which inflated all cards to PARTIAL regardless of content). Research artifacts remain locked at `safe_for_decision=FALSE`. 31 new tests; 62 total for PR 3A+3B (all pass). PR open on branch `claude/analyst-evidence-mapping-8lnSF`.
+- Roadmap stage: **Stage 3A completed** (Action Feedback Foundation v1). All Build 3 PRs merged/validated (PRs #337–348). PR #348 (evidence mapping version guard) is merged and production-validated; the evidence-mapping loop is done. Stage 3A adds the user-feedback memory layer before full alert delivery.
+- Active build queue item: **Stage 3A — Action Feedback Foundation v1** — append-only feedback events for Intel/Deploy/Watchtower actions. New table `action_feedback_events`, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). Feedback types: executed|skipped|ignored|snoozed|too_risky|not_relevant|user_note. Idempotent by `(user_id, idempotency_key)`. Feedback is stored evidence/context only — does NOT mutate Intel v3 decisions, Deploy sizing, or Watchtower behavior. SQL migration required (019). 22 tests (all pass). Next: alert trigger/notification policy.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture — Build 2 additions
@@ -107,34 +107,20 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**All Build 3 PRs (#337–342) merged and production-validated.**
+**All Build 3 PRs (#337–348) merged and production-validated.** Evidence-mapping loop is done.
 
-- PR #337 — Build 3 PR 1: real AxisBand in visible cards, Cap 5 conviction guardrail, STUB removed
-- PRs #338–340 — Build 3 PR 2A: Watchtower Railway production loop, analyst-eligibility trigger, Intel republisher
-- PR #341 — Build 3 PR 2B: valuation context bridge + IntelV3Drawer section (feature-flagged)
-- PR #342 — Build 3 PR 2B root-cause fix: observability logs confirming flag was disabled in Railway
+**Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 
-**Valuation context is production-activated and visually validated.** The Intel detail drawer now shows the "Valuation context" section. Operational requirements (both must remain set): `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on the main app Railway service and the Watchtower Railway service. Future validation log key: `valuation_context_pr2b_aggregate_summary renderable_context_count=N`.
-
-**Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
-
-**Build 3 PR 3A (merged PR #344) + hotfix PR #345 (production-validated):**
-- PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. 31 tests.
-- PR #345: `_log_evidence_depth_summary()` shared helper; `_normalize_legacy_committee_status()` converts persisted `deferred` → real status at API response time. Log key: `intel_v3_source_pack_legacy_normalization_summary`. 22 tests.
-
-**Build 3 PR 3B — analyst_verdict trusted-signal mapping (merged PR #347):**
-- Root cause fixed: `data_quality_label="MEDIUM"` hardcoded fallback and missing `intel_read` synthesis caused ALL cards to show PARTIAL regardless of actual analyst content.
-- Fix: synthesize `intel_read.trusted_signals` from real `analyst_verdict` fields — `primary_driver` → `analyst_primary_driver`, `action_reason` → `analyst_action_rationale`, `key_drivers` → `analyst_key_drivers`. Count 0–3 dims: 3=STRONG, 1–2=OK(PARTIAL), 0=THIN/SUPPRESSED.
-- Fallback phrases excluded via `_FALLBACK_PHRASES` + `_is_real_signal()`. Research artifacts locked `safe_for_decision=FALSE`.
-- 31 synthesis/policy tests + 9 direct adapter-path tests. No SQL, no UI, no policy change.
-- Post-merge validation: `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
-
-**PR 3B Activation Guard — evidence mapping version guard (PR #348, pending merge, branch claude/evidence-mapping-version-guard-WK2im):**
-- Problem: PR #347 changed `ReadOnlyEvidenceAdapter.load_cards()` synthesis logic, but production may serve a `worker_certified` snapshot built before that change — `Run Intel` no-op and Watchtower skip-republish could both leave the stale pre-PR #347 snapshot in place.
-- Fix: `EVIDENCE_MAPPING_VERSION = "analyst_verdict_synthesis_v1"` constant in `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload (`build_snapshot()`). Both `compare_and_republish()` and `republish_after_analyst_eligibility()` treat mapping-version mismatch as a republish trigger even when `evidence_newer_than_certified_snapshot=False`. `enqueue_run_v3()` calls `run_prewarm_snapshot()` (zero-LLM) instead of returning the `analyst_evidence_current` no-op when mapping version is stale. On prewarm failure, returns `mapping_version_recertification_failed` (not `analyst_evidence_current`) — honest non-current signal. Frontend `IntelV3RunResult.status` includes both new statuses; `isNoOpRun` in `IntelV3Cockpit` treats both as refetch-not-poll so the spinner never runs indefinitely.
-- 17 new tests in `test_evidence_mapping_version_guard.py` (all pass). 4 new banner tests. `_make_client()` in `test_watchtower_build_2.py` updated to include `evidence_mapping_version` by default.
-- Post-merge validation log keys: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
-- No SQL, no UI design change, no Deploy change, no analyst jobs, no LLM calls.
+**Stage 3A — Action Feedback Foundation v1 (this PR, branch `claude/action-feedback-foundation-2I1IN`):**
+- New table `action_feedback_events` — append-only, user-scoped, idempotent by `(user_id, idempotency_key)`.
+- Feedback types: `executed` | `skipped` | `ignored` | `snoozed` | `too_risky` | `not_relevant` | `user_note`.
+- Source areas: `intel` | `deploy` | `watchtower` | `alert`.
+- Optional context: ticker, action_type (BUY/HOLD/TRIM/SELL/DEPLOY_ACTION), agent_run_id, snapshot_id, note.
+- `POST /api/v1/action-feedback` (idempotent) + `GET /api/v1/action-feedback` (filter by ticker/source_area).
+- Feedback does NOT mutate Intel v3 decisions, Deploy sizing, Watchtower refresh, or any broker behavior.
+- SQL migration required: `v2/database/019_action_feedback_events.sql`.
+- 22 tests (all pass). Intel v3 + Deploy regression: 133 tests pass.
+- Next after merge: alert trigger / notification policy (Stage 3B).
 
 ## Handoff maintenance rule
 

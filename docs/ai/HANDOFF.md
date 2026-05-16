@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Build 3 PR 3: Evidence depth / PARTIAL band improvement)
+Last updated: 2026-05-16 (Build 3 PR 3A: Source-pack status + evidence-depth observability — pending merge)
 
 ## Purpose
 
@@ -116,18 +116,17 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
-**Build 3 PR 3 (this PR — Evidence depth / PARTIAL band improvement):**
-- Root cause: `snapshot_builder.py` hard-coded `committee: {status: "deferred"}` for every card, regardless of whether the analyst actually ran and produced source-linked evidence.
-- Fix: `_build_source_pack_status()` now computes the real status: `source_validated` when `evidence_quality` is OK or STRONG (analyst produced 1+ trusted signals), `pending` when THIN or SUPPRESSED.
+**Build 3 PR 3A (this PR — Source-pack status + evidence-depth observability — pending merge):**
+- Scope: removes the hard-coded `committee: {status: "deferred"}` placeholder; computes real source-pack status from existing `evidence_quality`. Does NOT map `research_artifacts`/`research_artifact_facts` into `trusted_signals`; does NOT materially reduce PARTIAL bands by itself.
+- Fix: `_build_source_pack_status()` now computes the real status: `source_validated` when `evidence_quality` is OK or STRONG (analyst produced 1+ trusted signals in `intel_read`), `pending` with honest suppression reason when THIN or SUPPRESSED.
 - New aggregate observability log: `intel_v3_evidence_depth_summary` (total_tickers, strong/ok/thin counts, source_pack_validated/pending counts, primary_driver/rationale presence, top suppression reasons) emitted on every snapshot build.
 - Snapshot now carries `source_pack_validated_count` + `source_pack_pending_count`.
-- Frontend: committee section hidden for `source_validated` cards; shows "Evidence not yet source-linked" for `pending` (vs generic "Analysis pending" for old `deferred` snapshots).
-- 31 new backend tests (all pass). Evidence quality axis and Deploy behavior unchanged.
-- Supabase SQL: none.
+- Frontend (minimal): committee section hidden for `source_validated`; shows "Evidence not yet source-linked" for `pending` vs generic "Analysis pending" for old `deferred` snapshots.
+- 31 new backend tests. Evidence quality axis and Deploy behavior unchanged. Supabase SQL: none.
 
 **Next work (in priority order):**
 1. **Stage 2 exit validation** — still pending; all five gates in "Active build queue item" above must be confirmed in production.
-2. **Evidence depth deeper work** — if production logs show many `source_pack_pending` cards, the next slice investigates whether `research_artifacts`/`research_artifact_facts` hold source-linked evidence that could be mapped into `trusted_signals`.
+2. **Evidence depth PR 3B** — if production `intel_v3_evidence_depth_summary` logs show persistent high `source_pack_pending_count` or many PARTIAL bands, next slice maps `research_artifacts`/`research_artifact_facts` into `trusted_signals` to reduce PARTIAL genuinely.
 
 ## Handoff maintenance rule
 

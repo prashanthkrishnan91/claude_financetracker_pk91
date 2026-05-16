@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Build 3 PR 1 — evidence quality visibility)
+Last updated: 2026-05-16 (Build 3 PR 2B — visible price/valuation context)
 
 ## Purpose
 
@@ -51,6 +51,8 @@ Key structured logs to confirm in production:
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-16 — **Build 3 PR 2B: Visible price/valuation context** — Grounded plain-English valuation context added to Intel v3 detail drawer (not card/list view). New `priceband_snapshot_context_v1.py` bridges Phase 14D shadow classifier + Phase 14F visible language → async DB fetch (EPS from `research_artifact_facts`, price from `market_snapshots`) → `build_ticker_valuation_context_map()`. Serialized `Optional[dict]` (visible_text/limitation_text/source_basis) passed via `valuation_context_map` into `snapshot_builder.build_snapshot()` → `detail_drawer_payload.valuation_context`. Feature-flagged via `intel_v3_priceband_visible_context_v1_enabled` (default False). Non-company assets (ETF/fund/crypto) always suppressed; stale price (>7d) suppressed; low evidence suppressed. `IntelV3Drawer.tsx` renders the section only when `payload.valuation_context` is non-null. No target prices, no fair values, no upside/downside percentages, no raw metric keys in frontend. Build 3 PR 1 / worker_certified / Watchtower behavior unchanged. 39 new backend tests (96 pass for new+modified test files); 6 files changed. No SQL, no new providers.
 
 - 2026-05-16 — **Build 2.6: Tighten Intel research freshness SLA** — Recommendation SLA tightened from 24h → 8h; agent insight SLA from 48h → 24h. Changed in three places: `certified_intel_run_contract_v1.py` (RECOMMENDATION_FRESH_HOURS, AGENT_INSIGHT_FRESH_HOURS), `evidence_freshness_contract_v1.py` (SOURCE_SLAS), `watchtower_freshness_ledger_v1.py` (FRESHNESS_SLA_CONFIG). Worker certification now blocks when rec > 8h or insight > 24h. Fast freshness gate queues analyst jobs under new policy. Price refresh / Watchtower / Deploy behavior unchanged. 4 new boundary tests (7h fresh, 9h stale, 23h fresh, 25h stale) + updated comments for old 24h/48h assumptions. No SQL, no UI changes.
 

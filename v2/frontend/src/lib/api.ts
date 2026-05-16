@@ -1150,6 +1150,8 @@ export interface IntelV3HeldCard {
     blockers: string[];
     suppression_reasons: Record<string, string>;
     schema_version: string;
+    /** Build 3 PR 2B — plain-English valuation context. Null when suppressed or unavailable. */
+    valuation_context?: { visible_text: string; limitation_text: string; source_basis: string } | null;
     committee: { status: "deferred" | "ready"; reason?: string };
   };
 }

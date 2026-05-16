@@ -396,6 +396,9 @@ class IntelV3Service:
                     "thesis_state": "intact",
                 })
 
+            # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
+            valuation_context_map = await self._build_valuation_context_map(cards)
+
             # Step 4: build snapshot (without diagnostics initially; diagnostics need the payload).
             snapshot_payload = build_snapshot(
                 run_id=run_id,
@@ -403,6 +406,7 @@ class IntelV3Service:
                 card_metas=card_metas,
                 source_health={"status": "signals_from_existing_cards"},
                 is_stale=False,
+                valuation_context_map=valuation_context_map,
             )
 
             # Step 4a: compute freshness + decision-diff diagnostics and embed.
@@ -1022,6 +1026,9 @@ class IntelV3Service:
                 "thesis_state": "intact",
             })
 
+        # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
+        valuation_context_map = await self._build_valuation_context_map(cards)
+
         # Step 4: build snapshot.
         snapshot_payload = build_snapshot(
             run_id=prewarm_run_id,
@@ -1029,6 +1036,7 @@ class IntelV3Service:
             card_metas=card_metas,
             source_health={"status": "signals_from_existing_cards"},
             is_stale=False,
+            valuation_context_map=valuation_context_map,
         )
 
         # Step 4a: diagnostics.
@@ -1665,6 +1673,45 @@ class IntelV3Service:
         except Exception as exc:
             logger.warning(
                 "intel_v3_sec_readiness_for_adapters_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return None
+
+    async def _build_valuation_context_map(
+        self,
+        cards: list,
+    ) -> "Optional[dict]":
+        """Build a ticker→serialized-valuation-context map when the flag is enabled.
+
+        Returns a dict when intel_v3_priceband_visible_context_v1_enabled is True.
+        Returns None when disabled. Never raises — errors degrade to None silently.
+
+        The returned map is passed to build_snapshot() so snapshot_builder can embed
+        plain-English valuation context in detail_drawer_payload.valuation_context.
+        Values are pre-serialized dicts (not Phase 14F objects) so snapshot_builder
+        has no coupling to the priceband modules.
+        """
+        settings = get_settings()
+        if not getattr(settings, "intel_v3_priceband_visible_context_v1_enabled", False):
+            return None
+
+        try:
+            from .priceband_snapshot_context_v1 import build_ticker_valuation_context_map
+            tickers = [c.ticker.upper() for c in cards if hasattr(c, "ticker")]
+            categories = {
+                c.ticker.upper(): (c.category or "stock")
+                for c in cards if hasattr(c, "ticker")
+            }
+            return await build_ticker_valuation_context_map(
+                user_id=self.user_id,
+                client=self.client,
+                tickers=tickers,
+                categories=categories,
+            )
+        except Exception as exc:
+            logger.warning(
+                "intel_v3_valuation_context_map_failed user_id=%s error=%s — "
+                "snapshot proceeds without valuation context",
                 self.user_id, exc,
             )
             return None

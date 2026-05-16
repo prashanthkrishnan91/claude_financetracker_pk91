@@ -100,68 +100,25 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 - Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
-- Watchtower trigger model is still scoped but unbuilt; no live alerts.
+- Watchtower background refresh loop is live in Railway (requires `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true`). Alert-based push trigger (real-time threshold alerts) is deferred.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-**Build 3 PR 2A Hotfix 2 complete (branch: claude/watchtower-intel-republish-GAgXk).** Watchtower now republishes Intel when analyst eligibility is reached.
+**All Build 3 PRs (#337–342) merged and production-validated.**
 
-**Build 3 PR 2A Hotfix 2 summary**: Root cause: `compare_and_republish()` was only called inside the price-snapshot-persist path. When analyst jobs drained and the cycle ended with intel_eligible=True / stale_types=none / analyst_jobs_enqueued=0, no code path triggered the Intel republisher. Fix: Step 7 added to `run_refresh_cycle()` in `watchtower_background_refresh_worker_v1.py`. When eligibility conditions are met (intel_eligible=True, stale_types empty, analyst_jobs_enqueued=0, no complete price failure, republish not already triggered this cycle), calls new `republish_after_analyst_eligibility()` in `watchtower_intel_republisher_v1.py`. Idempotency: uses max `as_of` from analyst_llm + recommendation evidence records to compare against Intel snapshot `generated_at` — if Intel was generated AFTER the analyst evidence, returns `skipped_no_new_evidence`. New constant `PUBLISH_SKIPPED_NO_NEW_EVIDENCE = "skipped_no_new_evidence"`. Worker boundary preserved (no `decide()` import). `_max_evidence_at()` helper added to worker. 20 new tests. No SQL, no UI, no valuation changes.
+- PR #337 — Build 3 PR 1: real AxisBand in visible cards, Cap 5 conviction guardrail, STUB removed
+- PRs #338–340 — Build 3 PR 2A: Watchtower Railway production loop, analyst-eligibility trigger, Intel republisher
+- PR #341 — Build 3 PR 2B: valuation context bridge + IntelV3Drawer section (feature-flagged)
+- PR #342 — Build 3 PR 2B root-cause fix: observability logs confirming flag was disabled in Railway
 
-Key structured logs to confirm in production after this fix:
-- `watchtower_intel_republisher.publish_decision user_id=... publish_status=rebuilt_and_published evidence_newer_than_certified_snapshot=True`
-- `watchtower_intel_republisher.publish_decision user_id=... publish_status=skipped_no_new_evidence evidence_newer_than_certified_snapshot=False` (subsequent cycles, idempotent)
-- `intel_v3_worker_certified_snapshot_published` (from `run_prewarm_snapshot` inside the callable)
+**Valuation context is production-activated and visually validated.** The Intel detail drawer now shows the "Valuation context" section. Operational requirements (both must remain set): `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on the main app Railway service and the Watchtower Railway service. Future validation log key: `valuation_context_pr2b_aggregate_summary renderable_context_count=N`.
 
-**Build 3 PR 2A complete (branch: claude/watchtower-production-loop-mCYXt).** Watchtower production loop wired as a Railway process.
+**Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
-**Build 3 PR 2A summary**: Watchtower process fully routed in Railway. `railway.toml` and `Procfile` now support `PROCESS_TYPE=watchtower` → `watchtower_worker_entrypoint --loop`. Requires explicit double opt-in: `PROCESS_TYPE=watchtower` AND `INTEL_V3_WATCHTOWER_ENABLED=true`; missing or non-truthy `INTEL_V3_WATCHTOWER_ENABLED` exits safely with no loop started. Interval defaults to 60s when enabled; invalid/non-positive values fall back safely. The loop uses existing production-safe callables (price refresh, analyst enqueue, Intel republish) from `watchtower_callables_v1`. No analyst LLM inline in cycles — stale analyst evidence enqueues a job to the analyst worker, not a direct LLM call. 42 new tests covering process routing, boundary isolation, kill switch, interval bounds, callable wiring, analyst enqueue policy, and cycle result integration. No SQL, no UI, no valuation changes.
-
-**Build 3 PR 1 merged (PR #337).** Evidence quality visibility complete.
-
-**Build 3 PR 1 summary**: Evidence band in visible Intel cards now reflects real evidence quality (AxisBand from `decide()`), not the conviction label. The BUY conviction guardrail promoted from shadow-only to the visible policy via Cap 5 in `_compute_conviction`: HIGH-conviction BUY requires STRONG evidence; OK evidence (1–2 trusted signals) caps conviction at MEDIUM. STUB removed from `_SPECULATIVE_TICKERS` in both `existing_signal_adapter.py` and `portfolio_governor_lite.py`. 31 new tests. Three shadow test assertions updated to reflect that the policy now handles what the shadow guardrail used to do.
-
-**Remaining Build 3 work**: (1) Production validation — confirm `evidence_band` in visible cards now reflects real quality (not conviction); (2) Validate `evidence_freshness_state=certified_current` after Watchtower refresh; (3) Decide next Build 3 slice (analyst evidence depth, primary_driver completeness, rationale quality).
-
-**Next: Build 3 — Intelligence quality GO/NO-GO audit (pre-existing)**: Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; Confirm `compare_and_republish` logs show `publish_status=rebuilt_and_published` and `analyst_jobs_queued=0` after a price refresh cycle; Check certification contract passes (recs ≤8h, insights ≤24h).
-
-Key logs to confirm Build 1D gate is running in production:
-  - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`
-  - `watchtower_price_snapshot_writer.snapshot_written user_id=... certified=N carried=N`
-  - `intel_v3_urgent_watchtower_refresh_triggered user_id=... deploy_blockers=[price]`
-  - Check that `gate_check_ms` stays under 500ms.
-
-**Previous production validation steps (still apply):**
-
-**Production validation of Build 1.5 sub-10s UX + drain cycle.** Re-run the Run Intel v3 button. Key log signals:
-
-- `intel_v3_full_refresh_enqueued ... run_click_response_ms=N` — click must respond in under 1,000ms.
-- `intel_v3_snapshot_response_summary ... snapshot_response_ms=N` — page load must return snapshot in under 500ms.
-- `intel_v3_full_refresh_enqueued ... certified_snapshot_available_on_click=True` (if a prior certified snapshot exists) — confirms banner shows "Latest Certified Snapshot Available — New Refresh Running."
-- `intel_v3.analyst_refresh_worker_drain_cycle_summary worker_batches_drained=4 worker_idle_delay_skipped=True` — confirms 34 tickers drain in 4 batches without 60s artificial gaps.
-- `intel_v3.analyst_refresh_worker_drain_cycle_summary time_to_worker_certified_snapshot_ms=N` where `run_resumable_after_cycle=False` — confirms certification completed in one drain cycle.
-- Same Build 1 signals still hold: `intel_v3.analyst_refresh_worker_prewarm_deferred reason=jobs_remain` during intermediate batches, `intel_v3_worker_certified_snapshot_published` only after final batch.
-
-**Production validation of Stage 3.3 certified intelligence run contract.** Full expected flow:
-
-1. Click "Run Intel v3" → returns `{status:"refresh_requested"}` — no snapshot built, no LLM calls
-2. UI immediately shows "Refreshing Analyst Intelligence" (grey banner); polling starts every 15s
-3. Worker picks up jobs within ~60s (Railway log: `intel_v3.analyst_refresh_worker_run_summary` with `claimed>0, succeeded>0`)
-4. Worker writes evidence and prewarms: `analyst_evidence_writer_persisted_count=N verdicts_available=N`
-5. Contract check: `intel_v3_certified_contract_summary certified=true certified_holding_count=N/N`
-6. If contract passes: `intel_v3_worker_certified_snapshot_published` → `GET /intel/v3/snapshot` returns `snapshot_source=worker_certified`
-7. UI switches to green "Certified Current" with coverage N/N and latest analyst run timestamp
-8. Verify worker logs show `claimed>0` (not 0), `attempted_llm_calls>0` (not 0)
-9. Verify snapshot has `agents_ran_via_worker=true`, `this_click_used_llm=false`
-
-**If contract fails:** log shows `intel_v3_worker_certified_snapshot_rejected` with `failed_tickers` and failure reasons; UI shows red "Intel Blocked — Certification Failed" with failed ticker list.
-
-**Prerequisite (if not yet applied):** Apply `v2/database/018_analyst_refresh_jobs.sql`. Ensure Railway worker running with `PROCESS_TYPE=worker`.
-
-**Stage 2 exit validation (re-run).** Open the Deploy page in production, enter $900 in Step 1, confirm Step 2 shows 3–5 amount-aware BUY recommendations, edit one row's actual amount, add a manual NVDA BUY $100, save, refresh, and confirm both rows persist. Confirm decision log history shows BUY spend, manual BUY, and Trim/Sell separately. Repeat with $1,500 and confirm selected BUY recommendations total exactly $1,500. Stage 2 exit remains pending on all five gates listed in Active build queue item above.
-
-Real tax-lot / wash-sale guardrail logic is intentionally pending and stays `not_evaluated_yet` at both item and rollup levels. Parked under Build Queue → Design Pause Candidates. Must not be auto-promoted into Now by routine queue updates.
+**Next work (in priority order):**
+1. **Stage 2 exit validation** — still pending; all five gates in "Active build queue item" above must be confirmed in production.
+2. **Evidence depth / PARTIAL band** — next Build 3 slice: most cards show PARTIAL band (1–2 trusted signals); HIGH BUY requires STRONG. Next quality slice improves primary_driver completeness and source linking. Start after Stage 2 exit confirmed.
 
 ## Handoff maintenance rule
 

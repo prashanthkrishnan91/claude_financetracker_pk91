@@ -21,15 +21,18 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .decision_contracts import ActionV3, ConvictionV3, DecisionOutputV3
+from .decision_contracts import ActionV3, AxisBand, ConvictionV3, DecisionOutputV3
 
 _SCHEMA_VERSION = "v3.1"
 
-# Conviction → evidence band mapping for display.
-_CONVICTION_TO_EVIDENCE_BAND: dict[str, str] = {
-    ConvictionV3.HIGH.value: "STRONG",
-    ConvictionV3.MEDIUM.value: "PARTIAL",
-    ConvictionV3.LOW.value: "THIN",
+# Evidence quality axis → visible evidence band.
+# Maps the structural AxisBand (from decide()) to the display label.
+# SUPPRESSED collapses to THIN so the UI never shows an internal axis label.
+_EVIDENCE_QUALITY_TO_BAND: dict[str, str] = {
+    AxisBand.STRONG.value:     "STRONG",
+    AxisBand.OK.value:         "PARTIAL",
+    AxisBand.THIN.value:       "THIN",
+    AxisBand.SUPPRESSED.value: "THIN",
 }
 
 # FitBand → portfolio_fit display mapping.
@@ -63,7 +66,7 @@ def _build_held_card(
     """Build a single held-card payload from a v3 decision + original card metadata."""
     action = decision.action.value
     conviction = decision.conviction.value
-    evidence_band = _CONVICTION_TO_EVIDENCE_BAND.get(conviction, "THIN")
+    evidence_band = _EVIDENCE_QUALITY_TO_BAND.get(decision.evidence_quality.value, "THIN")
     portfolio_fit = _FIT_DISPLAY.get(decision.portfolio_fit.value, "Not assessed")
     risk_level = _RISK_DISPLAY.get(decision.risk_band.value, "UNKNOWN")
 

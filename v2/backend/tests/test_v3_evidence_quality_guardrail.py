@@ -549,7 +549,13 @@ class TestShadowProjectionGuardrailIntegration:
         assert gcg.get("buy_high_conviction_guardrail_applied") is False
 
     def test_medium_evidence_buy_conviction_capped(self):
-        """Guardrail fires: 2 trusted dims (PRESENT/MEDIUM) → BUY/HIGH capped to MEDIUM."""
+        """Policy now caps OK-evidence BUY conviction to MEDIUM before shadow guardrail.
+
+        After Build 3 PR 1: the visible decision policy (_compute_conviction Cap 5)
+        caps HIGH → MEDIUM for BUY + OK evidence. The shadow guardrail receives
+        MEDIUM conviction and does not fire. Final conviction is still MEDIUM (correct).
+        This test confirms the visible path and shadow path now agree.
+        """
         result = project_shadow_from_card_signals(**_medium_evidence_buy_signals())
         assert result is not None
         assert result["v3_shadow_action"] == "BUY"
@@ -557,9 +563,9 @@ class TestShadowProjectionGuardrailIntegration:
         td = result["truth_diagnostics"]
         assert td is not None
         gcg = td.get("buy_conviction_guardrail", {})
-        assert gcg.get("buy_high_conviction_guardrail_applied") is True
-        assert gcg.get("pre_guardrail_conviction") == "HIGH"
-        assert gcg.get("post_guardrail_conviction") == "MEDIUM"
+        # Policy already capped conviction before shadow guardrail → shadow guardrail
+        # does not fire (conviction entering shadow is already MEDIUM, not HIGH).
+        assert gcg.get("buy_high_conviction_guardrail_applied") is False
 
     def test_v2_visible_action_not_mutated(self):
         """Test 10: v2 visible action is never changed by guardrail."""
@@ -777,7 +783,12 @@ class TestGoldenPortfolioDiversity:
         assert strong_buy["v3_shadow_conviction"] == "HIGH"
 
     def test_medium_evidence_buy_capped_at_medium(self):
-        """Guardrail fires for MED_EV_BUY: BUY preserved, conviction capped MEDIUM."""
+        """Policy caps MED_EV_BUY conviction to MEDIUM; shadow guardrail then does not fire.
+
+        After Build 3 PR 1: the visible policy caps OK-evidence BUY to MEDIUM before
+        the shadow guardrail runs. Shadow guardrail receives MEDIUM → does not fire.
+        Final conviction is still MEDIUM (correct). Visible and shadow now agree.
+        """
         results = self._run_portfolio()
         med_buy = next(
             (r for r in results if isinstance(r, dict) and r["ticker"] == "MED_EV_BUY"),
@@ -788,7 +799,8 @@ class TestGoldenPortfolioDiversity:
         assert med_buy["v3_shadow_conviction"] == "MEDIUM"
         td = med_buy.get("truth_diagnostics") or {}
         gcg = td.get("buy_conviction_guardrail", {})
-        assert gcg.get("buy_high_conviction_guardrail_applied") is True
+        # Policy already capped; shadow guardrail does not fire.
+        assert gcg.get("buy_high_conviction_guardrail_applied") is False
 
     def test_sell_card_conviction_independent(self):
         results = self._run_portfolio()

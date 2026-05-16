@@ -22,7 +22,7 @@ from .decision_contracts import FitBand
 
 # Tickers/categories blocked from BUY by design.
 _SPECULATIVE_TICKERS: frozenset[str] = frozenset(
-    {"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"}
+    {"BTC", "XRP", "RIVN", "KLAR", "BLSH"}
 )
 _BLOCKED_CAT_KEYWORDS: frozenset[str] = frozenset({"crypto", "speculative", "ipo"})
 

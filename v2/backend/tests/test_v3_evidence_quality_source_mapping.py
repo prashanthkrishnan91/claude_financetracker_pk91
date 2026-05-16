@@ -330,7 +330,13 @@ class TestShadowProjectionProductionShapes:
         assert guardrail["buy_high_conviction_guardrail_applied"] is True
 
     def test_partial_signals_card_yields_present_medium(self):
-        """Card with 2 trusted signals → PRESENT/MEDIUM → guardrail fires for HIGH-conviction BUY."""
+        """Card with 2 trusted signals → AxisBand.OK → policy caps conviction before shadow.
+
+        After Build 3 PR 1: 2 trusted signals → AxisBand.OK in the visible policy.
+        _compute_conviction Cap 5 fires (BUY + HIGH + OK) → conviction is MEDIUM before
+        the shadow guardrail sees it. Shadow guardrail receives MEDIUM, does not fire.
+        Truth diagnostics still report PRESENT/MEDIUM correctly.
+        """
         diag = _prod_shadow(
             ticker="NVDA",
             analyst_action="BUY",
@@ -343,7 +349,10 @@ class TestShadowProjectionProductionShapes:
         guardrail = td["buy_conviction_guardrail"]
         assert guardrail["evidence_quality_truth_status"] == "PRESENT"
         assert guardrail["evidence_quality_trust_level"] == "MEDIUM"
-        assert guardrail["buy_high_conviction_guardrail_applied"] is True
+        # Policy already capped conviction; shadow guardrail does not fire.
+        assert guardrail["buy_high_conviction_guardrail_applied"] is False
+        # Final conviction is MEDIUM — correct.
+        assert diag["v3_shadow_conviction"] == "MEDIUM"
 
     def test_fallback_insufficient_card_remains_weak(self):
         """Insufficient intel_read → WEAK/LOW regardless of fallback flag."""

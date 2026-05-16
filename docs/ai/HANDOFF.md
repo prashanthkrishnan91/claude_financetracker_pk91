@@ -101,9 +101,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Build 2 + patch complete.** PR #333 merged.
+**Build 3 PR 1 complete (pending PR merge).** Evidence quality visibility fixed.
 
-**Next: Build 3 — Intelligence quality GO/NO-GO audit.** Before any intelligence quality changes, run an evidence-quality audit: (1) Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; (2) Confirm `compare_and_republish` logs show `publish_status=rebuilt_and_published` and `analyst_jobs_queued=0` after a price refresh cycle; (3) Check that `run_prewarm_snapshot` certification contract passes (all analyst evidence SLAs still met — recommendation ≤24h, agent_insight ≤48h); (4) Decide GO/NO-GO on intelligence-quality improvements (analyst evidence quality, primary_driver depth, rationale completeness).
+**Build 3 PR 1 summary**: Evidence band in visible Intel cards now reflects real evidence quality (AxisBand from `decide()`), not the conviction label. The BUY conviction guardrail promoted from shadow-only to the visible policy via Cap 5 in `_compute_conviction`: HIGH-conviction BUY requires STRONG evidence; OK evidence (1–2 trusted signals) caps conviction at MEDIUM. STUB removed from `_SPECULATIVE_TICKERS`. 29 new tests. Three shadow test assertions updated to reflect that the policy now handles what the shadow guardrail used to do.
+
+**Remaining Build 3 work**: (1) Run production validation to confirm `evidence_band` now reflects real quality in visible cards; (2) Validate `evidence_freshness_state=certified_current` after Watchtower refresh; (3) Decide on next Build 3 slice (analyst evidence depth, primary_driver completeness, rationale quality).
+
+**Next: Build 3 — Intelligence quality GO/NO-GO audit (pre-existing)**: Confirm `evidence_freshness_state=certified_current` in production after Watchtower refresh + prewarm; Confirm `compare_and_republish` logs show `publish_status=rebuilt_and_published` and `analyst_jobs_queued=0` after a price refresh cycle; Check certification contract passes (recs ≤8h, insights ≤24h).
 
 Key logs to confirm Build 1D gate is running in production:
   - `intel_v3_fast_freshness_gate_summary user_id=... intel_status=... deploy_status=... gate_check_ms=N`

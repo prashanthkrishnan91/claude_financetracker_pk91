@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from .buy_conviction_guardrail import apply_buy_conviction_guardrail_by_band
 from .decision_contracts import (
     ActionV3,
     AxisBand,
@@ -142,6 +143,15 @@ def _compute_conviction(
     # Cap 4: HIGH/CRITICAL risk on BUY → LOW conviction.
     if risk_band in {RiskBand.HIGH, RiskBand.CRITICAL} and action == ActionV3.BUY:
         return ConvictionV3.LOW
+
+    # Cap 5: BUY + HIGH conviction requires STRONG evidence.
+    # OK evidence (1–2 trusted signals) caps HIGH to MEDIUM for BUY.
+    # Promotes the evidence-quality guardrail from shadow-only to the visible policy.
+    base = apply_buy_conviction_guardrail_by_band(
+        action=action,
+        conviction=base,
+        evidence_quality=evidence_quality,
+    )
 
     return base
 

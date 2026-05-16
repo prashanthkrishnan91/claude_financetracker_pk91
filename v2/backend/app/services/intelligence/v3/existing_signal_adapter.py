@@ -26,7 +26,7 @@ from .decision_contracts import (
 
 # Tickers always treated as high-risk / speculative.
 _SPECULATIVE_TICKERS: frozenset[str] = frozenset(
-    {"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"}
+    {"BTC", "XRP", "RIVN", "KLAR", "BLSH"}
 )
 
 # Category keywords implying BLOCKED fit (not core portfolio material).

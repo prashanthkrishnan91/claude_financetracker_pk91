@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Optional
 
 from .data_truth_contracts import AxisTruthSummary, DataTruthStatus, SourceTrustLevel
-from .decision_contracts import ActionV3, ConvictionV3
+from .decision_contracts import ActionV3, AxisBand, ConvictionV3
 
 _CAPPED_CONVICTION = ConvictionV3.MEDIUM
 
@@ -102,3 +102,31 @@ def apply_buy_conviction_guardrail(
     }
 
     return post_conviction, diagnostics
+
+
+def apply_buy_conviction_guardrail_by_band(
+    *,
+    action: ActionV3,
+    conviction: ConvictionV3,
+    evidence_quality: AxisBand,
+) -> ConvictionV3:
+    """Apply the BUY conviction guardrail using AxisBand for the visible decision path.
+
+    Used by _compute_conviction() in decision_policy_v1.py where AxisTruthSummary
+    is not available. Semantically equivalent to apply_buy_conviction_guardrail()
+    with the AxisBand → trust-level mapping:
+
+      STRONG ↔ PRESENT/HIGH trust  → HIGH conviction allowed (no cap)
+      OK     ↔ PRESENT/MEDIUM trust → HIGH conviction capped at MEDIUM
+      THIN/SUPPRESSED are already handled by Cap 1 in _compute_conviction
+
+    Fires only when: action == BUY AND conviction == HIGH AND evidence != STRONG.
+    SELL/TRIM/HOLD are never affected.
+    """
+    if (
+        action == ActionV3.BUY
+        and conviction == ConvictionV3.HIGH
+        and evidence_quality != AxisBand.STRONG
+    ):
+        return _CAPPED_CONVICTION
+    return conviction

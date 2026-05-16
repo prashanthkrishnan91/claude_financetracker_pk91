@@ -330,6 +330,45 @@ class WatchtowerBackgroundRefreshWorker:
         result.deploy_eligible_after = plan.deploy_eligible
         result.intel_eligible_after = plan.intel_eligible
 
+        # ── Step 7: Eligibility-driven Intel republish ─────────────────────
+        # When all evidence is fresh (intel_eligible=True, stale_types=none,
+        # analyst_jobs_enqueued=0) and no blocking price failure occurred,
+        # trigger a deterministic Intel republish. This catches the
+        # post-analyst-drain case where compare_and_republish (price-path only)
+        # never fires because price was already fresh.
+        _should_republish_on_eligibility = (
+            result.intel_eligible_after
+            and not plan.stale_by_type
+            and result.analyst_jobs_enqueued == 0
+            and result.intel_republish_result is None
+            and self._intel_republish is not None
+            # Complete price failure (all failed, none succeeded) is a signal
+            # that evidence may still be stale; skip republish in that case.
+            and not (result.failed_price_tickers and not result.refreshed_price_tickers)
+        )
+        if _should_republish_on_eligibility:
+            try:
+                from .watchtower_intel_republisher_v1 import (
+                    republish_after_analyst_eligibility,
+                )
+                latest_ev_at = _max_evidence_at(
+                    evidence_records,
+                    evidence_types={EVIDENCE_TYPE_ANALYST_LLM, EVIDENCE_TYPE_RECOMMENDATION},
+                )
+                republish_res = await republish_after_analyst_eligibility(
+                    user_id,
+                    self.client,
+                    intel_republish_callable=self._intel_republish,
+                    latest_evidence_at=latest_ev_at,
+                )
+                result.intel_republish_result = republish_res.to_dict()
+            except Exception as republish_exc:
+                logger.warning(
+                    "watchtower_evidence_updated user_id=%s "
+                    "action=eligibility_republish_error error=%s",
+                    user_id, republish_exc,
+                )
+
         cycle_ms = int((time.monotonic() - cycle_start) * 1000)
         result.cycle_duration_ms = cycle_ms
         result.evidence_summary = {
@@ -357,6 +396,23 @@ class WatchtowerBackgroundRefreshWorker:
         )
 
         return result
+
+
+def _max_evidence_at(
+    evidence_records: list[EvidenceRecord],
+    evidence_types: Optional[set[str]] = None,
+) -> Optional[datetime]:
+    """Return the max as_of datetime across evidence records of the given types."""
+    best: Optional[datetime] = None
+    for r in evidence_records:
+        if evidence_types is not None and r.evidence_type not in evidence_types:
+            continue
+        if r.as_of is None:
+            continue
+        ts: Optional[datetime] = r.as_of if isinstance(r.as_of, datetime) else None
+        if ts is not None and (best is None or ts > best):
+            best = ts
+    return best
 
 
 def _stale_tickers_for_type(

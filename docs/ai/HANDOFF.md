@@ -101,6 +101,15 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
+**Build 3 PR 2A Hotfix 2 complete (branch: claude/watchtower-intel-republish-GAgXk).** Watchtower now republishes Intel when analyst eligibility is reached.
+
+**Build 3 PR 2A Hotfix 2 summary**: Root cause: `compare_and_republish()` was only called inside the price-snapshot-persist path. When analyst jobs drained and the cycle ended with intel_eligible=True / stale_types=none / analyst_jobs_enqueued=0, no code path triggered the Intel republisher. Fix: Step 7 added to `run_refresh_cycle()` in `watchtower_background_refresh_worker_v1.py`. When eligibility conditions are met (intel_eligible=True, stale_types empty, analyst_jobs_enqueued=0, no complete price failure, republish not already triggered this cycle), calls new `republish_after_analyst_eligibility()` in `watchtower_intel_republisher_v1.py`. Idempotency: uses max `as_of` from analyst_llm + recommendation evidence records to compare against Intel snapshot `generated_at` — if Intel was generated AFTER the analyst evidence, returns `skipped_no_new_evidence`. New constant `PUBLISH_SKIPPED_NO_NEW_EVIDENCE = "skipped_no_new_evidence"`. Worker boundary preserved (no `decide()` import). `_max_evidence_at()` helper added to worker. 20 new tests. No SQL, no UI, no valuation changes.
+
+Key structured logs to confirm in production after this fix:
+- `watchtower_intel_republisher.publish_decision user_id=... publish_status=rebuilt_and_published evidence_newer_than_certified_snapshot=True`
+- `watchtower_intel_republisher.publish_decision user_id=... publish_status=skipped_no_new_evidence evidence_newer_than_certified_snapshot=False` (subsequent cycles, idempotent)
+- `intel_v3_worker_certified_snapshot_published` (from `run_prewarm_snapshot` inside the callable)
+
 **Build 3 PR 2A complete (branch: claude/watchtower-production-loop-mCYXt).** Watchtower production loop wired as a Railway process.
 
 **Build 3 PR 2A summary**: Watchtower process fully routed in Railway. `railway.toml` and `Procfile` now support `PROCESS_TYPE=watchtower` → `watchtower_worker_entrypoint --loop`. Kill switch `INTEL_V3_WATCHTOWER_ENABLED` (default enabled; set to `0`/`false`/`no`/`off` to disable). Interval defaults to 60s; invalid/non-positive values fall back safely. The loop uses existing production-safe callables (price refresh, analyst enqueue, Intel republish) from `watchtower_callables_v1`. No analyst LLM inline in cycles — stale analyst evidence enqueues a job to the analyst worker, not a direct LLM call. 42 new tests covering process routing, boundary isolation, kill switch, interval bounds, callable wiring, analyst enqueue policy, and cycle result integration. No SQL, no UI, no valuation changes.

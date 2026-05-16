@@ -1152,7 +1152,7 @@ export interface IntelV3HeldCard {
     schema_version: string;
     /** Build 3 PR 2B — plain-English valuation context. Null when suppressed or unavailable. */
     valuation_context?: { visible_text: string; limitation_text: string; source_basis: string } | null;
-    committee: { status: "deferred" | "ready"; reason?: string };
+    committee: { status: "deferred" | "ready" | "source_validated" | "pending"; reason?: string };
   };
 }
 
@@ -1176,6 +1176,8 @@ export interface IntelV3Snapshot {
   action_counts: Record<IntelV3Action, number>;
   evidence_band_counts: Record<IntelV3EvidenceBand, number>;
   conviction_counts: Record<IntelV3Conviction, number>;
+  source_pack_validated_count?: number;
+  source_pack_pending_count?: number;
   best_buys: IntelV3HeldCard[];
   trim_sell_desk: IntelV3HeldCard[];
   current_holdings: IntelV3HeldCard[];

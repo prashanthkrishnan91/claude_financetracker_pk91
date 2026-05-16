@@ -25,6 +25,9 @@ from .decision_contracts import ActionV3, AxisBand, ConvictionV3, DecisionOutput
 
 _SCHEMA_VERSION = "v3.1"
 
+# Evidence bands that indicate source-linked analyst evidence was present and scored.
+_SOURCE_VALIDATED_BANDS: frozenset = frozenset({AxisBand.OK, AxisBand.STRONG})
+
 # Evidence quality axis → visible evidence band.
 # Maps the structural AxisBand (from decide()) to the display label.
 # SUPPRESSED collapses to THIN so the UI never shows an internal axis label.
@@ -54,6 +57,25 @@ _RISK_DISPLAY: dict[str, str] = {
     "CRITICAL": "HIGH",
     "UNKNOWN":  "UNKNOWN",
 }
+
+
+def _build_source_pack_status(decision: DecisionOutputV3) -> dict:
+    """Compute honest source-pack / committee status from decision evidence quality.
+
+    source_validated: intel_read had 1+ trusted signals — analyst produced real evidence.
+    pending: evidence is thin or suppressed — no trusted source-linked signals present.
+
+    This replaces the hard-coded "deferred" status so the UI accurately reflects
+    whether analyst evidence has been source-validated for this ticker.
+    """
+    if decision.evidence_quality in _SOURCE_VALIDATED_BANDS:
+        return {"status": "source_validated"}
+
+    # Evidence is THIN or SUPPRESSED — surface the suppression reason when available.
+    ev_reason = decision.suppression_reasons.get("evidence_quality") or ""
+    truth_reason = decision.suppression_reasons.get("truth_evidence_quality") or ""
+    reason_text = ev_reason or truth_reason or "Source-linked evidence not yet available for this ticker."
+    return {"status": "pending", "reason": reason_text}
 
 
 def _build_held_card(
@@ -128,8 +150,8 @@ def _build_held_card(
             "schema_version":       decision.schema_version,
             # Build 3 PR 2B — plain-English valuation context (None when suppressed).
             "valuation_context":    valuation_context,
-            # Committee deferred.
-            "committee":            {"status": "deferred", "reason": "Source pack not yet validated."},
+            # Source-pack / committee status — computed from real evidence quality.
+            "committee":            _build_source_pack_status(decision),
         },
     }
 
@@ -188,6 +210,13 @@ def build_snapshot(
     # Evidence band counts.
     evidence_band_counts = dict(Counter(c["evidence_band"] for c in held_cards))
 
+    # Source-pack validation counts — for observability and aggregate logging.
+    _source_pack_counts = Counter(
+        c["detail_drawer_payload"]["committee"]["status"] for c in held_cards
+    )
+    source_pack_validated_count = _source_pack_counts.get("source_validated", 0)
+    source_pack_pending_count = _source_pack_counts.get("pending", 0)
+
     # Conviction counts.
     conviction_counts = dict(Counter(c["conviction"] for c in held_cards))
 
@@ -224,6 +253,8 @@ def build_snapshot(
         "portfolio_command_center": portfolio_command_center,
         "action_counts":            action_counts,
         "evidence_band_counts":     evidence_band_counts,
+        "source_pack_validated_count": source_pack_validated_count,
+        "source_pack_pending_count":   source_pack_pending_count,
         "conviction_counts":        conviction_counts,
         "best_buys":                best_buys,
         "trim_sell_desk":           trim_sell_desk,

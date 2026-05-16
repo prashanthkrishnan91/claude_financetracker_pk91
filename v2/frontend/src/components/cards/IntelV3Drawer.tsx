@@ -159,11 +159,15 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
             </>
           )}
 
-          {/* Committee — deferred */}
-          {payload.committee.status === "deferred" && (
+          {/* Committee / source-pack status — hidden when evidence is source-validated */}
+          {payload.committee.status !== "source_validated" && (
             <DrawerSection title="Committee view">
               <div className="bg-surface-elevated rounded-lg p-3 text-xs text-text-muted border border-border">
-                <span className="block font-medium text-text-secondary mb-1">Analysis pending</span>
+                <span className="block font-medium text-text-secondary mb-1">
+                  {payload.committee.status === "pending"
+                    ? "Evidence not yet source-linked"
+                    : "Analysis pending"}
+                </span>
                 {payload.committee.reason ?? "Committee view will be available after source validation is complete."}
               </div>
             </DrawerSection>

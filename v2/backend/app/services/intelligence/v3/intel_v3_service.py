@@ -599,6 +599,50 @@ class IntelV3Service:
                 snapshot_payload.get("schema_version", "v3.1"),
             )
 
+            # Evidence-depth aggregate summary — production-safe, no raw metrics.
+            # Parse from Railway logs using key: intel_v3_evidence_depth_summary
+            _ebc = snapshot_payload.get("evidence_band_counts", {})
+            _strong_count = _ebc.get("STRONG", 0)
+            _ok_count = _ebc.get("PARTIAL", 0)  # AxisBand.OK → "PARTIAL"
+            _thin_count = _ebc.get("THIN", 0)
+            _sp_validated = snapshot_payload.get("source_pack_validated_count", 0)
+            _sp_pending = snapshot_payload.get("source_pack_pending_count", 0)
+            _primary_driver_present = sum(
+                1 for d in decisions
+                if d.source_signal_summary.get("has_primary_driver")
+            )
+            _action_reason_present = sum(
+                1 for d in decisions
+                if d.source_signal_summary.get("has_action_reason")
+            )
+            # Collect suppression reason counts — no raw metric values, keys only.
+            _supp_counter = _Counter()
+            for d in decisions:
+                for k in d.suppression_reasons:
+                    _supp_counter[k] += 1
+            _top_supp = _supp_counter.most_common(3)
+            _top_supp_str = " ".join(f"{k}={v}" for k, v in _top_supp) or "none"
+
+            logger.info(
+                "intel_v3_evidence_depth_summary user_id=%s snapshot_id=%s run_id=%s "
+                "total_tickers=%d strong_count=%d ok_count=%d thin_count=%d "
+                "source_pack_validated_count=%d source_pack_pending_count=%d "
+                "primary_driver_present_count=%d analyst_rationale_present_count=%d "
+                "top_suppression_reasons=%s",
+                self.user_id,
+                snapshot_id,
+                run_id,
+                total_cards,
+                _strong_count,
+                _ok_count,
+                _thin_count,
+                _sp_validated,
+                _sp_pending,
+                _primary_driver_present,
+                _action_reason_present,
+                _top_supp_str,
+            )
+
             return snapshot_payload
 
         except Exception as exc:

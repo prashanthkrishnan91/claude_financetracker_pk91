@@ -38,7 +38,19 @@ from uuid import UUID
 logger = logging.getLogger("intel_v3.watchtower_worker_entrypoint")
 
 _INTERVAL_ENV = "INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS"
+_ENABLED_ENV = "INTEL_V3_WATCHTOWER_ENABLED"
 DEFAULT_INTERVAL_SECONDS = 60.0
+
+
+def _is_watchtower_enabled() -> bool:
+    """Explicit opt-in: returns True ONLY when INTEL_V3_WATCHTOWER_ENABLED=1/true/yes/on.
+
+    Defaults to False (safe) when the env var is absent, empty, or any other value.
+    Both PROCESS_TYPE=watchtower (Railway routing) AND INTEL_V3_WATCHTOWER_ENABLED=true
+    must be set for the loop to run.
+    """
+    raw = (os.getenv(_ENABLED_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def _resolve_interval_seconds() -> float:
@@ -204,6 +216,16 @@ def main(argv: "list[str] | None" = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if not _is_watchtower_enabled():
+        logger.info(
+            "intel_v3.watchtower_worker_entrypoint not enabled — "
+            "set %s=true to start the loop (currently absent or not a truthy value). "
+            "Exiting cleanly.",
+            _ENABLED_ENV,
+        )
+        return 0
+
     interval_seconds = (
         args.interval_seconds
         if args.interval_seconds is not None

@@ -38,6 +38,7 @@ PUBLISH_REBUILT_AND_PUBLISHED = "rebuilt_and_published"
 PUBLISH_REPUBLISH_PENDING = "republish_pending"
 PUBLISH_CERTIFICATION_BLOCKED = "certification_blocked"
 PUBLISH_NO_SNAPSHOT_EXISTS = "no_snapshot_exists"
+PUBLISH_SKIPPED_NO_NEW_EVIDENCE = "skipped_no_new_evidence"
 
 
 @dataclass
@@ -234,6 +235,122 @@ async def get_evidence_freshness_state(
             user_id, exc,
         )
         return PUBLISH_REPUBLISH_PENDING
+
+
+async def republish_after_analyst_eligibility(
+    user_id: UUID,
+    client: Any,
+    *,
+    intel_republish_callable: Optional[Callable] = None,
+    latest_evidence_at: Optional[datetime] = None,
+    now: Optional[datetime] = None,
+) -> WatchtowerRepublishResult:
+    """Trigger deterministic Intel republish when all analyst evidence is fresh.
+
+    Called by the Watchtower worker when:
+    - intel_eligible=True (all evidence is fresh)
+    - stale_types=none (nothing stale in the plan)
+    - analyst_jobs_enqueued=0 (no jobs needed this cycle)
+
+    Unlike compare_and_republish() (which tracks price snapshot timestamps),
+    this function uses latest_evidence_at — the max evidence record as_of from
+    the caller's evidence collection — to determine if analyst evidence predates
+    the current Intel snapshot. This correctly captures the post-analyst-drain
+    case where portfolio_snapshots.snapshot_at does not reflect analyst freshness.
+
+    Idempotency: after a successful republish, the Intel snapshot gets a new
+    generated_at=now. The next Watchtower cycle will see latest_evidence_at
+    (analyst evidence age) < intel_snapshot.generated_at → skipped_no_new_evidence.
+
+    publish_status values:
+    - rebuilt_and_published: republish ran and certification passed
+    - skipped_no_new_evidence: Intel snapshot already covers latest evidence
+    - certification_blocked: republish ran but certification failed
+    - no_snapshot_exists: no Intel snapshot found
+    - republish_pending: evidence newer but no callable provided
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    t0 = time.monotonic()
+    result = WatchtowerRepublishResult(
+        publish_status=PUBLISH_REPUBLISH_PENDING,
+        watchtower_refresh_triggered=False,
+        analyst_jobs_queued=0,
+    )
+
+    try:
+        snap_row = await _fetch_latest_intel_snapshot(user_id, client)
+        if snap_row is None:
+            result.publish_status = PUBLISH_NO_SNAPSHOT_EXISTS
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_log(user_id, result)
+            return result
+
+        result.latest_certified_snapshot_id = snap_row.get("snapshot_id")
+        result.latest_certified_snapshot_generated_at = snap_row.get("generated_at")
+
+        intel_ts = _parse_iso(result.latest_certified_snapshot_generated_at)
+
+        if latest_evidence_at is not None and intel_ts is not None:
+            diff_seconds = (latest_evidence_at - intel_ts).total_seconds()
+            result.evidence_newer_than_certified_snapshot = (
+                diff_seconds > _EVIDENCE_NEWER_THRESHOLD_SECONDS
+            )
+        elif latest_evidence_at is not None and intel_ts is None:
+            result.evidence_newer_than_certified_snapshot = True
+        # else: no evidence timestamp available → default False → skip
+
+        if not result.evidence_newer_than_certified_snapshot:
+            result.publish_status = PUBLISH_SKIPPED_NO_NEW_EVIDENCE
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_log(user_id, result)
+            return result
+
+        if intel_republish_callable is None:
+            result.publish_status = PUBLISH_REPUBLISH_PENDING
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_log(user_id, result)
+            return result
+
+        result.watchtower_refresh_triggered = True
+        try:
+            returned_payload = await intel_republish_callable(user_id)
+            snapshot_source = None
+            if isinstance(returned_payload, dict):
+                snapshot_source = returned_payload.get("snapshot_source")
+            if snapshot_source == "worker_certified":
+                result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+            else:
+                result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+                result.error = (
+                    f"republish ran but snapshot_source={snapshot_source!r}; "
+                    "certification contract not satisfied"
+                )
+                logger.warning(
+                    "watchtower_intel_republisher.republish_not_certified user_id=%s "
+                    "snapshot_source=%s",
+                    user_id, snapshot_source,
+                )
+        except Exception as exc:
+            result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+            result.error = str(exc)
+            logger.warning(
+                "watchtower_intel_republisher.republish_callable_failed user_id=%s error=%s",
+                user_id, exc,
+            )
+
+    except Exception as outer_exc:
+        result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+        result.error = str(outer_exc)
+        logger.warning(
+            "watchtower_intel_republisher.compare_failed user_id=%s error=%s",
+            user_id, outer_exc,
+        )
+
+    result.duration_ms = int((time.monotonic() - t0) * 1000)
+    _emit_log(user_id, result)
+    return result
 
 
 # ── Private helpers ───────────────────────────────────────────────────────────

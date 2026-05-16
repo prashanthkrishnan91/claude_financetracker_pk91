@@ -38,7 +38,14 @@ from uuid import UUID
 logger = logging.getLogger("intel_v3.watchtower_worker_entrypoint")
 
 _INTERVAL_ENV = "INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS"
+_ENABLED_ENV = "INTEL_V3_WATCHTOWER_ENABLED"
 DEFAULT_INTERVAL_SECONDS = 60.0
+
+
+def _is_watchtower_enabled() -> bool:
+    """Kill switch: returns False when INTEL_V3_WATCHTOWER_ENABLED=0 or false."""
+    raw = (os.getenv(_ENABLED_ENV) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _resolve_interval_seconds() -> float:
@@ -204,6 +211,15 @@ def main(argv: "list[str] | None" = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if not _is_watchtower_enabled():
+        logger.info(
+            "intel_v3.watchtower_worker_entrypoint disabled "
+            "%s=0 — exiting cleanly without starting loop",
+            _ENABLED_ENV,
+        )
+        return 0
+
     interval_seconds = (
         args.interval_seconds
         if args.interval_seconds is not None

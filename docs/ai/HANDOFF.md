@@ -101,6 +101,10 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
+**Build 3 PR 2A complete (branch: claude/watchtower-production-loop-mCYXt).** Watchtower production loop wired as a Railway process.
+
+**Build 3 PR 2A summary**: Watchtower process fully routed in Railway. `railway.toml` and `Procfile` now support `PROCESS_TYPE=watchtower` → `watchtower_worker_entrypoint --loop`. Kill switch `INTEL_V3_WATCHTOWER_ENABLED` (default enabled; set to `0`/`false`/`no`/`off` to disable). Interval defaults to 60s; invalid/non-positive values fall back safely. The loop uses existing production-safe callables (price refresh, analyst enqueue, Intel republish) from `watchtower_callables_v1`. No analyst LLM inline in cycles — stale analyst evidence enqueues a job to the analyst worker, not a direct LLM call. 42 new tests covering process routing, boundary isolation, kill switch, interval bounds, callable wiring, analyst enqueue policy, and cycle result integration. No SQL, no UI, no valuation changes.
+
 **Build 3 PR 1 merged (PR #337).** Evidence quality visibility complete.
 
 **Build 3 PR 1 summary**: Evidence band in visible Intel cards now reflects real evidence quality (AxisBand from `decide()`), not the conviction label. The BUY conviction guardrail promoted from shadow-only to the visible policy via Cap 5 in `_compute_conviction`: HIGH-conviction BUY requires STRONG evidence; OK evidence (1–2 trusted signals) caps conviction at MEDIUM. STUB removed from `_SPECULATIVE_TICKERS` in both `existing_signal_adapter.py` and `portfolio_governor_lite.py`. 31 new tests. Three shadow test assertions updated to reflect that the policy now handles what the shadow guardrail used to do.

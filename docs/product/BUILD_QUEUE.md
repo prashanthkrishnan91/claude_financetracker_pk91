@@ -25,6 +25,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Build 3 PR 2A: Watchtower production loop** (Stage 3, merged). Watchtower process wired as a Railway process type (`PROCESS_TYPE=watchtower`). Kill switch `INTEL_V3_WATCHTOWER_ENABLED` (default on). Loop interval configurable via env (`INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS`, default 60s). Production callables (price refresh, analyst enqueue, Intel republish) from `watchtower_callables_v1`. Analyst LLM not run inline — stale analyst evidence enqueues jobs to analyst worker only. 42 new tests. No SQL, no UI.
+
 - **Build 3 PR 1: Trust-the-band evidence quality visibility** (Stage 3, merged PR #337). Evidence band in visible Intel cards now reflects real evidence quality (AxisBand from the decision kernel), not the conviction label. BUY conviction guardrail promoted from shadow-only to visible policy (Cap 5 in `_compute_conviction`: OK evidence caps HIGH BUY to MEDIUM). STUB removed from `_SPECULATIVE_TICKERS` in both `existing_signal_adapter.py` and `portfolio_governor_lite.py`. 31 new tests. No SQL, no UI changes, no new providers.
 
 - **Build 2.6: Tighten Intel research freshness SLA** (Stage 3, merged). Recommendation SLA 24h → 8h; agent insight SLA 48h → 24h. Worker certification now blocks at the new thresholds. Fast freshness gate queues analyst jobs under new policy. Price/Watchtower/Deploy unchanged. 4 new boundary tests. No SQL, no UI.

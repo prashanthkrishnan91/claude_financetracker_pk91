@@ -10,7 +10,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Next
 
-- **Evidence depth / PARTIAL band improvement** (Stage 3, next Build 3 slice). Most visible Intel cards show PARTIAL band (1–2 trusted signals). HIGH BUY conviction requires STRONG evidence. Next quality slice: improve primary_driver completeness, source linking, and analyst rationale quality. Begin after Stage 2 exit validation is confirmed in production.
+- **Evidence depth PR 3B** (Stage 3). PR 3A (source-pack status + observability) pending merge. PR 3B scope: if production `intel_v3_evidence_depth_summary` logs show persistent high `source_pack_pending_count` or many PARTIAL bands, map `research_artifacts`/`research_artifact_facts` into `trusted_signals` so evidence bands can improve naturally. Do not start until PR 3A is merged and production log key `intel_v3_evidence_depth_summary source_pack_pending_count=N` is visible.
 
 ## Later
 
@@ -20,6 +20,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Build 3 PR 3A: Source-pack status + evidence-depth observability** (Stage 3, pending merge PR #344). Removes hard-coded `committee: {status: "deferred"}` from every card; `_build_source_pack_status()` now derives real status from `decision.evidence_quality` (`source_validated` / `pending`). Aggregate observability log `intel_v3_evidence_depth_summary` added. Does NOT map research_artifacts into trusted_signals; does NOT materially reduce PARTIAL bands. 31 new backend tests. No SQL, no providers, no Deploy/Watchtower change.
 
 - **Build 3 PR 2B: Visible price/valuation context** (Stage 3, merged PR #341 + PR #342, production-activated and visually validated). PR #341 built the bridge and UI; PR #342 confirmed root cause (flag not set in Railway) and added observability logs. 15 new observability tests. Production rendering is live: `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` is set on both the main app and Watchtower Railway services. Operational log key: `valuation_context_pr2b_aggregate_summary renderable_context_count=N`.
 

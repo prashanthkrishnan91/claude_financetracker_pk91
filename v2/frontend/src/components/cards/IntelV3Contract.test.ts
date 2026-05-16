@@ -227,9 +227,37 @@ describe("Intel v3 drawer payload contract", () => {
     expect(card.detail_drawer_payload.schema_version).toBe("v3.1");
   });
 
-  it("committee status is deferred by default", () => {
+  it("committee status is a valid source-pack status string", () => {
+    const validStatuses = ["deferred", "ready", "source_validated", "pending"];
     const card = makeCard("AAPL", "BUY");
-    expect(card.detail_drawer_payload.committee.status).toBe("deferred");
+    expect(validStatuses).toContain(card.detail_drawer_payload.committee.status);
+  });
+
+  it("committee section hidden when source_validated", () => {
+    const card = makeCard("AAPL", "BUY", {
+      detail_drawer_payload: {
+        rationale: "Signals support this.",
+        why_now: "Evidence is strong.",
+        committee: { status: "source_validated" },
+        schema_version: "v3.1",
+      },
+    });
+    // source_validated means the drawer should NOT show the "Analysis pending" block.
+    expect(card.detail_drawer_payload.committee.status).toBe("source_validated");
+    expect(card.detail_drawer_payload.committee.reason).toBeUndefined();
+  });
+
+  it("committee section visible with reason when pending", () => {
+    const card = makeCard("MSFT", "HOLD", {
+      detail_drawer_payload: {
+        rationale: "Holding position.",
+        why_now: "No clear trigger.",
+        committee: { status: "pending", reason: "No trusted evidence — 0 trusted dimension(s)." },
+        schema_version: "v3.1",
+      },
+    });
+    expect(card.detail_drawer_payload.committee.status).toBe("pending");
+    expect(card.detail_drawer_payload.committee.reason).toBeTruthy();
   });
 
   it("no price targets in rationale or why_now", () => {

@@ -139,14 +139,14 @@ FRESHNESS_SLA_CONFIG: dict[str, EvidenceSLA] = {
     ),
     # Analyst LLM: explanation freshness (not Deploy authority)
     EVIDENCE_TYPE_ANALYST_LLM: EvidenceSLA(
-        fresh_seconds=172_800,  # 48 h
+        fresh_seconds=86_400,   # 24 h
         aging_seconds=432_000,  # 5 d
         stale_seconds=604_800,  # 7 d
     ),
     # Recommendation: deterministic policy output; gates Intel certification
     EVIDENCE_TYPE_RECOMMENDATION: EvidenceSLA(
-        fresh_seconds=86_400,   # 24 h
-        aging_seconds=172_800,  # 48 h
+        fresh_seconds=28_800,   # 8 h
+        aging_seconds=86_400,   # 24 h
         stale_seconds=604_800,  # 7 d
     ),
     # Snapshot: the certified Intel v3 snapshot

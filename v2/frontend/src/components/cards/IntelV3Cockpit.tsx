@@ -315,6 +315,16 @@ export function IntelV3Cockpit() {
     runMutation.mutate(undefined, {
       onSuccess: (result) => {
         setLastRunResult(result);
+        // Backend says evidence is already current — no worker jobs were queued.
+        // A new snapshot will not be generated, so isNewerThanClick would never
+        // be satisfied if we started polling. Just refetch to confirm current state.
+        const isNoOpRun =
+          result.status === "analyst_evidence_current" ||
+          (result.queued_ticker_count === 0 && result.existing_certified_snapshot === true);
+        if (isNoOpRun) {
+          refetchSnapshot();
+          return;
+        }
         // Start polling — worker will certify in background
         startPolling();
       },

@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **PR #345 production validation** (Stage 3, active). PR #345 cleanup patch merging. After merge, validate in Railway logs: (1) `intel_v3_evidence_depth_summary` appears on prewarm-certified snapshot builds; (2) `intel_v3_source_pack_legacy_normalization_summary` appears on first `GET /intel/v3/snapshot` for the existing snapshot; (3) UI no longer shows "Analysis pending" for PARTIAL/STRONG evidence cards.
+- **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, PR #347 open — pending merge). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests (fake Supabase client). No SQL, no UI, no policy change. After merge: validate in Railway logs `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 
 ## Next
 
-- **Evidence depth PR 3B** (Stage 3). PR 3A (#344) + hotfix (#345) complete. PR 3B scope: map `research_artifacts`/`research_artifact_facts` into `trusted_signals` so evidence bands improve naturally. Gate: start only if production logs after PR #345 show persistent high `source_pack_pending_count` or PARTIAL bands remain a real problem — not before.
+- Alerts / action feedback (Stage 3 or later).
 
 ## Later
 

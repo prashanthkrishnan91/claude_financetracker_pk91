@@ -615,6 +615,7 @@ class IntelV3Service:
                 run_id=run_id,
                 snapshot_payload=snapshot_payload,
                 decisions=decisions,
+                evidence_stats=evidence_stats,
             )
 
             return snapshot_payload
@@ -1240,6 +1241,7 @@ class IntelV3Service:
             run_id=prewarm_run_id,
             snapshot_payload=snapshot_payload,
             decisions=decisions,
+            evidence_stats=evidence_stats,
         )
 
         return snapshot_payload
@@ -1823,11 +1825,16 @@ def _log_evidence_depth_summary(
     run_id: str,
     snapshot_payload: dict,
     decisions: list,
+    evidence_stats: Optional[dict] = None,
 ) -> None:
     """Emit intel_v3_evidence_depth_summary. Shared between run_v3 and run_prewarm_snapshot.
 
     Production-safe: no raw metrics, no source URLs, no per-ticker payloads.
     Log key: intel_v3_evidence_depth_summary
+
+    PR 3B extensions: adds mapped_existing_analyst_signal_count,
+    trusted_signal_count_distribution, artifact_decision_safe_count,
+    artifact_suppressed_unsafe_count to prove the fix without per-ticker payloads.
     """
     from collections import Counter as _Counter
     _ebc = snapshot_payload.get("evidence_band_counts", {})
@@ -1852,11 +1859,25 @@ def _log_evidence_depth_summary(
     _top_supp = _supp_counter.most_common(3)
     _top_supp_str = " ".join(f"{k}={v}" for k, v in _top_supp) or "none"
 
+    # PR 3B: evidence-mapping provenance fields from the adapter stats.
+    _stats = evidence_stats or {}
+    _mapped_analyst = _stats.get("mapped_existing_analyst_signal_count", 0)
+    _artifact_safe = _stats.get("artifact_decision_safe_count", 0)
+    _artifact_suppressed = _stats.get("artifact_suppressed_unsafe_count", 0)
+    _dist = _stats.get("trusted_signal_count_distribution") or {}
+    _dist_str = (
+        f"0={_dist.get(0,0)} 1={_dist.get(1,0)} 2={_dist.get(2,0)} 3={_dist.get(3,0)}"
+        if _dist else "unavailable"
+    )
+
     logger.info(
         "intel_v3_evidence_depth_summary user_id=%s snapshot_id=%s run_id=%s "
         "total_tickers=%d strong_count=%d ok_count=%d thin_count=%d "
         "source_pack_validated_count=%d source_pack_pending_count=%d "
         "primary_driver_present_count=%d analyst_rationale_present_count=%d "
+        "mapped_existing_analyst_signal_count=%d "
+        "trusted_signal_count_distribution=%s "
+        "artifact_decision_safe_count=%d artifact_suppressed_unsafe_count=%d "
         "top_suppression_reasons=%s",
         user_id,
         snapshot_id,
@@ -1869,6 +1890,10 @@ def _log_evidence_depth_summary(
         _sp_pending,
         _primary_driver_present,
         _action_reason_present,
+        _mapped_analyst,
+        _dist_str,
+        _artifact_safe,
+        _artifact_suppressed,
         _top_supp_str,
     )
 

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Build 3 PR 3A hotfix — PR #345 cleanup patch)
+Last updated: 2026-05-16 (Build 3 PR 3B — analyst_verdict trusted-signal mapping)
 
 ## Purpose
 
@@ -9,7 +9,7 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 3.3 merged** (All-or-nothing certified intelligence run contract). Stage 3.2c complete. **Stage 2 exit production-passed.** $900 and $1,500 Deploy flows validated: BUY sizing totals matched planning cash when guardrails allowed; Step 3 actual logging, manual rows, and history/accounting worked; Evaluate captured a recent baseline and rendered older comparison correctly. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts, per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows via `is_manual: true`. The Step 2 recommendation surface stays read-only. Decision log history (latest 10 deduped logs) shows below Step 3; re-logging the same active plan updates the matching log rather than duplicating.
-- Active build queue item: **Build 3 PR 3A production validation** — confirm in Railway logs: (1) `intel_v3_evidence_depth_summary` appears on prewarm-certified snapshot builds; (2) `intel_v3_source_pack_legacy_normalization_summary` appears on the first `GET /intel/v3/snapshot` response for the existing snapshot; (3) UI no longer shows "Analysis pending" for PARTIAL/STRONG evidence cards. Once confirmed, decide whether to proceed to PR 3B based on `source_pack_pending_count` in logs.
+- Active build queue item: **Build 3 PR 3B** — trusted-signal mapping from real `analyst_verdict` fields. `ReadOnlyEvidenceAdapter.load_cards()` now synthesizes a minimal `intel_read`-compatible structure from `primary_driver`, `action_reason`, and `key_drivers` instead of defaulting every card to `data_quality_label="MEDIUM"` (which inflated all cards to PARTIAL regardless of content). Research artifacts remain locked at `safe_for_decision=FALSE`. 31 new tests; 62 total for PR 3A+3B (all pass). PR open on branch `claude/analyst-evidence-mapping-8lnSF`.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture — Build 2 additions
@@ -118,15 +118,20 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
-**Build 3 PR 3A (merged PR #344) + hotfix PR #345 (cleanup patch):**
-- PR #344 (merged): `_build_source_pack_status()` derives real status from `decision.evidence_quality` for all new snapshots. 31 backend tests.
-- PR #345 hotfix: (1) `_log_evidence_depth_summary()` shared helper — both `run_v3()` and `run_prewarm_snapshot()` emit `intel_v3_evidence_depth_summary`. (2) `_normalize_legacy_committee_status()` in `get_latest_snapshot()` — converts persisted `deferred` → `source_validated`/`pending` in API response only (no DB mutation); also updates `source_pack_validated_count` / `source_pack_pending_count` on the response to match post-normalization reality. Log key: `intel_v3_source_pack_legacy_normalization_summary`. (3) 22 new backend tests.
-- Frontend: `IntelV3Drawer.tsx` correct from PR #344 — committee section hidden for `source_validated`, "Evidence not yet source-linked" for `pending`.
-- Supabase SQL: none. No evidence-band inflation. No policy change.
+**Build 3 PR 3A (merged PR #344) + hotfix PR #345 (production-validated):**
+- PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. 31 tests.
+- PR #345: `_log_evidence_depth_summary()` shared helper; `_normalize_legacy_committee_status()` converts persisted `deferred` → real status at API response time. Log key: `intel_v3_source_pack_legacy_normalization_summary`. 22 tests.
 
-**Next work:**
-1. **PR #345 production validation** — check Railway logs for `intel_v3_evidence_depth_summary` on prewarm path and `intel_v3_source_pack_legacy_normalization_summary` on first snapshot read. Confirm UI no longer shows "Analysis pending" for PARTIAL/STRONG cards.
-2. **Evidence depth PR 3B** — only if production logs show persistent high `source_pack_pending_count` or PARTIAL bands are a real problem after PR #345 normalizes the legacy snapshot.
+**Build 3 PR 3B — analyst_verdict trusted-signal mapping (PR #347 open, pending merge):**
+- Root cause fixed: `data_quality_label="MEDIUM"` hardcoded fallback and missing `intel_read` synthesis caused ALL cards to show PARTIAL regardless of actual analyst content.
+- Fix: synthesize `intel_read.trusted_signals` from real `analyst_verdict` fields — `primary_driver` → `analyst_primary_driver`, `action_reason` → `analyst_action_rationale`, `key_drivers` → `analyst_key_drivers`. Count 0–3 dims: 3=STRONG, 1–2=OK(PARTIAL), 0=THIN/SUPPRESSED.
+- Also fixed: field name mismatch — `av.get("key_drivers") or av.get("drivers")` (was just `av.get("drivers")`).
+- Fallback phrases excluded via `_FALLBACK_PHRASES` + `_is_real_signal()` with trailing-punctuation normalization.
+- Research artifacts: confirmed locked `safe_for_decision=FALSE`; `artifact_decision_safe_count=0`, `artifact_suppressed_unsafe_count=0` always.
+- Observability: `mapped_existing_analyst_signal_count`, `trusted_signal_count_distribution`, `artifact_decision_safe_count`, `artifact_suppressed_unsafe_count` added to `load_cards()` stats and `_log_evidence_depth_summary()`.
+- 31 synthesis/policy tests in `test_v3_analyst_verdict_signal_mapping.py` + 9 direct adapter-path tests (fake Supabase client) in `test_intel_v3_read_only_adapter.py`; all 75 PR 3A+3B tests pass. No SQL, no UI, no policy change.
+
+**Next work after PR #347 merges:** confirm in Railway logs that `intel_v3_evidence_depth_summary` shows `mapped_existing_analyst_signal_count > 0` and `trusted_signal_count_distribution` shows fewer 0-signal cards after a fresh certified run.
 
 ## Handoff maintenance rule
 

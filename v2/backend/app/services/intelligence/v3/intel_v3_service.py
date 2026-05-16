@@ -1693,6 +1693,12 @@ class IntelV3Service:
         """
         settings = get_settings()
         if not getattr(settings, "intel_v3_priceband_visible_context_v1_enabled", False):
+            logger.info(
+                "valuation_context_pr2b_summary user_id=%s flag_enabled=false "
+                "bridge_not_called=true renderable_context_count=0 "
+                "set_env=INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true to enable",
+                self.user_id,
+            )
             return None
 
         try:

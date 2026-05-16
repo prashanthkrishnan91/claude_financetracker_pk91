@@ -351,6 +351,86 @@ describe("buildBannerState — tone and copy", () => {
   });
 });
 
+// ── analyst_evidence_current no-op run contract ───────────────────────────────
+// When backend returns analyst_evidence_current (evidence fresh, zero queued
+// jobs), the component skips polling and calls refetchSnapshot() once.
+// These tests cover the state-machine half: with isRefreshing=false and a
+// certified snapshot, the UI must show Ready — never Updating.
+
+describe("analyst_evidence_current — no-op run state machine", () => {
+  it("certified snapshot + isRefreshing=false shows Ready even when lastRunResult is analyst_evidence_current", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "analyst_evidence_current" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
+    expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
+  });
+
+  it("analyst_evidence_current does not put the UI in Updating state", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "analyst_evidence_current" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    const pill = buildStatusPillState(snap, false, runResult);
+    expect(pill.pill).not.toBe("Updating");
+    expect(pill.tone).toBe("green");
+  });
+
+  it("refresh_requested with isRefreshing=true still shows Updating (existing queued behavior preserved)", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = { status: "refresh_requested" as const, queued_ticker_count: 5 };
+    expect(deriveIntelV3UIStatus(snap, true, runResult)).toBe("latest_certified_new_refresh_running");
+    expect(buildStatusPillState(snap, true, runResult).pill).toBe("Updating");
+  });
+
+  it("no snapshot + analyst_evidence_current + isRefreshing=false => Needs Research (no snapshot to show)", () => {
+    const runResult = {
+      status: "analyst_evidence_current" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(deriveIntelV3UIStatus(null, false, runResult)).toBe("unavailable_evidence_incomplete");
+  });
+});
+
+// ── worker_certified + certified_current terminal Ready contract ──────────────
+
+describe("worker_certified + certified_current => terminal Ready", () => {
+  it("snapshot_source=worker_certified + evidence_freshness_state=certified_current => Ready pill", () => {
+    const snap = makeCertifiedSnapshot({
+      evidence_freshness_state: "certified_current",
+    } as any);
+    expect(deriveIntelV3UIStatus(snap, false)).toBe("certified_current");
+    expect(buildStatusPillState(snap, false).pill).toBe("Ready");
+    expect(buildStatusPillState(snap, false).tone).toBe("green");
+  });
+
+  it("worker_certified + certified_current while polling (isRefreshing=true) shows Updating until poll stops", () => {
+    // While isRefreshing is true the banner stays amber — polling has not yet
+    // confirmed the snapshot is newer than the click.
+    const snap = makeCertifiedSnapshot({
+      evidence_freshness_state: "certified_current",
+    } as any);
+    expect(deriveIntelV3UIStatus(snap, true)).toBe("latest_certified_new_refresh_running");
+    expect(buildStatusPillState(snap, true).pill).toBe("Updating");
+  });
+
+  it("worker_certified + certified_current with isRefreshing=false => green Ready, not grey", () => {
+    const snap = makeCertifiedSnapshot({
+      evidence_freshness_state: "certified_current",
+    } as any);
+    const pill = buildStatusPillState(snap, false);
+    expect(pill.pill).toBe("Ready");
+    expect(pill.tone).toBe("green");
+    expect(pill.tone).not.toBe("grey");
+  });
+});
+
 // ── Build 2: evidence_freshness_state contract ────────────────────────────────
 
 describe("Build 2 — evidence_freshness_state status mapping", () => {

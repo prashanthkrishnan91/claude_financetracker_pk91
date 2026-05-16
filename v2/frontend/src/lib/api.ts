@@ -1303,12 +1303,14 @@ export interface IntelV3RunResult {
   status:
     | "refresh_requested"
     | "refresh_in_progress"
+    | "analyst_evidence_current"  // backend: evidence fresh, no jobs queued
     | "no_active_holdings"
     | "enqueue_failed"
     | "completed"   // legacy — may appear if backend version mismatch
     | "running"
     | "failed";
   queued_ticker_count?: number;
+  stale_analyst_count?: number;
   total_holding_count?: number;
   existing_certified_snapshot_id?: string | null;
   existing_certified_snapshot?: boolean;

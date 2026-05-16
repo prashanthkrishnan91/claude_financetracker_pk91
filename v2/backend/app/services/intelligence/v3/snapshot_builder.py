@@ -62,6 +62,7 @@ def _build_held_card(
     card_meta: dict[str, Any],
     snapshot_id: str,
     run_id: str,
+    valuation_context: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Build a single held-card payload from a v3 decision + original card metadata."""
     action = decision.action.value
@@ -125,6 +126,8 @@ def _build_held_card(
             "blockers":             list(decision.blockers),
             "suppression_reasons":  dict(decision.suppression_reasons),
             "schema_version":       decision.schema_version,
+            # Build 3 PR 2B — plain-English valuation context (None when suppressed).
+            "valuation_context":    valuation_context,
             # Committee deferred.
             "committee":            {"status": "deferred", "reason": "Source pack not yet validated."},
         },
@@ -141,17 +144,20 @@ def build_snapshot(
     what_changed: Optional[list[str]] = None,
     warnings: Optional[list[str]] = None,
     diagnostics: Optional[dict[str, Any]] = None,
+    valuation_context_map: Optional[dict[str, Optional[dict]]] = None,
 ) -> dict[str, Any]:
     """Build a complete IntelV3Snapshot payload.
 
     Args:
-        run_id:        Run ID that produced these decisions.
-        decisions:     List of DecisionOutputV3 from the v3 kernel.
-        card_metas:    Parallel list of card metadata dicts (ticker, name, category...).
-        source_health: Optional source health summary.
-        is_stale:      Whether this snapshot is considered stale.
-        what_changed:  List of human-readable change notes since last run.
-        warnings:      List of warning strings for the banner.
+        run_id:               Run ID that produced these decisions.
+        decisions:            List of DecisionOutputV3 from the v3 kernel.
+        card_metas:           Parallel list of card metadata dicts (ticker, name, category...).
+        source_health:        Optional source health summary.
+        is_stale:             Whether this snapshot is considered stale.
+        what_changed:         List of human-readable change notes since last run.
+        warnings:             List of warning strings for the banner.
+        valuation_context_map: Optional ticker→serialized-valuation-context map from
+                              priceband_snapshot_context_v1. None when context disabled.
 
     Returns:
         Complete snapshot payload dict (to be stored as JSONB).
@@ -162,11 +168,17 @@ def build_snapshot(
     # Build held cards.
     held_cards = []
     for decision, meta in zip(decisions, card_metas):
+        ticker = meta.get("ticker", "")
+        val_ctx = (
+            valuation_context_map.get(ticker.upper())
+            if valuation_context_map else None
+        )
         card = _build_held_card(
             decision=decision,
             card_meta=meta,
             snapshot_id=snapshot_id,
             run_id=run_id,
+            valuation_context=val_ctx,
         )
         held_cards.append(card)
 

@@ -146,6 +146,19 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Divider />
 
+          {/* Valuation context — only shown when real evidence supports it */}
+          {payload.valuation_context && (
+            <>
+              <Divider />
+              <DrawerSection title="Valuation context">
+                <p>{payload.valuation_context.visible_text}</p>
+                <p className="text-[10px] text-text-muted mt-2 leading-snug">
+                  {payload.valuation_context.limitation_text}
+                </p>
+              </DrawerSection>
+            </>
+          )}
+
           {/* Committee — deferred */}
           {payload.committee.status === "deferred" && (
             <DrawerSection title="Committee view">

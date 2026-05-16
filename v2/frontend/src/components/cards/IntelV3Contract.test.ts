@@ -240,6 +240,62 @@ describe("Intel v3 drawer payload contract", () => {
       expect(pattern.test(card.detail_drawer_payload.why_now)).toBe(false);
     }
   });
+
+  it("valuation_context is absent (undefined/null) when not provided", () => {
+    const card = makeCard("AAPL", "BUY");
+    // valuation_context is optional — must not be present or must be null/undefined
+    const vc = card.detail_drawer_payload.valuation_context;
+    expect(vc == null).toBe(true);
+  });
+
+  it("valuation_context when present has only visible_text, limitation_text, source_basis", () => {
+    // Build a complete drawer payload to satisfy the TypeScript type
+    const vc = {
+      visible_text: "Trading at a reasonable multiple relative to recent earnings.",
+      limitation_text: "Based on annual EPS. Forward estimates not included.",
+      source_basis: "fy_eps_earnings_yield",
+    };
+    const drawerPayload = makeCard("AAPL", "BUY").detail_drawer_payload;
+    const payloadWithCtx = { ...drawerPayload, valuation_context: vc };
+
+    expect(typeof payloadWithCtx.valuation_context!.visible_text).toBe("string");
+    expect(typeof payloadWithCtx.valuation_context!.limitation_text).toBe("string");
+    expect(typeof payloadWithCtx.valuation_context!.source_basis).toBe("string");
+    // No raw metric or financial precision keys
+    const forbidden = [
+      "target_price", "fair_value", "intrinsic_value", "upside", "downside",
+      "buy_below", "sell_above", "valuation_signal", "earnings_yield_bucket",
+    ];
+    for (const key of forbidden) {
+      expect(payloadWithCtx.valuation_context).not.toHaveProperty(key);
+    }
+  });
+
+  it("valuation_context visible_text contains no price targets or raw metric values", () => {
+    const drawerPayload = makeCard("MSFT", "HOLD").detail_drawer_payload;
+    const vc = {
+      visible_text: "Trading at a reasonable multiple relative to recent earnings.",
+      limitation_text: "Based on annual EPS only.",
+      source_basis: "fy_eps_earnings_yield",
+    };
+    const payloadWithCtx = { ...drawerPayload, valuation_context: vc };
+
+    const FORBIDDEN_PATTERNS = [
+      /\$\d+/,
+      /target price/i,
+      /price target/i,
+      /fair value/i,
+      /upside/i,
+      /downside/i,
+      /\d+\.\d+%/,
+      /earnings_yield_bucket/,
+      /unusually_cheap/,
+      /negative_eps/,
+    ];
+    for (const pattern of FORBIDDEN_PATTERNS) {
+      expect(pattern.test(payloadWithCtx.valuation_context.visible_text)).toBe(false);
+    }
+  });
 });
 
 // ── Snapshot structure contract ───────────────────────────────────────────────

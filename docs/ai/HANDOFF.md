@@ -112,14 +112,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - PR #341 — Build 3 PR 2B: valuation context bridge + IntelV3Drawer section (feature-flagged)
 - PR #342 — Build 3 PR 2B root-cause fix: observability logs confirming flag was disabled in Railway
 
-**To activate valuation context in production:** set `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` in Railway on **both** the main app service and the Watchtower service. After enabling, trigger a new Intel run to populate valuation context. Verify with: `valuation_context_pr2b_aggregate_summary renderable_context_count=N suppressed_context_count=N`.
+**Valuation context is production-activated and visually validated.** The Intel detail drawer now shows the "Valuation context" section. Operational requirements (both must remain set): `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on the main app Railway service and the Watchtower Railway service. Future validation log key: `valuation_context_pr2b_aggregate_summary renderable_context_count=N`.
 
 **Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
 **Next work (in priority order):**
 1. **Stage 2 exit validation** — still pending; all five gates in "Active build queue item" above must be confirmed in production.
-2. **Valuation context production activation** — set env var in Railway, re-run Intel, confirm `renderable_context_count > 0` in Railway logs.
-3. **Evidence depth / PARTIAL band** — next Build 3 slice: most cards show PARTIAL band (1–2 trusted signals); HIGH BUY requires STRONG. Next quality slice improves primary_driver completeness and source linking. Start after Stage 2 exit confirmed.
+2. **Evidence depth / PARTIAL band** — next Build 3 slice: most cards show PARTIAL band (1–2 trusted signals); HIGH BUY requires STRONG. Next quality slice improves primary_driver completeness and source linking. Start after Stage 2 exit confirmed.
 
 ## Handoff maintenance rule
 

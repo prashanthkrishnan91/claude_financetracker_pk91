@@ -25,3 +25,4 @@ def get_snapshot_mapping_version(payload: Optional[dict]) -> Optional[str]:
     if not payload:
         return None
     return payload.get("evidence_mapping_version") or None
+

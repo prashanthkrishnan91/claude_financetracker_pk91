@@ -29,9 +29,15 @@ from app.services.intelligence.v3.decision_contracts import (
 )
 from app.services.intelligence.v3.decision_policy_v1 import decide
 from app.services.intelligence.v3.existing_signal_adapter import (
-    _SPECULATIVE_TICKERS,
+    _SPECULATIVE_TICKERS as _ADAPTER_SPECULATIVE_TICKERS,
     build_decision_input_from_card,
 )
+from app.services.intelligence.v3.portfolio_governor_lite import (
+    _SPECULATIVE_TICKERS as _GOVERNOR_SPECULATIVE_TICKERS,
+)
+
+# Expose single name for backward compat with older tests in this module.
+_SPECULATIVE_TICKERS = _ADAPTER_SPECULATIVE_TICKERS
 from app.services.intelligence.v3.shadow_projection import project_shadow_from_card_signals
 from app.services.intelligence.v3.snapshot_builder import build_snapshot
 
@@ -362,11 +368,34 @@ class TestShadowVisibleAgreement:
 # ── 5. STUB is not in production speculative allowlists ──────────────────────
 
 class TestStubRemovedFromSpeculative:
-    """Acceptance criterion 6: STUB must not appear in production speculative tickers."""
+    """Acceptance criterion 6: STUB must not appear in any production speculative allowlist."""
 
-    def test_stub_not_in_speculative_tickers(self):
-        assert "STUB" not in _SPECULATIVE_TICKERS, (
-            "STUB must not be in _SPECULATIVE_TICKERS (production speculative allowlist)"
+    _EXPECTED = frozenset({"BTC", "XRP", "RIVN", "KLAR", "BLSH"})
+
+    def test_stub_not_in_adapter_speculative_tickers(self):
+        """existing_signal_adapter._SPECULATIVE_TICKERS must not contain STUB."""
+        assert "STUB" not in _ADAPTER_SPECULATIVE_TICKERS, (
+            "STUB must not be in existing_signal_adapter._SPECULATIVE_TICKERS"
+        )
+
+    def test_stub_not_in_governor_speculative_tickers(self):
+        """portfolio_governor_lite._SPECULATIVE_TICKERS must not contain STUB."""
+        assert "STUB" not in _GOVERNOR_SPECULATIVE_TICKERS, (
+            "STUB must not be in portfolio_governor_lite._SPECULATIVE_TICKERS"
+        )
+
+    def test_adapter_speculative_tickers_are_real_assets(self):
+        """existing_signal_adapter allowlist contains only real higher-risk assets."""
+        assert _ADAPTER_SPECULATIVE_TICKERS == self._EXPECTED, (
+            f"Adapter speculative allowlist should be {self._EXPECTED}, "
+            f"got {_ADAPTER_SPECULATIVE_TICKERS}"
+        )
+
+    def test_governor_speculative_tickers_are_real_assets(self):
+        """portfolio_governor_lite allowlist contains only real higher-risk assets."""
+        assert _GOVERNOR_SPECULATIVE_TICKERS == self._EXPECTED, (
+            f"Governor speculative allowlist should be {self._EXPECTED}, "
+            f"got {_GOVERNOR_SPECULATIVE_TICKERS}"
         )
 
     def test_stub_ticker_not_forced_to_blocked_fit(self):
@@ -386,13 +415,6 @@ class TestStubRemovedFromSpeculative:
         )
         assert inp.portfolio_fit != FitBand.BLOCKED, (
             "STUB should no longer be forced to BLOCKED fit — it was a test artifact"
-        )
-
-    def test_production_speculative_tickers_are_real_assets(self):
-        """All remaining speculative tickers are real higher-risk assets."""
-        expected = {"BTC", "XRP", "RIVN", "KLAR", "BLSH"}
-        assert _SPECULATIVE_TICKERS == expected, (
-            f"Speculative allowlist should be {expected}, got {_SPECULATIVE_TICKERS}"
         )
 
 

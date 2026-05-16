@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Build 3 PR 3A: Source-pack status + evidence-depth observability — pending merge)
+Last updated: 2026-05-16 (Build 3 PR 3A hotfix — PR #345 cleanup patch)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3.3 merged** (All-or-nothing certified intelligence run contract). Stage 3.2c complete. Stage 2 exit still pending. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts per visible Deploy v3 recommendation (default = recommended), per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows (e.g. NVDA BUY $100) clearly labelled as manual via `is_manual: true` on `ActualDecisionItem`. The Step 2 recommendation surface stays read-only. The primary Deploy UX now shows the most recent 10 decision logs below Step 3 using the existing `DecisionHistoryEntry` component (single definition; no parallel history surface). The v3 snapshot mirrors `session_key` and entered/deploy/reserve amounts into `decision_context` so existing fingerprint dedupe + history rendering work uniformly across legacy and v3 logs. Re-logging the same active plan still updates the latest matching log rather than creating duplicate spam. Plain-English clarity note added near Step 3: "These are Intel v3 planning recommendations, not broker-executed trades." No confidence engine, no new provider/market data, no Intel/Deploy sizing changes, no SQL. Frontend-only.
-- Active build queue item: **Stage 2 exit validation** — re-validate end-to-end in production with a real dollar amount in Step 1: Step 2 shows 3–5 amount-aware BUY recommendations totaling exactly cash_to_deploy when no guardrail prevents it (e.g. $1,500 = $1,500, not $1,498); Step 3 lets the user edit actual amounts and add manual rows; the decision log history shows BUY spend, manual BUY, and Trim/Sell separately (never negative reserve; "Over planned by $X" / "Unallocated $X" as appropriate); Evaluate button works or gracefully reports insufficient data. Stage 2 exit remains pending until: (1) amount-aware recommendations work, (2) editable actual logging works, (3) decision log history persists after refresh, (4) journal accounting/evaluate behavior is production-validated, (5) recommendation confidence/ranking explanation is reviewed in a later evidence-quality slice.
+- Roadmap stage: **Stage 3.3 merged** (All-or-nothing certified intelligence run contract). Stage 3.2c complete. **Stage 2 exit production-passed.** $900 and $1,500 Deploy flows validated: BUY sizing totals matched planning cash when guardrails allowed; Step 3 actual logging, manual rows, and history/accounting worked; Evaluate captured a recent baseline and rendered older comparison correctly. Stages 2.5A–2.6D produced amount-aware Deploy v3 with new-cash sleeve sizing. Stage 2.7 turns Step 3 into the user's actual execution journal: editable actual dollar amounts, per-row status (BOUGHT / PARTIAL / SKIPPED / WATCHED / TRIMMED / SOLD / HELD), and user-added manual rows via `is_manual: true`. The Step 2 recommendation surface stays read-only. Decision log history (latest 10 deduped logs) shows below Step 3; re-logging the same active plan updates the matching log rather than duplicating.
+- Active build queue item: **Build 3 PR 3A production validation** — confirm in Railway logs: (1) `intel_v3_evidence_depth_summary` appears on prewarm-certified snapshot builds; (2) `intel_v3_source_pack_legacy_normalization_summary` appears on the first `GET /intel/v3/snapshot` response for the existing snapshot; (3) UI no longer shows "Analysis pending" for PARTIAL/STRONG evidence cards. Once confirmed, decide whether to proceed to PR 3B based on `source_pack_pending_count` in logs.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture — Build 2 additions
@@ -116,16 +116,15 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
-**Build 3 PR 3A (merged PR #344) + hotfix (this PR — pending merge):**
-- PR #344 scope (merged): removes hard-coded `committee: {status: "deferred"}` placeholder; computes real source-pack status via `_build_source_pack_status()` for all NEW snapshots. 31 backend tests.
-- Hotfix root cause: (1) `intel_v3_evidence_depth_summary` log was only wired to `run_v3()`, NOT to `run_prewarm_snapshot()` — the certified production path. (2) Existing persisted snapshots keep legacy `committee.status="deferred"` in DB until a new prewarm rebuilds them, so old snapshots showed stale "Analysis pending" immediately after deploy.
-- Hotfix fix: (1) Extracted `_log_evidence_depth_summary()` as a shared module-level helper; both `run_v3()` and `run_prewarm_snapshot()` now call it — same log key `intel_v3_evidence_depth_summary`. (2) Added `_normalize_legacy_committee_status()` called in `get_latest_snapshot()`: converts `deferred` → `source_validated` (PARTIAL/STRONG bands) or `pending` (THIN) in the API response only — does NOT mutate the DB row. Log key: `intel_v3_source_pack_legacy_normalization_summary`. (3) 18 new backend tests for normalization + evidence-depth helper.
-- Frontend: `IntelV3Drawer.tsx` already correct from PR #344 — committee section hidden for `source_validated`, "Evidence not yet source-linked" for `pending`, "Analysis pending" for `deferred`.
+**Build 3 PR 3A (merged PR #344) + hotfix PR #345 (cleanup patch):**
+- PR #344 (merged): `_build_source_pack_status()` derives real status from `decision.evidence_quality` for all new snapshots. 31 backend tests.
+- PR #345 hotfix: (1) `_log_evidence_depth_summary()` shared helper — both `run_v3()` and `run_prewarm_snapshot()` emit `intel_v3_evidence_depth_summary`. (2) `_normalize_legacy_committee_status()` in `get_latest_snapshot()` — converts persisted `deferred` → `source_validated`/`pending` in API response only (no DB mutation); also updates `source_pack_validated_count` / `source_pack_pending_count` on the response to match post-normalization reality. Log key: `intel_v3_source_pack_legacy_normalization_summary`. (3) 22 new backend tests.
+- Frontend: `IntelV3Drawer.tsx` correct from PR #344 — committee section hidden for `source_validated`, "Evidence not yet source-linked" for `pending`.
 - Supabase SQL: none. No evidence-band inflation. No policy change.
 
-**Next work (in priority order):**
-1. **Stage 2 exit validation** — still pending; all five gates in "Active build queue item" above must be confirmed in production.
-2. **Evidence depth PR 3B** — if production `intel_v3_evidence_depth_summary` logs show persistent high `source_pack_pending_count` or many PARTIAL bands, next slice maps `research_artifacts`/`research_artifact_facts` into `trusted_signals` to reduce PARTIAL genuinely.
+**Next work:**
+1. **PR #345 production validation** — check Railway logs for `intel_v3_evidence_depth_summary` on prewarm path and `intel_v3_source_pack_legacy_normalization_summary` on first snapshot read. Confirm UI no longer shows "Analysis pending" for PARTIAL/STRONG cards.
+2. **Evidence depth PR 3B** — only if production logs show persistent high `source_pack_pending_count` or PARTIAL bands are a real problem after PR #345 normalizes the legacy snapshot.
 
 ## Handoff maintenance rule
 

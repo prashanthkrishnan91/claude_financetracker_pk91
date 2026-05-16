@@ -1909,6 +1909,8 @@ def _normalize_legacy_committee_status(
     validated_count = 0
     pending_count = 0
     unchanged_count = 0
+    existing_validated = 0   # already source_validated, passed through
+    existing_pending = 0     # already pending, passed through
     normalized_by_ticker: dict[str, dict] = {}
     new_holdings: list[dict] = []
 
@@ -1921,6 +1923,10 @@ def _normalize_legacy_committee_status(
             new_holdings.append(card)
             normalized_by_ticker[card.get("ticker", "")] = card
             unchanged_count += 1
+            if status == "source_validated":
+                existing_validated += 1
+            elif status == "pending":
+                existing_pending += 1
             continue
 
         evidence_band = card.get("evidence_band") or ddp.get("evidence_band") or "THIN"
@@ -1951,17 +1957,26 @@ def _normalize_legacy_committee_status(
     response_payload["best_buys"] = _replace_cards(response_payload.get("best_buys", []))
     response_payload["trim_sell_desk"] = _replace_cards(response_payload.get("trim_sell_desk", []))
 
+    # Update aggregate counts to match the post-normalization committee state.
+    # This keeps source_pack_validated_count / source_pack_pending_count consistent
+    # with what the UI actually sees, even for old persisted snapshots.
+    response_payload["source_pack_validated_count"] = validated_count + existing_validated
+    response_payload["source_pack_pending_count"] = pending_count + existing_pending
+
     logger.info(
         "intel_v3_source_pack_legacy_normalization_summary "
         "user_id=%s snapshot_id=%s total_cards=%d "
         "normalized_to_source_validated_count=%d "
-        "normalized_to_pending_count=%d unchanged_count=%d",
+        "normalized_to_pending_count=%d unchanged_count=%d "
+        "response_source_pack_validated_count=%d response_source_pack_pending_count=%d",
         user_id,
         snapshot_id,
         len(holdings),
         validated_count,
         pending_count,
         unchanged_count,
+        validated_count + existing_validated,
+        pending_count + existing_pending,
     )
 
 

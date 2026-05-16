@@ -256,6 +256,74 @@ class TestLegacyCommitteeNormalization:
         assert statuses.count("source_validated") == 3  # A, B, D
         assert statuses.count("pending") == 1  # C
 
+    def test_aggregate_counts_updated_after_normalization(self):
+        """Response source_pack_validated/pending counts reflect post-normalization state."""
+        cards = [
+            _make_card("A", evidence_band="PARTIAL", committee_status="deferred"),  # → source_validated
+            _make_card("B", evidence_band="STRONG", committee_status="deferred"),   # → source_validated
+            _make_card("C", evidence_band="THIN", committee_status="deferred"),     # → pending
+            _make_card("D", evidence_band="PARTIAL", committee_status="source_validated"),  # existing validated
+            _make_card("E", evidence_band="THIN", committee_status="pending",
+                       committee_reason="No evidence."),                             # existing pending
+        ]
+        payload = _make_payload(cards)
+        # Stale stored counts (what old snapshot had before normalization)
+        payload["source_pack_validated_count"] = 1
+        payload["source_pack_pending_count"] = 1
+
+        _normalize_legacy_committee_status(payload, user_id="u1", snapshot_id="snap-001")
+
+        # 2 normalized + 1 existing = 3 source_validated
+        assert payload["source_pack_validated_count"] == 3
+        # 1 normalized + 1 existing = 2 pending
+        assert payload["source_pack_pending_count"] == 2
+
+    def test_already_normalized_snapshot_counts_unchanged(self):
+        """Snapshot with no deferred cards: short-circuits, counts not touched."""
+        cards = [
+            _make_card("A", committee_status="source_validated"),
+            _make_card("B", committee_status="pending"),
+        ]
+        payload = _make_payload(cards)
+        payload["source_pack_validated_count"] = 1
+        payload["source_pack_pending_count"] = 1
+        original_holdings = payload["current_holdings"]
+
+        _normalize_legacy_committee_status(payload, user_id="u1", snapshot_id="snap-001")
+
+        # Short-circuit: holdings not replaced, counts not touched
+        assert payload["current_holdings"] is original_holdings
+        assert payload["source_pack_validated_count"] == 1
+        assert payload["source_pack_pending_count"] == 1
+
+    def test_all_deferred_updates_counts_from_zero(self):
+        """All-deferred snapshot: counts go from stale zero to correct post-normalization values."""
+        cards = [
+            _make_card("A", evidence_band="STRONG", committee_status="deferred"),
+            _make_card("B", evidence_band="PARTIAL", committee_status="deferred"),
+            _make_card("C", evidence_band="THIN", committee_status="deferred"),
+        ]
+        payload = _make_payload(cards)
+        payload["source_pack_validated_count"] = 0
+        payload["source_pack_pending_count"] = 0
+
+        _normalize_legacy_committee_status(payload, user_id="u1", snapshot_id="snap-001")
+
+        assert payload["source_pack_validated_count"] == 2  # A (STRONG) + B (PARTIAL)
+        assert payload["source_pack_pending_count"] == 1    # C (THIN)
+
+    def test_best_buys_normalized_committee_matches_holdings(self):
+        """best_buys committee status matches normalized current_holdings after sync."""
+        buy_card = _make_card("AAPL", action="BUY", evidence_band="STRONG", committee_status="deferred")
+        hold_card = _make_card("MSFT", action="HOLD", evidence_band="THIN", committee_status="deferred")
+        payload = _make_payload([buy_card, hold_card])
+        _normalize_legacy_committee_status(payload, user_id="u1", snapshot_id="snap-001")
+
+        holdings_by_ticker = {c["ticker"]: c for c in payload["current_holdings"]}
+        for bb in payload["best_buys"]:
+            assert bb["detail_drawer_payload"]["committee"] == \
+                holdings_by_ticker[bb["ticker"]]["detail_drawer_payload"]["committee"]
+
     def test_normalization_logs_summary(self, caplog):
         """Normalization emits intel_v3_source_pack_legacy_normalization_summary log."""
         card = _make_card("AAPL", evidence_band="PARTIAL", committee_status="deferred")

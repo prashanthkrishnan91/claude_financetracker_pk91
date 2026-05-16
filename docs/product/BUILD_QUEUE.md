@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **PR 3B production validation** (Stage 3, active). PR open on branch `claude/analyst-evidence-mapping-8lnSF`. After merge, validate in Railway logs: `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0 on a fresh certified run. Confirm `trusted_signal_count_distribution` shows fewer 0-signal cards. No SQL apply step needed.
+- **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, PR #347 open — pending merge). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests (fake Supabase client). No SQL, no UI, no policy change. After merge: validate in Railway logs `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 
 ## Next
 
@@ -22,8 +22,6 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 ## Completed
 
 - **Stage 2 exit validation** (Stage 2, production-passed). $900 and $1,500 Deploy flows validated: BUY sizing totaled planning cash when guardrails allowed; Step 3 actual logging/manual rows/history/accounting worked; Evaluate captured recent baseline and rendered older comparison. All five exit gates confirmed.
-
-- **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, PR open). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 new tests. No SQL, no UI, no policy change.
 
 - **Build 3 PR 3A: Source-pack status + evidence-depth observability** (Stage 3, merged PR #344 + cleanup hotfix PR #345). PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. PR #345: (1) `intel_v3_evidence_depth_summary` wired to prewarm path via `_log_evidence_depth_summary()` shared helper; (2) `_normalize_legacy_committee_status()` in `get_latest_snapshot()` converts persisted `deferred` → real status at API response time and updates aggregate counts (no DB mutation). 31 + 22 = 53 backend tests total. No SQL, no providers, no Deploy/Watchtower change.
 

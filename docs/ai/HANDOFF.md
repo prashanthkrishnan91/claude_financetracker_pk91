@@ -122,16 +122,16 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. 31 tests.
 - PR #345: `_log_evidence_depth_summary()` shared helper; `_normalize_legacy_committee_status()` converts persisted `deferred` → real status at API response time. Log key: `intel_v3_source_pack_legacy_normalization_summary`. 22 tests.
 
-**Build 3 PR 3B — analyst_verdict trusted-signal mapping (PR open, branch `claude/analyst-evidence-mapping-8lnSF`):**
+**Build 3 PR 3B — analyst_verdict trusted-signal mapping (PR #347 open, pending merge):**
 - Root cause fixed: `data_quality_label="MEDIUM"` hardcoded fallback and missing `intel_read` synthesis caused ALL cards to show PARTIAL regardless of actual analyst content.
 - Fix: synthesize `intel_read.trusted_signals` from real `analyst_verdict` fields — `primary_driver` → `analyst_primary_driver`, `action_reason` → `analyst_action_rationale`, `key_drivers` → `analyst_key_drivers`. Count 0–3 dims: 3=STRONG, 1–2=OK(PARTIAL), 0=THIN/SUPPRESSED.
 - Also fixed: field name mismatch — `av.get("key_drivers") or av.get("drivers")` (was just `av.get("drivers")`).
 - Fallback phrases excluded via `_FALLBACK_PHRASES` + `_is_real_signal()` with trailing-punctuation normalization.
 - Research artifacts: confirmed locked `safe_for_decision=FALSE`; `artifact_decision_safe_count=0`, `artifact_suppressed_unsafe_count=0` always.
 - Observability: `mapped_existing_analyst_signal_count`, `trusted_signal_count_distribution`, `artifact_decision_safe_count`, `artifact_suppressed_unsafe_count` added to `load_cards()` stats and `_log_evidence_depth_summary()`.
-- 31 new backend tests in `test_v3_analyst_verdict_signal_mapping.py`; all 62 PR 3A+3B tests pass. No SQL, no UI, no policy change.
+- 31 synthesis/policy tests in `test_v3_analyst_verdict_signal_mapping.py` + 9 direct adapter-path tests (fake Supabase client) in `test_intel_v3_read_only_adapter.py`; all 75 PR 3A+3B tests pass. No SQL, no UI, no policy change.
 
-**Next work:** PR 3B production validation — confirm in Railway logs that `intel_v3_evidence_depth_summary` shows `mapped_existing_analyst_signal_count > 0` and `trusted_signal_count_distribution` shows fewer 0-signal cards after a fresh certified run.
+**Next work after PR #347 merges:** confirm in Railway logs that `intel_v3_evidence_depth_summary` shows `mapped_existing_analyst_signal_count > 0` and `trusted_signal_count_distribution` shows fewer 0-signal cards after a fresh certified run.
 
 ## Handoff maintenance rule
 

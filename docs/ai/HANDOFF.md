@@ -116,13 +116,12 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Watchtower production requirements:** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service.
 
-**Build 3 PR 3A (this PR — Source-pack status + evidence-depth observability — pending merge):**
-- Scope: removes the hard-coded `committee: {status: "deferred"}` placeholder; computes real source-pack status from existing `evidence_quality`. Does NOT map `research_artifacts`/`research_artifact_facts` into `trusted_signals`; does NOT materially reduce PARTIAL bands by itself.
-- Fix: `_build_source_pack_status()` now computes the real status: `source_validated` when `evidence_quality` is OK or STRONG (analyst produced 1+ trusted signals in `intel_read`), `pending` with honest suppression reason when THIN or SUPPRESSED.
-- New aggregate observability log: `intel_v3_evidence_depth_summary` (total_tickers, strong/ok/thin counts, source_pack_validated/pending counts, primary_driver/rationale presence, top suppression reasons) emitted on every snapshot build.
-- Snapshot now carries `source_pack_validated_count` + `source_pack_pending_count`.
-- Frontend (minimal): committee section hidden for `source_validated`; shows "Evidence not yet source-linked" for `pending` vs generic "Analysis pending" for old `deferred` snapshots.
-- 31 new backend tests. Evidence quality axis and Deploy behavior unchanged. Supabase SQL: none.
+**Build 3 PR 3A (merged PR #344) + hotfix (this PR — pending merge):**
+- PR #344 scope (merged): removes hard-coded `committee: {status: "deferred"}` placeholder; computes real source-pack status via `_build_source_pack_status()` for all NEW snapshots. 31 backend tests.
+- Hotfix root cause: (1) `intel_v3_evidence_depth_summary` log was only wired to `run_v3()`, NOT to `run_prewarm_snapshot()` — the certified production path. (2) Existing persisted snapshots keep legacy `committee.status="deferred"` in DB until a new prewarm rebuilds them, so old snapshots showed stale "Analysis pending" immediately after deploy.
+- Hotfix fix: (1) Extracted `_log_evidence_depth_summary()` as a shared module-level helper; both `run_v3()` and `run_prewarm_snapshot()` now call it — same log key `intel_v3_evidence_depth_summary`. (2) Added `_normalize_legacy_committee_status()` called in `get_latest_snapshot()`: converts `deferred` → `source_validated` (PARTIAL/STRONG bands) or `pending` (THIN) in the API response only — does NOT mutate the DB row. Log key: `intel_v3_source_pack_legacy_normalization_summary`. (3) 18 new backend tests for normalization + evidence-depth helper.
+- Frontend: `IntelV3Drawer.tsx` already correct from PR #344 — committee section hidden for `source_validated`, "Evidence not yet source-linked" for `pending`, "Analysis pending" for `deferred`.
+- Supabase SQL: none. No evidence-band inflation. No policy change.
 
 **Next work (in priority order):**
 1. **Stage 2 exit validation** — still pending; all five gates in "Active build queue item" above must be confirmed in production.

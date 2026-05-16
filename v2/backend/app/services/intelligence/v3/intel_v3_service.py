@@ -129,6 +129,15 @@ class IntelV3Service:
             response_payload = dict(payload)
             response_payload["evidence_freshness_state"] = evidence_freshness_state
 
+            # Response-time normalization: convert legacy committee.status="deferred"
+            # to real source-pack status based on serialized evidence_band.
+            # Does not mutate the persisted DB row.
+            _normalize_legacy_committee_status(
+                response_payload,
+                user_id=self.user_id,
+                snapshot_id=str(snapshot_id),
+            )
+
             logger.info(
                 "intel_v3_snapshot_response_summary user_id=%s result=found "
                 "snapshot_id=%s total_cards=%d action_counts=%s "
@@ -599,48 +608,13 @@ class IntelV3Service:
                 snapshot_payload.get("schema_version", "v3.1"),
             )
 
-            # Evidence-depth aggregate summary — production-safe, no raw metrics.
-            # Parse from Railway logs using key: intel_v3_evidence_depth_summary
-            _ebc = snapshot_payload.get("evidence_band_counts", {})
-            _strong_count = _ebc.get("STRONG", 0)
-            _ok_count = _ebc.get("PARTIAL", 0)  # AxisBand.OK → "PARTIAL"
-            _thin_count = _ebc.get("THIN", 0)
-            _sp_validated = snapshot_payload.get("source_pack_validated_count", 0)
-            _sp_pending = snapshot_payload.get("source_pack_pending_count", 0)
-            _primary_driver_present = sum(
-                1 for d in decisions
-                if d.source_signal_summary.get("has_primary_driver")
-            )
-            _action_reason_present = sum(
-                1 for d in decisions
-                if d.source_signal_summary.get("has_action_reason")
-            )
-            # Collect suppression reason counts — no raw metric values, keys only.
-            _supp_counter = _Counter()
-            for d in decisions:
-                for k in d.suppression_reasons:
-                    _supp_counter[k] += 1
-            _top_supp = _supp_counter.most_common(3)
-            _top_supp_str = " ".join(f"{k}={v}" for k, v in _top_supp) or "none"
-
-            logger.info(
-                "intel_v3_evidence_depth_summary user_id=%s snapshot_id=%s run_id=%s "
-                "total_tickers=%d strong_count=%d ok_count=%d thin_count=%d "
-                "source_pack_validated_count=%d source_pack_pending_count=%d "
-                "primary_driver_present_count=%d analyst_rationale_present_count=%d "
-                "top_suppression_reasons=%s",
-                self.user_id,
-                snapshot_id,
-                run_id,
-                total_cards,
-                _strong_count,
-                _ok_count,
-                _thin_count,
-                _sp_validated,
-                _sp_pending,
-                _primary_driver_present,
-                _action_reason_present,
-                _top_supp_str,
+            # Evidence-depth aggregate summary — shared helper, same log key as prewarm path.
+            _log_evidence_depth_summary(
+                user_id=self.user_id,
+                snapshot_id=snapshot_id,
+                run_id=run_id,
+                snapshot_payload=snapshot_payload,
+                decisions=decisions,
             )
 
             return snapshot_payload
@@ -1258,6 +1232,16 @@ class IntelV3Service:
             contract_dict.get("latest_recommendation_at"),
             "Certified Current" if contract_certified else "Intel Blocked — Certification Failed",
         )
+
+        # Evidence-depth aggregate summary — same log key as run_v3() path.
+        _log_evidence_depth_summary(
+            user_id=self.user_id,
+            snapshot_id=snapshot_payload.get("snapshot_id", prewarm_run_id),
+            run_id=prewarm_run_id,
+            snapshot_payload=snapshot_payload,
+            decisions=decisions,
+        )
+
         return snapshot_payload
 
     # ── Helpers ───────────────────────────────────────────────────────────────
@@ -1830,6 +1814,155 @@ class IntelV3Service:
         except Exception as exc:
             logger.warning("intel_v3.get_run_by_id_failed run_id=%s error=%s", run_id, exc)
             return None
+
+
+def _log_evidence_depth_summary(
+    *,
+    user_id: Any,
+    snapshot_id: str,
+    run_id: str,
+    snapshot_payload: dict,
+    decisions: list,
+) -> None:
+    """Emit intel_v3_evidence_depth_summary. Shared between run_v3 and run_prewarm_snapshot.
+
+    Production-safe: no raw metrics, no source URLs, no per-ticker payloads.
+    Log key: intel_v3_evidence_depth_summary
+    """
+    from collections import Counter as _Counter
+    _ebc = snapshot_payload.get("evidence_band_counts", {})
+    _strong_count = _ebc.get("STRONG", 0)
+    _ok_count = _ebc.get("PARTIAL", 0)
+    _thin_count = _ebc.get("THIN", 0)
+    _sp_validated = snapshot_payload.get("source_pack_validated_count", 0)
+    _sp_pending = snapshot_payload.get("source_pack_pending_count", 0)
+    total_cards = len(snapshot_payload.get("current_holdings", []))
+    _primary_driver_present = sum(
+        1 for d in decisions
+        if d.source_signal_summary.get("has_primary_driver")
+    )
+    _action_reason_present = sum(
+        1 for d in decisions
+        if d.source_signal_summary.get("has_action_reason")
+    )
+    _supp_counter = _Counter()
+    for d in decisions:
+        for k in d.suppression_reasons:
+            _supp_counter[k] += 1
+    _top_supp = _supp_counter.most_common(3)
+    _top_supp_str = " ".join(f"{k}={v}" for k, v in _top_supp) or "none"
+
+    logger.info(
+        "intel_v3_evidence_depth_summary user_id=%s snapshot_id=%s run_id=%s "
+        "total_tickers=%d strong_count=%d ok_count=%d thin_count=%d "
+        "source_pack_validated_count=%d source_pack_pending_count=%d "
+        "primary_driver_present_count=%d analyst_rationale_present_count=%d "
+        "top_suppression_reasons=%s",
+        user_id,
+        snapshot_id,
+        run_id,
+        total_cards,
+        _strong_count,
+        _ok_count,
+        _thin_count,
+        _sp_validated,
+        _sp_pending,
+        _primary_driver_present,
+        _action_reason_present,
+        _top_supp_str,
+    )
+
+
+def _normalize_legacy_committee_status(
+    response_payload: dict,
+    *,
+    user_id: Any,
+    snapshot_id: str,
+) -> None:
+    """Normalize legacy committee.status='deferred' in the API response payload.
+
+    Response-time fix for persisted snapshots built before PR #344 introduced
+    real source-pack status. Does not mutate the DB row.
+
+    - STRONG or PARTIAL evidence_band → {status: "source_validated"}
+    - THIN or unavailable             → {status: "pending", reason: <safe text>}
+    - Cards with status != "deferred" pass through unchanged.
+
+    Does not change action, conviction, evidence_band, valuation_context,
+    snapshot_source, or any certification fields.
+    Logs intel_v3_source_pack_legacy_normalization_summary (no raw ticker list).
+    """
+    holdings = response_payload.get("current_holdings")
+    if not holdings:
+        return
+
+    deferred_count = sum(
+        1 for c in holdings
+        if (c.get("detail_drawer_payload") or {}).get("committee", {}).get("status") == "deferred"
+    )
+    if deferred_count == 0:
+        return
+
+    _PENDING_REASON = "Evidence not yet source-linked for this ticker."
+    _STRONG_PARTIAL = {"STRONG", "PARTIAL"}
+
+    validated_count = 0
+    pending_count = 0
+    unchanged_count = 0
+    normalized_by_ticker: dict[str, dict] = {}
+    new_holdings: list[dict] = []
+
+    for card in holdings:
+        ddp = card.get("detail_drawer_payload") or {}
+        committee = ddp.get("committee") or {}
+        status = committee.get("status", "")
+
+        if status != "deferred":
+            new_holdings.append(card)
+            normalized_by_ticker[card.get("ticker", "")] = card
+            unchanged_count += 1
+            continue
+
+        evidence_band = card.get("evidence_band") or ddp.get("evidence_band") or "THIN"
+        new_card = dict(card)
+        new_ddp = dict(ddp)
+
+        if evidence_band in _STRONG_PARTIAL:
+            new_ddp["committee"] = {"status": "source_validated"}
+            validated_count += 1
+        else:
+            existing_reason = committee.get("reason") or ""
+            new_ddp["committee"] = {
+                "status": "pending",
+                "reason": existing_reason if existing_reason else _PENDING_REASON,
+            }
+            pending_count += 1
+
+        new_card["detail_drawer_payload"] = new_ddp
+        new_holdings.append(new_card)
+        normalized_by_ticker[card.get("ticker", "")] = new_card
+
+    response_payload["current_holdings"] = new_holdings
+
+    # Keep best_buys and trim_sell_desk in sync (same card objects, same order).
+    def _replace_cards(card_list: list) -> list:
+        return [normalized_by_ticker.get(c.get("ticker", ""), c) for c in (card_list or [])]
+
+    response_payload["best_buys"] = _replace_cards(response_payload.get("best_buys", []))
+    response_payload["trim_sell_desk"] = _replace_cards(response_payload.get("trim_sell_desk", []))
+
+    logger.info(
+        "intel_v3_source_pack_legacy_normalization_summary "
+        "user_id=%s snapshot_id=%s total_cards=%d "
+        "normalized_to_source_validated_count=%d "
+        "normalized_to_pending_count=%d unchanged_count=%d",
+        user_id,
+        snapshot_id,
+        len(holdings),
+        validated_count,
+        pending_count,
+        unchanged_count,
+    )
 
 
 def _stale_analyst_tickers_from_gate(gate_result: Any) -> list[str]:

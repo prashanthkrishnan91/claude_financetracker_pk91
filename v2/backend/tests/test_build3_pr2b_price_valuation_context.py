@@ -662,3 +662,150 @@ class TestPricebandSnapshotContextV1:
             PRICE_STALE_THRESHOLD_DAYS,
         )
         assert PRICE_STALE_THRESHOLD_DAYS == 7
+
+    @pytest.mark.asyncio
+    async def test_happy_path_company_returns_non_null_context(self):
+        """Company ticker with source-linked FY EPS + fresh price → non-null serialized context.
+
+        Failure seam: test_happy_path_company_returns_non_null_context
+        Confirms the full pipeline (bridge → Phase 14D → Phase 14F → serialize) produces
+        a valid renderable dict for well-evidenced input. EPS=5.0, price=100.0 →
+        earnings yield=5% → 'reasonable' signal → should_render=True.
+        """
+        from datetime import datetime, timezone, timedelta
+        from uuid import uuid4
+        from app.services.intelligence.v3.priceband_snapshot_context_v1 import (
+            build_ticker_valuation_context_map,
+        )
+
+        today = datetime.now(timezone.utc).date()
+        fresh_date = (today - timedelta(days=1)).isoformat()
+
+        client = self._make_mock_client(
+            artifacts=[{"id": "art-msft", "ticker": "MSFT"}],
+            facts=[{
+                "artifact_id": "art-msft",
+                "fact_kind": "metric_observation",
+                "source_id": "src-sec-001",
+                "structured_payload": {
+                    "claim": "sec_companyfact_observed",
+                    "tag": "EarningsPerShareDiluted",
+                    "value": 5.0,
+                    "fiscal_period": "FY",
+                    "fiscal_year": 2024,
+                },
+            }],
+            market_snapshots=[{
+                "ticker": "MSFT",
+                "as_of": fresh_date,
+                "price": 100.0,
+                "sector": "Technology",
+                "industry": "Software",
+            }],
+        )
+
+        result = await build_ticker_valuation_context_map(
+            user_id=uuid4(),
+            client=client,
+            tickers=["MSFT"],
+            categories={"MSFT": "stock"},
+        )
+
+        assert "MSFT" in result
+        vc = result["MSFT"]
+        assert vc is not None, (
+            "Company with source-linked FY EPS + fresh price must return renderable context"
+        )
+        # Serialized dict must have exactly these three plain-English keys
+        assert set(vc.keys()) == {"visible_text", "limitation_text", "source_basis"}, (
+            f"Unexpected keys in bridge context: {set(vc.keys())}"
+        )
+        assert isinstance(vc["visible_text"], str) and len(vc["visible_text"]) > 0
+        assert isinstance(vc["limitation_text"], str) and len(vc["limitation_text"]) > 0
+        # No raw metric keys, no financial precision terms
+        forbidden = {
+            "target_price", "fair_value", "intrinsic_value", "upside", "downside",
+            "buy_below", "sell_above", "valuation_signal", "earnings_yield_bucket",
+            "eps_value", "raw_eps", "fy_diluted_eps", "unavailable_reason",
+        }
+        for key in forbidden:
+            assert key not in vc, f"Forbidden key {key!r} found in bridge-produced context"
+
+    @pytest.mark.asyncio
+    async def test_bridge_context_independent_of_action_conviction(self):
+        """Bridge-produced context is identical regardless of snapshot action/conviction.
+
+        Failure seam: test_bridge_context_independent_of_action_conviction
+        Calls the bridge directly (not manually passed serialized context). The
+        context_map returned by build_ticker_valuation_context_map contains only
+        EPS/price evidence — it has no knowledge of action, conviction, or evidence
+        band. Two snapshots built from the same map with different action/conviction
+        must have the same valuation_context.
+        """
+        from datetime import datetime, timezone, timedelta
+        from uuid import uuid4
+        from app.services.intelligence.v3.priceband_snapshot_context_v1 import (
+            build_ticker_valuation_context_map,
+        )
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+
+        today = datetime.now(timezone.utc).date()
+        fresh_date = (today - timedelta(days=1)).isoformat()
+
+        client = self._make_mock_client(
+            artifacts=[{"id": "art-aapl", "ticker": "AAPL"}],
+            facts=[{
+                "artifact_id": "art-aapl",
+                "fact_kind": "metric_observation",
+                "source_id": "src-sec-002",
+                "structured_payload": {
+                    "claim": "sec_companyfact_observed",
+                    "tag": "EarningsPerShareDiluted",
+                    "value": 5.0,
+                    "fiscal_period": "FY",
+                    "fiscal_year": 2024,
+                },
+            }],
+            market_snapshots=[{
+                "ticker": "AAPL",
+                "as_of": fresh_date,
+                "price": 100.0,
+                "sector": "Technology",
+                "industry": "Consumer Electronics",
+            }],
+        )
+
+        # Bridge produces context from EPS/price — action/conviction not involved
+        context_map = await build_ticker_valuation_context_map(
+            user_id=uuid4(),
+            client=client,
+            tickers=["AAPL"],
+            categories={"AAPL": "stock"},
+        )
+        vc = context_map.get("AAPL")
+        assert vc is not None, "Bridge must produce context for valid EPS/price input"
+
+        # Build two snapshots with different action/conviction from the same context_map
+        d_buy = _make_snapshot_decision(action="BUY", conviction="HIGH", evidence_quality="STRONG")
+        d_sell = _make_snapshot_decision(action="SELL", conviction="LOW", evidence_quality="THIN")
+        card_meta = [{"ticker": "AAPL", "name": "Apple", "category": "stock"}]
+
+        snap_buy = build_snapshot(
+            run_id="iso-bridge-buy",
+            decisions=[d_buy],
+            card_metas=card_meta,
+            valuation_context_map={"AAPL": vc},
+        )
+        snap_sell = build_snapshot(
+            run_id="iso-bridge-sell",
+            decisions=[d_sell],
+            card_metas=card_meta,
+            valuation_context_map={"AAPL": vc},
+        )
+
+        vc_buy = snap_buy["current_holdings"][0]["detail_drawer_payload"]["valuation_context"]
+        vc_sell = snap_sell["current_holdings"][0]["detail_drawer_payload"]["valuation_context"]
+        assert vc_buy == vc_sell, (
+            "Bridge-produced valuation context must be identical regardless of "
+            f"action/conviction: BUY/HIGH={vc_buy!r} vs SELL/LOW={vc_sell!r}"
+        )

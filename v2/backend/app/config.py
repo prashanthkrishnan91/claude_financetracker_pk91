@@ -265,14 +265,18 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation.
     intel_v3_priceband_shadow_v1_diagnostics_enabled: bool = False
 
-    # ── Intel v3 Phase 14F — PriceBand Visible Context Scaffold v1 (off by default) ──
-    # Hidden backend scaffold only. Composes Phase 14D shadow diagnostics with
-    # the Phase 14E visible-language translator into a future-renderable internal
-    # context object. NOT wired to any route, snapshot, frontend, or visible path.
-    # NO DecisionInputV3 mutation. NO Buy/Hold/Trim/Sell changes. NO SQL writes.
-    # NO provider/LLM calls. NO target price, fair value, or threshold exposure.
-    # enabled=True is for tests and scaffold validation only — never runtime.
-    # Must NOT be enabled in normal app operation.
+    # ── Intel v3 Build 3 PR 2B — PriceBand Visible Context v1 (off by default) ──
+    # When True, fetches source-linked FY EPS + fresh price for company tickers,
+    # runs Phase 14D shadow classification and Phase 14F plain-English translation,
+    # and embeds the result in detail_drawer_payload.valuation_context (detail
+    # drawer only — never card or list view).
+    # Non-company assets (ETF/fund/crypto/bond) are always suppressed.
+    # Stale price (>7 days) is always suppressed.
+    # Low-confidence or negative-EPS observations are always suppressed.
+    # NO LLM. NO provider calls — reads market_snapshots + research_artifact_facts only.
+    # NO target price, fair value, intrinsic value, upside, downside, buy_below/sell_above.
+    # NO DecisionInputV3 mutation. NO Buy/Hold/Trim/Sell authority change.
+    # Default off — set INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true to enable.
     intel_v3_priceband_visible_context_v1_enabled: bool = False
 
     # ── Deploy v3 sizing policy config (optional; policy is UNSUPPORTED if absent) ──

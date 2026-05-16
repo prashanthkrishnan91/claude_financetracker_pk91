@@ -6,6 +6,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
+- **PR 3B Activation Guard: evidence mapping version guard** (Stage 3, branch claude/evidence-mapping-version-guard-WK2im). Ensures production does not keep serving pre-PR #347 evidence-mapping snapshots after PR #347 merges. `EVIDENCE_MAPPING_VERSION="analyst_verdict_synthesis_v1"` added to `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload. `compare_and_republish()`, `republish_after_analyst_eligibility()`, and `enqueue_run_v3()` all treat mapping-version mismatch as a deterministic recertification trigger (zero-LLM). 16 new tests. No SQL, no UI, no analyst jobs. Post-merge validation: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
+
 - **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, PR #347 open — pending merge). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests (fake Supabase client). No SQL, no UI, no policy change. After merge: validate in Railway logs `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 
 ## Next

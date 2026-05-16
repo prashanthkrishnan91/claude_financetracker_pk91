@@ -122,6 +122,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. 31 tests.
 - PR #345: `_log_evidence_depth_summary()` shared helper; `_normalize_legacy_committee_status()` converts persisted `deferred` → real status at API response time. Log key: `intel_v3_source_pack_legacy_normalization_summary`. 22 tests.
 
+**PR 3B Activation Guard — evidence mapping version guard (this PR, branch claude/evidence-mapping-version-guard-WK2im):**
+- Problem: PR #347 changed `ReadOnlyEvidenceAdapter.load_cards()` synthesis logic, but production may serve a `worker_certified` snapshot built before that change — `Run Intel` no-op and Watchtower skip-republish could both leave the stale pre-PR #347 snapshot in place.
+- Fix: Added `EVIDENCE_MAPPING_VERSION = "analyst_verdict_synthesis_v1"` constant in `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload (added to `build_snapshot()`). Both `compare_and_republish()` and `republish_after_analyst_eligibility()` treat mapping-version mismatch as a republish trigger even when `evidence_newer_than_certified_snapshot=False`. `enqueue_run_v3()` calls `run_prewarm_snapshot()` (zero-LLM) instead of returning the `analyst_evidence_current` no-op when mapping version is stale. Idempotency preserved: once the current-version snapshot is published, all repeat checks return `CERTIFIED_CURRENT` / `analyst_evidence_current`. Observability: `intel_v3_evidence_mapping_version_summary` log in all three paths.
+- 16 new tests in `test_evidence_mapping_version_guard.py` (all pass). `_make_client()` in `test_watchtower_build_2.py` updated to include `evidence_mapping_version` by default.
+- Post-merge validation log keys: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
+- No SQL, no UI, no Deploy change, no analyst jobs, no LLM calls.
+
 **Build 3 PR 3B — analyst_verdict trusted-signal mapping (PR #347 open, pending merge):**
 - Root cause fixed: `data_quality_label="MEDIUM"` hardcoded fallback and missing `intel_read` synthesis caused ALL cards to show PARTIAL regardless of actual analyst content.
 - Fix: synthesize `intel_read.trusted_signals` from real `analyst_verdict` fields — `primary_driver` → `analyst_primary_driver`, `action_reason` → `analyst_action_rationale`, `key_drivers` → `analyst_key_drivers`. Count 0–3 dims: 3=STRONG, 1–2=OK(PARTIAL), 0=THIN/SUPPRESSED.

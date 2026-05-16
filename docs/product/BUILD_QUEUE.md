@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 2 exit validation (re-run)** (Stage 2, active). Stages 2.5A–2.9 complete. Re-validate the full Step 1/2/3 flow in production with a real amount (e.g. $900 and $1,500). Stage 2 exit remains pending until **all five** are observed: (1) amount-aware Deploy v3 shows 3–5 BUY recommendations and $1,500 sleeve totals exactly $1,500 when no guardrail prevents it (rounding residual distribution); (2) Step 3 lets the user edit actual amounts and add manual rows with `recommended_amount` preserved and `is_manual` correctly set; (3) decision log history renders below Step 3 and persists after refresh, with re-saving the same active plan updating the latest log rather than duplicating; (4) journal accounting shows BUY spend, manual BUY, and Trim/Sell separately, never negative reserve (e.g. $900 deposit + manual NVDA BUY $100 surfaces "Over planned by $X"); Evaluate button works or gracefully reports insufficient data without crashing on manual/TRIM rows; (5) recommendation confidence/ranking explanation is reviewed in a later evidence-quality slice (deferred). Readiness gates must be green. Do not mark Stage 2 complete or move to Stage 3 until all five are validated in production.
+- **PR #345 production validation** (Stage 3, active). PR #345 cleanup patch merging. After merge, validate in Railway logs: (1) `intel_v3_evidence_depth_summary` appears on prewarm-certified snapshot builds; (2) `intel_v3_source_pack_legacy_normalization_summary` appears on first `GET /intel/v3/snapshot` for the existing snapshot; (3) UI no longer shows "Analysis pending" for PARTIAL/STRONG evidence cards.
 
 ## Next
 
-- **Evidence depth PR 3B** (Stage 3). PR 3A (source-pack status + observability) pending merge. PR 3B scope: if production `intel_v3_evidence_depth_summary` logs show persistent high `source_pack_pending_count` or many PARTIAL bands, map `research_artifacts`/`research_artifact_facts` into `trusted_signals` so evidence bands can improve naturally. Do not start until PR 3A is merged and production log key `intel_v3_evidence_depth_summary source_pack_pending_count=N` is visible.
+- **Evidence depth PR 3B** (Stage 3). PR 3A (#344) + hotfix (#345) complete. PR 3B scope: map `research_artifacts`/`research_artifact_facts` into `trusted_signals` so evidence bands improve naturally. Gate: start only if production logs after PR #345 show persistent high `source_pack_pending_count` or PARTIAL bands remain a real problem — not before.
 
 ## Later
 
@@ -21,7 +21,9 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Build 3 PR 3A: Source-pack status + evidence-depth observability** (Stage 3, pending merge PR #344). Removes hard-coded `committee: {status: "deferred"}` from every card; `_build_source_pack_status()` now derives real status from `decision.evidence_quality` (`source_validated` / `pending`). Aggregate observability log `intel_v3_evidence_depth_summary` added. Does NOT map research_artifacts into trusted_signals; does NOT materially reduce PARTIAL bands. 31 new backend tests. No SQL, no providers, no Deploy/Watchtower change.
+- **Stage 2 exit validation** (Stage 2, production-passed). $900 and $1,500 Deploy flows validated: BUY sizing totaled planning cash when guardrails allowed; Step 3 actual logging/manual rows/history/accounting worked; Evaluate captured recent baseline and rendered older comparison. All five exit gates confirmed.
+
+- **Build 3 PR 3A: Source-pack status + evidence-depth observability** (Stage 3, merged PR #344 + cleanup hotfix PR #345). PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. PR #345: (1) `intel_v3_evidence_depth_summary` wired to prewarm path via `_log_evidence_depth_summary()` shared helper; (2) `_normalize_legacy_committee_status()` in `get_latest_snapshot()` converts persisted `deferred` → real status at API response time and updates aggregate counts (no DB mutation). 31 + 22 = 53 backend tests total. No SQL, no providers, no Deploy/Watchtower change.
 
 - **Build 3 PR 2B: Visible price/valuation context** (Stage 3, merged PR #341 + PR #342, production-activated and visually validated). PR #341 built the bridge and UI; PR #342 confirmed root cause (flag not set in Railway) and added observability logs. 15 new observability tests. Production rendering is live: `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` is set on both the main app and Watchtower Railway services. Operational log key: `valuation_context_pr2b_aggregate_summary renderable_context_count=N`.
 

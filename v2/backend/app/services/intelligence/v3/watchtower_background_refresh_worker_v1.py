@@ -259,30 +259,49 @@ class WatchtowerBackgroundRefreshWorker:
             finally:
                 self._in_progress.discard(price_key)
 
-        # ── Step 4: Background refresh — analyst LLM ───────────────────────
+        # ── Step 4: Background refresh — analyst LLM and stale recommendations ──
+        # Recommendations expire at the same 8h SLA as the certification contract.
+        # Stale recommendations require analyst re-runs just like stale analyst_llm
+        # evidence — the analyst worker produces both.  Without this, Watchtower
+        # would loop indefinitely with stale research and never re-certify Intel.
         analyst_key = (user_key, EVIDENCE_TYPE_ANALYST_LLM)
+        rec_stale = (
+            EVIDENCE_TYPE_RECOMMENDATION in plan.stale_by_type
+            or EVIDENCE_TYPE_RECOMMENDATION in plan.missing_by_type
+        )
+        llm_stale = (
+            EVIDENCE_TYPE_ANALYST_LLM in plan.stale_by_type
+            or EVIDENCE_TYPE_ANALYST_LLM in plan.missing_by_type
+        )
         if (
-            (EVIDENCE_TYPE_ANALYST_LLM in plan.stale_by_type
-             or EVIDENCE_TYPE_ANALYST_LLM in plan.missing_by_type)
+            (llm_stale or rec_stale)
             and analyst_key not in self._in_progress
             and self._analyst_enqueue is not None
             and elapsed < self._max_cycle_seconds
         ):
-            stale_analyst_tickers = _stale_tickers_for_type(plan, EVIDENCE_TYPE_ANALYST_LLM)
+            # Union tickers from both analyst_llm and recommendation stale records.
+            analyst_llm_tickers = set(_stale_tickers_for_type(plan, EVIDENCE_TYPE_ANALYST_LLM))
+            rec_tickers = set(_stale_tickers_for_type(plan, EVIDENCE_TYPE_RECOMMENDATION))
+            stale_analyst_tickers = list(analyst_llm_tickers | rec_tickers)
+            enqueue_reason = _analyst_enqueue_reason(llm_stale=llm_stale, rec_stale=rec_stale)
             if stale_analyst_tickers:
                 self._in_progress.add(analyst_key)
                 try:
                     logger.info(
                         "watchtower_evidence_updated user_id=%s evidence_type=%s "
-                        "action=enqueue_started ticker_count=%d",
-                        user_id, EVIDENCE_TYPE_ANALYST_LLM, len(stale_analyst_tickers),
+                        "action=enqueue_started ticker_count=%d "
+                        "analyst_enqueue_reason=%s",
+                        user_id, EVIDENCE_TYPE_ANALYST_LLM,
+                        len(stale_analyst_tickers), enqueue_reason,
                     )
                     count = await self._analyst_enqueue(user_id, stale_analyst_tickers)
                     result.analyst_jobs_enqueued = count or 0
                     logger.info(
                         "watchtower_evidence_updated user_id=%s evidence_type=%s "
-                        "action=enqueue_complete jobs_enqueued=%d",
-                        user_id, EVIDENCE_TYPE_ANALYST_LLM, result.analyst_jobs_enqueued,
+                        "action=enqueue_complete jobs_enqueued=%d "
+                        "analyst_enqueue_reason=%s",
+                        user_id, EVIDENCE_TYPE_ANALYST_LLM,
+                        result.analyst_jobs_enqueued, enqueue_reason,
                     )
                 except Exception as exc:
                     logger.warning(
@@ -333,8 +352,8 @@ class WatchtowerBackgroundRefreshWorker:
             cycle_ms,
             result.deploy_eligible_after,
             result.intel_eligible_after,
-            ",".join(plan.stale_by_type.keys()) or "none",
-            ",".join(plan.missing_by_type.keys()) or "none",
+            ",".join(sorted(plan.stale_by_type.keys())) or "none",
+            ",".join(sorted(plan.missing_by_type.keys())) or "none",
         )
 
         return result
@@ -350,6 +369,15 @@ def _stale_tickers_for_type(
         if job.evidence_type == evidence_type:
             tickers.extend(job.tickers)
     return list(set(tickers))
+
+
+def _analyst_enqueue_reason(*, llm_stale: bool, rec_stale: bool) -> str:
+    """Return a structured log value describing why analyst jobs are being enqueued."""
+    if llm_stale and rec_stale:
+        return "analyst_llm_and_recommendation_stale"
+    if rec_stale:
+        return "recommendation_stale"
+    return "analyst_llm_stale"
 
 
 # ── Runnable entry point (consistent with analyst_refresh_worker_entrypoint) ──

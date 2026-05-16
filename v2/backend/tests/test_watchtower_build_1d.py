@@ -908,6 +908,101 @@ class TestSelectiveAnalystEnqueue:
         )
 
 
+# ── Test 14b: Freshness gate / certification SLA alignment (Build 2.6 patch) ──
+#
+# Verifies that the Watchtower freshness classification (which drives analyst
+# job queuing) uses the same 8h/24h boundary as the certification contract.
+# With aging_seconds == fresh_seconds for recommendation and analyst_llm,
+# there is no AGING buffer — evidence is FRESH or STALE, nothing in between.
+
+class TestFreshnessGateCertificationAlignment:
+    """Freshness gate and certification contract must agree on research SLA boundaries."""
+
+    def _classify(self, evidence_type: str, age_hours: float) -> str:
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            classify_freshness_status,
+        )
+        ref = NOW - timedelta(hours=age_hours)
+        return classify_freshness_status(
+            evidence_type=evidence_type,
+            as_of=ref,
+            collected_at=ref,
+            now=NOW,
+        )
+
+    def _would_queue(self, evidence_type: str, age_hours: float) -> bool:
+        """True when the stale-analyst filter would enqueue this ticker."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            FRESHNESS_FRESH, FRESHNESS_AGING,
+        )
+        status = self._classify(evidence_type, age_hours)
+        return status not in (FRESHNESS_FRESH, FRESHNESS_AGING)
+
+    # ── Recommendation: 8h boundary ──────────────────────────────────────────
+
+    def test_7h_recommendation_is_fresh_no_analyst_job(self):
+        """7h recommendation: FRESH → no analyst job queued (within 8h SLA)."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_RECOMMENDATION, FRESHNESS_FRESH,
+        )
+        status = self._classify(EVIDENCE_TYPE_RECOMMENDATION, 7)
+        assert status == FRESHNESS_FRESH, f"7h rec expected FRESH, got {status}"
+        assert not self._would_queue(EVIDENCE_TYPE_RECOMMENDATION, 7), \
+            "7h recommendation must NOT queue an analyst job"
+
+    def test_9h_recommendation_is_stale_queues_analyst_job(self):
+        """9h recommendation: STALE → analyst job queued (exceeds 8h SLA)."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_RECOMMENDATION, FRESHNESS_STALE,
+        )
+        status = self._classify(EVIDENCE_TYPE_RECOMMENDATION, 9)
+        assert status == FRESHNESS_STALE, f"9h rec expected STALE, got {status}"
+        assert self._would_queue(EVIDENCE_TYPE_RECOMMENDATION, 9), \
+            "9h recommendation MUST queue an analyst job"
+
+    # ── Analyst LLM: 24h boundary ─────────────────────────────────────────────
+
+    def test_23h_analyst_insight_is_fresh_no_analyst_job(self):
+        """23h analyst insight: FRESH → no analyst job queued (within 24h SLA)."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_ANALYST_LLM, FRESHNESS_FRESH,
+        )
+        status = self._classify(EVIDENCE_TYPE_ANALYST_LLM, 23)
+        assert status == FRESHNESS_FRESH, f"23h insight expected FRESH, got {status}"
+        assert not self._would_queue(EVIDENCE_TYPE_ANALYST_LLM, 23), \
+            "23h analyst insight must NOT queue an analyst job"
+
+    def test_25h_analyst_insight_is_stale_queues_analyst_job(self):
+        """25h analyst insight: STALE → analyst job queued (exceeds 24h SLA)."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_ANALYST_LLM, FRESHNESS_STALE,
+        )
+        status = self._classify(EVIDENCE_TYPE_ANALYST_LLM, 25)
+        assert status == FRESHNESS_STALE, f"25h insight expected STALE, got {status}"
+        assert self._would_queue(EVIDENCE_TYPE_ANALYST_LLM, 25), \
+            "25h analyst insight MUST queue an analyst job"
+
+    def test_no_aging_buffer_for_recommendation(self):
+        """Recommendation has no AGING window: age just above 8h goes straight to STALE."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_RECOMMENDATION, FRESHNESS_AGING,
+        )
+        # 8.1h = just past fresh_seconds; with aging_seconds == fresh_seconds → STALE, not AGING
+        status = self._classify(EVIDENCE_TYPE_RECOMMENDATION, 8.1)
+        assert status != FRESHNESS_AGING, \
+            "Recommendation must not enter AGING state — gate and contract would diverge"
+
+    def test_no_aging_buffer_for_analyst_llm(self):
+        """Analyst LLM has no AGING window: age just above 24h goes straight to STALE."""
+        from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import (
+            EVIDENCE_TYPE_ANALYST_LLM, FRESHNESS_AGING,
+        )
+        # 24.1h = just past fresh_seconds; with aging_seconds == fresh_seconds → STALE, not AGING
+        status = self._classify(EVIDENCE_TYPE_ANALYST_LLM, 24.1)
+        assert status != FRESHNESS_AGING, \
+            "Analyst LLM must not enter AGING state — gate and contract would diverge"
+
+
 # ── Test 15: Watchtower entrypoint is importable with production defaults ──────
 
 class TestWatchtowerEntrypointImportable:

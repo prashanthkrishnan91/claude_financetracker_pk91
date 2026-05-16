@@ -138,15 +138,19 @@ FRESHNESS_SLA_CONFIG: dict[str, EvidenceSLA] = {
         stale_seconds=604_800,  # 7 d
     ),
     # Analyst LLM: explanation freshness (not Deploy authority)
+    # aging_seconds == fresh_seconds: no AGING buffer — anything >24h is immediately STALE
+    # so the planner queues analyst jobs at the same boundary as the certification contract.
     EVIDENCE_TYPE_ANALYST_LLM: EvidenceSLA(
         fresh_seconds=86_400,   # 24 h
-        aging_seconds=432_000,  # 5 d
+        aging_seconds=86_400,   # 24 h — collapsed; no AGING window for analyst evidence
         stale_seconds=604_800,  # 7 d
     ),
     # Recommendation: deterministic policy output; gates Intel certification
+    # aging_seconds == fresh_seconds: no AGING buffer — anything >8h is immediately STALE
+    # so the planner queues analyst jobs at the same boundary as the certification contract.
     EVIDENCE_TYPE_RECOMMENDATION: EvidenceSLA(
         fresh_seconds=28_800,   # 8 h
-        aging_seconds=86_400,   # 24 h
+        aging_seconds=28_800,   # 8 h — collapsed; no AGING window for recommendation evidence
         stale_seconds=604_800,  # 7 d
     ),
     # Snapshot: the certified Intel v3 snapshot

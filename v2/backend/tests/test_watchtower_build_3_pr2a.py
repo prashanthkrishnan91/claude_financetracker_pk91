@@ -146,33 +146,43 @@ class TestEntrypointBoundary:
             "watchtower_worker_entrypoint must not import IntelV3Service at module level"
 
 
-# ── 3. Kill switch: INTEL_V3_WATCHTOWER_ENABLED=0 exits cleanly ──────────────
+# ── 3. Opt-in gate: INTEL_V3_WATCHTOWER_ENABLED must be explicitly truthy ─────
 
 class TestKillSwitch:
-    """Kill switch must prevent the loop from starting when disabled."""
+    """Loop must NOT start unless INTEL_V3_WATCHTOWER_ENABLED is explicitly truthy.
 
-    @pytest.mark.parametrize("disabled_value", ["0", "false", "False", "FALSE", "no", "off"])
-    def test_disabled_exits_cleanly(self, disabled_value):
+    Default-false: absent env var, empty string, or any non-truthy value all
+    exit cleanly. Only 1/true/yes/on enables the loop.
+    """
+
+    @pytest.mark.parametrize("disabled_value", ["0", "false", "False", "FALSE", "no", "off", "", "random"])
+    def test_not_enabled_exits_cleanly(self, disabled_value):
         from app.services.intelligence.v3 import watchtower_worker_entrypoint as mod
         with patch.dict(os.environ, {"INTEL_V3_WATCHTOWER_ENABLED": disabled_value}):
             with patch.object(mod, "asyncio") as mock_asyncio:
                 result = mod.main(["--loop"])
-        assert result == 0, f"main() must return 0 when disabled ({disabled_value!r})"
+        assert result == 0, f"main() must return 0 when not enabled ({disabled_value!r})"
         mock_asyncio.run.assert_not_called()
 
-    def test_enabled_by_default_when_env_absent(self):
+    def test_disabled_by_default_when_env_absent(self):
+        """Absent env var means disabled — explicit opt-in required."""
         from app.services.intelligence.v3 import watchtower_worker_entrypoint as mod
         env = {k: v for k, v in os.environ.items() if k != "INTEL_V3_WATCHTOWER_ENABLED"}
         with patch.dict(os.environ, env, clear=True):
-            assert mod._is_watchtower_enabled() is True
+            assert mod._is_watchtower_enabled() is False
 
-    @pytest.mark.parametrize("enabled_value", ["1", "true", "True", "yes", "on", ""])
-    def test_enabled_values(self, enabled_value):
+    @pytest.mark.parametrize("enabled_value", ["1", "true", "True", "TRUE", "yes", "on"])
+    def test_explicit_truthy_values_enable(self, enabled_value):
         from app.services.intelligence.v3 import watchtower_worker_entrypoint as mod
         with patch.dict(os.environ, {"INTEL_V3_WATCHTOWER_ENABLED": enabled_value}):
             assert mod._is_watchtower_enabled() is True
 
-    def test_disabled_value_zero(self):
+    def test_empty_string_is_disabled(self):
+        from app.services.intelligence.v3 import watchtower_worker_entrypoint as mod
+        with patch.dict(os.environ, {"INTEL_V3_WATCHTOWER_ENABLED": ""}):
+            assert mod._is_watchtower_enabled() is False
+
+    def test_zero_is_disabled(self):
         from app.services.intelligence.v3 import watchtower_worker_entrypoint as mod
         with patch.dict(os.environ, {"INTEL_V3_WATCHTOWER_ENABLED": "0"}):
             assert mod._is_watchtower_enabled() is False

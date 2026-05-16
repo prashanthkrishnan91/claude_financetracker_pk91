@@ -43,9 +43,14 @@ DEFAULT_INTERVAL_SECONDS = 60.0
 
 
 def _is_watchtower_enabled() -> bool:
-    """Kill switch: returns False when INTEL_V3_WATCHTOWER_ENABLED=0 or false."""
-    raw = (os.getenv(_ENABLED_ENV) or "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    """Explicit opt-in: returns True ONLY when INTEL_V3_WATCHTOWER_ENABLED=1/true/yes/on.
+
+    Defaults to False (safe) when the env var is absent, empty, or any other value.
+    Both PROCESS_TYPE=watchtower (Railway routing) AND INTEL_V3_WATCHTOWER_ENABLED=true
+    must be set for the loop to run.
+    """
+    raw = (os.getenv(_ENABLED_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def _resolve_interval_seconds() -> float:
@@ -214,8 +219,9 @@ def main(argv: "list[str] | None" = None) -> int:
 
     if not _is_watchtower_enabled():
         logger.info(
-            "intel_v3.watchtower_worker_entrypoint disabled "
-            "%s=0 — exiting cleanly without starting loop",
+            "intel_v3.watchtower_worker_entrypoint not enabled — "
+            "set %s=true to start the loop (currently absent or not a truthy value). "
+            "Exiting cleanly.",
             _ENABLED_ENV,
         )
         return 0

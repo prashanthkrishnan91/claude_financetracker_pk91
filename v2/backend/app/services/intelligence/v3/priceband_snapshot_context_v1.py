@@ -118,6 +118,20 @@ async def _build(
     ]
 
     if not company_tickers:
+        logger.info(
+            "valuation_context_pr2b_aggregate_summary user_id=%s "
+            "flag_enabled=true "
+            "total_tickers=%d company_ticker_count=0 non_company_suppressed_count=%d "
+            "eps_found_count=0 source_linked_eps_count=0 "
+            "fresh_price_count=0 sector_found_count=0 "
+            "priceband_computed_count=0 "
+            "renderable_context_count=0 suppressed_context_count=%d "
+            "suppression_missing_eps=0 suppression_stale_price=0 "
+            "suppression_missing_price=0 suppression_zero_eps=0 "
+            "suppression_non_positive_price=0 "
+            "fetch_errors=0",
+            user_id, len(tickers), len(tickers), len(tickers),
+        )
         return {t: None for t in tickers}
 
     user_id_str = str(user_id)
@@ -228,6 +242,14 @@ async def _build(
             user_id, exc,
         )
 
+    # Intermediate counts for aggregate observability log (PR 2B root-cause fix).
+    eps_found_count = sum(
+        1 for t in company_tickers
+        if fy_diluted_by_ticker.get(t) is not None or fy_basic_by_ticker.get(t) is not None
+    )
+    fresh_price_count = sum(1 for (_, is_fresh) in price_by_ticker.values() if is_fresh)
+    sector_found_count = len(sector_label_by_ticker)
+
     # ── Step 3: Build PriceBandShadowInput records ────────────────────────────
     company_set = set(company_tickers)
     records: list[PriceBandShadowInput] = []
@@ -251,6 +273,10 @@ async def _build(
         ))
 
     # ── Step 4: Phase 14D shadow classification ───────────────────────────────
+    from .priceband_shadow_policy_v1 import (
+        REASON_MISSING_EPS, REASON_STALE_PRICE, REASON_MISSING_PRICE,
+        REASON_ZERO_EPS, REASON_NON_POSITIVE_PRICE,
+    )
     shadow_result = build_priceband_shadow(records=records, extra_errors=errors)
 
     computed_count = shadow_result.priceband_computed_count
@@ -293,6 +319,38 @@ async def _build(
         len(tickers),
         renderable,
         len(tickers) - renderable,
+    )
+
+    # ── Aggregate production-safe observability log (PR 2B root-cause fix) ───
+    # Emitted every time the bridge runs so Railway logs can explain exactly
+    # why valuation context is or is not rendered per snapshot build.
+    # No raw EPS values, prices, ratios, or per-ticker sensitive data.
+    non_company_suppressed_count = len(tickers) - len(company_tickers)
+    unavail = shadow_result.unavailable_reason_counts
+    logger.info(
+        "valuation_context_pr2b_aggregate_summary user_id=%s "
+        "flag_enabled=true "
+        "total_tickers=%d company_ticker_count=%d non_company_suppressed_count=%d "
+        "eps_found_count=%d source_linked_eps_count=%d "
+        "fresh_price_count=%d sector_found_count=%d "
+        "priceband_computed_count=%d "
+        "renderable_context_count=%d suppressed_context_count=%d "
+        "suppression_missing_eps=%d suppression_stale_price=%d "
+        "suppression_missing_price=%d suppression_zero_eps=%d "
+        "suppression_non_positive_price=%d "
+        "fetch_errors=%d",
+        user_id,
+        len(tickers), len(company_tickers), non_company_suppressed_count,
+        eps_found_count, len(eps_source_linked_tickers),
+        fresh_price_count, sector_found_count,
+        shadow_result.priceband_computed_count,
+        renderable, len(tickers) - renderable,
+        unavail.get(REASON_MISSING_EPS, 0),
+        unavail.get(REASON_STALE_PRICE, 0),
+        unavail.get(REASON_MISSING_PRICE, 0),
+        unavail.get(REASON_ZERO_EPS, 0),
+        unavail.get(REASON_NON_POSITIVE_PRICE, 0),
+        len(errors),
     )
 
     return context_map

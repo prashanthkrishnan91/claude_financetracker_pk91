@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, PR #347 open — pending merge). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests (fake Supabase client). No SQL, no UI, no policy change. After merge: validate in Railway logs `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
+- **PR 3B Activation Guard: evidence mapping version guard** (Stage 3, PR #348 pending merge, branch claude/evidence-mapping-version-guard-WK2im). Ensures production does not keep serving pre-PR #347 evidence-mapping snapshots after PR #347 merges. `EVIDENCE_MAPPING_VERSION="analyst_verdict_synthesis_v1"` added to `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload. `compare_and_republish()`, `republish_after_analyst_eligibility()`, and `enqueue_run_v3()` all treat mapping-version mismatch as a deterministic recertification trigger (zero-LLM). On prewarm failure, returns `mapping_version_recertification_failed` (not `analyst_evidence_current`). Frontend `IntelV3RunResult.status` type updated; `isNoOpRun` guard prevents indefinite polling on both new statuses. 17 backend + 4 frontend banner tests. No SQL, no UI design change, no analyst jobs. Post-merge validation: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
 
 ## Next
 
@@ -20,6 +20,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, merged PR #347). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests. No SQL, no UI, no policy change. Post-merge log key: `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 
 - **Stage 2 exit validation** (Stage 2, production-passed). $900 and $1,500 Deploy flows validated: BUY sizing totaled planning cash when guardrails allowed; Step 3 actual logging/manual rows/history/accounting worked; Evaluate captured recent baseline and rendered older comparison. All five exit gates confirmed.
 

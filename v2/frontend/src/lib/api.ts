@@ -1304,6 +1304,8 @@ export interface IntelV3RunResult {
     | "refresh_requested"
     | "refresh_in_progress"
     | "analyst_evidence_current"  // backend: evidence fresh, no jobs queued
+    | "mapping_version_recertified"  // stale mapping version recertified via zero-LLM prewarm
+    | "mapping_version_recertification_failed"  // prewarm failed during mapping recertification
     | "no_active_holdings"
     | "enqueue_failed"
     | "completed"   // legacy — may appear if backend version mismatch

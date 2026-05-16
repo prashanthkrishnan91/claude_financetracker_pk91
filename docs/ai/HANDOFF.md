@@ -122,16 +122,19 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - PR #344: `_build_source_pack_status()` derives real status from `decision.evidence_quality`. 31 tests.
 - PR #345: `_log_evidence_depth_summary()` shared helper; `_normalize_legacy_committee_status()` converts persisted `deferred` → real status at API response time. Log key: `intel_v3_source_pack_legacy_normalization_summary`. 22 tests.
 
-**Build 3 PR 3B — analyst_verdict trusted-signal mapping (PR #347 open, pending merge):**
+**Build 3 PR 3B — analyst_verdict trusted-signal mapping (merged PR #347):**
 - Root cause fixed: `data_quality_label="MEDIUM"` hardcoded fallback and missing `intel_read` synthesis caused ALL cards to show PARTIAL regardless of actual analyst content.
 - Fix: synthesize `intel_read.trusted_signals` from real `analyst_verdict` fields — `primary_driver` → `analyst_primary_driver`, `action_reason` → `analyst_action_rationale`, `key_drivers` → `analyst_key_drivers`. Count 0–3 dims: 3=STRONG, 1–2=OK(PARTIAL), 0=THIN/SUPPRESSED.
-- Also fixed: field name mismatch — `av.get("key_drivers") or av.get("drivers")` (was just `av.get("drivers")`).
-- Fallback phrases excluded via `_FALLBACK_PHRASES` + `_is_real_signal()` with trailing-punctuation normalization.
-- Research artifacts: confirmed locked `safe_for_decision=FALSE`; `artifact_decision_safe_count=0`, `artifact_suppressed_unsafe_count=0` always.
-- Observability: `mapped_existing_analyst_signal_count`, `trusted_signal_count_distribution`, `artifact_decision_safe_count`, `artifact_suppressed_unsafe_count` added to `load_cards()` stats and `_log_evidence_depth_summary()`.
-- 31 synthesis/policy tests in `test_v3_analyst_verdict_signal_mapping.py` + 9 direct adapter-path tests (fake Supabase client) in `test_intel_v3_read_only_adapter.py`; all 75 PR 3A+3B tests pass. No SQL, no UI, no policy change.
+- Fallback phrases excluded via `_FALLBACK_PHRASES` + `_is_real_signal()`. Research artifacts locked `safe_for_decision=FALSE`.
+- 31 synthesis/policy tests + 9 direct adapter-path tests. No SQL, no UI, no policy change.
+- Post-merge validation: `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 
-**Next work after PR #347 merges:** confirm in Railway logs that `intel_v3_evidence_depth_summary` shows `mapped_existing_analyst_signal_count > 0` and `trusted_signal_count_distribution` shows fewer 0-signal cards after a fresh certified run.
+**PR 3B Activation Guard — evidence mapping version guard (PR #348, pending merge, branch claude/evidence-mapping-version-guard-WK2im):**
+- Problem: PR #347 changed `ReadOnlyEvidenceAdapter.load_cards()` synthesis logic, but production may serve a `worker_certified` snapshot built before that change — `Run Intel` no-op and Watchtower skip-republish could both leave the stale pre-PR #347 snapshot in place.
+- Fix: `EVIDENCE_MAPPING_VERSION = "analyst_verdict_synthesis_v1"` constant in `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload (`build_snapshot()`). Both `compare_and_republish()` and `republish_after_analyst_eligibility()` treat mapping-version mismatch as a republish trigger even when `evidence_newer_than_certified_snapshot=False`. `enqueue_run_v3()` calls `run_prewarm_snapshot()` (zero-LLM) instead of returning the `analyst_evidence_current` no-op when mapping version is stale. On prewarm failure, returns `mapping_version_recertification_failed` (not `analyst_evidence_current`) — honest non-current signal. Frontend `IntelV3RunResult.status` includes both new statuses; `isNoOpRun` in `IntelV3Cockpit` treats both as refetch-not-poll so the spinner never runs indefinitely.
+- 17 new tests in `test_evidence_mapping_version_guard.py` (all pass). 4 new banner tests. `_make_client()` in `test_watchtower_build_2.py` updated to include `evidence_mapping_version` by default.
+- Post-merge validation log keys: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
+- No SQL, no UI design change, no Deploy change, no analyst jobs, no LLM calls.
 
 ## Handoff maintenance rule
 

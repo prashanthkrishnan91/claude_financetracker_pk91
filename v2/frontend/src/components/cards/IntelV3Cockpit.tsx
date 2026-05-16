@@ -318,8 +318,12 @@ export function IntelV3Cockpit() {
         // Backend says evidence is already current — no worker jobs were queued.
         // A new snapshot will not be generated, so isNewerThanClick would never
         // be satisfied if we started polling. Just refetch to confirm current state.
+        // mapping_version_recertified: prewarm published synchronously — refetch finds it immediately.
+        // mapping_version_recertification_failed: no new snapshot — polling would spin indefinitely.
         const isNoOpRun =
           result.status === "analyst_evidence_current" ||
+          result.status === "mapping_version_recertified" ||
+          result.status === "mapping_version_recertification_failed" ||
           (result.queued_ticker_count === 0 && result.existing_certified_snapshot === true);
         if (isNoOpRun) {
           refetchSnapshot();

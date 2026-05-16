@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from .decision_contracts import ActionV3, AxisBand, ConvictionV3, DecisionOutputV3
+from .evidence_mapping_version_v1 import EVIDENCE_MAPPING_VERSION
 
 _SCHEMA_VERSION = "v3.1"
 
@@ -267,4 +268,5 @@ def build_snapshot(
         "warnings":       warnings or [],
         "legacy_path_used": False,
         "diagnostics":    diagnostics,
+        "evidence_mapping_version": EVIDENCE_MAPPING_VERSION,
     }

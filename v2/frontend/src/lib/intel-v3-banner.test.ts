@@ -474,3 +474,52 @@ describe("Build 2 — evidence_freshness_state status mapping", () => {
     expect(deriveIntelV3UIStatus(snap, false)).toBe("certified_current");
   });
 });
+
+// ── mapping_version_recertified / mapping_version_recertification_failed ───────
+// These statuses must not put the UI in Updating/spinning state when a
+// certified snapshot is present and isRefreshing=false.
+
+describe("mapping version guard — banner state machine contract", () => {
+  it("mapping_version_recertified + certified snapshot + isRefreshing=false => Ready pill", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "mapping_version_recertified" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
+    expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
+    expect(buildStatusPillState(snap, false, runResult).tone).toBe("green");
+  });
+
+  it("mapping_version_recertified does not put the UI in Updating state", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "mapping_version_recertified" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(buildStatusPillState(snap, false, runResult).pill).not.toBe("Updating");
+  });
+
+  it("mapping_version_recertification_failed + certified snapshot + isRefreshing=false => Ready pill", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "mapping_version_recertification_failed" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(deriveIntelV3UIStatus(snap, false, runResult)).toBe("certified_current");
+    expect(buildStatusPillState(snap, false, runResult).pill).toBe("Ready");
+  });
+
+  it("mapping_version_recertification_failed does not put the UI in Updating state", () => {
+    const snap = makeCertifiedSnapshot();
+    const runResult = {
+      status: "mapping_version_recertification_failed" as const,
+      queued_ticker_count: 0,
+      existing_certified_snapshot: true,
+    };
+    expect(buildStatusPillState(snap, false, runResult).pill).not.toBe("Updating");
+  });
+});

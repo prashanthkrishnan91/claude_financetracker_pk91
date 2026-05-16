@@ -822,9 +822,48 @@ class IntelV3Service:
                 }
 
         # Determine status. When gate determined analyst evidence is current
-        # (0 stale tickers), the response status reflects that.
+        # (0 stale tickers), also check evidence mapping version. A stale mapping
+        # version means the persisted snapshot was built before PR #347's synthesis
+        # change and must be recertified deterministically before reporting current.
         if gate_succeeded and not stale_analyst_tickers:
-            status = "analyst_evidence_current"
+            from .evidence_mapping_version_v1 import (
+                EVIDENCE_MAPPING_VERSION as _CURRENT_MAPPING_VER,
+                is_snapshot_mapping_current as _is_mapping_current,
+            )
+            _snap_mapping_ver = (
+                latest_snapshot.get("evidence_mapping_version") if latest_snapshot else None
+            )
+            _mapping_current = _is_mapping_current(latest_snapshot or {})
+            logger.info(
+                "intel_v3_evidence_mapping_version_summary user_id=%s "
+                "current_evidence_mapping_version=%s "
+                "latest_snapshot_evidence_mapping_version=%s "
+                "mapping_version_current=%s "
+                "deterministic_republish_required=%s "
+                "analyst_jobs_required=false "
+                "snapshot_id=%s",
+                self.user_id,
+                _CURRENT_MAPPING_VER,
+                _snap_mapping_ver or "missing",
+                _mapping_current,
+                not _mapping_current,
+                existing_certified_snapshot_id or "none",
+            )
+            if _mapping_current:
+                status = "analyst_evidence_current"
+            else:
+                # Mapping version stale — trigger zero-LLM deterministic recertification.
+                try:
+                    _prewarm_id = str(uuid.uuid4())
+                    await self.run_prewarm_snapshot(prewarm_run_id=_prewarm_id)
+                    status = "mapping_version_recertified"
+                except Exception as _prewarm_exc:
+                    logger.warning(
+                        "intel_v3_evidence_mapping_version_recertification_failed "
+                        "user_id=%s error=%s",
+                        self.user_id, _prewarm_exc,
+                    )
+                    status = "mapping_version_recertification_failed"
         elif enqueue_result_touched > 0 and enqueue_result_created == 0:
             status = "refresh_in_progress"
         else:
@@ -879,6 +918,9 @@ class IntelV3Service:
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."
                 if queued_count > 0
+                else "Deterministic recertification failed — evidence mapping version mismatch. "
+                "Retry Run Intel to recertify."
+                if status == "mapping_version_recertification_failed"
                 else "Analyst evidence is current — no refresh needed."
             ),
         }

@@ -863,7 +863,7 @@ class IntelV3Service:
                         "user_id=%s error=%s",
                         self.user_id, _prewarm_exc,
                     )
-                    status = "analyst_evidence_current"
+                    status = "mapping_version_recertification_failed"
         elif enqueue_result_touched > 0 and enqueue_result_created == 0:
             status = "refresh_in_progress"
         else:
@@ -918,6 +918,9 @@ class IntelV3Service:
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."
                 if queued_count > 0
+                else "Deterministic recertification failed — evidence mapping version mismatch. "
+                "Retry Run Intel to recertify."
+                if status == "mapping_version_recertification_failed"
                 else "Analyst evidence is current — no refresh needed."
             ),
         }

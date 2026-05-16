@@ -353,6 +353,46 @@ class TestEnqueueRunV3MappingGuard:
         assert result["status"] == "analyst_evidence_current"
         assert prewarm_called == []
 
+    @pytest.mark.asyncio
+    async def test_stale_mapping_prewarm_failure_returns_recertification_failed(self):
+        """analyst_evidence_current + stale mapping + prewarm raises → mapping_version_recertification_failed."""
+        svc = self._make_service()
+
+        stale_snapshot = {
+            "snapshot_id": str(uuid.uuid4()),
+            "snapshot_source": "worker_certified",
+            # no evidence_mapping_version key → stale
+        }
+
+        async def fake_prewarm_raising(*, prewarm_run_id: str) -> dict:
+            raise RuntimeError("contract_check_failed")
+
+        svc.get_latest_snapshot = AsyncMock(return_value=stale_snapshot)
+        svc.run_prewarm_snapshot = fake_prewarm_raising
+        svc._get_active_tickers = AsyncMock(return_value=["AAPL", "MSFT"])
+
+        gate_result = MagicMock()
+        gate_result.intel_status = "current"
+        gate_result.deploy_status = "eligible"
+        gate_result.deploy_blockers = []
+        gate_result.refresh_plan = MagicMock(
+            urgent_refresh_count=0, deploy_blockers=[]
+        )
+        gate_result.gate_check_ms = 5
+
+        with patch(
+            "app.services.intelligence.v3.intel_v3_fast_freshness_gate_v1.run_fast_freshness_gate",
+            new=AsyncMock(return_value=gate_result),
+        ), patch(
+            "app.services.intelligence.v3.intel_v3_service._stale_analyst_tickers_from_gate",
+            return_value=[],
+        ):
+            result = await svc.enqueue_run_v3()
+
+        assert result["status"] == "mapping_version_recertification_failed"
+        assert result["status"] != "analyst_evidence_current"
+        assert result["queued_ticker_count"] == 0
+
 
 # ── build_snapshot includes evidence_mapping_version ─────────────────────────
 

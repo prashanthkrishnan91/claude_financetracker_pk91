@@ -24,10 +24,10 @@ from uuid import UUID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000000001")
 NOW = datetime(2026, 5, 14, 12, 0, 0, tzinfo=timezone.utc)
-FRESH_REC_AT = (NOW - timedelta(hours=2)).isoformat()       # 2h old — within 24h SLA
-FRESH_INSIGHT_AT = (NOW - timedelta(hours=3)).isoformat()   # 3h old — within 48h SLA
-STALE_REC_AT = (NOW - timedelta(hours=30)).isoformat()      # 30h old — stale (>24h)
-STALE_INSIGHT_AT = (NOW - timedelta(hours=55)).isoformat()  # 55h old — stale (>48h)
+FRESH_REC_AT = (NOW - timedelta(hours=2)).isoformat()       # 2h old — within 8h SLA
+FRESH_INSIGHT_AT = (NOW - timedelta(hours=3)).isoformat()   # 3h old — within 24h SLA
+STALE_REC_AT = (NOW - timedelta(hours=30)).isoformat()      # 30h old — stale (>8h)
+STALE_INSIGHT_AT = (NOW - timedelta(hours=55)).isoformat()  # 55h old — stale (>24h)
 AGENT_RUN_ID = "run-abc-123"
 
 
@@ -361,7 +361,7 @@ async def test_stale_recommendation_fails():
     tickers = ["AAPL"]
     recs = [
         {"ticker": "AAPL", "action": "BUY", "agent_run_id": AGENT_RUN_ID,
-         "created_at": STALE_REC_AT, "is_active": True}    # 30h > 24h SLA
+         "created_at": STALE_REC_AT, "is_active": True}    # 30h > 8h SLA
     ]
     insights = [
         {"ticker": "AAPL", "run_id": AGENT_RUN_ID,
@@ -388,7 +388,7 @@ async def test_stale_agent_insight_fails():
     ]
     insights = [
         {"ticker": "AAPL", "run_id": AGENT_RUN_ID,
-         "created_at": STALE_INSIGHT_AT,             # 55h > 48h SLA
+         "created_at": STALE_INSIGHT_AT,             # 55h > 24h SLA
          "analyst_verdict": _fresh_verdict("AAPL")}
     ]
     agent_runs = [{"id": AGENT_RUN_ID, "status": "completed", "finished_at": STALE_INSIGHT_AT}]
@@ -624,3 +624,59 @@ async def test_prewarm_snapshot_source_certification_failed_when_contract_fails(
     assert snapshot["agents_ran_via_worker"] is True
     assert snapshot["failed_tickers_in_certification"] == ["MSFT"]
     assert snapshot["certification_summary"]["certified"] is False
+
+
+# ── SLA boundary tests (Build 2.6 — 8h rec / 24h insight) ──────────────────
+
+def _make_single_ticker_client(rec_at: str, insight_at: str) -> MagicMock:
+    """Helper: one-ticker client with a completed agent run."""
+    recs = [{"ticker": "AAPL", "action": "BUY", "agent_run_id": AGENT_RUN_ID,
+             "created_at": rec_at, "is_active": True}]
+    insights = [{"ticker": "AAPL", "run_id": AGENT_RUN_ID,
+                 "created_at": insight_at, "analyst_verdict": _fresh_verdict("AAPL")}]
+    agent_runs = [{"id": AGENT_RUN_ID, "status": "completed", "finished_at": insight_at}]
+    return _make_client(tickers=["AAPL"], recs=recs, insights=insights, agent_runs=agent_runs)
+
+
+@pytest.mark.asyncio
+async def test_7h_recommendation_is_fresh():
+    """Recommendation 7h old is within the 8h SLA — must certify."""
+    rec_at = (NOW - timedelta(hours=7)).isoformat()
+    insight_at = (NOW - timedelta(hours=1)).isoformat()
+    client = _make_single_ticker_client(rec_at, insight_at)
+    result = await check_certified_intel_run_contract(user_id=USER_ID, client=client, now=NOW)
+    assert result.certified is True, f"7h rec should be fresh; got {result.failed_tickers_with_reasons}"
+
+
+@pytest.mark.asyncio
+async def test_9h_recommendation_is_stale():
+    """Recommendation 9h old exceeds the 8h SLA — must not certify."""
+    rec_at = (NOW - timedelta(hours=9)).isoformat()
+    insight_at = (NOW - timedelta(hours=1)).isoformat()
+    client = _make_single_ticker_client(rec_at, insight_at)
+    result = await check_certified_intel_run_contract(user_id=USER_ID, client=client, now=NOW)
+    assert result.certified is False
+    assert result.stale_evidence_count == 1
+    assert FAIL_STALE_RECOMMENDATION in [r["reason"] for r in result.failed_tickers_with_reasons]
+
+
+@pytest.mark.asyncio
+async def test_23h_agent_insight_is_fresh():
+    """Agent insight 23h old is within the 24h SLA — must certify."""
+    rec_at = (NOW - timedelta(hours=1)).isoformat()
+    insight_at = (NOW - timedelta(hours=23)).isoformat()
+    client = _make_single_ticker_client(rec_at, insight_at)
+    result = await check_certified_intel_run_contract(user_id=USER_ID, client=client, now=NOW)
+    assert result.certified is True, f"23h insight should be fresh; got {result.failed_tickers_with_reasons}"
+
+
+@pytest.mark.asyncio
+async def test_25h_agent_insight_is_stale():
+    """Agent insight 25h old exceeds the 24h SLA — must not certify."""
+    rec_at = (NOW - timedelta(hours=1)).isoformat()
+    insight_at = (NOW - timedelta(hours=25)).isoformat()
+    client = _make_single_ticker_client(rec_at, insight_at)
+    result = await check_certified_intel_run_contract(user_id=USER_ID, client=client, now=NOW)
+    assert result.certified is False
+    assert result.stale_evidence_count == 1
+    assert FAIL_STALE_AGENT_INSIGHT in [r["reason"] for r in result.failed_tickers_with_reasons]

@@ -15,8 +15,8 @@ active position ticker:
      ``risk_flag``, and ``conviction_level``.
   5. ``primary_driver`` is not a ticker-prefix-only template string
      (i.e. does not start with just the ticker followed by a short clause).
-  6. Recommendation timestamp is within the fresh SLA (24 h).
-  7. Agent insight timestamp is within the fresh SLA (48 h).
+  6. Recommendation timestamp is within the fresh SLA (8 h).
+  7. Agent insight timestamp is within the fresh SLA (24 h).
 
 This is a pure async read — no writes, no LLM calls, no side effects.
 Never raises into its caller; DB failures degrade to honest failure rows.
@@ -33,8 +33,8 @@ from uuid import UUID
 logger = logging.getLogger(__name__)
 
 # SLA windows (hours) — mirror evidence_freshness_contract_v1.py SOURCE_SLAS
-RECOMMENDATION_FRESH_HOURS = 24.0
-AGENT_INSIGHT_FRESH_HOURS = 48.0
+RECOMMENDATION_FRESH_HOURS = 8.0
+AGENT_INSIGHT_FRESH_HOURS = 24.0
 
 
 # ── Per-ticker failure reasons ────────────────────────────────────────────────

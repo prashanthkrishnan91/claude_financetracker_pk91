@@ -25,6 +25,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Build 2.6: Tighten Intel research freshness SLA** (Stage 3, merged). Recommendation SLA 24h → 8h; agent insight SLA 48h → 24h. Worker certification now blocks at the new thresholds. Fast freshness gate queues analyst jobs under new policy. Price/Watchtower/Deploy unchanged. 4 new boundary tests. No SQL, no UI.
+
 - **Build 2.5: Simplified user-facing Intel status** (Stage 3, merged). Replaced large internal certification/debug banner with a compact "Portfolio Intelligence" status area showing a plain-English pill (Ready / Updating / Needs Research / Blocked) and one short line. Backend complexity (worker_certified, agent run IDs, LLM details, evidence class names) hidden behind a collapsible "Diagnostics" drawer. Backend certification contract unchanged; all 415 frontend tests pass. No SQL, no new providers.
 
 - **Build 2: Evidence-grade certification + publish contract** (Stage 3, merged). New `watchtower_intel_republisher_v1.py`: after Watchtower writes fresh prices to `portfolio_snapshots`, `compare_and_republish()` triggers `IntelV3Service.run_prewarm_snapshot()` (zero LLM calls) to re-certify and publish a new `worker_certified` snapshot from the fresh evidence. `GET /intel/v3/snapshot` now includes `evidence_freshness_state` (`certified_current` | `republish_pending`) in every response. Watchtower worker boundary preserved — no `decide()` import in the worker. `build_default_intel_republish_callable()` added to `watchtower_callables_v1.py`. 28 new tests. No SQL.

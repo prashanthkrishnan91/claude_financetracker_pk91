@@ -92,8 +92,8 @@ class SourceSLA:
 
 SOURCE_SLAS: dict[str, SourceSLA] = {
     # Critical (gates visible action)
-    SOURCE_RECOMMENDATIONS:    SourceSLA(fresh_hours=24.0,  stale_hours=168.0, critical=True),   # 1d / 7d
-    SOURCE_AGENT_INSIGHTS:     SourceSLA(fresh_hours=48.0,  stale_hours=168.0, critical=True),   # 2d / 7d
+    SOURCE_RECOMMENDATIONS:    SourceSLA(fresh_hours=8.0,   stale_hours=168.0, critical=True),   # 8h / 7d
+    SOURCE_AGENT_INSIGHTS:     SourceSLA(fresh_hours=24.0,  stale_hours=168.0, critical=True),   # 1d / 7d
     SOURCE_POSITIONS:          SourceSLA(fresh_hours=24.0,  stale_hours=168.0, critical=True),   # 1d / 7d
     # Non-critical (sizing / context)
     SOURCE_PORTFOLIO_SNAPSHOT: SourceSLA(fresh_hours=24.0,  stale_hours=168.0, critical=False),

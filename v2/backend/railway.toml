@@ -2,6 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"watchtower\" ]; then python -m app.services.intelligence.v3.watchtower_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
+startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"watchtower\" ]; then python -m app.services.intelligence.v3.watchtower_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"alert_email_delivery\" ]; then python -m app.services.alert.alert_email_delivery_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

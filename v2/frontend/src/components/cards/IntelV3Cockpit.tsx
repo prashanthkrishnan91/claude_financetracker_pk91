@@ -29,6 +29,7 @@ import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
 import { buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
+import { DataHealthDrawer } from "./DataHealthDrawer";
 import { ComingLaterPanel } from "./IntelV3Primitives";
 import { Spinner } from "@/components/ui/Spinner";
 import type {
@@ -65,12 +66,14 @@ function CommitteeStatusBand({
   lastRunResult,
   onRun,
   isRunDisabled,
+  onDataHealth,
 }: {
   snapshot: IntelV3Snapshot | null;
   isRefreshing: boolean;
   lastRunResult?: IntelV3RunResult | null;
   onRun: () => void;
   isRunDisabled: boolean;
+  onDataHealth?: () => void;
 }) {
   const [diagOpen, setDiagOpen] = useState(false);
   const pillState = buildStatusPillState(snapshot, isRefreshing, lastRunResult);
@@ -109,13 +112,23 @@ function CommitteeStatusBand({
           {isRefreshing && <Spinner className="h-3 w-3 text-text-muted" />}
         </div>
         <p className="text-[11px] text-text-secondary">{pillState.line}</p>
-        <button
-          onClick={() => setDiagOpen((v) => !v)}
-          className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
-          aria-expanded={diagOpen}
-        >
-          {diagOpen ? "▲ Hide diagnostics" : "▼ Diagnostics"}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setDiagOpen((v) => !v)}
+            className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
+            aria-expanded={diagOpen}
+          >
+            {diagOpen ? "▲ Hide diagnostics" : "▼ Diagnostics"}
+          </button>
+          {onDataHealth && (
+            <button
+              onClick={onDataHealth}
+              className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
+            >
+              Data Health
+            </button>
+          )}
+        </div>
         {diagOpen && (
           <div className="mt-1 pt-1.5 border-t border-border space-y-0.5 text-[11px] text-text-muted">
             <p className="font-medium text-text-secondary">{bannerState.headline}</p>
@@ -332,6 +345,7 @@ export function IntelV3Cockpit() {
   const [selectedCard, setSelectedCard] = useState<IntelV3HeldCard | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [lastRunResult, setLastRunResult] = useState<IntelV3RunResult | null>(null);
+  const [dataHealthOpen, setDataHealthOpen] = useState(false);
 
   const refreshStartedAt = useRef<number | null>(null);
   const pollTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -462,6 +476,7 @@ export function IntelV3Cockpit() {
           lastRunResult={lastRunResult}
           onRun={handleRun}
           isRunDisabled={runMutation.isPending}
+          onDataHealth={() => setDataHealthOpen(true)}
         />
         <div className="flex items-center justify-center py-16 gap-3 text-text-muted">
           <Spinner className="h-5 w-5" />
@@ -490,6 +505,7 @@ export function IntelV3Cockpit() {
         lastRunResult={lastRunResult}
         onRun={handleRun}
         isRunDisabled={runMutation.isPending}
+        onDataHealth={() => setDataHealthOpen(true)}
       />
 
       {/* Portfolio overview */}
@@ -530,6 +546,9 @@ export function IntelV3Cockpit() {
 
       {/* Detail drawer */}
       <IntelV3Drawer card={selectedCard} onClose={() => setSelectedCard(null)} />
+
+      {/* Data Health drawer — mounted only when open so hooks don't run while closed */}
+      {dataHealthOpen && <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />}
     </div>
   );
 }

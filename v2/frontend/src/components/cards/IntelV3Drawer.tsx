@@ -27,6 +27,13 @@ import {
   DataMissingPill,
   ACTION_TOKEN_STYLES,
 } from "./IntelV3Primitives";
+import { SourceMetadataStrip } from "./TrustPrimitives";
+import {
+  evidenceBandToBeginnerLabel,
+  committeeStatusToPlainLabel,
+  formatSnapshotIdShort,
+  formatUpdatedAtSafe,
+} from "@/lib/intel-v3-evidence";
 
 interface IntelV3DrawerProps {
   card: IntelV3HeldCard | null;
@@ -56,17 +63,6 @@ function CloseIcon() {
   );
 }
 
-// Simple display label for the metadata footer. UTC timezone ensures the date
-// doesn't shift for near-midnight UTC timestamps across server/client timezones.
-function formatUpdatedAt(iso: string): string {
-  try {
-    const d = new Date(iso);
-    if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
-  } catch {
-    return iso;
-  }
-}
 
 export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -111,12 +107,10 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
   const convictionLabel =
     card.conviction.charAt(0) + card.conviction.slice(1).toLowerCase();
-  const evidenceBandLabel =
-    card.evidence_band === "STRONG"
-      ? "Strong"
-      : card.evidence_band === "PARTIAL"
-      ? "Partial"
-      : "Thin";
+  const evidenceBandBeginnerLabel = evidenceBandToBeginnerLabel(card.evidence_band);
+  const committeeStatusLabel = committeeStatusToPlainLabel(
+    payload.committee?.status ?? ""
+  );
 
   return (
     <>
@@ -267,19 +261,33 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* Evidence check */}
+          {/* Evidence + source shell */}
           <Section title="Evidence check">
+            {/* Source row — plainly attributes the snapshot and source-pack status */}
+            <div className="rounded-lg border border-border bg-surface/40 px-3 py-2.5 mb-3">
+              <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">Source</p>
+              <p className="text-xs font-medium text-text-secondary">
+                Built from Intel v3 snapshot
+              </p>
+              <p className="text-[10px] text-text-muted mt-0.5">{committeeStatusLabel}</p>
+            </div>
+
+            {/* Evidence summary */}
             {card.evidence_text ? (
-              <p>{card.evidence_text}</p>
+              <p className="mb-3">{card.evidence_text}</p>
             ) : (
-              <p className="text-xs text-text-muted italic">No evidence summary available.</p>
+              <p className="text-xs text-text-muted italic mb-3">No evidence summary available.</p>
             )}
-            <div className="grid grid-cols-2 gap-2 mt-2.5 text-xs">
+
+            {/* Evidence quality grid — beginner language */}
+            <div className="grid grid-cols-2 gap-2 text-xs">
               <div className="bg-surface-elevated rounded-lg p-2.5">
                 <span className="text-[10px] text-text-muted block mb-0.5 uppercase tracking-wide">
-                  Signal quality
+                  Evidence
                 </span>
-                <span className="font-semibold text-text-primary">{evidenceBandLabel}</span>
+                <span className="font-semibold text-text-primary text-[11px] leading-snug">
+                  {evidenceBandBeginnerLabel}
+                </span>
               </div>
               <div className="bg-surface-elevated rounded-lg p-2.5">
                 <span className="text-[10px] text-text-muted block mb-0.5 uppercase tracking-wide">
@@ -305,14 +313,21 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* ── Coming-Later modules ────────────────────────────────────── */}
+          {/* ── Coming-Later evidence modules ───────────────────────────── */}
           <div className="space-y-3">
             <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
               Preparing for the next intelligence stage
             </p>
-            <ComingLaterPanel title="Business story" />
-            <ComingLaterPanel title="Technical & fundamental context" />
             <ComingLaterPanel title="Source credibility tier" />
+            <ComingLaterPanel title="Contradiction strip" />
+            <ComingLaterPanel title="Evidence completeness score" />
+            <ComingLaterPanel title="Business story" />
+            <ComingLaterPanel title="SEC filing evidence room" />
+            <ComingLaterPanel title="Technical evidence room" />
+            <ComingLaterPanel title="Fundamental evidence room" />
+            <ComingLaterPanel title="Sentiment & news evidence room" />
+            <ComingLaterPanel title="Company strategy evidence room" />
+            <ComingLaterPanel title="Source snippets & citations" />
             <ComingLaterPanel
               title="Ask why / Challenge / Explain"
               caption="This intelligence module is being prepared. The next intelligence stage will surface it here."
@@ -320,10 +335,12 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
           </div>
 
           {/* ── Snapshot metadata ───────────────────────────────────────── */}
-          <div className="text-[10px] text-text-muted space-y-0.5 pt-2 border-t border-border">
-            <p>Updated: {formatUpdatedAt(card.updated_at)}</p>
-            <p>Snapshot: {card.source_snapshot_id?.slice(0, 8) ?? "—"}</p>
-            <p>Schema: {payload.schema_version}</p>
+          <div className="pt-2 border-t border-border">
+            <SourceMetadataStrip
+              updatedAt={formatUpdatedAtSafe(card.updated_at)}
+              snapshotIdShort={formatSnapshotIdShort(card.source_snapshot_id)}
+              schemaVersion={payload.schema_version}
+            />
           </div>
         </div>
       </aside>

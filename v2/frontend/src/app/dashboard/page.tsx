@@ -15,6 +15,7 @@ import {
   useDeployV3Plan,
   useAlertCandidates,
 } from "@/lib/hooks";
+import { DataHealthDrawer } from "@/components/cards/DataHealthDrawer";
 import {
   buildTheBrief,
   buildActToday,
@@ -35,6 +36,8 @@ export default function DashboardPage() {
   const { data: intelSnapshot } = useIntelV3Snapshot();
   const { data: deployPlan } = useDeployV3Plan();
   const { data: alertCandidates } = useAlertCandidates(50);
+
+  const [dataHealthOpen, setDataHealthOpen] = useState(false);
 
   // Empty string on server; set after mount to avoid locale/hydration mismatch.
   const [todayLabel, setTodayLabel] = useState("");
@@ -94,6 +97,13 @@ export default function DashboardPage() {
             {plaidStatus && (
               <PlaidBadge status={plaidStatus.status} age={plaidStatus.age_hours} />
             )}
+            <button
+              onClick={() => setDataHealthOpen(true)}
+              className="text-xs text-text-muted hover:text-text-primary transition-colors"
+            >
+              <span className="sm:hidden">Health</span>
+              <span className="hidden sm:inline">Data Health</span>
+            </button>
             <span className="text-xs text-text-muted hidden sm:inline">v2.0</span>
             <button
               onClick={signOut}
@@ -274,6 +284,9 @@ export default function DashboardPage() {
           <HoldingsList />
         </section>
       </main>
+
+      {/* Data Health drawer — mounted only when open so hooks don't run while closed */}
+      {dataHealthOpen && <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />}
     </>
   );
 }

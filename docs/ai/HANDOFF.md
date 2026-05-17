@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 4B — Today Command Center; **merged PR #359**; next: Stage 4C)
+Last updated: 2026-05-17 (Stage 4C — Intel Investment Committee Redesign; **PR #361 open**; next: Stage 4D)
 
 ## Purpose
 

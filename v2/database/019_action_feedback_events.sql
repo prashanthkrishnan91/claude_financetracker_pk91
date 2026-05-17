@@ -14,8 +14,9 @@
 --   1. Open the Supabase production project → SQL Editor → New query.
 --   2. Paste the contents of this file and Run.
 --   3. Verify: SELECT COUNT(*) FROM public.action_feedback_events;  (0 rows is OK)
---   Until applied, the action-feedback POST endpoint returns 500; GET returns [].
---   No other app behavior is affected (Intel v3, Deploy, Watchtower unchanged).
+--   Until applied, both action-feedback endpoints (POST and GET) will return 500
+--   because the table does not exist. No other app behavior is affected
+--   (Intel v3, Deploy, Watchtower unchanged).
 -- ============================================================================
 
 CREATE TABLE IF NOT EXISTS public.action_feedback_events (

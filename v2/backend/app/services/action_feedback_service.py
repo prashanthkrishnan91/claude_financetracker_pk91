@@ -47,6 +47,7 @@ class ActionFeedbackService:
             "note": data.get("note"),
         }
 
+        is_unique_conflict = False
         try:
             result = self.client.table(_TABLE).insert(payload).execute()
             if result.data:
@@ -58,6 +59,8 @@ class ActionFeedbackService:
                     ticker,
                 )
                 return result.data[0], True
+            # Insert succeeded but returned no rows — fetch to confirm the row exists.
+            is_unique_conflict = False
         except Exception as exc:
             exc_str = str(exc).lower()
             is_unique_violation = any(
@@ -65,20 +68,30 @@ class ActionFeedbackService:
             )
             if not is_unique_violation:
                 raise
+            is_unique_conflict = True
 
-        # Dedup: unique constraint hit — return the existing row
+        # Either insert returned no data or a unique conflict was detected.
+        # In both cases look up the persisted row.
         existing = self._fetch_by_idempotency_key(
             user_id=user_id, idempotency_key=payload["idempotency_key"]
         )
         if existing:
             logger.info(
-                "action_feedback.dedup_hit user_id=%s idempotency_key=%s",
+                "action_feedback.%s user_id=%s idempotency_key=%s",
+                "dedup_hit" if is_unique_conflict else "insert_no_data_recovered",
                 user_id,
                 payload["idempotency_key"],
             )
             return existing, False
-        # Fallback: shouldn't reach here, but return payload as-is rather than raising
-        return payload, False
+
+        # Row cannot be found after insert attempt — fail explicitly.
+        if is_unique_conflict:
+            raise RuntimeError(
+                f"action_feedback_dedup_lookup_failed idempotency_key={payload['idempotency_key']!r}"
+            )
+        raise RuntimeError(
+            f"action_feedback_create_no_row_returned idempotency_key={payload['idempotency_key']!r}"
+        )
 
     def _fetch_by_idempotency_key(
         self, user_id: str, idempotency_key: str

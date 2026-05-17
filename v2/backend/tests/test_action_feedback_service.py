@@ -454,3 +454,98 @@ def test_list_does_not_touch_intel_v3_snapshots():
 
     assert "intel_v3_snapshots" not in touched_tables
     assert "action_feedback_events" in touched_tables
+
+
+# ── Explicit failure tests (new safe-fallback behavior) ───────────────────────
+
+
+def _make_insert_no_data_client(*, lookup_row: dict[str, Any] | None) -> MagicMock:
+    """Insert succeeds but returns no rows; subsequent lookup returns lookup_row."""
+    client = MagicMock()
+    insert_chain = MagicMock()
+    insert_chain.insert.return_value = insert_chain
+    insert_chain.execute.return_value = MagicMock(data=[])
+
+    select_chain = MagicMock()
+    select_chain.select.return_value = select_chain
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(data=[lookup_row] if lookup_row else [])
+
+    call_count = [0]
+
+    def table_side_effect(name: str):
+        call_count[0] += 1
+        return insert_chain if call_count[0] == 1 else select_chain
+
+    client.table.side_effect = table_side_effect
+    return client
+
+
+def test_insert_no_data_but_lookup_succeeds_returns_existing():
+    """insert returns no data; follow-up lookup finds the row → return it, created=False."""
+    existing = _make_row(idempotency_key="no-data-key")
+    client = _make_insert_no_data_client(lookup_row=existing)
+    svc = _make_service(client)
+
+    result_row, created = svc.create(
+        user_id=USER_A,
+        data={
+            "feedback_type": "skipped",
+            "source_area": "intel",
+            "idempotency_key": "no-data-key",
+        },
+    )
+
+    assert created is False
+    assert result_row["idempotency_key"] == "no-data-key"
+
+
+def test_insert_no_data_and_lookup_empty_raises():
+    """insert returns no data and follow-up lookup also returns nothing → explicit RuntimeError."""
+    client = _make_insert_no_data_client(lookup_row=None)
+    svc = _make_service(client)
+
+    with pytest.raises(RuntimeError, match="action_feedback_create_no_row_returned"):
+        svc.create(
+            user_id=USER_A,
+            data={
+                "feedback_type": "skipped",
+                "source_area": "intel",
+                "idempotency_key": "ghost-key",
+            },
+        )
+
+
+def test_unique_conflict_lookup_empty_raises():
+    """Unique conflict hit but follow-up lookup returns nothing → explicit RuntimeError."""
+    client = MagicMock()
+
+    insert_chain = MagicMock()
+    insert_chain.insert.return_value = insert_chain
+    insert_chain.execute.side_effect = Exception("23505 unique constraint violation")
+
+    select_chain = MagicMock()
+    select_chain.select.return_value = select_chain
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(data=[])
+
+    call_count = [0]
+
+    def table_side_effect(name: str):
+        call_count[0] += 1
+        return insert_chain if call_count[0] == 1 else select_chain
+
+    client.table.side_effect = table_side_effect
+    svc = _make_service(client)
+
+    with pytest.raises(RuntimeError, match="action_feedback_dedup_lookup_failed"):
+        svc.create(
+            user_id=USER_A,
+            data={
+                "feedback_type": "ignored",
+                "source_area": "deploy",
+                "idempotency_key": "conflict-ghost-key",
+            },
+        )

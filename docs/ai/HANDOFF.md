@@ -114,24 +114,23 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4D (PR open)
+## Current design stage — Stage 4E (PR open)
 
 **Stage 4C — Intel Investment Committee Redesign** — merged (PR #361). `IntelV3Primitives.tsx`, redesigned Cockpit/Card/Drawer, 56 contract tests. No backend, no SQL.
 
-**Stage 4D — Evidence Shell + Source UX + Data Health Drawer** — PR open on branch `claude/stage-4d-evidence-health-jsZQj`. 8 frontend files (3 modified, 5 new). No backend, no SQL.
+**Stage 4D — Evidence Shell + Source UX + Data Health Drawer** — merged (PR #362). `intel-v3-evidence.ts`, `TrustPrimitives.tsx`, `DataHealthDrawer.tsx`, `IntelV3Drawer.tsx` enhancements. 82 tests. No backend, no SQL.
+
+**Stage 4E — Deploy Ledger Redesign** — PR open on branch `claude/deploy-ledger-redesign-LJmii`. Frontend-only redesign of the Deploy surface into a Capital Allocation Ledger. No backend, no SQL.
 
 What landed:
-- `src/lib/intel-v3-evidence.ts` (new): Pure helpers — `evidenceBandToBeginnerLabel`, `committeeStatusToPlainLabel`, `formatSnapshotIdShort`, `formatUpdatedAtSafe`, `evidenceFreshnessToLabel`, `buildDataHealthRows`. No JSX, safe for test environments.
-- `TrustPrimitives.tsx` (new): Shared trust/evidence UI primitives — `DataHealthPill`, `TrustStatusRow`, `SourceMetadataStrip`, `DataUnavailableCallout`, `EvidenceShell`.
-- `DataHealthDrawer.tsx` (new): Accessible Data Health drawer (`role=dialog`). Uses hooks internally (React Query cached). Shows 7 plain-English health rows: Intel snapshot, Evidence freshness, Deploy readiness, Watchtower alerts, Price data, Broker sync, Email delivery safety. Missing data → "Not connected to this view yet". 3 Coming-Later modules (source credibility tier, contradiction detection, evidence completeness score).
-- `IntelV3Drawer.tsx` (enhanced): Evidence check section now shows "Built from Intel v3 snapshot" source row, committee status in plain English, evidence band in beginner language (Strong/Partial/Thin → full sentence labels). Expanded to 11 Coming-Later evidence modules. Metadata footer uses `SourceMetadataStrip`.
-- `IntelV3Cockpit.tsx` (enhanced): "Data Health" button in status band; renders `DataHealthDrawer`.
-- `dashboard/page.tsx` (enhanced): "Data Health" button in Today header; renders `DataHealthDrawer`.
-- `src/lib/intel-v3-evidence.test.ts` (new): 47 pure helper tests. All pass.
-- `IntelV3Stage4DContract.test.ts` (new): 35 Stage 4D contract tests. All pass.
-- Total: 612 tests pass. 3 pre-existing unrelated suite failures unchanged.
+- `src/lib/deploy-ledger.ts` (new): Pure helpers — `mapFinalStatusToLedger`, `buildLedgerItems`, `buildLedgerPlanState`, `buildGuardrailGroups`, `hasPortfolioShapeData`. No JSX, safe for tests.
+- `src/components/cards/DeployLedger.tsx` (new): Ledger UI primitives — `LedgerActionCard`, `GuardrailStatusRail`, `PortfolioShapePreview`, `ComingLaterLedgerSection`, `CashPlanningStrip`, `LedgerPlanSummaryBar`, `NonBrokerageDisclaimer`.
+- `src/app/dashboard/deposits/page.tsx` (modified): Page renamed "Capital Allocation Ledger". Step 1 → `CashPlanningStrip`. `DeployV3Step2Section` transformed to show action cards + guardrail rail + portfolio shape preview (honest Coming Later) + coming-later modules. Decision journal heading updated. All existing API calls, decision log, and Setup & diagnostics preserved unchanged.
+- `src/lib/deploy-ledger.test.ts` (new): 50 pure helper tests. All pass. Cover: ready action, pending guardrail, not_evaluated_yet, actionable_pending_tax, ready_pending_guardrails, missing portfolio-shape honest state, no fake tax/wash-sale/target-allocation intelligence.
+- Total: 662 tests pass (50 new). 3 pre-existing unrelated suite failures unchanged.
+- No backend changes, no SQL, no env/provider/email/LLM changes. ALERT_EMAIL_DRY_RUN remains true.
 
-**Next after merge: Stage 4E — Deploy Ledger Redesign.**
+**Next after merge: Stage 4F.**
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

@@ -38,6 +38,20 @@ import { buildInitialActualDecisions, buildRecommendationSnapshotWithContext, de
 import type { ExecutionStatus } from "@/lib/decision-log";
 import { buildDeployV3DecisionSnapshot, buildDeployV3InitialActualDecisions, buildDeployV3ManualRow, buildDeployV3SessionKey, classifyActualAction, computeJournalTotals, getDeployV3LogSessionKey, isManualDecisionRow, isSessionKeyChanged, shouldUpdateExistingLog } from "@/lib/deploy-v3-decision-log";
 import type { DeployV3PlanResponse } from "@/lib/api";
+import {
+  CashPlanningStrip,
+  LedgerPlanSummaryBar,
+  LedgerActionCard,
+  GuardrailStatusRail,
+  PortfolioShapePreview,
+  ComingLaterLedgerSection,
+  NonBrokerageDisclaimer,
+} from "@/components/cards/DeployLedger";
+import {
+  buildLedgerItems,
+  buildLedgerPlanState,
+  buildGuardrailGroups,
+} from "@/lib/deploy-ledger";
 
 const MAX_REASON_WORDS = 12;
 
@@ -273,62 +287,26 @@ export default function DepositsPage() {
   return (
     <>
       <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border px-4 py-3">
-        <div className="max-w-7xl mx-auto flex items-center justify-between">
-          <h1 className="text-xl font-display text-text-primary">Deploy</h1>
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h1 className="text-xl font-display text-text-primary">Capital Allocation Ledger</h1>
+            <p className="text-[10px] text-text-muted mt-0.5 hidden sm:block">
+              Planning only — not a brokerage account. Intel v3 owns all decisions.
+            </p>
+          </div>
+          <span className="text-[10px] px-2 py-0.5 rounded-pill border border-border bg-surface-elevated text-text-muted font-semibold uppercase tracking-wide">
+            Read-only · No trades
+          </span>
         </div>
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
 
-        <section id="step-1" className="card-glass p-4 space-y-3 border border-border/80 bg-gradient-to-b from-surface-elevated/25 to-transparent">
-          <div className="flex items-start justify-between gap-3 flex-wrap">
-            <div>
-              <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
-                Step 1 — How much are you investing?
-              </p>
-              <p className="text-xs text-text-muted mt-1">
-                Set deployment capital, then review the plan below.
-              </p>
-            </div>
-            {summary && (
-              <p className="text-xs text-text-secondary">
-                Available cash:{" "}
-                <span className="font-mono text-text-primary font-semibold">
-                  {formatCurrency(summary.cash_balance)}
-                </span>
-              </p>
-            )}
-          </div>
-          <div className="flex gap-3 items-center">
-            <div className="relative flex-1">
-              <span className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted">$</span>
-              <input
-                type="number"
-                value={amount}
-                onChange={(e) => setAmount(Math.max(0, Number(e.target.value)))}
-                className="w-full pl-7 pr-3 py-2.5 bg-surface border border-border/80 rounded-lg text-text-primary font-mono text-base focus:outline-none focus:ring-1 focus:ring-accent shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]"
-                min={0}
-                step={50}
-              />
-            </div>
-          </div>
-          <div className="flex gap-2">
-            {[500, 900, 1500, 2000].map((preset) => (
-              <button
-                key={preset}
-                onClick={() => setAmount(preset)}
-                className={cn(
-                  "px-3 py-1 text-xs rounded-md transition-colors border",
-                  amount === preset
-                    ? "bg-accent text-background font-semibold border-accent"
-                    : "text-text-muted bg-surface-elevated border-border/70 hover:text-text-primary"
-                )}
-              >
-                ${preset}
-              </button>
-            ))}
-          </div>
-        </section>
+        <CashPlanningStrip
+          amount={amount}
+          onChange={setAmount}
+          availableCash={summary?.cash_balance ?? null}
+        />
 
         {/* Step 2 — powered by Deploy v3 when available, legacy plan as fallback */}
         {(isV3Loading || isPlanLoading) && !v3Plan && !deployPlan ? (
@@ -350,9 +328,9 @@ export default function DepositsPage() {
           </details>
         )}
 
-        {/* Secondary diagnostics — collapsed by default */}
+        {/* Setup & diagnostics — collapsed by default */}
         <details className="card-glass border border-border/70">
-          <summary className="px-4 py-3 text-xs font-semibold uppercase tracking-wide text-text-muted cursor-pointer select-none">
+          <summary className="px-4 py-3 text-[10px] font-semibold uppercase tracking-widest text-text-muted cursor-pointer select-none">
             Setup &amp; diagnostics
           </summary>
           <div className="px-4 pb-4 space-y-4 pt-2">
@@ -380,61 +358,122 @@ function DeployV3Step2Section({
   v3Plan: DeployV3PlanResponse | null;
   amount: number;
 }) {
+  const allItems = v3Plan?.items ?? [];
+  const ledgerItems = buildLedgerItems(allItems);
+  const planState = buildLedgerPlanState(v3Plan?.rollup?.plan_readiness_status ?? null, v3Plan?.rollup ?? null);
+  const guardrailGroups = buildGuardrailGroups(ledgerItems);
+
+  // Actionable items (BUY/TRIM/SELL with positive dollar amounts) surface as action cards.
+  const actionCardItems = ledgerItems.filter(
+    (it) => it.action !== "HOLD" && it.dollarAmount != null && it.dollarAmount > 0,
+  );
+
   return (
     <div className="space-y-4">
-      <section className="card-glass p-4 space-y-4 border border-border/80 bg-gradient-to-b from-surface-elevated/20 to-transparent">
-        <div className="flex items-start justify-between gap-2 flex-wrap">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
-            Step 2 — Where should this go?
+      {/* Ledger main section */}
+      <section
+        aria-label="Capital allocation plan"
+        className="card-glass border border-border/80 overflow-hidden"
+      >
+        {/* Section header */}
+        <div className="px-4 pt-4 pb-3 border-b border-border/60 flex items-center justify-between gap-2 flex-wrap">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+            Capital allocation plan
           </p>
-          <span className="text-[10px] px-2 py-0.5 rounded-full border border-border bg-surface-elevated text-text-muted font-semibold uppercase tracking-wide">
+          <span className="text-[10px] px-2 py-0.5 rounded-pill border border-border bg-surface-elevated text-text-muted font-semibold uppercase tracking-wide">
             Intel v3 · Deploy v3
           </span>
         </div>
 
-        {step2.state === "setup_incomplete" && (
-          <div className="space-y-2">
-            <p className="text-sm text-yellow-300 font-semibold">Setup required before sizing</p>
-            <p className="text-xs text-text-secondary">
-              Target allocations or deploy policy settings are not fully configured yet.
-              Use the Setup &amp; diagnostics section below to complete setup.
-            </p>
-            <p className="text-[11px] text-text-muted">
-              Intel v3 Buy / Hold / Trim / Sell authority is unaffected — only exact-dollar sizing is paused.
-            </p>
-          </div>
-        )}
+        <div className="px-4 py-4 space-y-5">
+          {/* Plan state summary bar */}
+          {v3Plan && (
+            <LedgerPlanSummaryBar
+              planState={planState}
+              cashToDeploy={step2.cash_to_deploy}
+              amountAware={step2.amount_aware}
+            />
+          )}
 
-        {step2.state === "no_moves" && (
-          <div className="space-y-2">
-            <p className="text-sm text-blue-300 font-semibold">No additional dollars needed right now</p>
-            <p className="text-xs text-text-secondary">
-              Your target model says the current portfolio already matches your targets.
-              No cash deployment moves were produced from your certified portfolio model.
-            </p>
-            <p className="text-[11px] text-text-muted">
-              Intel v3 owns all Buy / Hold / Trim / Sell decisions. Deploy only sizes validated moves.
-            </p>
-          </div>
-        )}
+          {/* Setup incomplete */}
+          {step2.state === "setup_incomplete" && (
+            <div className="rounded-md border border-action-trim/25 bg-action-trim/5 px-4 py-3 space-y-1.5">
+              <p className="text-xs font-semibold text-action-trim">Setup required before sizing</p>
+              <p className="text-[11px] text-text-secondary leading-snug">
+                Target allocations or deploy policy settings are not fully configured yet.
+                Use the Setup &amp; diagnostics section below to complete setup.
+              </p>
+              <p className="text-[10px] text-text-muted">
+                Intel v3 Buy / Hold / Trim / Sell authority is unaffected — only exact-dollar sizing is paused.
+              </p>
+            </div>
+          )}
 
-        {step2.state === "has_moves" && (
-          <div className="space-y-3">
-            <p className="text-xs text-text-secondary">
-              {step2.amount_aware && step2.cash_to_deploy != null
-                ? `Deploy v3 sized this plan for your ${formatCurrency(step2.cash_to_deploy)} cash input.`
-                : "Deploy v3 found target-driven moves from your certified portfolio model."}
+          {/* No moves */}
+          {step2.state === "no_moves" && (
+            <div className="rounded-md border border-action-hold/25 bg-action-hold/5 px-4 py-3 space-y-1.5">
+              <p className="text-xs font-semibold text-action-hold">Hold as planned — no moves needed</p>
+              <p className="text-[11px] text-text-secondary leading-snug">
+                The current portfolio already matches your targets.
+                No cash deployment moves were produced from your certified portfolio model.
+              </p>
+              <p className="text-[10px] text-text-muted">
+                Intel v3 owns all Buy / Hold / Trim / Sell decisions. Deploy only sizes validated moves.
+              </p>
+            </div>
+          )}
+
+          {/* Recommended dollar actions */}
+          {actionCardItems.length > 0 && (
+            <div className="space-y-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                Recommended actions
+              </p>
+              {/* Mobile: stack cards. Desktop: keep cards full-width for readability. */}
+              <div className="grid gap-2 sm:gap-3">
+                {actionCardItems.map((item) => (
+                  <LedgerActionCard key={item.ticker} item={item} />
+                ))}
+              </div>
+              <p className="text-[10px] text-text-muted leading-snug">
+                Intel v3 policy owns all Buy / Hold / Trim / Sell decisions.
+                Pending tax and guardrail checks — do not treat as executable trade instructions.
+                {step2.amount_aware && (
+                  <> Sized for user-entered planning capital — not broker-verified cash.</>
+                )}
+              </p>
+            </div>
+          )}
+
+          {/* No actionable cards + no_items → prompt */}
+          {step2.state === "not_available" && (
+            <p className="text-xs text-text-secondary leading-snug">
+              Run Intel v3 first to generate a capital allocation plan.
             </p>
-            <DeployV3AllocationTable items={step2.items} />
-            <p className="text-[11px] text-text-muted leading-snug">
-              <span className="font-semibold text-text-secondary">Decision authority:</span>{" "}
-              Intel v3 policy owns all Buy / Hold / Trim / Sell decisions. Pending tax and guardrail review.
-              {step2.amount_aware && (
-                <> Sized for user-entered planning capital — not broker-verified cash.</>
-              )}
-            </p>
+          )}
+
+          {/* Guardrail status rail */}
+          {guardrailGroups.length > 0 && (
+            <div className="border-t border-border/50 pt-4">
+              <GuardrailStatusRail groups={guardrailGroups} />
+            </div>
+          )}
+
+          {/* Portfolio shape preview — honest Coming Later */}
+          <div className="border-t border-border/50 pt-4">
+            <PortfolioShapePreview />
           </div>
-        )}
+
+          {/* Coming later modules */}
+          <div className="border-t border-border/50 pt-4">
+            <ComingLaterLedgerSection />
+          </div>
+
+          {/* Non-brokerage disclaimer */}
+          <div className="border-t border-border/50 pt-3">
+            <NonBrokerageDisclaimer />
+          </div>
+        </div>
       </section>
 
       <DeployV3DecisionLogSection step2={step2} v3Plan={v3Plan} amount={amount} />
@@ -456,37 +495,60 @@ function DeployV3AllocationTable({ items }: { items: Step2Result["items"] }) {
     <div className="card-glass overflow-hidden border border-border/80">
       <div className="px-4 py-2.5 border-b border-border">
         <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-          Allocation Breakdown — Deploy v3
+          Allocation breakdown — Deploy v3
         </p>
       </div>
-      <div className="divide-y divide-border">
-        <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40">
-          <div className="col-span-5">Ticker</div>
-          <div className="col-span-3">Action</div>
-          <div className="col-span-2 text-right">Amount</div>
-          <div className="col-span-2 text-right">Status</div>
-        </div>
+      {/* Desktop table header */}
+      <div className="hidden sm:grid grid-cols-12 gap-2 px-4 py-2 text-[10px] uppercase tracking-wide text-text-muted font-semibold bg-surface-elevated/40 border-b border-border/60">
+        <div className="col-span-4">Ticker</div>
+        <div className="col-span-2">Action</div>
+        <div className="col-span-3">Why</div>
+        <div className="col-span-2 text-right">Amount</div>
+        <div className="col-span-1 text-right">Status</div>
+      </div>
+      <div className="divide-y divide-border/60">
         {items.map((item) => (
-          <div key={item.ticker} className="px-4 py-2.5 text-sm hover:bg-surface-elevated/20 transition-colors">
-            <div className="grid grid-cols-12 gap-2 items-start">
-              <div className="col-span-5">
-                <span className="font-mono font-bold text-text-primary">{item.ticker}</span>
-                <p className="text-[11px] text-text-muted leading-snug mt-0.5">{item.reason}</p>
+          <div key={item.ticker} className="px-4 py-3 hover:bg-surface-elevated/20 transition-colors">
+            {/* Mobile layout: stack */}
+            <div className="sm:hidden space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono font-bold text-sm text-text-primary">{item.ticker}</span>
+                  <span className={cn(
+                    "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border",
+                    item.action === "BUY"  ? "bg-action-buy/10 text-action-buy border-action-buy/30" :
+                    item.action === "TRIM" || item.action === "SELL" ? "bg-action-sell/10 text-action-sell border-action-sell/30" :
+                    "bg-action-hold/10 text-action-hold border-action-hold/25",
+                  )}>
+                    {item.action}
+                  </span>
+                </div>
+                <span className="font-mono font-semibold text-sm text-text-primary tabular-nums">
+                  {item.dollar_amount != null ? formatCurrency(item.dollar_amount) : "—"}
+                </span>
               </div>
-              <div className="col-span-3">
+              {item.reason && (
+                <p className="text-[10px] text-text-muted leading-snug">{item.reason}</p>
+              )}
+            </div>
+            {/* Desktop layout: grid */}
+            <div className="hidden sm:grid grid-cols-12 gap-2 items-center">
+              <div className="col-span-4 font-mono font-bold text-text-primary text-sm">{item.ticker}</div>
+              <div className="col-span-2">
                 <span className={cn(
-                  "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded-full",
-                  item.action === "BUY" ? "bg-emerald-500/10 text-emerald-300 border border-emerald-400/30" :
-                  item.action === "TRIM" || item.action === "SELL" ? "bg-red-500/10 text-red-300 border border-red-400/30" :
-                  "bg-blue-500/10 text-blue-300 border border-blue-400/25"
+                  "text-[10px] uppercase tracking-wide font-semibold px-1.5 py-0.5 rounded border",
+                  item.action === "BUY"  ? "bg-action-buy/10 text-action-buy border-action-buy/30" :
+                  item.action === "TRIM" || item.action === "SELL" ? "bg-action-sell/10 text-action-sell border-action-sell/30" :
+                  "bg-action-hold/10 text-action-hold border-action-hold/25",
                 )}>
                   {item.action}
                 </span>
               </div>
-              <div className="col-span-2 text-right font-mono font-semibold text-emerald-300 text-sm">
+              <div className="col-span-3 text-[10px] text-text-muted leading-snug">{item.reason}</div>
+              <div className="col-span-2 text-right font-mono font-semibold text-text-primary tabular-nums text-sm">
                 {item.dollar_amount != null ? formatCurrency(item.dollar_amount) : "—"}
               </div>
-              <div className="col-span-2 text-right text-[10px] text-text-muted">
+              <div className="col-span-1 text-right text-[9px] text-text-muted">
                 {item.final_actionability_status.replace(/_/g, " ")}
               </div>
             </div>
@@ -669,7 +731,7 @@ function DeployV3DecisionLogSection({
   if (step2.state === "setup_incomplete") {
     return (
       <section id="step-3" className="card-glass p-4 border border-border/80 space-y-2">
-        <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log your decision</p>
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Execution journal</p>
         <p className="text-xs text-text-muted">Complete setup in Setup &amp; diagnostics below before logging.</p>
       </section>
     );
@@ -683,9 +745,9 @@ function DeployV3DecisionLogSection({
     <div className="space-y-4">
       <section id="step-3" className="card-glass p-4 border border-border/80 space-y-4">
         <div className="flex items-center justify-between gap-2 flex-wrap">
-          <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">Step 3 — Log what you actually did</p>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">Execution journal — log what you did</p>
           {isLogged && (
-            <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-300 font-semibold uppercase tracking-wide">
+            <span className="text-[10px] px-2 py-0.5 rounded-pill border border-action-buy/30 bg-action-buy/10 text-action-buy font-semibold uppercase tracking-wide">
               Logged
             </span>
           )}

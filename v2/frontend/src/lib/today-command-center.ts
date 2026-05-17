@@ -329,6 +329,26 @@ export function buildWhyThisMatters(card: IntelV3HeldCard): string | null {
   return null;
 }
 
+// ── Today secondary rail (Stage 4H) ──────────────────────────────────────────
+
+export interface SecondaryRailLink {
+  href: string;
+  label: string;
+  category: "alerts" | "journal" | "radar";
+}
+
+/**
+ * Static secondary rail links for the Today page.
+ * Always present — Alerts is reachable regardless of alert candidate count.
+ * Journal and Radar are desktop-SideNav destinations made reachable on mobile
+ * via this rail per §30.8.
+ */
+export const TODAY_SECONDARY_RAIL_LINKS: readonly SecondaryRailLink[] = [
+  { href: "/dashboard/alerts", label: "Watchtower", category: "alerts" },
+  { href: "/dashboard/journal", label: "Journal",    category: "journal" },
+  { href: "/dashboard/radar",   label: "Radar",      category: "radar"   },
+] as const;
+
 // ── Coming-Later slot caption ─────────────────────────────────────────────────
 
 /**
@@ -337,4 +357,72 @@ export function buildWhyThisMatters(card: IntelV3HeldCard): string | null {
  */
 export function buildLearningSlotCaption(): string {
   return "This daily lesson is being prepared. The next intelligence stage will surface it here.";
+}
+
+// ── Today mini-bar (Stage 4H) ─────────────────────────────────────────────────
+
+export interface TodayMiniBarResult {
+  show: boolean;
+  primaryLabel: string;
+  primaryHref: string;
+  secondaryLabel: string | null;
+  secondaryHref: string | null;
+}
+
+/**
+ * Build the compact mobile Today mini-bar state from existing deterministic data.
+ * Priority: Act Today actions > Deploy buy candidates > Watchtower alerts.
+ * Returns show:false when no actionable signal exists.
+ * Never invents intelligence — all inputs come from existing API responses.
+ */
+export function buildTodayMiniBar(
+  actToday: ActTodayResult,
+  deployReady: DeployReadyResult,
+  watchtowerSummary: WatchtowerSummaryResult,
+): TodayMiniBarResult {
+  const none: TodayMiniBarResult = {
+    show: false,
+    primaryLabel: "",
+    primaryHref: "",
+    secondaryLabel: null,
+    secondaryHref: null,
+  };
+
+  if (actToday.hasActionableItems) {
+    const count = actToday.rows.length;
+    const primaryLabel = `${count} action${count !== 1 ? "s" : ""} today — Intel`;
+    const secondaryLabel =
+      deployReady.hasData && deployReady.buyCount > 0
+        ? `${deployReady.buyCount} Deploy candidate${deployReady.buyCount !== 1 ? "s" : ""}`
+        : null;
+    return {
+      show: true,
+      primaryLabel,
+      primaryHref: "/dashboard/recommendations",
+      secondaryLabel,
+      secondaryHref: secondaryLabel ? "/dashboard/deposits" : null,
+    };
+  }
+
+  if (deployReady.hasData && deployReady.buyCount > 0) {
+    return {
+      show: true,
+      primaryLabel: `${deployReady.buyCount} Buy candidate${deployReady.buyCount !== 1 ? "s" : ""} — Deploy`,
+      primaryHref: "/dashboard/deposits",
+      secondaryLabel: null,
+      secondaryHref: null,
+    };
+  }
+
+  if (watchtowerSummary.candidateCount > 0) {
+    return {
+      show: true,
+      primaryLabel: `${watchtowerSummary.candidateCount} Watchtower alert${watchtowerSummary.candidateCount !== 1 ? "s" : ""}`,
+      primaryHref: "/dashboard/alerts",
+      secondaryLabel: null,
+      secondaryHref: null,
+    };
+  }
+
+  return none;
 }

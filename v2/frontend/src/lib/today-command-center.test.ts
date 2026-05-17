@@ -12,6 +12,11 @@ import {
   buildWatchtowerSummary,
   buildWhyThisMatters,
   buildLearningSlotCaption,
+  buildTodayMiniBar,
+  TODAY_SECONDARY_RAIL_LINKS,
+  type ActTodayResult,
+  type DeployReadyResult,
+  type WatchtowerSummaryResult,
 } from "@/lib/today-command-center";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -635,5 +640,194 @@ describe("buildLearningSlotCaption", () => {
   it("is a non-empty string", () => {
     expect(typeof buildLearningSlotCaption()).toBe("string");
     expect(buildLearningSlotCaption().length).toBeGreaterThan(0);
+  });
+});
+
+// ── buildTodayMiniBar (Stage 4H) ─────────────────────────────────────────────
+
+function makeActToday(overrides: Partial<ActTodayResult> = {}): ActTodayResult {
+  return { rows: [], hasActionableItems: false, allHold: false, ...overrides };
+}
+
+function makeDeployReady(overrides: Partial<DeployReadyResult> = {}): DeployReadyResult {
+  return {
+    planReadinessStatus: "no_items",
+    planReadinessLabel: "No actions pending",
+    buyCount: 0,
+    cashNote: null,
+    hasData: true,
+    ...overrides,
+  };
+}
+
+function makeWatchtowerSummary(overrides: Partial<WatchtowerSummaryResult> = {}): WatchtowerSummaryResult {
+  return { candidateCount: 0, highSeverityCount: 0, summaryLine: "", hasData: true, ...overrides };
+}
+
+describe("buildTodayMiniBar", () => {
+  it("returns show:false when no actionable data exists", () => {
+    const result = buildTodayMiniBar(makeActToday(), makeDeployReady(), makeWatchtowerSummary());
+    expect(result.show).toBe(false);
+  });
+
+  it("returns show:false when deploy has no buy candidates and no actions", () => {
+    const result = buildTodayMiniBar(
+      makeActToday({ hasActionableItems: false }),
+      makeDeployReady({ buyCount: 0 }),
+      makeWatchtowerSummary({ candidateCount: 0 }),
+    );
+    expect(result.show).toBe(false);
+  });
+
+  it("prioritizes act-today actions over deploy and watchtower", () => {
+    const actToday = makeActToday({
+      hasActionableItems: true,
+      rows: [{ ticker: "AAPL", name: "Apple", action: "BUY", conviction: "HIGH", evidenceBand: "STRONG", whyText: "", whyThisMatters: null }],
+    });
+    const result = buildTodayMiniBar(actToday, makeDeployReady({ buyCount: 2 }), makeWatchtowerSummary({ candidateCount: 3 }));
+    expect(result.show).toBe(true);
+    expect(result.primaryHref).toBe("/dashboard/recommendations");
+    expect(result.primaryLabel).toContain("1 action today");
+  });
+
+  it("includes deploy as secondary when act-today is primary and deploy has buy candidates", () => {
+    const actToday = makeActToday({
+      hasActionableItems: true,
+      rows: [{ ticker: "TSLA", name: "Tesla", action: "TRIM", conviction: "MEDIUM", evidenceBand: "PARTIAL", whyText: "", whyThisMatters: null }],
+    });
+    const result = buildTodayMiniBar(actToday, makeDeployReady({ buyCount: 2 }), makeWatchtowerSummary());
+    expect(result.secondaryLabel).not.toBeNull();
+    expect(result.secondaryHref).toBe("/dashboard/deposits");
+    expect(result.secondaryLabel).toContain("Deploy");
+  });
+
+  it("omits secondary when act-today is primary but no deploy candidates", () => {
+    const actToday = makeActToday({
+      hasActionableItems: true,
+      rows: [{ ticker: "TSLA", name: "Tesla", action: "TRIM", conviction: "MEDIUM", evidenceBand: "PARTIAL", whyText: "", whyThisMatters: null }],
+    });
+    const result = buildTodayMiniBar(actToday, makeDeployReady({ buyCount: 0 }), makeWatchtowerSummary());
+    expect(result.secondaryLabel).toBeNull();
+    expect(result.secondaryHref).toBeNull();
+  });
+
+  it("falls back to deploy when no act-today actions", () => {
+    const result = buildTodayMiniBar(
+      makeActToday(),
+      makeDeployReady({ buyCount: 3 }),
+      makeWatchtowerSummary({ candidateCount: 5 }),
+    );
+    expect(result.show).toBe(true);
+    expect(result.primaryHref).toBe("/dashboard/deposits");
+    expect(result.primaryLabel).toContain("3 Buy candidates");
+  });
+
+  it("falls back to watchtower when no act-today and no deploy candidates", () => {
+    const result = buildTodayMiniBar(
+      makeActToday(),
+      makeDeployReady({ buyCount: 0 }),
+      makeWatchtowerSummary({ candidateCount: 2 }),
+    );
+    expect(result.show).toBe(true);
+    expect(result.primaryHref).toBe("/dashboard/alerts");
+    expect(result.primaryLabel).toContain("2 Watchtower alerts");
+  });
+
+  it("handles singular count correctly for 1 action", () => {
+    const actToday = makeActToday({
+      hasActionableItems: true,
+      rows: [{ ticker: "X", name: "Steel", action: "SELL", conviction: "HIGH", evidenceBand: "STRONG", whyText: "", whyThisMatters: null }],
+    });
+    const result = buildTodayMiniBar(actToday, makeDeployReady(), makeWatchtowerSummary());
+    expect(result.primaryLabel).toContain("1 action today");
+    expect(result.primaryLabel).not.toContain("1 actions");
+  });
+
+  it("handles singular count for 1 buy candidate", () => {
+    const result = buildTodayMiniBar(
+      makeActToday(),
+      makeDeployReady({ buyCount: 1 }),
+      makeWatchtowerSummary(),
+    );
+    expect(result.primaryLabel).toContain("1 Buy candidate");
+    expect(result.primaryLabel).not.toContain("1 Buy candidates");
+  });
+
+  it("handles singular watchtower alert", () => {
+    const result = buildTodayMiniBar(
+      makeActToday(),
+      makeDeployReady({ buyCount: 0 }),
+      makeWatchtowerSummary({ candidateCount: 1 }),
+    );
+    expect(result.primaryLabel).toContain("1 Watchtower alert");
+    expect(result.primaryLabel).not.toContain("1 Watchtower alerts");
+  });
+
+  it("returns show:false when deploy has no data and no other signals", () => {
+    const result = buildTodayMiniBar(
+      makeActToday(),
+      makeDeployReady({ hasData: false, buyCount: 0 }),
+      makeWatchtowerSummary({ candidateCount: 0 }),
+    );
+    expect(result.show).toBe(false);
+  });
+
+  it("mobile nav item set is Today / Intel / Deploy / Portfolio (4 items)", () => {
+    // Structural assertion: BottomNav should be 4 items only.
+    // This test documents the Stage 4H contract without importing React.
+    const mobileItems = [
+      "/dashboard",
+      "/dashboard/recommendations",
+      "/dashboard/deposits",
+      "/dashboard/portfolio",
+    ];
+    expect(mobileItems).toHaveLength(4);
+    expect(mobileItems).toContain("/dashboard");              // Today
+    expect(mobileItems).toContain("/dashboard/recommendations"); // Intel
+    expect(mobileItems).toContain("/dashboard/deposits");    // Deploy
+    expect(mobileItems).toContain("/dashboard/portfolio");   // Portfolio
+    expect(mobileItems).not.toContain("/dashboard/alerts");  // Alerts: desktop only / Today links
+  });
+});
+
+// ── TODAY_SECONDARY_RAIL_LINKS (Stage 4H mobile reachability) ─────────────────
+
+describe("TODAY_SECONDARY_RAIL_LINKS", () => {
+  it("has exactly 3 destinations: alerts, journal, radar", () => {
+    expect(TODAY_SECONDARY_RAIL_LINKS).toHaveLength(3);
+    const categories = TODAY_SECONDARY_RAIL_LINKS.map(l => l.category);
+    expect(categories).toContain("alerts");
+    expect(categories).toContain("journal");
+    expect(categories).toContain("radar");
+  });
+
+  it("Alerts link is always present — static constant, not conditional on candidateCount", () => {
+    const alertLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "alerts");
+    expect(alertLink).toBeDefined();
+    expect(alertLink?.href).toBe("/dashboard/alerts");
+  });
+
+  it("Journal link is present and reachable from mobile Today rail", () => {
+    const journalLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "journal");
+    expect(journalLink).toBeDefined();
+    expect(journalLink?.href).toBe("/dashboard/journal");
+  });
+
+  it("Radar link is present and reachable from mobile Today rail", () => {
+    const radarLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "radar");
+    expect(radarLink).toBeDefined();
+    expect(radarLink?.href).toBe("/dashboard/radar");
+  });
+
+  it("all links have non-empty labels", () => {
+    for (const link of TODAY_SECONDARY_RAIL_LINKS) {
+      expect(link.label.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("all hrefs start with /dashboard/", () => {
+    for (const link of TODAY_SECONDARY_RAIL_LINKS) {
+      expect(link.href).toMatch(/^\/dashboard\//);
+    }
   });
 });

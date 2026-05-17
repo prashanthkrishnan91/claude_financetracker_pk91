@@ -348,6 +348,24 @@
   }
 }
 
+/* ─── Mobile bottom sheet ──────────────────────────────────────────────────── */
+/* Slide-up from bottom; collapsed to instant-appear under prefers-reduced-motion */
+@keyframes sheet-slide-up {
+  from { transform: translateY(100%); opacity: 0.8; }
+  to   { transform: translateY(0);    opacity: 1; }
+}
+
+@layer components {
+  .sheet-slide-up {
+    animation: sheet-slide-up var(--dur-slow, 240ms) var(--motion-enter, cubic-bezier(0.2, 0.8, 0.2, 1)) both;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .sheet-slide-up {
+      animation: none !important;
+    }
+  }
+}
+
 /* ─── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 4px;

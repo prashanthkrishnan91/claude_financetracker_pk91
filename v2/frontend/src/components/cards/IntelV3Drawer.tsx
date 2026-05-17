@@ -121,17 +121,30 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
         aria-hidden="true"
       />
 
-      {/* Drawer panel */}
+      {/* Drawer panel — mobile: bottom sheet; desktop: right-side drawer */}
       <aside
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          "fixed right-0 top-0 bottom-0 z-50 w-full max-w-md",
-          "bg-background border-l border-border",
-          "overflow-y-auto overscroll-contain"
+          // Mobile: full-width bottom sheet anchored to viewport bottom
+          "fixed inset-x-0 bottom-0 z-50",
+          "max-h-[88dvh] rounded-t-2xl",
+          "border-t border-border bg-background",
+          "overflow-y-auto overscroll-contain",
+          "sheet-slide-up",
+          // Desktop: right-side drawer (overrides mobile layout)
+          "lg:inset-x-auto lg:right-0 lg:top-0 lg:bottom-0",
+          "lg:w-full lg:max-w-md lg:max-h-none",
+          "lg:rounded-none lg:border-t-0 lg:border-l",
+          "lg:[animation:none]",
         )}
       >
+        {/* Mobile drag handle — visual cue, hidden on desktop */}
+        <div className="lg:hidden flex justify-center pt-3 pb-1" aria-hidden="true">
+          <div className="w-8 h-1 rounded-full bg-border-strong opacity-50" />
+        </div>
+
         {/* ── Sticky header ───────────────────────────────────────────────── */}
         <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-border px-5 py-4">
           <div className="flex items-center justify-between gap-3">

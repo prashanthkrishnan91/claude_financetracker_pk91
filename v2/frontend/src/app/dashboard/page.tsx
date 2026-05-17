@@ -23,6 +23,8 @@ import {
   buildDeployReady,
   buildWatchtowerSummary,
   buildLearningSlotCaption,
+  buildTodayMiniBar,
+  TODAY_SECONDARY_RAIL_LINKS,
   type ActTodayRow,
 } from "@/lib/today-command-center";
 
@@ -81,6 +83,7 @@ export default function DashboardPage() {
   const riskPulse = buildRiskPulse(intelSnapshot);
   const deployReady = buildDeployReady(deployPlan);
   const watchtowerSummary = buildWatchtowerSummary(alertCandidates);
+  const miniBar = buildTodayMiniBar(actToday, deployReady, watchtowerSummary);
 
   return (
     <>
@@ -114,6 +117,34 @@ export default function DashboardPage() {
           </div>
         </div>
       </header>
+
+      {/* Mobile sticky mini-bar — shows most actionable signal; hidden on desktop */}
+      {miniBar.show && (
+        <div
+          className="lg:hidden sticky top-[61px] z-40 px-4 py-2 border-b border-border-subtle/60 flex items-center justify-between gap-3"
+          style={{
+            background: "var(--bottom-nav-glass-bg)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+          }}
+          aria-label="Today quick actions"
+        >
+          <Link
+            href={miniBar.primaryHref}
+            className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors truncate"
+          >
+            {miniBar.primaryLabel}
+          </Link>
+          {miniBar.secondaryLabel && miniBar.secondaryHref && (
+            <Link
+              href={miniBar.secondaryHref}
+              className="text-xs text-accent hover:underline shrink-0"
+            >
+              {miniBar.secondaryLabel} →
+            </Link>
+          )}
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-4">
 
@@ -254,6 +285,27 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
+
+        {/* Secondary rail — mobile reachability for Alerts, Journal, Radar (§30.8) */}
+        {/* Alerts link is always present — not conditional on candidateCount */}
+        <nav aria-label="Study rooms" className="grid grid-cols-3 gap-2">
+          {TODAY_SECONDARY_RAIL_LINKS.map(link => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className="card-glass p-3 flex flex-col items-center gap-1 hover:bg-surface-elevated/60 transition-colors duration-160 rounded-lg"
+            >
+              <span className="text-[10px] uppercase tracking-label text-text-muted">
+                {link.label}
+              </span>
+              {link.category === "alerts" && watchtowerSummary.candidateCount > 0 && (
+                <span className="text-xs font-semibold text-text-primary tabular-nums">
+                  {watchtowerSummary.candidateCount}
+                </span>
+              )}
+            </Link>
+          ))}
+        </nav>
 
         {/* What I Learned Today — Coming-Later chrome (Stage 6E activates) */}
         <section className="card-glass p-5 opacity-50">

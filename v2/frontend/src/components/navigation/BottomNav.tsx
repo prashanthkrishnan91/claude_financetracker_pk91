@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
 
+// All destinations rendered in the desktop SideNav.
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Today", icon: BarChartIcon },
   { href: "/dashboard/portfolio", label: "Portfolio", icon: BriefcaseIcon },
@@ -15,9 +16,18 @@ const NAV_ITEMS = [
   { href: "/settings", label: "Settings", icon: GearIcon },
 ];
 
-// Desktop-only destinations: Journal and Radar are first-class routes on the
-// SideNav per §26.1 and §30.7. They are NOT in the mobile BottomNav — on phone
-// they are reached from the Today secondary rail + command bar (Stage 4H / 6).
+// Stage 4H: Mobile BottomNav is the focused 4-tab subset (§30.8).
+// Alerts stays reachable via Today Watchtower links and in-product links.
+// Desktop SideNav keeps all NAV_ITEMS + SIDE_ONLY_NAV_ITEMS.
+const MOBILE_NAV_ITEMS = [
+  { href: "/dashboard", label: "Today", icon: BarChartIcon },
+  { href: "/dashboard/recommendations", label: "Intel", icon: LightbulbIcon },
+  { href: "/dashboard/deposits", label: "Deploy", icon: WalletIcon },
+  { href: "/dashboard/portfolio", label: "Portfolio", icon: BriefcaseIcon },
+];
+
+// Desktop-only destinations: Journal, Radar, and any future surface that is
+// deferred from mobile BottomNav per §26.1 and §30.7.
 const SIDE_ONLY_NAV_ITEMS = [
   { href: "/dashboard/journal", label: "Journal", icon: BookIcon },
   { href: "/dashboard/radar", label: "Radar", icon: RadarIcon },
@@ -36,7 +46,7 @@ export function BottomNav() {
       }}
     >
       <div className="flex justify-around items-center h-16 max-w-lg mx-auto">
-        {NAV_ITEMS.map((item) => {
+        {MOBILE_NAV_ITEMS.map((item) => {
           const active =
             pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 4C — Intel Investment Committee Redesign; **PR #361 open**; next: Stage 4D)
+Last updated: 2026-05-17 (Stage 4F — Portfolio Living Thesis Ledger; **PR open**; next: Stage 4G)
 
 ## Purpose
 
@@ -114,23 +114,26 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4E (PR open)
+## Current design stage — Stage 4F (PR open)
 
 **Stage 4C — Intel Investment Committee Redesign** — merged (PR #361). `IntelV3Primitives.tsx`, redesigned Cockpit/Card/Drawer, 56 contract tests. No backend, no SQL.
 
 **Stage 4D — Evidence Shell + Source UX + Data Health Drawer** — merged (PR #362). `intel-v3-evidence.ts`, `TrustPrimitives.tsx`, `DataHealthDrawer.tsx`, `IntelV3Drawer.tsx` enhancements. 82 tests. No backend, no SQL.
 
-**Stage 4E — Deploy Ledger Redesign** — PR open on branch `claude/deploy-ledger-redesign-LJmii`. Frontend-only redesign of the Deploy surface into a Capital Allocation Ledger. No backend, no SQL.
+**Stage 4E — Deploy Ledger Redesign** — merged PR #363. Frontend-only redesign of the Deploy surface into a Capital Allocation Ledger. `deploy-ledger.ts`, `DeployLedger.tsx`, 50 tests. No backend, no SQL.
+
+**Stage 4F — Portfolio Living Thesis Ledger** — PR open on branch `claude/portfolio-living-thesis-ledger-ZmoKr`. Frontend-only. New first-class `/dashboard/portfolio` route as a Living Thesis Ledger.
 
 What landed:
-- `src/lib/deploy-ledger.ts` (new): Pure helpers — `mapFinalStatusToLedger`, `buildLedgerItems`, `buildLedgerPlanState`, `buildGuardrailGroups`, `hasPortfolioShapeData`. No JSX, safe for tests.
-- `src/components/cards/DeployLedger.tsx` (new): Ledger UI primitives — `LedgerActionCard`, `GuardrailStatusRail`, `PortfolioShapePreview`, `ComingLaterLedgerSection`, `CashPlanningStrip`, `LedgerPlanSummaryBar`, `NonBrokerageDisclaimer`.
-- `src/app/dashboard/deposits/page.tsx` (modified): Page renamed "Capital Allocation Ledger". Step 1 → `CashPlanningStrip`. `DeployV3Step2Section` transformed to show action cards + guardrail rail + portfolio shape preview (honest Coming Later) + coming-later modules. Decision journal heading updated. All existing API calls, decision log, and Setup & diagnostics preserved unchanged.
-- `src/lib/deploy-ledger.test.ts` (new): 50 pure helper tests. All pass. Cover: ready action, pending guardrail, not_evaluated_yet, actionable_pending_tax, ready_pending_guardrails, missing portfolio-shape honest state, no fake tax/wash-sale/target-allocation intelligence.
-- Total: 662 tests pass (50 new). 3 pre-existing unrelated suite failures unchanged.
+- `src/lib/portfolio-ledger.ts` (new): Pure helpers — `buildLedgerHoldings`, `buildConcentrationTop5`, `buildCategoryExposure`, `buildThesisHealthSummary`, `buildSourceFreshnessSummary`, `buildHoldingDrawerData`, `buildLedgerData`, plain-English formatters. No JSX, safe for tests.
+- `src/app/dashboard/portfolio/page.tsx` (new): Living Thesis Ledger surface — editorial holdings ledger, concentration panel, category exposure, thesis-health panel, source-freshness panel, holding detail drawer (Esc/close, accessible), Coming-Later capsules for Business Story / Company Strategy / What Would Make Thesis Wrong / Good Company vs Good Stock.
+- `src/components/navigation/BottomNav.tsx` (modified): Portfolio nav item added (`/dashboard/portfolio`, BriefcaseIcon) to both BottomNav and SideNav.
+- `src/app/dashboard/page.tsx` (modified): "Full Ledger →" link added to Today portfolio snapshot section.
+- `src/lib/portfolio-ledger.test.ts` (new): 51 pure helper tests. All pass. Covers: empty holdings, top-5 ordering, category exposure, missing theme data → Coming-Later, Intel action/evidence mapping without raw keys, drawer last-3-decisions, Coming-Later capsules render no fabricated content.
+- Total: 731 tests pass. 3 pre-existing unrelated suite failures unchanged.
 - No backend changes, no SQL, no env/provider/email/LLM changes. ALERT_EMAIL_DRY_RUN remains true.
 
-**Next after merge: Stage 4F.**
+**Next after merge: Stage 4G.**
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

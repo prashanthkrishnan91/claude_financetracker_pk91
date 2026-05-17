@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 
 const NAV_ITEMS = [
   { href: "/dashboard", label: "Today", icon: BarChartIcon },
+  { href: "/dashboard/portfolio", label: "Portfolio", icon: BriefcaseIcon },
   { href: "/dashboard/recommendations", label: "Intel", icon: LightbulbIcon },
   { href: "/dashboard/deposits", label: "Deploy", icon: WalletIcon },
   { href: "/dashboard/alerts", label: "Alerts", icon: BellIcon },
@@ -140,6 +141,22 @@ function BarChartIcon({
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
       <path d="M18 20V10M12 20V4M6 20v-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BriefcaseIcon({
+  className,
+  strokeWidth = 1.5,
+}: {
+  className?: string;
+  strokeWidth?: number;
+}) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+      <rect x="2" y="7" width="20" height="14" rx="2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 12v3" strokeLinecap="round" />
     </svg>
   );
 }

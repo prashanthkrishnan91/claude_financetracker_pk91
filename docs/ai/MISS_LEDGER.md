@@ -174,6 +174,40 @@ Follow-up needed: After 1–2 PRs verify nothing depends on the removed claude-f
 
 ---
 
+### 2026-05-17 — Policy filtered on serialization label it didn't read (evidence band "OK" vs "PARTIAL")
+
+Repo: claude_financetracker_pk91
+Area: backend/alert-policy
+Severity: Level 1 — caught by patch review before any production traffic
+Miss: `alert_trigger_policy_v1.py` used `_ACTIONABLE_BANDS = {"STRONG", "OK"}` but `snapshot_builder._EVIDENCE_QUALITY_TO_BAND` serializes `AxisBand.OK → "PARTIAL"`. Production cards carry `evidence_band="PARTIAL"` for OK-quality evidence; `"OK"` never appears in real card output. The policy silently suppressed all AxisBand.OK cards.
+Impact: No production impact (migration 020 not yet applied, endpoint not yet wired). If shipped as-is, the policy would have missed all real "OK evidence" candidates.
+What caught it: Code review of the patch task — reviewer traced the serialization layer to `snapshot_builder._EVIDENCE_QUALITY_TO_BAND`.
+Root cause: Policy was written without reading the serialization layer that produces the field values being filtered. The policy test used `evidence_band="OK"` (the axis enum name) rather than `"PARTIAL"` (the serialized display label).
+What should catch it next time: When writing a filter/policy on an enum-derived field, read the serialization layer (the module that builds the output dict) before writing the filter. Add a comment in the policy pointing to the mapping source.
+One-off or repeated: One-off.
+Promotion target: None yet. If it recurs, add a checklist item to the policy archetype in SAFETY_PACKS_AND_ARCHETYPES: "Read the serialization layer before filtering on display-label fields."
+Action taken: Fixed `_ACTIONABLE_BANDS` to `{"STRONG","PARTIAL"}`; added source comment; updated suppression message; updated all tests to use `"PARTIAL"`; added 4 new tests explicitly documenting the AxisBand.OK→PARTIAL mapping.
+Follow-up needed: No.
+
+---
+
+### 2026-05-17 — Initial PR push used non-template body + missing USAGE_LEDGER row
+
+Repo: claude_financetracker_pk91
+Area: PR authoring / workflow compliance
+Severity: Level 1 — caught by CI readiness gate before merge
+Miss: Initial push for PR #350 used a custom PR body format that omitted required template sections (`## Severity`, `## Validation`, SQL/env/providers/UI, AI usage note, AI PR readiness). USAGE_LEDGER row was also missing. Required two follow-up commits + body update to pass CI.
+Impact: Two wasted CI cycles; ~15-min delay.
+What caught it: AI PR Readiness Check CI gate.
+Root cause: PR body was drafted in the session without the template open. USAGE_LEDGER row was not committed in the same commit as the code.
+What should catch it next time: Draft PR body against `.github/pull_request_template.md` before the first push; run `python3 scripts/workflow/ai_pr_readiness_check.py --base-ref origin/main` locally before pushing; commit USAGE_LEDGER row in the same commit as code (or immediately after code, before opening PR).
+One-off or repeated: Repeated pattern (see 2026-05-15 entries). Promotion held — gate already catches it; the miss is in execution not tooling.
+Promotion target: None (gate already enforces; MISS_LEDGER tracking for pattern count).
+Action taken: Added entries; no OS surface changes.
+Follow-up needed: No.
+
+---
+
 ## Seed entries
 
 ### 2026-05-07 — Old-format prompt after OS v2

@@ -56,13 +56,13 @@ function CloseIcon() {
   );
 }
 
-// Deterministic date label — avoids hydration mismatch.
-// Uses en-US locale explicitly so server and client agree.
+// Simple display label for the metadata footer. UTC timezone ensures the date
+// doesn't shift for near-midnight UTC timestamps across server/client timezones.
 function formatUpdatedAt(iso: string): string {
   try {
     const d = new Date(iso);
     if (Number.isNaN(d.getTime())) return iso;
-    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
   } catch {
     return iso;
   }

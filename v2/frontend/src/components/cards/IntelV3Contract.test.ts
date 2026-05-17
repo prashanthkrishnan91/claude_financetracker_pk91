@@ -13,6 +13,7 @@
  */
 
 import type { IntelV3Snapshot, IntelV3HeldCard, IntelV3Action } from "@/lib/api";
+import { ACTION_TOKEN_STYLES, COMING_LATER_CANONICAL_CAPTION } from "./IntelV3PrimitivesData";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -488,20 +489,13 @@ describe("Intel v3 source-of-truth contract — visible page uses only v3 snapsh
 describe("Stage 4C — action token style mapping contract", () => {
   // Validates that ACTION_TOKEN_STYLES covers every valid action and routes
   // through design-system tokens (action-*) rather than raw Tailwind colors.
+  // Imports the real exported constant from IntelV3Primitives — no local mirror.
 
   const VALID_ACTIONS: IntelV3Action[] = ["BUY", "HOLD", "TRIM", "SELL"];
   const FORBIDDEN_RAW_CLASSES = [
     "text-green-", "text-blue-", "text-amber-", "text-red-",
     "bg-green-",  "bg-blue-",  "bg-amber-",  "bg-red-",
   ];
-
-  // Mirrors ACTION_TOKEN_STYLES from IntelV3Primitives (pure contract test, no import).
-  const ACTION_TOKEN_STYLES: Record<IntelV3Action, { text: string; bg: string; border: string; glyph: string; dot: string }> = {
-    BUY:  { text: "text-action-buy",  bg: "bg-action-buy/10",  border: "border-action-buy/30",  glyph: "↑", dot: "bg-action-buy"  },
-    HOLD: { text: "text-action-hold", bg: "bg-action-hold/10", border: "border-action-hold/30", glyph: "─", dot: "bg-action-hold" },
-    TRIM: { text: "text-action-trim", bg: "bg-action-trim/10", border: "border-action-trim/30", glyph: "↓", dot: "bg-action-trim" },
-    SELL: { text: "text-action-sell", bg: "bg-action-sell/10", border: "border-action-sell/30", glyph: "✕", dot: "bg-action-sell" },
-  };
 
   it("every valid action has a token style entry", () => {
     for (const action of VALID_ACTIONS) {
@@ -669,18 +663,14 @@ describe("Stage 4C — drawer Coming-Later contract", () => {
       "source verified", "sentiment confirmed", "SEC filing analysis",
       "company strategy confirmed",
     ];
-    const comingLaterCaption =
-      "This intelligence module is being prepared. The next intelligence stage will surface it here.";
     for (const forbidden of FORBIDDEN_FABRICATIONS) {
-      expect(comingLaterCaption.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      expect(COMING_LATER_CANONICAL_CAPTION.toLowerCase()).not.toContain(forbidden.toLowerCase());
     }
   });
 
-  it("Coming-Later caption is the canonical pattern string", () => {
-    const caption =
-      "This intelligence module is being prepared. The next intelligence stage will surface it here.";
-    expect(caption).toContain("being prepared");
-    expect(caption).toContain("next intelligence stage");
+  it("Coming-Later caption is the canonical pattern string from IntelV3Primitives export", () => {
+    expect(COMING_LATER_CANONICAL_CAPTION).toContain("being prepared");
+    expect(COMING_LATER_CANONICAL_CAPTION).toContain("next intelligence stage");
   });
 });
 

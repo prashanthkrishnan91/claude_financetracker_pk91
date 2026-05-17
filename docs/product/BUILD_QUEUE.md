@@ -6,9 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
+- **Stage 4C** — Intel Investment Committee Redesign (PR #361 open). Action Card visual system with `action-*` tokens; Investment Committee cockpit; "Why this view?" accessible drawer; 56 contract tests. No backend, no SQL.
 
 ## Later (Stage 4 sequence)
+- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness). Starts after Stage 4C merges.
 - **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
 - **Stage 4F** — Portfolio Living Thesis Ledger.
 - **Stage 4G** — Alert Center polish + Journal chrome + Radar destination + buildable capsule subset (Coming-Later for Lessons / What I learned today archive / Radar candidates).
@@ -39,8 +40,6 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
-
-- **Stage 4C — Intel Investment Committee Redesign** (PR open). Action Card visual system with `action-*` tokens; `ActionGlyph`, `ConfidenceRing`, `RiskGlyph`, `FreshnessDot`, `ComingLaterPanel`, `DataMissingPill` primitives; "Why this view?" drawer with accessible dialog, live sections, Coming-Later chrome; Investment Committee cockpit with filter rail + portfolio overview + card grid. 56 contract tests (23 new). No backend, no SQL.
 
 - **Stage 4B — Today Command Center** (merged PR #359). The Brief + Act Today + Risk Pulse + Deploy Ready + Watchtower Summary from existing Intel v3 / Deploy v3 / Watchtower data. "What I Learned Today" Coming-Later chrome (Stage 6E activates). 49 unit tests. Hydration-safe date. No backend, no SQL.
 

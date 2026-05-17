@@ -11,7 +11,7 @@ Hard safety:
 - No LLM calls. No SQL schema changes. No frontend changes.
 
 Structured log key:
-  alert_email_delivery_summary scanned=N sent=N failed=N skipped=N dry_run=... provider=resend
+  alert_email_delivery_summary scanned=N sent=N failed=N skipped=N status_update_failed=N dry_run=... provider=resend
 """
 
 from __future__ import annotations
@@ -76,6 +76,7 @@ class AlertEmailDeliveryWorker:
             "sent": 0,
             "failed": 0,
             "skipped": 0,
+            "status_update_failed": 0,
             "dry_run": self._dry_run,
             "provider": self._provider or "none",
         }
@@ -106,6 +107,26 @@ class AlertEmailDeliveryWorker:
         for row in rows:
             row_id = str(row.get("id", ""))
             ticker = row.get("ticker", "?")
+
+            # Step 1: Atomically claim the row (pending → processing).
+            # Skip rows that can't be claimed to prevent duplicate sends.
+            try:
+                claimed = svc.claim_for_delivery(row_id, now)
+            except Exception as claim_exc:
+                logger.warning(
+                    "alert_email_delivery.claim_error row_id=%s ticker=%s error=%s skipping",
+                    row_id,
+                    ticker,
+                    claim_exc,
+                )
+                summary["skipped"] += 1
+                continue
+
+            if not claimed:
+                summary["skipped"] += 1
+                continue
+
+            # Step 2: Send and update status.
             try:
                 body = self._build_email_body(row)
                 result = client.send_email(
@@ -115,12 +136,23 @@ class AlertEmailDeliveryWorker:
                     body=body,
                 )
                 if result.success:
-                    svc.mark_sent(
-                        row_id,
-                        provider_message_id=result.provider_message_id,
-                        sent_at=now,
-                    )
-                    summary["sent"] += 1
+                    try:
+                        svc.mark_sent(
+                            row_id,
+                            provider_message_id=result.provider_message_id,
+                            sent_at=now,
+                        )
+                        summary["sent"] += 1
+                    except Exception as mark_exc:
+                        # Email was delivered; do NOT mark_failed to avoid future resend.
+                        # Row stays in 'processing' for manual recovery.
+                        logger.warning(
+                            "alert_email_delivery.mark_sent_failed row_id=%s "
+                            "email_was_sent=True error=%s leaving_in_processing",
+                            row_id,
+                            mark_exc,
+                        )
+                        summary["status_update_failed"] += 1
                 else:
                     svc.mark_failed(
                         row_id,
@@ -176,11 +208,12 @@ class AlertEmailDeliveryWorker:
     def _emit_log(self, summary: dict[str, Any], note: str = "") -> None:
         logger.info(
             "alert_email_delivery_summary scanned=%d sent=%d failed=%d skipped=%d "
-            "dry_run=%s provider=%s%s",
+            "status_update_failed=%d dry_run=%s provider=%s%s",
             summary["scanned"],
             summary["sent"],
             summary["failed"],
             summary["skipped"],
+            summary.get("status_update_failed", 0),
             summary["dry_run"],
             summary["provider"],
             f" note={note}" if note else "",

@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3E — Resend Email Delivery Worker v1**: PR open on branch `claude/resend-email-delivery-worker-LzTqL`. Validate in production (dry-run pass → real send with all env vars set). SQL 021 already applied.
+- **Stage 3E — Resend Email Delivery Worker v1**: PR open on branch `claude/resend-email-delivery-worker-LzTqL`. Includes claim-before-send safety patch (SQL 022 pending manual Supabase application — `022_alert_delivery_processing_status.sql`). Validate in production: (1) apply SQL 022, (2) dry-run pass, (3) real send with all env vars set. SQL 021 already applied.
 
 ## Next
 

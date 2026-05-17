@@ -2,7 +2,7 @@
 
 Acceptance criteria:
   1.  delivery disabled => no provider call, no sent status
-  2.  dry-run mode => no provider call, rows left as skipped in summary
+  2.  dry-run mode => no provider call, no claim, rows left as skipped in summary
   3.  missing API key => skipped/failure without provider call
   4.  missing ALERT_EMAIL_FROM => skipped without provider call
   5.  missing ALERT_EMAIL_TO => skipped without provider call
@@ -31,6 +31,12 @@ Acceptance criteria:
  28.  fetch_pending_email_rows filters out future-scheduled rows
  29.  fetch_pending_email_rows includes null scheduled_for rows
  30.  fetch_pending_email_rows handles DB error gracefully
+ 31.  claim_for_delivery called before send_email
+ 32.  claim returns False => row skipped, no send
+ 33.  claim raises => row skipped without mark_failed
+ 34.  send succeeds but mark_sent raises => status_update_failed, no mark_failed
+ 35.  invalid scheduled_for string => row excluded (fail-safe)
+ 36.  dry-run does not call claim_for_delivery
 """
 
 from __future__ import annotations
@@ -110,6 +116,7 @@ def _pending_row(
 def _make_outbox_svc(rows: list[dict] | None = None) -> MagicMock:
     svc = MagicMock()
     svc.fetch_pending_email_rows.return_value = rows or []
+    svc.claim_for_delivery.return_value = True
     svc.mark_sent.return_value = None
     svc.mark_failed.return_value = None
     return svc
@@ -155,6 +162,7 @@ def test_dry_run_no_provider_call():
     worker = _make_worker(dry_run=True, outbox_service=svc, resend_client=resend)
     result = worker.run_delivery_pass(now=_NOW)
     resend.send_email.assert_not_called()
+    svc.claim_for_delivery.assert_not_called()
     svc.mark_sent.assert_not_called()
     svc.mark_failed.assert_not_called()
     assert result["scanned"] == 1
@@ -356,7 +364,7 @@ def test_no_intel_deploy_watchtower_candidate_mutation():
         name for name, _args, _kwargs in svc.method_calls
         if not name.startswith("_")
     }
-    assert called_methods <= {"fetch_pending_email_rows", "mark_sent", "mark_failed"}
+    assert called_methods <= {"fetch_pending_email_rows", "claim_for_delivery", "mark_sent", "mark_failed"}
 
 
 # ── 16. No real network calls ─────────────────────────────────────────────────
@@ -422,6 +430,7 @@ def test_empty_pending_rows_returns_zero_summary():
         "sent": 0,
         "failed": 0,
         "skipped": 0,
+        "status_update_failed": 0,
         "dry_run": False,
         "provider": "resend",
     }
@@ -592,3 +601,98 @@ def test_fetch_db_error_returns_empty():
 
     rows = svc.fetch_pending_email_rows(limit=50, now=_NOW)
     assert rows == []
+
+
+# ── 31. Claim called before send ──────────────────────────────────────────────
+
+def test_claim_called_before_send():
+    row = _pending_row()
+    resend = _make_resend_client()
+    svc = _make_outbox_svc([row])
+    call_order: list[str] = []
+    svc.claim_for_delivery.side_effect = lambda *a, **kw: call_order.append("claim") or True
+    resend.send_email.side_effect = lambda **kw: call_order.append("send") or ResendSendResult(
+        success=True, provider_message_id="m1", failure_reason=None
+    )
+    worker = _make_worker(outbox_service=svc, resend_client=resend)
+    worker.run_delivery_pass(now=_NOW)
+    assert call_order.index("claim") < call_order.index("send")
+
+
+# ── 32. Claim returns False => skip, no send ──────────────────────────────────
+
+def test_claim_false_skips_row_no_send():
+    row = _pending_row()
+    resend = _make_resend_client()
+    svc = _make_outbox_svc([row])
+    svc.claim_for_delivery.return_value = False
+    worker = _make_worker(outbox_service=svc, resend_client=resend)
+    result = worker.run_delivery_pass(now=_NOW)
+    resend.send_email.assert_not_called()
+    svc.mark_sent.assert_not_called()
+    svc.mark_failed.assert_not_called()
+    assert result["skipped"] == 1
+    assert result["sent"] == 0
+
+
+# ── 33. Claim raises => skip without mark_failed ──────────────────────────────
+
+def test_claim_exception_skips_without_mark_failed():
+    row = _pending_row()
+    resend = _make_resend_client()
+    svc = _make_outbox_svc([row])
+    svc.claim_for_delivery.side_effect = RuntimeError("db timeout")
+    worker = _make_worker(outbox_service=svc, resend_client=resend)
+    result = worker.run_delivery_pass(now=_NOW)
+    resend.send_email.assert_not_called()
+    svc.mark_failed.assert_not_called()
+    assert result["skipped"] == 1
+    assert result["sent"] == 0
+
+
+# ── 34. Send success + mark_sent failure => status_update_failed, no mark_failed
+
+def test_send_success_mark_sent_failure_leaves_processing():
+    row = _pending_row()
+    resend = _make_resend_client(success=True, msg_id="msg_ok")
+    svc = _make_outbox_svc([row])
+    svc.mark_sent.side_effect = RuntimeError("DB write failed after send")
+    worker = _make_worker(outbox_service=svc, resend_client=resend)
+    result = worker.run_delivery_pass(now=_NOW)
+    # Email was sent; must NOT call mark_failed (would risk duplicate on retry).
+    svc.mark_failed.assert_not_called()
+    assert result["status_update_failed"] == 1
+    assert result["sent"] == 0
+    assert result["failed"] == 0
+
+
+# ── 35. Invalid scheduled_for safe skip ───────────────────────────────────────
+
+def test_invalid_scheduled_for_safe_skip():
+    from app.services.alert.alert_delivery_outbox_service import AlertDeliveryOutboxService
+
+    bad_row = _pending_row(scheduled_for="not-a-timestamp")
+    good_row = _pending_row(ticker="GOOG", scheduled_for=None)
+
+    client = MagicMock()
+    client.table.return_value.select.return_value.eq.return_value.eq.return_value \
+        .order.return_value.limit.return_value.execute.return_value = MagicMock(
+        data=[bad_row, good_row]
+    )
+    svc = AlertDeliveryOutboxService.__new__(AlertDeliveryOutboxService)
+    svc.client = client
+
+    rows = svc.fetch_pending_email_rows(limit=50, now=_NOW)
+    tickers = [r["ticker"] for r in rows]
+    assert "AAPL" not in tickers   # malformed → excluded
+    assert "GOOG" in tickers       # null → included
+
+
+# ── 36. Dry-run does not call claim_for_delivery ──────────────────────────────
+
+def test_dry_run_does_not_claim():
+    row = _pending_row()
+    svc = _make_outbox_svc([row])
+    worker = _make_worker(dry_run=True, outbox_service=svc)
+    worker.run_delivery_pass(now=_NOW)
+    svc.claim_for_delivery.assert_not_called()

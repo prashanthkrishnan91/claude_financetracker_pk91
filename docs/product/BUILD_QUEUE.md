@@ -6,20 +6,51 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3F — Email Delivery Production Activation / Dry-Run Gate**: PR open on branch `claude/stage-3f-email-delivery-jGMBY`. Adds `email_delivery` PROCESS_TYPE to railway.toml and Procfile. Expands entrypoint docstring with staged activation instructions (dry-run gate → real-send). Docs updated to reflect PR #354 merged, SQL 021/022 applied. No code logic changes. Validate: set `PROCESS_TYPE=email_delivery` on Railway service, run dry-run pass, confirm log shows `sent=0 dry_run=True`.
+- **S-Grade Execution Contract (docs-only)**: PR open on branch `claude/s-grade-execution-contract-g9tVA`. Adds `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` — implementation-ready contract for the Stage 4 / 5 / 6 design + intelligence overhaul, with explicit Stage 4 (UX foundation + core current-data surfaces) / Stage 5 (backend intelligence) / Stage 6 (advanced surfaces) split and the Coming-Later Pattern for honest unavailable states. No app code, no SQL, no backend, no provider, no LLM, no email-delivery change.
 
 ## Next
 
-- Alert center UI (frontend surface for alert candidates — after email delivery dry-run is validated and real sends confirmed).
+- **Stage 4A — Design System Foundation + App Shell Reset.** Frontend-only. Tailwind tokens (Obsidian dark + Paper light), CSS variables, two type families via `next/font`, 4-pt spacing / radii / elevation / type tokens, top / side / bottom nav shell reset. ~12 files. Medium usage. New chat. No page content restructuring; no component redesign; no backend calls. See `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` §30.1.
 
-## Later
+## Later (Stage 4 sequence)
 
-- Alerts / action feedback.
-- Research artifact UX.
-- Premium cockpit design polish.
+- **Stage 4B** — Today Command Center (current-data only, Coming-Later for "What I learned today").
+- **Stage 4C** — Intel Investment Committee Redesign (Action Card + Detail Drawer; Coming-Later for capsules that depend on Stage 5).
+- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
+- **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
+- **Stage 4F** — Portfolio Living Thesis Ledger.
+- **Stage 4G** — Alert Center polish + Journal chrome + Radar destination + buildable capsule subset (Coming-Later for Lessons / What I learned today archive / Radar candidates).
+- **Stage 4H** — Mobile Atelier + Motion Polish + a11y audit.
+
+## Later (Stage 5 backend reservation — not active Stage 4 work)
+
+- Stage 5A — Research Artifact Store production apply + writer scaffolding.
+- Stage 5B — Source credibility registry.
+- Stage 5C — Contradiction detection.
+- Stage 5D — Evidence completeness scoring.
+- Stage 5E — Truth adapter.
+- Stage 5F – Stage 5L — Finance research workers (filings, sentiment, technical, fundamental, company strategy, pattern detection, Radar candidates).
+- Stage 5M — Real-send activation for email alerts (after Resend domain verification). Separate, non-design stage.
+
+## Later (Stage 6 advanced visible surfaces — depend on Stage 5)
+
+- Stage 6A — Source Room live.
+- Stage 6B / 6C — Intel detail drawer technical / fundamental context live.
+- Stage 6D — Intel detail drawer Business story / Company strategy primer / artifact-backed "What would make this thesis wrong" live.
+- Stage 6E — Today "What I learned today" capsule live.
+- Stage 6F — Journal Lessons surface + archive live.
+- Stage 6G — Radar live.
+- Stage 6H — Command bar live AI.
+
+## Later (deferred / design-dependent)
+
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 3G — Alert Center UI v1** (merged). Read-only Alert Center at `/dashboard/alerts` reading `GET /api/v1/alert-candidates` + `GET /api/v1/alert-delivery-outbox`. Nav added to BottomNav and SideNav. Dry-run safety banner always visible. Plain-English status labels, severity pills, empty/loading/error states. 28 unit tests on pure mapping helpers in `src/lib/alert-center.ts`. No SQL, no email-delivery changes.
+
+- **Stage 3F — Email Delivery Production Activation Config** (merged PR #355). Added `email_delivery` PROCESS_TYPE to `railway.toml` and `Procfile`. Entrypoint docstring expanded with staged dry-run → real-send activation instructions. Dry-run pass confirmed on Railway. Resend domain verification still pending; real-send remains parked.
 
 - **Stage 3E — Resend Email Delivery Worker v1** (merged PR #354, SQL 022 applied). Claim-before-send safety. 38 tests. `alert_email_delivery_summary` structured log. Worker separate from Watchtower.
 

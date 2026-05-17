@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3G — Alert Center UI v1)
+Last updated: 2026-05-17 (S-Grade Execution Contract — docs-only planning PR; next: Stage 4A — Design System Foundation + App Shell Reset)
 
 ## Purpose
 
@@ -116,9 +116,18 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Stage 3G PR is open** (branch `claude/alert-center-ui-v1-cAzJ8`). After merge: no email delivery activation steps are required — the worker is already running in dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log already confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet.**
+**S-Grade Execution Contract docs-only PR is open** (branch `claude/s-grade-execution-contract-g9tVA`). It adds `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` — the implementation-ready contract for the Stage 4 / 5 / 6 design + intelligence overhaul. No app code, no SQL, no backend, no provider, no LLM, no email-delivery change.
 
-The next product step after PR #356 merge is the **Opus Design Overhaul Execution Contract** — a design planning pass before any further visible UI work. Do NOT add push/SMS delivery, broker execution, or new providers before domain verification is complete.
+After merge, the next implementation step is **Stage 4A — Design System Foundation + App Shell Reset** (per §30.1 of the contract). Stage 4A is frontend-only: Tailwind tokens (Obsidian dark + Paper light palettes), CSS variables, two type families via `next/font`, 4-pt spacing scale enforcement, radii / elevation / type tokens, and a shell reset for top / side / bottom nav. No page content restructuring. No component redesign. No backend calls. Estimated usage Medium. UI budget ~12 files. Use a new chat for Stage 4A.
+
+**Do not skip ahead.** The contract splits the overhaul into:
+- **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only.
+- **Stage 5** — S-grade Research Artifact + finance-agent intelligence backend (5A–5M). Backend / data only.
+- **Stage 6** — Advanced evidence, learning, Radar, Journal, command-bar intelligence surfaces (6A–6H). Activates the Coming-Later chrome reserved by Stage 4.
+
+Stage 4 must never fabricate Stage 5 / 6 intelligence. Every surface that anticipates a future intelligence module renders the **Coming-Later Pattern** (§28.4): chrome only, with a calm caption that the module is being prepared.
+
+**Email delivery activation is out of scope for the entire design overhaul.** Email worker remains dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet. Real-send activation is reserved as Stage 5M, a separate, non-design stage.**
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 

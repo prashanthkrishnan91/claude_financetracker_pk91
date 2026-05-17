@@ -114,35 +114,25 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4F (PR open)
+## Current design stage — Stage 4H (PR open) — Stage 4 COMPLETE after merge
 
-**Stage 4C — Intel Investment Committee Redesign** — merged (PR #361). `IntelV3Primitives.tsx`, redesigned Cockpit/Card/Drawer, 56 contract tests. No backend, no SQL.
+**Stage 4A–4G** — all merged. Stage 4C (PR #361), 4D (PR #362), 4E (PR #363), 4F (PR #364), 4G (PR #365). See summaries below.
 
-**Stage 4D — Evidence Shell + Source UX + Data Health Drawer** — merged (PR #362). `intel-v3-evidence.ts`, `TrustPrimitives.tsx`, `DataHealthDrawer.tsx`, `IntelV3Drawer.tsx` enhancements. 82 tests. No backend, no SQL.
+**Stage 4G — Alert Center Polish + Journal + Radar + Capsules** — merged PR #365. Frontend-only. Alert Center Review Queue, Journal route, Radar route, DeterministicCapsules, 71 tests. No backend/SQL.
 
-**Stage 4E — Deploy Ledger Redesign** — merged PR #363. Frontend-only redesign of the Deploy surface into a Capital Allocation Ledger. `deploy-ledger.ts`, `DeployLedger.tsx`, 50 tests. No backend, no SQL.
+**Stage 4H — Mobile Atelier + Motion Polish** — PR open on branch `claude/stage-4h-mobile-polish-fEszR`. The final Stage 4 pass. Frontend-only.
 
-**Stage 4F — Portfolio Living Thesis Ledger** — Merged as PR #364. Frontend-only. `/dashboard/portfolio` Living Thesis Ledger.
+What landed in Stage 4H (PR open):
+- `src/components/navigation/BottomNav.tsx`: Mobile BottomNav trimmed to 4-tab focused subset: Today / Intel / Deploy / Portfolio. `MOBILE_NAV_ITEMS` constant replaces full `NAV_ITEMS` for mobile. Desktop SideNav unchanged (all destinations including Alerts, DRIP, Import, Settings, Journal, Radar).
+- `src/components/cards/IntelV3Drawer.tsx`: Responsive drawer — mobile bottom sheet (full-width, `max-h-[88dvh]`, `rounded-t-2xl`, `sheet-slide-up` animation) + desktop right-side drawer. Mobile drag handle. `aria-modal/role=dialog` preserved.
+- `src/components/cards/DataHealthDrawer.tsx`: Same responsive bottom-sheet pattern as IntelV3Drawer.
+- `src/app/globals.css`: `@keyframes sheet-slide-up` + `.sheet-slide-up` class + `prefers-reduced-motion` collapse to `animation: none`.
+- `src/lib/today-command-center.ts`: `buildTodayMiniBar()` — deterministic mini-bar state from existing Act Today / Deploy / Watchtower data. Returns `show:false` when no actionable signal.
+- `src/app/dashboard/page.tsx`: Mobile sticky mini-bar below Today header (`lg:hidden sticky top-[61px]`), backed by `buildTodayMiniBar`. Links to Intel, Deploy, or Alerts. Secondary Deploy link shown when act-today is primary and deploy has candidates.
+- `src/lib/today-command-center.test.ts`: 12 new `buildTodayMiniBar` tests + structural BottomNav 4-tab contract test. Total: 61 tests pass.
+- No backend changes, no SQL, no env/provider/email/LLM/package dependency changes. ALERT_EMAIL_DRY_RUN remains true.
 
-**Stage 4G — Alert Center Polish + Journal + Radar + Capsules** — PR open on branch `claude/stage-4g-alert-journal-1YrV8`. Frontend-only.
-
-What landed in Stage 4F (PR #364):
-- `src/lib/portfolio-ledger.ts`, `src/app/dashboard/portfolio/page.tsx`, BottomNav Portfolio item, Today "Full Ledger →" link, 51 tests. No backend/SQL changes.
-
-What landed in Stage 4G (PR open):
-- `src/lib/alert-capsules.ts` (new): Pure helpers — `buildAlertWhyThisMatters`, `buildMissingDataCapsule`, `buildCandidateCapsuleState`. No JSX.
-- `src/lib/journal-ledger.ts` (new): Pure helpers — `buildJournalEntries`, `buildEvaluationState`, `toRomanNumeral`, `computeCashDeployed`, Coming-Later captions.
-- `src/app/dashboard/alerts/page.tsx` (modified): Redesigned as Watchtower Review Queue. Dry-run banner preserved. "Why this matters" expandable capsule per candidate (WhyTrimIsNotBadCompany + WhatMissingDataMeans inline). Behavior unchanged.
-- `src/app/dashboard/journal/page.tsx` (new): Journal route — chapter-numeral timeline from existing `DecisionMemoryLog` rows. Entry anatomy, evaluation-window state. Coming-Later for Lessons / What I Learned Today.
-- `src/app/dashboard/radar/page.tsx` (new): Radar route — honest Coming-Later destination. No mock candidates.
-- `src/components/cards/DeterministicCapsules.tsx` (new): Buildable capsule set — `WhyThisMattersCapsule`, `WhyTrimIsNotBadCompanyCapsule`, `WhatMissingDataMeansCapsule`, `PatienceIsActionCapsule`, `HowDecisionChangesPortfolioShapeCapsule` (Coming-Later). Future-only capsules (Business Story, Company Strategy, What Would Make Thesis Wrong, Good Company vs Good Stock, What I Learned Today) all render `ComingLaterPanel`.
-- `src/components/navigation/BottomNav.tsx` (modified): Journal and Radar added to `SIDE_ONLY_NAV_ITEMS` (desktop SideNav only; mobile BottomNav unchanged per §30.8).
-- `src/lib/alert-capsules.test.ts` (new): 38 tests.
-- `src/lib/journal-ledger.test.ts` (new): 33 tests.
-- Total: 807 tests pass. 3 pre-existing unrelated suite failures unchanged. No TypeScript errors in new files.
-- No backend changes, no SQL, no env/provider/email/LLM changes. ALERT_EMAIL_DRY_RUN remains true.
-
-**Next after merge: Stage 4H.**
+**Stage 4 is complete after Stage 4H merge.**
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

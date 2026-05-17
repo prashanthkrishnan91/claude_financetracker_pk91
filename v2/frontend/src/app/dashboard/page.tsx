@@ -23,6 +23,7 @@ import {
   buildDeployReady,
   buildWatchtowerSummary,
   buildLearningSlotCaption,
+  buildTodayMiniBar,
   type ActTodayRow,
 } from "@/lib/today-command-center";
 
@@ -81,6 +82,7 @@ export default function DashboardPage() {
   const riskPulse = buildRiskPulse(intelSnapshot);
   const deployReady = buildDeployReady(deployPlan);
   const watchtowerSummary = buildWatchtowerSummary(alertCandidates);
+  const miniBar = buildTodayMiniBar(actToday, deployReady, watchtowerSummary);
 
   return (
     <>
@@ -114,6 +116,34 @@ export default function DashboardPage() {
           </div>
         </div>
       </header>
+
+      {/* Mobile sticky mini-bar — shows most actionable signal; hidden on desktop */}
+      {miniBar.show && (
+        <div
+          className="lg:hidden sticky top-[61px] z-40 px-4 py-2 border-b border-border-subtle/60 flex items-center justify-between gap-3"
+          style={{
+            background: "var(--bottom-nav-glass-bg)",
+            backdropFilter: "blur(12px)",
+            WebkitBackdropFilter: "blur(12px)",
+          }}
+          aria-label="Today quick actions"
+        >
+          <Link
+            href={miniBar.primaryHref}
+            className="text-xs font-medium text-text-secondary hover:text-text-primary transition-colors truncate"
+          >
+            {miniBar.primaryLabel}
+          </Link>
+          {miniBar.secondaryLabel && miniBar.secondaryHref && (
+            <Link
+              href={miniBar.secondaryHref}
+              className="text-xs text-accent hover:underline shrink-0"
+            >
+              {miniBar.secondaryLabel} →
+            </Link>
+          )}
+        </div>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-4">
 

@@ -338,3 +338,71 @@ export function buildWhyThisMatters(card: IntelV3HeldCard): string | null {
 export function buildLearningSlotCaption(): string {
   return "This daily lesson is being prepared. The next intelligence stage will surface it here.";
 }
+
+// ── Today mini-bar (Stage 4H) ─────────────────────────────────────────────────
+
+export interface TodayMiniBarResult {
+  show: boolean;
+  primaryLabel: string;
+  primaryHref: string;
+  secondaryLabel: string | null;
+  secondaryHref: string | null;
+}
+
+/**
+ * Build the compact mobile Today mini-bar state from existing deterministic data.
+ * Priority: Act Today actions > Deploy buy candidates > Watchtower alerts.
+ * Returns show:false when no actionable signal exists.
+ * Never invents intelligence — all inputs come from existing API responses.
+ */
+export function buildTodayMiniBar(
+  actToday: ActTodayResult,
+  deployReady: DeployReadyResult,
+  watchtowerSummary: WatchtowerSummaryResult,
+): TodayMiniBarResult {
+  const none: TodayMiniBarResult = {
+    show: false,
+    primaryLabel: "",
+    primaryHref: "",
+    secondaryLabel: null,
+    secondaryHref: null,
+  };
+
+  if (actToday.hasActionableItems) {
+    const count = actToday.rows.length;
+    const primaryLabel = `${count} action${count !== 1 ? "s" : ""} today — Intel`;
+    const secondaryLabel =
+      deployReady.hasData && deployReady.buyCount > 0
+        ? `${deployReady.buyCount} Deploy candidate${deployReady.buyCount !== 1 ? "s" : ""}`
+        : null;
+    return {
+      show: true,
+      primaryLabel,
+      primaryHref: "/dashboard/recommendations",
+      secondaryLabel,
+      secondaryHref: secondaryLabel ? "/dashboard/deposits" : null,
+    };
+  }
+
+  if (deployReady.hasData && deployReady.buyCount > 0) {
+    return {
+      show: true,
+      primaryLabel: `${deployReady.buyCount} Buy candidate${deployReady.buyCount !== 1 ? "s" : ""} — Deploy`,
+      primaryHref: "/dashboard/deposits",
+      secondaryLabel: null,
+      secondaryHref: null,
+    };
+  }
+
+  if (watchtowerSummary.candidateCount > 0) {
+    return {
+      show: true,
+      primaryLabel: `${watchtowerSummary.candidateCount} Watchtower alert${watchtowerSummary.candidateCount !== 1 ? "s" : ""}`,
+      primaryHref: "/dashboard/alerts",
+      secondaryLabel: null,
+      secondaryHref: null,
+    };
+  }
+
+  return none;
+}

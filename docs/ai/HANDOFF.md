@@ -116,7 +116,9 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Stage 3G PR is open** (branch `claude/alert-center-ui-v1-cAzJ8`). After merge: activate the email delivery worker in Railway using `PROCESS_TYPE=email_delivery` (from Stage 3F). Run a single dry-run pass to confirm `scanned=N sent=0 skipped=N dry_run=True` in Railway logs. Once dry-run is validated, set `ALERT_EMAIL_DRY_RUN=false` for real sends. The Alert Center UI will then show real delivery status (sent/failed) once candidates flow through the outbox. Do NOT add push/SMS delivery, broker execution, or real-send activation before validating dry-run output.
+**Stage 3G PR is open** (branch `claude/alert-center-ui-v1-cAzJ8`). After merge: no email delivery activation steps are required — the worker is already running in dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log already confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet.**
+
+The next product step after PR #356 merge is the **Opus Design Overhaul Execution Contract** — a design planning pass before any further visible UI work. Do NOT add push/SMS delivery, broker execution, or new providers before domain verification is complete.
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 

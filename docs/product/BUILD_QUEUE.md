@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3E — Real delivery provider**: wire `pending` outbox rows to a confirmed email/push provider (SendGrid/Resend/SES/etc.). Requires explicit provider decision before building. Do NOT start until SQL 021 (`alert_delivery_outbox`) is applied in Supabase.
+- **Stage 3E — Resend Email Delivery Worker v1**: PR open on branch `claude/resend-email-delivery-worker-LzTqL`. Validate in production (dry-run pass → real send with all env vars set). SQL 021 already applied.
 
 ## Next
 
@@ -21,7 +21,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Stage 3D — Alert Delivery Outbox v1** (merged PR #353). Provider-neutral `alert_delivery_outbox` table (SQL migration 021 — **MANUAL ACTION REQUIRED** in Supabase if not yet applied). Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook for all returned candidate rows. `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs. 109 tests pass.
+- **Stage 3D — Alert Delivery Outbox v1** (merged PR #353, SQL 021 applied). Provider-neutral `alert_delivery_outbox` table. Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook for all returned candidate rows. `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs. 109 tests pass.
 
 - **Stage 3C — Watchtower alert candidate generation hook** (merged PR #352). `watchtower_alert_candidate_hook_v1.py` wired after certified Intel v3 snapshot publishes via `compare_and_republish()` / `republish_after_analyst_eligibility()`. Candidates auto-generated on each Watchtower cycle. Fail-soft; errors logged but never break Intel/Watchtower publication. 23 tests pass. SQL 020 already applied.
 

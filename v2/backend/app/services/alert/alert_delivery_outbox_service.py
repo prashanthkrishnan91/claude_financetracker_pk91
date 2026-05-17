@@ -226,6 +226,101 @@ class AlertDeliveryOutboxService:
             )
             return {}, "error"
 
+    # ── Delivery worker helpers ───────────────────────────────────────────────
+
+    def fetch_pending_email_rows(
+        self,
+        limit: int = 50,
+        now: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch pending email outbox rows eligible for delivery.
+
+        Filters: channel=email, status=pending, scheduled_for is null or <=now.
+        Ordered oldest-first so earlier rows are processed first.
+        Volume for v1 is low (personal use); Python-level scheduled_for filter is safe.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        fetch_limit = max(limit * 3, 150)
+        try:
+            result = (
+                self.client.table(_TABLE)
+                .select("*")
+                .eq("channel", "email")
+                .eq("status", "pending")
+                .order("created_at")
+                .limit(fetch_limit)
+                .execute()
+            )
+            rows = result.data or []
+            eligible = [
+                r for r in rows
+                if not r.get("scheduled_for") or r["scheduled_for"] <= now_iso
+            ]
+            return eligible[:limit]
+        except Exception as exc:
+            logger.warning(
+                "alert_delivery_outbox.fetch_pending_failed error=%s", exc
+            )
+            return []
+
+    def mark_sent(
+        self,
+        row_id: str,
+        *,
+        provider_message_id: Optional[str] = None,
+        sent_at: Optional[datetime] = None,
+    ) -> None:
+        """Mark an outbox row as sent. Only updates rows still in pending status."""
+        if sent_at is None:
+            sent_at = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "status": "sent",
+            "sent_at": sent_at.isoformat(),
+            "updated_at": sent_at.isoformat(),
+        }
+        if provider_message_id:
+            payload["provider_message_id"] = provider_message_id
+        (
+            self.client.table(_TABLE)
+            .update(payload)
+            .eq("id", row_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        logger.info(
+            "alert_delivery_outbox.marked_sent row_id=%s provider_message_id=%s",
+            row_id,
+            provider_message_id,
+        )
+
+    def mark_failed(
+        self,
+        row_id: str,
+        *,
+        failure_reason: str = "unknown",
+    ) -> None:
+        """Mark an outbox row as failed. Only updates rows still in pending status."""
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "status": "failed",
+            "failure_reason": (failure_reason or "unknown")[:500],
+            "updated_at": now.isoformat(),
+        }
+        (
+            self.client.table(_TABLE)
+            .update(payload)
+            .eq("id", row_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        logger.info(
+            "alert_delivery_outbox.marked_failed row_id=%s reason=%s",
+            row_id,
+            (failure_reason or "unknown")[:100],
+        )
+
     # ── Read path ─────────────────────────────────────────────────────────────
 
     def list_outbox_entries(

@@ -65,13 +65,13 @@ export default function RadarPage() {
             <span className="mt-0.5 shrink-0 text-border-strong">—</span>
             <span>
               Each candidate surfaced with a thesis quality rating and evidence band — no hollow
-              "opportunity" labels.
+              &quot;opportunity&quot; labels.
             </span>
           </li>
           <li className="flex items-start gap-2">
             <span className="mt-0.5 shrink-0 text-border-strong">—</span>
             <span>
-              Reachable from Today's secondary rail once the screening layer is live.
+              Reachable from the Today secondary rail once the screening layer is live.
             </span>
           </li>
         </ul>

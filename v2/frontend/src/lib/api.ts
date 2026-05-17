@@ -262,6 +262,14 @@ export const api = {
     },
     getReadiness: () => fetchApi<DeployV3ReadinessDiagnostic>(DEPLOY_V3_READINESS_ENDPOINT),
   },
+
+  // Alert Center — read-only. No email is sent from these calls.
+  alertCenter: {
+    getCandidates: (limit = 50) =>
+      fetchApi<AlertCandidate[]>(`/api/v1/alert-candidates?limit=${limit}`),
+    getOutbox: (limit = 50) =>
+      fetchApi<AlertDeliveryOutbox[]>(`/api/v1/alert-delivery-outbox?limit=${limit}`),
+  },
 };
 
 /** Form data upload (no JSON content-type) */
@@ -1470,4 +1478,47 @@ export interface DeployV3ReadinessDiagnostic {
   };
   suppression_reasons: string[];
   next_required_action: string;
+}
+
+// ── Alert Center types (mirrors backend Pydantic models) ─────────────────────
+
+export interface AlertCandidate {
+  id: string;
+  user_id: string;
+  ticker: string;
+  source_area: string;
+  candidate_type: string;
+  action_type: string | null;
+  severity: string;
+  reason_code: string;
+  plain_english_reason: string;
+  policy_version: string;
+  status: string;
+  dedupe_key: string;
+  source_snapshot_id: string | null;
+  source_run_id: string | null;
+  expires_at: string | null;
+  cooldown_until: string | null;
+  created_at: string;
+}
+
+export interface AlertDeliveryOutbox {
+  id: string;
+  user_id: string;
+  alert_candidate_id: string;
+  ticker: string;
+  channel: string;
+  delivery_mode: string;
+  severity: string;
+  subject: string;
+  plain_english_body: string;
+  status: string;
+  dedupe_key: string;
+  provider_message_id: string | null;
+  failure_reason: string | null;
+  scheduled_for: string | null;
+  sent_at: string | null;
+  created_at: string;
+  updated_at: string;
+  policy_version: string;
 }

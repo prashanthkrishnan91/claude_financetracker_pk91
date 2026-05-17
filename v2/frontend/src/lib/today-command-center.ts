@@ -166,7 +166,7 @@ export function buildTheBrief(
   if (!alertCandidates) {
     s4 = "Watchtower data is loading.";
   } else if (alertCandidates.length === 0) {
-    s4 = "No Watchtower alerts — your portfolio is within normal thresholds.";
+    s4 = "No Watchtower alerts are currently waiting for review.";
   } else {
     const highCount = alertCandidates.filter(
       c => (c.severity ?? "").toUpperCase() === "HIGH"
@@ -305,7 +305,7 @@ export function buildWatchtowerSummary(
 
   let summaryLine: string;
   if (candidateCount === 0) {
-    summaryLine = "No active alerts — portfolio is within normal thresholds.";
+    summaryLine = "No active alerts are currently waiting for review.";
   } else if (highSeverityCount > 0) {
     summaryLine = `${plural(candidateCount, "alert candidate", "alert candidates")}, including ${plural(highSeverityCount, "high-severity item", "high-severity items")}.`;
   } else {

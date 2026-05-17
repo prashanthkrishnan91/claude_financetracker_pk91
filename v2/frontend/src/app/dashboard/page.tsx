@@ -36,6 +36,18 @@ export default function DashboardPage() {
   const { data: deployPlan } = useDeployV3Plan();
   const { data: alertCandidates } = useAlertCandidates(50);
 
+  // Empty string on server; set after mount to avoid locale/hydration mismatch.
+  const [todayLabel, setTodayLabel] = useState("");
+  useEffect(() => {
+    setTodayLabel(
+      new Date().toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "long",
+        day: "numeric",
+      })
+    );
+  }, []);
+
   // Auto-create one snapshot per day when the dashboard loads and the portfolio
   // has positions. Checks whether the most recent snapshot was taken today to
   // avoid creating duplicates on page refreshes.
@@ -66,12 +78,6 @@ export default function DashboardPage() {
   const riskPulse = buildRiskPulse(intelSnapshot);
   const deployReady = buildDeployReady(deployPlan);
   const watchtowerSummary = buildWatchtowerSummary(alertCandidates);
-
-  const todayLabel = new Date().toLocaleDateString(undefined, {
-    weekday: "long",
-    month: "long",
-    day: "numeric",
-  });
 
   return (
     <>
@@ -307,7 +313,7 @@ function ActTodayCard({ row }: { row: ActTodayRow }) {
 
       {/* Why this matters — expandable, only when data supports it */}
       {row.whyThisMatters && (
-        <div className="mt-1.5 ml-[calc(theme(spacing.2)+theme(spacing.px)*12)]">
+        <div className="mt-1.5 ml-8">
           <button
             onClick={() => setExpanded(e => !e)}
             className="text-[10px] text-text-muted hover:text-text-secondary transition-colors"

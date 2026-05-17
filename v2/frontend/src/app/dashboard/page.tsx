@@ -268,9 +268,17 @@ export default function DashboardPage() {
         {/* ── Portfolio snapshot ────────────────────────────────────────────── */}
 
         <div className="border-t border-border-subtle/40 pt-4 mt-2">
-          <p className="text-[10px] uppercase tracking-label text-text-muted opacity-40 mb-4">
-            Portfolio Snapshot
-          </p>
+          <div className="flex items-center justify-between mb-4">
+            <p className="text-[10px] uppercase tracking-label text-text-muted opacity-40">
+              Portfolio Snapshot
+            </p>
+            <Link
+              href="/dashboard/portfolio"
+              className="text-[10px] text-accent hover:underline uppercase tracking-label opacity-70"
+            >
+              Full Ledger →
+            </Link>
+          </div>
         </div>
 
         <PortfolioSummaryCard />

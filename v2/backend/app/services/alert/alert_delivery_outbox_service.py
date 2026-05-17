@@ -168,17 +168,39 @@ class AlertDeliveryOutboxService:
 
         Returns (row_or_empty_dict, outcome) where outcome is one of:
           created    — new outbox row created
-          deduped    — row already existed (same candidate+channel)
-          suppressed — recent pending/sent row exists for user+ticker+channel
+          deduped    — row already existed (exact same candidate+channel dedupe key)
+          suppressed — different candidate but recent pending/sent row for user+ticker+channel
           ineligible — candidate status is not 'candidate'
           error      — unexpected error (logged; does not raise)
+
+        Order of checks:
+          1. Build spec (eligibility check)
+          2. Exact dedupe: fetch by dedupe_key — if found, return 'deduped'
+          3. Noisy-repeat suppression: recent pending/sent for user+ticker+channel
+          4. Insert new pending row
+        This ordering ensures reprocessing the same candidate always returns
+        'deduped' rather than 'suppressed', preserving the distinct semantics.
         """
         try:
             spec = build_delivery_spec(candidate_row, channel=channel)
             if spec is None:
                 return {}, "ineligible"
 
-            # Suppress if a recent pending/sent row exists for this signal.
+            # Step 1: exact dedupe — same candidate+channel already has an outbox row.
+            existing = self._fetch_by_dedupe_key(spec.user_id, spec.dedupe_key)
+            if existing:
+                logger.info(
+                    "alert_delivery_outbox.deduped user_id=%s ticker=%s "
+                    "channel=%s dedupe_key=%s",
+                    spec.user_id,
+                    spec.ticker,
+                    spec.channel,
+                    spec.dedupe_key,
+                )
+                return existing, "deduped"
+
+            # Step 2: noisy-repeat suppression — a *different* candidate recently
+            # created a pending/sent outbox row for the same user+ticker+channel.
             if self.has_recent_outbox(
                 spec.user_id, spec.ticker, spec.channel, now=now
             ):
@@ -191,6 +213,7 @@ class AlertDeliveryOutboxService:
                 )
                 return {}, "suppressed"
 
+            # Step 3: insert new pending row.
             row, created = self.persist_outbox_entry(spec)
             return row, "created" if created else "deduped"
 

@@ -97,7 +97,10 @@ async def run_alert_candidate_generation(
         summary["policy_version"] = policy_result.policy_version
 
         # Step 4: persist candidates (idempotent by dedupe_key).
-        newly_persisted_rows: list[dict] = []
+        # Collect ALL returned rows (created and deduped) for outbox creation.
+        # If outbox creation failed on a prior run, a later candidate-deduped
+        # rerun must still attempt outbox creation for the missing row.
+        candidate_rows_for_outbox: list[dict] = []
         if policy_result.candidates:
             svc = AlertCandidateService()
             persisted = 0
@@ -107,9 +110,9 @@ async def run_alert_candidate_generation(
                     row, created = await asyncio.to_thread(svc.persist_candidate, candidate)
                     if created:
                         persisted += 1
-                        newly_persisted_rows.append(row)
                     else:
                         deduped += 1
+                    candidate_rows_for_outbox.append(row)
                 except Exception as persist_exc:
                     logger.warning(
                         "alert_candidate_hook.persist_error user_id=%s ticker=%s error=%s",
@@ -120,15 +123,18 @@ async def run_alert_candidate_generation(
             summary["persisted"] = persisted
             summary["deduped"] = deduped
 
-        # Step 5: create delivery outbox entries for newly persisted candidates.
-        # Fail-soft: outbox errors never block candidate generation or Watchtower.
-        if newly_persisted_rows:
+        # Step 5: create delivery outbox entries for all returned candidate rows.
+        # Outbox idempotency (dedupe_key) and noisy-repeat suppression prevent
+        # duplicates when rows are reprocessed. Fail-soft: outbox errors never
+        # block candidate generation or Watchtower.
+        if candidate_rows_for_outbox:
             outbox_summary = await _create_delivery_outbox_entries(
-                user_id_str, newly_persisted_rows
+                user_id_str, candidate_rows_for_outbox
             )
             summary["outbox_created"] = outbox_summary.get("created", 0)
             summary["outbox_suppressed"] = outbox_summary.get("suppressed", 0)
             summary["outbox_deduped"] = outbox_summary.get("deduped", 0)
+            summary["outbox_errors"] = outbox_summary.get("errors", 0)
 
     except Exception as exc:
         summary["error"] = str(exc)
@@ -242,7 +248,7 @@ def _emit_log(summary: dict[str, Any]) -> None:
     logger.info(
         "alert_candidate_generation_summary user_id=%s evaluated=%s "
         "candidates=%s persisted=%s deduped=%s suppressions=%s "
-        "outbox_created=%s outbox_suppressed=%s outbox_deduped=%s "
+        "outbox_created=%s outbox_suppressed=%s outbox_deduped=%s outbox_errors=%s "
         "skipped_reason=%s policy_version=%s error=%s",
         summary["user_id"],
         summary["evaluated"],
@@ -253,6 +259,7 @@ def _emit_log(summary: dict[str, Any]) -> None:
         summary.get("outbox_created", 0),
         summary.get("outbox_suppressed", 0),
         summary.get("outbox_deduped", 0),
+        summary.get("outbox_errors", 0),
         summary.get("skipped_reason") or "none",
         summary["policy_version"],
         summary.get("error") or "none",

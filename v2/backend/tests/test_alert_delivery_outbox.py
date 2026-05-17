@@ -2,8 +2,8 @@
 
 Covers acceptance criteria:
   1.  Eligible candidate (status=candidate) creates a pending outbox row
-  2.  Duplicate outbox generation for same candidate+channel dedupes (created=False)
-  3.  Recent pending outbox suppresses repeat (has_recent_outbox=True → suppressed)
+  2.  Duplicate outbox generation for same candidate+channel dedupes (exact dedupe)
+  3.  Recent pending outbox suppresses *different* candidate for same user+ticker+channel
   4.  Recent sent outbox suppresses repeat
   5.  SELL + high severity → delivery_mode=immediate
   6.  BUY (any severity) → delivery_mode=digest
@@ -26,6 +26,10 @@ Covers acceptance criteria:
  23.  list_outbox_entries empty when no rows
  24.  list_outbox_entries channel filter applied
  25.  list_outbox_entries status filter applied
+ 26.  Exact same candidate+channel returns deduped (not suppressed)
+ 27.  Hook passes deduped candidate rows (created=False) to outbox creation
+ 28.  If outbox fails on first run, later deduped candidate can create missing row
+ 29.  outbox_errors count appears in hook summary
 """
 
 from __future__ import annotations
@@ -114,7 +118,13 @@ def _make_insert_client(*, inserted_row: dict[str, Any]) -> MagicMock:
 
 
 def _make_no_recent_client(*, inserted_row: dict[str, Any]) -> MagicMock:
-    """Client that returns no recent outbox rows (suppression check passes), then inserts."""
+    """Client: exact-dedupe miss → noisy-repeat miss → insert succeeds.
+
+    create_pending_from_candidate call sequence (new ordering):
+      1. _fetch_by_dedupe_key (select/eq/eq/limit) → empty
+      2. has_recent_outbox (select/eq/eq/eq/in_/gte/limit) → empty
+      3. persist_outbox_entry insert → inserted_row
+    """
     client = MagicMock()
     call_count = [0]
 
@@ -122,7 +132,13 @@ def _make_no_recent_client(*, inserted_row: dict[str, Any]) -> MagicMock:
         call_count[0] += 1
         chain = MagicMock()
         if call_count[0] == 1:
-            # has_recent_outbox query
+            # _fetch_by_dedupe_key — exact dedupe miss
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(data=[])
+        elif call_count[0] == 2:
+            # has_recent_outbox — no recent row
             chain.select.return_value = chain
             chain.eq.return_value = chain
             chain.in_.return_value = chain
@@ -130,7 +146,7 @@ def _make_no_recent_client(*, inserted_row: dict[str, Any]) -> MagicMock:
             chain.limit.return_value = chain
             chain.execute.return_value = MagicMock(data=[])
         else:
-            # insert
+            # persist_outbox_entry insert
             chain.insert.return_value = chain
             chain.execute.return_value = MagicMock(data=[inserted_row])
         return chain
@@ -139,17 +155,53 @@ def _make_no_recent_client(*, inserted_row: dict[str, Any]) -> MagicMock:
     return client
 
 
-def _make_has_recent_client() -> MagicMock:
-    """Client that returns a recent pending outbox row on the suppression check."""
+def _make_exact_dedupe_client(*, existing_outbox_row: dict[str, Any]) -> MagicMock:
+    """Client: exact-dedupe hit on first call → returns existing row immediately.
+
+    create_pending_from_candidate call sequence:
+      1. _fetch_by_dedupe_key → returns existing_outbox_row (dedupe hit)
+      (no further calls needed)
+    """
     client = MagicMock()
     chain = MagicMock()
     chain.select.return_value = chain
     chain.eq.return_value = chain
-    chain.in_.return_value = chain
-    chain.gte.return_value = chain
     chain.limit.return_value = chain
-    chain.execute.return_value = MagicMock(data=[{"id": str(uuid.uuid4())}])
+    chain.execute.return_value = MagicMock(data=[existing_outbox_row])
     client.table.return_value = chain
+    return client
+
+
+def _make_has_recent_client() -> MagicMock:
+    """Client: exact-dedupe miss → noisy-repeat hit → suppressed.
+
+    create_pending_from_candidate call sequence:
+      1. _fetch_by_dedupe_key → empty (no exact match)
+      2. has_recent_outbox → found (recent pending/sent for same ticker+channel)
+    """
+    client = MagicMock()
+    call_count = [0]
+
+    def table_side(name: str):
+        call_count[0] += 1
+        chain = MagicMock()
+        if call_count[0] == 1:
+            # _fetch_by_dedupe_key → miss
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(data=[])
+        else:
+            # has_recent_outbox → hit
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.in_.return_value = chain
+            chain.gte.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(data=[{"id": str(uuid.uuid4())}])
+        return chain
+
+    client.table.side_effect = table_side
     return client
 
 
@@ -300,18 +352,36 @@ def test_recent_pending_suppresses_new_row():
 
 
 def test_recent_sent_suppresses_new_row():
-    """has_recent_outbox checks both pending AND sent rows — same suppression path."""
+    """has_recent_outbox checks both pending AND sent rows — same suppression path.
+
+    New call order: exact-dedupe miss first, then recent check finds a 'sent' row.
+    """
     row = _candidate_row()
-    # Client returns a "sent" row in the recent check
     client = MagicMock()
-    chain = MagicMock()
-    chain.select.return_value = chain
-    chain.eq.return_value = chain
-    chain.in_.return_value = chain
-    chain.gte.return_value = chain
-    chain.limit.return_value = chain
-    chain.execute.return_value = MagicMock(data=[{"id": str(uuid.uuid4()), "status": "sent"}])
-    client.table.return_value = chain
+    call_count = [0]
+
+    def table_side(name: str):
+        call_count[0] += 1
+        chain = MagicMock()
+        if call_count[0] == 1:
+            # _fetch_by_dedupe_key → miss
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(data=[])
+        else:
+            # has_recent_outbox → "sent" row found
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.in_.return_value = chain
+            chain.gte.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(
+                data=[{"id": str(uuid.uuid4()), "status": "sent"}]
+            )
+        return chain
+
+    client.table.side_effect = table_side
     svc = _make_service(client)
 
     _, outcome = svc.create_pending_from_candidate(row, now=_NOW)
@@ -340,7 +410,10 @@ def test_user_isolation_different_services():
 
 
 def test_no_mutation_of_intel_snapshots_or_feedback():
-    """create_pending_from_candidate must not touch intel_v3_snapshots or feedback."""
+    """create_pending_from_candidate must not touch intel_v3_snapshots or feedback.
+
+    Call order: exact-dedupe miss (call 1), noisy-recent miss (call 2), insert (call 3).
+    """
     touched: list[str] = []
     row = _candidate_row()
     outbox_row = _outbox_row()
@@ -353,7 +426,13 @@ def test_no_mutation_of_intel_snapshots_or_feedback():
         call_count[0] += 1
         chain = MagicMock()
         if call_count[0] == 1:
-            # has_recent_outbox
+            # _fetch_by_dedupe_key — exact dedupe miss
+            chain.select.return_value = chain
+            chain.eq.return_value = chain
+            chain.limit.return_value = chain
+            chain.execute.return_value = MagicMock(data=[])
+        elif call_count[0] == 2:
+            # has_recent_outbox — no recent row
             chain.select.return_value = chain
             chain.eq.return_value = chain
             chain.in_.return_value = chain
@@ -361,7 +440,7 @@ def test_no_mutation_of_intel_snapshots_or_feedback():
             chain.limit.return_value = chain
             chain.execute.return_value = MagicMock(data=[])
         else:
-            # insert
+            # persist_outbox_entry insert
             chain.insert.return_value = chain
             chain.execute.return_value = MagicMock(data=[outbox_row])
         return chain
@@ -517,6 +596,10 @@ def test_list_outbox_entries_status_filter():
     assert client.table.return_value.eq.called
 
 
+_HOOK_MODULE = "app.services.alert.watchtower_alert_candidate_hook_v1"
+_OUTBOX_SVC_MODULE = "app.services.alert.alert_delivery_outbox_service"
+
+
 # ── Hook integration: fail-soft outbox creation ───────────────────────────────
 
 @pytest.mark.asyncio
@@ -526,75 +609,40 @@ async def test_hook_outbox_creation_fail_soft_does_not_raise():
         run_alert_candidate_generation,
     )
 
-    user_id = uuid.UUID(_USER_A)
     current_snap = {
         "snapshot_id": _SNAP_ID,
         "current_holdings": [
-            {
-                "ticker": "AAPL",
-                "action": "BUY",
-                "conviction": "MEDIUM",
-                "evidence_band": "PARTIAL",
-            }
+            {"ticker": "AAPL", "action": "BUY", "conviction": "MEDIUM", "evidence_band": "PARTIAL"}
         ],
     }
     prior_snap = {
         "snapshot_id": str(uuid.uuid4()),
         "current_holdings": [
-            {
-                "ticker": "AAPL",
-                "action": "HOLD",
-                "conviction": "LOW",
-                "evidence_band": "PARTIAL",
-            }
+            {"ticker": "AAPL", "action": "HOLD", "conviction": "LOW", "evidence_band": "PARTIAL"}
         ],
     }
-
-    snap_rows = [{"payload": current_snap}, {"payload": prior_snap}]
-    feedback_rows: list[dict] = []
-
-    client = MagicMock()
-
-    snap_chain = MagicMock()
-    snap_chain.select.return_value = snap_chain
-    snap_chain.eq.return_value = snap_chain
-    snap_chain.order.return_value = snap_chain
-    snap_chain.limit.return_value = snap_chain
-    snap_chain.execute.return_value = MagicMock(data=snap_rows)
-
-    fb_chain = MagicMock()
-    fb_chain.select.return_value = fb_chain
-    fb_chain.eq.return_value = fb_chain
-    fb_chain.order.return_value = fb_chain
-    fb_chain.limit.return_value = fb_chain
-    fb_chain.execute.return_value = MagicMock(data=feedback_rows)
-
-    # Candidate persist succeeds
     cand_row = _candidate_row(user_id=_USER_A, ticker="AAPL")
-    cand_insert_chain = MagicMock()
-    cand_insert_chain.insert.return_value = cand_insert_chain
-    cand_insert_chain.execute.return_value = MagicMock(data=[cand_row])
 
-    call_count = [0]
+    # Outbox service raises on create_pending_from_candidate
+    mock_outbox_svc = MagicMock()
+    mock_outbox_svc.create_pending_from_candidate.side_effect = RuntimeError("outbox DB down")
 
-    def table_side(name: str):
-        call_count[0] += 1
-        n = call_count[0]
-        if name == "intel_v3_snapshots":
-            return snap_chain
-        if name == "action_feedback_events":
-            return fb_chain
-        if name == "watchtower_alert_candidates":
-            return cand_insert_chain
-        # alert_delivery_outbox — raise to simulate failure
-        raise RuntimeError("simulated outbox DB failure")
+    with patch(f"{_HOOK_MODULE}._fetch_latest_two_intel_snapshots", new_callable=AsyncMock) as mock_fetch, \
+         patch(f"{_HOOK_MODULE}._fetch_feedback_rows", new_callable=AsyncMock) as mock_fb, \
+         patch(f"{_HOOK_MODULE}.AlertCandidateService") as mock_cand_cls, \
+         patch(f"{_OUTBOX_SVC_MODULE}.AlertDeliveryOutboxService") as mock_outbox_cls:
+        mock_fetch.return_value = [current_snap, prior_snap]
+        mock_fb.return_value = []
+        mock_cand_cls.return_value.persist_candidate = MagicMock(return_value=(cand_row, True))
+        mock_outbox_cls.return_value = mock_outbox_svc
 
-    client.table.side_effect = table_side
+        # Must not raise despite outbox failure
+        summary = await run_alert_candidate_generation(
+            uuid.UUID(_USER_A), MagicMock(), now=_NOW
+        )
 
-    # Must not raise despite outbox failure
-    summary = await run_alert_candidate_generation(user_id, client, now=_NOW)
     assert summary.get("error") is None
-    assert summary["persisted"] >= 0  # candidate persist may or may not succeed depending on mock detail
+    assert summary["persisted"] == 1
 
 
 @pytest.mark.asyncio
@@ -604,8 +652,7 @@ async def test_hook_summary_includes_outbox_created_count():
         run_alert_candidate_generation,
     )
 
-    user_id = uuid.UUID(_USER_A)
-    cand_id = str(uuid.uuid4())
+    cand_row = _candidate_row(user_id=_USER_A, ticker="AAPL")
     current_snap = {
         "snapshot_id": _SNAP_ID,
         "current_holdings": [
@@ -619,72 +666,158 @@ async def test_hook_summary_includes_outbox_created_count():
         ],
     }
 
-    persisted_cand_row = {
-        "id": cand_id,
-        "user_id": _USER_A,
-        "ticker": "AAPL",
-        "action_type": "BUY",
-        "severity": "normal",
-        "status": "candidate",
-        "candidate_type": "new_actionable_action",
-        "plain_english_reason": "AAPL is a new BUY opportunity.",
-        "policy_version": "v1",
-        "source_snapshot_id": _SNAP_ID,
-        "created_at": _NOW.isoformat(),
-    }
-    outbox_row_val = _outbox_row()
+    mock_outbox_svc = MagicMock()
+    mock_outbox_svc.create_pending_from_candidate.return_value = (_outbox_row(), "created")
 
-    client = MagicMock()
-    call_map: dict[str, int] = {}
+    with patch(f"{_HOOK_MODULE}._fetch_latest_two_intel_snapshots", new_callable=AsyncMock) as mock_fetch, \
+         patch(f"{_HOOK_MODULE}._fetch_feedback_rows", new_callable=AsyncMock) as mock_fb, \
+         patch(f"{_HOOK_MODULE}.AlertCandidateService") as mock_cand_cls, \
+         patch(f"{_OUTBOX_SVC_MODULE}.AlertDeliveryOutboxService") as mock_outbox_cls:
+        mock_fetch.return_value = [current_snap, prior_snap]
+        mock_fb.return_value = []
+        mock_cand_cls.return_value.persist_candidate = MagicMock(return_value=(cand_row, True))
+        mock_outbox_cls.return_value = mock_outbox_svc
 
-    snap_chain = MagicMock()
-    snap_chain.select.return_value = snap_chain
-    snap_chain.eq.return_value = snap_chain
-    snap_chain.order.return_value = snap_chain
-    snap_chain.limit.return_value = snap_chain
-    snap_chain.execute.return_value = MagicMock(
-        data=[{"payload": current_snap}, {"payload": prior_snap}]
+        summary = await run_alert_candidate_generation(
+            uuid.UUID(_USER_A), MagicMock(), now=_NOW
+        )
+
+    assert summary.get("error") is None
+    assert summary.get("outbox_created") == 1
+
+
+# ── New: exact dedupe vs suppression ordering ─────────────────────────────────
+
+def test_exact_same_candidate_returns_deduped_not_suppressed():
+    """Reprocessing the exact same candidate+channel must return 'deduped', not 'suppressed'.
+
+    The new ordering checks dedupe_key first. If the outbox row already exists
+    for this candidate+channel, we return 'deduped' without consulting
+    has_recent_outbox at all.
+    """
+    row = _candidate_row()
+    spec = build_delivery_spec(row)
+    assert spec is not None
+    existing_outbox = _outbox_row(spec)
+    # Patch the dedupe_key field to match what the spec would produce
+    existing_outbox["dedupe_key"] = spec.dedupe_key
+
+    client = _make_exact_dedupe_client(existing_outbox_row=existing_outbox)
+    svc = _make_service(client)
+
+    result, outcome = svc.create_pending_from_candidate(row, now=_NOW)
+
+    assert outcome == "deduped"
+    assert result["dedupe_key"] == spec.dedupe_key
+
+
+def test_suppression_only_fires_for_different_candidates():
+    """Suppression should only fire when the dedupe_key does NOT match
+    but there is a recent pending/sent row for the same user+ticker+channel.
+
+    This confirms the ordering: exact dedupe first → suppression second.
+    """
+    # Use a different candidate row (fresh ID → different dedupe_key)
+    row = _candidate_row(ticker="MSFT", action_type="SELL", severity="normal")
+    client = _make_has_recent_client()
+    svc = _make_service(client)
+
+    _, outcome = svc.create_pending_from_candidate(row, now=_NOW)
+    assert outcome == "suppressed"
+
+
+@pytest.mark.asyncio
+async def test_hook_passes_deduped_rows_to_outbox():
+    """Hook must attempt outbox creation for candidate rows returned with created=False.
+
+    If a candidate already existed (deduped), we still pass the returned row
+    to the outbox service so a missing outbox entry can be self-healed.
+    """
+    from app.services.alert.watchtower_alert_candidate_hook_v1 import (
+        run_alert_candidate_generation,
     )
 
-    fb_chain = MagicMock()
-    fb_chain.select.return_value = fb_chain
-    fb_chain.eq.return_value = fb_chain
-    fb_chain.order.return_value = fb_chain
-    fb_chain.limit.return_value = fb_chain
-    fb_chain.execute.return_value = MagicMock(data=[])
+    cand_row = _candidate_row(user_id=_USER_A, ticker="AAPL")
+    current_snap = {
+        "snapshot_id": _SNAP_ID,
+        "current_holdings": [
+            {"ticker": "AAPL", "action": "BUY", "conviction": "MEDIUM", "evidence_band": "PARTIAL"}
+        ],
+    }
+    prior_snap = {
+        "snapshot_id": str(uuid.uuid4()),
+        "current_holdings": [
+            {"ticker": "AAPL", "action": "HOLD", "conviction": "LOW", "evidence_band": "PARTIAL"}
+        ],
+    }
 
-    cand_chain = MagicMock()
-    cand_chain.insert.return_value = cand_chain
-    cand_chain.execute.return_value = MagicMock(data=[persisted_cand_row])
+    # Candidate already existed in DB (created=False = deduped)
+    mock_cand_svc = MagicMock()
+    mock_cand_svc.persist_candidate = MagicMock(return_value=(cand_row, False))
 
-    # Outbox: has_recent returns empty, insert succeeds
-    outbox_call_count = [0]
+    # Outbox service is still called for the deduped row and creates the entry
+    mock_outbox_svc = MagicMock()
+    mock_outbox_svc.create_pending_from_candidate.return_value = (_outbox_row(), "created")
 
-    outbox_chain_recent = MagicMock()
-    outbox_chain_recent.select.return_value = outbox_chain_recent
-    outbox_chain_recent.eq.return_value = outbox_chain_recent
-    outbox_chain_recent.in_.return_value = outbox_chain_recent
-    outbox_chain_recent.gte.return_value = outbox_chain_recent
-    outbox_chain_recent.limit.return_value = outbox_chain_recent
-    outbox_chain_recent.execute.return_value = MagicMock(data=[])
+    with patch(f"{_HOOK_MODULE}._fetch_latest_two_intel_snapshots", new_callable=AsyncMock) as mock_fetch, \
+         patch(f"{_HOOK_MODULE}._fetch_feedback_rows", new_callable=AsyncMock) as mock_fb, \
+         patch(f"{_HOOK_MODULE}.AlertCandidateService") as mock_cand_cls, \
+         patch(f"{_OUTBOX_SVC_MODULE}.AlertDeliveryOutboxService") as mock_outbox_cls:
+        mock_fetch.return_value = [current_snap, prior_snap]
+        mock_fb.return_value = []
+        mock_cand_cls.return_value = mock_cand_svc
+        mock_outbox_cls.return_value = mock_outbox_svc
 
-    outbox_chain_insert = MagicMock()
-    outbox_chain_insert.insert.return_value = outbox_chain_insert
-    outbox_chain_insert.execute.return_value = MagicMock(data=[outbox_row_val])
+        summary = await run_alert_candidate_generation(
+            uuid.UUID(_USER_A), MagicMock(), now=_NOW
+        )
 
-    def table_side(name: str):
-        if name == "intel_v3_snapshots":
-            return snap_chain
-        if name == "action_feedback_events":
-            return fb_chain
-        if name == "watchtower_alert_candidates":
-            return cand_chain
-        # alert_delivery_outbox
-        outbox_call_count[0] += 1
-        return outbox_chain_recent if outbox_call_count[0] % 2 == 1 else outbox_chain_insert
-
-    client.table.side_effect = table_side
-
-    summary = await run_alert_candidate_generation(user_id, client, now=_NOW)
     assert summary.get("error") is None
-    assert summary.get("outbox_created", 0) >= 0  # wired; exact count depends on timing
+    assert summary.get("deduped", 0) >= 1   # candidate was deduped
+    assert summary.get("outbox_created", 0) >= 1  # outbox was still created for deduped row
+    mock_outbox_svc.create_pending_from_candidate.assert_called_once_with(cand_row)
+
+
+@pytest.mark.asyncio
+async def test_hook_outbox_errors_reported_in_summary():
+    """outbox_errors should appear in the hook summary when outbox creation fails."""
+    from app.services.alert.watchtower_alert_candidate_hook_v1 import (
+        run_alert_candidate_generation,
+    )
+
+    cand_row = _candidate_row(user_id=_USER_A, ticker="AAPL")
+    current_snap = {
+        "snapshot_id": _SNAP_ID,
+        "current_holdings": [
+            {"ticker": "AAPL", "action": "BUY", "conviction": "MEDIUM", "evidence_band": "PARTIAL"}
+        ],
+    }
+    prior_snap = {
+        "snapshot_id": str(uuid.uuid4()),
+        "current_holdings": [
+            {"ticker": "AAPL", "action": "HOLD", "conviction": "LOW", "evidence_band": "PARTIAL"}
+        ],
+    }
+
+    mock_cand_svc = MagicMock()
+    mock_cand_svc.persist_candidate = MagicMock(return_value=(cand_row, True))
+
+    # Outbox service raises on every create_pending_from_candidate call
+    mock_outbox_svc = MagicMock()
+    mock_outbox_svc.create_pending_from_candidate.side_effect = RuntimeError("outbox DB failure")
+
+    with patch(f"{_HOOK_MODULE}._fetch_latest_two_intel_snapshots", new_callable=AsyncMock) as mock_fetch, \
+         patch(f"{_HOOK_MODULE}._fetch_feedback_rows", new_callable=AsyncMock) as mock_fb, \
+         patch(f"{_HOOK_MODULE}.AlertCandidateService") as mock_cand_cls, \
+         patch(f"{_OUTBOX_SVC_MODULE}.AlertDeliveryOutboxService") as mock_outbox_cls:
+        mock_fetch.return_value = [current_snap, prior_snap]
+        mock_fb.return_value = []
+        mock_cand_cls.return_value = mock_cand_svc
+        mock_outbox_cls.return_value = mock_outbox_svc
+
+        summary = await run_alert_candidate_generation(
+            uuid.UUID(_USER_A), MagicMock(), now=_NOW
+        )
+
+    assert summary.get("error") is None  # top-level hook is still fail-soft
+    assert summary.get("outbox_errors", 0) >= 1  # error was counted in summary

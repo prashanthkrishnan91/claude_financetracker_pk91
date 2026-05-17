@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **PR 3B Activation Guard: evidence mapping version guard** (Stage 3, PR #348 pending merge, branch claude/evidence-mapping-version-guard-WK2im). Ensures production does not keep serving pre-PR #347 evidence-mapping snapshots after PR #347 merges. `EVIDENCE_MAPPING_VERSION="analyst_verdict_synthesis_v1"` added to `evidence_mapping_version_v1.py`. New snapshots carry `evidence_mapping_version` in payload. `compare_and_republish()`, `republish_after_analyst_eligibility()`, and `enqueue_run_v3()` all treat mapping-version mismatch as a deterministic recertification trigger (zero-LLM). On prewarm failure, returns `mapping_version_recertification_failed` (not `analyst_evidence_current`). Frontend `IntelV3RunResult.status` type updated; `isNoOpRun` guard prevents indefinite polling on both new statuses. 17 backend + 4 frontend banner tests. No SQL, no UI design change, no analyst jobs. Post-merge validation: `intel_v3_evidence_mapping_version_summary mapping_version_current=true` + `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N`.
+- **Stage 3A — Action Feedback Foundation v1** (branch `claude/action-feedback-foundation-2I1IN`, PR open). Append-only `action_feedback_events` table + service + router. Feedback types: `executed|skipped|ignored|snoozed|too_risky|not_relevant|user_note`. Source areas: `intel|deploy|watchtower|alert`. `POST /api/v1/action-feedback` (idempotent by `idempotency_key`) + `GET /api/v1/action-feedback`. Feedback stored as evidence/context only — no Intel v3 decision mutation, no Deploy sizing change, no Watchtower behavior change. SQL migration required: `v2/database/019_action_feedback_events.sql`. 22 tests pass.
 
 ## Next
 
-- Alerts / action feedback (Stage 3 or later).
+- **Stage 3B — Alert trigger / notification policy**: define when feedback history and Watchtower evidence should surface a push notification or email. Requires Stage 3A merged first.
 
 ## Later
 
@@ -20,6 +20,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **PR 3B Activation Guard: evidence mapping version guard** (Stage 3, merged PR #348). Ensures production does not keep serving pre-PR #347 snapshots after PR #347 merges. `EVIDENCE_MAPPING_VERSION="analyst_verdict_synthesis_v1"` in `evidence_mapping_version_v1.py`; all republish paths treat mapping-version mismatch as a recertification trigger (zero-LLM). 17 backend + 4 frontend tests. Evidence-mapping loop complete.
 
 - **Build 3 PR 3B: Analyst_verdict trusted-signal mapping** (Stage 3, merged PR #347). Root cause: `data_quality_label="MEDIUM"` hardcoded fallback and absent `intel_read` synthesis inflated ALL cards to PARTIAL regardless of analyst content. Fix: synthesize `intel_read.trusted_signals` from `primary_driver` / `action_reason` / `key_drivers` in `ReadOnlyEvidenceAdapter.load_cards()`. Fallback phrases excluded. Research artifacts remain locked (`safe_for_decision=FALSE`, counters always 0). 31 synthesis/policy tests + 9 direct adapter-path tests. No SQL, no UI, no policy change. Post-merge log key: `intel_v3_evidence_depth_summary mapped_existing_analyst_signal_count=N` where N > 0.
 

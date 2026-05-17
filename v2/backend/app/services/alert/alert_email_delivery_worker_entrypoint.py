@@ -3,13 +3,61 @@
 Processes pending alert_delivery_outbox rows and delivers via Resend.
 By default, delivery is OFF (dry-run safe). Set env vars to enable.
 
-── Required env vars for real sends ──────────────────────────────────────────
-    ALERT_EMAIL_DELIVERY_ENABLED=true   (must be truthy)
+── Railway activation (Stage 3F) ─────────────────────────────────────────────
+Run as a SEPARATE Railway service. Do NOT wire into the Watchtower loop — the
+two workers are intentionally decoupled so evidence refresh cycles cannot
+accidentally trigger sends.
+
+Canonical process type:  PROCESS_TYPE=email_delivery
+Backward-compat alias:   PROCESS_TYPE=alert_email_delivery
+Both dispatch to this worker via railway.toml.
+
+── Step 1: Dry-run validation (safe — no emails sent) ────────────────────────
+Set these env vars on the Railway email-delivery service:
+
+    ALERT_EMAIL_DELIVERY_ENABLED=true
     ALERT_EMAIL_PROVIDER=resend
-    RESEND_API_KEY=<your_resend_api_key>
+    ALERT_EMAIL_DRY_RUN=true            (default — must be explicit)
+    RESEND_API_KEY=<your_resend_api_key> (required even in dry-run — see note)
     ALERT_EMAIL_FROM=<from_address>
-    ALERT_EMAIL_TO=<recipient_address>
-    ALERT_EMAIL_DRY_RUN=false           (default is true — explicit opt-out)
+    ALERT_EMAIL_TO=<your_own_email>
+
+Note: RESEND_API_KEY, ALERT_EMAIL_FROM, and ALERT_EMAIL_TO are validated
+before scanning rows, even in dry-run mode. This is intentional — it ensures
+the worker is fully configured before any outbox rows are processed.
+The API key is NOT called in dry-run mode; no Resend requests are made.
+A pending Resend domain is acceptable for dry-run (ALERT_EMAIL_DRY_RUN=true);
+real sends require the domain to be verified in the Resend dashboard first.
+
+Query pending outbox count before validating:
+    SELECT COUNT(*) FROM public.alert_delivery_outbox WHERE status = 'pending';
+
+Run a single dry-run pass:
+    cd v2/backend
+    python -m app.services.alert.alert_email_delivery_worker_entrypoint
+
+Expected log (no outbox rows yet — scanned=0 is fine):
+    alert_email_delivery_summary scanned=0 sent=0 failed=0 skipped=0
+        status_update_failed=0 dry_run=True provider=resend
+
+Expected log (with pending rows):
+    alert_email_delivery_summary scanned=N sent=0 failed=0 skipped=N
+        status_update_failed=0 dry_run=True provider=resend note=rows_would_send
+
+If config is incomplete, the log will show note=config_incomplete:<reason>.
+No row is claimed or mutated in dry-run mode.
+
+── Step 2: Real-send activation (later — separate manual step) ───────────────
+Only after dry-run is validated AND Resend domain is verified:
+
+    ALERT_EMAIL_DRY_RUN=false           (explicit opt-out from dry-run default)
+    RESEND_API_KEY=<your_resend_api_key>
+    ALERT_EMAIL_FROM=<verified_sender_address>
+    ALERT_EMAIL_TO=<your_own_email_only> (personal use — never a bulk list)
+
+Do NOT flip ALERT_EMAIL_DRY_RUN=false until dry-run has been validated and
+the Resend sending domain is verified. Never put secret values in docs, code,
+or commit messages.
 
 ── Manual single pass ────────────────────────────────────────────────────────
     cd v2/backend
@@ -18,18 +66,9 @@ By default, delivery is OFF (dry-run safe). Set env vars to enable.
 ── Continuous loop ───────────────────────────────────────────────────────────
     python -m app.services.alert.alert_email_delivery_worker_entrypoint --loop
 
-── Railway ───────────────────────────────────────────────────────────────────
-Run as a SEPARATE Railway service (do NOT wire into the Watchtower loop).
-Set the start command to:
-
-    python -m app.services.alert.alert_email_delivery_worker_entrypoint --loop
-
 ALERT_EMAIL_DELIVERY_WORKER_INTERVAL_SECONDS overrides the loop interval
 (default 300s / 5 minutes). Invalid or non-positive values fall back to default.
 --interval-seconds on the CLI overrides the env var.
-
-Email delivery is intentionally kept separate from Watchtower candidate generation
-so that evidence refresh cycles cannot accidentally trigger sends.
 """
 
 from __future__ import annotations

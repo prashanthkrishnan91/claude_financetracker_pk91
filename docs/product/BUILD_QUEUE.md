@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3E — Resend Email Delivery Worker v1**: PR open on branch `claude/resend-email-delivery-worker-LzTqL`. Includes claim-before-send safety patch (SQL 022 pending manual Supabase application — `022_alert_delivery_processing_status.sql`). Validate in production: (1) apply SQL 022, (2) dry-run pass, (3) real send with all env vars set. SQL 021 already applied.
+- **Stage 3F — Email Delivery Production Activation / Dry-Run Gate**: PR open on branch `claude/stage-3f-email-delivery-jGMBY`. Adds `email_delivery` PROCESS_TYPE to railway.toml and Procfile. Expands entrypoint docstring with staged activation instructions (dry-run gate → real-send). Docs updated to reflect PR #354 merged, SQL 021/022 applied. No code logic changes. Validate: set `PROCESS_TYPE=email_delivery` on Railway service, run dry-run pass, confirm log shows `sent=0 dry_run=True`.
 
 ## Next
 
-- Alert center UI (frontend surface for alert candidates — after delivery layer is live).
+- Alert center UI (frontend surface for alert candidates — after email delivery dry-run is validated and real sends confirmed).
 
 ## Later
 
@@ -20,6 +20,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 3E — Resend Email Delivery Worker v1** (merged PR #354, SQL 022 applied). Claim-before-send safety. 38 tests. `alert_email_delivery_summary` structured log. Worker separate from Watchtower.
 
 - **Stage 3D — Alert Delivery Outbox v1** (merged PR #353, SQL 021 applied). Provider-neutral `alert_delivery_outbox` table. Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook for all returned candidate rows. `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs. 109 tests pass.
 

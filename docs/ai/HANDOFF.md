@@ -124,12 +124,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 What landed in Stage 4H (PR open):
 - `src/components/navigation/BottomNav.tsx`: Mobile BottomNav trimmed to 4-tab focused subset: Today / Intel / Deploy / Portfolio. `MOBILE_NAV_ITEMS` constant replaces full `NAV_ITEMS` for mobile. Desktop SideNav unchanged (all destinations including Alerts, DRIP, Import, Settings, Journal, Radar).
-- `src/components/cards/IntelV3Drawer.tsx`: Responsive drawer — mobile bottom sheet (full-width, `max-h-[88dvh]`, `rounded-t-2xl`, `sheet-slide-up` animation) + desktop right-side drawer. Mobile drag handle. `aria-modal/role=dialog` preserved.
-- `src/components/cards/DataHealthDrawer.tsx`: Same responsive bottom-sheet pattern as IntelV3Drawer.
+- `src/components/cards/IntelV3Drawer.tsx`: Responsive drawer — mobile bottom sheet (`max-h-[88dvh]`, `rounded-t-2xl`, `sheet-slide-up`) + desktop right-side drawer. Mobile drag handle. `aria-modal/role=dialog` preserved.
+- `src/components/cards/DataHealthDrawer.tsx`: Same responsive bottom-sheet pattern.
+- `src/app/dashboard/portfolio/page.tsx`: `HoldingDrawer` — same responsive bottom-sheet pattern. `focus-visible` ring on close button.
 - `src/app/globals.css`: `@keyframes sheet-slide-up` + `.sheet-slide-up` class + `prefers-reduced-motion` collapse to `animation: none`.
-- `src/lib/today-command-center.ts`: `buildTodayMiniBar()` — deterministic mini-bar state from existing Act Today / Deploy / Watchtower data. Returns `show:false` when no actionable signal.
-- `src/app/dashboard/page.tsx`: Mobile sticky mini-bar below Today header (`lg:hidden sticky top-[61px]`), backed by `buildTodayMiniBar`. Links to Intel, Deploy, or Alerts. Secondary Deploy link shown when act-today is primary and deploy has candidates.
-- `src/lib/today-command-center.test.ts`: 12 new `buildTodayMiniBar` tests + structural BottomNav 4-tab contract test. Total: 61 tests pass.
+- `src/lib/today-command-center.ts`: `buildTodayMiniBar()` — deterministic mini-bar (Act Today / Deploy / Watchtower priority). `TODAY_SECONDARY_RAIL_LINKS` — static 3-item constant: Watchtower/Alerts, Journal, Radar.
+- `src/app/dashboard/page.tsx`: Mobile sticky mini-bar (`lg:hidden sticky top-[61px]`). Static secondary rail (`<nav>` grid) with Watchtower, Journal, Radar links — Alerts always present regardless of alert count; Journal and Radar reachable on mobile via this rail.
+- `src/lib/today-command-center.test.ts`: 67 tests (12 miniBar + 6 secondary-rail + 1 BottomNav structural). 3 pre-existing suite failures unchanged.
 - No backend changes, no SQL, no env/provider/email/LLM/package dependency changes. ALERT_EMAIL_DRY_RUN remains true.
 
 **Stage 4 is complete after Stage 4H merge.**

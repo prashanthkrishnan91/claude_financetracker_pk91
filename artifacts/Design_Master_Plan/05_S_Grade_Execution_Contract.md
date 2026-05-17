@@ -230,19 +230,21 @@ This section reconciles `02_Architecture_and_Pages.md` with the contract's stric
 
 ### 26.1 Top-level destinations (final)
 
-| Position | Destination | Job |
-|---|---|---|
-| 1 | **Today** (Command Center) | The 30-second daily brief. |
-| 2 | **Intel** (Investment Committee) | Buy / Hold / Trim / Sell across watched tickers, with thesis, evidence, risk, and learning. |
-| 3 | **Deploy** (Capital Allocation Ledger) | Where the next dollar goes and why. |
-| 4 | **Portfolio** (Living Thesis Ledger) | Holdings as living theses, with concentration, exposure, and thesis health. |
-| 5 | **Alerts** (Watchtower Review Queue) | A calm, read-only review surface of candidate alerts (no send authority in UI). |
-| 6 | **Radar** (Opportunity Study Room) | Candidates not yet owned, surfaced with discipline. |
-| 7 | **Journal** (Decision + Learning Memory) | Decision history, outcomes, lessons, daily learnings. |
-| corner | **Command Bar** (`⌘K`) | Ask, explain, compare, challenge. |
-| corner | **Source Room** (drawer) | Evidence inspection (summoned from any claim or any page). |
-| corner | **Data Health** (drawer) | Trust surface (summoned from the persistent data-health dot). |
-| corner | **Settings** | Account, sources, brokerage links, preferences. |
+Desktop / full-nav model. The mobile bottom-nav model (§30.8) is a focused subset for thumb-reach, not a separate IA — every desktop destination remains a first-class route on mobile, reachable from Today, the command bar, or in-context chips.
+
+| Position | Destination | Job | Desktop nav | Mobile bottom nav |
+|---|---|---|---|---|
+| 1 | **Today** (Command Center) | The 30-second daily brief. | ✅ | ✅ |
+| 2 | **Intel** (Investment Committee) | Buy / Hold / Trim / Sell across watched tickers, with thesis, evidence, risk, and learning. | ✅ | ✅ |
+| 3 | **Deploy** (Capital Allocation Ledger) | Where the next dollar goes and why. | ✅ | ✅ |
+| 4 | **Portfolio** (Living Thesis Ledger) | Holdings as living theses, with concentration, exposure, and thesis health. | ✅ | ✅ |
+| 5 | **Alerts** (Watchtower Review Queue) | A calm, read-only review surface of candidate alerts (no send authority in UI). | ✅ | Reached from Today Watchtower summary, command bar, and any Alert chip / link (not in bottom nav). |
+| 6 | **Radar** (Opportunity Study Room) | Candidates not yet owned, surfaced with discipline. | ✅ | Reached from Today secondary rail + command bar. |
+| 7 | **Journal** (Decision + Learning Memory) | Decision history, outcomes, lessons, daily learnings. | ✅ | Reached from Today secondary rail + command bar. |
+| corner | **Command Bar** (`⌘K`) | Ask, explain, compare, challenge. | ✅ | Title-bar search affordance. |
+| corner | **Source Room** (drawer) | Evidence inspection (summoned from any claim or any page). | summoned | summoned (bottom sheet). |
+| corner | **Data Health** (drawer) | Trust surface (summoned from the persistent data-health dot). | summoned | summoned (bottom sheet). |
+| corner | **Settings** | Account, sources, brokerage links, preferences. | ✅ | Reached from Today / chrome. |
 
 ### 26.2 Page contract template
 
@@ -379,10 +381,11 @@ A globally summonable drawer, not a top-level destination. Always reachable from
 A globally summonable drawer summoned by the persistent data-health dot in the chrome.
 
 - **Primary user question.** *"What does the system know, what is fresh, what is stale, what is missing — and what would it take to fix?"*
-- **Drawer sections.** Per-source freshness rollup · Provider health (ok / near-limit / limited) · Certification state plain-English line · Stale-source inventory · Email-delivery state (when relevant) · "Next intelligence run at HH:MM ET."
+- **Drawer sections (Stage 4D — Live from existing app state only).** Per-source freshness rollup (from existing Intel v3 `evidence_freshness_state` and related snapshot fields) · Certification state plain-English line (from existing snapshot) · Stale-source inventory (derived from the same) · Alert candidate / outbox state (from existing `/api/v1/alert-candidates` and `/api/v1/alert-delivery-outbox`) · Plain-English dry-run state (derived from the existing Alert Center dry-run banner state) · "Next intelligence run at HH:MM ET" from existing snapshot fields.
+- **Drawer sections (Coming-Later chrome only — activates as the backing capability ships).** Provider health (ok / near-limit / limited) — activates after the relevant Stage 5 provider-health surface ships. Source-class freshness for filings / fundamentals / sentiment / analyst notes — activates per Stage 5F–5J. Worker-log summary of the email-delivery cycle — activates only after Stage 5M.
+- **Stage 4 implementation rule.** Stage 4 must not introduce any new frontend endpoint that ingests Railway logs or scrapes worker output. If a section would require backend work to render honestly, it stays Coming-Later until the backing Stage 5 slice ships.
 - **What it teaches.** "What missing data means" capsule on every stale row.
-- **Data consumed.** Evidence freshness ledger, provider registry health, Intel certification state, email-delivery worker log summary (when domain-verified; before then, surfaces the dry-run state honestly).
-- **Must never appear.** Stack traces. Internal log lines. Provider API keys. Resend domain-verification raw state (only plain-English summary).
+- **Must never appear.** Stack traces. Internal log lines. Provider API keys. Resend domain-verification raw state. Fabricated provider-health tiers. Fabricated source-class freshness for source classes whose worker has not yet shipped.
 - **Mobile behavior.** Bottom sheet.
 
 ### 26.12 Command Bar — Ask, Explain, Compare, Challenge
@@ -404,7 +407,8 @@ Stage 3G shipped Alert Center UI v1 as a read-only top-level destination at `/da
 
 ### 27.1 Final design role
 
-- **Top-level destination.** Alerts remain in the primary nav (BottomNav + SideNav).
+- **First-class route and top-level destination on desktop / full nav.** Alerts remain in the desktop SideNav as a primary destination at `/dashboard/alerts`. Alerts also remain a first-class route reachable from the command bar, from the Today Watchtower summary, and from any Alert chip / link.
+- **Mobile bottom nav stays focused on the four primary destinations.** On phone widths, the bottom nav is Today / Intel / Deploy / Portfolio (per §30.8). Alerts on mobile is reached via the Today Watchtower summary chip, the command bar, and any Alert chip / link. This is not hiding Alerts — it is preserving thumb-first mobile IA while keeping Alerts first-class.
 - **Read-only and dry-run safe.** Email worker remains dry-run until Resend domain verification is complete. The dry-run safety banner remains always visible until real-send is safely activated in a future, separate, non-design stage.
 - **No send controls in UI.** Ever. Send activation is an environment-level operation, not a UI gesture.
 - **Today and Alerts cross-link.** Today shows a one-line plain-English Watchtower summary; tapping it opens Alerts. Alert Center does not duplicate Today's brief.
@@ -599,6 +603,16 @@ This is the single most important table in the contract. Every Stage 4 PR review
 
 If any Stage 4 PR diff includes any of the above as if it existed today, the merge gate must reject the PR.
 
+**Explicit no-fabrication rule for the evidence shell (Stage 4D and any downstream stage that consumes it).** No Stage 4 PR may fabricate, mock, or stub any of:
+
+- Source trails (lists of sources for a claim that does not have them in real backend data).
+- Source snippets (verbatim quotes that were not actually fetched).
+- Credibility tiers (5-dot ladder values without a registry to back them — Stage 5B).
+- Contradiction tags / contradiction strips populated with fake "Source X disagrees with Source Y" text without a real detector — Stage 5C.
+- Evidence completeness scores beyond the coarse `evidence_band` signal that already exists — full completeness is Stage 5D.
+
+Where any of these is anticipated, the Coming-Later Pattern (§28.4) is the only allowed rendering.
+
 ---
 
 ## 29. Visual Execution Standard
@@ -608,7 +622,7 @@ The visual identity, motion, typography, and tokens defined in `01_Principles_Id
 ### 29.1 Hard rules (each must be checkable against the diff)
 
 - **Dark-first quiet atelier canvas.** `bg.canvas = #0A0B0F`. Light mode is secondary and uses *Paper* tokens. No raw hex outside the token file.
-- **Boutique editorial typography.** Display serif (Tiempos Headline / GT Sectra) + body sans (Söhne / Inter Tight). `tabular-nums` and `slashed-zero` always on for numerics.
+- **Boutique editorial typography.** A refined display serif paired with a clean body sans, with `tabular-nums` and `slashed-zero` always on for numerics. The specific family names called out in `01_Principles_Identity_Motion.md` §4.5 (Tiempos Headline / GT Sectra / Söhne / Inter Tight) are **inspirational references for the editorial-serif + clean-sans intent — not licensed implementation targets for this repo.** Stage 4A must use repo-available, open-source, or standard `next/font` options only. No paid / proprietary font files. No committed font binaries. If a close open-source substitute is needed (e.g., a Google Fonts editorial serif + Inter / IBM Plex Sans pairing via `next/font/google`), use it and preserve the editorial-serif + clean-sans intent.
 - **Premium but restrained motion.** Motion tokens from §5.1. `prefers-reduced-motion: reduce` collapses every motion to a 160 ms fade. No spring physics on data. No parallax. No confetti. No bounce.
 - **No generic blue/gold legacy UI.** Old Intel cockpit accent colors are retired. Signature accent is Atelier Green.
 - **No neon. No glow. No crypto-casino look.** Glass surfaces only on top nav, command bar, Deploy confirmation.
@@ -640,6 +654,7 @@ The visual identity, motion, typography, and tokens defined in `01_Principles_Id
 - Illustrated mascots.
 - Emoji in UI strings.
 - Exclamation marks in primary copy.
+- Paid / proprietary font files. Committed font binaries. Implementation against fonts whose license is not present in this repo.
 
 ---
 
@@ -662,10 +677,10 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 - **Exact scope.**
   - Add Obsidian (dark) + Paper (light) palettes to `tailwind.config.ts` (additive; no removal of existing tokens).
   - Add CSS variables to `globals.css` for both modes.
-  - Add the two type families via `next/font` (display serif + body sans).
+  - Add the two type families via `next/font` (display serif + body sans). **Use repo-available, open-source, or standard `next/font` options only** (e.g., `next/font/google`). The names in §4.5 of the design bible (Tiempos Headline / GT Sectra / Söhne / Inter Tight) are inspirational references, not licensed implementation targets — do not add paid / proprietary font files and do not commit font binaries.
   - Add tabular-nums / slashed-zero opentype features as default for numerics.
   - Enforce 4-pt spacing scale; radii; elevation; type tokens.
-  - Reset app shell: top nav (glass), side nav (engraved active rule), bottom nav (mobile), data-health dot (placeholder state — wired in 4D for real source data), `⌘K` placeholder (functional shell only, no AI calls).
+  - Reset app shell: top nav (glass), side nav (engraved active rule — preserves Alerts / Radar / Journal as first-class destinations per §26.1), bottom nav (mobile — Stage 4A re-themes the existing bottom nav onto the new tokens without changing the item set; the final mobile subset of Today / Intel / Deploy / Portfolio is locked in Stage 4H per §30.8), data-health dot (placeholder state — wired in 4D for real source data), `⌘K` placeholder (functional shell only, no AI calls).
   - Apply the canvas to existing pages (Today, Intel, Deploy, Portfolio, Alerts, Settings) **without** restructuring their content.
 - **Model recommendation.** **Sonnet.** Mechanical but design-sensitive; Sonnet is appropriate. Codex is a fallback for pure-config diffs but the shell reset crosses too many files.
 - **New chat vs follow-up.** **New chat.** This is a fresh slice; CLAUDE.md fresh-chat-default applies.
@@ -743,7 +758,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.4 Stage 4D — Evidence Shell + Source UX (current data) + Data Health Drawer
 
-- **Visible transformation delivered.** Every claim across Today / Intel / Deploy / Portfolio is now source-backed (or honestly marked Data Missing); a globally summonable Source Room drawer opens from any claim and shows the underlying evidence with freshness; a Data Health drawer summoned from the persistent chrome dot shows what the system knows, what is fresh, what is stale, and the next intelligence run. The product feels auditable for the first time.
+- **Visible transformation delivered.** Claims across Today / Intel / Deploy / Portfolio are now **source-linked where current source data exists**, and rendered honestly as **Data Missing** (or as Coming-Later chrome) where no source data is yet available. A globally summonable Source Room drawer opens from any source-linked claim and shows the underlying evidence with freshness from existing data. A Data Health drawer summoned from the persistent chrome dot shows what the system knows from already-readable app state — Intel certification / freshness, alert candidate / outbox state, and the next intelligence run. The product feels auditable for the first time without inventing what the backend has not yet provided.
 - **Purpose.** Land the Source Room and Data Health drawers, source-backed claim primitive, data-missing pill, and Composed-mark primitive. Reserve credibility-tier ladder, contradiction strip, and evidence-weak completeness panel as Coming-Later chrome.
 - **Exact scope.**
   - **Source-Backed Claim** primitive (inline superscripts, hairline accent.lapis, max 3 or compressed `¹⁻⁵`).
@@ -752,9 +767,9 @@ The stage-by-stage spec follows. Each stage uses the same fields.
     - **Coming-Later chrome only:** 5-dot credibility ladder · contradiction strip · evidence completeness score.
   - **Data-Missing Pill** primitive (renders honestly whenever a claim has no sources).
   - **Composed-mark** primitive (used by any future AI-composed prose).
-  - **Data Health Drawer** (per §26.11) with the following:
-    - **Live (from existing data):** per-source freshness rollup · Intel v3 certification state (plain-English) · stale-source inventory · email-delivery dry-run state · next intelligence run.
-    - **Coming-Later chrome only:** provider health (ok / near-limit / limited) · source-class freshness for filings / fundamentals / sentiment / analyst notes (until each worker class ships in Stage 5).
+  - **Data Health Drawer** (per §26.11) with the following — strict rule: **Stage 4D introduces no new backend or Railway-log ingestion endpoint.** The drawer renders only what the frontend already has read access to.
+    - **Live (from existing app state already readable by the frontend):** per-source freshness from the existing Intel v3 snapshot `evidence_freshness_state` field; Intel v3 certification state in plain English from the existing snapshot; stale-source inventory derived from the same; alert candidate / outbox state from `GET /api/v1/alert-candidates` and `GET /api/v1/alert-delivery-outbox`; dry-run state derived from existing alert-outbox rows and the existing frontend dry-run banner state used by Alert Center; next intelligence run timestamp from existing snapshot fields.
+    - **Coming-Later chrome only:** provider health (ok / near-limit / limited); source-class freshness for filings / fundamentals / sentiment / analyst notes (each lights up only when its Stage 5 worker class ships); any worker-log-summary view of the email-delivery cycle (Stage 5M activates real-send and any associated worker-log surface — Stage 4D may not introduce a frontend endpoint that ingests Railway logs).
   - The **calm-caution panel** for the existing `evidence_band = OK / PARTIAL` is allowed live (coarse signal), but it must read *"Evidence quality is currently Working — the full evidence-completeness score will appear here when the next intelligence stage lights up."* It must not claim a completeness score it does not have.
 - **Model recommendation.** **Sonnet.** Source UX is the moral spine; design judgment required.
 - **New chat vs follow-up.** **New chat.**
@@ -764,11 +779,13 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 - **SQL.** **No.**
 - **Test / validation plan.**
   - Snapshot tests for Source Room with 0 / 1 / 3 / 8 / 12 sources.
-  - Contradiction strip rendering when at least two disagreeing sources exist.
+  - **Coming-Later chrome rendering** for the contradiction strip — Stage 4D verifies the chrome renders the calm Coming-Later caption, **not** real contradiction detection. Real contradiction-strip rendering is owned by Stage 6A after Stage 5C ships the detector.
+  - **Coming-Later chrome rendering** for the 5-dot credibility ladder — Stage 4D verifies the chrome renders the placeholder; the live tier ladder activates in Stage 6A after Stage 5B ships the registry.
+  - **Coming-Later chrome rendering** for the evidence-weak completeness panel — Stage 4D verifies the chrome renders the calm caption; the live completeness score activates in Stage 6A after Stage 5D ships the scorer.
   - Data-missing pill rendering when source list is empty.
-  - aria-label tests for superscripts, freshness dots, credibility tiers.
-- **Merge gate.** Plain-English UI Pack, Data Truth reviewer (verifies missing-data honesty), Accessibility reviewer.
-- **Out of scope.** Source credibility registry as runtime (Stage 5B). Contradiction detection backend (Stage 5C). AI command bar live.
+  - aria-label tests for superscripts, freshness dots, and the Coming-Later credibility-tier chrome.
+- **Merge gate.** Plain-English UI Pack, Data Truth reviewer (verifies missing-data honesty AND that no fabricated source trails / snippets / credibility tiers / contradictions / completeness scores have been added), Accessibility reviewer.
+- **Out of scope.** Source credibility registry as runtime (Stage 5B). Contradiction detection backend or live contradiction-strip rendering (Stage 5C → Stage 6A). Evidence completeness scoring or live completeness-panel rendering (Stage 5D → Stage 6A). AI command bar live. Any new frontend endpoint that ingests Railway logs or worker-log summaries.
 - **Risk + split rule.** Medium-High. If the Source Room becomes a separate page, split is needed — but the contract is "drawer, not page." Hold the line.
 
 ### 30.5 Stage 4E — Deploy Ledger Redesign
@@ -864,7 +881,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 - **Visible transformation delivered.** On phone, the app is now thumb-first and atelier-calm: bottom nav for the four primary destinations, bottom-sheet drawers, card stack with peek on Intel, swipe-to-confirm on Deploy, sticky "what to do today" mini-bar on Today, full reduced-motion compliance, and a clean a11y audit. This is the only allowed polish-only stage — and it earns it because it completes the now-finished Stage 4 product.
 - **Purpose.** Final mobile pass, motion polish, and accessibility audit.
 - **Exact scope.**
-  - **Bottom navigation** finalized (4 primary tabs: Today, Intel, Deploy, Portfolio; Alerts accessible from Today summary; Radar + Journal from Today secondary rail + `⌘K`).
+  - **Bottom navigation** finalized as the focused thumb-reach subset: **4 primary tabs — Today, Intel, Deploy, Portfolio**. Alerts is a first-class route (per §27.1) but is reached on mobile via the Today Watchtower summary chip, the command bar, and any Alert chip / link — not from the bottom nav. Radar + Journal are reached from the Today secondary rail + `⌘K`. The desktop SideNav (§26.1) keeps Alerts / Radar / Journal as primary destinations; this is a focused mobile subset, not a different IA.
   - **Bottom sheets** for all drawers (Intel detail, Source Room, Data Health, Holding detail, Compare).
   - **Card stack** with 12 px peek on Intel.
   - **Swipe-to-confirm** on Deploy Confirm.

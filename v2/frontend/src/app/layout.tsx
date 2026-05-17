@@ -1,5 +1,5 @@
 import type { Metadata, Viewport } from "next";
-import { DM_Serif_Display, Inter } from "next/font/google";
+import { DM_Serif_Display, Inter, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { Providers } from "./providers";
 
@@ -18,6 +18,14 @@ const sansFont = Inter({
   weight: ["400", "500", "600", "700"],
   display: "swap",
   variable: "--font-sans",
+});
+
+// Monospace — ticker tags, amounts, code, data table values.
+const monoFont = JetBrains_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  display: "swap",
+  variable: "--font-mono",
 });
 
 export const metadata: Metadata = {
@@ -40,7 +48,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`dark ${displayFont.variable} ${sansFont.variable}`}
+      className={`dark ${displayFont.variable} ${sansFont.variable} ${monoFont.variable}`}
     >
       <body className="min-h-screen font-sans">
         <Providers>{children}</Providers>

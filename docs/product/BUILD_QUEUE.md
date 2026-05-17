@@ -6,21 +6,22 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3D — Alert Delivery Outbox v1** (PR #353 open): Provider-neutral outbox between candidate generation (3C) and real delivery (3E). New table `alert_delivery_outbox` (SQL migration 021 — **MANUAL ACTION REQUIRED** in Supabase). Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook (all returned candidate rows, not just newly-created). `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs.
+- **Stage 3E — Real delivery provider**: wire `pending` outbox rows to a confirmed email/push provider (SendGrid/Resend/SES/etc.). Requires explicit provider decision before building. Do NOT start until SQL 021 (`alert_delivery_outbox`) is applied in Supabase.
 
 ## Next
 
-- **Stage 3E — Real delivery provider**: wire `pending` outbox rows to a confirmed email/push provider (SendGrid/Resend/SES/etc.). Requires explicit provider decision before building. Do NOT start until Stage 3D merges and SQL 021 is applied.
+- Alert center UI (frontend surface for alert candidates — after delivery layer is live).
 
 ## Later
 
-- Alert center UI (frontend surface for alert candidates — after delivery layer is live).
 - Alerts / action feedback.
 - Research artifact UX.
 - Premium cockpit design polish.
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 3D — Alert Delivery Outbox v1** (merged PR #353). Provider-neutral `alert_delivery_outbox` table (SQL migration 021 — **MANUAL ACTION REQUIRED** in Supabase if not yet applied). Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook for all returned candidate rows. `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs. 109 tests pass.
 
 - **Stage 3C — Watchtower alert candidate generation hook** (merged PR #352). `watchtower_alert_candidate_hook_v1.py` wired after certified Intel v3 snapshot publishes via `compare_and_republish()` / `republish_after_analyst_eligibility()`. Candidates auto-generated on each Watchtower cycle. Fail-soft; errors logged but never break Intel/Watchtower publication. 23 tests pass. SQL 020 already applied.
 

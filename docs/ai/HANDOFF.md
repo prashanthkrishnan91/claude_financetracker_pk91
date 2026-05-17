@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3D — Alert Delivery Outbox v1 — PR #353 open)
+Last updated: 2026-05-17 (Stage 3D merged PR #353 — Stage 3E is next)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3D in progress** (PR #353 open). Stage 3C is merged (PR #352).
-- Stage 3D summary (PR #353 open): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **MANUAL ACTION REQUIRED** in Supabase). New modules: `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Outbox wired as fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — attempts outbox for ALL returned candidate rows (created + deduped), not just newly-created ones. Outbox errors never block candidate generation or Watchtower. No external delivery, no provider SDKs, no LLM calls, no frontend UI.
+- Roadmap stage: **Stage 3E next** (provider wiring). Stage 3D merged PR #353. Stage 3C merged PR #352.
+- Stage 3D summary (merged PR #353): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **MANUAL ACTION REQUIRED** in Supabase if not yet applied). `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + 24h noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — outbox attempted for ALL returned candidate rows (created + deduped) for self-healing. No external delivery, no provider SDKs, no LLM calls, no frontend UI. 109 tests pass.
 - Stage 3C summary (merged PR #352): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()`. Fail-soft. 23 tests pass. No SQL, no delivery, no UI.
 - Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020 — **applied**) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020.
 - Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass.

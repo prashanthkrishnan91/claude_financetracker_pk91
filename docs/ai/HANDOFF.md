@@ -114,17 +114,20 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4B (next)
+## Current design stage — Stage 4B (PR open)
 
-**Stage 4A — Design System Foundation + App Shell Reset** merged as **PR #358** on 2026-05-17.
+**Stage 4B — Today Command Center** PR open on branch `claude/stage-4b-today-command-doUxk`. 4 frontend files + 1 new lib + 1 new test file.
 
-What landed (4 frontend files):
-- `tailwind.config.ts`: Obsidian dark + Paper light palettes; Atelier Green `#2EC27E`; semantic action tokens; type scale; radii; elev shadows; motion timing functions.
-- `globals.css`: All glass/scrollbar/selection/bottom-nav colors as named CSS vars (`--glass-bg`, `--bottom-nav-glass-bg`, etc.); motion vars; reduced-motion; Coming-Later utility; engraved divider.
-- `layout.tsx`: `DM_Serif_Display` + `Inter` + `JetBrains_Mono` via `next/font/google`; CSS vars on `<html>`.
-- `BottomNav.tsx`: Engraved active rule, font-display brand mark, data-health dot placeholder, glass BottomNav chrome; all routes preserved.
+What landed:
+- `src/app/dashboard/page.tsx`: `/dashboard` home reframed as "Today". Above-the-fold modules: The Brief (3–4 deterministic prose sentences), Act Today (top 3–5 Buy/Trim/Sell rows from Intel v3 snapshot, conviction-sorted), Risk Pulse (ELEVATED/ACUTE tickers from Intel v3 holdings), Deploy Ready (plan readiness + BUY count + link to Deploy), Watchtower Summary (alert candidate count + link to Alerts). "What I Learned Today" Coming-Later chrome (Stage 6E activates). Portfolio snapshot (existing PortfolioSummaryCard / PortfolioChart / HoldingsList) preserved below the fold. Existing auto-snapshot behavior intact.
+- `src/lib/today-command-center.ts`: 6 pure deterministic helper functions: `buildTheBrief`, `buildActToday`, `buildRiskPulse`, `buildDeployReady`, `buildWatchtowerSummary`, `buildWhyThisMatters`, `buildLearningSlotCaption`. No LLM. No fabricated claims.
+- `src/lib/today-command-center.test.ts`: 49 unit tests (all passing). Covers no-Intel, all-Hold, Buy/Trim/Sell mix, missing Deploy, missing alerts, Watchtower count, Coming-Later caption.
+- `src/components/navigation/BottomNav.tsx`: `/dashboard` nav item label updated from "Portfolio" to "Today".
+- Docs: `HANDOFF.md` and `BUILD_QUEUE.md` updated.
 
-**Current next step: Stage 4B — Today Command Center.** Current-data only; Coming-Later for "What I learned today".
+**Next after merge: Stage 4C — Intel Investment Committee Redesign.** Action Card visual system, Confidence Ring, Risk Glyph, Freshness Dot, Detail Drawer with existing Intel v3 data. Coming-Later chrome for future capsules. No backend, no SQL.
+
+**Stage 4A — Design System Foundation + App Shell Reset** merged as **PR #358** on 2026-05-17. Tokens: `tailwind.config.ts`, `globals.css`, `layout.tsx` (fonts), `BottomNav.tsx` (glass chrome).
 
 **Do not skip ahead.** The contract splits the overhaul into:
 - **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only. Done-definition: §35.9.

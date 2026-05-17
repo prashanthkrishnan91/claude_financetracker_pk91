@@ -4,9 +4,9 @@ The active product queue. Every meaningful implementation PR should map to one i
 
 Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap decisions or merged PRs. Keep updates concise.
 
-## Now
+## Now (active)
 
-- **Stage 4B — Today Command Center.** Current-data only. Coming-Later for "What I learned today".
+- **Stage 4B — Today Command Center.** PR open on branch `claude/stage-4b-today-command-doUxk`. The Brief + Act Today + Risk Pulse + Deploy Ready + Watchtower Summary from existing data. "What I Learned Today" Coming-Later chrome reserved (Stage 6E activates). 49 unit tests. No backend, no SQL.
 
 ## Later (Stage 4 sequence)
 

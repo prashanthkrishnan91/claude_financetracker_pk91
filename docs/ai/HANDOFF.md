@@ -104,6 +104,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower background refresh loop is live in Railway (requires `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true`). Alert-based push trigger (real-time threshold alerts) is deferred.
+- Stage 3B alert candidates table (`watchtower_alert_candidates`) requires manual SQL migration 020 in Supabase before `GET /api/v1/alert-candidates` works. Rollback: `DROP TABLE IF EXISTS public.watchtower_alert_candidates CASCADE;` (commented in migration file).
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step

@@ -49,7 +49,7 @@ export function buildAlertWhyThisMatters(c: AlertCandidate): AlertWhyThisMatters
 
   const trimNote =
     c.action_type === "TRIM"
-      ? "Trim means the portfolio sizing model recommends reducing your position to move toward the target allocation — not that the company's quality has declined. A Trim is a sizing action, not an exit signal."
+      ? "Trim does not automatically mean the company is bad. It can mean the position is too large, risk has changed, evidence is less compelling, or the system is applying discipline after gains. Open Intel for the full thesis."
       : null;
 
   return { headline, body, trimNote };

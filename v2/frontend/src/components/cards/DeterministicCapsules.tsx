@@ -70,9 +70,9 @@ export function WhyThisMattersCapsule({
 // Shown on every Trim row visible in Intel / Alert Center / Today.
 
 export const TRIM_NOT_BAD_COMPANY_BODY =
-  "Trim means the portfolio sizing model recommends reducing your position to move toward the target allocation — not that the company's fundamentals have deteriorated. " +
-  "A Trim recommendation is a portfolio-sizing action, not an exit signal. " +
-  "If you want to understand the full thesis, open the Intel detail drawer for this holding.";
+  "Trim does not automatically mean the company is bad. " +
+  "It can mean the position is too large for the portfolio, risk has changed, evidence is less compelling, or the system is applying discipline after gains. " +
+  "Treat it as a review signal and open Intel for the full thesis.";
 
 export function WhyTrimIsNotBadCompanyCapsule({ className }: { className?: string }) {
   return (

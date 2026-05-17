@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-_Nothing active. Stage 3C merged; Stage 3D requires a provider decision before building._
+- **Stage 3D — Alert Delivery Outbox v1** (PR #353 open): Provider-neutral outbox between candidate generation (3C) and real delivery (3E). New table `alert_delivery_outbox` (SQL migration 021 — **MANUAL ACTION REQUIRED** in Supabase). Pure delivery policy, outbox service with idempotent persistence + 24h noisy-repeat suppression + exact-dedupe-before-suppression ordering, fail-soft Step 5 in hook (all returned candidate rows, not just newly-created). `GET /api/v1/alert-delivery-outbox`. No external delivery, no provider SDKs.
 
 ## Next
 
-- **Stage 3D — Email/push delivery layer**: wire `watchtower_alert_candidates` to a delivery provider (email or push). Requires confirmed provider decision before building.
+- **Stage 3E — Real delivery provider**: wire `pending` outbox rows to a confirmed email/push provider (SendGrid/Resend/SES/etc.). Requires explicit provider decision before building. Do NOT start until Stage 3D merges and SQL 021 is applied.
 
 ## Later
 

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (S-Grade Execution Contract — docs-only planning PR; next: Stage 4A — Design System Foundation + App Shell Reset)
+Last updated: 2026-05-17 (Stage 4A — Design System Foundation + App Shell Reset; PR open on branch `claude/design-system-foundation-eMw96`)
 
 ## Purpose
 
@@ -114,11 +114,19 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Next recommended step
+## Current design stage — Stage 4A
 
-**S-Grade Execution Contract docs-only PR is open** (branch `claude/s-grade-execution-contract-g9tVA`). It adds `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` — the implementation-ready contract for the Stage 4 / 5 / 6 design + intelligence overhaul. No app code, no SQL, no backend, no provider, no LLM, no email-delivery change.
+**Stage 4A — Design System Foundation + App Shell Reset** is open on branch `claude/design-system-foundation-eMw96`.
 
-After merge, the next implementation step is **Stage 4A — Design System Foundation + App Shell Reset** (per §30.1 of the contract). Stage 4A is frontend-only: Tailwind tokens (Obsidian dark + Paper light palettes), CSS variables, two type families via `next/font`, 4-pt spacing scale enforcement, radii / elevation / type tokens, and a shell reset for top / side / bottom nav. No page content restructuring. No component redesign. No backend calls. Estimated usage Medium. UI budget ~12 files. Use a new chat for Stage 4A.
+Changes (4 files, frontend-only):
+- `tailwind.config.ts`: Obsidian dark + Paper light palettes; Atelier Green `#2EC27E` replaces neon `#00e676`; semantic Buy/Hold/Trim/Sell action tokens; correct radii (sharp/md/lg/xl/pill); elev-0/1/2/3 shadows; motion timing functions; type scale tokens (`display-xl` → `caption`).
+- `globals.css`: CSS variables for both modes + motion tokens + reduced-motion support; font-feature-settings with `tnum`/`zero`/`kern` on body; glass `page-header` with 24px blur; Coming-Later utility class; engraved divider rule; Atelier Green selection color.
+- `layout.tsx`: `DM_Serif_Display` + `Inter` loaded via `next/font/google`; CSS variables applied to `<html>`; theme-color updated to `#0A0B0F`.
+- `BottomNav.tsx`: SideNav uses font-display brand mark + engraved active rule + data-health dot placeholder; BottomNav uses glass bottom chrome + 2px top indicator; icon strokeWidth varies active/inactive; all routes and behavior preserved.
+
+No page content restructured. No backend changes. No SQL. No new component library. All existing 463 tests still pass; 3 pre-existing test-suite failures (unrelated TS type mismatches and JSX-transform config) are unchanged.
+
+**Next after this PR merges:** Stage 4B — Today Command Center.
 
 **Do not skip ahead.** The contract splits the overhaul into:
 - **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only. Done-definition: §35.9.

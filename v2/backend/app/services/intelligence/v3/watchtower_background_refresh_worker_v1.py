@@ -109,6 +109,7 @@ class WatchtowerBackgroundRefreshWorker:
         price_refresh_callable: Optional[Callable] = None,
         analyst_job_enqueue_callable: Optional[Callable] = None,
         intel_republish_callable: Optional[Callable] = None,
+        alert_candidate_hook_callable: Optional[Callable] = None,
         max_cycle_seconds: float = DEFAULT_MAX_CYCLE_SECONDS,
         max_price_tickers_per_cycle: int = DEFAULT_MAX_PRICE_TICKERS_PER_CYCLE,
     ):
@@ -116,6 +117,7 @@ class WatchtowerBackgroundRefreshWorker:
         self._price_refresh = price_refresh_callable
         self._analyst_enqueue = analyst_job_enqueue_callable
         self._intel_republish = intel_republish_callable
+        self._alert_candidate_hook = alert_candidate_hook_callable
         self._max_cycle_seconds = max_cycle_seconds
         self._max_price_tickers_per_cycle = max_price_tickers_per_cycle
         self._in_progress: set[tuple[str, str]] = set()  # (user_id_str, evidence_type)
@@ -229,6 +231,7 @@ class WatchtowerBackgroundRefreshWorker:
                                             user_id,
                                             self.client,
                                             intel_republish_callable=self._intel_republish,
+                                            alert_candidate_hook_callable=self._alert_candidate_hook,
                                         )
                                         result.intel_republish_result = republish_res.to_dict()
                                     except Exception as republish_exc:
@@ -359,6 +362,7 @@ class WatchtowerBackgroundRefreshWorker:
                     user_id,
                     self.client,
                     intel_republish_callable=self._intel_republish,
+                    alert_candidate_hook_callable=self._alert_candidate_hook,
                     latest_evidence_at=latest_ev_at,
                 )
                 result.intel_republish_result = republish_res.to_dict()

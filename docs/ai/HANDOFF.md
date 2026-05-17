@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3B merged — PR #350)
+Last updated: 2026-05-17 (Stage 3C — Watchtower candidate generation hook — PR in review)
 
 ## Purpose
 
@@ -8,8 +8,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3B merged** (PR #350). Stage 3C (email/push delivery or Watchtower integration hook) is the next build queue item.
-- Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020. No email/push delivery, no frontend UI, no broker execution.
+- Roadmap stage: **Stage 3C in progress** (PR open). Stage 3B is merged and SQL 020 is applied.
+- Stage 3C summary (PR open): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()` as `alert_candidate_hook_callable`. Fail-soft: errors logged, never break Intel/Watchtower publication. 23 new tests pass. No SQL, no email/push delivery, no frontend UI.
+- Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020 — **applied**) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020.
 - Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
@@ -104,20 +105,14 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower background refresh loop is live in Railway (requires `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true`). Alert-based push trigger (real-time threshold alerts) is deferred.
-- **SQL manual action required (Stage 3B):** Apply `v2/database/020_alert_candidates.sql` in Supabase SQL Editor. Creates `watchtower_alert_candidates` table and adds `cooldown_until` column to `action_feedback_events`. Until applied, `GET /api/v1/alert-candidates` returns 500. All other endpoints unaffected. Rollback: `ALTER TABLE public.action_feedback_events DROP COLUMN IF EXISTS cooldown_until; DROP TABLE IF EXISTS public.watchtower_alert_candidates CASCADE;`
+- SQL migration 020 has been applied in Supabase (`watchtower_alert_candidates` table + `cooldown_until` column on `action_feedback_events`). No further SQL action required for Stage 3C.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-**Stage 3B merged (PR #350). Apply SQL migration 020 in Supabase, then build Stage 3C.**
-
-**Immediate manual action:** Apply `v2/database/020_alert_candidates.sql` in Supabase SQL Editor (creates `watchtower_alert_candidates` + adds `cooldown_until` to `action_feedback_events`).
+**Stage 3C candidate generation hook is in review.** SQL migration 020 is already applied. After Stage 3C merges, the next step is the email/push delivery layer — wire `watchtower_alert_candidates` to a delivery provider. Requires a provider decision before building.
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
-
-**Stage 3C options (choose one):**
-1. **Email/push delivery layer** — wire `watchtower_alert_candidates` to a delivery provider (email or push). Requires provider decision first.
-2. **Watchtower integration hook** — call `evaluate_snapshot_for_alert_candidates()` post-republish inside `watchtower_intel_republisher_v1.compare_and_republish()`. Low-risk, no new provider. Produces candidates automatically on each Watchtower cycle.
 
 ## Handoff maintenance rule
 

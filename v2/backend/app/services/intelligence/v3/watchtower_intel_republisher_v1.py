@@ -76,6 +76,7 @@ async def compare_and_republish(
     client: Any,
     *,
     intel_republish_callable: Optional[Callable] = None,
+    alert_candidate_hook_callable: Optional[Callable] = None,
     now: Optional[datetime] = None,
 ) -> WatchtowerRepublishResult:
     """Compare Watchtower evidence freshness against the current Intel snapshot.
@@ -182,6 +183,18 @@ async def compare_and_republish(
                 snapshot_source = returned_payload.get("snapshot_source")
             if snapshot_source == "worker_certified":
                 result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+                # Stage 3C: generate alert candidates after successful publish.
+                # Fail-soft: errors must not break Intel/Watchtower publication.
+                if alert_candidate_hook_callable is not None:
+                    try:
+                        await alert_candidate_hook_callable(user_id)
+                    except Exception as hook_exc:
+                        logger.warning(
+                            "watchtower_intel_republisher.alert_candidate_hook_error "
+                            "user_id=%s error=%s",
+                            user_id,
+                            hook_exc,
+                        )
             else:
                 result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
                 result.error = (
@@ -268,6 +281,7 @@ async def republish_after_analyst_eligibility(
     client: Any,
     *,
     intel_republish_callable: Optional[Callable] = None,
+    alert_candidate_hook_callable: Optional[Callable] = None,
     latest_evidence_at: Optional[datetime] = None,
     now: Optional[datetime] = None,
 ) -> WatchtowerRepublishResult:
@@ -370,6 +384,18 @@ async def republish_after_analyst_eligibility(
                 snapshot_source = returned_payload.get("snapshot_source")
             if snapshot_source == "worker_certified":
                 result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+                # Stage 3C: generate alert candidates after successful publish.
+                # Fail-soft: errors must not break Intel/Watchtower publication.
+                if alert_candidate_hook_callable is not None:
+                    try:
+                        await alert_candidate_hook_callable(user_id)
+                    except Exception as hook_exc:
+                        logger.warning(
+                            "watchtower_intel_republisher.alert_candidate_hook_error "
+                            "user_id=%s error=%s",
+                            user_id,
+                            hook_exc,
+                        )
             else:
                 result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
                 result.error = (

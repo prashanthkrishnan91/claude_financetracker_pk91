@@ -116,7 +116,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Current design stage — Stage 4C (open PR)
 
-**Stage 4C — Intel Investment Committee Redesign** — PR open on branch `claude/intel-v3-committee-redesign-9ERGn`. 5 frontend files (4 modified, 1 new). No backend, no SQL.
+**Stage 4C — Intel Investment Committee Redesign** — PR #361 open on branch `claude/intel-v3-committee-redesign-9ERGn`. 5 frontend files (4 modified, 1 new). No backend, no SQL.
 
 What landed:
 - `IntelV3Primitives.tsx` (new): Shared UI primitives — `ActionGlyph`, `ConfidenceRing`, `RiskGlyph`, `FreshnessDot`, `ComingLaterPanel`, `DataMissingPill`. All action styles route through `action-*` design tokens; no raw Tailwind color classes.

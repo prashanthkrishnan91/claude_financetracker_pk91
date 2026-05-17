@@ -121,11 +121,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 After merge, the next implementation step is **Stage 4A — Design System Foundation + App Shell Reset** (per §30.1 of the contract). Stage 4A is frontend-only: Tailwind tokens (Obsidian dark + Paper light palettes), CSS variables, two type families via `next/font`, 4-pt spacing scale enforcement, radii / elevation / type tokens, and a shell reset for top / side / bottom nav. No page content restructuring. No component redesign. No backend calls. Estimated usage Medium. UI budget ~12 files. Use a new chat for Stage 4A.
 
 **Do not skip ahead.** The contract splits the overhaul into:
-- **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only.
-- **Stage 5** — S-grade Research Artifact + finance-agent intelligence backend (5A–5M). Backend / data only.
-- **Stage 6** — Advanced evidence, learning, Radar, Journal, command-bar intelligence surfaces (6A–6H). Activates the Coming-Later chrome reserved by Stage 4.
+- **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only. Done-definition: §35.9.
+- **Stage 5** — S-grade Research Artifact + finance-agent intelligence backend (5A–5M). Backend / data only. Done-definition: §35.10.
+- **Stage 6** — Advanced evidence, learning, Radar, Journal, command-bar intelligence surfaces (6A–6H). Activates the Coming-Later chrome reserved by Stage 4. Done-definition: §35.11.
 
 Stage 4 must never fabricate Stage 5 / 6 intelligence. Every surface that anticipates a future intelligence module renders the **Coming-Later Pattern** (§28.4): chrome only, with a calm caption that the module is being prepared.
+
+**Execution discipline (contract §35).** Optimize for fast, safe completion: each stage is a meaningful product slice with a visible transformation; no cosmetic micro-builds, no patch loops, no redundant docs, no polish-only PRs (4H is the only exception). Completion target: a transformed, usable, beautiful app first; then deeper S-grade intelligence; then the mentor / learning surfaces.
 
 **Email delivery activation is out of scope for the entire design overhaul.** Email worker remains dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet. Real-send activation is reserved as Stage 5M, a separate, non-design stage.**
 

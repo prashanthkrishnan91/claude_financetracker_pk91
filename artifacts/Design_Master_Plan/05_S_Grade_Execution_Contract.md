@@ -645,16 +645,19 @@ The visual identity, motion, typography, and tokens defined in `01_Principles_Id
 
 ## 30. Build Sequence — Stage 4A → 4H
 
-> **Capacity rule.** Each stage is one coherent capability slice per the OS v4 prompt-compression standard (CLAUDE.md §1). Each stage is reviewable, reversible, and stops at a clear merge gate. No "complete redesign" PR.
+> **Capacity rule.** Each stage is one coherent capability slice per the OS v4 prompt-compression standard (CLAUDE.md §1). Each stage is reviewable, reversible, and stops at a clear merge gate. No "complete redesign" PR — and no cosmetic micro-build either (see §35.2).
 >
 > **Authority rule.** No stage touches Intel v3 / Deploy v3 / Watchtower decision authority. No stage activates real email send. No stage applies SQL unless explicitly named and pre-approved (none in Stage 4).
 >
 > **Future-proof rule.** Every Stage 4 stage that *anticipates* a Stage 5 / 6 intelligence module must use the **Coming-Later Pattern** (§28.4). Never fabricate. Never mock. Always reserve chrome, not body.
+>
+> **Visible-transformation rule.** Each stage carries a **Visible transformation delivered** line. If a stage's PR cannot honestly state that line, the stage is wrong-sized and must be re-scoped before opening the PR. See §35.8.
 
 The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.1 Stage 4A — Design System Foundation + App Shell Reset
 
+- **Visible transformation delivered.** The entire app rerenders on a dark atelier canvas with the new editorial typography, the engraved navigation chrome, and the calm token palette — every page immediately reads as the new product, even before its content is restructured. This is the only allowed foundation-only stage; it earns its slot because every later stage depends on it.
 - **Purpose.** Land the visual tokens, typography, spacing, and app shell chrome so every subsequent stage has a foundation to render against.
 - **Exact scope.**
   - Add Obsidian (dark) + Paper (light) palettes to `tailwind.config.ts` (additive; no removal of existing tokens).
@@ -680,6 +683,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.2 Stage 4B — Today Command Center
 
+- **Visible transformation delivered.** Opening the app now reads as a private morning brief: a 3–4 sentence editorial paragraph, the three things to act on today, the risks worth watching, the cash-to-deploy plan, and a one-line Watchtower summary — all from real data, all in 30 seconds. This is the surface the user opens daily; transforming it transforms the product.
 - **Purpose.** Land the 30-second daily brief and prove the editorial spine end-to-end on the most-opened surface — using only existing Intel v3 / Deploy v3 / Watchtower data, with the Coming-Later pattern for advanced-synthesis modules.
 - **Exact scope.**
   - **The Brief** component — deterministic prose composition only. (LLM-composed branch is **out of Stage 4**; the Composed-mark primitive ships in 4D for use when 5G+ enables real composition.)
@@ -709,6 +713,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.3 Stage 4C — Intel Investment Committee Redesign
 
+- **Visible transformation delivered.** Intel reads as a calm investment-committee workspace: Action Cards with Buy / Hold / Trim / Sell glyphs, confidence rings, freshness dots, plain-English theses, and a right-side Detail Drawer that opens the "Why this view?" + thesis + evidence trail + risk challenge + what-changed strip on every tap. The old recommendation cockpit is replaced wholesale.
 - **Purpose.** Land the Action Card visual system, confidence / risk / freshness primitives, beginner thesis copy, and detail drawer with all sections wired — using only existing Intel v3 snapshot data. Coming-Later chrome for future-only capsule slots.
 - **Exact scope.**
   - **Action Card** (per §15.1, on the new tokens).
@@ -738,6 +743,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.4 Stage 4D — Evidence Shell + Source UX (current data) + Data Health Drawer
 
+- **Visible transformation delivered.** Every claim across Today / Intel / Deploy / Portfolio is now source-backed (or honestly marked Data Missing); a globally summonable Source Room drawer opens from any claim and shows the underlying evidence with freshness; a Data Health drawer summoned from the persistent chrome dot shows what the system knows, what is fresh, what is stale, and the next intelligence run. The product feels auditable for the first time.
 - **Purpose.** Land the Source Room and Data Health drawers, source-backed claim primitive, data-missing pill, and Composed-mark primitive. Reserve credibility-tier ladder, contradiction strip, and evidence-weak completeness panel as Coming-Later chrome.
 - **Exact scope.**
   - **Source-Backed Claim** primitive (inline superscripts, hairline accent.lapis, max 3 or compressed `¹⁻⁵`).
@@ -767,6 +773,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.5 Stage 4E — Deploy Ledger Redesign
 
+- **Visible transformation delivered.** Deploy reads as a single-column investment memo: deployable cash + first-class Reserve row + one ledger row per Buy with rationale + a two-step Review → Confirm ceremony that explains, on the Review screen, exactly how this decision changes the portfolio's shape. Deposit deployment becomes a calm, deliberate act, not a click.
 - **Purpose.** Land the Deploy editorial ledger, portfolio-shape explanation, cash discipline rendering, and "Why this dollar goes here" rationale — with no math changes.
 - **Exact scope.**
   - **Deploy Instruction Row** primitive (per §15.6, on new tokens).
@@ -794,6 +801,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.6 Stage 4F — Portfolio Living Thesis Ledger
 
+- **Visible transformation delivered.** Portfolio reads as the index of a private collection: an editorial holdings ledger, concentration + sector + theme exposure panels, a thesis-health summary, and a holding drawer with a thesis-health sparkline and last-3-decisions trail. Each holding feels like a living thesis, not a row in a spreadsheet.
 - **Purpose.** Land the editorial holdings ledger, concentration / exposure panels, and holding detail drawer using existing portfolio + Intel-decision data. Coming-Later chrome for capsules that depend on Stage 5 workers.
 - **Exact scope.**
   - **Holdings ledger** (editorial table per §26.6).
@@ -821,6 +829,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.7 Stage 4G — Alert Center Polish + Journal Chrome + Radar Destination + Buildable Capsules
 
+- **Visible transformation delivered.** Alert Center is on the new design system with a "Why this matters" capsule per candidate; Journal is live with a chapter-numeral timeline of real decisions; Radar exists as a destination with an honest Coming-Later body; the deterministic capsule subset (Why this matters, Patience is an action, Why Trim does not mean bad company, What missing data means, How this decision changes your portfolio shape) is wired across the product. The full Stage 4 surface family is now in place.
 - **Purpose.** Apply the design system to Alert Center; ship Journal as a real surface using existing decision history; reserve Radar as a destination with Coming-Later body; and ship the **subset of capsules that can be built deterministically from existing data**. Future-only capsules remain Coming-Later.
 - **Exact scope.**
   - **Alert Center polish** — apply tokens / shell / candidate row redesign / dry-run banner restyle. Behavior unchanged from Stage 3G. Add deterministic "Why this matters" capsule per candidate (composed from existing severity + posture_reason + freshness).
@@ -852,6 +861,7 @@ The stage-by-stage spec follows. Each stage uses the same fields.
 
 ### 30.8 Stage 4H — Mobile Atelier + Motion Polish
 
+- **Visible transformation delivered.** On phone, the app is now thumb-first and atelier-calm: bottom nav for the four primary destinations, bottom-sheet drawers, card stack with peek on Intel, swipe-to-confirm on Deploy, sticky "what to do today" mini-bar on Today, full reduced-motion compliance, and a clean a11y audit. This is the only allowed polish-only stage — and it earns it because it completes the now-finished Stage 4 product.
 - **Purpose.** Final mobile pass, motion polish, and accessibility audit.
 - **Exact scope.**
   - **Bottom navigation** finalized (4 primary tabs: Today, Intel, Deploy, Portfolio; Alerts accessible from Today summary; Radar + Journal from Today secondary rail + `⌘K`).
@@ -963,9 +973,10 @@ This contract **extends** `00_README_and_Verdict.md` through `04_Mobile_QA_Seque
 - **Beginner learning layer** (§25): the capsule library and integration rules, split into "buildable now" and "future-only."
 - **Stage 4 / Stage 5 / Stage 6 sequencing split** (§28): the controlling rule for what gets built when, with the **Coming-Later Pattern** for honest unavailable states.
 - **Module-by-module build-now vs. wait matrix** (§28.8): the single most important reviewer checklist for Stage 4 PRs.
-- **Stage 4 build sequence** (§30): eight capability slices using only existing data, each with explicit Live / Coming-Later splits.
+- **Stage 4 build sequence** (§30): eight capability slices using only existing data, each with explicit Live / Coming-Later splits and a per-stage **Visible transformation delivered** line.
 - **Source Room and Data Health as global drawers** (§26.10, §26.11) rather than destinations.
 - **Alert Center final design role** (§27) preserving top-level placement and dry-run safety.
+- **Execution Focus Addendum** (§35): the controlling execution rule. Optimizes for fast, safe completion; bans cosmetic micro-builds, patch loops, polish-only PRs (except 4H), and redundant docs; names the Stage 4 / 5 / 6 done-definitions; carries the blocking-backend-gap rule; outranks any other instruction in this contract that contradicts it.
 
 ---
 
@@ -1017,6 +1028,137 @@ S-grade, for this product, means:
 That is the bar.
 
 Stage 4A is the first stone. Stage 4H is the last polish. Everything in between is a deliberate, reversible, beautifully boring capability slice.
+
+---
+
+## 35. Execution Focus Addendum — Optimize for Fast, Safe Completion
+
+> **This addendum is the controlling execution rule for the entire overhaul. It outranks any other instruction in this contract that contradicts it.**
+>
+> The execution contract optimizes for **fast, safe completion** — not micro builds, not cosmetic patching, not endless polishing.
+
+### 35.1 Completion target
+
+A transformed, usable, beautiful app first; then deeper S-grade intelligence; then advanced mentor / learning surfaces. In that order. Each phase fully shipped before the next begins.
+
+- **Stage 4** finishes when the app feels **fundamentally transformed** — boutique design system, app shell, navigation, Today, Intel, Deploy, Alert / Watchtower, evidence shell, learning shell, and mobile foundation, all built on currently available backend data. Stage 4 is *not* lightly polished surfaces; it is a visibly different product.
+- **Stage 5** finishes when the missing intelligence depth exists end-to-end: Research Artifact Store + finance research workers (filings, fundamentals, technicals, sentiment, analyst notes, capital allocation, sector / macro) + source credibility + contradiction detection + evidence completeness + replayability / audit trail. Deterministic decision policy remains final authority.
+- **Stage 6** finishes when the mentor layer is live: contextual learning, company strategy primers, thesis history, Radar opportunity study room, Journal learning loop, command-bar explain / challenge / compare flows — all backed by real Stage 5 evidence.
+
+### 35.2 What every implementation stage must be
+
+Every Stage 4 / 5 / 6 stage must be **a meaningful product slice that visibly moves toward completion**.
+
+- ✅ A coherent slice that delivers a visible, usable change (or, for Stage 5, a backend capability that unlocks the next visible surface).
+- ❌ A tiny cosmetic micro-build (one button restyled, one capsule isolated, one component split for its own sake).
+- ❌ A polish-only PR — unless it is the *final pass* after core surfaces are built (Stage 4H is the only such pass allowed).
+- ❌ A giant unreviewable PR that bundles unrelated surfaces.
+- ❌ A "redundant docs" PR that re-derives what an existing doc already says.
+
+The §30 build sequence (Stage 4A–4H) is sized to match this rule. Each stage already delivers a visible product change; the per-stage "Visible transformation delivered" line in §30 is the testable check.
+
+### 35.3 The three execution discipline guards
+
+1. **Patch-loop guard.** If two consecutive PRs on the same surface land within a week and the second is purely a polish / wording / placement tweak, stop and consolidate the remaining work into the next stage instead of opening a third patch.
+2. **Cosmetic-tweak guard.** A PR that only restyles existing components without delivering a new product capability, a new translation, or a Stage 4 surface contract is **not allowed** until Stage 4H. Visual restyling rides along inside its owning stage.
+3. **Redundant-docs guard.** A docs PR is only allowed if it adds a new durable contract or current-state delta that cannot be derived from the existing docs. PR descriptions are not contracts; the contract lives in the canonical doc.
+
+### 35.4 Scope-drift guards (both directions)
+
+- **Design work must not drift into random backend behavior changes.** Stage 4 PRs never touch Intel v3 / Deploy v3 / Watchtower / alert / decision-authority code. If a backend change is genuinely required to unlock a Stage 4 surface, see §35.5.
+- **Backend intelligence work must not drift into fake frontend placeholders.** Stage 5 PRs never add UI surfaces. They light up data; Stage 6 surfaces consume it.
+- **No UI module may pretend future data exists.** The Coming-Later Pattern (§28.4) is the only allowed way to render unavailable intelligence.
+
+### 35.5 Module classification rule (per stage)
+
+For every planned stage, every module / surface inside it must be classified as one of:
+
+1. **Build now from current data** — proceed inside the stage.
+2. **Needs backend contract first** — defer to Stage 5; reserve chrome via the Coming-Later Pattern in the current Stage 4 stage if the surface anchors it.
+3. **Future-only — reserve space but do not implement yet** — Stage 6 only.
+
+This classification mirrors §28.8 (the build-now-vs-wait matrix). The matrix is the source of truth; this addendum is the rule that the matrix must be respected on every stage.
+
+### 35.6 Blocking-backend-gap rule
+
+If a Stage 4 stage discovers a blocking backend gap (e.g., a surface genuinely cannot be built honestly without a small backend addition), then:
+
+1. **Stop** the Stage 4 stage.
+2. Define the **smallest durable backend contract** needed (named, scoped, testable).
+3. Ship that single backend contract as a focused Stage 5 sub-slice.
+4. **Return** to the original Stage 4 sequence and complete the stage on top of the new contract.
+
+Do **not** invent the frontend around an undefined backend gap. Do **not** expand the backend slice beyond the smallest durable contract.
+
+### 35.7 Anti-waste — explicit ban list
+
+The following waste patterns are banned across all Stage 4 / 5 / 6 work:
+
+- Patch loops on the same surface for cosmetic reasons.
+- Low-impact cosmetic tweaks shipped as their own PR.
+- Redundant docs that paraphrase what an existing doc already says.
+- Over-scoped implementation PRs that bundle two stages' worth of work.
+- "Refactor for its own sake" PRs that do not enable a named next stage.
+- New abstractions, new component libraries, or new motion libraries beyond what is already in the repo, unless explicitly justified.
+- Re-running planning prompts that re-derive contracts already captured in this file.
+- Endless polishing of Stage 4 surfaces in lieu of starting Stage 5.
+
+### 35.8 Per-stage visible-transformation check
+
+Before any Stage 4 PR opens, the prompt author must be able to state, in one sentence, the **visible transformation** the stage delivers. The sentence is in the PR summary. If it cannot be stated, the stage is wrong-sized — either too small (cosmetic) or too vague (over-scoped).
+
+The §30 build sequence has been annotated with each stage's visible-transformation line. Stage 4H is the only allowed "polish only" pass and its visible transformation is the mobile + a11y completeness of the now-finished design.
+
+### 35.9 The Stage 4 done-definition
+
+Stage 4 is **done** when:
+
+- The app shell, navigation, dark atelier canvas, typography, and motion are in place.
+- Today reads as a 30-second daily brief built from real data.
+- Intel renders as a calm investment committee with the new Action Cards + Detail Drawer.
+- Deploy reads as a single-column editorial ledger with Review + Confirm ceremony.
+- Portfolio reads as a living thesis ledger.
+- Alert Center is on the design system, dry-run safe.
+- Source Room + Data Health drawers exist and are wired to real freshness / source data.
+- Buildable capsules (Why this matters, Patience is an action, Why Trim does not mean bad company, What missing data means, How this decision changes your portfolio shape) ship and are wired into their owning surfaces.
+- Coming-Later chrome is reserved for every future-only surface, with no fabricated content.
+- Mobile + reduced motion + a11y audit complete.
+- The user opens the app and feels it has been transformed — not lightly polished.
+
+When all of the above is true, Stage 4 is complete and Stage 5 begins. Until all of the above is true, no Stage 5 work starts.
+
+### 35.10 The Stage 5 done-definition
+
+Stage 5 is **done** when each of the following has a deterministic, source-grounded, replayable runtime contract live in production:
+
+- Research Artifact Store applied + writer scaffolding live.
+- Source credibility registry (curated, deterministic).
+- Contradiction detection within evidence trails.
+- Evidence completeness scoring per claim.
+- Truth adapter (Phase 5 in the architecture plan).
+- Filings / fundamentals / technicals / sentiment / analyst / capital-allocation / company-strategy workers producing artifacts surfaced as evidence-only.
+- Pattern-detection worker (Journal lessons).
+- Radar candidate worker.
+- Real-send email activation (Stage 5M) after Resend domain verification, as a separate, non-design slice.
+
+Until all the above is true, Stage 6 surfaces do not light up.
+
+### 35.11 The Stage 6 done-definition
+
+Stage 6 is **done** when the Coming-Later chrome reserved by Stage 4 is fully replaced by live, source-backed content:
+
+- Source Room renders real credibility tiers + contradiction strips + completeness panels.
+- Intel detail drawer renders Business story, Company strategy primer, artifact-backed "What would make this thesis wrong," Good company vs good stock, technical context, fundamental context.
+- Today renders the live "What I learned today" capsule.
+- Journal renders the live Lessons surface + archive.
+- Radar is live with real candidates.
+- Command bar is live (ask / explain / compare / challenge), source-bounded.
+
+At Stage 6 completion, the app is the finished S-grade product described in §22 and §34.
+
+### 35.12 Final operating rule
+
+Move forward decisively. Ship the next meaningful slice. Resist the urge to polish, re-derive, re-plan, or revisit. The contract is the plan; the matrix is the truth; the addendum is the discipline. Open the smallest reviewable PR that genuinely advances the stage, and stop when the stage is done.
 
 ---
 

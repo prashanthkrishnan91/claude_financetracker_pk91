@@ -6,10 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 4C — Intel Investment Committee Redesign.** Action Card visual system, Confidence Ring, Risk Glyph, Freshness Dot, Detail Drawer with existing Intel v3 data. Coming-Later chrome for future capsules. No backend, no SQL.
+- **Stage 4C** — Intel Investment Committee Redesign (PR #361 open). Action Card visual system with `action-*` tokens; Investment Committee cockpit; "Why this view?" accessible drawer; 56 contract tests. No backend, no SQL.
 
 ## Later (Stage 4 sequence)
-- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
+- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness). Starts after Stage 4C merges.
 - **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
 - **Stage 4F** — Portfolio Living Thesis Ledger.
 - **Stage 4G** — Alert Center polish + Journal chrome + Radar destination + buildable capsule subset (Coming-Later for Lessons / What I learned today archive / Radar candidates).

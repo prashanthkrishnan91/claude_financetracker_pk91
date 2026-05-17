@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 4A — Design System Foundation + App Shell Reset; PR open on branch `claude/design-system-foundation-eMw96`)
+Last updated: 2026-05-17 (Stage 4A — Design System Foundation + App Shell Reset; **merged PR #358**; next: Stage 4B)
 
 ## Purpose
 
@@ -114,19 +114,17 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4A
+## Current design stage — Stage 4B (next)
 
-**Stage 4A — Design System Foundation + App Shell Reset** is open on branch `claude/design-system-foundation-eMw96`.
+**Stage 4A — Design System Foundation + App Shell Reset** merged as **PR #358** on 2026-05-17.
 
-Changes (4 files, frontend-only):
-- `tailwind.config.ts`: Obsidian dark + Paper light palettes; Atelier Green `#2EC27E` replaces neon `#00e676`; semantic Buy/Hold/Trim/Sell action tokens; correct radii (sharp/md/lg/xl/pill); elev-0/1/2/3 shadows; motion timing functions; type scale tokens (`display-xl` → `caption`).
-- `globals.css`: CSS variables for both modes + motion tokens + reduced-motion support; font-feature-settings with `tnum`/`zero`/`kern` on body; glass `page-header` with 24px blur; Coming-Later utility class; engraved divider rule; Atelier Green selection color.
-- `layout.tsx`: `DM_Serif_Display` + `Inter` loaded via `next/font/google`; CSS variables applied to `<html>`; theme-color updated to `#0A0B0F`.
-- `BottomNav.tsx`: SideNav uses font-display brand mark + engraved active rule + data-health dot placeholder; BottomNav uses glass bottom chrome + 2px top indicator; icon strokeWidth varies active/inactive; all routes and behavior preserved.
+What landed (4 frontend files):
+- `tailwind.config.ts`: Obsidian dark + Paper light palettes; Atelier Green `#2EC27E`; semantic action tokens; type scale; radii; elev shadows; motion timing functions.
+- `globals.css`: All glass/scrollbar/selection/bottom-nav colors as named CSS vars (`--glass-bg`, `--bottom-nav-glass-bg`, etc.); motion vars; reduced-motion; Coming-Later utility; engraved divider.
+- `layout.tsx`: `DM_Serif_Display` + `Inter` + `JetBrains_Mono` via `next/font/google`; CSS vars on `<html>`.
+- `BottomNav.tsx`: Engraved active rule, font-display brand mark, data-health dot placeholder, glass BottomNav chrome; all routes preserved.
 
-No page content restructured. No backend changes. No SQL. No new component library. All existing 463 tests still pass; 3 pre-existing test-suite failures (unrelated TS type mismatches and JSX-transform config) are unchanged.
-
-**Next after this PR merges:** Stage 4B — Today Command Center.
+**Current next step: Stage 4B — Today Command Center.** Current-data only; Coming-Later for "What I learned today".
 
 **Do not skip ahead.** The contract splits the overhaul into:
 - **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only. Done-definition: §35.9.

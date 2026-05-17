@@ -6,15 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 4A — Design System Foundation + App Shell Reset** — PR open on branch `claude/design-system-foundation-eMw96`. Obsidian dark + Paper light token palettes, `next/font/google` for DM Serif Display + Inter, CSS variables + motion tokens + reduced-motion support, engraved SideNav + glass BottomNav shell reset. 4 files: `tailwind.config.ts`, `globals.css`, `layout.tsx`, `BottomNav.tsx`. No page content restructuring; no backend calls; no SQL.
-
-## Next
-
 - **Stage 4B — Today Command Center.** Current-data only. Coming-Later for "What I learned today".
 
 ## Later (Stage 4 sequence)
 
-- **Stage 4B** — Today Command Center (current-data only, Coming-Later for "What I learned today").
 - **Stage 4C** — Intel Investment Committee Redesign (Action Card + Detail Drawer; Coming-Later for capsules that depend on Stage 5).
 - **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
 - **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
@@ -47,6 +42,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 4A — Design System Foundation + App Shell Reset** (merged PR #358). Obsidian dark + Paper light token palettes on main; Atelier Green `#2EC27E`; DM Serif Display + Inter + JetBrains Mono via `next/font/google`; named CSS vars for all glass/selection/scrollbar surfaces; engraved SideNav + glass BottomNav; Coming-Later utility; reduced-motion support. 4 frontend files. No backend, no SQL.
 
 - **Stage 3G — Alert Center UI v1** (merged). Read-only Alert Center at `/dashboard/alerts` reading `GET /api/v1/alert-candidates` + `GET /api/v1/alert-delivery-outbox`. Nav added to BottomNav and SideNav. Dry-run safety banner always visible. Plain-English status labels, severity pills, empty/loading/error states. 28 unit tests on pure mapping helpers in `src/lib/alert-center.ts`. No SQL, no email-delivery changes.
 

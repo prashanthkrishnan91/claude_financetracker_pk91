@@ -97,17 +97,22 @@ async def run_alert_candidate_generation(
         summary["policy_version"] = policy_result.policy_version
 
         # Step 4: persist candidates (idempotent by dedupe_key).
+        # Collect ALL returned rows (created and deduped) for outbox creation.
+        # If outbox creation failed on a prior run, a later candidate-deduped
+        # rerun must still attempt outbox creation for the missing row.
+        candidate_rows_for_outbox: list[dict] = []
         if policy_result.candidates:
             svc = AlertCandidateService()
             persisted = 0
             deduped = 0
             for candidate in policy_result.candidates:
                 try:
-                    _, created = await asyncio.to_thread(svc.persist_candidate, candidate)
+                    row, created = await asyncio.to_thread(svc.persist_candidate, candidate)
                     if created:
                         persisted += 1
                     else:
                         deduped += 1
+                    candidate_rows_for_outbox.append(row)
                 except Exception as persist_exc:
                     logger.warning(
                         "alert_candidate_hook.persist_error user_id=%s ticker=%s error=%s",
@@ -117,6 +122,19 @@ async def run_alert_candidate_generation(
                     )
             summary["persisted"] = persisted
             summary["deduped"] = deduped
+
+        # Step 5: create delivery outbox entries for all returned candidate rows.
+        # Outbox idempotency (dedupe_key) and noisy-repeat suppression prevent
+        # duplicates when rows are reprocessed. Fail-soft: outbox errors never
+        # block candidate generation or Watchtower.
+        if candidate_rows_for_outbox:
+            outbox_summary = await _create_delivery_outbox_entries(
+                user_id_str, candidate_rows_for_outbox
+            )
+            summary["outbox_created"] = outbox_summary.get("created", 0)
+            summary["outbox_suppressed"] = outbox_summary.get("suppressed", 0)
+            summary["outbox_deduped"] = outbox_summary.get("deduped", 0)
+            summary["outbox_errors"] = outbox_summary.get("errors", 0)
 
     except Exception as exc:
         summary["error"] = str(exc)
@@ -128,6 +146,52 @@ async def run_alert_candidate_generation(
 
     _emit_log(summary)
     return summary
+
+
+async def _create_delivery_outbox_entries(
+    user_id_str: str,
+    candidate_rows: list[dict],
+) -> dict:
+    """Create outbox entries for newly persisted candidates. Never raises."""
+    from .alert_delivery_outbox_service import AlertDeliveryOutboxService
+
+    counts: dict[str, int] = {"created": 0, "suppressed": 0, "deduped": 0, "errors": 0}
+    try:
+        outbox_svc = AlertDeliveryOutboxService()
+        for row in candidate_rows:
+            try:
+                _, outcome = await asyncio.to_thread(
+                    outbox_svc.create_pending_from_candidate, row
+                )
+                if outcome in counts:
+                    counts[outcome] += 1
+                else:
+                    counts["errors"] += 1
+            except Exception as row_exc:
+                logger.warning(
+                    "alert_candidate_hook.outbox_row_error user_id=%s ticker=%s error=%s",
+                    user_id_str,
+                    row.get("ticker", "?"),
+                    row_exc,
+                )
+                counts["errors"] += 1
+    except Exception as exc:
+        logger.warning(
+            "alert_candidate_hook.outbox_creation_error user_id=%s error=%s",
+            user_id_str,
+            exc,
+        )
+        counts["errors"] += len(candidate_rows)
+    logger.info(
+        "alert_delivery_outbox_creation_summary user_id=%s "
+        "created=%d suppressed=%d deduped=%d errors=%d",
+        user_id_str,
+        counts["created"],
+        counts["suppressed"],
+        counts["deduped"],
+        counts["errors"],
+    )
+    return counts
 
 
 async def _fetch_latest_two_intel_snapshots(
@@ -184,6 +248,7 @@ def _emit_log(summary: dict[str, Any]) -> None:
     logger.info(
         "alert_candidate_generation_summary user_id=%s evaluated=%s "
         "candidates=%s persisted=%s deduped=%s suppressions=%s "
+        "outbox_created=%s outbox_suppressed=%s outbox_deduped=%s outbox_errors=%s "
         "skipped_reason=%s policy_version=%s error=%s",
         summary["user_id"],
         summary["evaluated"],
@@ -191,6 +256,10 @@ def _emit_log(summary: dict[str, Any]) -> None:
         summary["persisted"],
         summary["deduped"],
         summary["suppressions"],
+        summary.get("outbox_created", 0),
+        summary.get("outbox_suppressed", 0),
+        summary.get("outbox_deduped", 0),
+        summary.get("outbox_errors", 0),
         summary.get("skipped_reason") or "none",
         summary["policy_version"],
         summary.get("error") or "none",

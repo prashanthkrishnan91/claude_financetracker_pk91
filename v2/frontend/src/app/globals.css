@@ -2,28 +2,109 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design token CSS variables ──────────────────────────────────────────── */
+/*
+ * Dark mode (Obsidian) is the default and canonical path.
+ * Light mode (Paper) applies when html.light or html:not(.dark) is set.
+ * shadcn-compatible HSL vars share the same :root block.
+ */
+
 @layer base {
   :root {
-    --background: 222 47% 3%;
-    --foreground: 220 14% 91%;
-    --card: 222 27% 6%;
-    --card-foreground: 220 14% 91%;
-    --popover: 222 27% 6%;
-    --popover-foreground: 220 14% 91%;
-    --primary: 152 100% 45%;
-    --primary-foreground: 222 47% 3%;
-    --secondary: 215 14% 14%;
-    --secondary-foreground: 220 14% 91%;
-    --muted: 215 14% 14%;
-    --muted-foreground: 220 5% 53%;
-    --accent: 152 100% 45%;
-    --accent-foreground: 222 47% 3%;
-    --destructive: 0 100% 66%;
-    --destructive-foreground: 220 14% 91%;
-    --border: 215 14% 18%;
-    --input: 215 14% 18%;
-    --ring: 152 100% 45%;
-    --radius: 0.75rem;
+    /* ── shadcn-compat HSL vars (Obsidian) ───────────────────── */
+    --background: 228 24% 5%;
+    --foreground: 218 14% 91%;
+    --card: 225 25% 9%;
+    --card-foreground: 218 14% 91%;
+    --popover: 225 25% 9%;
+    --popover-foreground: 218 14% 91%;
+    --primary: 152 61% 47%;
+    --primary-foreground: 228 24% 5%;
+    --secondary: 221 23% 17%;
+    --secondary-foreground: 218 14% 91%;
+    --muted: 221 23% 17%;
+    --muted-foreground: 220 12% 44%;
+    --accent: 152 61% 47%;
+    --accent-foreground: 228 24% 5%;
+    --destructive: 355 55% 56%;
+    --destructive-foreground: 218 14% 91%;
+    --border: 223 24% 21%;
+    --input: 223 24% 21%;
+    --ring: 152 61% 47%;
+    --radius: 0.5rem;
+
+    /* ── Motion tokens ───────────────────────────────────────── */
+    --motion-enter: cubic-bezier(0.2, 0.8, 0.2, 1);
+    --motion-exit:  cubic-bezier(0.4, 0.0, 1.0, 1.0);
+    --motion-cross: cubic-bezier(0.4, 0.0, 0.2, 1.0);
+    --motion-tween: cubic-bezier(0.25, 0.1, 0.25, 1.0);
+    --motion-emphasis: cubic-bezier(0.34, 1.56, 0.64, 1.0);
+    --dur-fast:    120ms;
+    --dur-base:    160ms;
+    --dur-slow:    240ms;
+    --dur-slower:  280ms;
+    --dur-slowest: 320ms;
+    --dur-breath:  1400ms;
+
+    /* ── Glass overlay / scrollbar / selection tokens ───────── */
+    --glass-bg: rgba(16, 19, 26, 0.85);
+    --bottom-nav-glass-bg: rgba(16, 19, 26, 0.92);
+    --glass-divider-highlight: rgba(255, 255, 255, 0.03);
+    --scrollbar-thumb: hsl(var(--border));
+    --scrollbar-thumb-hover: hsl(221 18% 28%);
+    --selection-bg: hsl(var(--primary) / 0.15);
+    --selection-fg: hsl(var(--foreground));
+  }
+
+  /* ── Paper light palette ─────────────────────────────────────────────────── */
+  html.light,
+  html:not(.dark) {
+    --background: 40 43% 96%;
+    --glass-bg: rgba(250, 247, 242, 0.85);
+    --bottom-nav-glass-bg: rgba(250, 247, 242, 0.92);
+    --foreground: 228 30% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 228 30% 14%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 228 30% 14%;
+    --primary: 152 73% 29%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 38 28% 91%;
+    --secondary-foreground: 228 30% 14%;
+    --muted: 38 28% 91%;
+    --muted-foreground: 220 15% 45%;
+    --accent: 152 73% 29%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 355 63% 39%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 34 22% 84%;
+    --input: 34 22% 84%;
+    --ring: 152 73% 29%;
+  }
+
+  /* ── Reduced-motion: collapse all transitions to a single fade ───────────── */
+  @media (prefers-reduced-motion: reduce) {
+    :root {
+      --motion-enter: linear;
+      --motion-exit:  linear;
+      --motion-cross: linear;
+      --motion-tween: linear;
+      --dur-fast:    0ms;
+      --dur-base:    160ms;
+      --dur-slow:    160ms;
+      --dur-slower:  160ms;
+      --dur-slowest: 160ms;
+      --dur-breath:  0ms;
+    }
+
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 160ms !important;
+      scroll-behavior: auto !important;
+    }
   }
 }
 
@@ -31,16 +112,28 @@
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-text-primary antialiased;
-    font-family: "Inter", system-ui, sans-serif;
-    font-feature-settings: "tnum" 1, "kern" 1;
+    font-family: var(--font-sans), Inter, system-ui, sans-serif;
+    /* tabular-nums: fixed-width numerals; kern: kerning; zero: slashed zero */
+    font-feature-settings: "tnum" 1, "kern" 1, "zero" 1;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
     text-rendering: optimizeLegibility;
+  }
+
+  /* Numeric elements always use tabular + slashed-zero */
+  .numeric,
+  [data-numeric],
+  .font-mono,
+  .tabular-nums {
+    font-feature-settings: "tnum" 1, "zero" 1, "kern" 1;
+    font-variant-numeric: tabular-nums slashed-zero;
   }
 }
 
-/* ─── Card primitives ─────────────────────────────────────────── */
+/* ─── Card primitives ──────────────────────────────────────────────────────── */
 @layer components {
   /* Legacy — kept for backward compatibility */
   .card-glass {
@@ -50,19 +143,19 @@
     @apply bg-surface-elevated border border-border rounded-lg;
   }
 
-  /* Elite data cards */
+  /* Primary card types */
   .data-card {
-    @apply bg-surface border border-border rounded-lg;
+    @apply bg-surface border border-border rounded-md shadow-elev-1;
   }
   .data-card-elevated {
-    @apply bg-surface-elevated border border-border/80 rounded-lg;
+    @apply bg-surface-elevated border border-border/80 rounded-md shadow-elev-1;
   }
   .intel-card {
-    @apply bg-surface border border-border/60 rounded-lg transition-colors;
+    @apply bg-surface border border-border/60 rounded-md shadow-elev-1 transition-colors duration-160;
   }
 }
 
-/* ─── Data state colors ───────────────────────────────────────── */
+/* ─── Data state colors ────────────────────────────────────────────────────── */
 @layer components {
   .data-positive { @apply text-positive; }
   .data-negative { @apply text-negative; }
@@ -74,15 +167,14 @@
   .pnl-negative { @apply text-pnl-negative; }
 }
 
-/* ─── Badge / pill system ─────────────────────────────────────── */
+/* ─── Badge / pill system ──────────────────────────────────────────────────── */
 @layer components {
-  /* Base badge — shared shape */
   .badge {
-    @apply inline-flex items-center text-[10px] px-2 py-0.5 rounded-full
+    @apply inline-flex items-center text-[10px] px-2 py-0.5 rounded-pill
            font-semibold uppercase tracking-[0.07em] border;
   }
   .badge-sm {
-    @apply inline-flex items-center text-[9px] px-1.5 py-px rounded-full
+    @apply inline-flex items-center text-[9px] px-1.5 py-px rounded-pill
            font-semibold uppercase tracking-[0.06em] border;
   }
 
@@ -90,52 +182,62 @@
   .badge-positive { @apply badge bg-positive/10 text-positive border-positive/30; }
   .badge-negative { @apply badge bg-negative/10 text-negative border-negative/30; }
   .badge-caution  { @apply badge bg-caution/10  text-caution  border-caution/30; }
-  .badge-info     { @apply badge bg-accent-blue/10 text-accent-blue border-accent-blue/30; }
+  .badge-info     { @apply badge bg-accent-lapis/10 text-accent-lapis border-accent-lapis/30; }
   .badge-accent   { @apply badge bg-accent/10  text-accent  border-accent/30; }
-  .badge-purple   { @apply badge bg-accent-purple/10 text-accent-purple border-accent-purple/30; }
+  .badge-purple   { @apply badge bg-accent-plum/10 text-accent-plum border-accent-plum/30; }
   .badge-surface  { @apply badge bg-surface-elevated text-text-muted border-border; }
 
-  /* Action badge — rectangular, bolder */
+  /* Action badge — sharp corners, semantic color per action */
   .action-badge {
-    @apply px-2 py-0.5 rounded text-xs font-bold uppercase tracking-wide;
+    @apply inline-flex items-center gap-1 px-1.5 py-0.5 rounded-sharp text-xs font-bold
+           uppercase tracking-wide;
   }
-  .action-badge-buy    { @apply action-badge bg-positive/10 text-positive; }
-  .action-badge-sell   { @apply action-badge bg-negative/10 text-negative; }
-  .action-badge-trim   { @apply action-badge bg-caution/10 text-caution; }
-  .action-badge-hold   { @apply action-badge bg-accent-blue/10 text-accent-blue; }
-  .action-badge-review { @apply action-badge bg-accent-purple/10 text-accent-purple; }
+  .action-badge-buy    { @apply action-badge bg-action-buy/10  text-action-buy; }
+  .action-badge-hold   { @apply action-badge bg-action-hold/10 text-action-hold; }
+  .action-badge-trim   { @apply action-badge bg-action-trim/10 text-action-trim; }
+  .action-badge-sell   { @apply action-badge bg-action-sell/10 text-action-sell; }
+  .action-badge-review { @apply action-badge bg-accent-plum/10 text-accent-plum; }
 }
 
-/* ─── Typography primitives ───────────────────────────────────── */
+/* ─── Typography primitives ────────────────────────────────────────────────── */
 @layer components {
-  /* Dense uppercase label — used for section headers and data labels */
+  /* Dense uppercase label — section headers, data labels, metric eyebrows */
   .metric-label {
-    @apply text-[10px] uppercase tracking-[0.08em] font-semibold text-text-muted;
+    @apply text-[10px] uppercase tracking-label font-semibold text-text-muted;
   }
 
-  /* Section header — slightly larger than metric-label */
+  /* Section header */
   .section-header {
     @apply text-xs uppercase tracking-[0.07em] font-semibold text-text-muted;
   }
 
-  /* Mono data value */
+  /* Mono data value — always tabular + slashed-zero */
   .data-value {
     @apply font-mono font-semibold text-text-primary tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
   }
   .data-value-sm {
     @apply font-mono text-sm font-semibold text-text-primary tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
   }
   .data-value-xs {
     @apply font-mono text-xs text-text-secondary tabular-nums;
+    font-feature-settings: "tnum" 1, "zero" 1;
   }
 
   /* Ticker symbol */
   .ticker-symbol {
     @apply font-mono font-bold text-text-primary tracking-tight;
+    font-feature-settings: "tnum" 1, "zero" 1;
+  }
+
+  /* Editorial display — uses the serif variable */
+  .display-serif {
+    @apply font-display font-normal;
   }
 }
 
-/* ─── Table primitives ────────────────────────────────────────── */
+/* ─── Table primitives ─────────────────────────────────────────────────────── */
 @layer components {
   .data-table {
     @apply w-full text-sm;
@@ -145,7 +247,7 @@
            text-[10px] uppercase tracking-[0.07em] font-semibold text-text-muted;
   }
   .data-table-row {
-    @apply border-b border-border/50 transition-colors;
+    @apply border-b border-border/50 transition-colors duration-120;
   }
   .data-table-row:hover {
     @apply bg-surface-hover/40;
@@ -158,58 +260,95 @@
   }
 }
 
-/* ─── Button primitives ───────────────────────────────────────── */
+/* ─── Button primitives ────────────────────────────────────────────────────── */
 @layer components {
   .btn-primary {
     @apply px-3 py-1.5 bg-accent text-background rounded-md text-xs font-semibold
-           hover:bg-accent-hover transition-colors
+           transition-colors duration-160
+           hover:bg-accent-hover
            disabled:opacity-50 disabled:cursor-not-allowed;
   }
   .btn-secondary {
     @apply px-3 py-1.5 bg-surface-elevated text-text-primary border border-border
            rounded-md text-xs font-semibold
-           hover:bg-surface-hover hover:border-border-strong transition-colors;
+           transition-colors duration-160
+           hover:bg-surface-hover hover:border-border-strong;
   }
   .btn-ghost {
-    @apply px-2 py-1 text-text-muted hover:text-text-primary
-           rounded-md hover:bg-surface-elevated transition-colors text-xs;
+    @apply px-2 py-1 text-text-muted rounded-md text-xs
+           transition-colors duration-160
+           hover:text-text-primary hover:bg-surface-elevated;
   }
   .btn-danger {
     @apply px-3 py-1.5 bg-negative/10 text-negative border border-negative/30
-           rounded-md text-xs font-semibold hover:bg-negative/20 transition-colors;
+           rounded-md text-xs font-semibold
+           transition-colors duration-160
+           hover:bg-negative/20;
   }
 }
 
-/* ─── Page shell ──────────────────────────────────────────────── */
+/* ─── Page shell ───────────────────────────────────────────────────────────── */
 @layer components {
+  /* Glass top bar — 24 px blur, 85% surface opacity. Color from --glass-bg token. */
   .page-header {
-    @apply sticky top-0 z-50 bg-background/90 backdrop-blur-xl border-b border-border;
+    @apply sticky top-0 z-50 border-b border-border-subtle;
+    background-color: var(--glass-bg);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
   }
   .page-header-inner {
     @apply max-w-7xl mx-auto px-4 py-3 flex items-center justify-between;
   }
   .page-title {
-    @apply text-base font-semibold text-text-primary tracking-tight;
+    @apply text-body-md font-semibold text-text-primary tracking-tight;
   }
   .page-main {
     @apply max-w-7xl mx-auto px-4 py-6 space-y-6;
   }
 }
 
-/* ─── Warning / risk block ────────────────────────────────────── */
+/* ─── Engraved divider rule ────────────────────────────────────────────────── */
+/* 0.5 pt line + 1 pt highlight = hairline elegance per §4.14 */
+@layer components {
+  .atelier-divider {
+    @apply relative border-0 my-0;
+  }
+  .atelier-divider::before {
+    content: "";
+    @apply absolute inset-x-0 top-0 h-px bg-border-subtle;
+  }
+  .atelier-divider::after {
+    content: "";
+    position: absolute;
+    inset-inline: 0;
+    top: 1px;
+    height: 1px;
+    background-color: var(--glass-divider-highlight);
+  }
+}
+
+/* ─── Warning / risk block ─────────────────────────────────────────────────── */
 @layer components {
   .risk-block {
-    @apply p-3 rounded-lg border border-caution/30 bg-caution/5;
+    @apply p-3 rounded-md border border-caution/30 bg-caution/5;
   }
   .risk-block-title {
     @apply text-xs font-semibold uppercase tracking-[0.07em] text-caution;
   }
   .info-block {
-    @apply p-3 rounded-lg border border-border/80 bg-surface-elevated/40;
+    @apply p-3 rounded-md border border-border/80 bg-surface-elevated/40;
   }
 }
 
-/* ─── Scrollbar ───────────────────────────────────────────────── */
+/* ─── Coming-Later placeholder (Stage 4 pattern) ───────────────────────────── */
+@layer components {
+  .coming-later {
+    @apply px-3 py-2 rounded-md border border-border-subtle/50 bg-surface-elevated/20
+           text-caption text-text-muted italic;
+  }
+}
+
+/* ─── Scrollbar ────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar {
   width: 4px;
   height: 4px;
@@ -218,15 +357,15 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #21262d;
+  background: var(--scrollbar-thumb);
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #30363d;
+  background: var(--scrollbar-thumb-hover);
 }
 
-/* ─── Selection ───────────────────────────────────────────────── */
+/* ─── Selection ────────────────────────────────────────────────────────────── */
 ::selection {
-  background-color: rgba(0, 230, 118, 0.15);
-  color: #e8eaed;
+  background-color: var(--selection-bg);
+  color: var(--selection-fg);
 }

@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **S-Grade Execution Contract (docs-only)**: PR open on branch `claude/s-grade-execution-contract-g9tVA`. Adds `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` — implementation-ready contract for the Stage 4 / 5 / 6 design + intelligence overhaul, with explicit Stage 4 (UX foundation + core current-data surfaces) / Stage 5 (backend intelligence) / Stage 6 (advanced surfaces) split and the Coming-Later Pattern for honest unavailable states. No app code, no SQL, no backend, no provider, no LLM, no email-delivery change.
+- **Stage 4A — Design System Foundation + App Shell Reset** — PR open on branch `claude/design-system-foundation-eMw96`. Obsidian dark + Paper light token palettes, `next/font/google` for DM Serif Display + Inter, CSS variables + motion tokens + reduced-motion support, engraved SideNav + glass BottomNav shell reset. 4 files: `tailwind.config.ts`, `globals.css`, `layout.tsx`, `BottomNav.tsx`. No page content restructuring; no backend calls; no SQL.
 
 ## Next
 
-- **Stage 4A — Design System Foundation + App Shell Reset.** Frontend-only. Tailwind tokens (Obsidian dark + Paper light), CSS variables, two type families via `next/font`, 4-pt spacing / radii / elevation / type tokens, top / side / bottom nav shell reset. ~12 files. Medium usage. New chat. No page content restructuring; no component redesign; no backend calls. See `artifacts/Design_Master_Plan/05_S_Grade_Execution_Contract.md` §30.1.
+- **Stage 4B — Today Command Center.** Current-data only. Coming-Later for "What I learned today".
 
 ## Later (Stage 4 sequence)
 

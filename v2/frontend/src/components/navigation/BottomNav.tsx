@@ -15,6 +15,14 @@ const NAV_ITEMS = [
   { href: "/settings", label: "Settings", icon: GearIcon },
 ];
 
+// Desktop-only destinations: Journal and Radar are first-class routes on the
+// SideNav per §26.1 and §30.7. They are NOT in the mobile BottomNav — on phone
+// they are reached from the Today secondary rail + command bar (Stage 4H / 6).
+const SIDE_ONLY_NAV_ITEMS = [
+  { href: "/dashboard/journal", label: "Journal", icon: BookIcon },
+  { href: "/dashboard/radar", label: "Radar", icon: RadarIcon },
+];
+
 export function BottomNav() {
   const pathname = usePathname();
 
@@ -87,7 +95,7 @@ export function SideNav() {
 
       {/* Navigation items */}
       <div className="space-y-px">
-        {NAV_ITEMS.map((item) => {
+        {[...NAV_ITEMS, ...SIDE_ONLY_NAV_ITEMS].map((item) => {
           const active =
             pathname === item.href ||
             (item.href !== "/dashboard" && pathname.startsWith(item.href));
@@ -245,6 +253,38 @@ function BellIcon({
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
       <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" strokeLinecap="round" strokeLinejoin="round" />
       <path d="M13.73 21a2 2 0 0 1-3.46 0" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function BookIcon({
+  className,
+  strokeWidth = 1.5,
+}: {
+  className?: string;
+  strokeWidth?: number;
+}) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function RadarIcon({
+  className,
+  strokeWidth = 1.5,
+}: {
+  className?: string;
+  strokeWidth?: number;
+}) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
+      <path d="M12 2a10 10 0 1 0 10 10" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 6a6 6 0 0 1 6 6" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 10a2 2 0 0 1 2 2" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 12l6-6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

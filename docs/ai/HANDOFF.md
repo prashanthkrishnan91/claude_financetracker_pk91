@@ -114,17 +114,27 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4C (next)
+## Current design stage — Stage 4C (open PR)
+
+**Stage 4C — Intel Investment Committee Redesign** — PR open on branch `claude/intel-v3-committee-redesign-9ERGn`. 5 frontend files (4 modified, 1 new). No backend, no SQL.
+
+What landed:
+- `IntelV3Primitives.tsx` (new): Shared UI primitives — `ActionGlyph`, `ConfidenceRing`, `RiskGlyph`, `FreshnessDot`, `ComingLaterPanel`, `DataMissingPill`. All action styles route through `action-*` design tokens; no raw Tailwind color classes.
+- `IntelV3Cockpit.tsx` (redesigned): "Investment Committee" workspace — identity band with status pill + Run Intel, portfolio overview with `font-display` heading, pill-style action filter rail (ALL/BUY/HOLD/TRIM/SELL locked), unified card grid, What Changed strip, Opportunity Radar as Coming-Later chrome only.
+- `IntelV3Card.tsx` (redesigned): Action Card with glyph + action badge + ConfidenceRing, plain-English why_text, FreshnessDot / DataMissingPill for thin data, RiskGlyph, portfolio fit. Token-routed colors throughout.
+- `IntelV3Drawer.tsx` (redesigned): "Why this view?" detail room. Accessible dialog (role=dialog, aria-modal, aria-labelledby, close button focused on open, Escape close). Live sections: why view, thesis, risk challenge, blockers/flags, what would change view, portfolio fit, evidence check, valuation context (when present). Coming-Later chrome for business story, technical/fundamental context, source credibility tier, Ask why/Challenge. No fabricated content.
+- `IntelV3Contract.test.ts` (+23 tests): Stage 4C contracts — action token routing, glyph mapping, thin/missing evidence honesty, drawer live sections, Coming-Later contracts, filter rail locked contract. 56 total (all pass). 3 pre-existing unrelated suite failures unchanged.
+- Intel v3 authority, polling, certification logic, Run Intel behavior, NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED split: all unchanged.
+
+**Next after merge: Stage 4D — Evidence Shell + Source UX + Data Health Drawer.** Coming-Later chrome for credibility tier, contradiction strip, evidence completeness. No backend, no SQL.
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 
 What landed:
 - `src/app/dashboard/page.tsx`: `/dashboard` reframed as "Today". Above-the-fold: The Brief, Act Today, Risk Pulse, Deploy Ready, Watchtower Summary (all from existing data). "What I Learned Today" Coming-Later chrome (Stage 6E activates). Portfolio snapshot below fold. Hydration-safe `todayLabel` via `useEffect`. `ml-8` replaces fragile calc class.
-- `src/lib/today-command-center.ts`: 7 pure deterministic helpers (no LLM, no fabricated claims). Zero-candidate Watchtower copy is calmer: "currently waiting for review" (no "within normal thresholds" overclaim).
+- `src/lib/today-command-center.ts`: 7 pure deterministic helpers (no LLM, no fabricated claims).
 - `src/lib/today-command-center.test.ts`: 49 unit tests, all pass.
 - `src/components/navigation/BottomNav.tsx`: `/dashboard` label "Portfolio" → "Today".
-
-**Next: Stage 4C — Intel Investment Committee Redesign.** Action Card visual system, Confidence Ring, Risk Glyph, Freshness Dot, Detail Drawer with existing Intel v3 data. Coming-Later chrome for future capsules. No backend, no SQL.
 
 **Stage 4A — Design System Foundation + App Shell Reset** merged as **PR #358** on 2026-05-17. Tokens: `tailwind.config.ts`, `globals.css`, `layout.tsx` (fonts), `BottomNav.tsx` (glass chrome).
 

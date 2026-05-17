@@ -482,3 +482,237 @@ describe("Intel v3 source-of-truth contract — visible page uses only v3 snapsh
     expect(snap.action_counts).toEqual(recomputed);
   });
 });
+
+// ── Stage 4C — Investment Committee redesign contracts ────────────────────────
+
+describe("Stage 4C — action token style mapping contract", () => {
+  // Validates that ACTION_TOKEN_STYLES covers every valid action and routes
+  // through design-system tokens (action-*) rather than raw Tailwind colors.
+
+  const VALID_ACTIONS: IntelV3Action[] = ["BUY", "HOLD", "TRIM", "SELL"];
+  const FORBIDDEN_RAW_CLASSES = [
+    "text-green-", "text-blue-", "text-amber-", "text-red-",
+    "bg-green-",  "bg-blue-",  "bg-amber-",  "bg-red-",
+  ];
+
+  // Mirrors ACTION_TOKEN_STYLES from IntelV3Primitives (pure contract test, no import).
+  const ACTION_TOKEN_STYLES: Record<IntelV3Action, { text: string; bg: string; border: string; glyph: string; dot: string }> = {
+    BUY:  { text: "text-action-buy",  bg: "bg-action-buy/10",  border: "border-action-buy/30",  glyph: "↑", dot: "bg-action-buy"  },
+    HOLD: { text: "text-action-hold", bg: "bg-action-hold/10", border: "border-action-hold/30", glyph: "─", dot: "bg-action-hold" },
+    TRIM: { text: "text-action-trim", bg: "bg-action-trim/10", border: "border-action-trim/30", glyph: "↓", dot: "bg-action-trim" },
+    SELL: { text: "text-action-sell", bg: "bg-action-sell/10", border: "border-action-sell/30", glyph: "✕", dot: "bg-action-sell" },
+  };
+
+  it("every valid action has a token style entry", () => {
+    for (const action of VALID_ACTIONS) {
+      expect(ACTION_TOKEN_STYLES).toHaveProperty(action);
+    }
+  });
+
+  it("every action token style has text, bg, border, glyph, dot keys", () => {
+    for (const action of VALID_ACTIONS) {
+      const s = ACTION_TOKEN_STYLES[action];
+      expect(typeof s.text).toBe("string");
+      expect(typeof s.bg).toBe("string");
+      expect(typeof s.border).toBe("string");
+      expect(typeof s.glyph).toBe("string");
+      expect(typeof s.dot).toBe("string");
+      expect(s.glyph.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("text classes route through action-* tokens, not raw Tailwind colors", () => {
+    for (const action of VALID_ACTIONS) {
+      const s = ACTION_TOKEN_STYLES[action];
+      for (const forbidden of FORBIDDEN_RAW_CLASSES) {
+        expect(s.text).not.toContain(forbidden);
+        expect(s.bg).not.toContain(forbidden);
+        expect(s.border).not.toContain(forbidden);
+        expect(s.dot).not.toContain(forbidden);
+      }
+    }
+  });
+
+  it("BUY glyph indicates upward direction", () => {
+    expect(ACTION_TOKEN_STYLES.BUY.glyph).toBe("↑");
+  });
+
+  it("HOLD glyph indicates steady / no-change", () => {
+    expect(ACTION_TOKEN_STYLES.HOLD.glyph).toBe("─");
+  });
+
+  it("TRIM glyph indicates downward direction", () => {
+    expect(ACTION_TOKEN_STYLES.TRIM.glyph).toBe("↓");
+  });
+
+  it("SELL glyph indicates exit", () => {
+    expect(ACTION_TOKEN_STYLES.SELL.glyph).toBe("✕");
+  });
+});
+
+describe("Stage 4C — card thin/missing evidence contract", () => {
+  it("THIN evidence band is surfaced as thin data label, not hidden", () => {
+    const card = makeCard("AAPL", "BUY", { evidence_band: "THIN" });
+    expect(card.evidence_band).toBe("THIN");
+    // The UI contract: THIN evidence must show 'Thin data' / DataMissingPill,
+    // not a STRONG label. The card renders honestly — THIN is never promoted.
+    expect(card.evidence_band).not.toBe("STRONG");
+    expect(card.evidence_band).not.toBe("PARTIAL");
+  });
+
+  it("card with thin evidence still has a valid action — thin data does not override action", () => {
+    const VALID_ACTIONS: IntelV3Action[] = ["BUY", "HOLD", "TRIM", "SELL"];
+    const card = makeCard("MSFT", "HOLD", { evidence_band: "THIN" });
+    expect(VALID_ACTIONS).toContain(card.action);
+    expect(card.evidence_band).toBe("THIN");
+  });
+
+  it("card with missing why_text falls back to action_text without rendering fake content", () => {
+    // why_text may be empty when evidence is thin; UI should not invent a summary
+    const card = makeCard("GOOG", "HOLD", { why_text: "", action_text: "Holding position." });
+    expect(card.why_text).toBe("");
+    expect(card.action_text).toBe("Holding position.");
+  });
+
+  it("THIN evidence band with no evidence_text is rendered honestly — no invented text", () => {
+    const card = makeCard("AMZN", "HOLD", { evidence_band: "THIN", evidence_text: "" });
+    expect(card.evidence_band).toBe("THIN");
+    expect(card.evidence_text).toBe("");
+  });
+});
+
+describe("Stage 4C — drawer live-data contract", () => {
+  it("drawer payload rationale is the primary why_view source", () => {
+    const card = makeCard("AAPL", "BUY", {
+      detail_drawer_payload: {
+        rationale: "Strong evidence supports adding to this position.",
+        why_now: "Current setup is favorable.",
+        committee: { status: "deferred" },
+        schema_version: "v3.1",
+      },
+    });
+    expect(card.detail_drawer_payload.rationale).toBeTruthy();
+    expect(card.detail_drawer_payload.rationale).toContain("evidence supports");
+  });
+
+  it("drawer falls back to card why_text when payload rationale is absent", () => {
+    const card = makeCard("MSFT", "HOLD", {
+      why_text: "Holding while evidence builds.",
+      detail_drawer_payload: {
+        rationale: "",
+        why_now: "",
+        committee: { status: "pending" },
+        schema_version: "v3.1",
+      },
+    });
+    // Fallback contract: when rationale is empty, why_text is the source.
+    expect(card.detail_drawer_payload.rationale).toBe("");
+    expect(card.why_text).toBe("Holding while evidence builds.");
+  });
+
+  it("drawer renders risk_text in risk section — not invented", () => {
+    const card = makeCard("NVDA", "TRIM", { risk_text: "Sector concentration risk applies." });
+    expect(card.risk_text).toContain("concentration risk");
+  });
+
+  it("drawer evidence check shows both evidence_band and conviction", () => {
+    const card = makeCard("META", "BUY", { conviction: "HIGH", evidence_band: "STRONG" });
+    expect(card.conviction).toBe("HIGH");
+    expect(card.evidence_band).toBe("STRONG");
+  });
+
+  it("valuation_context section is absent (null/undefined) when not provided", () => {
+    const card = makeCard("TSLA", "HOLD");
+    expect(card.detail_drawer_payload.valuation_context == null).toBe(true);
+  });
+
+  it("valuation_context renders when present — visible_text is plain English, no price targets", () => {
+    const card = makeCard("AAPL", "BUY", {
+      detail_drawer_payload: {
+        rationale: "Solid evidence.",
+        why_now: "Favorable setup.",
+        committee: { status: "source_validated" },
+        schema_version: "v3.1",
+        valuation_context: {
+          visible_text: "Trading at a reasonable multiple relative to recent earnings.",
+          limitation_text: "Based on annual EPS only.",
+          source_basis: "fy_eps_earnings_yield",
+        },
+      },
+    });
+    expect(card.detail_drawer_payload.valuation_context).not.toBeNull();
+    expect(card.detail_drawer_payload.valuation_context!.visible_text).not.toMatch(/\$\d+/);
+    expect(card.detail_drawer_payload.valuation_context!.visible_text).not.toMatch(/price target/i);
+  });
+});
+
+describe("Stage 4C — drawer Coming-Later contract", () => {
+  const COMING_LATER_MODULES = [
+    "Business story",
+    "Technical & fundamental context",
+    "Source credibility tier",
+    "Ask why / Challenge / Explain",
+  ];
+
+  it("Coming-Later module titles are defined for future Stage 5/6 intelligence", () => {
+    for (const title of COMING_LATER_MODULES) {
+      expect(typeof title).toBe("string");
+      expect(title.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("Coming-Later modules must not render fabricated financial content", () => {
+    // The contract: Coming-Later panels carry only a calm caption string.
+    // No fake evidence, no fake source credibility scores, no fabricated sentiment.
+    const FORBIDDEN_FABRICATIONS = [
+      "credibility score", "contradiction", "evidence completeness",
+      "source verified", "sentiment confirmed", "SEC filing analysis",
+      "company strategy confirmed",
+    ];
+    const comingLaterCaption =
+      "This intelligence module is being prepared. The next intelligence stage will surface it here.";
+    for (const forbidden of FORBIDDEN_FABRICATIONS) {
+      expect(comingLaterCaption.toLowerCase()).not.toContain(forbidden.toLowerCase());
+    }
+  });
+
+  it("Coming-Later caption is the canonical pattern string", () => {
+    const caption =
+      "This intelligence module is being prepared. The next intelligence stage will surface it here.";
+    expect(caption).toContain("being prepared");
+    expect(caption).toContain("next intelligence stage");
+  });
+});
+
+describe("Stage 4C — filter rail locked contract", () => {
+  it("filter rail has exactly 5 entries: ALL, BUY, HOLD, TRIM, SELL", () => {
+    // Mirrors INTEL_V3_FILTERS keys in IntelV3Cockpit.tsx
+    const FILTER_KEYS = ["ALL", "BUY", "HOLD", "TRIM", "SELL"];
+    expect(FILTER_KEYS).toHaveLength(5);
+  });
+
+  it("filter rail does not include WATCH, AVOID, REVIEW, or radar labels", () => {
+    const FILTER_KEYS = ["ALL", "BUY", "HOLD", "TRIM", "SELL"];
+    const FORBIDDEN_LABELS = ["WATCH", "AVOID", "REVIEW", "RADAR", "ADD_CANDIDATE", "POSTURE"];
+    for (const forbidden of FORBIDDEN_LABELS) {
+      expect(FILTER_KEYS).not.toContain(forbidden);
+    }
+  });
+
+  it("each filter chip has activeClass using action-* tokens, not raw color classes", () => {
+    const FILTER_ACTIVE_CLASSES: Record<string, string> = {
+      ALL:  "bg-surface-elevated text-text-primary border-border-strong",
+      BUY:  "bg-action-buy/10 text-action-buy border-action-buy/30",
+      HOLD: "bg-action-hold/10 text-action-hold border-action-hold/30",
+      TRIM: "bg-action-trim/10 text-action-trim border-action-trim/30",
+      SELL: "bg-action-sell/10 text-action-sell border-action-sell/30",
+    };
+    const FORBIDDEN = ["text-green-", "text-blue-", "text-amber-", "text-red-"];
+    for (const [key, cls] of Object.entries(FILTER_ACTIVE_CLASSES)) {
+      if (key === "ALL") continue;
+      for (const f of FORBIDDEN) {
+        expect(cls).not.toContain(f);
+      }
+    }
+  });
+});

@@ -6,10 +6,9 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 4C — Intel Investment Committee Redesign.** Action Card visual system, Confidence Ring, Risk Glyph, Freshness Dot, Detail Drawer with existing Intel v3 data. Coming-Later chrome for future capsules. No backend, no SQL.
+- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
 
 ## Later (Stage 4 sequence)
-- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (Coming-Later for credibility tier, contradiction strip, evidence completeness).
 - **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
 - **Stage 4F** — Portfolio Living Thesis Ledger.
 - **Stage 4G** — Alert Center polish + Journal chrome + Radar destination + buildable capsule subset (Coming-Later for Lessons / What I learned today archive / Radar candidates).
@@ -40,6 +39,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 4C — Intel Investment Committee Redesign** (PR open). Action Card visual system with `action-*` tokens; `ActionGlyph`, `ConfidenceRing`, `RiskGlyph`, `FreshnessDot`, `ComingLaterPanel`, `DataMissingPill` primitives; "Why this view?" drawer with accessible dialog, live sections, Coming-Later chrome; Investment Committee cockpit with filter rail + portfolio overview + card grid. 56 contract tests (23 new). No backend, no SQL.
 
 - **Stage 4B — Today Command Center** (merged PR #359). The Brief + Act Today + Risk Pulse + Deploy Ready + Watchtower Summary from existing Intel v3 / Deploy v3 / Watchtower data. "What I Learned Today" Coming-Later chrome (Stage 6E activates). 49 unit tests. Hydration-safe date. No backend, no SQL.
 

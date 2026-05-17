@@ -226,6 +226,151 @@ class AlertDeliveryOutboxService:
             )
             return {}, "error"
 
+    # ── Delivery worker helpers ───────────────────────────────────────────────
+
+    @staticmethod
+    def _is_scheduled_eligible(scheduled_for_str: Optional[str], now: datetime) -> bool:
+        """True if scheduled_for is null or <= now. Skips row on any parse error."""
+        if not scheduled_for_str:
+            return True
+        try:
+            scheduled_for = datetime.fromisoformat(scheduled_for_str)
+            if scheduled_for.tzinfo is None:
+                scheduled_for = scheduled_for.replace(tzinfo=timezone.utc)
+            return scheduled_for <= now
+        except (ValueError, TypeError):
+            logger.warning(
+                "alert_delivery_outbox.invalid_scheduled_for value=%r skipping",
+                scheduled_for_str,
+            )
+            return False
+
+    def fetch_pending_email_rows(
+        self,
+        limit: int = 50,
+        now: Optional[datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Fetch pending email outbox rows eligible for delivery.
+
+        Filters: channel=email, status=pending, scheduled_for is null or <=now.
+        Ordered oldest-first so earlier rows are processed first.
+        Volume for v1 is low (personal use); Python-level scheduled_for filter is safe.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        fetch_limit = max(limit * 3, 150)
+        try:
+            result = (
+                self.client.table(_TABLE)
+                .select("*")
+                .eq("channel", "email")
+                .eq("status", "pending")
+                .order("created_at")
+                .limit(fetch_limit)
+                .execute()
+            )
+            rows = result.data or []
+            eligible = [
+                r for r in rows
+                if self._is_scheduled_eligible(r.get("scheduled_for"), now)
+            ]
+            return eligible[:limit]
+        except Exception as exc:
+            logger.warning(
+                "alert_delivery_outbox.fetch_pending_failed error=%s", exc
+            )
+            return []
+
+    def claim_for_delivery(
+        self,
+        row_id: str,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        """Atomically claim a pending row for delivery (pending → processing).
+
+        Returns True if claimed. Returns False if the row was already non-pending
+        (claimed by another pass or already sent/failed). Never raises.
+        """
+        if now is None:
+            now = datetime.now(timezone.utc)
+        now_iso = now.isoformat()
+        result = (
+            self.client.table(_TABLE)
+            .update({
+                "status": "processing",
+                "processing_started_at": now_iso,
+                "last_attempt_at": now_iso,
+                "delivery_attempt_count": 1,
+                "updated_at": now_iso,
+            })
+            .eq("id", row_id)
+            .eq("status", "pending")
+            .execute()
+        )
+        claimed = bool(result.data)
+        if not claimed:
+            logger.info(
+                "alert_delivery_outbox.claim_skipped row_id=%s reason=already_non_pending",
+                row_id,
+            )
+        return claimed
+
+    def mark_sent(
+        self,
+        row_id: str,
+        *,
+        provider_message_id: Optional[str] = None,
+        sent_at: Optional[datetime] = None,
+    ) -> None:
+        """Mark a claimed (processing) row as sent."""
+        if sent_at is None:
+            sent_at = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "status": "sent",
+            "sent_at": sent_at.isoformat(),
+            "updated_at": sent_at.isoformat(),
+        }
+        if provider_message_id:
+            payload["provider_message_id"] = provider_message_id
+        (
+            self.client.table(_TABLE)
+            .update(payload)
+            .eq("id", row_id)
+            .eq("status", "processing")
+            .execute()
+        )
+        logger.info(
+            "alert_delivery_outbox.marked_sent row_id=%s provider_message_id=%s",
+            row_id,
+            provider_message_id,
+        )
+
+    def mark_failed(
+        self,
+        row_id: str,
+        *,
+        failure_reason: str = "unknown",
+    ) -> None:
+        """Mark a claimed (processing) row as failed."""
+        now = datetime.now(timezone.utc)
+        payload: dict[str, Any] = {
+            "status": "failed",
+            "failure_reason": (failure_reason or "unknown")[:500],
+            "updated_at": now.isoformat(),
+        }
+        (
+            self.client.table(_TABLE)
+            .update(payload)
+            .eq("id", row_id)
+            .eq("status", "processing")
+            .execute()
+        )
+        logger.info(
+            "alert_delivery_outbox.marked_failed row_id=%s reason=%s",
+            row_id,
+            (failure_reason or "unknown")[:100],
+        )
+
     # ── Read path ─────────────────────────────────────────────────────────────
 
     def list_outbox_entries(

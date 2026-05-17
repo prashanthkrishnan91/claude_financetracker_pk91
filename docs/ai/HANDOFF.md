@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3D merged PR #353 — Stage 3E is next)
+Last updated: 2026-05-17 (Stage 3E — Resend Email Delivery Worker v1 in PR)
 
 ## Purpose
 
@@ -8,8 +8,10 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3E next** (provider wiring). Stage 3D merged PR #353. Stage 3C merged PR #352.
-- Stage 3D summary (merged PR #353): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **MANUAL ACTION REQUIRED** in Supabase if not yet applied). `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + 24h noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — outbox attempted for ALL returned candidate rows (created + deduped) for self-healing. No external delivery, no provider SDKs, no LLM calls, no frontend UI. 109 tests pass.
+- Roadmap stage: **Stage 3E in PR** (Resend Email Delivery Worker v1). Stage 3D merged PR #353 (SQL 021 applied — `SELECT COUNT(*) FROM public.alert_delivery_outbox;` returns 0, expected). Stage 3C merged PR #352.
+- Stage 3E summary (current PR — branch `claude/resend-email-delivery-worker-LzTqL`): Resend email delivery worker that processes pending `alert_delivery_outbox` rows. Env-gated (default OFF, default dry-run ON). New files: `resend_client_v1.py` (thin httpx wrapper, mockable), `alert_email_delivery_worker_v1.py` (delivery worker, claim-before-send, fail-soft per-row), `alert_email_delivery_worker_entrypoint.py` (runnable via `--loop` or single pass). New outbox service methods: `fetch_pending_email_rows` (datetime-based scheduled_for filtering, fail-safe on malformed timestamps), `claim_for_delivery` (atomic pending→processing claim), `mark_sent`, `mark_failed` (both filter on `status='processing'`). Config settings: `ALERT_EMAIL_DELIVERY_ENABLED` (default false), `ALERT_EMAIL_PROVIDER` (default empty), `RESEND_API_KEY`, `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_DRY_RUN` (default true). SQL migration 022 (`processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns) — pending manual Supabase application. Worker claim-before-send safety: worker atomically claims pending row before sending; unclaimed rows skipped; if `mark_sent()` fails after successful send, row stays in `processing` (NOT marked failed) to prevent duplicate resend. 38 tests, no real network calls in tests. No frontend UI, no LLM calls. Structured log: `alert_email_delivery_summary scanned=... sent=... failed=... skipped=... status_update_failed=... dry_run=... provider=resend`.
+- Stage 3E env setup (placeholder names only — no secrets): Set `ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_PROVIDER=resend`, `RESEND_API_KEY=<key>`, `ALERT_EMAIL_FROM=<from>`, `ALERT_EMAIL_TO=<to>`, `ALERT_EMAIL_DRY_RUN=false` on the email delivery Railway service. Run separately from Watchtower.
+- Stage 3D summary (merged PR #353): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **applied**). `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + 24h noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — outbox attempted for ALL returned candidate rows (created + deduped) for self-healing. No external delivery, no provider SDKs, no LLM calls, no frontend UI. 109 tests pass.
 - Stage 3C summary (merged PR #352): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()`. Fail-soft. 23 tests pass. No SQL, no delivery, no UI.
 - Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020 — **applied**) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020.
 - Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass.
@@ -107,12 +109,13 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
 - Watchtower background refresh loop is live in Railway (requires `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true`). Alert-based push trigger (real-time threshold alerts) is deferred.
 - SQL migration 020 has been applied in Supabase (`watchtower_alert_candidates` table + `cooldown_until` column on `action_feedback_events`).
-- **SQL migration 021 PENDING** — `alert_delivery_outbox` table must be applied manually in Supabase (see `v2/database/021_alert_delivery_outbox.sql`). Until applied, `GET /api/v1/alert-delivery-outbox` returns 500. Alert candidate generation and Intel/Watchtower behavior are unaffected.
+- SQL migration 021 applied — `alert_delivery_outbox` table is live (0 rows expected until eligible candidates flow through).
+- SQL migration 022 pending — adds `processing` status to `chk_outbox_status` constraint and `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns + partial index. Must be applied before Stage 3E worker can claim rows. File: `v2/database/022_alert_delivery_processing_status.sql`.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
 ## Next recommended step
 
-**Stage 3D delivery outbox PR #353 is in review.** Apply SQL migration 021 manually in Supabase (`v2/database/021_alert_delivery_outbox.sql`). After 3D merges, the next step is Stage 3E — wire a real delivery provider (email/push) to consume `pending` outbox rows. Provider decision (SendGrid/Resend/SES/etc.) required before Stage 3E begins.
+**Stage 3E PR is open** (branch `claude/resend-email-delivery-worker-LzTqL`). After merge: production validate by setting env vars and running a single-pass dry-run, then optionally enable real sends. After delivery is validated, the next stage is the alert center UI (frontend surface for alert candidates). Do NOT add more delivery providers, push/SMS, or broker execution before validating 3E.
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 

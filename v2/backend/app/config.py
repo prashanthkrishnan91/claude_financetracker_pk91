@@ -286,6 +286,17 @@ class Settings(BaseSettings):
     deploy_minimum_trade_usd: Optional[float] = None
     deploy_rounding_policy: Optional[str] = None
 
+    # ── Stage 3E — Alert Email Delivery (Resend provider, off by default) ────────
+    # Default state: delivery OFF, dry-run ON. Both must be explicitly configured
+    # for real emails to send. Never send email unless ALERT_EMAIL_DELIVERY_ENABLED
+    # is explicitly true AND all required config is set AND ALERT_EMAIL_DRY_RUN=false.
+    alert_email_delivery_enabled: bool = False
+    alert_email_provider: str = ""          # resend | (empty = no provider)
+    resend_api_key: Optional[str] = None
+    alert_email_from: Optional[str] = None  # e.g. "alerts@yourdomain.com"
+    alert_email_to: Optional[str] = None    # v1: single recipient
+    alert_email_dry_run: bool = True        # must set =false for real sends
+
 
 @lru_cache
 def get_settings() -> Settings:

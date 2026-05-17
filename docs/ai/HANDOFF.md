@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-16 (Stage 3A — Action Feedback Foundation v1)
+Last updated: 2026-05-17 (Stage 3B — Alert Trigger Policy v1)
 
 ## Purpose
 
@@ -8,8 +8,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3A completed** (Action Feedback Foundation v1). All Build 3 PRs merged/validated (PRs #337–348). PR #348 (evidence mapping version guard) is merged and production-validated; the evidence-mapping loop is done. Stage 3A adds the user-feedback memory layer before full alert delivery.
-- Active build queue item: **Stage 3A — Action Feedback Foundation v1** — append-only feedback events for Intel/Deploy/Watchtower actions. New table `action_feedback_events`, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). Feedback types: executed|skipped|ignored|snoozed|too_risky|not_relevant|user_note. Idempotent by `(user_id, idempotency_key)`. Feedback is stored evidence/context only — does NOT mutate Intel v3 decisions, Deploy sizing, or Watchtower behavior. SQL migration required (019). 22 tests (all pass). Next: alert trigger/notification policy.
+- Roadmap stage: **Stage 3B active** (Alert Trigger Policy v1). Stage 3A (PR #349) is merged and completed. Stage 3B adds the deterministic alert-worthiness layer before any email/push delivery.
+- Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass. Feedback stored as evidence/context only — no Intel/Deploy/Watchtower mutation.
+- Active build queue item: **Stage 3B — Alert Trigger Policy v1** — pure deterministic policy module (`alert_trigger_policy_v1.py`) + candidate persistence service + `watchtower_alert_candidates` table (SQL migration 020) + read-only `GET /api/v1/alert-candidates` endpoint. 45 new tests (all pass). No email/push delivery, no frontend UI, no broker execution.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 ## Current architecture — Build 2 additions
@@ -107,20 +108,18 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**All Build 3 PRs (#337–348) merged and production-validated.** Evidence-mapping loop is done.
+**Stage 3A merged (PR #349). Stage 3B alert trigger policy built and ready for review.**
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 
-**Stage 3A — Action Feedback Foundation v1 (this PR, branch `claude/action-feedback-foundation-2I1IN`):**
-- New table `action_feedback_events` — append-only, user-scoped, idempotent by `(user_id, idempotency_key)`.
-- Feedback types: `executed` | `skipped` | `ignored` | `snoozed` | `too_risky` | `not_relevant` | `user_note`.
-- Source areas: `intel` | `deploy` | `watchtower` | `alert`.
-- Optional context: ticker, action_type (BUY/HOLD/TRIM/SELL/DEPLOY_ACTION), agent_run_id, snapshot_id, note.
-- `POST /api/v1/action-feedback` (idempotent) + `GET /api/v1/action-feedback` (filter by ticker/source_area).
-- Feedback does NOT mutate Intel v3 decisions, Deploy sizing, Watchtower refresh, or any broker behavior.
-- SQL migration required: `v2/database/019_action_feedback_events.sql`.
-- 22 tests (all pass). Intel v3 + Deploy regression: 133 tests pass.
-- Next after merge: alert trigger / notification policy (Stage 3B).
+**Stage 3B — Alert Trigger Policy v1 (branch `claude/alert-trigger-policy-v1-t9Wzy`):**
+- New table `watchtower_alert_candidates` (SQL migration 020 — apply manually to Supabase).
+- Pure policy module `alert_trigger_policy_v1.py`: evaluates Intel v3 snapshot action changes + feedback history → structured candidates / suppressions. No DB, no LLM, no IO.
+- Service `alert_candidate_service.py`: persists candidates, idempotent by `(user_id, dedupe_key)`.
+- `GET /api/v1/alert-candidates` (read-only, authenticated, user-scoped).
+- Policy v1 rules: new_actionable_action (BUY/TRIM/SELL transition, STRONG/OK evidence only) + conviction_upgrade (BUY LOW→MEDIUM or higher). HOLD never creates candidates. Weak/THIN/PARTIAL evidence suppresses. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d cooldown), snoozed (14d default or cooldown_until). user_note + skipped never suppress.
+- 45 new tests (all pass). 25 Stage 3A regression tests still pass.
+- Next after merge: email/push delivery layer (Stage 3C) or Watchtower integration hook to call the policy post-republish.
 
 ## Handoff maintenance rule
 

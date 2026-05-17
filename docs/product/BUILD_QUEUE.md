@@ -6,20 +6,24 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3A — Action Feedback Foundation v1** (branch `claude/action-feedback-foundation-2I1IN`, PR open). Append-only `action_feedback_events` table + service + router. Feedback types: `executed|skipped|ignored|snoozed|too_risky|not_relevant|user_note`. Source areas: `intel|deploy|watchtower|alert`. `POST /api/v1/action-feedback` (idempotent by `idempotency_key`) + `GET /api/v1/action-feedback`. Feedback stored as evidence/context only — no Intel v3 decision mutation, no Deploy sizing change, no Watchtower behavior change. SQL migration required: `v2/database/019_action_feedback_events.sql`. 22 tests pass.
+- **Stage 3B — Alert Trigger Policy v1** (branch `claude/alert-trigger-policy-v1-t9Wzy`, PR open). Pure deterministic policy module + candidate persistence + read-only endpoint. New table `watchtower_alert_candidates` (SQL migration 020). `GET /api/v1/alert-candidates`. Policy v1 rules: new_actionable_action + conviction_upgrade candidates for BUY/TRIM/SELL with STRONG/OK evidence. Feedback suppression (executed indefinite; ignored/not_relevant/too_risky 7d; snoozed 14d default). No email/push delivery, no frontend UI. 45 tests pass. **SQL manual action required: apply `v2/database/020_alert_candidates.sql` in Supabase.**
 
 ## Next
 
-- **Stage 3B — Alert trigger / notification policy**: define when feedback history and Watchtower evidence should surface a push notification or email. Requires Stage 3A merged first.
+- **Stage 3C — Email/push delivery layer**: wire alert candidates to notification delivery after Stage 3B merged. Requires confirmed delivery provider (email/push) decision.
+- **Watchtower integration hook** (optional, low-risk): call `evaluate_snapshot_for_alert_candidates()` post-republish in `watchtower_intel_republisher_v1.py` to auto-create candidates when evidence is refreshed. Can be done in Stage 3B patch or Stage 3C.
 
 ## Later
 
+- Alert center UI (frontend surface for alert candidates — after delivery layer is live).
 - Alerts / action feedback.
 - Research artifact UX.
 - Premium cockpit design polish.
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 3A — Action Feedback Foundation v1** (merged PR #349). Append-only `action_feedback_events` table + service + router. SQL migration 019. 22 tests pass. Feedback stored as evidence/context only — no Intel v3 decision mutation, no Deploy sizing change, no Watchtower behavior change.
 
 - **PR 3B Activation Guard: evidence mapping version guard** (Stage 3, merged PR #348). Ensures production does not keep serving pre-PR #347 snapshots after PR #347 merges. `EVIDENCE_MAPPING_VERSION="analyst_verdict_synthesis_v1"` in `evidence_mapping_version_v1.py`; all republish paths treat mapping-version mismatch as a recertification trigger (zero-LLM). 17 backend + 4 frontend tests. Evidence-mapping loop complete.
 

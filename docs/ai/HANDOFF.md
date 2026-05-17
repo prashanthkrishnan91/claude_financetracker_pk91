@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3F — Email Delivery Production Activation / Dry-Run Gate)
+Last updated: 2026-05-17 (Stage 3G — Alert Center UI v1)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3F** (Email Delivery Production Activation / Dry-Run Gate). Stage 3E merged PR #354 (SQL 022 applied — `processing` status + claim columns on `alert_delivery_outbox`). Stage 3D merged PR #353 (SQL 021 applied). Stage 3C merged PR #352.
-- Stage 3F summary (current — branch `claude/stage-3f-email-delivery-jGMBY`): Production activation readiness for the Resend email delivery worker. No new code logic; adds `email_delivery` PROCESS_TYPE to `railway.toml` and `Procfile`, expands entrypoint docstring with dry-run validation instructions (env gates, expected log, query, note that RESEND_API_KEY is required even in dry-run). Docs updated: HANDOFF and BUILD_QUEUE reflect PR #354 merged and SQL 021/022 applied. No new SQL, no UI, no LLM calls, no provider changes. Stage 3E worker unchanged.
+- Roadmap stage: **Stage 3G** (Alert Center UI v1). Stage 3F merged PR #355 — Railway activation config for email delivery worker (PROCESS_TYPE=email_delivery). Stage 3E merged PR #354 (SQL 022 applied). Stage 3D merged PR #353 (SQL 021 applied). Stage 3C merged PR #352.
+- Stage 3G summary (current — branch `claude/alert-center-ui-v1-cAzJ8`): Read-only Alert Center UI reachable at `/dashboard/alerts`. Shows alert candidates and delivery outbox from existing backend endpoints (`GET /api/v1/alert-candidates`, `GET /api/v1/alert-delivery-outbox`). Navigation item "Alerts" added to BottomNav and SideNav. Dry-run safety banner always visible. Plain-English status labels, severity pills, empty/loading/error states. Pure mapping functions extracted to `src/lib/alert-center.ts` with 28 unit tests. No new SQL, no email delivery changes, no Watchtower/Intel v3 changes.
 - Stage 3E summary (merged PR #354): Resend email delivery worker processing pending `alert_delivery_outbox` rows. Env-gated (default OFF, default dry-run ON). Files: `resend_client_v1.py`, `alert_email_delivery_worker_v1.py` (claim-before-send, fail-soft), `alert_email_delivery_worker_entrypoint.py`. Outbox service methods: `fetch_pending_email_rows`, `claim_for_delivery`, `mark_sent`, `mark_failed`. Config: `ALERT_EMAIL_DELIVERY_ENABLED` (default false), `ALERT_EMAIL_PROVIDER`, `RESEND_API_KEY`, `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_DRY_RUN` (default true). SQL 022 applied. 38 tests. Structured log: `alert_email_delivery_summary scanned=... sent=... failed=... skipped=... status_update_failed=... dry_run=... provider=resend`.
 - Stage 3F Railway activation: Use `PROCESS_TYPE=email_delivery` on a separate Railway service. Do NOT wire into Watchtower. See entrypoint docstring for step-by-step dry-run and real-send instructions.
 - Stage 3D summary (merged PR #353): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **applied**). `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + 24h noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — outbox attempted for ALL returned candidate rows (created + deduped) for self-healing. No external delivery, no provider SDKs, no LLM calls, no frontend UI. 109 tests pass.
@@ -116,7 +116,9 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Stage 3F PR is open** (branch `claude/stage-3f-email-delivery-jGMBY`). After merge: activate the email delivery worker in Railway using `PROCESS_TYPE=email_delivery`. Run a single dry-run pass to confirm `scanned=N sent=0 skipped=N dry_run=True`. Only after dry-run passes, set `ALERT_EMAIL_DRY_RUN=false` for real sends. After delivery is validated, the next stage is the alert center UI. Do NOT add more delivery providers, push/SMS, or broker execution before validating.
+**Stage 3G PR is open** (branch `claude/alert-center-ui-v1-cAzJ8`). After merge: no email delivery activation steps are required — the worker is already running in dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log already confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet.**
+
+The next product step after PR #356 merge is the **Opus Design Overhaul Execution Contract** — a design planning pass before any further visible UI work. Do NOT add push/SMS delivery, broker execution, or new providers before domain verification is complete.
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 

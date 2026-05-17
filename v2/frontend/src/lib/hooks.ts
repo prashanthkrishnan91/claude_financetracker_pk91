@@ -2,7 +2,7 @@
 
 import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { ActualDecisionItem, DeployV3PlanResponse, DeployV3ReadinessDiagnostic, IntelV3Snapshot, IntelV3RunResult } from "./api";
+import type { ActualDecisionItem, AlertCandidate, AlertDeliveryOutbox, DeployV3PlanResponse, DeployV3ReadinessDiagnostic, IntelV3Snapshot, IntelV3RunResult } from "./api";
 import { DEPLOY_V3_PLAN_QUERY_KEY, DEPLOY_V3_READINESS_QUERY_KEY } from "./deploy-v3-helpers";
 
 // ── Portfolio ────────────────────────────────────────────
@@ -547,5 +547,23 @@ export function useSetDeployTargets() {
       qc.invalidateQueries({ queryKey: DEPLOY_V3_READINESS_QUERY_KEY });
       qc.invalidateQueries({ queryKey: DEPLOY_V3_PLAN_QUERY_KEY });
     },
+  });
+}
+
+// ── Alert Center ─────────────────────────────────────────────────────────────
+
+export function useAlertCandidates(limit = 50) {
+  return useQuery<AlertCandidate[]>({
+    queryKey: ["alertCenter", "candidates", limit],
+    queryFn: () => api.alertCenter.getCandidates(limit),
+    staleTime: 30_000,
+  });
+}
+
+export function useAlertOutbox(limit = 50) {
+  return useQuery<AlertDeliveryOutbox[]>({
+    queryKey: ["alertCenter", "outbox", limit],
+    queryFn: () => api.alertCenter.getOutbox(limit),
+    staleTime: 30_000,
   });
 }

@@ -35,6 +35,8 @@ class ActionFeedbackService:
         agent_run_id = data.get("agent_run_id")
         snapshot_id = data.get("snapshot_id")
 
+        cooldown_until = data.get("cooldown_until")
+
         payload: dict[str, Any] = {
             "user_id": user_id,
             "feedback_type": data["feedback_type"],
@@ -45,6 +47,9 @@ class ActionFeedbackService:
             "agent_run_id": str(agent_run_id) if agent_run_id else None,
             "snapshot_id": str(snapshot_id) if snapshot_id else None,
             "note": data.get("note"),
+            "cooldown_until": (
+                cooldown_until.isoformat() if hasattr(cooldown_until, "isoformat") else cooldown_until
+            ),
         }
 
         is_unique_conflict = False

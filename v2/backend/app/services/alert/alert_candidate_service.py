@@ -83,8 +83,12 @@ class AlertCandidateService:
             )
             return existing, False
 
+        if is_unique_conflict:
+            raise RuntimeError(
+                f"alert_candidate_dedup_lookup_failed dedupe_key={candidate.dedupe_key!r}"
+            )
         raise RuntimeError(
-            f"alert_candidate_dedup_lookup_failed dedupe_key={candidate.dedupe_key!r}"
+            f"alert_candidate_create_no_row_returned dedupe_key={candidate.dedupe_key!r}"
         )
 
     def _fetch_by_dedupe_key(

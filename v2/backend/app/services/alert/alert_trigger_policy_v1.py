@@ -6,14 +6,16 @@ It does NOT mutate Intel v3 decisions, Deploy sizing, Watchtower data, or feedba
 Policy version: v1
 
 Rules:
-  1. Candidates only for BUY / TRIM / SELL actions with STRONG or OK evidence bands.
-  2. HOLD actions are never candidates. PARTIAL/THIN/SUPPRESSED evidence never produces
-     actionable candidates.
+  1. Candidates only for BUY / TRIM / SELL actions with STRONG or PARTIAL evidence bands.
+     PARTIAL maps to AxisBand.OK from snapshot_builder._EVIDENCE_QUALITY_TO_BAND —
+     it is the display label for "OK" axis quality. THIN, SUPPRESSED, blank, or unknown
+     evidence bands never produce actionable candidates.
+  2. HOLD actions are never candidates.
   3. new_actionable_action candidate: action changed from non-actionable (or ticker newly
      appears in portfolio) between prior and current snapshot. When no prior snapshot
      exists (first ever evaluation), no candidates are created (conservative / low-noise).
   4. conviction_upgrade candidate: BUY conviction increases (LOW→MEDIUM, LOW→HIGH,
-     MEDIUM→HIGH) while action stays BUY and evidence band is STRONG or OK.
+     MEDIUM→HIGH) while action stays BUY and evidence band is STRONG or PARTIAL.
   5. Feedback suppression:
      - executed → indefinite suppression for same user/ticker/action
      - ignored | not_relevant → 7-day cooldown
@@ -36,8 +38,11 @@ logger = logging.getLogger(__name__)
 
 POLICY_VERSION = "v1"
 
-# Evidence bands that permit actionable candidates
-_ACTIONABLE_BANDS = frozenset({"STRONG", "OK"})
+# Evidence bands that permit actionable candidates.
+# PARTIAL = snapshot_builder._EVIDENCE_QUALITY_TO_BAND[AxisBand.OK.value] — production
+# cards carry "PARTIAL" for what the axis layer calls "OK" quality evidence.
+# THIN, SUPPRESSED, blank, and unknown bands are all non-actionable.
+_ACTIONABLE_BANDS = frozenset({"STRONG", "PARTIAL"})
 
 # Actions that may produce candidates (HOLD never does)
 _ACTIONABLE_ACTIONS = frozenset({"BUY", "TRIM", "SELL"})
@@ -342,7 +347,7 @@ def evaluate_snapshot_for_alert_candidates(
                     action_type=current_action,
                     suppression_reason=(
                         f"Evidence band '{current_band}' is below actionable threshold "
-                        f"(STRONG or OK required)"
+                        f"(STRONG or PARTIAL required)"
                     ),
                     dedupe_key=dedupe,
                 )

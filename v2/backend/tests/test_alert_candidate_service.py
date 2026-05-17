@@ -11,6 +11,9 @@ Covers:
   8.  User isolation in list_candidates
   9.  Candidate does not touch intel_v3_snapshots or action_feedback_events
   10. Ticker is stored uppercase
+  11. Insert returns no data + lookup succeeds → created=False (no RuntimeError)
+  12. Insert returns no data + lookup empty → RuntimeError("alert_candidate_create_no_row_returned")
+  13. Unique conflict + lookup empty → RuntimeError("alert_candidate_dedup_lookup_failed")
 """
 
 from __future__ import annotations
@@ -251,3 +254,110 @@ def test_ticker_stored_uppercase():
     insert_call = client.table.return_value.insert.call_args
     payload = insert_call[0][0]
     assert payload["ticker"] == "AAPL"
+
+
+# ── Tests 11–13: Fallback error differentiation (mirrors Stage 3A pattern) ────
+
+def _make_no_data_client_with_existing(existing_row: dict[str, Any]) -> MagicMock:
+    """Insert returns no data (data=[]), lookup finds an existing row."""
+    client = MagicMock()
+
+    insert_chain = MagicMock()
+    insert_chain.insert.return_value = insert_chain
+    insert_chain.execute.return_value = MagicMock(data=[])  # no data, no exception
+
+    select_chain = MagicMock()
+    select_chain.select.return_value = select_chain
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(data=[existing_row])
+
+    call_count = [0]
+
+    def table_side(name: str):
+        call_count[0] += 1
+        return insert_chain if call_count[0] == 1 else select_chain
+
+    client.table.side_effect = table_side
+    return client
+
+
+def _make_no_data_client_empty_lookup() -> MagicMock:
+    """Insert returns no data (data=[]), lookup finds nothing."""
+    client = MagicMock()
+
+    insert_chain = MagicMock()
+    insert_chain.insert.return_value = insert_chain
+    insert_chain.execute.return_value = MagicMock(data=[])
+
+    select_chain = MagicMock()
+    select_chain.select.return_value = select_chain
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(data=[])
+
+    call_count = [0]
+
+    def table_side(name: str):
+        call_count[0] += 1
+        return insert_chain if call_count[0] == 1 else select_chain
+
+    client.table.side_effect = table_side
+    return client
+
+
+def _make_conflict_empty_lookup(conflict_msg: str = "unique violation 23505") -> MagicMock:
+    """Insert raises unique conflict, lookup finds nothing."""
+    client = MagicMock()
+
+    insert_chain = MagicMock()
+    insert_chain.insert.return_value = insert_chain
+    insert_chain.execute.side_effect = Exception(conflict_msg)
+
+    select_chain = MagicMock()
+    select_chain.select.return_value = select_chain
+    select_chain.eq.return_value = select_chain
+    select_chain.limit.return_value = select_chain
+    select_chain.execute.return_value = MagicMock(data=[])
+
+    call_count = [0]
+
+    def table_side(name: str):
+        call_count[0] += 1
+        return insert_chain if call_count[0] == 1 else select_chain
+
+    client.table.side_effect = table_side
+    return client
+
+
+def test_insert_no_data_lookup_succeeds_returns_created_false():
+    """Insert returns empty data (not a conflict) but lookup finds the row → created=False."""
+    import pytest
+    candidate = _make_candidate()
+    existing = _make_row(candidate)
+    svc = _make_service(_make_no_data_client_with_existing(existing))
+
+    result_row, created = svc.persist_candidate(candidate)
+
+    assert created is False
+    assert result_row["dedupe_key"] == candidate.dedupe_key
+
+
+def test_insert_no_data_lookup_empty_raises_no_row_returned():
+    """Insert returns empty data and lookup also finds nothing → RuntimeError with correct tag."""
+    import pytest
+    candidate = _make_candidate()
+    svc = _make_service(_make_no_data_client_empty_lookup())
+
+    with pytest.raises(RuntimeError, match="alert_candidate_create_no_row_returned"):
+        svc.persist_candidate(candidate)
+
+
+def test_unique_conflict_lookup_empty_raises_dedup_lookup_failed():
+    """Unique conflict on insert and lookup also finds nothing → RuntimeError with correct tag."""
+    import pytest
+    candidate = _make_candidate()
+    svc = _make_service(_make_conflict_empty_lookup())
+
+    with pytest.raises(RuntimeError, match="alert_candidate_dedup_lookup_failed"):
+        svc.persist_candidate(candidate)

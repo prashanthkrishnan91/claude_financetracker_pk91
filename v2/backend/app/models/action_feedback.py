@@ -25,6 +25,7 @@ class ActionFeedbackCreateRequest(BaseModel):
     agent_run_id: Optional[UUID] = None
     snapshot_id: Optional[UUID] = None
     note: Optional[str] = Field(default=None, max_length=2000)
+    cooldown_until: Optional[datetime] = None
 
 
 class ActionFeedbackResponse(BaseModel):
@@ -38,6 +39,7 @@ class ActionFeedbackResponse(BaseModel):
     agent_run_id: Optional[UUID] = None
     snapshot_id: Optional[UUID] = None
     note: Optional[str] = None
+    cooldown_until: Optional[datetime] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}

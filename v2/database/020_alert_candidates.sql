@@ -101,5 +101,14 @@ CREATE POLICY alert_candidates_user_policy
     USING (user_id = auth.uid())
     WITH CHECK (user_id = auth.uid());
 
+-- ── Stage 3B: feedback cooldown support ──────────────────────────────────────
+-- Migration 019 (action_feedback_events) is already applied in production.
+-- This additive ALTER TABLE adds the cooldown_until column needed for snoozed
+-- alert suppression (alert_trigger_policy_v1._is_suppressed_by_feedback reads it).
+-- Safe to re-run: IF NOT EXISTS guard prevents duplication.
+ALTER TABLE public.action_feedback_events
+    ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ;
+
 -- ── ROLLBACK (commented out by default) ──────────────────────────────────────
+-- ALTER TABLE public.action_feedback_events DROP COLUMN IF EXISTS cooldown_until;
 -- DROP TABLE IF EXISTS public.watchtower_alert_candidates CASCADE;

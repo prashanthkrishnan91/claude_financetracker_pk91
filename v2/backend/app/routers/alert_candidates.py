@@ -8,13 +8,15 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from ..middleware.auth import AuthenticatedUser, get_current_user
 from ..models.alert_candidate import AlertCandidateResponse
 from ..services.alert.alert_candidate_service import AlertCandidateService
 
 router = APIRouter(prefix="/alert-candidates", tags=["alert-candidates"])
+
+_VALID_STATUSES = frozenset({"candidate", "suppressed", "dismissed", "snoozed", "expired"})
 
 
 @router.get("", response_model=list[AlertCandidateResponse])
@@ -31,6 +33,11 @@ async def list_alert_candidates(
     Optionally filter by ticker and/or status
     (candidate | suppressed | dismissed | snoozed | expired).
     """
+    if status is not None and status not in _VALID_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status '{status}'. Valid values: {sorted(_VALID_STATUSES)}",
+        )
     svc = AlertCandidateService()
     return svc.list_candidates(
         user_id=str(user.id),

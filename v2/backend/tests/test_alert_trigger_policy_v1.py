@@ -1,14 +1,19 @@
 """Alert Trigger Policy v1 — unit tests.
 
+Evidence band note: snapshot_builder._EVIDENCE_QUALITY_TO_BAND maps AxisBand.OK →
+"PARTIAL". Production snapshot cards carry evidence_band="PARTIAL" for what the axis
+layer considers "OK" quality. The policy accepts STRONG and PARTIAL as actionable;
+THIN, SUPPRESSED, blank, and unknown bands are non-actionable.
+
 Covers:
   1.  No candidates when no prior snapshot exists (conservative baseline)
-  2.  New BUY candidate when action changes HOLD → BUY
-  3.  New TRIM candidate when action changes HOLD → TRIM
-  4.  New SELL candidate when action changes HOLD → SELL
+  2.  New BUY candidate when action changes HOLD → BUY (PARTIAL evidence)
+  3.  New TRIM candidate when action changes HOLD → TRIM (PARTIAL evidence)
+  4.  New SELL candidate when action changes HOLD → SELL (STRONG evidence)
   5.  No candidate when action stays HOLD in both snapshots
   6.  Candidate deduplicated: same snapshot_id produces same dedupe_key
   7.  Weak/THIN evidence suppresses actionable candidate (suppression, not candidate)
-  8.  Weak/PARTIAL evidence suppresses actionable candidate
+  8.  Weak/SUPPRESSED evidence suppresses actionable candidate
   9.  Strong evidence + BUY → candidate created
   10. Snoozed feedback suppresses repeated candidate (within cooldown window)
   11. Snoozed feedback with explicit cooldown_until suppresses
@@ -20,7 +25,7 @@ Covers:
   17. Executed feedback suppresses indefinitely
   18. user_note feedback does NOT suppress
   19. skipped feedback does NOT suppress
-  20. Conviction upgrade BUY LOW→MEDIUM with OK evidence creates candidate
+  20. Conviction upgrade BUY LOW→MEDIUM with PARTIAL evidence creates candidate
   21. Conviction upgrade BUY LOW→HIGH with STRONG evidence creates candidate
   22. Conviction upgrade with THIN evidence does NOT create candidate
   23. Conviction stays same → no conviction_upgrade candidate
@@ -31,6 +36,10 @@ Covers:
   28. No mutation of input card lists or feedback rows
   29. Empty current_holdings → empty result
   30. New ticker in current not in prior → creates candidate (prior snapshot exists)
+  31. PARTIAL evidence + HOLD→BUY creates candidate (production-shape card)
+  32. PARTIAL evidence + BUY conviction upgrade LOW→MEDIUM creates candidate
+  33. SUPPRESSED evidence suppresses BUY candidate
+  34. Missing/blank evidence_band suppresses BUY candidate
 """
 
 from __future__ import annotations
@@ -60,7 +69,7 @@ def _card(
     ticker: str = "AAPL",
     action: str = "BUY",
     conviction: str = "MEDIUM",
-    evidence_band: str = "OK",
+    evidence_band: str = "PARTIAL",  # matches snapshot_builder AxisBand.OK → "PARTIAL"
 ) -> dict[str, Any]:
     return {
         "ticker": ticker,
@@ -126,7 +135,7 @@ def test_no_prior_snapshot_produces_no_candidates():
 
 def test_buy_candidate_when_action_changes_hold_to_buy():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
         prior_cards=[_card("AAPL", action="HOLD")],
     )
     assert len(result.candidates) == 1
@@ -142,7 +151,7 @@ def test_buy_candidate_when_action_changes_hold_to_buy():
 
 def test_trim_candidate_when_action_changes_hold_to_trim():
     result = _evaluate(
-        current_cards=[_card("MSFT", action="TRIM", conviction="MEDIUM", evidence_band="OK")],
+        current_cards=[_card("MSFT", action="TRIM", conviction="MEDIUM", evidence_band="PARTIAL")],
         prior_cards=[_card("MSFT", action="HOLD")],
     )
     assert len(result.candidates) == 1
@@ -212,17 +221,17 @@ def test_thin_evidence_suppresses_buy_candidate():
     sup = result.suppressions[0]
     assert sup.ticker == "AAPL"
     assert "THIN" in sup.suppression_reason
-    assert "STRONG or OK" in sup.suppression_reason
+    assert "STRONG or PARTIAL" in sup.suppression_reason
 
 
-def test_partial_evidence_suppresses_trim_candidate():
+def test_suppressed_evidence_suppresses_trim_candidate():
     result = _evaluate(
-        current_cards=[_card("MSFT", action="TRIM", evidence_band="PARTIAL")],
+        current_cards=[_card("MSFT", action="TRIM", evidence_band="SUPPRESSED")],
         prior_cards=[_card("MSFT", action="HOLD")],
     )
     assert result.candidates == []
     assert len(result.suppressions) == 1
-    assert "PARTIAL" in result.suppressions[0].suppression_reason
+    assert "SUPPRESSED" in result.suppressions[0].suppression_reason
 
 
 # ── Test 9: Strong evidence + BUY → candidate created ────────────────────────
@@ -388,10 +397,10 @@ def test_skipped_does_not_suppress():
 
 # ── Tests 20–23: Conviction upgrade ───────────────────────────────────────────
 
-def test_conviction_upgrade_low_to_medium_ok_evidence():
+def test_conviction_upgrade_low_to_medium_partial_evidence():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="OK")],
-        prior_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
+        prior_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="PARTIAL")],
     )
     assert len(result.candidates) == 1
     c = result.candidates[0]
@@ -422,8 +431,8 @@ def test_conviction_upgrade_thin_evidence_does_not_create_candidate():
 
 def test_same_conviction_no_upgrade_candidate():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="OK")],
-        prior_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
+        prior_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
     )
     # Action unchanged (BUY→BUY) and conviction unchanged → no candidate
     assert result.candidates == []
@@ -431,8 +440,8 @@ def test_same_conviction_no_upgrade_candidate():
 
 def test_conviction_downgrade_no_candidate():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="OK")],
-        prior_cards=[_card("AAPL", action="BUY", conviction="HIGH", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="PARTIAL")],
+        prior_cards=[_card("AAPL", action="BUY", conviction="HIGH", evidence_band="PARTIAL")],
     )
     assert result.candidates == []
 
@@ -480,7 +489,7 @@ def test_action_isolation_executed_buy_does_not_suppress_trim():
         created_at=_NOW - timedelta(days=1),
     )
     result = _evaluate(
-        current_cards=[_card("AAPL", action="TRIM", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="TRIM", evidence_band="PARTIAL")],
         prior_cards=[_card("AAPL", action="HOLD")],
         feedback=[fb_buy],
     )
@@ -540,7 +549,7 @@ def test_new_ticker_in_current_creates_candidate():
 
 def test_severity_sell_is_high():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="SELL", conviction="MEDIUM", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="SELL", conviction="MEDIUM", evidence_band="PARTIAL")],
         prior_cards=[_card("AAPL", action="HOLD")],
     )
     assert result.candidates[0].severity == "high"
@@ -548,7 +557,7 @@ def test_severity_sell_is_high():
 
 def test_severity_buy_medium_conviction_is_normal():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
         prior_cards=[_card("AAPL", action="HOLD")],
     )
     assert result.candidates[0].severity == "normal"
@@ -556,7 +565,7 @@ def test_severity_buy_medium_conviction_is_normal():
 
 def test_severity_buy_low_conviction_is_low():
     result = _evaluate(
-        current_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="OK")],
+        current_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="PARTIAL")],
         prior_cards=[_card("AAPL", action="HOLD")],
     )
     assert result.candidates[0].severity == "low"
@@ -588,3 +597,49 @@ def test_no_intel_source_queried_during_policy_evaluation():
     # Must not import the supabase client or any DB-touching utilities
     assert "get_supabase_client" not in source
     assert "supabase" not in source.lower() or "supabase" not in source
+
+
+# ── Tests 31–34: Production-shape evidence band coverage ─────────────────────
+# snapshot_builder._EVIDENCE_QUALITY_TO_BAND: AxisBand.OK → "PARTIAL"
+# Real production cards carry evidence_band="PARTIAL" for AxisBand.OK quality.
+
+def test_partial_evidence_hold_to_buy_creates_candidate():
+    """PARTIAL = AxisBand.OK; confirms production-shape cards produce candidates."""
+    result = _evaluate(
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
+        prior_cards=[_card("AAPL", action="HOLD")],
+    )
+    assert len(result.candidates) == 1
+    c = result.candidates[0]
+    assert c.action_type == "BUY"
+    assert c.candidate_type == "new_actionable_action"
+
+
+def test_partial_evidence_conviction_upgrade_creates_candidate():
+    """PARTIAL evidence does not block conviction_upgrade for sustained BUY."""
+    result = _evaluate(
+        current_cards=[_card("AAPL", action="BUY", conviction="MEDIUM", evidence_band="PARTIAL")],
+        prior_cards=[_card("AAPL", action="BUY", conviction="LOW", evidence_band="PARTIAL")],
+    )
+    assert len(result.candidates) == 1
+    assert result.candidates[0].candidate_type == "conviction_upgrade"
+
+
+def test_suppressed_band_suppresses_buy_candidate():
+    result = _evaluate(
+        current_cards=[_card("AAPL", action="BUY", evidence_band="SUPPRESSED")],
+        prior_cards=[_card("AAPL", action="HOLD")],
+    )
+    assert result.candidates == []
+    assert len(result.suppressions) == 1
+    assert "SUPPRESSED" in result.suppressions[0].suppression_reason
+
+
+def test_missing_evidence_band_suppresses_buy_candidate():
+    card = {"ticker": "AAPL", "action": "BUY", "conviction": "MEDIUM"}  # no evidence_band key
+    result = _evaluate(
+        current_cards=[card],
+        prior_cards=[_card("AAPL", action="HOLD")],
+    )
+    assert result.candidates == []
+    assert len(result.suppressions) == 1

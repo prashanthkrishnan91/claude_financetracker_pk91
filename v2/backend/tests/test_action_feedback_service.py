@@ -14,6 +14,7 @@ Covers:
  11. Note stored and retrieved correctly
  12. Agent_run_id and snapshot_id stored as strings
  13. Null fields handled correctly (ticker/action_type/note all optional)
+ 14. cooldown_until stored in payload when provided (Stage 3B snoozed suppression support)
 """
 
 from __future__ import annotations
@@ -549,3 +550,48 @@ def test_unique_conflict_lookup_empty_raises():
                 "idempotency_key": "conflict-ghost-key",
             },
         )
+
+
+# ── Stage 3B: cooldown_until support ──────────────────────────────────────────
+
+
+def test_cooldown_until_stored_in_payload_when_provided():
+    """Stage 3B: snoozed feedback with explicit cooldown_until persists the field."""
+    from datetime import timedelta
+    cooldown = datetime(2026, 5, 31, 0, 0, 0, tzinfo=timezone.utc)
+    row = _make_row(feedback_type="snoozed")
+    row["cooldown_until"] = cooldown.isoformat()
+    client = _make_insert_client(inserted_row=row)
+    svc = _make_service(client)
+
+    svc.create(
+        user_id=USER_A,
+        data={
+            "feedback_type": "snoozed",
+            "source_area": "alert",
+            "idempotency_key": "alert:AAPL:BUY:snoozed-test",
+            "cooldown_until": cooldown,
+        },
+    )
+
+    payload = client.table.return_value.insert.call_args[0][0]
+    assert payload["cooldown_until"] == cooldown.isoformat()
+
+
+def test_cooldown_until_is_none_when_not_provided():
+    """cooldown_until defaults to None when not supplied."""
+    row = _make_row()
+    client = _make_insert_client(inserted_row=row)
+    svc = _make_service(client)
+
+    svc.create(
+        user_id=USER_A,
+        data={
+            "feedback_type": "skipped",
+            "source_area": "intel",
+            "idempotency_key": "intel:AAPL:BUY:no-cooldown",
+        },
+    )
+
+    payload = client.table.return_value.insert.call_args[0][0]
+    assert payload["cooldown_until"] is None

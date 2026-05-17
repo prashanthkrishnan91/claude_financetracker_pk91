@@ -6,12 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **SQL manual action (Stage 3B):** Apply `v2/database/020_alert_candidates.sql` in Supabase SQL Editor. Creates `watchtower_alert_candidates` + adds `cooldown_until` to `action_feedback_events`. Required before `GET /api/v1/alert-candidates` works.
+- **Stage 3C — Watchtower alert candidate generation hook** (PR in review): `watchtower_alert_candidate_hook_v1.py` wired after certified Intel v3 snapshot publishes via `compare_and_republish()` / `republish_after_analyst_eligibility()`. Candidates auto-generated on each Watchtower cycle. 23 tests pass. SQL 020 already applied.
 
 ## Next
 
-- **Stage 3C — Watchtower integration hook** (low-risk, no new provider): call `evaluate_snapshot_for_alert_candidates()` inside `watchtower_intel_republisher_v1.compare_and_republish()` post-republish, then persist candidates via `AlertCandidateService`. Auto-creates candidates on each Watchtower cycle.
-- **Stage 3C — Email/push delivery layer** (alternative/subsequent): wire `watchtower_alert_candidates` to a delivery provider. Requires confirmed delivery provider decision first.
+- **Stage 3D — Email/push delivery layer**: wire `watchtower_alert_candidates` to a delivery provider (email or push). Requires confirmed provider decision before building. Do NOT start until Stage 3C is merged.
 
 ## Later
 
@@ -23,7 +22,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Stage 3B — Alert Trigger Policy v1** (merged PR #350). Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (migration 020) + `GET /api/v1/alert-candidates`. Evidence bands: STRONG/PARTIAL actionable; THIN/SUPPRESSED/blank suppress. Feedback suppression: executed indefinite; ignored/not_relevant/too_risky 7d; snoozed 14d default or `cooldown_until`. `action_feedback_events.cooldown_until` added via ALTER TABLE. 79 tests pass. SQL manual action required (see Now).
+- **Stage 3B — Alert Trigger Policy v1** (merged PR #350, SQL 020 applied). Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (migration 020) + `GET /api/v1/alert-candidates`. Evidence bands: STRONG/PARTIAL actionable; THIN/SUPPRESSED/blank suppress. Feedback suppression: executed indefinite; ignored/not_relevant/too_risky 7d; snoozed 14d default or `cooldown_until`. `action_feedback_events.cooldown_until` added via ALTER TABLE. 79 tests pass.
 
 - **Stage 3A — Action Feedback Foundation v1** (merged PR #349). Append-only `action_feedback_events` table + service + router. SQL migration 019. 22 tests pass. Feedback stored as evidence/context only — no Intel v3 decision mutation, no Deploy sizing change, no Watchtower behavior change.
 

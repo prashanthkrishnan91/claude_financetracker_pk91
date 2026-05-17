@@ -45,12 +45,21 @@
     --dur-slower:  280ms;
     --dur-slowest: 320ms;
     --dur-breath:  1400ms;
+
+    /* ── Glass overlay / scrollbar / selection tokens ───────── */
+    --glass-bg: rgba(16, 19, 26, 0.85);
+    --glass-divider-highlight: rgba(255, 255, 255, 0.03);
+    --scrollbar-thumb: hsl(var(--border));
+    --scrollbar-thumb-hover: hsl(221 18% 28%);
+    --selection-bg: hsl(var(--primary) / 0.15);
+    --selection-fg: hsl(var(--foreground));
   }
 
   /* ── Paper light palette ─────────────────────────────────────────────────── */
   html.light,
   html:not(.dark) {
     --background: 40 43% 96%;
+    --glass-bg: rgba(250, 247, 242, 0.85);
     --foreground: 228 30% 14%;
     --card: 0 0% 100%;
     --card-foreground: 228 30% 14%;
@@ -100,11 +109,6 @@
 @layer base {
   * {
     @apply border-border;
-  }
-
-  html {
-    /* Prevent layout shift during font load */
-    font-display: optional;
   }
 
   body {
@@ -283,10 +287,10 @@
 
 /* ─── Page shell ───────────────────────────────────────────────────────────── */
 @layer components {
-  /* Glass top bar — 24 px blur, 70% surface opacity */
+  /* Glass top bar — 24 px blur, 85% surface opacity. Color from --glass-bg token. */
   .page-header {
     @apply sticky top-0 z-50 border-b border-border-subtle;
-    background-color: rgba(16, 19, 26, 0.85);
+    background-color: var(--glass-bg);
     backdrop-filter: blur(24px);
     -webkit-backdrop-filter: blur(24px);
   }
@@ -298,12 +302,6 @@
   }
   .page-main {
     @apply max-w-7xl mx-auto px-4 py-6 space-y-6;
-  }
-
-  /* Light mode glass override */
-  html.light .page-header,
-  html:not(.dark) .page-header {
-    background-color: rgba(250, 247, 242, 0.85);
   }
 }
 
@@ -323,7 +321,7 @@
     inset-inline: 0;
     top: 1px;
     height: 1px;
-    background-color: rgba(255, 255, 255, 0.03);
+    background-color: var(--glass-divider-highlight);
   }
 }
 
@@ -357,15 +355,15 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2A3140;
+  background: var(--scrollbar-thumb);
   border-radius: 2px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #3A4253;
+  background: var(--scrollbar-thumb-hover);
 }
 
 /* ─── Selection ────────────────────────────────────────────────────────────── */
 ::selection {
-  background-color: rgba(46, 194, 126, 0.15);   /* Atelier Green */
-  color: #E8EAED;
+  background-color: var(--selection-bg);
+  color: var(--selection-fg);
 }

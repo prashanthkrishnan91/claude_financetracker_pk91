@@ -62,8 +62,8 @@ export function BottomNav() {
           );
         })}
       </div>
-      {/* Safe area for iOS home indicator */}
-      <div className="h-safe-area-inset-bottom" />
+      {/* Safe area spacer for iOS home indicator */}
+      <div style={{ height: "env(safe-area-inset-bottom)" }} />
     </nav>
   );
 }

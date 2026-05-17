@@ -99,9 +99,10 @@ export default function DashboardPage() {
             )}
             <button
               onClick={() => setDataHealthOpen(true)}
-              className="text-xs text-text-muted hover:text-text-primary transition-colors hidden sm:inline"
+              className="text-xs text-text-muted hover:text-text-primary transition-colors"
             >
-              Data Health
+              <span className="sm:hidden">Health</span>
+              <span className="hidden sm:inline">Data Health</span>
             </button>
             <span className="text-xs text-text-muted hidden sm:inline">v2.0</span>
             <button
@@ -284,8 +285,8 @@ export default function DashboardPage() {
         </section>
       </main>
 
-      {/* Data Health drawer */}
-      <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />
+      {/* Data Health drawer — mounted only when open so hooks don't run while closed */}
+      {dataHealthOpen && <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />}
     </>
   );
 }

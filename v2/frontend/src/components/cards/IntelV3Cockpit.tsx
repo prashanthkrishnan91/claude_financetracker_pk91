@@ -547,8 +547,8 @@ export function IntelV3Cockpit() {
       {/* Detail drawer */}
       <IntelV3Drawer card={selectedCard} onClose={() => setSelectedCard(null)} />
 
-      {/* Data Health drawer */}
-      <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />
+      {/* Data Health drawer — mounted only when open so hooks don't run while closed */}
+      {dataHealthOpen && <DataHealthDrawer open={dataHealthOpen} onClose={() => setDataHealthOpen(false)} />}
     </div>
   );
 }

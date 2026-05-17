@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 4F — Portfolio Living Thesis Ledger; **PR open**; next: Stage 4G)
+Last updated: 2026-05-17 (Stage 4G — Alert Center Polish + Journal + Radar + Capsules; **PR open**; next: Stage 4H)
 
 ## Purpose
 
@@ -122,18 +122,27 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Stage 4E — Deploy Ledger Redesign** — merged PR #363. Frontend-only redesign of the Deploy surface into a Capital Allocation Ledger. `deploy-ledger.ts`, `DeployLedger.tsx`, 50 tests. No backend, no SQL.
 
-**Stage 4F — Portfolio Living Thesis Ledger** — PR open on branch `claude/portfolio-living-thesis-ledger-ZmoKr`. Frontend-only. New first-class `/dashboard/portfolio` route as a Living Thesis Ledger.
+**Stage 4F — Portfolio Living Thesis Ledger** — Merged as PR #364. Frontend-only. `/dashboard/portfolio` Living Thesis Ledger.
 
-What landed:
-- `src/lib/portfolio-ledger.ts` (new): Pure helpers — `buildLedgerHoldings`, `buildConcentrationTop5`, `buildCategoryExposure`, `buildThesisHealthSummary`, `buildSourceFreshnessSummary`, `buildHoldingDrawerData`, `buildLedgerData`, plain-English formatters. No JSX, safe for tests.
-- `src/app/dashboard/portfolio/page.tsx` (new): Living Thesis Ledger surface — editorial holdings ledger, concentration panel, category exposure, thesis-health panel, source-freshness panel, holding detail drawer (Esc/close, accessible), Coming-Later capsules for Business Story / Company Strategy / What Would Make Thesis Wrong / Good Company vs Good Stock.
-- `src/components/navigation/BottomNav.tsx` (modified): Portfolio nav item added (`/dashboard/portfolio`, BriefcaseIcon) to both BottomNav and SideNav.
-- `src/app/dashboard/page.tsx` (modified): "Full Ledger →" link added to Today portfolio snapshot section.
-- `src/lib/portfolio-ledger.test.ts` (new): 51 pure helper tests. All pass. Covers: empty holdings, top-5 ordering, category exposure, missing theme data → Coming-Later, Intel action/evidence mapping without raw keys, drawer last-3-decisions, Coming-Later capsules render no fabricated content.
-- Total: 731 tests pass. 3 pre-existing unrelated suite failures unchanged.
+**Stage 4G — Alert Center Polish + Journal + Radar + Capsules** — PR open on branch `claude/stage-4g-alert-journal-1YrV8`. Frontend-only.
+
+What landed in Stage 4F (PR #364):
+- `src/lib/portfolio-ledger.ts`, `src/app/dashboard/portfolio/page.tsx`, BottomNav Portfolio item, Today "Full Ledger →" link, 51 tests. No backend/SQL changes.
+
+What landed in Stage 4G (PR open):
+- `src/lib/alert-capsules.ts` (new): Pure helpers — `buildAlertWhyThisMatters`, `buildMissingDataCapsule`, `buildCandidateCapsuleState`. No JSX.
+- `src/lib/journal-ledger.ts` (new): Pure helpers — `buildJournalEntries`, `buildEvaluationState`, `toRomanNumeral`, `computeCashDeployed`, Coming-Later captions.
+- `src/app/dashboard/alerts/page.tsx` (modified): Redesigned as Watchtower Review Queue. Dry-run banner preserved. "Why this matters" expandable capsule per candidate (WhyTrimIsNotBadCompany + WhatMissingDataMeans inline). Behavior unchanged.
+- `src/app/dashboard/journal/page.tsx` (new): Journal route — chapter-numeral timeline from existing `DecisionMemoryLog` rows. Entry anatomy, evaluation-window state. Coming-Later for Lessons / What I Learned Today.
+- `src/app/dashboard/radar/page.tsx` (new): Radar route — honest Coming-Later destination. No mock candidates.
+- `src/components/cards/DeterministicCapsules.tsx` (new): Buildable capsule set — `WhyThisMattersCapsule`, `WhyTrimIsNotBadCompanyCapsule`, `WhatMissingDataMeansCapsule`, `PatienceIsActionCapsule`, `HowDecisionChangesPortfolioShapeCapsule` (Coming-Later). Future-only capsules (Business Story, Company Strategy, What Would Make Thesis Wrong, Good Company vs Good Stock, What I Learned Today) all render `ComingLaterPanel`.
+- `src/components/navigation/BottomNav.tsx` (modified): Journal and Radar added to `SIDE_ONLY_NAV_ITEMS` (desktop SideNav only; mobile BottomNav unchanged per §30.8).
+- `src/lib/alert-capsules.test.ts` (new): 38 tests.
+- `src/lib/journal-ledger.test.ts` (new): 33 tests.
+- Total: 807 tests pass. 3 pre-existing unrelated suite failures unchanged. No TypeScript errors in new files.
 - No backend changes, no SQL, no env/provider/email/LLM changes. ALERT_EMAIL_DRY_RUN remains true.
 
-**Next after merge: Stage 4G.**
+**Next after merge: Stage 4H.**
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

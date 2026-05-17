@@ -1,0 +1,228 @@
+/**
+ * Pure data helpers for Intel v3 evidence display and data health rows.
+ * No JSX, no React. Safe to import in Node test environments.
+ */
+
+// ── Evidence band ─────────────────────────────────────────────────────────────
+
+/** Evidence band → plain-English beginner label (per task spec §4 source UX contract). */
+export function evidenceBandToBeginnerLabel(band: string): string {
+  switch (band) {
+    case "STRONG":  return "Strong current evidence";
+    case "PARTIAL": return "Some evidence, still incomplete";
+    case "THIN":    return "Thin evidence — treat as lower confidence";
+    default:        return "Evidence state unavailable";
+  }
+}
+
+// ── Committee / source-pack status ───────────────────────────────────────────
+
+/** Committee/source-pack status → plain-English label (per task spec §4 source UX contract). */
+export function committeeStatusToPlainLabel(status: string): string {
+  switch (status) {
+    case "source_validated":
+    case "ready":    return "Source-linked";
+    case "pending":
+    case "deferred": return "Source linking not complete yet";
+    default:         return "Source state unavailable";
+  }
+}
+
+// ── Source metadata formatting ────────────────────────────────────────────────
+
+/** Format a snapshot or run ID to an 8-char short form, or "—" when absent. */
+export function formatSnapshotIdShort(id?: string | null): string {
+  if (!id) return "—";
+  return id.slice(0, 8);
+}
+
+/**
+ * Safe ISO date formatter for client-only display.
+ * Uses UTC timezone to avoid server/client hydration mismatch for near-midnight timestamps.
+ * Returns "—" on any parse failure.
+ */
+export function formatUpdatedAtSafe(iso?: string | null): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return "—";
+    return d.toLocaleDateString("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+      timeZone: "UTC",
+    });
+  } catch {
+    return "—";
+  }
+}
+
+// ── Evidence freshness state ──────────────────────────────────────────────────
+
+/** Intel v3 evidence freshness state → plain-English label. */
+export function evidenceFreshnessToLabel(state?: string | null): string {
+  switch (state) {
+    case "certified_current":     return "Up to date";
+    case "rebuilt_and_published": return "Refreshed and certified";
+    case "republish_pending":     return "Refresh pending";
+    case "certification_blocked": return "Certification blocked";
+    case "no_snapshot_exists":    return "No snapshot yet";
+    default:                      return "Freshness state unavailable";
+  }
+}
+
+// ── Data health rows ──────────────────────────────────────────────────────────
+
+export type DataHealthStatus = "ok" | "pending" | "unavailable" | "blocked";
+
+export interface DataHealthRow {
+  label: string;
+  status: DataHealthStatus;
+  detail: string;
+}
+
+export interface DataHealthInput {
+  intelSnapshotSource?: string | null;
+  intelFreshnessState?: string | null;
+  deployReadinessStatus?: string | null;
+  alertCandidateCount?: number | null;
+  pricesFresh?: number | null;
+  pricesStale?: number | null;
+  plaidStatus?: string | null;
+  plaidLastSyncedAt?: string | null;
+}
+
+function deployReadinessLabel(status: string): string {
+  switch (status) {
+    case "ready_pending_guardrails": return "Plan ready — awaiting guardrails";
+    case "partially_ready":          return "Partially ready";
+    case "no_items":                 return "No plan items";
+    case "blocked":                  return "Blocked";
+    case "all_suppressed":           return "All items suppressed";
+    case "all_informational":        return "Informational only";
+    case "not_ready":                return "Not ready";
+    default:                         return status.replace(/_/g, " ");
+  }
+}
+
+/**
+ * Build data health rows from current frontend-readable state.
+ * Missing inputs produce an "unavailable" row — never fake status.
+ */
+export function buildDataHealthRows(input: DataHealthInput): DataHealthRow[] {
+  const {
+    intelSnapshotSource,
+    intelFreshnessState,
+    deployReadinessStatus,
+    alertCandidateCount,
+    pricesFresh,
+    pricesStale,
+    plaidStatus,
+    plaidLastSyncedAt,
+  } = input;
+
+  const UNAVAILABLE_DETAIL = "Not connected to this view yet";
+
+  const rows: DataHealthRow[] = [];
+
+  // Intel snapshot
+  rows.push({
+    label: "Intel snapshot",
+    status:
+      intelSnapshotSource === "worker_certified" ? "ok"
+      : intelSnapshotSource === "certification_failed" ? "blocked"
+      : intelSnapshotSource != null ? "pending"
+      : "unavailable",
+    detail:
+      intelSnapshotSource === "worker_certified"
+        ? "Worker-certified snapshot available"
+      : intelSnapshotSource != null
+        ? intelSnapshotSource.replace(/_/g, " ")
+      : UNAVAILABLE_DETAIL,
+  });
+
+  // Evidence freshness
+  rows.push({
+    label: "Evidence freshness",
+    status:
+      intelFreshnessState === "certified_current" || intelFreshnessState === "rebuilt_and_published"
+        ? "ok"
+      : intelFreshnessState != null
+        ? "pending"
+      : "unavailable",
+    detail: intelFreshnessState != null
+      ? evidenceFreshnessToLabel(intelFreshnessState)
+      : UNAVAILABLE_DETAIL,
+  });
+
+  // Deploy readiness
+  rows.push({
+    label: "Deploy readiness",
+    status:
+      deployReadinessStatus == null ? "unavailable"
+      : ["no_items", "blocked", "all_suppressed", "not_ready"].includes(deployReadinessStatus)
+        ? "unavailable"
+      : deployReadinessStatus === "ready_pending_guardrails" || deployReadinessStatus === "partially_ready"
+        ? "pending"
+      : "ok",
+    detail: deployReadinessStatus != null
+      ? deployReadinessLabel(deployReadinessStatus)
+      : UNAVAILABLE_DETAIL,
+  });
+
+  // Watchtower alerts
+  rows.push({
+    label: "Watchtower alerts",
+    status:
+      alertCandidateCount == null ? "unavailable"
+      : alertCandidateCount > 0 ? "ok"
+      : "pending",
+    detail:
+      alertCandidateCount == null ? UNAVAILABLE_DETAIL
+      : alertCandidateCount > 0
+        ? `${alertCandidateCount} candidate${alertCandidateCount !== 1 ? "s" : ""} available`
+      : "No active alert candidates",
+  });
+
+  // Price data
+  {
+    const fresh = pricesFresh ?? null;
+    const stale = pricesStale ?? null;
+    const total = fresh != null && stale != null ? fresh + stale : null;
+    rows.push({
+      label: "Price data",
+      status:
+        total == null ? "unavailable"
+        : (stale ?? 0) > 0 ? "pending"
+        : "ok",
+      detail:
+        total == null ? UNAVAILABLE_DETAIL
+        : total > 0 ? `${fresh} of ${total} prices fresh`
+        : "No price data",
+    });
+  }
+
+  // Broker sync
+  rows.push({
+    label: "Broker sync",
+    status:
+      plaidStatus == null ? "unavailable"
+      : plaidStatus === "connected" ? "ok"
+      : plaidStatus === "pending" ? "pending"
+      : "unavailable",
+    detail:
+      plaidStatus == null ? UNAVAILABLE_DETAIL
+      : plaidStatus === "connected"
+        ? `Connected — last synced ${formatUpdatedAtSafe(plaidLastSyncedAt)}`
+      : plaidStatus.replace(/_/g, " "),
+  });
+
+  // Email delivery safety — static honest current-state copy
+  rows.push({
+    label: "Email delivery safety",
+    status: "ok",
+    detail: "Dry-run mode — no emails sent",
+  });
+
+  return rows;
+}

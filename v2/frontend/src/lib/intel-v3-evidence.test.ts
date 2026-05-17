@@ -1,0 +1,345 @@
+/**
+ * Stage 4D — intel-v3-evidence.ts pure helper contracts.
+ *
+ * Covers:
+ * - evidenceBandToBeginnerLabel: all bands + unknown
+ * - committeeStatusToPlainLabel: all statuses + unknown
+ * - formatSnapshotIdShort: null, undefined, full ID, short ID
+ * - formatUpdatedAtSafe: valid ISO, invalid, null/undefined
+ * - evidenceFreshnessToLabel: all states
+ * - buildDataHealthRows: various input combinations
+ */
+
+import {
+  evidenceBandToBeginnerLabel,
+  committeeStatusToPlainLabel,
+  formatSnapshotIdShort,
+  formatUpdatedAtSafe,
+  evidenceFreshnessToLabel,
+  buildDataHealthRows,
+  type DataHealthRow,
+} from "./intel-v3-evidence";
+
+// ── evidenceBandToBeginnerLabel ───────────────────────────────────────────────
+
+describe("evidenceBandToBeginnerLabel", () => {
+  it("STRONG → Strong current evidence", () => {
+    expect(evidenceBandToBeginnerLabel("STRONG")).toBe("Strong current evidence");
+  });
+
+  it("PARTIAL → Some evidence, still incomplete", () => {
+    expect(evidenceBandToBeginnerLabel("PARTIAL")).toBe("Some evidence, still incomplete");
+  });
+
+  it("THIN → Thin evidence — treat as lower confidence", () => {
+    expect(evidenceBandToBeginnerLabel("THIN")).toBe("Thin evidence — treat as lower confidence");
+  });
+
+  it("unknown band → Evidence state unavailable", () => {
+    expect(evidenceBandToBeginnerLabel("UNKNOWN")).toBe("Evidence state unavailable");
+    expect(evidenceBandToBeginnerLabel("")).toBe("Evidence state unavailable");
+  });
+
+  it("labels contain no raw metric keys", () => {
+    const RAW_KEYS = ["fcf_margin", "roic_ttm", "ev_ebitda", "peg_ratio", "gross_margin_ttm"];
+    for (const band of ["STRONG", "PARTIAL", "THIN"]) {
+      const label = evidenceBandToBeginnerLabel(band);
+      for (const key of RAW_KEYS) {
+        expect(label.toLowerCase()).not.toContain(key);
+      }
+    }
+  });
+
+  it("STRONG label does not appear for THIN band", () => {
+    expect(evidenceBandToBeginnerLabel("THIN")).not.toContain("Strong");
+  });
+});
+
+// ── committeeStatusToPlainLabel ───────────────────────────────────────────────
+
+describe("committeeStatusToPlainLabel", () => {
+  it("source_validated → Source-linked", () => {
+    expect(committeeStatusToPlainLabel("source_validated")).toBe("Source-linked");
+  });
+
+  it("ready → Source-linked", () => {
+    expect(committeeStatusToPlainLabel("ready")).toBe("Source-linked");
+  });
+
+  it("pending → Source linking not complete yet", () => {
+    expect(committeeStatusToPlainLabel("pending")).toBe("Source linking not complete yet");
+  });
+
+  it("deferred → Source linking not complete yet", () => {
+    expect(committeeStatusToPlainLabel("deferred")).toBe("Source linking not complete yet");
+  });
+
+  it("unknown/empty → Source state unavailable", () => {
+    expect(committeeStatusToPlainLabel("unknown")).toBe("Source state unavailable");
+    expect(committeeStatusToPlainLabel("")).toBe("Source state unavailable");
+  });
+
+  it("labels contain no fake credibility or contradiction text", () => {
+    const FORBIDDEN = ["credibility score", "contradiction", "SEC", "sentiment confirmed"];
+    for (const status of ["source_validated", "ready", "pending", "deferred"]) {
+      const label = committeeStatusToPlainLabel(status);
+      for (const forbidden of FORBIDDEN) {
+        expect(label.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      }
+    }
+  });
+});
+
+// ── formatSnapshotIdShort ─────────────────────────────────────────────────────
+
+describe("formatSnapshotIdShort", () => {
+  it("null → —", () => {
+    expect(formatSnapshotIdShort(null)).toBe("—");
+  });
+
+  it("undefined → —", () => {
+    expect(formatSnapshotIdShort(undefined)).toBe("—");
+  });
+
+  it("empty string → —", () => {
+    expect(formatSnapshotIdShort("")).toBe("—");
+  });
+
+  it("full UUID returns first 8 chars", () => {
+    expect(formatSnapshotIdShort("abc12345-def0-1234-5678-abcdef012345")).toBe("abc12345");
+  });
+
+  it("short ID (< 8 chars) returns full string", () => {
+    expect(formatSnapshotIdShort("abcd")).toBe("abcd");
+  });
+
+  it("exactly 8 chars returns all 8 chars", () => {
+    expect(formatSnapshotIdShort("12345678")).toBe("12345678");
+  });
+});
+
+// ── formatUpdatedAtSafe ───────────────────────────────────────────────────────
+
+describe("formatUpdatedAtSafe", () => {
+  it("null → —", () => {
+    expect(formatUpdatedAtSafe(null)).toBe("—");
+  });
+
+  it("undefined → —", () => {
+    expect(formatUpdatedAtSafe(undefined)).toBe("—");
+  });
+
+  it("empty string → —", () => {
+    expect(formatUpdatedAtSafe("")).toBe("—");
+  });
+
+  it("invalid ISO string → —", () => {
+    expect(formatUpdatedAtSafe("not-a-date")).toBe("—");
+  });
+
+  it("valid ISO string returns a non-empty human-readable date", () => {
+    const result = formatUpdatedAtSafe("2026-01-15T00:00:00Z");
+    expect(result).not.toBe("—");
+    expect(result.length).toBeGreaterThan(3);
+    // Should contain month abbreviation and year
+    expect(result).toMatch(/Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec/);
+    expect(result).toContain("2026");
+  });
+
+  it("does not output a raw ISO timestamp", () => {
+    const result = formatUpdatedAtSafe("2026-05-17T10:30:00Z");
+    expect(result).not.toMatch(/T\d{2}:\d{2}:\d{2}/);
+  });
+});
+
+// ── evidenceFreshnessToLabel ──────────────────────────────────────────────────
+
+describe("evidenceFreshnessToLabel", () => {
+  it("certified_current → Up to date", () => {
+    expect(evidenceFreshnessToLabel("certified_current")).toBe("Up to date");
+  });
+
+  it("rebuilt_and_published → Refreshed and certified", () => {
+    expect(evidenceFreshnessToLabel("rebuilt_and_published")).toBe("Refreshed and certified");
+  });
+
+  it("republish_pending → Refresh pending", () => {
+    expect(evidenceFreshnessToLabel("republish_pending")).toBe("Refresh pending");
+  });
+
+  it("certification_blocked → Certification blocked", () => {
+    expect(evidenceFreshnessToLabel("certification_blocked")).toBe("Certification blocked");
+  });
+
+  it("no_snapshot_exists → No snapshot yet", () => {
+    expect(evidenceFreshnessToLabel("no_snapshot_exists")).toBe("No snapshot yet");
+  });
+
+  it("null/undefined → Freshness state unavailable", () => {
+    expect(evidenceFreshnessToLabel(null)).toBe("Freshness state unavailable");
+    expect(evidenceFreshnessToLabel(undefined)).toBe("Freshness state unavailable");
+  });
+
+  it("unknown state → Freshness state unavailable", () => {
+    expect(evidenceFreshnessToLabel("some_unknown_state")).toBe("Freshness state unavailable");
+  });
+});
+
+// ── buildDataHealthRows ───────────────────────────────────────────────────────
+
+describe("buildDataHealthRows", () => {
+  it("returns exactly 7 rows always (Intel snapshot, Evidence freshness, Deploy, Alerts, Price, Broker sync, Email)", () => {
+    const rows = buildDataHealthRows({});
+    expect(rows).toHaveLength(7);
+  });
+
+  it("all rows have label, status, detail fields", () => {
+    const rows = buildDataHealthRows({});
+    for (const row of rows) {
+      expect(typeof row.label).toBe("string");
+      expect(row.label.length).toBeGreaterThan(0);
+      expect(["ok", "pending", "unavailable", "blocked"]).toContain(row.status);
+      expect(typeof row.label).toBe("string");
+    }
+  });
+
+  it("labels are the canonical plain-English set", () => {
+    const rows = buildDataHealthRows({});
+    const labels = rows.map((r) => r.label);
+    expect(labels).toContain("Intel snapshot");
+    expect(labels).toContain("Evidence freshness");
+    expect(labels).toContain("Deploy readiness");
+    expect(labels).toContain("Watchtower alerts");
+    expect(labels).toContain("Price data");
+    expect(labels).toContain("Broker sync");
+    expect(labels).toContain("Email delivery safety");
+  });
+
+  it("missing inputs produce unavailable rows — never fake status", () => {
+    const rows = buildDataHealthRows({});
+    const intelRow = rows.find((r) => r.label === "Intel snapshot")!;
+    const freshnessRow = rows.find((r) => r.label === "Evidence freshness")!;
+    const deployRow = rows.find((r) => r.label === "Deploy readiness")!;
+    const alertsRow = rows.find((r) => r.label === "Watchtower alerts")!;
+    const priceRow = rows.find((r) => r.label === "Price data")!;
+    const brokerRow = rows.find((r) => r.label === "Broker sync")!;
+
+    expect(intelRow.status).toBe("unavailable");
+    expect(freshnessRow.status).toBe("unavailable");
+    expect(deployRow.status).toBe("unavailable");
+    expect(alertsRow.status).toBe("unavailable");
+    expect(priceRow.status).toBe("unavailable");
+    expect(brokerRow.status).toBe("unavailable");
+  });
+
+  it("unavailable rows show 'Not connected to this view yet'", () => {
+    const rows = buildDataHealthRows({});
+    for (const row of rows.filter((r) => r.status === "unavailable")) {
+      expect(row.detail).toContain("Not connected");
+    }
+  });
+
+  it("worker_certified snapshot source → ok status", () => {
+    const rows = buildDataHealthRows({ intelSnapshotSource: "worker_certified" });
+    const intelRow = rows.find((r) => r.label === "Intel snapshot")!;
+    expect(intelRow.status).toBe("ok");
+    expect(intelRow.detail).toContain("certified");
+  });
+
+  it("certification_failed snapshot source → blocked status", () => {
+    const rows = buildDataHealthRows({ intelSnapshotSource: "certification_failed" });
+    const intelRow = rows.find((r) => r.label === "Intel snapshot")!;
+    expect(intelRow.status).toBe("blocked");
+  });
+
+  it("certified_current freshness → ok status", () => {
+    const rows = buildDataHealthRows({ intelFreshnessState: "certified_current" });
+    const row = rows.find((r) => r.label === "Evidence freshness")!;
+    expect(row.status).toBe("ok");
+    expect(row.detail).toBe("Up to date");
+  });
+
+  it("republish_pending freshness → pending status", () => {
+    const rows = buildDataHealthRows({ intelFreshnessState: "republish_pending" });
+    const row = rows.find((r) => r.label === "Evidence freshness")!;
+    expect(row.status).toBe("pending");
+    expect(row.detail).toBe("Refresh pending");
+  });
+
+  it("alert candidates > 0 → ok status", () => {
+    const rows = buildDataHealthRows({ alertCandidateCount: 5 });
+    const row = rows.find((r) => r.label === "Watchtower alerts")!;
+    expect(row.status).toBe("ok");
+    expect(row.detail).toContain("5 candidates");
+  });
+
+  it("alert candidates = 1 → singular label", () => {
+    const rows = buildDataHealthRows({ alertCandidateCount: 1 });
+    const row = rows.find((r) => r.label === "Watchtower alerts")!;
+    expect(row.detail).toContain("1 candidate");
+    expect(row.detail).not.toContain("candidates");
+  });
+
+  it("alert candidates = 0 → pending status", () => {
+    const rows = buildDataHealthRows({ alertCandidateCount: 0 });
+    const row = rows.find((r) => r.label === "Watchtower alerts")!;
+    expect(row.status).toBe("pending");
+    expect(row.detail).toContain("No active");
+  });
+
+  it("all prices fresh → ok status", () => {
+    const rows = buildDataHealthRows({ pricesFresh: 10, pricesStale: 0 });
+    const row = rows.find((r) => r.label === "Price data")!;
+    expect(row.status).toBe("ok");
+    expect(row.detail).toContain("10 of 10");
+  });
+
+  it("some stale prices → pending status", () => {
+    const rows = buildDataHealthRows({ pricesFresh: 8, pricesStale: 2 });
+    const row = rows.find((r) => r.label === "Price data")!;
+    expect(row.status).toBe("pending");
+  });
+
+  it("plaid connected → ok status with last-synced detail", () => {
+    const rows = buildDataHealthRows({
+      plaidStatus: "connected",
+      plaidLastSyncedAt: "2026-05-17T10:00:00Z",
+    });
+    const row = rows.find((r) => r.label === "Broker sync")!;
+    expect(row.status).toBe("ok");
+    expect(row.detail).toContain("Connected");
+  });
+
+  it("email delivery safety row is always ok with dry-run copy", () => {
+    const rows = buildDataHealthRows({});
+    const row = rows.find((r) => r.label === "Email delivery safety")!;
+    expect(row.status).toBe("ok");
+    expect(row.detail).toContain("Dry-run");
+    expect(row.detail).toContain("no emails sent");
+  });
+
+  it("no fake credibility, contradiction, or completeness labels appear as live values", () => {
+    const FORBIDDEN_LIVE_LABELS = [
+      "credibility score",
+      "contradiction detected",
+      "evidence complete",
+      "SEC filing",
+      "sentiment confirmed",
+      "technical analysis",
+    ];
+    const rows = buildDataHealthRows({
+      intelSnapshotSource: "worker_certified",
+      intelFreshnessState: "certified_current",
+      alertCandidateCount: 3,
+      pricesFresh: 5,
+      pricesStale: 0,
+      plaidStatus: "connected",
+    });
+    for (const row of rows) {
+      for (const forbidden of FORBIDDEN_LIVE_LABELS) {
+        expect(row.detail.toLowerCase()).not.toContain(forbidden.toLowerCase());
+        expect(row.label.toLowerCase()).not.toContain(forbidden.toLowerCase());
+      }
+    }
+  });
+});

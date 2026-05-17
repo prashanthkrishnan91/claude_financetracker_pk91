@@ -114,19 +114,24 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4C (open PR)
+## Current design stage — Stage 4D (PR open)
 
-**Stage 4C — Intel Investment Committee Redesign** — PR #361 open on branch `claude/intel-v3-committee-redesign-9ERGn`. 5 frontend files (4 modified, 1 new). No backend, no SQL.
+**Stage 4C — Intel Investment Committee Redesign** — merged (PR #361). `IntelV3Primitives.tsx`, redesigned Cockpit/Card/Drawer, 56 contract tests. No backend, no SQL.
+
+**Stage 4D — Evidence Shell + Source UX + Data Health Drawer** — PR open on branch `claude/stage-4d-evidence-health-jsZQj`. 8 frontend files (3 modified, 5 new). No backend, no SQL.
 
 What landed:
-- `IntelV3Primitives.tsx` (new): Shared UI primitives — `ActionGlyph`, `ConfidenceRing`, `RiskGlyph`, `FreshnessDot`, `ComingLaterPanel`, `DataMissingPill`. All action styles route through `action-*` design tokens; no raw Tailwind color classes.
-- `IntelV3Cockpit.tsx` (redesigned): "Investment Committee" workspace — identity band with status pill + Run Intel, portfolio overview with `font-display` heading, pill-style action filter rail (ALL/BUY/HOLD/TRIM/SELL locked), unified card grid, What Changed strip, Opportunity Radar as Coming-Later chrome only.
-- `IntelV3Card.tsx` (redesigned): Action Card with glyph + action badge + ConfidenceRing, plain-English why_text, FreshnessDot / DataMissingPill for thin data, RiskGlyph, portfolio fit. Token-routed colors throughout.
-- `IntelV3Drawer.tsx` (redesigned): "Why this view?" detail room. Accessible dialog (role=dialog, aria-modal, aria-labelledby, close button focused on open, Escape close). Live sections: why view, thesis, risk challenge, blockers/flags, what would change view, portfolio fit, evidence check, valuation context (when present). Coming-Later chrome for business story, technical/fundamental context, source credibility tier, Ask why/Challenge. No fabricated content.
-- `IntelV3Contract.test.ts` (+23 tests): Stage 4C contracts — action token routing, glyph mapping, thin/missing evidence honesty, drawer live sections, Coming-Later contracts, filter rail locked contract. 56 total (all pass). 3 pre-existing unrelated suite failures unchanged.
-- Intel v3 authority, polling, certification logic, Run Intel behavior, NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED split: all unchanged.
+- `src/lib/intel-v3-evidence.ts` (new): Pure helpers — `evidenceBandToBeginnerLabel`, `committeeStatusToPlainLabel`, `formatSnapshotIdShort`, `formatUpdatedAtSafe`, `evidenceFreshnessToLabel`, `buildDataHealthRows`. No JSX, safe for test environments.
+- `TrustPrimitives.tsx` (new): Shared trust/evidence UI primitives — `DataHealthPill`, `TrustStatusRow`, `SourceMetadataStrip`, `DataUnavailableCallout`, `EvidenceShell`.
+- `DataHealthDrawer.tsx` (new): Accessible Data Health drawer (`role=dialog`). Uses hooks internally (React Query cached). Shows 7 plain-English health rows: Intel snapshot, Evidence freshness, Deploy readiness, Watchtower alerts, Price data, Broker sync, Email delivery safety. Missing data → "Not connected to this view yet". 3 Coming-Later modules (source credibility tier, contradiction detection, evidence completeness score).
+- `IntelV3Drawer.tsx` (enhanced): Evidence check section now shows "Built from Intel v3 snapshot" source row, committee status in plain English, evidence band in beginner language (Strong/Partial/Thin → full sentence labels). Expanded to 11 Coming-Later evidence modules. Metadata footer uses `SourceMetadataStrip`.
+- `IntelV3Cockpit.tsx` (enhanced): "Data Health" button in status band; renders `DataHealthDrawer`.
+- `dashboard/page.tsx` (enhanced): "Data Health" button in Today header; renders `DataHealthDrawer`.
+- `src/lib/intel-v3-evidence.test.ts` (new): 47 pure helper tests. All pass.
+- `IntelV3Stage4DContract.test.ts` (new): 35 Stage 4D contract tests. All pass.
+- Total: 612 tests pass. 3 pre-existing unrelated suite failures unchanged.
 
-**Next after merge: Stage 4D — Evidence Shell + Source UX + Data Health Drawer.** Coming-Later chrome for credibility tier, contradiction strip, evidence completeness. No backend, no SQL.
+**Next after merge: Stage 4E — Deploy Ledger Redesign.**
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

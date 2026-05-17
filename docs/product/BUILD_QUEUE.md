@@ -6,11 +6,11 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now
 
-- **Stage 3C — Watchtower alert candidate generation hook** (PR in review): `watchtower_alert_candidate_hook_v1.py` wired after certified Intel v3 snapshot publishes via `compare_and_republish()` / `republish_after_analyst_eligibility()`. Candidates auto-generated on each Watchtower cycle. 23 tests pass. SQL 020 already applied.
+_Nothing active. Stage 3C merged; Stage 3D requires a provider decision before building._
 
 ## Next
 
-- **Stage 3D — Email/push delivery layer**: wire `watchtower_alert_candidates` to a delivery provider (email or push). Requires confirmed provider decision before building. Do NOT start until Stage 3C is merged.
+- **Stage 3D — Email/push delivery layer**: wire `watchtower_alert_candidates` to a delivery provider (email or push). Requires confirmed provider decision before building.
 
 ## Later
 
@@ -21,6 +21,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 3C — Watchtower alert candidate generation hook** (merged PR #352). `watchtower_alert_candidate_hook_v1.py` wired after certified Intel v3 snapshot publishes via `compare_and_republish()` / `republish_after_analyst_eligibility()`. Candidates auto-generated on each Watchtower cycle. Fail-soft; errors logged but never break Intel/Watchtower publication. 23 tests pass. SQL 020 already applied.
 
 - **Stage 3B — Alert Trigger Policy v1** (merged PR #350, SQL 020 applied). Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (migration 020) + `GET /api/v1/alert-candidates`. Evidence bands: STRONG/PARTIAL actionable; THIN/SUPPRESSED/blank suppress. Feedback suppression: executed indefinite; ignored/not_relevant/too_risky 7d; snoozed 14d default or `cooldown_until`. `action_feedback_events.cooldown_until` added via ALTER TABLE. 79 tests pass.
 

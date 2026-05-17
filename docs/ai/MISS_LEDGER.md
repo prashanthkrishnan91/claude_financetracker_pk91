@@ -208,6 +208,23 @@ Follow-up needed: No.
 
 ---
 
+### 2026-05-17 — USAGE_LEDGER row omitted from initial commit again (PR #352, third occurrence)
+
+Repo: claude_financetracker_pk91
+Area: PR authoring / workflow compliance
+Severity: Level 1 — caught by CI readiness gate before merge
+Miss: PR #352 (Stage 3C) opened without a committed USAGE_LEDGER row. Gate failed twice; required a follow-up commit with the ledger row and a PR body update to pass. This is the third occurrence (#338 patch-1, #350, and now #352) of the same ledger-row miss.
+Impact: Two wasted CI cycles; one follow-up patch commit required.
+What caught it: AI PR Readiness Check CI gate.
+Root cause: Ledger row not committed in the same commit as code. The gate requires `docs/ai/USAGE_LEDGER.md` to be changed for all Level 1+ PRs; "usage unavailable" in the PR body does not waive this.
+What should catch it next time: At promotion threshold (3+ occurrences). Recommend adding a checklist line to `pre-pr-self-audit` skill: "Did you commit a USAGE_LEDGER row before the first push?" This catches it before CI runs, not after.
+One-off or repeated: Third occurrence — promotion warranted.
+Promotion target: `.claude/skills/pre-pr-self-audit/SKILL.md` — add explicit ledger-row checklist item so it fires before the first push to a new PR.
+Action taken: Added this MISS_LEDGER entry. SKILL.md update deferred to next session — requires a targeted one-line addition to the pre-PR self-audit checklist.
+Follow-up needed: Yes — add "USAGE_LEDGER row committed?" to pre-pr-self-audit checklist.
+
+---
+
 ## Seed entries
 
 ### 2026-05-07 — Old-format prompt after OS v2

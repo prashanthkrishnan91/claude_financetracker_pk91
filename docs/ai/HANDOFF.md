@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 3C — Watchtower candidate generation hook — PR in review)
+Last updated: 2026-05-17 (Stage 3C merged — PR #352)
 
 ## Purpose
 
@@ -8,8 +8,8 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3C in progress** (PR open). Stage 3B is merged and SQL 020 is applied.
-- Stage 3C summary (PR #352 open): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()` as `alert_candidate_hook_callable`. Fail-soft: errors logged, never break Intel/Watchtower publication. 23 new tests pass. No SQL, no email/push delivery, no frontend UI.
+- Roadmap stage: **Stage 3C merged** (PR #352). Stage 3D (email/push delivery) requires a provider decision before building.
+- Stage 3C summary (merged PR #352): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()` as `alert_candidate_hook_callable`. Fail-soft: errors logged, never break Intel/Watchtower publication. 23 new tests pass. No SQL, no email/push delivery, no frontend UI.
 - Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020 — **applied**) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020.
 - Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass.
 - Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
@@ -110,7 +110,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Next recommended step
 
-**Stage 3C candidate generation hook is in review.** SQL migration 020 is already applied. After Stage 3C merges, the next step is the email/push delivery layer — wire `watchtower_alert_candidates` to a delivery provider. Requires a provider decision before building.
+**Stage 3C merged (PR #352).** The full alert pipeline is now end-to-end: action feedback → policy → candidates → persist. The next step is the email/push delivery layer (Stage 3D) — wire `watchtower_alert_candidates` to a delivery provider. Requires a provider decision (email vs push, provider name) before building.
 
 **Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
 

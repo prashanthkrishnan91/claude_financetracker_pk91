@@ -116,24 +116,60 @@ describe("buildLedgerHoldings", () => {
     expect(result[0].hasIntel).toBe(true);
   });
 
-  it("computes market value = shares × current_price", () => {
-    const pos = makePosition({ shares: 10, current_price: 170, avg_cost: 150 });
+  it("prefers backend market_value when present and positive", () => {
+    const pos = makePosition({ shares: 10, current_price: 170, avg_cost: 150, market_value: 1800 });
+    const result = buildLedgerHoldings([pos], []);
+    expect(result[0].marketValue).toBe(1800);
+  });
+
+  it("uses shares × current_price when market_value absent", () => {
+    const pos = makePosition({ shares: 10, current_price: 170, avg_cost: 150, market_value: undefined });
     const result = buildLedgerHoldings([pos], []);
     expect(result[0].marketValue).toBe(1700);
   });
 
-  it("falls back to avg_cost when current_price is absent", () => {
-    const pos = makePosition({ shares: 10, current_price: undefined, avg_cost: 150 });
+  it("returns undefined marketValue when current_price absent and no market_value — no avg_cost fallback", () => {
+    const pos = makePosition({ shares: 10, current_price: undefined, avg_cost: 150, market_value: undefined });
     const result = buildLedgerHoldings([pos], []);
-    expect(result[0].marketValue).toBe(1500);
+    expect(result[0].marketValue).toBeUndefined();
   });
 
-  it("computes portfolio weight as pct of total", () => {
-    const p1 = makePosition({ ticker: "AAPL", shares: 10, current_price: 100 });
-    const p2 = makePosition({ ticker: "MSFT", shares: 10, current_price: 100 });
+  it("returns undefined marketValue when current_price is 0 and no market_value", () => {
+    const pos = makePosition({ shares: 10, current_price: 0, avg_cost: 150, market_value: undefined });
+    const result = buildLedgerHoldings([pos], []);
+    expect(result[0].marketValue).toBeUndefined();
+  });
+
+  it("does not use avg_cost as a current value proxy", () => {
+    // avg_cost is cost basis, not current value — must never appear as marketValue
+    const pos = makePosition({ shares: 5, current_price: undefined, avg_cost: 200, market_value: undefined });
+    const result = buildLedgerHoldings([pos], []);
+    expect(result[0].marketValue).toBeUndefined();
+    // Specifically must not equal shares × avg_cost
+    expect(result[0].marketValue).not.toBe(1000);
+  });
+
+  it("computes portfolio weight as pct of total from real current values only", () => {
+    const p1 = makePosition({ ticker: "AAPL", shares: 10, current_price: 100, market_value: undefined });
+    const p2 = makePosition({ ticker: "MSFT", shares: 10, current_price: 100, market_value: undefined });
     const result = buildLedgerHoldings([p1, p2], []);
     expect(result[0].portfolioWeight).toBeCloseTo(50, 1);
     expect(result[1].portfolioWeight).toBeCloseTo(50, 1);
+  });
+
+  it("returns undefined portfolioWeight when marketValue is unavailable", () => {
+    const pos = makePosition({ shares: 10, current_price: undefined, market_value: undefined });
+    const result = buildLedgerHoldings([pos], []);
+    expect(result[0].portfolioWeight).toBeUndefined();
+  });
+
+  it("excludes unavailable-value holdings from weight denominator", () => {
+    // p1 has real price; p2 has no price — p1 weight should be 100%, not inflated by p2
+    const p1 = makePosition({ ticker: "AAPL", shares: 10, current_price: 200, market_value: undefined });
+    const p2 = makePosition({ ticker: "NOPR", shares: 10, current_price: undefined, market_value: undefined });
+    const result = buildLedgerHoldings([p1, p2], []);
+    expect(result[0].portfolioWeight).toBeCloseTo(100, 1);
+    expect(result[1].portfolioWeight).toBeUndefined();
   });
 
   it("marks isStaleOrThin=true when no intel card", () => {
@@ -235,15 +271,15 @@ describe("buildCategoryExposure", () => {
     expect(rows[0].category).toBe("Large");
   });
 
-  it("renders missing theme data as Coming-Later — pct is undefined when value unavailable", () => {
-    // This represents a holding with no price data (category exists but value unavailable)
+  it("renders missing theme data as unavailable — pct is undefined when no current price", () => {
+    // Holding with no current_price and no market_value → marketValue undefined → pct undefined
     const holdings = buildLedgerHoldings(
-      [makePosition({ ticker: "A", category: "Crypto", shares: 0, current_price: 0, avg_cost: 0 })],
+      [makePosition({ ticker: "A", category: "Crypto", current_price: undefined, market_value: undefined })],
       []
     );
-    // With price=0 and shares=0, totalValue=0 → pct undefined
     const rows = buildCategoryExposure(holdings);
     expect(rows[0].pct).toBeUndefined();
+    expect(rows[0].valueUnavailable).toBe(true);
   });
 });
 

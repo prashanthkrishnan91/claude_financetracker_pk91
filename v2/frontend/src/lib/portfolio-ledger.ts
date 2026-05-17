@@ -117,15 +117,33 @@ export interface HoldingDrawerData {
 
 // ── Build helpers ─────────────────────────────────────────────────────────────
 
-/** Derive market value from a position. Mirrors HoldingsList computation. */
-function positionMarketValue(p: Position): number {
-  const price = p.current_price ?? p.avg_cost;
-  return p.shares * price;
+/**
+ * Derive current market value from a position honestly.
+ * Preference order:
+ *   1. Position.market_value when finite and positive (backend-computed certified value).
+ *   2. shares × current_price when current_price is finite and positive.
+ *   3. undefined — no fallback to avg_cost; cost-basis ≠ current value.
+ */
+function positionCurrentValue(p: Position): number | undefined {
+  if (typeof p.market_value === "number" && isFinite(p.market_value) && p.market_value > 0) {
+    return p.market_value;
+  }
+  if (
+    typeof p.current_price === "number" &&
+    isFinite(p.current_price) &&
+    p.current_price > 0 &&
+    p.shares > 0
+  ) {
+    return p.shares * p.current_price;
+  }
+  return undefined;
 }
 
 /**
  * Merge positions + intel cards into LedgerHolding rows.
  * Matches by ticker (case-insensitive). Missing Intel = hasIntel false.
+ * Portfolio weight is computed only from holdings with real current value;
+ * holdings with unavailable value get portfolioWeight = undefined.
  */
 export function buildLedgerHoldings(
   positions: Position[],
@@ -138,13 +156,16 @@ export function buildLedgerHoldings(
     intelByTicker.set(card.ticker.toUpperCase(), card);
   }
 
-  const rawValues = positions.map(p => positionMarketValue(p));
-  const totalValue = rawValues.reduce((s, v) => s + v, 0);
+  const rawValues = positions.map(p => positionCurrentValue(p));
+  // Only sum holdings with real current value; do not inflate total with undefined.
+  const totalValue = rawValues.reduce<number>((s, v) => s + (v ?? 0), 0);
 
   return positions.map((p, i) => {
     const card = intelByTicker.get(p.ticker.toUpperCase());
     const mv = rawValues[i];
-    const weight = totalValue > 0 ? (mv / totalValue) * 100 : undefined;
+    // Weight is only meaningful when this holding has a real value and there is a real total.
+    const weight =
+      mv !== undefined && totalValue > 0 ? (mv / totalValue) * 100 : undefined;
     const isStaleOrThin =
       !card || card.evidence_band === "THIN" || card.evidence_band === undefined;
 

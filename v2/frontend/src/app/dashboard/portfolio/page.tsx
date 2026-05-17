@@ -460,13 +460,30 @@ function HoldingDrawer({
         aria-hidden="true"
       />
 
-      {/* Drawer panel */}
+      {/* Drawer panel — mobile: bottom sheet; desktop: right-side drawer */}
       <aside
         role="dialog"
         aria-label={`${holding.ticker} thesis details`}
         aria-modal="true"
-        className="fixed right-0 top-0 bottom-0 z-50 w-full max-w-md bg-surface border-l border-border-subtle shadow-2xl overflow-y-auto flex flex-col"
+        className={cn(
+          // Mobile: full-width bottom sheet
+          "fixed inset-x-0 bottom-0 z-50",
+          "max-h-[88dvh] rounded-t-2xl",
+          "border-t border-border-subtle bg-surface",
+          "overflow-y-auto overscroll-contain flex flex-col",
+          "sheet-slide-up",
+          // Desktop: right-side drawer
+          "lg:inset-x-auto lg:right-0 lg:top-0 lg:bottom-0",
+          "lg:w-full lg:max-w-md lg:max-h-none",
+          "lg:rounded-none lg:border-t-0 lg:border-l",
+          "lg:[animation:none]",
+        )}
       >
+        {/* Mobile drag handle */}
+        <div className="lg:hidden flex justify-center pt-3 pb-1 shrink-0" aria-hidden="true">
+          <div className="w-8 h-1 rounded-full bg-border-strong opacity-50" />
+        </div>
+
         {/* Drawer header */}
         <div className="sticky top-0 bg-surface/95 backdrop-blur-sm border-b border-border-subtle px-5 py-4 flex items-start justify-between gap-3">
           <div className="min-w-0">
@@ -488,7 +505,7 @@ function HoldingDrawer({
           <button
             onClick={onClose}
             aria-label="Close thesis drawer"
-            className="shrink-0 text-text-muted hover:text-text-primary transition-colors mt-0.5 p-1"
+            className="shrink-0 text-text-muted hover:text-text-primary transition-colors mt-0.5 p-1 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
           >
             <CloseIcon className="w-4 h-4" />
           </button>

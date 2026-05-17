@@ -329,6 +329,26 @@ export function buildWhyThisMatters(card: IntelV3HeldCard): string | null {
   return null;
 }
 
+// ── Today secondary rail (Stage 4H) ──────────────────────────────────────────
+
+export interface SecondaryRailLink {
+  href: string;
+  label: string;
+  category: "alerts" | "journal" | "radar";
+}
+
+/**
+ * Static secondary rail links for the Today page.
+ * Always present — Alerts is reachable regardless of alert candidate count.
+ * Journal and Radar are desktop-SideNav destinations made reachable on mobile
+ * via this rail per §30.8.
+ */
+export const TODAY_SECONDARY_RAIL_LINKS: readonly SecondaryRailLink[] = [
+  { href: "/dashboard/alerts", label: "Watchtower", category: "alerts" },
+  { href: "/dashboard/journal", label: "Journal",    category: "journal" },
+  { href: "/dashboard/radar",   label: "Radar",      category: "radar"   },
+] as const;
+
 // ── Coming-Later slot caption ─────────────────────────────────────────────────
 
 /**

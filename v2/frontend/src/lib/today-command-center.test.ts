@@ -13,6 +13,7 @@ import {
   buildWhyThisMatters,
   buildLearningSlotCaption,
   buildTodayMiniBar,
+  TODAY_SECONDARY_RAIL_LINKS,
   type ActTodayResult,
   type DeployReadyResult,
   type WatchtowerSummaryResult,
@@ -786,5 +787,47 @@ describe("buildTodayMiniBar", () => {
     expect(mobileItems).toContain("/dashboard/deposits");    // Deploy
     expect(mobileItems).toContain("/dashboard/portfolio");   // Portfolio
     expect(mobileItems).not.toContain("/dashboard/alerts");  // Alerts: desktop only / Today links
+  });
+});
+
+// ── TODAY_SECONDARY_RAIL_LINKS (Stage 4H mobile reachability) ─────────────────
+
+describe("TODAY_SECONDARY_RAIL_LINKS", () => {
+  it("has exactly 3 destinations: alerts, journal, radar", () => {
+    expect(TODAY_SECONDARY_RAIL_LINKS).toHaveLength(3);
+    const categories = TODAY_SECONDARY_RAIL_LINKS.map(l => l.category);
+    expect(categories).toContain("alerts");
+    expect(categories).toContain("journal");
+    expect(categories).toContain("radar");
+  });
+
+  it("Alerts link is always present — static constant, not conditional on candidateCount", () => {
+    const alertLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "alerts");
+    expect(alertLink).toBeDefined();
+    expect(alertLink?.href).toBe("/dashboard/alerts");
+  });
+
+  it("Journal link is present and reachable from mobile Today rail", () => {
+    const journalLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "journal");
+    expect(journalLink).toBeDefined();
+    expect(journalLink?.href).toBe("/dashboard/journal");
+  });
+
+  it("Radar link is present and reachable from mobile Today rail", () => {
+    const radarLink = TODAY_SECONDARY_RAIL_LINKS.find(l => l.category === "radar");
+    expect(radarLink).toBeDefined();
+    expect(radarLink?.href).toBe("/dashboard/radar");
+  });
+
+  it("all links have non-empty labels", () => {
+    for (const link of TODAY_SECONDARY_RAIL_LINKS) {
+      expect(link.label.trim().length).toBeGreaterThan(0);
+    }
+  });
+
+  it("all hrefs start with /dashboard/", () => {
+    for (const link of TODAY_SECONDARY_RAIL_LINKS) {
+      expect(link.href).toMatch(/^\/dashboard\//);
+    }
   });
 });

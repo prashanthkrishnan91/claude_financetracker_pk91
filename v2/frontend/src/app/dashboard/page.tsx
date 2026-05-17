@@ -24,6 +24,7 @@ import {
   buildWatchtowerSummary,
   buildLearningSlotCaption,
   buildTodayMiniBar,
+  TODAY_SECONDARY_RAIL_LINKS,
   type ActTodayRow,
 } from "@/lib/today-command-center";
 
@@ -284,6 +285,27 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
+
+        {/* Secondary rail — mobile reachability for Alerts, Journal, Radar (§30.8) */}
+        {/* Alerts link is always present — not conditional on candidateCount */}
+        <nav aria-label="Study rooms" className="grid grid-cols-3 gap-2">
+          {TODAY_SECONDARY_RAIL_LINKS.map(link => (
+            <Link
+              key={link.href}
+              href={link.href}
+              className="card-glass p-3 flex flex-col items-center gap-1 hover:bg-surface-elevated/60 transition-colors duration-160 rounded-lg"
+            >
+              <span className="text-[10px] uppercase tracking-label text-text-muted">
+                {link.label}
+              </span>
+              {link.category === "alerts" && watchtowerSummary.candidateCount > 0 && (
+                <span className="text-xs font-semibold text-text-primary tabular-nums">
+                  {watchtowerSummary.candidateCount}
+                </span>
+              )}
+            </Link>
+          ))}
+        </nav>
 
         {/* What I Learned Today — Coming-Later chrome (Stage 6E activates) */}
         <section className="card-glass p-5 opacity-50">

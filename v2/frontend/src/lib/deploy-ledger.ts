@@ -302,3 +302,17 @@ export function buildGuardrailGroups(items: LedgerItem[]): GuardrailGroup[] {
 export function hasPortfolioShapeData(_items: LedgerItem[]): false {
   return false;
 }
+
+// ── Action card filter ────────────────────────────────────────────────────────
+
+/**
+ * True only for items that belong under "Recommended actions".
+ * Only pending/actionable items with a positive dollar amount surface as action cards.
+ * Blocked, suppressed, not_ready, not_evaluated_yet, and unknown items belong in
+ * the guardrail status rail only — never under "Recommended actions".
+ */
+export function isLedgerActionCardItem(item: LedgerItem): boolean {
+  if (item.action === "HOLD") return false;
+  if (item.dollarAmount == null || item.dollarAmount <= 0) return false;
+  return item.ledgerStatus.group === "pending" || item.ledgerStatus.group === "actionable";
+}

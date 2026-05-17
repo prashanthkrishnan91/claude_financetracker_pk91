@@ -51,6 +51,7 @@ import {
   buildLedgerItems,
   buildLedgerPlanState,
   buildGuardrailGroups,
+  isLedgerActionCardItem,
 } from "@/lib/deploy-ledger";
 
 const MAX_REASON_WORDS = 12;
@@ -363,10 +364,9 @@ function DeployV3Step2Section({
   const planState = buildLedgerPlanState(v3Plan?.rollup?.plan_readiness_status ?? null, v3Plan?.rollup ?? null);
   const guardrailGroups = buildGuardrailGroups(ledgerItems);
 
-  // Actionable items (BUY/TRIM/SELL with positive dollar amounts) surface as action cards.
-  const actionCardItems = ledgerItems.filter(
-    (it) => it.action !== "HOLD" && it.dollarAmount != null && it.dollarAmount > 0,
-  );
+  // Only pending/actionable items with positive amounts surface as action cards.
+  // Blocked, suppressed, not_ready, not_evaluated_yet, unknown → guardrail rail only.
+  const actionCardItems = ledgerItems.filter(isLedgerActionCardItem);
 
   return (
     <div className="space-y-4">

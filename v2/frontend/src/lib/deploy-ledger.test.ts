@@ -19,6 +19,7 @@ import {
   buildLedgerPlanState,
   buildGuardrailGroups,
   hasPortfolioShapeData,
+  isLedgerActionCardItem,
   type LedgerItem,
   type LedgerStatusGroup,
 } from "@/lib/deploy-ledger";
@@ -515,5 +516,81 @@ describe("No fake tax/wash-sale/target-allocation intelligence", () => {
         expect(result.sub.toLowerCase()).not.toContain(f);
       }
     }
+  });
+});
+
+// ── isLedgerActionCardItem ────────────────────────────────────────────────────
+
+function makeLedgerItem(overrides: Partial<LedgerItem> = {}): LedgerItem {
+  return {
+    ticker: "AAPL",
+    action: "BUY",
+    dollarAmount: 200,
+    ledgerStatus: mapFinalStatusToLedger("actionable_pending_tax"),
+    rationale: "Intel Buy recommendation.",
+    hasPortfolioShape: false,
+    ...overrides,
+  };
+}
+
+describe("isLedgerActionCardItem — action card filter", () => {
+  it("BUY + positive amount + pending group → true", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 500, ledgerStatus: mapFinalStatusToLedger("actionable_pending_tax") });
+    expect(isLedgerActionCardItem(item)).toBe(true);
+  });
+
+  it("TRIM + positive amount + pending group → true", () => {
+    const item = makeLedgerItem({ action: "TRIM", dollarAmount: 300, ledgerStatus: mapFinalStatusToLedger("pending_guardrails") });
+    expect(isLedgerActionCardItem(item)).toBe(true);
+  });
+
+  it("SELL + positive amount + pending group → true", () => {
+    const item = makeLedgerItem({ action: "SELL", dollarAmount: 100, ledgerStatus: mapFinalStatusToLedger("ready_pending_guardrails") });
+    expect(isLedgerActionCardItem(item)).toBe(true);
+  });
+
+  it("positive amount + blocked group → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 400, ledgerStatus: mapFinalStatusToLedger("blocked_cash") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("positive amount + suppressed group → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 200, ledgerStatus: mapFinalStatusToLedger("suppressed") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("positive amount + not_ready group → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 150, ledgerStatus: mapFinalStatusToLedger("not_ready") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("positive amount + not_evaluated_yet group → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 100, ledgerStatus: mapFinalStatusToLedger("not_evaluated_yet") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("positive amount + unknown group → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 100, ledgerStatus: mapFinalStatusToLedger("completely_unknown_status") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("HOLD + positive amount + pending group → false", () => {
+    const item = makeLedgerItem({ action: "HOLD", dollarAmount: 500, ledgerStatus: mapFinalStatusToLedger("actionable_pending_tax") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("null dollar amount → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: null, ledgerStatus: mapFinalStatusToLedger("actionable_pending_tax") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("zero dollar amount → false", () => {
+    const item = makeLedgerItem({ action: "BUY", dollarAmount: 0, ledgerStatus: mapFinalStatusToLedger("actionable_pending_tax") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
+  });
+
+  it("informational_hold (HOLD) → false even with positive amount", () => {
+    const item = makeLedgerItem({ action: "HOLD", dollarAmount: 200, ledgerStatus: mapFinalStatusToLedger("informational_hold") });
+    expect(isLedgerActionCardItem(item)).toBe(false);
   });
 });

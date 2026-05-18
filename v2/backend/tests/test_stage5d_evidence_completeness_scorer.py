@@ -235,7 +235,7 @@ def _make_comparable_fact(
     period: str = "Q1-2025",
     as_of: Optional[str] = None,
     is_quote_grounded: bool = False,
-    fact_kind: str = "metric",
+    fact_kind: str = "metric_observation",
     source_index: int = 0,
 ) -> FactRecord:
     sp: dict[str, Any] = {"claim_key": claim_key, "value": value}
@@ -256,7 +256,7 @@ def _make_comparable_fact(
 def _make_noncomparable_fact() -> FactRecord:
     """A fact with no claim_key/metric_name and no value field."""
     return FactRecord(
-        fact_kind="observation",
+        fact_kind="quality_observation",
         structured_payload={"note": "revenue grew substantially"},
     )
 
@@ -347,13 +347,13 @@ class TestPartialBand:
         sources = [_make_source("sec_filing")]
         facts = [
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "revenue", "value": 100.0, "period": "Q1-2025"},
                 period="Q1-2025",
                 is_quote_grounded=True,
             ),
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "revenue", "value": 200.0, "period": "Q1-2025"},
                 period="Q1-2025",
                 is_quote_grounded=True,
@@ -369,7 +369,7 @@ class TestPartialBand:
         sources = [_make_source("sec_filing")]
         facts = [
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "revenue", "value": 100.0},
                 is_quote_grounded=True,
             )
@@ -645,13 +645,13 @@ class TestWriteArtifactIntegration:
         svc = self._svc(db)
         conflicting_facts = [
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "eps", "value": 1.0, "period": "Q1-2025"},
                 period="Q1-2025",
                 is_quote_grounded=True,
             ),
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "eps", "value": 2.5, "period": "Q1-2025"},
                 period="Q1-2025",
                 is_quote_grounded=True,
@@ -751,7 +751,7 @@ class TestEdgeCases:
         sources = [_make_source("sec_filing")]
         facts = [
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"claim_key": "price", "value": 150.0, "as_of": "2025-01-15"},
                 as_of="2025-01-15",
                 is_quote_grounded=True,
@@ -766,7 +766,7 @@ class TestEdgeCases:
         sources = [_make_source("vendor_fundamentals")]
         facts = [
             FactRecord(
-                fact_kind="metric",
+                fact_kind="metric_observation",
                 structured_payload={"metric_name": "pe_ratio", "value": 22.5, "period": "TTM"},
                 period="TTM",
                 is_quote_grounded=True,

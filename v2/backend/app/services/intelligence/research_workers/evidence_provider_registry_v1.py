@@ -13,7 +13,7 @@ Design principles:
   - Disabled providers must NEVER be called by the evidence provider router.
 
 Providers registered in Stage 5G:
-  - sec_edgar       FREE / OFFICIAL            — sec_filing, fundamentals (existing provider)
+  - sec_edgar       FREE / OFFICIAL            — sec_filing only (XBRL/company-facts = future lane)
   - yfinance        FREE / UNOFFICIAL_AGGREGATOR — fundamentals, technicals, news_sentiment
   - fred            FREE / OFFICIAL            — macro; metadata-only (no client yet)
   - fmp             PAID / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate

@@ -1,0 +1,372 @@
+"""Stage 5B — Source Credibility Registry v1.
+
+Deterministic, typed registry that classifies research artifact sources by
+capability band. No numeric scores, no LLM calls, no external API calls, no IO.
+
+Architecture contracts (non-negotiable):
+  - No fake credibility scores (no 87/100, no numeric confidence values).
+  - No LLM calls, no external API calls, no IO of any kind.
+  - Cannot emit or imply Buy/Hold/Trim/Sell, price target, conviction,
+    allocation, deploy amount, or broker action.
+  - Same inputs always produce the same output (fully replayable/auditable).
+  - No-source artifacts are ALLOWED; they are assessed as UNKNOWN/INSUFFICIENT.
+  - safe_for_decision is never touched — remains False as DB enforces.
+  - Supports future Stage 5C contradiction detection and Stage 5D completeness
+    scoring via the per-source capability metadata, but does NOT implement them.
+
+Source kinds supported (matching migration 017 CHECK constraint):
+  sec_filing, transcript, vendor_calendar, news, vendor_fundamentals,
+  vendor_estimates, peer_set_def, press_release, company_disclosure, other
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Dict, FrozenSet, List, Optional
+
+SOURCE_CREDIBILITY_REGISTRY_VERSION = "source_credibility_registry.v1"
+
+# ── Authority levels ──────────────────────────────────────────────────────────
+
+
+class AuthorityLevel(str, Enum):
+    """Named capability bands. Not numeric scores."""
+    PRIMARY_AUTHORITY = "PRIMARY_AUTHORITY"
+    # SEC filings — mandatory regulatory disclosure. Strongest available
+    # authority for company-stated facts at the filing date.
+
+    COMPANY_AUTHORED = "COMPANY_AUTHORED"
+    # Company-originated material (press releases, transcripts, disclosures).
+    # Authoritative for company-stated guidance; not independent verification.
+
+    VENDOR_DERIVED = "VENDOR_DERIVED"
+    # Vendor-provided data (fundamentals, estimates, calendar, peer sets).
+    # Derived/normalized by a third-party; freshness and provenance required.
+
+    EDITORIAL_CONTEXT = "EDITORIAL_CONTEXT"
+    # Editorial/journalistic content (news).
+    # Contextual evidence only. Cannot be authoritative for financial facts.
+
+    UNKNOWN = "UNKNOWN"
+    # Source kind is 'other', unrecognized, or lacks enough metadata.
+
+
+# Ordering for strongest_authority_level computation (higher = stronger).
+_AUTHORITY_RANK: Dict[AuthorityLevel, int] = {
+    AuthorityLevel.PRIMARY_AUTHORITY: 4,
+    AuthorityLevel.COMPANY_AUTHORED: 3,
+    AuthorityLevel.VENDOR_DERIVED: 2,
+    AuthorityLevel.EDITORIAL_CONTEXT: 1,
+    AuthorityLevel.UNKNOWN: 0,
+}
+
+
+# ── Source authorship categories ──────────────────────────────────────────────
+
+
+class SourceAuthorship(str, Enum):
+    """Who wrote / produced the source material."""
+    OFFICIAL_REGULATORY = "OFFICIAL_REGULATORY"   # Mandatory regulatory (SEC)
+    COMPANY_AUTHORED = "COMPANY_AUTHORED"          # Company-originated material
+    THIRD_PARTY_VENDOR = "THIRD_PARTY_VENDOR"      # Vendor-provided data
+    EDITORIAL = "EDITORIAL"                        # Journalistic / editorial
+    UNKNOWN = "UNKNOWN"
+
+
+# ── Claim categories ──────────────────────────────────────────────────────────
+# Labels for what a source can and cannot support.
+# These are metadata labels only — not decision inputs.
+
+CLAIM_FINANCIAL_STATED_FACT = "financial_stated_fact"
+CLAIM_REGULATORY_DISCLOSURE = "regulatory_disclosure"
+CLAIM_COMPANY_GUIDANCE = "company_guidance"
+CLAIM_VENDOR_DERIVED_METRIC = "vendor_derived_metric"
+CLAIM_EDITORIAL_CONTEXT = "editorial_context"
+CLAIM_EARNINGS_CALENDAR = "earnings_calendar"
+CLAIM_PEER_BENCHMARK = "peer_benchmark"
+
+# These claim categories are NEVER supported by any source in this registry.
+_CLAIMS_NEVER_SUPPORTED: FrozenSet[str] = frozenset({
+    "future_performance",
+    "price_target",
+    "conviction",
+    "allocation",
+    "buy_sell_action",
+    "final_action",
+    "recommendation",
+})
+
+
+# ── Per-source-kind canonical definitions ─────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class SourceKindDefinition:
+    """Immutable canonical definition for one source_kind value."""
+    source_kind: str
+    authority_level: AuthorityLevel
+    authorship: SourceAuthorship
+    claim_categories_supported: FrozenSet[str]
+    limitations: str
+
+
+_REGISTRY: Dict[str, SourceKindDefinition] = {
+    "sec_filing": SourceKindDefinition(
+        source_kind="sec_filing",
+        authority_level=AuthorityLevel.PRIMARY_AUTHORITY,
+        authorship=SourceAuthorship.OFFICIAL_REGULATORY,
+        claim_categories_supported=frozenset({
+            CLAIM_FINANCIAL_STATED_FACT,
+            CLAIM_REGULATORY_DISCLOSURE,
+        }),
+        limitations=(
+            "SEC filings are authoritative for company-stated regulatory facts at "
+            "the filing date. They do not prove future performance, price direction, "
+            "or investment outcome."
+        ),
+    ),
+    "company_disclosure": SourceKindDefinition(
+        source_kind="company_disclosure",
+        authority_level=AuthorityLevel.COMPANY_AUTHORED,
+        authorship=SourceAuthorship.COMPANY_AUTHORED,
+        claim_categories_supported=frozenset({
+            CLAIM_FINANCIAL_STATED_FACT,
+            CLAIM_COMPANY_GUIDANCE,
+        }),
+        limitations=(
+            "Company disclosures are company-authored and may include forward-looking "
+            "statements. They do not constitute independent verification of financial facts."
+        ),
+    ),
+    "press_release": SourceKindDefinition(
+        source_kind="press_release",
+        authority_level=AuthorityLevel.COMPANY_AUTHORED,
+        authorship=SourceAuthorship.COMPANY_AUTHORED,
+        claim_categories_supported=frozenset({
+            CLAIM_COMPANY_GUIDANCE,
+        }),
+        limitations=(
+            "Press releases are company-authored promotional material. They are "
+            "contextual evidence, not independent financial verification."
+        ),
+    ),
+    "transcript": SourceKindDefinition(
+        source_kind="transcript",
+        authority_level=AuthorityLevel.COMPANY_AUTHORED,
+        authorship=SourceAuthorship.COMPANY_AUTHORED,
+        claim_categories_supported=frozenset({
+            CLAIM_FINANCIAL_STATED_FACT,
+            CLAIM_COMPANY_GUIDANCE,
+        }),
+        limitations=(
+            "Earnings transcripts contain company-stated guidance and management "
+            "commentary. Guidance is forward-looking and subject to material change."
+        ),
+    ),
+    "vendor_fundamentals": SourceKindDefinition(
+        source_kind="vendor_fundamentals",
+        authority_level=AuthorityLevel.VENDOR_DERIVED,
+        authorship=SourceAuthorship.THIRD_PARTY_VENDOR,
+        claim_categories_supported=frozenset({
+            CLAIM_VENDOR_DERIVED_METRIC,
+        }),
+        limitations=(
+            "Vendor fundamentals are derived/normalized by a third-party provider. "
+            "Freshness and provenance metadata are required for meaningful use. "
+            "Methodology differences across vendors may cause metric discrepancies."
+        ),
+    ),
+    "vendor_estimates": SourceKindDefinition(
+        source_kind="vendor_estimates",
+        authority_level=AuthorityLevel.VENDOR_DERIVED,
+        authorship=SourceAuthorship.THIRD_PARTY_VENDOR,
+        claim_categories_supported=frozenset({
+            CLAIM_VENDOR_DERIVED_METRIC,
+        }),
+        limitations=(
+            "Vendor estimates are analyst consensus aggregations by a third-party. "
+            "They represent expectations, not guarantees of future performance. "
+            "Estimate revisions can be material; freshness is required."
+        ),
+    ),
+    "vendor_calendar": SourceKindDefinition(
+        source_kind="vendor_calendar",
+        authority_level=AuthorityLevel.VENDOR_DERIVED,
+        authorship=SourceAuthorship.THIRD_PARTY_VENDOR,
+        claim_categories_supported=frozenset({
+            CLAIM_EARNINGS_CALENDAR,
+            CLAIM_VENDOR_DERIVED_METRIC,
+        }),
+        limitations=(
+            "Vendor calendar data may change; event dates are subject to revision. "
+            "Confirm official dates via company announcements."
+        ),
+    ),
+    "peer_set_def": SourceKindDefinition(
+        source_kind="peer_set_def",
+        authority_level=AuthorityLevel.VENDOR_DERIVED,
+        authorship=SourceAuthorship.THIRD_PARTY_VENDOR,
+        claim_categories_supported=frozenset({
+            CLAIM_PEER_BENCHMARK,
+            CLAIM_VENDOR_DERIVED_METRIC,
+        }),
+        limitations=(
+            "Peer set definitions are vendor-defined or analyst-curated. "
+            "Peer composition choices affect benchmark comparisons materially."
+        ),
+    ),
+    "news": SourceKindDefinition(
+        source_kind="news",
+        authority_level=AuthorityLevel.EDITORIAL_CONTEXT,
+        authorship=SourceAuthorship.EDITORIAL,
+        claim_categories_supported=frozenset({
+            CLAIM_EDITORIAL_CONTEXT,
+        }),
+        limitations=(
+            "News sources are editorial/contextual evidence only. They cannot serve "
+            "as authoritative sources of financial truth. Corroboration from official "
+            "or vendor-derived sources is required before any financial claim from "
+            "news can be elevated."
+        ),
+    ),
+    "other": SourceKindDefinition(
+        source_kind="other",
+        authority_level=AuthorityLevel.UNKNOWN,
+        authorship=SourceAuthorship.UNKNOWN,
+        claim_categories_supported=frozenset(),
+        limitations=(
+            "Source kind 'other' or unrecognized source kinds cannot be classified "
+            "without additional provider metadata."
+        ),
+    ),
+}
+
+# All recognized source kinds (subset of migration 017 allowed values).
+KNOWN_SOURCE_KINDS: FrozenSet[str] = frozenset(_REGISTRY.keys()) - frozenset({"other"})
+
+
+# ── Assessment dataclasses ────────────────────────────────────────────────────
+
+
+@dataclass
+class SourceCredibilityAssessment:
+    """Full deterministic credibility assessment for one artifact's sources.
+
+    Replayable: same sources list always produces the same assessment.
+    Never contains Buy/Hold/Trim/Sell, price target, conviction, or allocation.
+    """
+    registry_version: str
+    has_sources: bool
+    is_insufficient: bool          # True when no sources OR all UNKNOWN
+    source_count: int
+    source_kind_counts: Dict[str, int]
+    strongest_authority_level: str  # AuthorityLevel value string
+    per_source_assessments: List[Dict[str, Any]]
+    aggregate_limitations: List[str]
+    claim_categories_any_source_supports: List[str]
+    claim_categories_no_source_can_support: List[str]
+
+    def to_dict(self) -> Dict[str, Any]:
+        """Plain dict for JSON serialization into artifact payload.
+
+        Key 'source_credibility_assessment' is NOT in WORKER_FORBIDDEN_PAYLOAD_KEYS.
+        """
+        return {
+            "registry_version": self.registry_version,
+            "has_sources": self.has_sources,
+            "is_insufficient": self.is_insufficient,
+            "source_count": self.source_count,
+            "source_kind_counts": self.source_kind_counts,
+            "strongest_authority_level": self.strongest_authority_level,
+            "per_source_assessments": self.per_source_assessments,
+            "aggregate_limitations": self.aggregate_limitations,
+            "claim_categories_any_source_supports": self.claim_categories_any_source_supports,
+            "claim_categories_no_source_can_support": self.claim_categories_no_source_can_support,
+        }
+
+
+# ── Public registry API ───────────────────────────────────────────────────────
+
+
+def get_source_kind_definition(source_kind: str) -> SourceKindDefinition:
+    """Return the canonical definition for source_kind; falls back to 'other'."""
+    return _REGISTRY.get(source_kind, _REGISTRY["other"])
+
+
+def assess_artifact_sources(
+    sources: List[Any],
+) -> SourceCredibilityAssessment:
+    """Deterministically assess credibility for a list of SourceRecord-compatible objects.
+
+    Args:
+        sources: List of objects with at least .source_kind and .provider_name
+                 attributes (compatible with contracts.SourceRecord).
+                 Empty list → UNKNOWN/INSUFFICIENT assessment.
+
+    Returns:
+        SourceCredibilityAssessment — always non-None, fully replayable.
+        Same inputs always produce the same output.
+    """
+    if not sources:
+        return SourceCredibilityAssessment(
+            registry_version=SOURCE_CREDIBILITY_REGISTRY_VERSION,
+            has_sources=False,
+            is_insufficient=True,
+            source_count=0,
+            source_kind_counts={},
+            strongest_authority_level=AuthorityLevel.UNKNOWN.value,
+            per_source_assessments=[],
+            aggregate_limitations=[
+                "No sources provided — credibility is UNKNOWN/INSUFFICIENT."
+            ],
+            claim_categories_any_source_supports=[],
+            claim_categories_no_source_can_support=sorted(_CLAIMS_NEVER_SUPPORTED),
+        )
+
+    per_source: List[Dict[str, Any]] = []
+    authority_levels: List[AuthorityLevel] = []
+    kind_counts: Dict[str, int] = {}
+    all_supported: set = set()
+    limitations_seen: List[str] = []
+    limitations_set: set = set()
+
+    for idx, source in enumerate(sources):
+        sk = (getattr(source, "source_kind", None) or "other").strip() or "other"
+        provider = getattr(source, "provider_name", None)
+
+        defn = get_source_kind_definition(sk)
+        authority_levels.append(defn.authority_level)
+        kind_counts[sk] = kind_counts.get(sk, 0) + 1
+        all_supported.update(defn.claim_categories_supported)
+
+        if defn.limitations not in limitations_set:
+            limitations_set.add(defn.limitations)
+            limitations_seen.append(defn.limitations)
+
+        per_source.append({
+            "source_index": idx,
+            "source_kind": sk,
+            "provider_name": provider,
+            "authority_level": defn.authority_level.value,
+            "authorship": defn.authorship.value,
+            "claim_categories_supported": sorted(defn.claim_categories_supported),
+            "claim_categories_never_supported": sorted(_CLAIMS_NEVER_SUPPORTED),
+            "limitations": defn.limitations,
+            "is_known_source_kind": sk in KNOWN_SOURCE_KINDS,
+        })
+
+    strongest = max(authority_levels, key=lambda lvl: _AUTHORITY_RANK.get(lvl, 0))
+    is_insufficient = strongest == AuthorityLevel.UNKNOWN
+
+    return SourceCredibilityAssessment(
+        registry_version=SOURCE_CREDIBILITY_REGISTRY_VERSION,
+        has_sources=True,
+        is_insufficient=is_insufficient,
+        source_count=len(sources),
+        source_kind_counts=kind_counts,
+        strongest_authority_level=strongest.value,
+        per_source_assessments=per_source,
+        aggregate_limitations=limitations_seen,
+        claim_categories_any_source_supports=sorted(all_supported),
+        claim_categories_no_source_can_support=sorted(_CLAIMS_NEVER_SUPPORTED),
+    )

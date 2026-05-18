@@ -901,6 +901,50 @@ class IntelV3Service:
         if freshness_gate_summary:
             freshness_gate_summary["has_pending_worker_jobs"] = (queued_count > 0)
 
+        # Dispatch enabled evidence lanes for all portfolio tickers on explicit run.
+        # Fires regardless of analyst freshness — evidence lane population is independent
+        # of the analyst refresh cycle. Fire-and-forget; does not delay the 202 response.
+        # Only reachable from explicit POST /run, not page-load GET.
+        from .intel_v3_evidence_lane_orchestrator_v1 import (
+            run_enabled_evidence_lanes_for_portfolio,
+        )
+        _evidence_run_id = str(uuid.uuid4())
+        _evidence_user_id = str(self.user_id)
+        _evidence_tickers = list(tickers)
+        _evidence_client = self.client
+        _evidence_settings = get_settings()
+
+        # Log before scheduling so Railway can confirm dispatch was attempted even if
+        # the background thread fails or the process terminates before it completes.
+        logger.info(
+            "intel_v3_evidence_lanes_dispatch_scheduled user_id=%s "
+            "total_tickers=%d parent_intel_run_id=%s",
+            _evidence_user_id,
+            len(_evidence_tickers),
+            _evidence_run_id,
+        )
+
+        async def _run_evidence_lanes_safe() -> None:
+            try:
+                await _asyncio.to_thread(
+                    run_enabled_evidence_lanes_for_portfolio,
+                    _evidence_user_id,
+                    _evidence_tickers,
+                    _evidence_client,
+                    _evidence_run_id,
+                    _evidence_settings,
+                )
+            except Exception as _exc:
+                logger.warning(
+                    "intel_v3_evidence_lanes_dispatch_failed user_id=%s "
+                    "parent_intel_run_id=%s error=%s",
+                    _evidence_user_id,
+                    _evidence_run_id,
+                    _exc,
+                )
+
+        _asyncio.create_task(_run_evidence_lanes_safe())
+
         return {
             "status": status,
             "queued_ticker_count": queued_count,

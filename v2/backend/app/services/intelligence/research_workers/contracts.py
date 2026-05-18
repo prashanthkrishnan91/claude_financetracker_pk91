@@ -141,6 +141,7 @@ class SourceRecord:
     quote_or_excerpt: Optional[str] = None
     section_reference: Optional[str] = None
     source_hash: Optional[str] = None
+    fetched_at: Optional[str] = None  # ISO 8601; None → DB uses DEFAULT NOW()
 
 
 @dataclass

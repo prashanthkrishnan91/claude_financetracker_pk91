@@ -736,3 +736,209 @@ class TestQueryActiveArtifacts:
         svc = ResearchArtifactServiceV1(_InsertFailClient(), _USER_ID)
         result = svc.write_artifact(_make_output())
         assert result is None
+
+
+# ── Tests: Fail-closed deactivation ──────────────────────────────────────────
+
+class TestFailClosedDeactivation:
+    def test_deactivation_failure_returns_none_no_insert(self) -> None:
+        """If deactivation (UPDATE) fails, write returns None without inserting."""
+        inserts_attempted: list[dict] = []
+
+        class _Q:
+            def __init__(self, name: str) -> None:
+                self._name = name
+                self._op: Optional[str] = None
+                self._row: Optional[dict] = None
+
+            def select(self, *a: Any) -> "_Q": self._op = "select"; return self
+            def insert(self, row: dict) -> "_Q":
+                self._op = "insert"; self._row = row; return self
+            def update(self, *a: Any) -> "_Q": self._op = "update"; return self
+            def eq(self, *a: Any) -> "_Q": return self
+            def neq(self, *a: Any) -> "_Q": return self
+            def order(self, *a: Any, **kw: Any) -> "_Q": return self
+            def limit(self, *a: Any) -> "_Q": return self
+
+            def execute(self) -> Any:
+                if self._op == "update" and self._name == "research_artifacts":
+                    raise RuntimeError("DB connection lost during deactivation")
+                if self._op == "insert" and self._name == "research_artifacts":
+                    row = dict(self._row or {})
+                    row.setdefault("id", str(uuid.uuid4()))
+                    inserts_attempted.append(row)
+                    class _Res:
+                        data = [row]
+                    return _Res()
+                class _E:
+                    data = []
+                return _E()
+
+        class _DeactivateFailClient:
+            def table(self, name: str) -> _Q:
+                return _Q(name)
+
+        svc = ResearchArtifactServiceV1(_DeactivateFailClient(), _USER_ID)
+        result = svc.write_artifact(_make_output())
+
+        assert result is None, "Deactivation failure must cause write to return None"
+        assert len(inserts_attempted) == 0, (
+            "No artifact insert must occur when deactivation fails (fail-closed)"
+        )
+
+    def test_deactivation_success_allows_insert(self) -> None:
+        """When deactivation succeeds, write proceeds and returns an artifact_id."""
+        service, db = _make_service()
+        # First write seeds an existing active row.
+        first_id = service.write_artifact(_make_output(key_suffix="v1"))
+        assert first_id is not None
+
+        # Second write with different key must deactivate v1 and insert v2.
+        second_id = service.write_artifact(_make_output(key_suffix="v2"))
+        assert second_id is not None
+        assert second_id != first_id
+
+
+# ── Tests: User-scoped replay idempotency ────────────────────────────────────
+
+class TestUserScopedIdempotency:
+    def test_same_key_different_users_both_succeed(self) -> None:
+        """Two users sharing the same replay_idempotency_key must each get their own artifact."""
+        db = _FakeDB()
+        client = _FakeClient(db)
+
+        svc_a = ResearchArtifactServiceV1(client, "user-alpha")
+        svc_b = ResearchArtifactServiceV1(client, "user-beta")
+
+        # Build both outputs with identical idempotency key.
+        output_a = _make_output(key_suffix="shared")
+        shared_key = output_a.replay_idempotency_key
+
+        fp_b = compute_input_fingerprint({"ticker": _TICKER, "user": "beta"})
+        output_b = WorkerOutput(
+            worker_run_id=str(uuid.uuid4()),
+            ticker=_TICKER,
+            artifact_type="filing_risk",
+            skill_pack="test_pack",
+            scope_kind="ticker",
+            artifact_payload={"evidence_summary": "beta evidence"},
+            sources=[],
+            facts=[],
+            audit_events=[AuditEventRecord(tool_call="test_run", status="completed")],
+            evidence_summary_plain_english="Beta evidence.",
+            limitations_or_missing_evidence=[],
+            confidence_or_trust_level="MEDIUM",
+            freshness_status="FRESH",
+            input_fingerprint=fp_b,
+            replay_idempotency_key=shared_key,
+        )
+
+        id_a = svc_a.write_artifact(output_a)
+        id_b = svc_b.write_artifact(output_b)
+
+        assert id_a is not None, "User alpha write must succeed"
+        assert id_b is not None, "User beta write must succeed with same key"
+        assert id_a != id_b, "Each user must get a distinct artifact_id"
+
+    def test_same_user_same_key_idempotent(self) -> None:
+        """Same user + same key = idempotent skip (existing id returned)."""
+        service, db = _make_service()
+        output = _make_output(key_suffix="idem")
+
+        first_id = service.write_artifact(output)
+        second_id = service.write_artifact(output)
+
+        assert first_id == second_id
+        assert len(db.inserts.get("research_artifacts", [])) == 1
+
+
+# ── Tests: fetched_at provenance ─────────────────────────────────────────────
+
+class TestFetchedAtProvenance:
+    def test_explicit_fetched_at_written_to_source_row(self) -> None:
+        """SourceRecord.fetched_at is written to research_artifact_sources when set."""
+        service, db = _make_service()
+        fetched = "2026-01-15T12:00:00+00:00"
+        sources = [
+            SourceRecord(
+                source_kind="sec_filing",
+                provider_name="edgar",
+                fetched_at=fetched,
+            )
+        ]
+        artifact_id = service.write_artifact(_make_output(sources=sources, key_suffix="fa1"))
+        assert artifact_id is not None
+
+        inserted_sources = db.inserts.get("research_artifact_sources", [])
+        assert len(inserted_sources) == 1
+        assert inserted_sources[0].get("fetched_at") == fetched
+
+    def test_omitted_fetched_at_not_in_source_row(self) -> None:
+        """When SourceRecord.fetched_at is None, fetched_at key is absent (DB uses DEFAULT)."""
+        service, db = _make_service()
+        sources = [SourceRecord(source_kind="transcript", provider_name="transcripts_co")]
+        service.write_artifact(_make_output(sources=sources, key_suffix="fa2"))
+
+        inserted_sources = db.inserts.get("research_artifact_sources", [])
+        assert len(inserted_sources) == 1
+        assert "fetched_at" not in inserted_sources[0], (
+            "fetched_at must not be written when SourceRecord.fetched_at is None"
+        )
+
+    def test_fetched_at_not_written_for_other_source_fields_absent(self) -> None:
+        """fetched_at is independent of other optional source fields."""
+        service, db = _make_service()
+        fetched = "2026-03-01T08:30:00+00:00"
+        sources = [
+            SourceRecord(
+                source_kind="api_call",
+                provider_name="market_data",
+                fetched_at=fetched,
+                source_url=None,   # other optional fields absent
+                source_hash=None,
+            )
+        ]
+        service.write_artifact(_make_output(sources=sources, key_suffix="fa3"))
+
+        inserted_sources = db.inserts.get("research_artifact_sources", [])
+        assert inserted_sources[0].get("fetched_at") == fetched
+        assert "source_url" not in inserted_sources[0]
+        assert "source_hash" not in inserted_sources[0]
+
+
+# ── Tests: SQL migration 023 content ─────────────────────────────────────────
+
+class TestMigration023Content:
+    def _load_sql(self) -> str:
+        import pathlib
+        sql_path = (
+            pathlib.Path(__file__).parent.parent.parent
+            / "database"
+            / "023_research_artifact_store_stage5a_extend.sql"
+        )
+        return sql_path.read_text()
+
+    def test_migration_023_contains_active_lane_uniqueness_index(self) -> None:
+        """Migration 023 must declare the active evidence-lane uniqueness index."""
+        content = self._load_sql()
+        assert "uq_research_artifacts_active_lane" in content
+        assert "COALESCE" in content
+        assert "is_active = TRUE" in content or "is_active=TRUE" in content
+
+    def test_migration_023_contains_user_scoped_replay_index(self) -> None:
+        """Migration 023 must declare the user-scoped replay idempotency index."""
+        content = self._load_sql()
+        assert "uq_research_artifacts_replay_user_active" in content
+        assert "user_id" in content
+
+    def test_migration_023_drops_global_replay_index(self) -> None:
+        """Migration 023 must drop the global replay index from 017."""
+        content = self._load_sql()
+        assert "uq_research_artifacts_replay_active" in content
+        assert "DROP INDEX" in content
+
+    def test_migration_023_contains_duplicate_guard(self) -> None:
+        """Migration 023 must have a loud-fail duplicate guard before creating the lane index."""
+        content = self._load_sql()
+        assert "RAISE EXCEPTION" in content
+        assert "duplicate" in content.lower() or "unique_violation" in content

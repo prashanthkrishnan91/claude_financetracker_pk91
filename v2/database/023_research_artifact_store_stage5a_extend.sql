@@ -136,6 +136,98 @@ COMMENT ON COLUMN public.research_artifacts.artifact_type IS
     'Original 12 types from 017; Stage 5A adds technical_signal, sentiment_event, '
     'company_strategy, journal_pattern. See 023_research_artifact_store_stage5a_extend.sql.';
 
+
+-- ============================================================================
+-- Fix: Replace global replay idempotency index (017) with user-scoped one.
+--
+-- The original index in 017 was:
+--   CREATE UNIQUE INDEX uq_research_artifacts_replay_active
+--       ON public.research_artifacts (replay_idempotency_key) WHERE is_active = TRUE;
+--
+-- That index is GLOBAL — two different users with the same idempotency key
+-- would collide. The correct scope is (user_id, replay_idempotency_key).
+-- ============================================================================
+
+DROP INDEX IF EXISTS public.uq_research_artifacts_replay_active;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_artifacts_replay_user_active
+    ON public.research_artifacts (user_id, replay_idempotency_key)
+    WHERE is_active = TRUE;
+
+COMMENT ON INDEX public.uq_research_artifacts_replay_user_active IS
+    'User-scoped idempotency: one active artifact per (user_id, replay_idempotency_key). '
+    'Replaces the global index from 017 which lacked user_id scoping.';
+
+
+-- ============================================================================
+-- Add active evidence-lane uniqueness index.
+--
+-- At most one active artifact is allowed per
+-- (user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, '')).
+-- The clean-replacement logic in research_artifact_service_v1 deactivates
+-- superseded rows before insert; this index is the DB-level hard enforcement.
+--
+-- Duplicate guard: fail loudly if existing data would violate the new index.
+-- This prevents the index from silently masking a data integrity problem.
+-- ============================================================================
+
+DO $$
+DECLARE
+    _dup_count int;
+BEGIN
+    SELECT COUNT(*) INTO _dup_count
+    FROM (
+        SELECT user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, '')
+        FROM public.research_artifacts
+        WHERE is_active = TRUE
+        GROUP BY user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, '')
+        HAVING COUNT(*) > 1
+    ) dups;
+
+    IF _dup_count > 0 THEN
+        RAISE EXCEPTION
+            'Cannot add active-lane uniqueness index: % duplicate active-artifact group(s) '
+            'exist for (user_id, artifact_type, skill_pack, scope_kind, ticker). '
+            'Resolve duplicates (set is_active=FALSE on stale rows) before re-running.',
+            _dup_count
+            USING ERRCODE = 'unique_violation';
+    END IF;
+END $$;
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_research_artifacts_active_lane
+    ON public.research_artifacts (
+        user_id,
+        artifact_type,
+        skill_pack,
+        scope_kind,
+        COALESCE(ticker, '')
+    )
+    WHERE is_active = TRUE;
+
+COMMENT ON INDEX public.uq_research_artifacts_active_lane IS
+    'At most one active artifact per (user_id, artifact_type, skill_pack, scope_kind, ticker). '
+    'DB-level enforcement of the clean-replacement policy in research_artifact_service_v1.';
+
+
+-- ============================================================================
+-- Manual apply additions (append to existing checklist in file header):
+--   6. Verify user-scoped replay index exists:
+--        SELECT indexname FROM pg_indexes
+--        WHERE tablename = 'research_artifacts'
+--          AND indexname = 'uq_research_artifacts_replay_user_active';
+--        -- Expected: 1 row.
+--   7. Verify old global replay index was dropped:
+--        SELECT indexname FROM pg_indexes
+--        WHERE tablename = 'research_artifacts'
+--          AND indexname = 'uq_research_artifacts_replay_active';
+--        -- Expected: 0 rows.
+--   8. Verify active-lane uniqueness index exists:
+--        SELECT indexname FROM pg_indexes
+--        WHERE tablename = 'research_artifacts'
+--          AND indexname = 'uq_research_artifacts_active_lane';
+--        -- Expected: 1 row.
+-- ============================================================================
+
 -- ============================================================================
 -- END 023_research_artifact_store_stage5a_extend.sql
 -- ============================================================================

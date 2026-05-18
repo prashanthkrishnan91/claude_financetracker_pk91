@@ -117,14 +117,26 @@ class ResearchArtifactServiceV1:
                 )
                 return existing_id
 
-            # Step 3: Clean replacement — deactivate superseded active artifacts.
+            # Step 3: Fail-closed clean replacement — deactivate superseded active artifacts.
+            # If deactivation fails we abort the write (return None) so we never insert
+            # a new active row while a stale active row still exists.
             if output.ticker:
-                self._deactivate_superseded(
-                    ticker=output.ticker,
-                    artifact_type=output.artifact_type,
-                    skill_pack=output.skill_pack,
-                    new_idempotency_key=output.replay_idempotency_key,
-                )
+                try:
+                    self._deactivate_superseded(
+                        ticker=output.ticker,
+                        artifact_type=output.artifact_type,
+                        skill_pack=output.skill_pack,
+                        new_idempotency_key=output.replay_idempotency_key,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.error(
+                        "research_artifact_service_deactivation_failed_abort_write "
+                        "ticker=%s type=%s error=%s",
+                        output.ticker,
+                        output.artifact_type,
+                        exc,
+                    )
+                    return None
 
             # Step 4: Insert the new artifact.
             artifact_id = self._writer.write(output)
@@ -215,39 +227,32 @@ class ResearchArtifactServiceV1:
         """Deactivate all active artifacts for (user_id, ticker, artifact_type, skill_pack)
         that do NOT have the new idempotency key.
 
-        Fail-soft: errors are logged but do not abort the write.
+        Fail-closed: exceptions propagate to write_artifact, which catches them and
+        returns None without proceeding to insert.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
-        try:
-            result = (
-                self._client.table("research_artifacts")
-                .update({
-                    "is_active": False,
-                    "invalidated_at": now_iso,
-                    "invalidation_reason": "superseded_by_new_write",
-                })
-                .eq("user_id", self._user_id)
-                .eq("ticker", ticker)
-                .eq("artifact_type", artifact_type)
-                .eq("skill_pack", skill_pack)
-                .eq("is_active", True)
-                .neq("replay_idempotency_key", new_idempotency_key)
-                .execute()
-            )
-            deactivated = len(result.data or [])
-            if deactivated > 0:
-                logger.info(
-                    "research_artifact_service_clean_replacement ticker=%s type=%s "
-                    "deactivated_count=%d new_key=%s",
-                    ticker,
-                    artifact_type,
-                    deactivated,
-                    new_idempotency_key,
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "research_artifact_service_deactivate_fail ticker=%s type=%s error=%s",
+        result = (
+            self._client.table("research_artifacts")
+            .update({
+                "is_active": False,
+                "invalidated_at": now_iso,
+                "invalidation_reason": "superseded_by_new_write",
+            })
+            .eq("user_id", self._user_id)
+            .eq("ticker", ticker)
+            .eq("artifact_type", artifact_type)
+            .eq("skill_pack", skill_pack)
+            .eq("is_active", True)
+            .neq("replay_idempotency_key", new_idempotency_key)
+            .execute()
+        )
+        deactivated = len(result.data or [])
+        if deactivated > 0:
+            logger.info(
+                "research_artifact_service_clean_replacement ticker=%s type=%s "
+                "deactivated_count=%d new_key=%s",
                 ticker,
                 artifact_type,
-                exc,
+                deactivated,
+                new_idempotency_key,
             )

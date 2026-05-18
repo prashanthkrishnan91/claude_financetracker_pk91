@@ -6,11 +6,9 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 5A** — Research Artifact Store production apply + writer scaffolding (PR open on `claude/stage-5a-artifact-store-54VcQ`). SQL migrations 017 + 023 required. `research_artifact_service_v1.py` (narrow typed API, idempotency + clean replacement policies). 44 new tests.
+- **Stage 5B** — Source credibility registry.
 
 ## Later (Stage 5 backend)
-
-- Stage 5B — Source credibility registry.
 - Stage 5C — Contradiction detection.
 - Stage 5D — Evidence completeness scoring.
 - Stage 5E — Truth adapter.
@@ -32,6 +30,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 5A — Research Artifact Store substrate + writer scaffolding** (merged PR #367 on 2026-05-18). SQL migrations 017 + 023 required (not yet applied to Supabase). `research_artifact_service_v1.py` — narrow typed API with user-scoped idempotency, scope-aware clean replacement (full evidence lane `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))`), portfolio-scope IS NULL filter, `query_active_artifacts()` helper. `WorkerOutput.ticker` → `Optional[str]`. 60 tests.
 
 - **Stage 4C — Intel Investment Committee Redesign** (merged PR #361). `IntelV3Primitives.tsx` + redesigned Cockpit/Card/Drawer. `action-*` token routing; accessible drawer; 56 contract tests. No backend, no SQL.
 

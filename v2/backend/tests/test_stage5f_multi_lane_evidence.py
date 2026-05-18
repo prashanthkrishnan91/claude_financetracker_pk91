@@ -449,7 +449,7 @@ class TestTechnicalsAdapter:
     def test_adapt_technicals_rich_data_produces_sources_and_facts(self) -> None:
         result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
         assert len(result.sources) == 1
-        assert result.sources[0].source_kind == "vendor_fundamentals"
+        assert result.sources[0].source_kind == "other"
         assert result.sources[0].provider_name == "yfinance"
         assert len(result.facts) >= 4
 
@@ -904,3 +904,181 @@ class TestEarningsReviewerPathUnchanged:
         assert "contradiction_assessment" in payload
         assert "evidence_completeness_assessment" in payload
         assert "truth_usability_assessment" in payload
+
+
+# ── Criterion 15: runner.py entrypoint for Stage 5F lanes ────────────────────
+
+class TestRunnerEntrypoint:
+    """runner.run_evidence_lanes_for_ticker() is the explicit backend callable.
+
+    Proves it is reachable from the established research-worker runner module,
+    delegates to run_all_evidence_lanes(), goes through ResearchArtifactServiceV1,
+    and honours the global kill switch.
+    """
+
+    def test_entrypoint_importable_from_runner(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        assert callable(run_evidence_lanes_for_ticker)
+
+    def test_entrypoint_returns_dict_with_all_lanes_when_enabled(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = _settings_all_on()
+        results = run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        assert LANE_FUNDAMENTALS in results
+        assert LANE_TECHNICALS in results
+        assert LANE_NEWS_SENTIMENT in results
+        assert all(v is not None for v in results.values())
+        assert len(db.artifact_inserts()) == 3
+
+    def test_entrypoint_global_kill_switch_off_returns_empty_dict(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = Settings(
+            supabase_url="http://fake", supabase_anon_key="fake",
+            supabase_service_role_key="fake", supabase_jwt_secret="fake",
+            encryption_key="fake",
+            intel_v3_research_workers_enabled=False,
+            intel_v3_fundamentals_evidence_enabled=True,
+            intel_v3_technicals_evidence_enabled=True,
+            intel_v3_news_sentiment_evidence_enabled=True,
+        )
+        results = run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        assert results == {}
+        assert db.artifact_inserts() == []
+
+    def test_entrypoint_all_flags_off_writes_nothing(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = _settings_all_off()
+        results = run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        # Global flag off → empty dict (never reaches lane dispatcher)
+        assert results == {}
+        assert db.artifact_inserts() == []
+
+    def test_entrypoint_does_not_import_artifact_store_writer_directly(self) -> None:
+        import ast, os
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(
+            base, "app", "services", "intelligence", "research_workers", "runner.py"
+        )
+        with open(path) as f:
+            source = f.read()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    assert alias.name != "ArtifactStoreWriter", (
+                        "runner.py must not import ArtifactStoreWriter directly"
+                    )
+
+    def test_entrypoint_writes_artifacts_with_all_four_enrichment_layers(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = _settings_all_on()
+        run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        for row in db.artifact_inserts():
+            payload = row["payload"]
+            assert "source_credibility_assessment" in payload
+            assert "contradiction_assessment" in payload
+            assert "evidence_completeness_assessment" in payload
+            assert "truth_usability_assessment" in payload
+
+    def test_entrypoint_safe_for_decision_false_in_all_artifacts(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = _settings_all_on()
+        run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        for row in db.artifact_inserts():
+            assert row.get("safe_for_decision") is False
+
+    def test_entrypoint_no_intel_v3_snapshots_writes(self) -> None:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+        db = FakeSupabaseClient()
+        s = _settings_all_on()
+        run_evidence_lanes_for_ticker(
+            user_id="user-123", ticker="AAPL", db_client=db, settings=s,
+            _fundamentals_fetch_fn=lambda t: _FUNDAMENTALS_RAW,
+            _technicals_fetch_fn=lambda t: _TECHNICALS_RAW,
+            _news_sentiment_fetch_fn=lambda t: _NEWS_ITEMS,
+        )
+        assert db.snapshot_writes() == []
+
+    def test_entrypoint_no_decide_call(self) -> None:
+        import ast, os
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(
+            base, "app", "services", "intelligence", "research_workers", "runner.py"
+        )
+        with open(path) as f:
+            source = f.read()
+        tree = ast.parse(source)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                assert "decision_policy" not in (node.module or ""), \
+                    "runner.py must not import from decision_policy"
+
+
+# ── Criterion 16: Technicals source_kind is not vendor_fundamentals ───────────
+
+class TestTechnicalsSourceKind:
+
+    def test_technicals_source_kind_is_not_vendor_fundamentals(self) -> None:
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        for src in result.sources:
+            assert src.source_kind != "vendor_fundamentals", (
+                "Technicals must not classify price history as vendor_fundamentals; "
+                "use 'other' since no price/technical source_kind exists in the DB enum."
+            )
+
+    def test_technicals_source_kind_is_other(self) -> None:
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        assert len(result.sources) == 1
+        assert result.sources[0].source_kind == "other"
+
+    def test_fundamentals_source_kind_remains_vendor_fundamentals(self) -> None:
+        result = adapt_fundamentals(_FUNDAMENTALS_RAW, "AAPL", _FAKE_AT)
+        assert result.sources[0].source_kind == "vendor_fundamentals"
+
+    def test_news_source_kind_remains_news(self) -> None:
+        result = adapt_news_sentiment(_NEWS_ITEMS, "AAPL", _FAKE_AT)
+        assert all(s.source_kind == "news" for s in result.sources)

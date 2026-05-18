@@ -261,8 +261,13 @@ def adapt_technicals(
             limitations=["yfinance returned empty price history — no technical metrics available."],
         )
 
+    # source_kind="other": no dedicated price/technical kind exists in the DB enum
+    # (sec_filing, transcript, vendor_calendar, news, vendor_fundamentals,
+    # vendor_estimates, peer_set_def, press_release, company_disclosure, other).
+    # "other" is the honest choice; "vendor_fundamentals" would misclassify
+    # price history as a fundamentals data feed.
     source = SourceRecord(
-        source_kind="vendor_fundamentals",
+        source_kind="other",
         provider_name="yfinance",
         provider_version=_TECHNICALS_MODEL_VERSION,
         source_published_at=fetched_at,

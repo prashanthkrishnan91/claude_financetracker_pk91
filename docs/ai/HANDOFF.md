@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 4G — Alert Center Polish + Journal + Radar + Capsules; **PR open**; next: Stage 4H)
+Last updated: 2026-05-17 (Stage 5A — Research Artifact Store substrate + writer scaffolding; **PR open**; next: Stage 5B)
 
 ## Purpose
 
@@ -112,28 +112,37 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 020 has been applied in Supabase (`watchtower_alert_candidates` table + `cooldown_until` column on `action_feedback_events`).
 - SQL migration 021 applied — `alert_delivery_outbox` table is live (0 rows expected until eligible candidates flow through).
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
+- SQL migration 017 (`research_artifact_store_v1`) — **NOT YET APPLIED** to Supabase. Must be applied before or with migration 023.
+- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **NOT YET APPLIED**. Apply after 017. Extends `artifact_type` CHECK with Stage 5A types.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Current design stage — Stage 4H (PR open) — Stage 4 COMPLETE after merge
+## Stage 5A — Research Artifact Store (PR open)
 
-**Stage 4A–4G** — all merged. Stage 4C (PR #361), 4D (PR #362), 4E (PR #363), 4F (PR #364), 4G (PR #365). See summaries below.
+**Stage 4 is COMPLETE** (Stage 4H merged as PR #366 on 2026-05-17). **Stage 5A** is the current work item.
 
-**Stage 4G — Alert Center Polish + Journal + Radar + Capsules** — merged PR #365. Frontend-only. Alert Center Review Queue, Journal route, Radar route, DeterministicCapsules, 71 tests. No backend/SQL.
+**Stage 5A status**: PR open on branch `claude/stage-5a-artifact-store-54VcQ`.
 
-**Stage 4H — Mobile Atelier + Motion Polish** — PR open on branch `claude/stage-4h-mobile-polish-fEszR`. The final Stage 4 pass. Frontend-only.
+**What landed in Stage 5A:**
+- SQL migration `023_research_artifact_store_stage5a_extend.sql` — extends the `artifact_type` CHECK constraint (from migration 017) with 4 new Stage 5A worker types: `technical_signal`, `sentiment_event`, `company_strategy`, `journal_pattern`. Existing 12 types unchanged. Migration 017 must be applied first (it is not yet applied to Supabase).
+- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — narrow typed public API for Stage 5A. Wraps `ArtifactStoreWriter` with two explicit write policies:
+  - **Idempotency**: same `replay_idempotency_key` → skip, return existing artifact_id, no duplicate.
+  - **Clean replacement**: new artifact for same (user_id, ticker, artifact_type, skill_pack) → deactivate prior active artifact (`is_active=False, invalidated_at=now, invalidation_reason='superseded_by_new_write'`), insert new. At most one active artifact per (user_id, ticker, artifact_type, skill_pack) at any time.
+  - `query_active_artifacts()` — safe read helper returning non-payload summary fields only.
+  - NEVER imports decide() or writes intel_v3_snapshots. safe_for_decision always False.
+- `v2/backend/tests/test_stage5a_research_artifact_store.py` — 44 focused tests covering all Stage 5A acceptance criteria: idempotency, clean replacement, provenance fields, freshness/as_of/expires_at, schema_version required, replay/run identity, forbidden key rejection, no Intel v3 decision mutation, all Stage 5A artifact_type values accepted.
 
-What landed in Stage 4H (PR open):
-- `src/components/navigation/BottomNav.tsx`: Mobile BottomNav trimmed to 4-tab focused subset: Today / Intel / Deploy / Portfolio. `MOBILE_NAV_ITEMS` constant replaces full `NAV_ITEMS` for mobile. Desktop SideNav unchanged (all destinations including Alerts, DRIP, Import, Settings, Journal, Radar).
-- `src/components/cards/IntelV3Drawer.tsx`: Responsive drawer — mobile bottom sheet (`max-h-[88dvh]`, `rounded-t-2xl`, `sheet-slide-up`) + desktop right-side drawer. Mobile drag handle. `aria-modal/role=dialog` preserved.
-- `src/components/cards/DataHealthDrawer.tsx`: Same responsive bottom-sheet pattern.
-- `src/app/dashboard/portfolio/page.tsx`: `HoldingDrawer` — same responsive bottom-sheet pattern. `focus-visible` ring on close button.
-- `src/app/globals.css`: `@keyframes sheet-slide-up` + `.sheet-slide-up` class + `prefers-reduced-motion` collapse to `animation: none`.
-- `src/lib/today-command-center.ts`: `buildTodayMiniBar()` — deterministic mini-bar (Act Today / Deploy / Watchtower priority). `TODAY_SECONDARY_RAIL_LINKS` — static 3-item constant: Watchtower/Alerts, Journal, Radar.
-- `src/app/dashboard/page.tsx`: Mobile sticky mini-bar (`lg:hidden sticky top-[61px]`). Static secondary rail (`<nav>` grid) with Watchtower, Journal, Radar links — Alerts always present regardless of alert count; Journal and Radar reachable on mobile via this rail.
-- `src/lib/today-command-center.test.ts`: 67 tests (12 miniBar + 6 secondary-rail + 1 BottomNav structural). 3 pre-existing suite failures unchanged.
-- No backend changes, no SQL, no env/provider/email/LLM/package dependency changes. ALERT_EMAIL_DRY_RUN remains true.
+**SQL required**: YES — two migrations must be applied in order:
+1. `v2/database/017_research_artifact_store_v1.sql` — creates research_artifacts, research_artifact_sources, research_artifact_facts, worker_audit_events tables with RLS, triggers, indexes.
+2. `v2/database/023_research_artifact_store_stage5a_extend.sql` — extends artifact_type CHECK.
 
-**Stage 4 is complete after Stage 4H merge.**
+**Existing infrastructure reused (not duplicated):**
+- `research_workers/contracts.py` — WorkerInput, WorkerOutput, SourceRecord, FactRecord, forbidden key validation, idempotency key computation.
+- `research_workers/artifact_store_writer.py` — DB writer with select-then-insert idempotency.
+- `research_workers/artifact_observability.py` — Phase 4 read-only observability.
+- `research_workers/artifact_truth_readiness.py` — Phase 5 truth adapter readiness contract.
+- `v3/evidence_artifact_contract_v1.py` — EvidenceArtifact mappers.
+
+**Stage 5B next**: Source credibility registry. Stage 5A schema fields (`confidence_or_trust_level`, `deterministic_inputs_allowed`, `safe_for_decision`) leave clean hooks for Stage 5B to fill in without schema churn.
 
 **Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
 

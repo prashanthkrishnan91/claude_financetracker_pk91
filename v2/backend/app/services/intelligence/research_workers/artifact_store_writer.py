@@ -126,10 +126,11 @@ class ArtifactStoreWriter:
         if output.model_version:
             row["model_version"] = output.model_version
 
-        # Step 1: Check for an existing active artifact before inserting.
+        # Step 1: Check for an existing active artifact before inserting (user-scoped).
         existing = (
             self._client.table("research_artifacts")
             .select("id")
+            .eq("user_id", self._user_id)
             .eq("replay_idempotency_key", output.replay_idempotency_key)
             .eq("is_active", True)
             .limit(1)
@@ -164,6 +165,7 @@ class ArtifactStoreWriter:
             fallback = (
                 self._client.table("research_artifacts")
                 .select("id")
+                .eq("user_id", self._user_id)
                 .eq("replay_idempotency_key", output.replay_idempotency_key)
                 .eq("is_active", True)
                 .limit(1)
@@ -200,6 +202,8 @@ class ArtifactStoreWriter:
                 row["section_reference"] = src.section_reference
             if src.source_hash:
                 row["source_hash"] = src.source_hash
+            if src.fetched_at:
+                row["fetched_at"] = src.fetched_at
 
             result = self._client.table("research_artifact_sources").insert(row).execute()
             data = result.data or []

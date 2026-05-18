@@ -6,17 +6,10 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 4D** — Evidence Shell + Source UX + Data Health Drawer (PR open on `claude/stage-4d-evidence-health-jsZQj`). Pure evidence helpers, trust/evidence primitives, Data Health drawer accessible from Today + Intel, enhanced IntelV3Drawer evidence shell. Coming-Later: source credibility tier, contradiction detection, evidence completeness score. 82 new tests. No backend, no SQL.
+- **Stage 5A** — Research Artifact Store production apply + writer scaffolding (PR open on `claude/stage-5a-artifact-store-54VcQ`). SQL migrations 017 + 023 required. `research_artifact_service_v1.py` (narrow typed API, idempotency + clean replacement policies). 44 new tests.
 
-## Later (Stage 4 sequence)
-- **Stage 4E** — Deploy Ledger Redesign (mandatory "How this decision changes portfolio shape" capsule).
-- **Stage 4F** — Portfolio Living Thesis Ledger.
-- **Stage 4G** — Alert Center polish + Journal chrome + Radar destination + buildable capsule subset (Coming-Later for Lessons / What I learned today archive / Radar candidates).
-- **Stage 4H** — Mobile Atelier + Motion Polish + a11y audit.
+## Later (Stage 5 backend)
 
-## Later (Stage 5 backend reservation — not active Stage 4 work)
-
-- Stage 5A — Research Artifact Store production apply + writer scaffolding.
 - Stage 5B — Source credibility registry.
 - Stage 5C — Contradiction detection.
 - Stage 5D — Evidence completeness scoring.

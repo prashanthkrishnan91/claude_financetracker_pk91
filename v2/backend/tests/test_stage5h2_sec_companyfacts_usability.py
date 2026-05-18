@@ -3,25 +3,33 @@
 Acceptance criteria:
   1.  Real company with multiple periods of Revenue/NetIncome/EPS is NOT marked
       SUPPRESSED_CONTRADICTED merely because values differ across periods.
-  2.  Same concept + same period + same unit, conflicting values from the same
-      filing → still flagged as contradiction (true intra-filing contradiction).
+  2.  Same concept + same duration identity + same period + same unit, conflicting
+      values → still flagged as contradiction (true contradiction preserved).
   3.  ETFs/funds/crypto/no-CIK/no-companyfacts → no placeholder artifact written.
   4.  ResearchArtifactServiceV1 still enriches valid SEC CompanyFacts artifacts
       with all four layers: credibility, contradiction, completeness, usability.
   5.  At least one valid SEC CompanyFacts artifact can reach USABLE or
       USABLE_WITH_LIMITATIONS when evidence is source-grounded and non-contradicted.
-  6.  Same-filing same-period quarterly vs YTD values (different start dates)
-      do NOT trigger false contradictions after parser deduplication.
-  7.  True intra-filing same-period contradiction still detected after dedup fix.
+  6.  Quarterly and YTD facts from the same 10-Q filing (different start/end dates)
+      are BOTH preserved and do NOT trigger false contradiction because the adapter
+      encodes duration identity in the FactRecord.period string.
+  7.  True same-duration conflicting values still trigger contradiction.
   8.  Existing Stage 5H run / dispatcher behavior unchanged for real companies.
 
-Root cause fixed (Stage 5H.2):
+Root cause fixed (Stage 5H.2 — duration-aware period identity):
   SEC XBRL 10-Q filings report the same metric (e.g., Revenue) for the same
   fy+fp (e.g., fy=2023, fp="Q3") twice — once as the 3-month quarterly figure
-  and once as the 9-month YTD figure. Both share the same accn, filed date, fy,
-  and fp. The parser now deduplicates by (accn, fy, fp), keeping the entry with
-  the most recent start date (shortest period = most specific quarterly figure),
-  so the contradiction detector never sees two values for the same group key.
+  (start=2023-04-02) and once as the 9-month YTD figure (start=2022-09-25).
+  Both share the same accn, filed date, fy, and fp.
+
+  Fix: The parser preserves period_start/period_end/frame from each XBRL entry
+  and uses exact-identity deduplication (accn, fy, fp, start, end) — true
+  duplicates are dropped, distinct durations are kept. The adapter then encodes
+  duration in the FactRecord.period string:
+    quarterly:  "2023-Q3:2023-04-02..2023-07-01"
+    YTD:        "2023-Q3:2022-09-25..2023-07-01"
+  Different period strings → different contradiction group keys → no false
+  SUPPRESSED_CONTRADICTED for legitimate multi-duration XBRL filings.
 
 No production Supabase access. All DB interactions use FakeSupabaseClient.
 """
@@ -168,6 +176,9 @@ def _obs(
     fiscal_period: str = "FY",
     filed: str = "2023-11-03",
     form: str = "10-K",
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
+    frame: Optional[str] = None,
 ) -> MetricObservation:
     return MetricObservation(
         taxonomy="us-gaap",
@@ -180,6 +191,9 @@ def _obs(
         fiscal_period=fiscal_period,
         filed=filed,
         accession_number=accession,
+        period_start=period_start,
+        period_end=period_end,
+        frame=frame,
     )
 
 
@@ -341,10 +355,12 @@ class TestMultiPeriodNotContradicted:
         )
 
 
-# ── 2. Parser deduplication: quarterly vs YTD same-filing fix ─────────────────
+# ── 2. Parser duration preservation: quarterly AND YTD both kept ──────────────
 
-class TestParserQuarterlyVsYTDDeduplication:
-    """Verify the parser deduplication correctly handles same-filing quarterly vs YTD entries."""
+class TestParserDurationPreservation:
+    """Verify the parser preserves BOTH quarterly and YTD observations from the
+    same 10-Q filing (they have different start/end XBRL duration identity),
+    and that the adapter's duration-aware period strings prevent false contradictions."""
 
     def _raw_json_with_quarterly_and_ytd(self, accn: str) -> dict:
         """Build a CompanyFacts JSON with Q3 quarterly AND Q3 YTD Revenue entries."""
@@ -355,7 +371,7 @@ class TestParserQuarterlyVsYTDDeduplication:
                         "label": "Revenues",
                         "units": {
                             "USD": [
-                                # Q3 quarterly (3 months): start > filed - 4 months
+                                # Q3 quarterly (3 months)
                                 {
                                     "accn": accn,
                                     "fy": 2023,
@@ -366,7 +382,7 @@ class TestParserQuarterlyVsYTDDeduplication:
                                     "end": "2023-07-01",
                                     "val": 81_797_000_000.0,
                                 },
-                                # Q3 YTD (9 months): same fy, fp, accn, filed — DIFFERENT start
+                                # Q3 YTD (9 months): same fy, fp, accn, filed — DIFFERENT start+end
                                 {
                                     "accn": accn,
                                     "fy": 2023,
@@ -384,21 +400,26 @@ class TestParserQuarterlyVsYTDDeduplication:
             }
         }
 
-    def test_parser_deduplicates_same_filing_same_period_keeps_shortest(self):
-        """After deduplication, only the quarterly (shorter) entry is kept.
-        The YTD entry (same accn, fy, fp but older start) is dropped."""
+    def test_parser_preserves_both_quarterly_and_ytd_different_durations(self):
+        """Both Q3 quarterly and Q3 YTD facts must be preserved — they have different
+        XBRL duration identity (different start dates) and are distinct measurements."""
         accn = "ACC-Q3-2023"
         raw = self._raw_json_with_quarterly_and_ytd(accn)
         result = parse_companyfacts(raw, source_accessions=frozenset({accn}))
         assert result.is_success
         revs = [o for o in result.observations if o.tag == "Revenues"]
-        assert len(revs) == 1, (
-            f"Parser should keep exactly 1 Revenue observation per (accn, fy, fp), got {len(revs)}"
+        assert len(revs) == 2, (
+            f"Parser should preserve BOTH quarterly and YTD observations (got {len(revs)}). "
+            "Different start/end dates = different XBRL duration dimensions."
         )
-        # The kept observation must be the quarterly (81_797M), not the YTD (244_776M)
-        assert revs[0].value == 81_797_000_000.0, (
-            "Parser should prefer the entry with the most recent start (shortest period)"
-        )
+        values = {o.value for o in revs}
+        assert 81_797_000_000.0 in values, "Quarterly value must be preserved"
+        assert 244_776_000_000.0 in values, "YTD value must be preserved"
+        # Each observation carries its own duration identity
+        starts = {o.period_start for o in revs}
+        assert len(starts) == 2, "Both distinct start dates must be preserved"
+        assert "2023-04-02" in starts, "Quarterly start date must be present"
+        assert "2022-09-25" in starts, "YTD start date must be present"
 
     def test_two_separate_filings_two_periods_both_kept(self):
         """Observations from DIFFERENT accessions for DIFFERENT periods are both kept."""
@@ -443,15 +464,49 @@ class TestParserQuarterlyVsYTDDeduplication:
         assert 383_285_000_000.0 in values
         assert 81_797_000_000.0 in values
 
+    def test_adapter_period_strings_differ_for_quarterly_vs_ytd(self):
+        """After parse→adapt, Q3 quarterly and Q3 YTD must produce DIFFERENT period strings.
+        Different period strings → different group keys → no false contradiction."""
+        accn = "ACC-Q3-2023"
+        raw = self._raw_json_with_quarterly_and_ytd(accn)
+        parse_result = parse_companyfacts(raw, source_accessions=frozenset({accn}))
+        assert len([o for o in parse_result.observations if o.tag == "Revenues"]) == 2
+
+        provider = SecEdgarProviderResult(
+            ticker="TESTCO",
+            cik="0000111111",
+            filings=[_filing(accn, "10-Q", "2023-08-04")],
+            fetch_status="success",
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+            request_count=3,
+            companyfacts_parse_result=parse_result,
+        )
+        adapter_result = adapt_sec_companyfacts(
+            provider, "TESTCO", datetime.now(timezone.utc).isoformat()
+        )
+        rev_facts = [
+            f for f in adapter_result.facts
+            if f.structured_payload.get("metric_name") == "Revenues"
+        ]
+        assert len(rev_facts) == 2
+        periods = {f.period for f in rev_facts}
+        assert len(periods) == 2, (
+            "Quarterly and YTD must produce different period strings so the "
+            "contradiction detector assigns them to different groups. "
+            f"Got: {periods}"
+        )
+        # Both should contain the duration suffix (start..end)
+        for p in periods:
+            assert ".." in p, f"Period string should contain duration suffix: {p!r}"
+
     def test_contradiction_detector_not_triggered_by_quarterly_vs_ytd(self):
-        """After parser deduplication, two Revenue observations from the same filing
-        (quarterly Q3 vs YTD Q3) no longer reach the contradiction detector together."""
+        """After parse→adapt, Q3 quarterly and Q3 YTD Revenue facts are BOTH present
+        with different period strings — no false contradiction is triggered."""
         accn = "ACC-Q3"
         raw = self._raw_json_with_quarterly_and_ytd(accn)
         result = parse_companyfacts(raw, source_accessions=frozenset({accn}))
         assert result.is_success
 
-        # Build full provider result and run through adapter → contradiction detection
         provider = SecEdgarProviderResult(
             ticker="TESTCO",
             cik="0000111111",
@@ -464,29 +519,72 @@ class TestParserQuarterlyVsYTDDeduplication:
         adapter_result = adapt_sec_companyfacts(
             provider, "TESTCO", datetime.now(timezone.utc).isoformat()
         )
+        # Both quarterly and YTD facts are present
+        rev_facts = [
+            f for f in adapter_result.facts
+            if f.structured_payload.get("metric_name") == "Revenues"
+        ]
+        assert len(rev_facts) == 2, (
+            "Both quarterly and YTD facts must survive parse→adapt"
+        )
         contradiction = detect_contradictions(adapter_result.facts)
         assert contradiction.has_contradictions is False, (
-            "Quarterly vs YTD in same filing must not trigger contradiction after parser dedup"
+            "Quarterly vs YTD in same filing must not trigger contradiction: "
+            "they have different duration-aware period strings"
         )
 
+    def test_exact_duplicate_entry_deduplicated(self):
+        """True exact-identity duplicate entries (same accn, fy, fp, start, end) are
+        deduplicated to one — no contradiction spam from genuinely identical entries."""
+        accn = "ACC-DUP"
+        raw = {
+            "facts": {
+                "us-gaap": {
+                    "Revenues": {
+                        "label": "Revenues",
+                        "units": {
+                            "USD": [
+                                # Exact duplicate (same everything)
+                                {
+                                    "accn": accn, "fy": 2023, "fp": "FY",
+                                    "form": "10-K", "filed": "2023-11-03",
+                                    "start": "2022-09-25", "end": "2023-09-30",
+                                    "val": 383_285_000_000.0,
+                                },
+                                {
+                                    "accn": accn, "fy": 2023, "fp": "FY",
+                                    "form": "10-K", "filed": "2023-11-03",
+                                    "start": "2022-09-25", "end": "2023-09-30",
+                                    "val": 383_285_000_000.0,  # identical
+                                },
+                            ]
+                        },
+                    }
+                }
+            }
+        }
+        result = parse_companyfacts(raw, source_accessions=frozenset({accn}))
+        revs = [o for o in result.observations if o.tag == "Revenues"]
+        assert len(revs) == 1, "Exact duplicates must be deduplicated to one"
 
-# ── 3. True intra-filing contradiction still detected ─────────────────────────
+
+# ── 3. True same-duration contradiction still detected ────────────────────────
 
 class TestTrueSameFilingContradictionDetected:
-    """Same concept + same period + same unit + same filing with conflicting values
+    """Same concept + same duration + same period + same unit with conflicting values
     must still be flagged as a contradiction (genuine data integrity issue)."""
 
-    def test_same_period_same_filing_conflicting_values_flagged(self):
-        """Two FactRecords for the SAME tag, same period, same as_of, different values.
-        This is a true contradiction (same source, same period, different claim) and
-        must still be detected."""
+    def test_same_period_same_duration_conflicting_values_flagged(self):
+        """Two FactRecords with the SAME duration-aware period string and conflicting
+        values must still be detected as a true contradiction."""
         from app.services.intelligence.research_workers.contracts import FactRecord
+        # Both have the same period (including duration suffix) and same as_of
         fact_a = FactRecord(
             fact_kind="metric_observation",
             structured_payload={
                 "metric_name": "Revenues", "value": 383_285_000_000.0, "unit": "USD",
             },
-            period="2023-FY",
+            period="2023-FY:2022-09-25..2023-09-30",
             as_of="2023-11-03",
         )
         fact_b = FactRecord(
@@ -494,15 +592,45 @@ class TestTrueSameFilingContradictionDetected:
             structured_payload={
                 "metric_name": "Revenues", "value": 999_999_000_000.0, "unit": "USD",
             },
-            period="2023-FY",
+            period="2023-FY:2022-09-25..2023-09-30",
             as_of="2023-11-03",
         )
         assessment = detect_contradictions([fact_a, fact_b])
         assert assessment.is_evaluable is True
         assert assessment.has_contradictions is True, (
-            "Same concept + same period + same as_of with conflicting values must be flagged"
+            "Same concept + same duration-aware period + same as_of with "
+            "conflicting values must be flagged as contradiction"
         )
         assert assessment.contradiction_count >= 1
+
+    def test_same_duration_different_accessions_same_filed_date_contradicts(self):
+        """Two observations from different filings (different accessions) but with
+        the same metric, same duration (start+end), and same filed date produce
+        the same period string → true contradiction detected through adapt chain."""
+        obs_a = _obs(
+            tag="Revenues", value=383_285_000_000.0, unit="USD",
+            accession="ACC-ORIG", fiscal_year=2023, fiscal_period="FY",
+            filed="2023-11-03", form="10-K",
+            period_start="2022-09-25", period_end="2023-09-30",
+        )
+        obs_b = _obs(
+            tag="Revenues", value=999_999_000_000.0, unit="USD",
+            accession="ACC-CONFLICT",  # different accession
+            fiscal_year=2023, fiscal_period="FY",
+            filed="2023-11-03",  # same filed date → same as_of
+            form="10-K",
+            period_start="2022-09-25", period_end="2023-09-30",  # same duration
+        )
+        filings = [_filing("ACC-ORIG"), _filing("ACC-CONFLICT")]
+        provider = _make_success_provider([obs_a, obs_b], filings=filings)
+        adapter_result = adapt_sec_companyfacts(
+            provider, "TESTCO", datetime.now(timezone.utc).isoformat()
+        )
+        assessment = detect_contradictions(adapter_result.facts)
+        assert assessment.has_contradictions is True, (
+            "Same metric + same duration + same filed date from different filings "
+            "with conflicting values must be detected as a true contradiction"
+        )
 
 
 # ── 4. ETF/no-CIK/no-companyfacts → no placeholder artifact ──────────────────

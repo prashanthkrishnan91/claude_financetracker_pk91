@@ -112,26 +112,35 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 020 has been applied in Supabase (`watchtower_alert_candidates` table + `cooldown_until` column on `action_feedback_events`).
 - SQL migration 021 applied — `alert_delivery_outbox` table is live (0 rows expected until eligible candidates flow through).
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
-- SQL migration 017 (`research_artifact_store_v1`) — **NOT YET APPLIED** to Supabase. Must be applied before or with migration 023.
-- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **NOT YET APPLIED**. Apply after 017. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
+- SQL migration 017 (`research_artifact_store_v1`) — **APPLIED** to Supabase. Creates `research_artifacts`, `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events` tables with RLS, triggers, indexes.
+- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5C — Contradiction Detector v1 (current PR)
+## Stage 5D — Evidence Completeness Scoring v1 (current PR)
 
-**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** is in PR (branch `claude/finance-tracker-v3-continue-WJCzK`). **Stage 5D** is next.
+**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** is in PR (branch `claude/finance-tracker-v3-continue-52cXd`). **Stage 5E** is next.
 
-**Stage 5C status**: PR open (2026-05-18).
+**SQL for migrations 017 and 023**: Both migrations were applied successfully to Supabase. Migration 017 creates the `research_artifacts` and related tables; migration 023 extends the `artifact_type` CHECK and adds uniqueness indexes.
+
+**Stage 5D status**: PR open (2026-05-18).
+
+**What landed in Stage 5D:**
+- `v2/backend/app/services/intelligence/v3/evidence_completeness_scorer_v1.py` — Pure deterministic evidence completeness scorer. No IO, no LLM, no external calls. Consumes `SourceCredibilityAssessment` (5B) and `ContradictionAssessment` (5C). Evaluates 8 requirements (present/missing/not_applicable): `has_at_least_one_source`, `has_known_or_contextual_source_credibility`, `has_at_least_one_fact`, `has_structured_claim_key_or_metric_name`, `has_time_context_period_or_as_of`, `has_quote_grounded_fact`, `has_no_detected_contradictions`, `has_comparable_fact_when_claim_is_metric_like`. Bands: COMPLETE / PARTIAL / THIN / NOT_EVALUABLE. No fake 0–100 scores. Includes per_fact_assessments (structural metadata only, no fact values).
+- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — Added Step 6: inject `score_evidence_completeness()` into `write_artifact()` after Steps 4 (credibility) and 5 (contradiction). Every new artifact payload now includes `evidence_completeness_assessment`. Steps 4 and 5 remain intact.
+- `v2/backend/tests/test_stage5d_evidence_completeness_scorer.py` — **49 tests** covering all acceptance criteria. Stage 5A (60), 5B (83), 5C (41) regression: all pass.
+
+**SQL required**: NO — `evidence_completeness_assessment` stored in existing `payload` JSONB column. No schema changes.
+
+**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell, price target, conviction, or allocation emitted. Contradiction resolution deferred to Stage 5E. Editorial-only and UNKNOWN-only sources cap at THIN. Contradicted artifacts cap at PARTIAL. Non-comparable facts cap at THIN.
+
+**Stage 5E next**: Truth adapter — consumes Stage 5D completeness assessment to determine whether an artifact's claims are usable as structured evidence inputs for Intel v3 decision support (deferred from Stage 5D by design).
+
+## Stage 5C — Contradiction Detector v1 (merged PR #370)
 
 **What landed in Stage 5C:**
-- `v2/backend/app/services/intelligence/v3/contradiction_detector_v1.py` — Pure deterministic contradiction detector. No IO, no LLM, no external calls. Analyzes `WorkerOutput.facts` for comparable structured contradictions. Grouping key: `(claim_key/metric_name, fact_kind, period, as_of)`. Detects: numeric conflicts (1% relative tolerance), boolean true/false conflicts, text-exact case-insensitive mismatches. No-fact → `not_evaluable_reason=no_facts_provided`. Non-comparable → `not_evaluable_reason=insufficient_comparable_facts`. `no_guessing=True` always.
-- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — Injected `detect_contradictions()` into `write_artifact()` Step 5 (after Stage 5B source credibility, before insert). Every new artifact payload now includes `contradiction_assessment`. Existing `source_credibility_assessment` (Step 4) intact.
-- `v2/backend/tests/test_stage5c_contradiction_detector.py` — **41 tests** covering all acceptance criteria. Stage 5A (60 tests) and 5B (83 tests) regression: all pass.
-
-**SQL required**: NO — `contradiction_assessment` stored in the existing `payload` JSONB column. No schema changes.
-
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell, price target, conviction, or allocation emitted. Contradiction resolution deferred to Stage 5E truth adapter.
-
-**Stage 5D next**: Evidence completeness scoring.
+- `contradiction_detector_v1.py` — Pure deterministic contradiction detector. Grouping key: `(claim_key/metric_name, fact_kind, period, as_of)`. Detects: numeric conflicts (1% tolerance), boolean, text-exact. No-fact → `not_evaluable_reason=no_facts_provided`. Non-comparable → `insufficient_comparable_facts`. `no_guessing=True` always.
+- `write_artifact()` Step 5 injects `contradiction_assessment` into payload. Stage 5B credibility (Step 4) intact.
+- **41 tests**. No SQL.
 
 ## Stage 5B — Source Credibility Registry (merged PR #369)
 

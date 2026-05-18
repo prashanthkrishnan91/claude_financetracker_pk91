@@ -1,0 +1,376 @@
+"""Stage 5F — Multi-lane evidence population runner (dispatcher/registry).
+
+Wires three feasible evidence lanes into ResearchArtifactServiceV1:
+  - fundamentals      → fundamental_quality artifact (yfinance sync)
+  - technicals        → technical_signal artifact   (yfinance sync)
+  - news_sentiment    → sentiment_event artifact     (yfinance sync)
+
+Each lane is independently kill-switched via Settings. All writes go through
+ResearchArtifactServiceV1.write_artifact(), which injects all four Stage 5
+enrichment layers (5B credibility, 5C contradiction, 5D completeness, 5E usability).
+
+What this runner NEVER does:
+  - Calls decide() or imports the v3 decision policy.
+  - Writes to intel_v3_snapshots or any visible-decision table.
+  - Uses async providers — all provider calls use sync variants to avoid
+    event-loop coupling in the runner context.
+  - Runs on page load — explicit callable only.
+  - Makes LLM calls.
+  - Uses new external providers — only existing yfinance sync functions.
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Callable, Optional
+
+logger = logging.getLogger(__name__)
+
+from app.config import Settings, get_settings
+
+from .contracts import WorkerInput
+from .evidence_lane_adapter_v1 import (
+    FEASIBLE_LANES,
+    LANE_FUNDAMENTALS,
+    LANE_TECHNICALS,
+    LANE_NEWS_SENTIMENT,
+    build_fundamentals_worker_output,
+    build_technicals_worker_output,
+    build_news_sentiment_worker_output,
+)
+from app.services.intelligence.v3.research_artifact_service_v1 import (
+    ResearchArtifactServiceV1,
+)
+
+
+# ── Lane dispatch tables ──────────────────────────────────────────────────────
+
+def _is_fundamentals_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_fundamentals_evidence_enabled
+    )
+
+
+def _is_technicals_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_technicals_evidence_enabled
+    )
+
+
+def _is_news_sentiment_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_news_sentiment_evidence_enabled
+    )
+
+
+# ── Per-lane runner functions ─────────────────────────────────────────────────
+
+def run_fundamentals_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _fetch_fn: Optional[Callable[[str], dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Run the fundamentals evidence lane for one ticker.
+
+    Returns artifact_id if written, None if disabled or on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      2. settings.intel_v3_fundamentals_evidence_enabled
+
+    Args:
+        _fetch_fn: Injectable sync fetch callable for tests.
+                   Signature: (ticker: str) -> dict[str, Any].
+                   Defaults to fetch_yfinance_fundamentals_sync.
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_fundamentals_enabled(settings):
+        logger.debug(
+            "evidence_lane_skip lane=fundamentals ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    ticker_upper = ticker.upper().strip()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _fetch_fn is not None:
+        fetch_fn = _fetch_fn
+    else:
+        from app.services.agents.data_sources import fetch_yfinance_fundamentals_sync
+        fetch_fn = fetch_yfinance_fundamentals_sync
+
+    logger.info(
+        "evidence_lane_start lane=fundamentals ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        raw = fetch_fn(ticker_upper)
+    except Exception as exc:
+        logger.warning(
+            "evidence_lane_fetch_error lane=fundamentals ticker=%s error=%s",
+            ticker_upper, exc,
+        )
+        raw = {}
+
+    output = build_fundamentals_worker_output(worker_input, raw, fetched_at)
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        logger.info(
+            "evidence_lane_complete lane=fundamentals ticker=%s artifact_id=%s "
+            "confidence=%s freshness=%s",
+            ticker_upper, artifact_id,
+            output.confidence_or_trust_level, output.freshness_status,
+        )
+    else:
+        logger.warning(
+            "evidence_lane_no_artifact lane=fundamentals ticker=%s", ticker_upper
+        )
+    return artifact_id
+
+
+def run_technicals_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _fetch_fn: Optional[Callable[[str], dict[str, Any]]] = None,
+) -> Optional[str]:
+    """Run the technicals evidence lane for one ticker.
+
+    Returns artifact_id if written, None if disabled or on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled
+      2. settings.intel_v3_technicals_evidence_enabled
+
+    Args:
+        _fetch_fn: Injectable sync fetch callable for tests.
+                   Signature: (ticker: str) -> dict[str, Any].
+                   Defaults to fetch_yfinance_history_sync.
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_technicals_enabled(settings):
+        logger.debug(
+            "evidence_lane_skip lane=technicals ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    ticker_upper = ticker.upper().strip()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _fetch_fn is not None:
+        fetch_fn = _fetch_fn
+    else:
+        from app.services.agents.data_sources import fetch_yfinance_history_sync
+        fetch_fn = fetch_yfinance_history_sync
+
+    logger.info(
+        "evidence_lane_start lane=technicals ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        raw = fetch_fn(ticker_upper)
+    except Exception as exc:
+        logger.warning(
+            "evidence_lane_fetch_error lane=technicals ticker=%s error=%s",
+            ticker_upper, exc,
+        )
+        raw = {}
+
+    output = build_technicals_worker_output(worker_input, raw, fetched_at)
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        logger.info(
+            "evidence_lane_complete lane=technicals ticker=%s artifact_id=%s "
+            "confidence=%s freshness=%s",
+            ticker_upper, artifact_id,
+            output.confidence_or_trust_level, output.freshness_status,
+        )
+    else:
+        logger.warning(
+            "evidence_lane_no_artifact lane=technicals ticker=%s", ticker_upper
+        )
+    return artifact_id
+
+
+def run_news_sentiment_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _fetch_fn: Optional[Callable[[str], list[dict[str, Any]]]] = None,
+) -> Optional[str]:
+    """Run the news/sentiment evidence lane for one ticker.
+
+    Returns artifact_id if written, None if disabled or on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled
+      2. settings.intel_v3_news_sentiment_evidence_enabled
+
+    Args:
+        _fetch_fn: Injectable sync fetch callable for tests.
+                   Signature: (ticker: str) -> list[dict[str, Any]].
+                   Defaults to fetch_yfinance_news_sync.
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_news_sentiment_enabled(settings):
+        logger.debug(
+            "evidence_lane_skip lane=news_sentiment ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    ticker_upper = ticker.upper().strip()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _fetch_fn is not None:
+        fetch_fn = _fetch_fn
+    else:
+        from app.services.agents.data_sources import fetch_yfinance_news_sync
+        fetch_fn = fetch_yfinance_news_sync
+
+    logger.info(
+        "evidence_lane_start lane=news_sentiment ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        items = fetch_fn(ticker_upper)
+    except Exception as exc:
+        logger.warning(
+            "evidence_lane_fetch_error lane=news_sentiment ticker=%s error=%s",
+            ticker_upper, exc,
+        )
+        items = []
+
+    output = build_news_sentiment_worker_output(worker_input, items, fetched_at)
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        logger.info(
+            "evidence_lane_complete lane=news_sentiment ticker=%s artifact_id=%s "
+            "confidence=%s freshness=%s",
+            ticker_upper, artifact_id,
+            output.confidence_or_trust_level, output.freshness_status,
+        )
+    else:
+        logger.warning(
+            "evidence_lane_no_artifact lane=news_sentiment ticker=%s", ticker_upper
+        )
+    return artifact_id
+
+
+# ── Dispatcher: run all feasible lanes ───────────────────────────────────────
+
+def run_all_evidence_lanes(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _fundamentals_fetch_fn: Optional[Callable] = None,
+    _technicals_fetch_fn: Optional[Callable] = None,
+    _news_sentiment_fetch_fn: Optional[Callable] = None,
+) -> dict[str, Optional[str]]:
+    """Run all feasible evidence lanes for one ticker.
+
+    Returns a dict mapping lane name → artifact_id (or None if disabled/failed).
+    Lanes that are disabled return None; no exception propagates.
+
+    Usage (production):
+        result = run_all_evidence_lanes(user_id, ticker, db_client, settings=settings)
+
+    Usage (tests — inject fakes to avoid real HTTP calls):
+        result = run_all_evidence_lanes(
+            user_id, ticker, db_client, settings=settings,
+            _fundamentals_fetch_fn=lambda t: {...},
+            _technicals_fetch_fn=lambda t: {...},
+            _news_sentiment_fetch_fn=lambda t: [...],
+        )
+    """
+    results: dict[str, Optional[str]] = {}
+
+    results[LANE_FUNDAMENTALS] = run_fundamentals_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _fetch_fn=_fundamentals_fetch_fn,
+    )
+    results[LANE_TECHNICALS] = run_technicals_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _fetch_fn=_technicals_fetch_fn,
+    )
+    results[LANE_NEWS_SENTIMENT] = run_news_sentiment_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _fetch_fn=_news_sentiment_fetch_fn,
+    )
+
+    enabled_count = sum(1 for v in results.values() if v is not None)
+    logger.info(
+        "evidence_lane_dispatcher_complete ticker=%s lanes_enabled=%d lanes_written=%d results=%s",
+        ticker.upper().strip(),
+        enabled_count,
+        sum(1 for v in results.values() if v is not None),
+        {k: ("written" if v else "skipped") for k, v in results.items()},
+    )
+    return results

@@ -116,22 +116,29 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5E — Deterministic Research Artifact Truth Adapter v1 (current PR)
+## Stage 5F — Multi-Lane Evidence Population Pack v1 (current PR)
 
-**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** merged (branch `claude/finance-tracker-v3-continue-xSJMk`). **Stage 5E** is the current PR (branch `claude/finance-tracker-intel-v3-eKyVW`).
+**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** merged. **Stage 5E** merged (branch `claude/finance-tracker-intel-v3-eKyVW`). **Stage 5F** is the current PR (branch `claude/finance-tracker-intel-v3-VPlGv`).
 
-**SQL for migrations 017 and 023**: Both applied to Supabase. Migration 017 creates the artifact tables; 023 extends the `artifact_type` CHECK and adds uniqueness indexes.
+**What changed in Stage 5F:**
+- **`evidence_lane_adapter_v1.py`** (new) — Pure, no-IO shared adapter. Three lane adapters: `adapt_fundamentals` → `fundamental_quality` artifact (yfinance fundamentals sync); `adapt_technicals` → `technical_signal` artifact (yfinance history sync); `adapt_news_sentiment` → `sentiment_event` artifact (yfinance news sync). Shared `build_worker_output()` builder. `FEASIBLE_LANES` constant + `DEFERRED_LANES` dict with exact blockers for SEC filing (covered by earnings_reviewer), analyst_revisions (yfinance too thin), company_strategy (no extractor).
+- **`evidence_lane_runner_v1.py`** (new) — Dispatcher/registry. Three per-lane runner functions + `run_all_evidence_lanes()` dispatcher. Each lane is kill-switched by `intel_v3_research_workers_enabled` (global) + per-lane flag. All writes go through `ResearchArtifactServiceV1.write_artifact()` (never raw `ArtifactStoreWriter`). Injectable `_fetch_fn` for tests (no real HTTP in tests).
+- **`config.py`** — Three new flags: `intel_v3_fundamentals_evidence_enabled`, `intel_v3_technicals_evidence_enabled`, `intel_v3_news_sentiment_evidence_enabled` (all default False).
+- **`test_stage5f_multi_lane_evidence.py`** — **63 new tests** proving: all three lanes implemented, all four enrichment layers present in every artifact, safe_for_decision=False, no intel_v3_snapshots/recommendations writes, no decide() import, kill-switch behavior, no fabrication on empty/error data, dispatcher runs all lanes, earnings reviewer path unchanged.
 
-**What changed in Stage 5E:**
-- **`artifact_truth_adapter_v1.py`** (new) — Pure deterministic usability adapter. Consumes `SourceCredibilityAssessment` (5B), `ContradictionAssessment` (5C), and `EvidenceCompletenessAssessment` (5D) to produce an `ArtifactUsabilityAssessment`. Six labels: `USABLE`, `USABLE_WITH_LIMITATIONS`, `SUPPRESSED_INCOMPLETE`, `SUPPRESSED_CONTRADICTED`, `SUPPRESSED_UNKNOWN_SOURCE`, `NOT_EVALUABLE`. Priority order: NOT_EVALUABLE → SUPPRESSED_CONTRADICTED → SUPPRESSED_UNKNOWN_SOURCE → SUPPRESSED_INCOMPLETE → USABLE_WITH_LIMITATIONS → USABLE. No IO, no LLM, no DB, replayable.
-- **`research_artifact_service_v1.py`** — Added Step 7 (truth/usability assessment injection) into `write_artifact()`. Every newly-written artifact now carries all four enrichment layers in `payload`: `source_credibility_assessment` (5B), `contradiction_assessment` (5C), `evidence_completeness_assessment` (5D), `truth_usability_assessment` (5E). Step 8 is now the insert delegate. Log line extended with `usability_label` and `is_usable`.
-- **`test_stage5e_truth_adapter.py`** — **37 new tests** proving: all 6 labels reachable, missing metadata → NOT_EVALUABLE, malformed metadata no crash, contradiction suppression priority, unknown source suppression deterministic, incomplete suppression deterministic, USABLE_WITH_LIMITATIONS distinct from USABLE, earnings reviewer artifacts include all 4 enrichment layers, safe_for_decision still False, no intel_v3_snapshots writes, no decide() import.
+**Lanes inspected**: SEC filing (covered by earnings_reviewer), fundamentals (yfinance), technicals (yfinance), news/sentiment (yfinance), analyst_revisions (thin — deferred), company_strategy (no extractor — deferred).
+**Lanes implemented**: fundamentals (`fundamental_quality`), technicals (`technical_signal`), news_sentiment (`sentiment_event`).
+**Lanes deferred**: `sec_filing` (earnings_reviewer already covers as `catalyst_window`; a separate `filing_risk` adapter needs XBRL parsing work beyond current scope); `analyst_revisions` (yfinance only provides 2 thin scalars — needs richer consensus provider); `company_strategy` (no guidance/commentary extractor in repo).
 
-**SQL required**: NO. All enrichment stored in existing `payload` JSONB column.
+**SQL required**: NO. No new tables; existing artifact_type CHECK already supports `fundamental_quality`, `technical_signal`, `sentiment_event` (migration 023 applied).
 
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell or recommendation authority. Env kill-switches unchanged. No new workers, no new providers, no LLM calls. `truth_usability_assessment.is_usable` does NOT propagate to `safe_for_decision`.
+**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell authority. No LLM calls. No new external providers. Existing earnings reviewer path intact. No UI changes. ALERT_EMAIL_DRY_RUN untouched.
 
-**Stage 5F next**: SEC filings / filing evidence worker or adapter expansion.
+**Stage 5G next**: Analyst revisions lane (requires richer consensus provider) OR SEC filing risk adapter (separate from earnings_reviewer catalyst_window).
+
+## Stage 5E — Deterministic Research Artifact Truth Adapter v1 (merged)
+
+**Stage 5E** merged (branch `claude/finance-tracker-intel-v3-eKyVW`). `artifact_truth_adapter_v1.py`: six usability labels, injected as Step 7 in `write_artifact()`. All four enrichment layers in every artifact. 37 tests. No SQL.
 
 ## Stage 5C — Contradiction Detector v1 (merged PR #370)
 

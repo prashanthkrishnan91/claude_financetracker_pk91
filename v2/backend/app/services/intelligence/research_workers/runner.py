@@ -41,6 +41,68 @@ from app.services.intelligence.v3.research_artifact_service_v1 import (
 )
 
 
+def run_evidence_lanes_for_ticker(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _fundamentals_fetch_fn: Optional[Callable] = None,
+    _technicals_fetch_fn: Optional[Callable] = None,
+    _news_sentiment_fetch_fn: Optional[Callable] = None,
+) -> dict[str, Optional[str]]:
+    """Run all Stage 5F evidence lanes for one ticker.
+
+    Explicit callable only — never runs on page load.
+    Returns a dict of {lane_name: artifact_id_or_None}.
+    Safe to call unconditionally — disabled flags skip immediately.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      Per-lane flags checked by the dispatcher:
+      2. settings.intel_v3_fundamentals_evidence_enabled
+      3. settings.intel_v3_technicals_evidence_enabled
+      4. settings.intel_v3_news_sentiment_evidence_enabled
+
+    Args:
+        _fundamentals_fetch_fn / _technicals_fetch_fn / _news_sentiment_fetch_fn:
+            Injectable sync fetch callables for tests.  Omit in production.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    if not settings.intel_v3_research_workers_enabled:
+        logger.debug(
+            "stage5f_evidence_lanes_skip reason=global_flag_off ticker=%s", ticker
+        )
+        return {}
+
+    from .evidence_lane_runner_v1 import run_all_evidence_lanes
+
+    results = run_all_evidence_lanes(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _fundamentals_fetch_fn=_fundamentals_fetch_fn,
+        _technicals_fetch_fn=_technicals_fetch_fn,
+        _news_sentiment_fetch_fn=_news_sentiment_fetch_fn,
+    )
+
+    written = sum(1 for v in results.values() if v is not None)
+    logger.info(
+        "stage5f_evidence_lanes_complete ticker=%s lanes_written=%d/%d results=%s",
+        ticker.upper().strip(),
+        written,
+        len(results),
+        {k: ("written" if v else "skipped") for k, v in results.items()},
+    )
+    return results
+
+
 def run_earnings_reviewer_dark(
     user_id: str,
     ticker: str,

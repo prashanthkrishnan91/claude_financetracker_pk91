@@ -93,6 +93,17 @@ class Settings(BaseSettings):
     # When True, logs one structured INFO line per observability call (aggregates only).
     intel_v3_research_artifact_observability_info_logs_enabled: bool = False
 
+    # ── Intel v3 Stage 5F — Multi-lane evidence population (off by default) ────
+    # Fundamentals evidence lane: yfinance fundamentals → fundamental_quality artifact.
+    # Requires intel_v3_research_workers_enabled.
+    intel_v3_fundamentals_evidence_enabled: bool = False
+    # Technicals evidence lane: yfinance price history → technical_signal artifact.
+    # Requires intel_v3_research_workers_enabled.
+    intel_v3_technicals_evidence_enabled: bool = False
+    # News/sentiment evidence lane: yfinance news → sentiment_event artifact.
+    # Requires intel_v3_research_workers_enabled.
+    intel_v3_news_sentiment_evidence_enabled: bool = False
+
     # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
     # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
     # to produce provider-backed, source-linked, freshness-classified artifacts.

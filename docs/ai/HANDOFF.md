@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-17 (Stage 5A — Research Artifact Store substrate + writer scaffolding; **PR open**; next: Stage 5B)
+Last updated: 2026-05-18 (Stage 5A — Research Artifact Store substrate + writer scaffolding + scope-aware clean replacement; **merged PR #367**; next: Stage 5B)
 
 ## Purpose
 
@@ -113,23 +113,24 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 021 applied — `alert_delivery_outbox` table is live (0 rows expected until eligible candidates flow through).
 - SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
 - SQL migration 017 (`research_artifact_store_v1`) — **NOT YET APPLIED** to Supabase. Must be applied before or with migration 023.
-- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **NOT YET APPLIED**. Apply after 017. Extends `artifact_type` CHECK with Stage 5A types.
+- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **NOT YET APPLIED**. Apply after 017. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5A — Research Artifact Store (PR open)
+## Stage 5A — Research Artifact Store (merged PR #367)
 
-**Stage 4 is COMPLETE** (Stage 4H merged as PR #366 on 2026-05-17). **Stage 5A** is the current work item.
+**Stage 4 is COMPLETE** (Stage 4H merged as PR #366 on 2026-05-17). **Stage 5A is COMPLETE** (merged PR #367 on 2026-05-18). **Stage 5B** is the current work item.
 
-**Stage 5A status**: PR open on branch `claude/stage-5a-artifact-store-54VcQ`.
+**Stage 5A status**: Merged as PR #367 on 2026-05-18.
 
-**What landed in Stage 5A:**
-- SQL migration `023_research_artifact_store_stage5a_extend.sql` — extends the `artifact_type` CHECK constraint (from migration 017) with 4 new Stage 5A worker types: `technical_signal`, `sentiment_event`, `company_strategy`, `journal_pattern`. Existing 12 types unchanged. Migration 017 must be applied first (it is not yet applied to Supabase).
+**What landed in Stage 5A (3 commits):**
+- SQL migration `023_research_artifact_store_stage5a_extend.sql` — extends the `artifact_type` CHECK constraint (from migration 017) with 4 new Stage 5A worker types: `technical_signal`, `sentiment_event`, `company_strategy`, `journal_pattern`. Adds user-scoped replay idempotency index (`uq_research_artifacts_replay_user_active`), active-lane uniqueness index (`uq_research_artifacts_active_lane` on `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))` WHERE `is_active = TRUE`), drops global replay index, and adds a duplicate-lane guard. Migration 017 must be applied first (not yet applied to Supabase).
 - `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — narrow typed public API for Stage 5A. Wraps `ArtifactStoreWriter` with two explicit write policies:
-  - **Idempotency**: same `replay_idempotency_key` → skip, return existing artifact_id, no duplicate.
-  - **Clean replacement**: new artifact for same (user_id, ticker, artifact_type, skill_pack) → deactivate prior active artifact (`is_active=False, invalidated_at=now, invalidation_reason='superseded_by_new_write'`), insert new. At most one active artifact per (user_id, ticker, artifact_type, skill_pack) at any time.
+  - **Idempotency**: same `replay_idempotency_key` → skip, return existing artifact_id, no duplicate (user-scoped).
+  - **Scope-aware clean replacement**: new artifact for same evidence lane `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))` → deactivate prior active artifacts (`is_active=False, invalidated_at=now, invalidation_reason='superseded_by_new_write'`), insert new. Portfolio-scope (`scope_kind='portfolio'`, `ticker IS NULL`) uses IS NULL filter; ticker-scope uses `.eq("ticker", ticker)`. Always runs clean replacement (no ticker-only guard).
   - `query_active_artifacts()` — safe read helper returning non-payload summary fields only.
   - NEVER imports decide() or writes intel_v3_snapshots. safe_for_decision always False.
-- `v2/backend/tests/test_stage5a_research_artifact_store.py` — 44 focused tests covering all Stage 5A acceptance criteria: idempotency, clean replacement, provenance fields, freshness/as_of/expires_at, schema_version required, replay/run identity, forbidden key rejection, no Intel v3 decision mutation, all Stage 5A artifact_type values accepted.
+- `v2/backend/app/services/intelligence/research_workers/contracts.py` — `WorkerOutput.ticker` changed `str` → `Optional[str]` to represent portfolio-scope artifacts (ticker IS NULL).
+- `v2/backend/tests/test_stage5a_research_artifact_store.py` — **60 tests** covering idempotency, scope-aware clean replacement (incl. portfolio-scope, IS NULL filter, cross-scope isolation), provenance, freshness/as_of/expires_at, schema_version, replay/run identity, forbidden key rejection, no Intel v3 decision mutation, all Stage 5A artifact_type values accepted, user-scoped idempotency, fetched_at provenance, migration 023 content.
 
 **SQL required**: YES — two migrations must be applied in order:
 1. `v2/database/017_research_artifact_store_v1.sql` — creates research_artifacts, research_artifact_sources, research_artifact_facts, worker_audit_events tables with RLS, triggers, indexes.

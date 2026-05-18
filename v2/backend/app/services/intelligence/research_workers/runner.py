@@ -34,9 +34,11 @@ logger = logging.getLogger(__name__)
 
 from app.config import Settings, get_settings
 
-from .artifact_store_writer import ArtifactStoreWriter
 from .contracts import WorkerInput
 from . import earnings_reviewer
+from app.services.intelligence.v3.research_artifact_service_v1 import (
+    ResearchArtifactServiceV1,
+)
 
 
 def run_earnings_reviewer_dark(
@@ -129,8 +131,8 @@ def run_earnings_reviewer_dark(
         _http_get_fn=_http_get_fn,
     )
 
-    writer = ArtifactStoreWriter(supabase_client=db_client, user_id=user_id)
-    artifact_id = writer.write(output)
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
 
     if artifact_id:
         logger.info(

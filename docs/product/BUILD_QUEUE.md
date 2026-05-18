@@ -6,7 +6,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 5E** — Truth adapter. Consumes Stage 5D completeness assessment to determine whether artifact claims are usable as structured evidence inputs for Intel v3 decision support.
+- **Stage 5E** — Truth adapter. Consumes Stage 5D completeness assessment (bridged via Stage 5E0) to determine whether artifact claims are usable as structured evidence inputs for Intel v3 decision support.
 
 ## Later (Stage 5 backend)
 - Stage 5E — Truth adapter (see Now).
@@ -30,7 +30,9 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Stage 5D — Evidence Completeness Scoring v1** (PR open 2026-05-18). Pure deterministic backend module. Evaluates 8 requirements (present/missing/not_applicable) and assigns COMPLETE/PARTIAL/THIN/NOT_EVALUABLE band. No numeric 0–100 scores. Consumes Stage 5B credibility and Stage 5C contradiction assessments. `evidence_completeness_assessment` injected into every new artifact payload as Step 6 in `write_artifact()`. Hard rules: editorial-only/UNKNOWN-only → THIN, contradictions → PARTIAL, non-comparable → THIN. 49 tests. No SQL.
+- **Stage 5E0 — Research Worker Contract Reconciliation** (PR open 2026-05-18). Bridge PR. Routes `run_earnings_reviewer_dark` through `ResearchArtifactServiceV1` so all three Stage 5B–5D assessments are injected into every worker artifact. No new workers, no Truth Adapter, no SQL. 23 new tests. All 158 Phase 3 regression tests pass.
+
+- **Stage 5D — Evidence Completeness Scoring v1** (merged PR #371, 2026-05-18). Pure deterministic backend module. Evaluates 8 requirements (present/missing/not_applicable) and assigns COMPLETE/PARTIAL/THIN/NOT_EVALUABLE band. No numeric 0–100 scores. Consumes Stage 5B credibility and Stage 5C contradiction assessments. `evidence_completeness_assessment` injected into every new artifact payload as Step 6 in `write_artifact()`. Hard rules: editorial-only/UNKNOWN-only → THIN, contradictions → PARTIAL, non-comparable → THIN. 49 tests. No SQL.
 
 - **Stage 5C — Contradiction Detector v1** (merged PR #370, 2026-05-18). Pure deterministic backend module. Groups comparable facts by (claim_key/metric_name, fact_kind, period, as_of). Detects numeric (1% tolerance), boolean, and text-exact conflicts. No-fact/non-comparable → not_evaluable (honest). `contradiction_assessment` injected into every new artifact payload. 41 tests. No SQL.
 

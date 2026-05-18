@@ -66,12 +66,18 @@ class FakeTableQuery:
         self._row: Optional[dict] = None
         self._on_conflict: Optional[str] = None
         self._ignore_duplicates: bool = False
+        self._is_update: bool = False
         self._filters: dict = {}
         self._limit_val: Optional[int] = None
         self._select_cols: Optional[str] = None
 
     def insert(self, row: dict) -> "FakeTableQuery":
         self._row = row
+        return self
+
+    def update(self, row: dict) -> "FakeTableQuery":
+        self._row = row
+        self._is_update = True
         return self
 
     def upsert(self, row: dict, *, on_conflict: str = "", ignore_duplicates: bool = False) -> "FakeTableQuery":
@@ -88,6 +94,12 @@ class FakeTableQuery:
         self._filters[col] = val
         return self
 
+    def neq(self, col: str, val: Any) -> "FakeTableQuery":
+        return self
+
+    def is_(self, col: str, val: Any) -> "FakeTableQuery":
+        return self
+
     def order(self, *args, **kwargs) -> "FakeTableQuery":
         return self
 
@@ -97,6 +109,11 @@ class FakeTableQuery:
 
     def execute(self) -> Any:
         if self._row is not None:
+            if self._is_update:
+                # UPDATE path — return empty data, not recorded as an insert.
+                class _UpdateResult:
+                    data = []
+                return _UpdateResult()
             row_with_id = {"id": self._return_id, **self._row}
             if self._on_conflict is not None:
                 self._state.upserts.append(self._row)

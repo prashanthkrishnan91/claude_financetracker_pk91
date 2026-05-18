@@ -62,11 +62,17 @@ class _ControlledArtifactTableQuery:
         self._insert_return_id = insert_return_id or str(uuid.uuid4())
         self._row: Optional[dict] = None
         self._on_conflict: Optional[str] = None
+        self._is_update: bool = False
         self._select_cols: Optional[str] = None
         self._filters: dict = {}
 
     def insert(self, row: dict) -> "_ControlledArtifactTableQuery":
         self._row = row
+        return self
+
+    def update(self, row: dict) -> "_ControlledArtifactTableQuery":
+        self._row = row
+        self._is_update = True
         return self
 
     def upsert(self, row: dict, *, on_conflict: str = "", ignore_duplicates: bool = False) -> "_ControlledArtifactTableQuery":
@@ -83,6 +89,12 @@ class _ControlledArtifactTableQuery:
         self._filters[col] = val
         return self
 
+    def neq(self, col: str, val: Any) -> "_ControlledArtifactTableQuery":
+        return self
+
+    def is_(self, col: str, val: Any) -> "_ControlledArtifactTableQuery":
+        return self
+
     def limit(self, n: int) -> "_ControlledArtifactTableQuery":
         return self
 
@@ -95,6 +107,12 @@ class _ControlledArtifactTableQuery:
                 def __init__(self, data_rows: list[dict]) -> None:
                     self.data = data_rows
             return _SelectResult(rows)
+
+        if self._row is not None and getattr(self, "_is_update", False):
+            # UPDATE path (clean replacement deactivation) — return empty, no insert.
+            class _UpdateResult:
+                data = []
+            return _UpdateResult()
 
         if self._row is not None and self._on_conflict is None:
             # INSERT path.
@@ -118,11 +136,17 @@ class _PassThroughTableQuery:
     def __init__(self, state: _TableState) -> None:
         self._state = state
         self._row: Optional[dict] = None
+        self._is_update: bool = False
         self._return_id = str(uuid.uuid4())
         self._select_cols: Optional[str] = None
 
     def insert(self, row: dict) -> "_PassThroughTableQuery":
         self._row = row
+        return self
+
+    def update(self, row: dict) -> "_PassThroughTableQuery":
+        self._row = row
+        self._is_update = True
         return self
 
     def upsert(self, row: dict, **kwargs: Any) -> "_PassThroughTableQuery":
@@ -136,10 +160,20 @@ class _PassThroughTableQuery:
     def eq(self, *a: Any, **kw: Any) -> "_PassThroughTableQuery":
         return self
 
+    def neq(self, *a: Any, **kw: Any) -> "_PassThroughTableQuery":
+        return self
+
+    def is_(self, *a: Any, **kw: Any) -> "_PassThroughTableQuery":
+        return self
+
     def limit(self, *a: Any, **kw: Any) -> "_PassThroughTableQuery":
         return self
 
     def execute(self) -> Any:
+        if self._row is not None and getattr(self, "_is_update", False):
+            class _U:
+                data = []
+            return _U()
         if self._row is not None:
             self._state.inserts.append(self._row)
             row_with_id = {"id": self._return_id, **self._row}

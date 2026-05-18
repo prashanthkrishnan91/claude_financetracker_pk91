@@ -18,6 +18,16 @@ enums to avoid SQL surface area; the `provider="fred"` payload key and the
 `fred_macro_evidence_v1` skill_pack keep this lane distinguishable from
 `portfolio_exposure` artifacts written by future workers.
 
+Stage 5I patch — provider-aware credibility (no SQL):
+  Until the dedicated source_kind enum is added, the Stage 5B
+  source_credibility_registry_v1 applies a narrow provider-aware override
+  that classifies sources with (source_kind="other", provider_name="fred",
+  source_id in FRED allowlist OR source_url matching fred.stlouisfed.org)
+  as PRIMARY_AUTHORITY / OFFICIAL_PUBLIC_DATA for CLAIM_OFFICIAL_MACRO_DATA
+  only. Generic source_kind="other" sources from unknown providers stay
+  UNKNOWN/INSUFFICIENT. This keeps the artifact source-grounded and usable
+  through Stage 5E truth adapter without weakening UNKNOWN handling.
+
 Source linking:
   One SourceRecord per successful FRED series. provider_name="fred",
   source_id=series_id, source_published_at=last_updated when available.
@@ -299,8 +309,11 @@ def adapt_fred_macro(
         "No directional interpretation or investment conclusion has been derived.",
         "Allowlisted macro series only (Fed funds, Treasury yields, CPI, "
         "unemployment, payrolls, GDP, optional yield spread). Not exhaustive.",
-        "source_kind=other; FRED official authority is encoded at the "
-        "provider_registry layer (see TODO in fred_macro_adapter_v1).",
+        "source_kind is stored as 'other' until a dedicated DB enum is added; "
+        "the Stage 5B source credibility registry applies a narrow provider-aware "
+        "override (provider=fred + allowlisted FRED series id / URL) so these "
+        "sources classify as PRIMARY_AUTHORITY / OFFICIAL_PUBLIC_DATA for "
+        "official_macro_data claims only — never for investment recommendations.",
     ]
     if provider_result.error_message:
         limitations.append(

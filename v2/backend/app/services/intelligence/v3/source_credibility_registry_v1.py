@@ -67,6 +67,7 @@ _AUTHORITY_RANK: Dict[AuthorityLevel, int] = {
 class SourceAuthorship(str, Enum):
     """Who wrote / produced the source material."""
     OFFICIAL_REGULATORY = "OFFICIAL_REGULATORY"   # Mandatory regulatory (SEC)
+    OFFICIAL_PUBLIC_DATA = "OFFICIAL_PUBLIC_DATA" # Public-sector statistical data (FRED, BLS, etc.)
     COMPANY_AUTHORED = "COMPANY_AUTHORED"          # Company-originated material
     THIRD_PARTY_VENDOR = "THIRD_PARTY_VENDOR"      # Vendor-provided data
     EDITORIAL = "EDITORIAL"                        # Journalistic / editorial
@@ -84,6 +85,10 @@ CLAIM_VENDOR_DERIVED_METRIC = "vendor_derived_metric"
 CLAIM_EDITORIAL_CONTEXT = "editorial_context"
 CLAIM_EARNINGS_CALENDAR = "earnings_calendar"
 CLAIM_PEER_BENCHMARK = "peer_benchmark"
+# Stage 5I patch — official public-sector macro/economic statistical data
+# (Federal Reserve releases via FRED, etc.). Describes the economic environment.
+# Never elevates to investment recommendation or future-performance claim.
+CLAIM_OFFICIAL_MACRO_DATA = "official_macro_data"
 
 # These claim categories are NEVER supported by any source in this registry.
 _CLAIMS_NEVER_SUPPORTED: FrozenSet[str] = frozenset({
@@ -245,6 +250,111 @@ _REGISTRY: Dict[str, SourceKindDefinition] = {
 KNOWN_SOURCE_KINDS: FrozenSet[str] = frozenset(_REGISTRY.keys()) - frozenset({"other"})
 
 
+# ── Provider-aware overrides (narrow, allowlisted) ────────────────────────────
+# These overrides only fire for very specific (source_kind, provider_name,
+# source_id-or-source_url) tuples. They exist to classify official-source
+# artifacts whose source_kind is still stored as "other" because no dedicated
+# DB enum value has been added yet.
+#
+# Generic source_kind="other" sources from unknown providers stay UNKNOWN —
+# the override is never applied unless every match condition is satisfied.
+
+# Allowlist of FRED series IDs that may carry official-source authority for
+# macro evidence. Mirrors fred_provider_v1.ALLOWED_MACRO_SERIES; duplicated
+# here to keep this module free of provider-module imports.
+_FRED_ALLOWED_SERIES: FrozenSet[str] = frozenset({
+    "FEDFUNDS", "DFF",
+    "DGS10", "DGS2", "T10Y2Y",
+    "CPIAUCSL",
+    "UNRATE", "PAYEMS",
+    "GDP", "GDPC1",
+})
+
+_FRED_URL_PREFIXES: tuple[str, ...] = (
+    "https://fred.stlouisfed.org/series/",
+    "http://fred.stlouisfed.org/series/",
+)
+
+_FRED_MACRO_OVERRIDE = SourceKindDefinition(
+    source_kind="other",
+    authority_level=AuthorityLevel.PRIMARY_AUTHORITY,
+    authorship=SourceAuthorship.OFFICIAL_PUBLIC_DATA,
+    claim_categories_supported=frozenset({
+        CLAIM_OFFICIAL_MACRO_DATA,
+    }),
+    limitations=(
+        "FRED (Federal Reserve Economic Data) macro observations are official "
+        "public-sector statistical data. They describe the macroeconomic "
+        "environment — rates, inflation, employment, growth — as published by "
+        "the Federal Reserve. They are NOT investment recommendations, price "
+        "targets, allocation guidance, or Buy/Hold/Trim/Sell directives. Future "
+        "performance, price direction, and investment outcome are NEVER claims "
+        "this source can support."
+    ),
+)
+
+
+def _normalize_provider_name(provider: Any) -> str:
+    return (str(provider) if provider is not None else "").strip().lower()
+
+
+def _normalize_source_id(source_id: Any) -> str:
+    return (str(source_id) if source_id is not None else "").strip().upper()
+
+
+def _matches_fred_macro_source(
+    source_kind: str,
+    provider_name: Any,
+    source_id: Any,
+    source_url: Any,
+) -> bool:
+    """Strict, narrow match for an official FRED macro source carried as source_kind='other'.
+
+    All of the following must hold:
+      - source_kind is "other"
+      - provider_name normalizes to "fred"
+      - source_id is an allowlisted FRED series id, OR source_url host/path
+        matches https://fred.stlouisfed.org/series/<series_id> with an
+        allowlisted id.
+
+    Returns False for anything else, including unknown providers and unknown
+    series ids. Generic source_kind="other" stays UNKNOWN.
+    """
+    if (source_kind or "").strip() != "other":
+        return False
+    if _normalize_provider_name(provider_name) != "fred":
+        return False
+
+    sid_norm = _normalize_source_id(source_id)
+    if sid_norm and sid_norm in _FRED_ALLOWED_SERIES:
+        return True
+
+    url = (str(source_url) if source_url is not None else "").strip().lower()
+    for prefix in _FRED_URL_PREFIXES:
+        if url.startswith(prefix):
+            tail = url[len(prefix):].split("?")[0].split("/")[0].strip().upper()
+            if tail in _FRED_ALLOWED_SERIES:
+                return True
+    return False
+
+
+def _resolve_definition_for_source(source: Any) -> tuple[SourceKindDefinition, bool]:
+    """Return (definition, provider_aware_override_applied).
+
+    Applies the narrow FRED-macro override when its match conditions hold.
+    Falls back to the source_kind registry otherwise.
+    """
+    sk = (getattr(source, "source_kind", None) or "other").strip() or "other"
+    if _matches_fred_macro_source(
+        source_kind=sk,
+        provider_name=getattr(source, "provider_name", None),
+        source_id=getattr(source, "source_id", None),
+        source_url=getattr(source, "source_url", None),
+    ):
+        return _FRED_MACRO_OVERRIDE, True
+    return get_source_kind_definition(sk), False
+
+
 # ── Assessment dataclasses ────────────────────────────────────────────────────
 
 
@@ -334,7 +444,7 @@ def assess_artifact_sources(
         sk = (getattr(source, "source_kind", None) or "other").strip() or "other"
         provider = getattr(source, "provider_name", None)
 
-        defn = get_source_kind_definition(sk)
+        defn, override_applied = _resolve_definition_for_source(source)
         authority_levels.append(defn.authority_level)
         kind_counts[sk] = kind_counts.get(sk, 0) + 1
         all_supported.update(defn.claim_categories_supported)
@@ -353,6 +463,8 @@ def assess_artifact_sources(
             "claim_categories_never_supported": sorted(_CLAIMS_NEVER_SUPPORTED),
             "limitations": defn.limitations,
             "is_known_source_kind": sk in KNOWN_SOURCE_KINDS,
+            "provider_aware_override_applied": override_applied,
+            "provider_aware_override_id": "fred_macro_official_v1" if override_applied else None,
         })
 
     strongest = max(authority_levels, key=lambda lvl: _AUTHORITY_RANK.get(lvl, 0))

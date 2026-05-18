@@ -1069,3 +1069,181 @@ class TestSafetyInvariants:
         with open(mod.__file__) as f:
             content = f.read()
         assert "macro_artifact_id" in content
+
+
+# ── Stage 5I patch — provider-aware credibility override ─────────────────────
+
+
+class TestFredProviderAwareCredibility:
+    """The Stage 5I patch adds a narrow provider-aware override that classifies
+    FRED macro sources as official authority despite source_kind="other",
+    without weakening UNKNOWN handling for generic 'other' sources."""
+
+    def _fred_source(
+        self,
+        series_id: str = "DGS10",
+        url: Optional[str] = None,
+        provider: str = "fred",
+        source_kind: str = "other",
+    ):
+        from app.services.intelligence.research_workers.contracts import SourceRecord
+        return SourceRecord(
+            source_kind=source_kind,
+            provider_name=provider,
+            provider_version="fred_official_macro_v1",
+            source_url=url if url is not None else f"https://fred.stlouisfed.org/series/{series_id}",
+            source_id=series_id,
+            section_reference="fred_series:treasury_yield",
+        )
+
+    def test_fred_source_classifies_as_primary_authority(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        result = assess_artifact_sources([self._fred_source("DGS10")])
+        assert result.is_insufficient is False
+        assert result.strongest_authority_level == AuthorityLevel.PRIMARY_AUTHORITY.value
+
+    def test_fred_source_authorship_is_official_public_data(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            SourceAuthorship,
+        )
+        result = assess_artifact_sources([self._fred_source("UNRATE")])
+        per = result.per_source_assessments[0]
+        assert per["authorship"] == SourceAuthorship.OFFICIAL_PUBLIC_DATA.value
+
+    def test_fred_source_supports_official_macro_data_claim(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            CLAIM_OFFICIAL_MACRO_DATA,
+        )
+        result = assess_artifact_sources([self._fred_source("PAYEMS")])
+        assert CLAIM_OFFICIAL_MACRO_DATA in result.claim_categories_any_source_supports
+
+    def test_fred_override_per_source_flag_present(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+        )
+        result = assess_artifact_sources([self._fred_source("CPIAUCSL")])
+        per = result.per_source_assessments[0]
+        assert per["provider_aware_override_applied"] is True
+        assert per["provider_aware_override_id"] == "fred_macro_official_v1"
+
+    def test_fred_override_never_supports_buy_sell_or_recommendation(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+        )
+        result = assess_artifact_sources([self._fred_source("DGS10")])
+        never_supported = result.claim_categories_no_source_can_support
+        for bad in (
+            "buy_sell_action", "recommendation", "price_target",
+            "final_action", "future_performance", "allocation", "conviction",
+        ):
+            assert bad in never_supported
+
+    def test_fred_override_matches_url_when_source_id_missing(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        src = self._fred_source("DGS2")
+        src.source_id = None  # rely on URL match only
+        result = assess_artifact_sources([src])
+        assert result.strongest_authority_level == AuthorityLevel.PRIMARY_AUTHORITY.value
+
+    def test_fred_override_rejects_unknown_series_id(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        src = self._fred_source("NOT_ALLOWED_SERIES", url="https://example.com/x")
+        result = assess_artifact_sources([src])
+        # Falls back to plain "other" → UNKNOWN.
+        assert result.strongest_authority_level == AuthorityLevel.UNKNOWN.value
+        assert result.is_insufficient is True
+
+    def test_generic_other_provider_stays_unknown(self):
+        """A different provider with source_kind='other' must remain UNKNOWN."""
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        src = self._fred_source("DGS10", provider="some_unknown_vendor",
+                                url="https://other.example.com/series/DGS10")
+        result = assess_artifact_sources([src])
+        assert result.strongest_authority_level == AuthorityLevel.UNKNOWN.value
+        assert result.is_insufficient is True
+
+    def test_fred_match_requires_source_kind_other(self):
+        """If a future migration switches source_kind, the 'other' override
+        does not over-match."""
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+        )
+        src = self._fred_source("DGS10", source_kind="news")
+        result = assess_artifact_sources([src])
+        per = result.per_source_assessments[0]
+        assert per["provider_aware_override_applied"] is False
+
+    def test_fred_provider_name_case_insensitive(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        src = self._fred_source("DGS10", provider="FRED")
+        result = assess_artifact_sources([src])
+        assert result.strongest_authority_level == AuthorityLevel.PRIMARY_AUTHORITY.value
+
+    def test_fred_artifact_truth_label_is_usable(self):
+        """End-to-end: a real FRED artifact written through the runner should
+        land on USABLE or USABLE_WITH_LIMITATIONS, never SUPPRESSED_UNKNOWN_SOURCE."""
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+            ArtifactUsabilityLabel,
+        )
+        db = _FakeSupabase()
+        run_fred_macro_evidence(
+            user_id="user-1", db_client=db,
+            settings=_settings_macro_on(),
+            _provider_fn=lambda sids: _success_provider_result(sids),
+        )
+        payload = db.artifact_inserts()[0]["payload"]
+        usab = payload["truth_usability_assessment"]
+        assert usab["usability_label"] in (
+            ArtifactUsabilityLabel.USABLE.value,
+            ArtifactUsabilityLabel.USABLE_WITH_LIMITATIONS.value,
+        ), (
+            f"FRED artifact must be truth-usable; got "
+            f"{usab['usability_label']} suppression_reason={usab.get('suppression_reason')}"
+        )
+        cred = payload["source_credibility_assessment"]
+        assert cred["is_insufficient"] is False
+        assert cred["strongest_authority_level"] == "PRIMARY_AUTHORITY"
+
+    def test_fred_artifact_safe_for_decision_unchanged(self):
+        """The override must NOT flip safe_for_decision to True."""
+        db = _FakeSupabase()
+        run_fred_macro_evidence(
+            user_id="user-1", db_client=db,
+            settings=_settings_macro_on(),
+            _provider_fn=lambda sids: _success_provider_result(sids),
+        )
+        for row in db.artifact_inserts():
+            assert row.get("safe_for_decision") is not True
+
+    def test_empty_sources_still_insufficient(self):
+        """Override does not affect the no-sources path."""
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+        )
+        result = assess_artifact_sources([])
+        assert result.is_insufficient is True
+        assert result.has_sources is False
+
+    def test_adapter_limitations_describe_provider_override(self):
+        """Adapter's limitations now explain the provider-aware override."""
+        provider = _success_provider_result(["DGS10"])
+        res = adapt_fred_macro(provider, provider.fetched_at)
+        joined = " ".join(res.limitations).lower()
+        assert "provider-aware override" in joined or "provider_aware" in joined

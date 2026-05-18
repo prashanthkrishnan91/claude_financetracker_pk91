@@ -718,6 +718,50 @@ def run_fred_macro_evidence(
             output.confidence_or_trust_level,
             output.freshness_status,
         )
+
+        # Stage 5I patch — emit a deterministic usability summary so Railway
+        # logs confirm the provider-aware FRED credibility override produced
+        # an officially-authoritative, truth-usable artifact. Replays the
+        # Stage 5B/5C/5D/5E chain on the same in-memory objects (no IO).
+        try:
+            from app.services.intelligence.v3.contradiction_detector_v1 import (
+                detect_contradictions,
+            )
+            from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+                assess_artifact_usability,
+            )
+            from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+                score_evidence_completeness,
+            )
+            from app.services.intelligence.v3.source_credibility_registry_v1 import (
+                assess_artifact_sources,
+            )
+            cred = assess_artifact_sources(output.sources)
+            contra = detect_contradictions(output.facts)
+            comp = score_evidence_completeness(
+                sources=output.sources, facts=output.facts,
+                credibility_assessment=cred, contradiction_assessment=contra,
+            )
+            usab = assess_artifact_usability(cred, contra, comp)
+            override_count = sum(
+                1 for s in cred.per_source_assessments
+                if s.get("provider_aware_override_applied")
+            )
+            logger.info(
+                "fred_macro_usability_summary observation_count=%d "
+                "strongest_authority=%s is_insufficient=%s completeness_band=%s "
+                "usability_label=%s provider_aware_override_count=%d",
+                output.artifact_payload.get("observation_count", 0),
+                cred.strongest_authority_level,
+                cred.is_insufficient,
+                comp.completeness_band,
+                usab.usability_label,
+                override_count,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug(
+                "fred_macro_usability_summary_failed error=%s", _exc,
+            )
     else:
         logger.warning(
             "fred_macro_evidence_complete series_attempted=%d series_written=0 "

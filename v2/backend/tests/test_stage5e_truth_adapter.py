@@ -277,6 +277,128 @@ class TestMalformedMetadataDoesNotCrash:
         assert ta["usability_label"] == ArtifactUsabilityLabel.NOT_EVALUABLE.value
 
 
+# ── Criterion 3b: Malformed (non-None) assessment objects fail closed ─────────
+
+
+class TestMalformedAssessmentObjectsFailClosed:
+    """Prove that malformed objects — not just None — return NOT_EVALUABLE without raising.
+
+    These tests cover:
+      - dict passed instead of dataclass (missing attribute access → AttributeError)
+      - object with wrong-typed fields (bool field is None/int)
+      - object with missing required attribute
+      - each of the three assessment positions independently
+    """
+
+    def test_malformed_credibility_dict_not_evaluable(self) -> None:
+        """dict passed as credibility → AttributeError → NOT_EVALUABLE, no raise."""
+        _, contr, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability({"is_insufficient": True}, contr, comp)
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+        assert result.suppression_reason is not None
+
+    def test_malformed_contradiction_dict_not_evaluable(self) -> None:
+        """dict passed as contradiction → AttributeError → NOT_EVALUABLE, no raise."""
+        cred, _, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(cred, {"has_contradictions": False}, comp)
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_malformed_completeness_dict_not_evaluable(self) -> None:
+        """dict passed as completeness → AttributeError → NOT_EVALUABLE, no raise."""
+        cred, contr, _ = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(cred, contr, {"completeness_band": "COMPLETE"})
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_object_missing_is_insufficient_attribute_not_evaluable(self) -> None:
+        """Object with missing is_insufficient attribute → NOT_EVALUABLE, no raise."""
+        class _BadCredibility:
+            pass  # no is_insufficient, no source_count
+
+        _, contr, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(_BadCredibility(), contr, comp)
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_object_missing_has_contradictions_attribute_not_evaluable(self) -> None:
+        """Object with missing has_contradictions attribute → NOT_EVALUABLE, no raise."""
+        class _BadContradiction:
+            is_evaluable = True
+            # no has_contradictions
+
+        cred, _, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(cred, _BadContradiction(), comp)
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_object_missing_completeness_band_attribute_not_evaluable(self) -> None:
+        """Object with missing completeness_band attribute → NOT_EVALUABLE, no raise."""
+        class _BadCompleteness:
+            pass  # no completeness_band
+
+        cred, contr, _ = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(cred, contr, _BadCompleteness())
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_credibility_is_insufficient_as_none_not_evaluable(self) -> None:
+        """is_insufficient=None (wrong type) on credibility → NOT_EVALUABLE, no raise."""
+        class _NullCredibility:
+            is_insufficient = None  # wrong type — bool expected
+            source_count = 0
+
+        _, contr, comp = _assess([], [])
+        result = assess_artifact_usability(_NullCredibility(), contr, comp)
+        # Either returns NOT_EVALUABLE (from exception or completeness=NOT_EVALUABLE) — either is correct.
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+        assert result.is_usable is False
+
+    def test_malformed_assessment_suppression_reason_set(self) -> None:
+        """All malformed-object cases set a suppression_reason string."""
+        class _NoAttrs:
+            pass
+
+        cred, contr, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        cases = [
+            (_NoAttrs(), contr, comp),
+            (cred, _NoAttrs(), comp),
+            (cred, contr, _NoAttrs()),
+        ]
+        for c, cn, co in cases:
+            result = assess_artifact_usability(c, cn, co)
+            assert result.suppression_reason is not None, (
+                "Malformed assessment object must set suppression_reason"
+            )
+
+    def test_integer_passed_as_credibility_not_evaluable(self) -> None:
+        """Completely wrong type (int) for credibility → NOT_EVALUABLE, no raise."""
+        _, contr, comp = _assess([_sec_source()], [_comparable_fact("rev", 100.0)])
+        result = assess_artifact_usability(42, contr, comp)  # type: ignore[arg-type]
+        assert result.usability_label == ArtifactUsabilityLabel.NOT_EVALUABLE.value
+
+    def test_existing_six_label_tests_unaffected_by_hardening(self) -> None:
+        """Verify that well-formed inputs still produce all expected labels after hardening."""
+        cases = [
+            # (sources, facts, expected_label)
+            ([_sec_source()], [_comparable_fact("rev", 100.0)], ArtifactUsabilityLabel.USABLE),
+            ([_sec_source()], [_unquoted_comparable_fact("rev", 100.0)], ArtifactUsabilityLabel.USABLE_WITH_LIMITATIONS),
+            ([_news_source()], [_comparable_fact("rev", 100.0)], ArtifactUsabilityLabel.SUPPRESSED_INCOMPLETE),
+            ([_sec_source()], [_comparable_fact("rev", 100.0), _comparable_fact("rev", 500.0)], ArtifactUsabilityLabel.SUPPRESSED_CONTRADICTED),
+            ([_unknown_source()], [_comparable_fact("rev", 100.0)], ArtifactUsabilityLabel.SUPPRESSED_UNKNOWN_SOURCE),
+            ([], [], ArtifactUsabilityLabel.NOT_EVALUABLE),
+        ]
+        for sources, facts, expected in cases:
+            cred, contr, comp = _assess(sources, facts)
+            result = assess_artifact_usability(cred, contr, comp)
+            assert result.usability_label == expected.value, (
+                f"Expected {expected.value}, got {result.usability_label} "
+                f"for sources={[s.source_kind for s in sources]}, "
+                f"facts={len(facts)}"
+            )
+
+
 # ── Criterion 4: Contradiction suppression beats completeness/source positives ─
 
 

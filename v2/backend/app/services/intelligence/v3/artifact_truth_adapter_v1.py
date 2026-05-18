@@ -158,25 +158,26 @@ def assess_artifact_usability(
 
     Args:
         credibility:  Output from assess_artifact_sources() (Stage 5B).
-                      None → NOT_EVALUABLE.
+                      None or malformed → NOT_EVALUABLE.
         contradiction: Output from detect_contradictions() (Stage 5C).
-                      None → NOT_EVALUABLE.
+                      None or malformed → NOT_EVALUABLE.
         completeness: Output from score_evidence_completeness() (Stage 5D).
-                      None → NOT_EVALUABLE.
+                      None or malformed → NOT_EVALUABLE.
 
     Returns:
-        ArtifactUsabilityAssessment — always non-None, fully replayable.
-        Same inputs always produce the same output.
+        ArtifactUsabilityAssessment — always non-None, never raises.
+        Malformed inputs of any kind fail closed to NOT_EVALUABLE.
+        Same well-formed inputs always produce the same output.
 
     Priority (first match wins):
-        1. NOT_EVALUABLE   — any input None, or completeness=NOT_EVALUABLE.
+        1. NOT_EVALUABLE   — any input None/malformed, or completeness=NOT_EVALUABLE.
         2. SUPPRESSED_CONTRADICTED — explicit contradiction in facts.
         3. SUPPRESSED_UNKNOWN_SOURCE — all sources are UNKNOWN authority.
         4. SUPPRESSED_INCOMPLETE — completeness is THIN.
         5. USABLE_WITH_LIMITATIONS — completeness is PARTIAL.
         6. USABLE — completeness is COMPLETE, credible, no contradictions.
     """
-    # ── Priority 1: NOT_EVALUABLE ─────────────────────────────────────────────
+    # ── Priority 1: NOT_EVALUABLE — missing inputs ────────────────────────────
     if credibility is None or contradiction is None or completeness is None:
         return _make_assessment(
             ArtifactUsabilityLabel.NOT_EVALUABLE,
@@ -184,6 +185,27 @@ def assess_artifact_usability(
             primary_limitation=_LIMITATION_NOT_EVALUABLE,
         )
 
+    # ── Fail-closed guard: malformed assessment objects ───────────────────────
+    # Any AttributeError, TypeError, or unexpected exception reading required
+    # fields on the three assessment objects returns NOT_EVALUABLE rather than
+    # raising. This protects the write path when assessment dataclasses are
+    # replaced with mocks, dicts, or objects with missing/wrong-typed fields.
+    try:
+        return _evaluate(credibility, contradiction, completeness)
+    except Exception:  # noqa: BLE001
+        return _make_assessment(
+            ArtifactUsabilityLabel.NOT_EVALUABLE,
+            suppression_reason="malformed_enrichment_metadata",
+            primary_limitation=_LIMITATION_NOT_EVALUABLE,
+        )
+
+
+def _evaluate(
+    credibility: SourceCredibilityAssessment,
+    contradiction: ContradictionAssessment,
+    completeness: EvidenceCompletenessAssessment,
+) -> ArtifactUsabilityAssessment:
+    """Inner evaluation — called only after None guard. May raise on malformed inputs."""
     completeness_band = completeness.completeness_band
     if completeness_band == BAND_NOT_EVALUABLE:
         return _make_assessment(

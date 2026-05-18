@@ -736,3 +736,82 @@ class TestOrchestratorSourceSafety:
             run_enabled_evidence_lanes_for_portfolio,
         )
         assert callable(run_enabled_evidence_lanes_for_portfolio)
+
+
+# ── Safe wrapper and scheduling log structural proofs ─────────────────────────
+
+class TestSafeWrapperStructural:
+    """Structural proof that enqueue_run_v3 has scheduling log + safe exception handler."""
+
+    def _method_src(self) -> str:
+        import sys, importlib
+        mod_name = "app.services.intelligence.v3.intel_v3_service"
+        mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        src = open(mod.__file__).read()
+        start = src.find("async def enqueue_run_v3")
+        assert start >= 0, "enqueue_run_v3 not found"
+        end = src.find("\n    # ──", start + 1)
+        return src[start:end if end > 0 else start + 10000]
+
+    def test_dispatch_scheduled_log_present(self):
+        """intel_v3_evidence_lanes_dispatch_scheduled must be logged before create_task."""
+        src = self._method_src()
+        assert "intel_v3_evidence_lanes_dispatch_scheduled" in src, (
+            "enqueue_run_v3 must log dispatch_scheduled before create_task"
+        )
+
+    def test_dispatch_scheduled_logged_before_evidence_create_task(self):
+        """Scheduling log must appear before the evidence-lane create_task call."""
+        src = self._method_src()
+        scheduled_pos = src.find("intel_v3_evidence_lanes_dispatch_scheduled")
+        # Look for the evidence-lane specific create_task — the safe wrapper function name
+        # is defined after the scheduled log, so its create_task call comes after the log.
+        safe_fn_def_pos = src.find("_run_evidence_lanes_safe")
+        assert scheduled_pos >= 0, "dispatch_scheduled log key not found"
+        assert safe_fn_def_pos >= 0, "_run_evidence_lanes_safe wrapper not found"
+        assert scheduled_pos < safe_fn_def_pos, (
+            "dispatch_scheduled log must appear before the evidence-lane safe wrapper definition"
+        )
+
+    def test_dispatch_failed_log_present(self):
+        """intel_v3_evidence_lanes_dispatch_failed must be logged on wrapper exception."""
+        src = self._method_src()
+        assert "intel_v3_evidence_lanes_dispatch_failed" in src, (
+            "enqueue_run_v3 must log dispatch_failed in the safe exception handler"
+        )
+
+    def test_safe_wrapper_has_try_except(self):
+        """The fire-and-forget wrapper must have a try/except block."""
+        src = self._method_src()
+        assert "try:" in src, (
+            "enqueue_run_v3 safe wrapper must use try/except to catch background exceptions"
+        )
+        assert "except Exception" in src, (
+            "enqueue_run_v3 safe wrapper must catch Exception generically"
+        )
+
+    def test_dispatch_failed_inside_except_block(self):
+        """dispatch_failed log must be inside the except block (after try:)."""
+        src = self._method_src()
+        try_pos = src.find("try:")
+        failed_pos = src.find("intel_v3_evidence_lanes_dispatch_failed")
+        assert try_pos >= 0 and failed_pos >= 0
+        assert failed_pos > try_pos, (
+            "dispatch_failed log must appear after try: (inside the except handler)"
+        )
+
+    def test_snapshot_get_no_dispatch_scheduled_log(self):
+        """get_latest_snapshot must not contain dispatch_scheduled (page-load contract)."""
+        import sys, importlib
+        mod_name = "app.services.intelligence.v3.intel_v3_service"
+        mod = sys.modules.get(mod_name) or importlib.import_module(mod_name)
+        src = open(mod.__file__).read()
+        start = src.find("async def get_latest_snapshot")
+        assert start >= 0
+        end = src.find("\n    # ──", start + 1)
+        if end < 0:
+            end = src.find("\n    async def ", start + 1)
+        method_src = src[start:end if end > 0 else start + 3000]
+        assert "dispatch_scheduled" not in method_src, (
+            "get_latest_snapshot must not log dispatch_scheduled (page-load contract)"
+        )

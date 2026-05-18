@@ -12,10 +12,10 @@ Design principles:
   - No network calls, no DB IO, no env reads at import time.
   - Disabled providers must NEVER be called by the evidence provider router.
 
-Providers registered in Stage 5G + Stage 5H:
+Providers registered in Stage 5G + Stage 5H + Stage 5I:
   - sec_edgar       FREE / OFFICIAL            — sec_filing + sec_company_facts lanes
   - yfinance        FREE / UNOFFICIAL_AGGREGATOR — fundamentals, technicals, news_sentiment
-  - fred            FREE / OFFICIAL            — macro; metadata-only (no client yet)
+  - fred            FREE / OFFICIAL            — macro lane (Stage 5I)
   - fmp             PAID / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
   - eodhd           LOW_COST / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
   - alpha_vantage   LOW_COST / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
@@ -194,16 +194,23 @@ _REGISTRY: Dict[str, EvidenceProviderEntry] = {
         max_stale_age_hours={
             LANE_MACRO: 24.0,
         },
-        requires_api_key=False,         # free API; key optional for higher rate limits
-        default_enabled=False,          # no FRED client adapter in repo yet
+        requires_api_key=True,          # Stage 5I: FRED_API_KEY required
+        default_enabled=True,           # Stage 5I: macro evidence lane wired
         source_of_truth_priority=2,     # official macro source; high priority when enabled
         limitations=[
-            "METADATA-ONLY — no FRED client adapter implemented in this repo.",
-            "No network calls until a FRED adapter is added and this entry is enabled.",
+            "Requires FRED_API_KEY environment variable for production use.",
+            "intel_v3_macro_evidence_enabled flag gates the actual macro lane runner.",
             "FRED covers macro indicators (rates, CPI, GDP) not company fundamentals.",
-            "API key required for production rate limits (free key available).",
+            "Allowlisted macro series only (Fed funds, Treasury yields, CPI, "
+            "unemployment, payrolls, GDP, optional yield spread).",
+            "Macro evidence is portfolio-scope context; never used to derive visible "
+            "Buy/Hold/Trim/Sell decisions (safe_for_decision stays False).",
         ],
-        notes="Planned for the macro evidence lane. Enable after FRED adapter is implemented.",
+        notes=(
+            "Stage 5I: macro lane wired via fred_macro_adapter_v1.py + "
+            "fred_provider_v1.py. Runs only on explicit Intel v3 run when "
+            "intel_v3_macro_evidence_enabled=True and fred_api_key is set."
+        ),
     ),
 
     "fmp": EvidenceProviderEntry(

@@ -113,6 +113,20 @@ class Settings(BaseSettings):
     # Tickers with no SEC company facts return honest no-artifact; no fabrication.
     intel_v3_sec_companyfacts_evidence_enabled: bool = False
 
+    # ── Intel v3 Stage 5I — FRED official macro evidence lane (off by default) ────
+    # FRED (Federal Reserve Economic Data) → portfolio-scope macro evidence artifact
+    # via fred_macro_adapter_v1. FREE / OFFICIAL source. No paid providers. No LLM calls.
+    # Writes one portfolio_exposure artifact per explicit Intel v3 run with
+    # skill_pack=fred_macro_evidence_v1 (distinct from any company fundamentals lane).
+    # Requires intel_v3_research_workers_enabled AND fred_api_key to be set.
+    # Allowlisted macro series only (FEDFUNDS/DFF, DGS10, DGS2, CPIAUCSL, UNRATE,
+    # PAYEMS, GDP/GDPC1, optional T10Y2Y). safe_for_decision stays False — macro
+    # evidence is portfolio context, never visible Buy/Hold/Trim/Sell authority.
+    intel_v3_macro_evidence_enabled: bool = False
+    # Free API key from https://fred.stlouisfed.org/docs/api/api_key.html
+    # Required for any FRED macro lane call. If unset, the macro lane skips honestly.
+    fred_api_key: Optional[str] = None
+
     # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
     # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
     # to produce provider-backed, source-linked, freshness-classified artifacts.

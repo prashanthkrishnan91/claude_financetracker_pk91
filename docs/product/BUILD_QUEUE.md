@@ -6,13 +6,13 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 5D** — Evidence completeness scoring.
+- **Stage 5E** — Truth adapter. Consumes Stage 5D completeness assessment to determine whether artifact claims are usable as structured evidence inputs for Intel v3 decision support.
 
 ## Later (Stage 5 backend)
-- Stage 5D — Evidence completeness scoring.
-- Stage 5E — Truth adapter.
+- Stage 5E — Truth adapter (see Now).
 - Stage 5F – Stage 5L — Finance research workers (filings, sentiment, technical, fundamental, company strategy, pattern detection, Radar candidates).
-- Stage 5M — Real-send activation for email alerts (after Resend domain verification). Separate, non-design stage.
+- Stage 5F – Stage 5L — Finance research workers (filings, sentiment, technical, fundamental, company strategy, pattern detection, Radar candidates).
+- Stage 5M — Real-send activation for email alerts (after Resend domain verification). Separate non-design stage.
 
 ## Later (Stage 6 advanced visible surfaces — depend on Stage 5)
 
@@ -30,11 +30,13 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
-- **Stage 5C — Contradiction Detector v1** (PR open 2026-05-18). Pure deterministic backend module. Groups comparable facts by (claim_key/metric_name, fact_kind, period, as_of). Detects numeric (1% tolerance), boolean, and text-exact conflicts. No-fact/non-comparable → not_evaluable (honest). `contradiction_assessment` injected into every new artifact payload. 41 tests. No SQL.
+- **Stage 5D — Evidence Completeness Scoring v1** (PR open 2026-05-18). Pure deterministic backend module. Evaluates 8 requirements (present/missing/not_applicable) and assigns COMPLETE/PARTIAL/THIN/NOT_EVALUABLE band. No numeric 0–100 scores. Consumes Stage 5B credibility and Stage 5C contradiction assessments. `evidence_completeness_assessment` injected into every new artifact payload as Step 6 in `write_artifact()`. Hard rules: editorial-only/UNKNOWN-only → THIN, contradictions → PARTIAL, non-comparable → THIN. 49 tests. No SQL.
 
-- **Stage 5B — Source Credibility Registry v1** (PR open 2026-05-18). Deterministic backend registry classifying all 10 source_kinds into 5 authority bands. Injected into `write_artifact()` — every new artifact payload includes `source_credibility_assessment`. 83 tests. No SQL.
+- **Stage 5C — Contradiction Detector v1** (merged PR #370, 2026-05-18). Pure deterministic backend module. Groups comparable facts by (claim_key/metric_name, fact_kind, period, as_of). Detects numeric (1% tolerance), boolean, and text-exact conflicts. No-fact/non-comparable → not_evaluable (honest). `contradiction_assessment` injected into every new artifact payload. 41 tests. No SQL.
 
-- **Stage 5A — Research Artifact Store substrate + writer scaffolding** (merged PR #367 on 2026-05-18). SQL migrations 017 + 023 required (not yet applied to Supabase). `research_artifact_service_v1.py` — narrow typed API with user-scoped idempotency, scope-aware clean replacement (full evidence lane `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))`), portfolio-scope IS NULL filter, `query_active_artifacts()` helper. `WorkerOutput.ticker` → `Optional[str]`. 60 tests.
+- **Stage 5B — Source Credibility Registry v1** (merged PR #369, 2026-05-18). Deterministic backend registry classifying all 10 source_kinds into 5 authority bands. Injected into `write_artifact()` — every new artifact payload includes `source_credibility_assessment`. 83 tests. No SQL.
+
+- **Stage 5A — Research Artifact Store substrate + writer scaffolding** (merged PR #367 on 2026-05-18). SQL migrations 017 + 023 applied to Supabase. `research_artifact_service_v1.py` — narrow typed API with user-scoped idempotency, scope-aware clean replacement (full evidence lane `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))`), portfolio-scope IS NULL filter, `query_active_artifacts()` helper. `WorkerOutput.ticker` → `Optional[str]`. 60 tests.
 
 - **Stage 4C — Intel Investment Committee Redesign** (merged PR #361). `IntelV3Primitives.tsx` + redesigned Cockpit/Card/Drawer. `action-*` token routing; accessible drawer; 56 contract tests. No backend, no SQL.
 

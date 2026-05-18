@@ -1,4 +1,5 @@
-"""Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility; Stage 5C: contradiction detection).
+"""Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility;
+Stage 5C: contradiction detection; Stage 5D: evidence completeness scoring).
 
 Public, narrow, typed API for writing evidence-only research artifacts into
 the Research Artifact Store (migration 017 + 023).
@@ -29,7 +30,8 @@ Write policies (explicit):
     Workers MAY write artifacts with no sources or facts (for scaffold/dark-run
     testing). No-source artifacts receive an UNKNOWN/INSUFFICIENT source
     credibility assessment automatically (Stage 5B). No-fact artifacts receive
-    a not_evaluable contradiction assessment (Stage 5C).
+    a not_evaluable contradiction assessment (Stage 5C). No-source-and-no-fact
+    artifacts receive a NOT_EVALUABLE completeness assessment (Stage 5D).
 
   Source credibility (Stage 5B):
     Every newly-written artifact receives a deterministic source credibility
@@ -43,6 +45,14 @@ Write policies (explicit):
     The assessment is produced by contradiction_detector_v1 and is always
     replayable. No-fact or non-comparable-fact artifacts are marked not evaluable
     — not "no contradictions." Contradiction resolution is deferred to Stage 5E.
+
+  Evidence completeness scoring (Stage 5D):
+    Every newly-written artifact receives a deterministic evidence completeness
+    assessment injected into its payload under key
+    'evidence_completeness_assessment'. The assessment is produced by
+    evidence_completeness_scorer_v1 consuming the source credibility and
+    contradiction assessments from the same write. Bands: COMPLETE / PARTIAL /
+    THIN / NOT_EVALUABLE. No fake numeric scores. No LLM calls. Replayable.
 
 Read helpers (safe, read-only):
   query_active_artifacts() — returns a compact summary list of active artifact
@@ -70,6 +80,9 @@ from app.services.intelligence.research_workers.contracts import (
 )
 from app.services.intelligence.v3.contradiction_detector_v1 import (
     detect_contradictions,
+)
+from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+    score_evidence_completeness,
 )
 from app.services.intelligence.v3.source_credibility_registry_v1 import (
     assess_artifact_sources,
@@ -117,7 +130,10 @@ class ResearchArtifactServiceV1:
              (Stage 5B — source_credibility_registry_v1).
           5. Inject deterministic contradiction assessment into payload
              (Stage 5C — contradiction_detector_v1).
-          6. Delegate insert to ArtifactStoreWriter.
+          6. Inject deterministic evidence completeness assessment into payload
+             (Stage 5D — evidence_completeness_scorer_v1). Consumes credibility
+             and contradiction assessments from Steps 4–5.
+          7. Delegate insert to ArtifactStoreWriter.
         """
         try:
             # Step 1: App-level forbidden-key guard (DB trigger also enforces this).
@@ -182,15 +198,28 @@ class ResearchArtifactServiceV1:
             contradiction = detect_contradictions(output.facts)
             enriched_payload["contradiction_assessment"] = contradiction.to_dict()
 
+            # Step 6: Inject evidence completeness assessment (Stage 5D).
+            # Consumes credibility (5B) and contradiction (5C) assessments.
+            # No fake numeric scores. Bands: COMPLETE/PARTIAL/THIN/NOT_EVALUABLE.
+            # No-source-and-no-fact → NOT_EVALUABLE with explicit missing requirements.
+            completeness = score_evidence_completeness(
+                sources=output.sources,
+                facts=output.facts,
+                credibility_assessment=credibility,
+                contradiction_assessment=contradiction,
+            )
+            enriched_payload["evidence_completeness_assessment"] = completeness.to_dict()
+
             output = _dc_replace(output, artifact_payload=enriched_payload)
 
-            # Step 6: Insert the new artifact.
+            # Step 7: Insert the new artifact.
             artifact_id = self._writer.write(output)
             if artifact_id:
                 logger.info(
                     "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s "
                     "credibility_strongest=%s is_insufficient=%s "
-                    "contradiction_evaluable=%s has_contradictions=%s contradiction_count=%d",
+                    "contradiction_evaluable=%s has_contradictions=%s contradiction_count=%d "
+                    "completeness_band=%s completeness_evaluable=%s",
                     output.ticker,
                     output.artifact_type,
                     artifact_id,
@@ -199,6 +228,8 @@ class ResearchArtifactServiceV1:
                     contradiction.is_evaluable,
                     contradiction.has_contradictions,
                     contradiction.contradiction_count,
+                    completeness.completeness_band,
+                    completeness.is_evaluable,
                 )
             return artifact_id
 

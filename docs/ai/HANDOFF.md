@@ -116,24 +116,24 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5D — Evidence Completeness Scoring v1 (current PR)
+## Stage 5E0 — Research Worker Contract Reconciliation (current PR)
 
-**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** is in PR (branch `claude/finance-tracker-v3-continue-52cXd`). **Stage 5E** is next.
+**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** is in PR (branch `claude/finance-tracker-v3-continue-xSJMk`).
 
-**SQL for migrations 017 and 023**: Both migrations were applied successfully to Supabase. Migration 017 creates the `research_artifacts` and related tables; migration 023 extends the `artifact_type` CHECK and adds uniqueness indexes.
+**SQL for migrations 017 and 023**: Both applied to Supabase. Migration 017 creates the artifact tables; 023 extends the `artifact_type` CHECK and adds uniqueness indexes.
 
-**Stage 5D status**: PR open (2026-05-18).
+**Stage 5E0 status**: PR open (2026-05-18).
 
-**What landed in Stage 5D:**
-- `v2/backend/app/services/intelligence/v3/evidence_completeness_scorer_v1.py` — Pure deterministic evidence completeness scorer. No IO, no LLM, no external calls. Consumes `SourceCredibilityAssessment` (5B) and `ContradictionAssessment` (5C). Evaluates 8 requirements (present/missing/not_applicable): `has_at_least_one_source`, `has_known_or_contextual_source_credibility`, `has_at_least_one_fact`, `has_structured_claim_key_or_metric_name`, `has_time_context_period_or_as_of`, `has_quote_grounded_fact`, `has_no_detected_contradictions`, `has_comparable_fact_when_claim_is_metric_like`. Bands: COMPLETE / PARTIAL / THIN / NOT_EVALUABLE. No fake 0–100 scores. Includes per_fact_assessments (structural metadata only, no fact values).
-- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — Added Step 6: inject `score_evidence_completeness()` into `write_artifact()` after Steps 4 (credibility) and 5 (contradiction). Every new artifact payload now includes `evidence_completeness_assessment`. Steps 4 and 5 remain intact.
-- `v2/backend/tests/test_stage5d_evidence_completeness_scorer.py` — **49 tests** covering all acceptance criteria. Stage 5A (60), 5B (83), 5C (41) regression: all pass.
+**What changed in Stage 5E0:**
+- **`runner.py`** — Replaced direct `ArtifactStoreWriter` usage with `ResearchArtifactServiceV1.write_artifact()`. Every artifact written by the earnings reviewer dark-run worker now receives all three Stage 5 quality assessments: `source_credibility_assessment` (5B), `contradiction_assessment` (5C), `evidence_completeness_assessment` (5D). No behavior change to any kill-switch or env-gate logic. No new LLM calls, no new providers, no SQL.
+- **`test_intel_v3_phase3_research_workers.py`, `test_intel_v3_phase3_5_validation_harness.py`, `test_intel_v3_phase3_7_artifact_idempotency.py`** — `FakeTableQuery` variants updated to support `update()`, `neq()`, `is_()` methods needed by `ResearchArtifactServiceV1._deactivate_superseded()`. All 158 existing Phase 3 tests still pass.
+- **`test_stage5e0_worker_contract_reconciliation.py`** — **23 new tests** proving: enriched assessments in payload, runner uses service path, no ArtifactStoreWriter bypass, safe_for_decision=False, no intel_v3_snapshots writes, no decide() import, idempotent rerun, compact diagnostic summary.
 
-**SQL required**: NO — `evidence_completeness_assessment` stored in existing `payload` JSONB column. No schema changes.
+**SQL required**: NO. No schema changes. All enrichment stored in existing `payload` JSONB column.
 
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell, price target, conviction, or allocation emitted. Contradiction resolution deferred to Stage 5E. Editorial-only and UNKNOWN-only sources cap at THIN. Contradicted artifacts cap at PARTIAL. Non-comparable facts cap at THIN.
+**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell or recommendation authority. Env kill-switches unchanged. No new workers created. No Truth Adapter yet.
 
-**Stage 5E next**: Truth adapter — consumes Stage 5D completeness assessment to determine whether an artifact's claims are usable as structured evidence inputs for Intel v3 decision support (deferred from Stage 5D by design).
+**Stage 5E Truth Adapter next**: consumes Stage 5D completeness assessment to determine whether artifact claims are usable as structured evidence inputs for Intel v3 decision support.
 
 ## Stage 5C — Contradiction Detector v1 (merged PR #370)
 

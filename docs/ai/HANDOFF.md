@@ -116,21 +116,32 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5G — Provider Registry v1 + Free-First Evidence Source Router (current PR)
+## Stage 5H — SEC CompanyFacts Official Fundamentals Adapter v1 (current PR)
 
-**Stage 5G** is the current PR (branch `claude/stage-5g-provider-registry-uqK9g`).
+**Stage 5H** is the current PR (branch `claude/sec-companyfacts-adapter-v1-ebkW4`).
 
-**What changed in Stage 5G:**
-- **`evidence_provider_registry_v1.py`** (new) — Pure, no-IO typed central registry for Stage 5 evidence lane providers. Six providers registered: `sec_edgar` (FREE/OFFICIAL, sec_filing lane), `yfinance` (FREE/UNOFFICIAL_AGGREGATOR, fundamentals/technicals/news_sentiment lanes), `fred` (FREE/OFFICIAL, macro lane — metadata-only, disabled), `fmp` (PAID/BROAD_FINANCIAL_VENDOR — disabled metadata-only), `eodhd` (LOW_COST/BROAD_FINANCIAL_VENDOR — disabled metadata-only), `alpha_vantage` (LOW_COST/BROAD_FINANCIAL_VENDOR — disabled metadata-only). Each entry declares: `cost_tier`, `trust_tier`, `supported_lanes`, `max_stale_age_hours`, `requires_api_key`, `default_enabled`, `source_of_truth_priority`, `limitations`. Registry summary always has `safe_for_decision=False`.
-- **`evidence_provider_router_v1.py`** (new) — Deterministic free-first routing policy. `resolve_provider_for_lane(lane)` → `ProviderRouteResult(provider_id, reason, provider_entry)`. Policy: (1) FREE/OFFICIAL first; (2) FREE baseline; (3) LOW_COST only if enabled; (4) PAID only if enabled; (5) no provider → `ROUTE_REASON_NO_PROVIDER`. Disabled providers never returned. No IO.
-- **`evidence_lane_runner_v1.py`** (modified) — Wired to consult the router before each lane run. Three insertion points (fundamentals, technicals, news_sentiment). If router returns `ROUTE_REASON_NO_PROVIDER`, lane skips honestly. Router selection logged at DEBUG. Existing yfinance fetch behavior unchanged (yfinance is the only enabled provider for these three lanes).
-- **`test_stage5g_provider_registry.py`** (new) — **109 tests** proving: registry structure, sec_edgar FREE/OFFICIAL for sec_filing, yfinance FREE/UNOFFICIAL_AGGREGATOR for 5F lanes, FRED FREE/OFFICIAL but disabled, paid candidates (fmp/eodhd/alpha_vantage) disabled and never callable, router deterministic policy, no-provider honest result, Stage 5F runner compatibility, safety invariants.
+**What changed in Stage 5H:**
+- **`sec_companyfacts_adapter_v1.py`** (new) — Pure, no-IO adapter. Converts `SecEdgarProviderResult` (with parsed XBRL `CompanyFactsParseResult`) → `WorkerOutput`. artifact_type=`fundamental_quality` (existing constraint), skill_pack=`sec_companyfacts_evidence_v1`, model_version=`sec_xbrl_companyfacts_v1`. One `SourceRecord` per unique filing accession (with EDGAR URL, form type, date). One `FactRecord` per `MetricObservation` (preserving period/unit/fiscal_year/fiscal_period/filed/accession_number). Honest thin-evidence on no_cik/timeout/error/no_facts — no fabrication.
+- **`evidence_provider_registry_v1.py`** (modified) — Added `LANE_SEC_COMPANY_FACTS = "sec_company_facts"` to constants and `ALL_LANES`. Extended `sec_edgar` entry's `supported_lanes` to include `LANE_SEC_COMPANY_FACTS`. Provider distinction documented: yfinance=FREE/UNOFFICIAL baseline fundamentals; sec_edgar=FREE/OFFICIAL official company-facts lane.
+- **`evidence_lane_runner_v1.py`** (modified) — Added `_is_sec_companyfacts_enabled()`, `run_sec_companyfacts_evidence()` (injectable `_provider_fn` for tests; router-consulted; writes via `ResearchArtifactServiceV1`). Extended `run_all_evidence_lanes()` dispatcher with 4th lane + `_sec_companyfacts_provider_fn` parameter.
+- **`config.py`** (modified) — Added `intel_v3_sec_companyfacts_evidence_enabled: bool = False` (default OFF).
+- **`test_stage5h_sec_companyfacts_adapter.py`** (new) — **75 tests** covering: registry/router structure, adapter SourceRecord/FactRecord with period/unit/accession references, no-data honest paths (no_cik/no_facts/timeout), four enrichment layers in written artifacts, safe_for_decision=False, no intel_v3_snapshots/recommendations writes, kill-switch, dispatcher, paid providers disabled, no decide() import, no ArtifactStoreWriter bypass.
 
-**Providers actually called**: sec_edgar (earnings_reviewer path only, unchanged), yfinance (three Stage 5F lanes, unchanged). **No new provider calls added.**
-**Paid providers**: metadata-only / disabled — fmp, eodhd, alpha_vantage.
-**SQL required**: NO.
+**Providers actually called**: sec_edgar (via `sec_edgar_provider.fetch_for_ticker` when flag on), yfinance (three Stage 5F lanes, unchanged). Paid providers remain disabled.
+**SQL required**: NO. `fundamental_quality` already in artifact_type CHECK constraint (migrations 017+023 applied).
 **UI changes**: No.
-**Next stage**: Free-source SEC company facts expansion (wiring sec_edgar company facts XBRL into a `sec_company_facts` lane) OR analyst_revisions lane expansion using a richer consensus provider.
+**Deferred XBRL concepts**: All 13 us-gaap allowlisted tags from existing `sec_companyfacts_parser.py` are reused. No new concepts added beyond what Phase 7A parser supports.
+**Next stage**: FRED macro lane OR analyst_revisions with richer consensus provider.
+
+## Stage 5G — Provider Registry v1 + Free-First Evidence Source Router (merged)
+
+**Stage 5G** merged (branch `claude/stage-5g-provider-registry-uqK9g`).
+
+**What landed in Stage 5G:**
+- **`evidence_provider_registry_v1.py`** — Six providers: `sec_edgar` (FREE/OFFICIAL), `yfinance` (FREE/UNOFFICIAL), `fred` (FREE/OFFICIAL, disabled), `fmp`/`eodhd`/`alpha_vantage` (disabled metadata-only). Registry summary always has `safe_for_decision=False`.
+- **`evidence_provider_router_v1.py`** — Deterministic free-first routing policy. `resolve_provider_for_lane(lane)` → `ProviderRouteResult`. Policy: FREE/OFFICIAL → FREE → LOW_COST → PAID → NO_PROVIDER.
+- **`evidence_lane_runner_v1.py`** — Router consulted before each Stage 5F lane run. Existing yfinance behavior unchanged.
+- **109 tests**. SQL: NO. UI: No.
 
 ## Stage 5F — Multi-Lane Evidence Population Pack v1 (merged)
 

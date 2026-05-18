@@ -937,7 +937,11 @@ class TestRunnerEntrypoint:
         assert LANE_FUNDAMENTALS in results
         assert LANE_TECHNICALS in results
         assert LANE_NEWS_SENTIMENT in results
-        assert all(v is not None for v in results.values())
+        # Three yfinance lanes are enabled by _settings_all_on(); the Stage 5H
+        # sec_company_facts lane is disabled (flag off) so its value is None.
+        assert results[LANE_FUNDAMENTALS] is not None
+        assert results[LANE_TECHNICALS] is not None
+        assert results[LANE_NEWS_SENTIMENT] is not None
         assert len(db.artifact_inserts()) == 3
 
     def test_entrypoint_global_kill_switch_off_returns_empty_dict(self) -> None:

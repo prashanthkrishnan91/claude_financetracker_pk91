@@ -1,13 +1,18 @@
-"""Stage 5F — Multi-lane evidence population runner (dispatcher/registry).
+"""Stage 5F + Stage 5H — Multi-lane evidence population runner (dispatcher/registry).
 
-Wires three feasible evidence lanes into ResearchArtifactServiceV1:
-  - fundamentals      → fundamental_quality artifact (yfinance sync)
-  - technicals        → technical_signal artifact   (yfinance sync)
-  - news_sentiment    → sentiment_event artifact     (yfinance sync)
+Wires four feasible evidence lanes into ResearchArtifactServiceV1:
+  - fundamentals      → fundamental_quality artifact (yfinance sync)          [Stage 5F]
+  - technicals        → technical_signal artifact   (yfinance sync)           [Stage 5F]
+  - news_sentiment    → sentiment_event artifact     (yfinance sync)          [Stage 5F]
+  - sec_company_facts → fundamental_quality artifact (SEC EDGAR XBRL sync)   [Stage 5H]
 
 Each lane is independently kill-switched via Settings. All writes go through
 ResearchArtifactServiceV1.write_artifact(), which injects all four Stage 5
 enrichment layers (5B credibility, 5C contradiction, 5D completeness, 5E usability).
+
+Stage 5H provider distinction:
+  yfinance  = FREE / UNOFFICIAL_AGGREGATOR — baseline fundamentals lane
+  sec_edgar = FREE / OFFICIAL              — official company-facts lane
 
 What this runner NEVER does:
   - Calls decide() or imports the v3 decision policy.
@@ -16,7 +21,7 @@ What this runner NEVER does:
     event-loop coupling in the runner context.
   - Runs on page load — explicit callable only.
   - Makes LLM calls.
-  - Uses new external providers — only existing yfinance sync functions.
+  - Activates paid providers.
 """
 from __future__ import annotations
 
@@ -43,6 +48,8 @@ from .evidence_provider_router_v1 import (
     ROUTE_REASON_NO_PROVIDER,
     resolve_provider_for_lane,
 )
+from .evidence_provider_registry_v1 import LANE_SEC_COMPANY_FACTS
+from .sec_companyfacts_adapter_v1 import build_sec_companyfacts_worker_output
 from app.services.intelligence.v3.research_artifact_service_v1 import (
     ResearchArtifactServiceV1,
 )
@@ -68,6 +75,13 @@ def _is_news_sentiment_enabled(s: Settings) -> bool:
     return (
         s.intel_v3_research_workers_enabled
         and s.intel_v3_news_sentiment_evidence_enabled
+    )
+
+
+def _is_sec_companyfacts_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_sec_companyfacts_evidence_enabled
     )
 
 
@@ -348,6 +362,121 @@ def run_news_sentiment_evidence(
     return artifact_id
 
 
+def run_sec_companyfacts_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _provider_fn: Optional[Callable] = None,
+) -> Optional[str]:
+    """Run the SEC CompanyFacts official fundamentals lane for one ticker.
+
+    Returns artifact_id if written, None if disabled, no-cik, or on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      2. settings.intel_v3_sec_companyfacts_evidence_enabled
+      3. settings.sec_edgar_user_agent must be non-empty
+
+    Provider distinction (Stage 5H):
+      This lane uses SEC EDGAR (FREE / OFFICIAL) — distinct from the yfinance
+      fundamentals lane. Both lanes write fundamental_quality artifacts but use
+      different skill_packs: sec_companyfacts_evidence_v1 vs fundamentals_evidence_v1.
+      yfinance remains the free baseline; SEC official lane runs when this flag is on.
+
+    Args:
+        _provider_fn: Injectable callable for tests.
+                      Signature: (ticker: str) -> SecEdgarProviderResult.
+                      Defaults to fetching via sec_edgar_provider.fetch_for_ticker().
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_sec_companyfacts_enabled(settings):
+        logger.debug(
+            "evidence_lane_skip lane=sec_company_facts ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    # Consult provider registry/router — ensures free-first selection.
+    route = resolve_provider_for_lane(LANE_SEC_COMPANY_FACTS)
+    if route.reason == ROUTE_REASON_NO_PROVIDER:
+        logger.warning(
+            "evidence_lane_no_provider lane=sec_company_facts ticker=%s", ticker
+        )
+        return None
+    logger.debug(
+        "evidence_lane_provider_resolved lane=sec_company_facts ticker=%s "
+        "provider=%s reason=%s",
+        ticker, route.provider_id, route.reason,
+    )
+
+    ticker_upper = ticker.upper().strip()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _provider_fn is not None:
+        provider_fn = _provider_fn
+    else:
+        from .sec_edgar_provider import fetch_for_ticker, SecEdgarProviderConfig
+        user_agent = settings.sec_edgar_user_agent or ""
+        if not user_agent.strip():
+            logger.warning(
+                "evidence_lane_skip lane=sec_company_facts ticker=%s "
+                "reason=no_sec_edgar_user_agent",
+                ticker_upper,
+            )
+            return None
+        _cfg = SecEdgarProviderConfig(user_agent=user_agent)
+        provider_fn = lambda t: fetch_for_ticker(t, _cfg)  # noqa: E731
+
+    logger.info(
+        "evidence_lane_start lane=sec_company_facts ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        from .sec_edgar_provider import SecEdgarProviderResult
+        provider_result: "SecEdgarProviderResult" = provider_fn(ticker_upper)
+    except Exception as exc:
+        logger.warning(
+            "evidence_lane_fetch_error lane=sec_company_facts ticker=%s error=%s",
+            ticker_upper, exc,
+        )
+        from .sec_edgar_provider import SecEdgarProviderResult
+        provider_result = SecEdgarProviderResult(
+            ticker=ticker_upper,
+            fetch_status="error",
+            error_message=f"runner_catch: {exc}",
+            fetched_at=fetched_at,
+        )
+
+    output = build_sec_companyfacts_worker_output(worker_input, provider_result, fetched_at)
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        logger.info(
+            "evidence_lane_complete lane=sec_company_facts ticker=%s artifact_id=%s "
+            "confidence=%s freshness=%s",
+            ticker_upper, artifact_id,
+            output.confidence_or_trust_level, output.freshness_status,
+        )
+    else:
+        logger.warning(
+            "evidence_lane_no_artifact lane=sec_company_facts ticker=%s", ticker_upper
+        )
+    return artifact_id
+
+
 # ── Dispatcher: run all feasible lanes ───────────────────────────────────────
 
 def run_all_evidence_lanes(
@@ -360,6 +489,7 @@ def run_all_evidence_lanes(
     _fundamentals_fetch_fn: Optional[Callable] = None,
     _technicals_fetch_fn: Optional[Callable] = None,
     _news_sentiment_fetch_fn: Optional[Callable] = None,
+    _sec_companyfacts_provider_fn: Optional[Callable] = None,
 ) -> dict[str, Optional[str]]:
     """Run all feasible evidence lanes for one ticker.
 
@@ -375,6 +505,7 @@ def run_all_evidence_lanes(
             _fundamentals_fetch_fn=lambda t: {...},
             _technicals_fetch_fn=lambda t: {...},
             _news_sentiment_fetch_fn=lambda t: [...],
+            _sec_companyfacts_provider_fn=lambda t: <SecEdgarProviderResult>,
         )
     """
     results: dict[str, Optional[str]] = {}
@@ -405,6 +536,15 @@ def run_all_evidence_lanes(
         holding_context=holding_context,
         settings=settings,
         _fetch_fn=_news_sentiment_fetch_fn,
+    )
+    results[LANE_SEC_COMPANY_FACTS] = run_sec_companyfacts_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _provider_fn=_sec_companyfacts_provider_fn,
     )
 
     enabled_count = sum(1 for v in results.values() if v is not None)

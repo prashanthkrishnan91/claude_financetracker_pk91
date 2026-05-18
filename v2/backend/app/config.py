@@ -104,6 +104,15 @@ class Settings(BaseSettings):
     # Requires intel_v3_research_workers_enabled.
     intel_v3_news_sentiment_evidence_enabled: bool = False
 
+    # ── Intel v3 Stage 5H — SEC CompanyFacts official fundamentals lane (off by default) ──
+    # SEC EDGAR CompanyFacts (XBRL) → fundamental_quality artifact via
+    # sec_companyfacts_adapter_v1. FREE / OFFICIAL source. No paid providers.
+    # No LLM calls. artifact_type=fundamental_quality, skill_pack=sec_companyfacts_evidence_v1.
+    # Distinct from yfinance fundamentals lane — does not replace it (yfinance is baseline).
+    # Requires intel_v3_research_workers_enabled AND sec_edgar_user_agent to be set.
+    # Tickers with no SEC company facts return honest no-artifact; no fabrication.
+    intel_v3_sec_companyfacts_evidence_enabled: bool = False
+
     # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
     # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
     # to produce provider-backed, source-linked, freshness-classified artifacts.

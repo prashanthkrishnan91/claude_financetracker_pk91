@@ -12,13 +12,17 @@ Design principles:
   - No network calls, no DB IO, no env reads at import time.
   - Disabled providers must NEVER be called by the evidence provider router.
 
-Providers registered in Stage 5G:
-  - sec_edgar       FREE / OFFICIAL            — sec_filing only (XBRL/company-facts = future lane)
+Providers registered in Stage 5G + Stage 5H:
+  - sec_edgar       FREE / OFFICIAL            — sec_filing + sec_company_facts lanes
   - yfinance        FREE / UNOFFICIAL_AGGREGATOR — fundamentals, technicals, news_sentiment
   - fred            FREE / OFFICIAL            — macro; metadata-only (no client yet)
   - fmp             PAID / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
   - eodhd           LOW_COST / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
   - alpha_vantage   LOW_COST / BROAD_FINANCIAL_VENDOR — disabled metadata-only candidate
+
+Provider distinction (Stage 5H):
+  yfinance  = FREE / UNOFFICIAL_AGGREGATOR — baseline fundamentals lane (LANE_FUNDAMENTALS)
+  sec_edgar = FREE / OFFICIAL              — official company-facts lane (LANE_SEC_COMPANY_FACTS)
 
 Pure module — no IO, no provider clients instantiated here.
 """
@@ -58,6 +62,7 @@ LANE_FUNDAMENTALS = "fundamentals"
 LANE_TECHNICALS = "technicals"
 LANE_NEWS_SENTIMENT = "news_sentiment"
 LANE_SEC_FILING = "sec_filing"
+LANE_SEC_COMPANY_FACTS = "sec_company_facts"  # Stage 5H: official XBRL fundamentals lane
 LANE_MACRO = "macro"
 LANE_ANALYST_REVISIONS = "analyst_revisions"
 LANE_COMPANY_STRATEGY = "company_strategy"
@@ -69,6 +74,7 @@ ALL_LANES: FrozenSet[str] = frozenset({
     LANE_TECHNICALS,
     LANE_NEWS_SENTIMENT,
     LANE_SEC_FILING,
+    LANE_SEC_COMPANY_FACTS,
     LANE_MACRO,
     LANE_ANALYST_REVISIONS,
     LANE_COMPANY_STRATEGY,
@@ -117,12 +123,13 @@ _REGISTRY: Dict[str, EvidenceProviderEntry] = {
 
     "sec_edgar": EvidenceProviderEntry(
         provider_id="sec_edgar",
-        display_name="SEC EDGAR (public filings API)",
+        display_name="SEC EDGAR (public filings API + XBRL CompanyFacts)",
         cost_tier=CostTier.FREE,
         trust_tier=TrustTier.OFFICIAL,
-        supported_lanes=frozenset({LANE_SEC_FILING}),
+        supported_lanes=frozenset({LANE_SEC_FILING, LANE_SEC_COMPANY_FACTS}),
         max_stale_age_hours={
-            LANE_SEC_FILING: 168.0,     # 7 days — filings update quarterly at most
+            LANE_SEC_FILING: 168.0,         # 7 days — filings update quarterly at most
+            LANE_SEC_COMPANY_FACTS: 168.0,  # 7 days — XBRL facts update with new filings
         },
         requires_api_key=False,         # public API; User-Agent header required (not a key)
         default_enabled=True,
@@ -131,21 +138,16 @@ _REGISTRY: Dict[str, EvidenceProviderEntry] = {
             "Requires a declared User-Agent header per SEC terms of service.",
             "Rate-limited to approximately 10 requests/second by SEC.",
             "Not applicable to ETF/fund/crypto tickers — SEC EDGAR is company-only.",
-            "CompanyFacts XBRL coverage varies; not all metrics available for every ticker.",
-            "No real-time data — filings reflect last reported period.",
-            (
-                "XBRL company-facts (authoritative fundamental metrics) are a separate "
-                "data product from the evidence_lane_runner's fundamentals lane; they "
-                "will be registered as a sec_company_facts sub-lane when wired."
-            ),
+            "CompanyFacts XBRL coverage limited to us-gaap allowlisted concepts only.",
+            "No real-time data — filings reflect last reported fiscal period.",
+            "sec_company_facts lane requires intel_v3_sec_companyfacts_evidence_enabled=True.",
         ],
         notes=(
-            "Existing adapter: sec_edgar_provider.py (filings + submissions + companyfacts). "
-            "Currently wired only via the earnings_reviewer path "
-            "(intel_v3_earnings_reviewer_sec_enabled). The evidence_lane_runner's "
-            "fundamentals lane uses yfinance (the only wired adapter). SEC EDGAR "
-            "company facts (XBRL) will be a separate sec_company_facts lane when "
-            "that adapter is wired into the evidence lane runner."
+            "Stage 5H: sec_company_facts lane wired via sec_companyfacts_adapter_v1.py. "
+            "Uses existing sec_edgar_provider.py (request 3: companyfacts XBRL). "
+            "sec_filing lane: wired via earnings_reviewer path (intel_v3_earnings_reviewer_sec_enabled). "
+            "Provider distinction: yfinance=FREE/UNOFFICIAL baseline fundamentals; "
+            "sec_edgar=FREE/OFFICIAL official company-facts lane."
         ),
     ),
 

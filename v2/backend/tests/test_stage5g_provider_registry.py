@@ -43,6 +43,7 @@ from app.services.intelligence.research_workers.evidence_provider_registry_v1 im
     LANE_INSIDER_13F,
     LANE_MACRO,
     LANE_NEWS_SENTIMENT,
+    LANE_SEC_COMPANY_FACTS,
     LANE_SEC_FILING,
     LANE_TECHNICALS,
     LANE_TRANSCRIPTS,
@@ -182,11 +183,13 @@ class TestEvidenceProviderRegistryStructure:
         for lane in ALL_LANES:
             assert isinstance(lane, str) and lane.strip()
 
-    def test_all_nine_lanes_present(self):
+    def test_all_ten_lanes_present(self):
+        # Stage 5H added LANE_SEC_COMPANY_FACTS (sec_edgar official XBRL lane).
         expected = {
             LANE_FUNDAMENTALS, LANE_TECHNICALS, LANE_NEWS_SENTIMENT,
-            LANE_SEC_FILING, LANE_MACRO, LANE_ANALYST_REVISIONS,
-            LANE_COMPANY_STRATEGY, LANE_TRANSCRIPTS, LANE_INSIDER_13F,
+            LANE_SEC_FILING, LANE_SEC_COMPANY_FACTS, LANE_MACRO,
+            LANE_ANALYST_REVISIONS, LANE_COMPANY_STRATEGY,
+            LANE_TRANSCRIPTS, LANE_INSIDER_13F,
         }
         assert ALL_LANES == expected
 

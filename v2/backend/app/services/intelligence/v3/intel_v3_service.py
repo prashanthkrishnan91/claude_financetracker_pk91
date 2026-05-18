@@ -901,6 +901,25 @@ class IntelV3Service:
         if freshness_gate_summary:
             freshness_gate_summary["has_pending_worker_jobs"] = (queued_count > 0)
 
+        # Dispatch enabled evidence lanes for all portfolio tickers on explicit run.
+        # Fires regardless of analyst freshness — evidence lane population is independent
+        # of the analyst refresh cycle. Fire-and-forget via to_thread so the 202 response
+        # is not delayed. Only reachable from explicit POST /run, not page-load GET.
+        from .intel_v3_evidence_lane_orchestrator_v1 import (
+            run_enabled_evidence_lanes_for_portfolio,
+        )
+        _evidence_run_id = str(uuid.uuid4())
+        _asyncio.create_task(
+            _asyncio.to_thread(
+                run_enabled_evidence_lanes_for_portfolio,
+                str(self.user_id),
+                list(tickers),
+                self.client,
+                _evidence_run_id,
+                get_settings(),
+            )
+        )
+
         return {
             "status": status,
             "queued_ticker_count": queued_count,

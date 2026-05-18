@@ -54,9 +54,27 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
+## Current evidence lane production wiring status (Stage 5H.1)
+
+`POST /intel/v3/run` now dispatches all enabled evidence lanes (5F + 5H) for every portfolio ticker via `run_enabled_evidence_lanes_for_portfolio()` in `intel_v3_evidence_lane_orchestrator_v1.py`. Dispatch is fire-and-forget (`asyncio.create_task(to_thread(...))`) so the 202 response is not delayed. Fires regardless of analyst freshness — even when `status=analyst_evidence_current` and no analyst refresh jobs are enqueued, evidence lanes run for all tickers.
+
+**To confirm in Railway after enabling flags:**
+- `intel_v3_evidence_lanes_dispatch_start total_tickers=N user_id=... parent_intel_run_id=...`
+- `evidence_lane_start lane=sec_company_facts ticker=...` / `evidence_lane_complete lane=sec_company_facts ticker=...`
+- `intel_v3_evidence_lanes_dispatch_complete tickers_attempted=N artifacts_written=N skipped=N`
+
+**Flags required:**
+- `INTEL_V3_RESEARCH_WORKERS_ENABLED=true` (global kill switch)
+- `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT=<agent>` for SEC lane
+- Per-lane: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED`
+
+**Page-load contract preserved:** `GET /intel/v3/snapshot` does NOT call the orchestrator.
+
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-18 — **Stage 5H.1: Wire enabled evidence lanes into Intel v3 run path** — `intel_v3_evidence_lane_orchestrator_v1.py` new; `intel_v3_service.enqueue_run_v3()` wired with fire-and-forget `create_task(to_thread(run_enabled_evidence_lanes_for_portfolio, ...))` dispatching after status computation. Runs for ALL tickers even when `analyst_evidence_current`. 28 new tests; 307 stage5e/5f/5g/5h tests still pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
 
 - 2026-05-16 — **Run Intel no-op/current UI fix** — Frontend state-machine bug: `handleRun()` always called `startPolling()`, but when backend returns `analyst_evidence_current` / `queued_ticker_count=0` / `existing_certified_snapshot=true` no new snapshot is created, so `isNewerThanClick` was never satisfied and the spinner ran until 5-min timeout. Fix: detect the no-op case and call `refetchSnapshot()` once instead of starting the polling loop. Added `analyst_evidence_current` to `IntelV3RunResult.status` type. 7 new banner tests; all 431 existing tests still pass.
 

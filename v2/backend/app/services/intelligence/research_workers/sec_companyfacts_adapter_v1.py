@@ -93,14 +93,28 @@ def _build_period_str(
     fiscal_year: Optional[int],
     fiscal_period: Optional[str],
     filed: str,
+    period_start: Optional[str] = None,
+    period_end: Optional[str] = None,
 ) -> str:
-    """Build a compact period string for FactRecord.period."""
+    """Build a duration-aware period string for FactRecord.period.
+
+    When period_start and period_end are present, appends them as a duration
+    suffix so that observations with different XBRL durations (e.g., Q3 quarterly
+    vs Q3 YTD) produce distinct period strings and therefore distinct group keys
+    in the contradiction detector. Same fiscal_year+fiscal_period but different
+    start/end → different period string → no false contradiction.
+    """
     if fiscal_year is not None and fiscal_period:
-        return f"{fiscal_year}-{fiscal_period}"
-    if fiscal_year is not None:
-        return str(fiscal_year)
-    # Fallback: YYYY-MM from filed date
-    return filed[:7] if filed and len(filed) >= 7 else filed
+        base = f"{fiscal_year}-{fiscal_period}"
+    elif fiscal_year is not None:
+        base = str(fiscal_year)
+    else:
+        # Fallback: YYYY-MM from filed date
+        base = filed[:7] if filed and len(filed) >= 7 else filed
+
+    if period_start and period_end:
+        return f"{base}:{period_start}..{period_end}"
+    return base
 
 
 def _freshness_from_filed_dates(
@@ -286,7 +300,10 @@ def adapt_sec_companyfacts(
     facts: list[FactRecord] = []
     for obs in observations:
         src_idx = seen_accns[obs.accession_number]
-        period_str = _build_period_str(obs.fiscal_year, obs.fiscal_period, obs.filed)
+        period_str = _build_period_str(
+            obs.fiscal_year, obs.fiscal_period, obs.filed,
+            obs.period_start, obs.period_end,
+        )
         facts.append(FactRecord(
             fact_kind="metric_observation",
             structured_payload={
@@ -301,6 +318,9 @@ def adapt_sec_companyfacts(
                 "taxonomy": obs.taxonomy,
                 "form": obs.form,
                 "provider": "sec_edgar",
+                "period_start": obs.period_start,
+                "period_end": obs.period_end,
+                "frame": obs.frame,
             },
             period=period_str,
             as_of=obs.filed if obs.filed else fetched_at,

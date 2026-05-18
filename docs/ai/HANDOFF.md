@@ -54,13 +54,22 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence lane production wiring status (Stage 5H.1)
+## Current evidence lane production wiring status (Stage 5H.2)
 
-`POST /intel/v3/run` now dispatches all enabled evidence lanes (5F + 5H) for every portfolio ticker via `run_enabled_evidence_lanes_for_portfolio()` in `intel_v3_evidence_lane_orchestrator_v1.py`. Dispatch is fire-and-forget (`asyncio.create_task(to_thread(...))`) so the 202 response is not delayed. Fires regardless of analyst freshness — even when `status=analyst_evidence_current` and no analyst refresh jobs are enqueued, evidence lanes run for all tickers.
+**Stage 5H.2 fix merged (PR pending):** SEC CompanyFacts usability classification corrected.
+
+**Root cause of false SUPPRESSED_CONTRADICTED:** SEC XBRL 10-Q filings report the same metric (e.g., Revenue) for the same `fy+fp` (e.g., fy=2023, fp=Q3) TWICE — once as the 3-month quarterly figure (start=Apr) and once as the 9-month YTD figure (start=Oct prior year). Both share the same `accn`, `filed`, `fy`, and `fp`. The contradiction detector grouped them identically and flagged the value difference (Q3 quarterly ≠ Q3 YTD) as a contradiction.
+
+**Fix:** Parser deduplicates by `(accn, fy, fp)` before period selection, keeping the entry with the most recent `start` date (shortest duration = most specific quarterly figure). YTD entries with older start dates are dropped. ETFs/crypto/no-CIK/no-facts tickers no longer write NOT_EVALUABLE placeholder artifacts (runner skips write when `observation_count == 0`).
+
+**Next runtime validation:** Re-run Intel v3 with flags enabled and confirm SEC CompanyFacts artifacts are no longer predominantly SUPPRESSED_CONTRADICTED or NOT_EVALUABLE. Expect real companies → USABLE or USABLE_WITH_LIMITATIONS.
+
+**Stage 5H.1 background:** `POST /intel/v3/run` dispatches all enabled evidence lanes via `run_enabled_evidence_lanes_for_portfolio()`. Fire-and-forget. Page-load contract preserved.
 
 **To confirm in Railway after enabling flags:**
 - `intel_v3_evidence_lanes_dispatch_start total_tickers=N user_id=... parent_intel_run_id=...`
-- `evidence_lane_start lane=sec_company_facts ticker=...` / `evidence_lane_complete lane=sec_company_facts ticker=...`
+- `sec_companyfacts_artifact_written ticker=... observation_count=N tag_count=N confidence=... freshness=...`
+- `sec_companyfacts_skip_no_artifact ticker=... reason=no_cik/no_observations` (for ETFs/crypto)
 - `intel_v3_evidence_lanes_dispatch_complete tickers_attempted=N artifacts_written=N skipped=N`
 
 **Flags required:**

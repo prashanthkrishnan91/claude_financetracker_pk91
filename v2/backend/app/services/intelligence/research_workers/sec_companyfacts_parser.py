@@ -15,6 +15,19 @@ Hard constraints (non-negotiable):
   - Never fabricates missing facts.
   - Never runs on page load — called only from research worker pipeline.
 
+Stage 5H.2 — XBRL duration identity preservation:
+  SEC 10-Q filings report the same metric (e.g., Revenue) for the same
+  fy+fp twice: once as the 3-month quarterly figure and once as the 9-month
+  YTD figure. Both share the same accn/fy/fp/filed but differ in start date.
+  These represent DIFFERENT XBRL duration dimensions and must NOT be treated
+  as contradictions. The parser:
+    - Preserves period_start, period_end, frame from each XBRL entry.
+    - Deduplicates only exact-identity entries: same (accn, fy, fp, start, end).
+      Different start/end under the same accn/fy/fp are kept as distinct
+      observations (quarterly and YTD are legitimately different measurements).
+    - The adapter then includes duration in the FactRecord.period string so
+      the contradiction detector sees different group keys for different durations.
+
 Phase 14C.2 — FY EPS coverage selection policy:
   For EPS tags only, after applying the generic latest-N policy, the parser
   also retains the latest annual FY observation if it is not already in the
@@ -83,17 +96,26 @@ class MetricObservation:
     Contains only machine-safe observation fields.
     No decision-authority keys (action, recommendation, target_price, etc.).
     No inferred direction, ratio, or valuation.
+
+    Duration identity fields (period_start, period_end, frame) are preserved
+    from the raw XBRL entry so the adapter can build duration-aware period
+    strings for contradiction grouping. Different start/end under the same
+    fy+fp represent distinct measurement windows (quarterly vs YTD) and must
+    not be collapsed.
     """
-    taxonomy: str                # always "us-gaap"
-    tag: str                     # e.g. "Revenues"
-    label: str                   # human-readable label from taxonomy
-    value: Any                   # numeric (int or float)
-    unit: str                    # "USD" or "USD/shares"
-    form: str                    # "10-K" or "10-Q"
-    fiscal_year: Optional[int]   # fy field, or None if absent
-    fiscal_period: Optional[str] # fp field (e.g. "FY", "Q1", "Q2"), or None
-    filed: str                   # filing date ISO string (YYYY-MM-DD)
-    accession_number: str        # e.g. "0000320193-23-000054"
+    taxonomy: str                        # always "us-gaap"
+    tag: str                             # e.g. "Revenues"
+    label: str                           # human-readable label from taxonomy
+    value: Any                           # numeric (int or float)
+    unit: str                            # "USD" or "USD/shares"
+    form: str                            # "10-K" or "10-Q"
+    fiscal_year: Optional[int]           # fy field, or None if absent
+    fiscal_period: Optional[str]         # fp field (e.g. "FY", "Q1", "Q2"), or None
+    filed: str                           # filing date ISO string (YYYY-MM-DD)
+    accession_number: str                # e.g. "0000320193-23-000054"
+    period_start: Optional[str] = None  # XBRL "start" date (ISO string), if present
+    period_end: Optional[str] = None    # XBRL "end" date (ISO string), if present
+    frame: Optional[str] = None         # XBRL "frame" value if present (e.g. "CY2023Q3I")
 
 
 @dataclass
@@ -157,7 +179,7 @@ def compute_metric_digest(observations: list[MetricObservation]) -> str:
     """Deterministic SHA-256 digest of a list of MetricObservations.
 
     Same observations in any order produce the same digest.
-    Any change to value, accession number, fiscal period, or filed date
+    Any change to value, accession number, fiscal period, duration, or filed date
     produces a different digest.
     """
     entries = sorted(
@@ -170,10 +192,13 @@ def compute_metric_digest(observations: list[MetricObservation]) -> str:
                 "fiscal_year": o.fiscal_year,
                 "fiscal_period": o.fiscal_period if o.fiscal_period is not None else "",
                 "filed": o.filed,
+                "period_start": o.period_start if o.period_start is not None else "",
+                "period_end": o.period_end if o.period_end is not None else "",
             }
             for o in observations
         ],
-        key=lambda x: (x["tag"], x["accession_number"], x["fiscal_period"]),
+        key=lambda x: (x["tag"], x["accession_number"], x["fiscal_period"],
+                       x["period_start"], x["period_end"]),
     )
     raw = json.dumps(entries, sort_keys=True)
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
@@ -264,6 +289,26 @@ def _parse(
         if not candidates:
             continue
 
+        # Deduplicate exact-identity entries only: same (accn, fy, fp, start, end).
+        # Different start/end under the same accn/fy/fp are DISTINCT XBRL duration
+        # dimensions (e.g., Q3 quarterly 3-month vs Q3 YTD 9-month) and are both
+        # preserved. The adapter encodes duration in the FactRecord.period string so
+        # the contradiction detector sees separate group keys for each duration.
+        seen_exact: set[tuple] = set()
+        deduped: list[dict] = []
+        for entry in candidates:
+            exact_key = (
+                str(entry.get("accn") or ""),
+                entry.get("fy"),
+                entry.get("fp"),
+                str(entry.get("start") or ""),
+                str(entry.get("end") or ""),
+            )
+            if exact_key not in seen_exact:
+                seen_exact.add(exact_key)
+                deduped.append(entry)
+        candidates = deduped
+
         # Sort by filed date descending (most recent first).
         candidates.sort(key=lambda e: str(e.get("filed") or ""), reverse=True)
 
@@ -298,6 +343,9 @@ def _parse(
         for entry in selected:
             fy_raw = entry.get("fy")
             fp_raw = entry.get("fp")
+            start_raw = entry.get("start")
+            end_raw = entry.get("end")
+            frame_raw = entry.get("frame")
             observations.append(MetricObservation(
                 taxonomy=_US_GAAP_TAXONOMY,
                 tag=tag,
@@ -309,6 +357,9 @@ def _parse(
                 fiscal_period=str(fp_raw) if fp_raw is not None else None,
                 filed=str(entry.get("filed") or ""),
                 accession_number=str(entry.get("accn") or ""),
+                period_start=str(start_raw) if start_raw is not None else None,
+                period_end=str(end_raw) if end_raw is not None else None,
+                frame=str(frame_raw) if frame_raw is not None else None,
             ))
 
     parse_status = "success" if observations else "no_facts"

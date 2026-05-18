@@ -116,7 +116,23 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5F — Multi-Lane Evidence Population Pack v1 (current PR)
+## Stage 5G — Provider Registry v1 + Free-First Evidence Source Router (current PR)
+
+**Stage 5G** is the current PR (branch `claude/stage-5g-provider-registry-uqK9g`).
+
+**What changed in Stage 5G:**
+- **`evidence_provider_registry_v1.py`** (new) — Pure, no-IO typed central registry for Stage 5 evidence lane providers. Six providers registered: `sec_edgar` (FREE/OFFICIAL, sec_filing lane), `yfinance` (FREE/UNOFFICIAL_AGGREGATOR, fundamentals/technicals/news_sentiment lanes), `fred` (FREE/OFFICIAL, macro lane — metadata-only, disabled), `fmp` (PAID/BROAD_FINANCIAL_VENDOR — disabled metadata-only), `eodhd` (LOW_COST/BROAD_FINANCIAL_VENDOR — disabled metadata-only), `alpha_vantage` (LOW_COST/BROAD_FINANCIAL_VENDOR — disabled metadata-only). Each entry declares: `cost_tier`, `trust_tier`, `supported_lanes`, `max_stale_age_hours`, `requires_api_key`, `default_enabled`, `source_of_truth_priority`, `limitations`. Registry summary always has `safe_for_decision=False`.
+- **`evidence_provider_router_v1.py`** (new) — Deterministic free-first routing policy. `resolve_provider_for_lane(lane)` → `ProviderRouteResult(provider_id, reason, provider_entry)`. Policy: (1) FREE/OFFICIAL first; (2) FREE baseline; (3) LOW_COST only if enabled; (4) PAID only if enabled; (5) no provider → `ROUTE_REASON_NO_PROVIDER`. Disabled providers never returned. No IO.
+- **`evidence_lane_runner_v1.py`** (modified) — Wired to consult the router before each lane run. Three insertion points (fundamentals, technicals, news_sentiment). If router returns `ROUTE_REASON_NO_PROVIDER`, lane skips honestly. Router selection logged at DEBUG. Existing yfinance fetch behavior unchanged (yfinance is the only enabled provider for these three lanes).
+- **`test_stage5g_provider_registry.py`** (new) — **109 tests** proving: registry structure, sec_edgar FREE/OFFICIAL for sec_filing, yfinance FREE/UNOFFICIAL_AGGREGATOR for 5F lanes, FRED FREE/OFFICIAL but disabled, paid candidates (fmp/eodhd/alpha_vantage) disabled and never callable, router deterministic policy, no-provider honest result, Stage 5F runner compatibility, safety invariants.
+
+**Providers actually called**: sec_edgar (earnings_reviewer path only, unchanged), yfinance (three Stage 5F lanes, unchanged). **No new provider calls added.**
+**Paid providers**: metadata-only / disabled — fmp, eodhd, alpha_vantage.
+**SQL required**: NO.
+**UI changes**: No.
+**Next stage**: Free-source SEC company facts expansion (wiring sec_edgar company facts XBRL into a `sec_company_facts` lane) OR analyst_revisions lane expansion using a richer consensus provider.
+
+## Stage 5F — Multi-Lane Evidence Population Pack v1 (merged)
 
 **Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** merged. **Stage 5E** merged (branch `claude/finance-tracker-intel-v3-eKyVW`). **Stage 5F** is the current PR (branch `claude/finance-tracker-intel-v3-VPlGv`).
 
@@ -134,7 +150,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 **Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell authority. No LLM calls. No new external providers. Existing earnings reviewer path intact. No UI changes. ALERT_EMAIL_DRY_RUN untouched.
 
-**Stage 5G next**: Analyst revisions lane (requires richer consensus provider) OR SEC filing risk adapter (separate from earnings_reviewer catalyst_window).
+**Stage 5H next**: SEC company facts lane expansion (wire sec_edgar XBRL company facts into a `sec_company_facts` evidence lane) OR analyst_revisions lane using EODHD or similar consensus provider.
 
 ## Stage 5E — Deterministic Research Artifact Truth Adapter v1 (merged)
 

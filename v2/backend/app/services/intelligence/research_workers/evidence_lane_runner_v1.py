@@ -39,6 +39,10 @@ from .evidence_lane_adapter_v1 import (
     build_technicals_worker_output,
     build_news_sentiment_worker_output,
 )
+from .evidence_provider_router_v1 import (
+    ROUTE_REASON_NO_PROVIDER,
+    resolve_provider_for_lane,
+)
 from app.services.intelligence.v3.research_artifact_service_v1 import (
     ResearchArtifactServiceV1,
 )
@@ -98,6 +102,20 @@ def run_fundamentals_evidence(
             "evidence_lane_skip lane=fundamentals ticker=%s reason=flag_off", ticker
         )
         return None
+
+    # Consult provider registry/router — ensures free-first selection and
+    # honest skip when no enabled provider exists for this lane.
+    route = resolve_provider_for_lane(LANE_FUNDAMENTALS)
+    if route.reason == ROUTE_REASON_NO_PROVIDER:
+        logger.warning(
+            "evidence_lane_no_provider lane=fundamentals ticker=%s", ticker
+        )
+        return None
+    logger.debug(
+        "evidence_lane_provider_resolved lane=fundamentals ticker=%s "
+        "provider=%s reason=%s",
+        ticker, route.provider_id, route.reason,
+    )
 
     ticker_upper = ticker.upper().strip()
     fetched_at = datetime.now(timezone.utc).isoformat()
@@ -178,6 +196,18 @@ def run_technicals_evidence(
         )
         return None
 
+    route = resolve_provider_for_lane(LANE_TECHNICALS)
+    if route.reason == ROUTE_REASON_NO_PROVIDER:
+        logger.warning(
+            "evidence_lane_no_provider lane=technicals ticker=%s", ticker
+        )
+        return None
+    logger.debug(
+        "evidence_lane_provider_resolved lane=technicals ticker=%s "
+        "provider=%s reason=%s",
+        ticker, route.provider_id, route.reason,
+    )
+
     ticker_upper = ticker.upper().strip()
     fetched_at = datetime.now(timezone.utc).isoformat()
     worker_run_id = str(uuid.uuid4())
@@ -256,6 +286,18 @@ def run_news_sentiment_evidence(
             "evidence_lane_skip lane=news_sentiment ticker=%s reason=flag_off", ticker
         )
         return None
+
+    route = resolve_provider_for_lane(LANE_NEWS_SENTIMENT)
+    if route.reason == ROUTE_REASON_NO_PROVIDER:
+        logger.warning(
+            "evidence_lane_no_provider lane=news_sentiment ticker=%s", ticker
+        )
+        return None
+    logger.debug(
+        "evidence_lane_provider_resolved lane=news_sentiment ticker=%s "
+        "provider=%s reason=%s",
+        ticker, route.provider_id, route.reason,
+    )
 
     ticker_upper = ticker.upper().strip()
     fetched_at = datetime.now(timezone.utc).isoformat()

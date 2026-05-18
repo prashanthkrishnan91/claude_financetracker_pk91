@@ -119,6 +119,53 @@ def _make_group_key(
     return "|".join(parts)
 
 
+def _make_sec_metric_observation_group_key(
+    claim_key: str,
+    sp: Dict[str, Any],
+    as_of: Optional[str],
+) -> str:
+    """SEC CompanyFacts metric_observation group key.
+
+    Stage 5H.3: SEC XBRL observations carry duration/period identity beyond
+    the generic (claim_key, period, as_of) tuple. Two observations are
+    genuinely the same fact only when metric_name, unit, fiscal_year,
+    fiscal_period, period_start, period_end, frame, and filed all match.
+    Different units, different fiscal periods, different XBRL durations,
+    or different filings → different group → no false contradiction.
+
+    Accession is intentionally excluded so two filings asserting different
+    values for the same identity (e.g., a restatement) still group together
+    and are flagged as a true contradiction.
+    """
+    unit = sp.get("unit") or ""
+    fiscal_year = sp.get("fiscal_year")
+    fiscal_period = sp.get("fiscal_period") or ""
+    period_start = sp.get("period_start") or ""
+    period_end = sp.get("period_end") or ""
+    frame = sp.get("frame") or ""
+    parts = [
+        "provider:sec_edgar",
+        f"metric:{claim_key}",
+        "fact_kind:metric_observation",
+        f"unit:{unit}",
+        f"fy:{fiscal_year if fiscal_year is not None else ''}",
+        f"fp:{fiscal_period}",
+        f"start:{period_start}",
+        f"end:{period_end}",
+        f"frame:{frame}",
+        f"filed:{as_of or ''}",
+    ]
+    return "|".join(parts)
+
+
+def _is_sec_metric_observation(fact_kind: str, sp: Dict[str, Any]) -> bool:
+    """Return True if this fact is a SEC CompanyFacts metric_observation."""
+    if fact_kind != "metric_observation":
+        return False
+    provider = sp.get("provider")
+    return isinstance(provider, str) and provider.strip().lower() == "sec_edgar"
+
+
 def _numeric_contradicts(a: float, b: float) -> bool:
     denominator = max(abs(a), abs(b), _NUMERIC_ABS_FLOOR)
     return abs(a - b) / denominator > NUMERIC_RELATIVE_TOLERANCE
@@ -210,7 +257,12 @@ def detect_contradictions(facts: List[Any]) -> ContradictionAssessment:
         values = _extract_value_fields(sp)
 
         if claim_key and values:
-            group_key = _make_group_key(claim_key, fact_kind, period, as_of)
+            if _is_sec_metric_observation(fact_kind, sp):
+                group_key = _make_sec_metric_observation_group_key(
+                    claim_key, sp, as_of,
+                )
+            else:
+                group_key = _make_group_key(claim_key, fact_kind, period, as_of)
             comparable.append((group_key, claim_key, period, as_of, values, fact))
         else:
             non_comparable_count += 1

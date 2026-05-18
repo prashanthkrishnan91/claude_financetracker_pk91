@@ -913,6 +913,13 @@ class IntelV3Service:
         _evidence_tickers = list(tickers)
         _evidence_client = self.client
         _evidence_settings = get_settings()
+        # Stage 5H.3 patch — fetch best-effort holding_context (category) so
+        # the SEC CompanyFacts non-equity guard can decide eligibility from
+        # actual position metadata when available, not just the static
+        # BTC/XRP/ETF symbol fallback. Empty dict on any DB failure is safe.
+        _evidence_holding_context_by_ticker = (
+            await self._get_active_holding_context_by_ticker()
+        )
 
         # Log before scheduling so Railway can confirm dispatch was attempted even if
         # the background thread fails or the process terminates before it completes.
@@ -933,6 +940,7 @@ class IntelV3Service:
                     _evidence_client,
                     _evidence_run_id,
                     _evidence_settings,
+                    _evidence_holding_context_by_ticker,
                 )
             except Exception as _exc:
                 logger.warning(
@@ -1656,6 +1664,34 @@ class IntelV3Service:
             return tickers
         except Exception:
             return []
+
+    async def _get_active_holding_context_by_ticker(self) -> dict[str, dict]:
+        """Return a compact {ticker: {"category": ...}} map for explicit-run
+        evidence lane eligibility (Stage 5H.3 patch).
+
+        Best-effort: failures return {} so callers fall back to ticker-only
+        dispatch. Read-only on the positions table. Never raises.
+        """
+        try:
+            result = await asyncio.to_thread(
+                lambda: self.client.table("positions")
+                .select("ticker,category")
+                .eq("user_id", str(self.user_id))
+                .execute()
+            )
+            ctx: dict[str, dict] = {}
+            for row in (result.data or []):
+                if not isinstance(row, dict):
+                    continue
+                t = row.get("ticker")
+                if not t:
+                    continue
+                category = row.get("category")
+                if isinstance(category, str) and category.strip():
+                    ctx.setdefault(str(t), {"category": category.strip()})
+            return ctx
+        except Exception:
+            return {}
 
     def _build_price_refresh_callable(self):
         """Return an async callable (tickers -> dict) that drives PriceService.fetch_prices.

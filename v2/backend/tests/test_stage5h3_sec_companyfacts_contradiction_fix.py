@@ -429,6 +429,131 @@ class TestEligibleTickerStillRuns:
                    for m in msgs), f"missing usability summary log; got: {msgs}"
 
 
+# ── 5b. Orchestrator plumbs holding_context_by_ticker → runner ────────────────
+
+class TestOrchestratorPlumbsHoldingContext:
+    """Stage 5H.3 patch: explicit-run orchestrator must pass holding_context per
+    ticker into run_evidence_lanes_for_ticker so the SEC non-equity guard can
+    decide eligibility from actual position metadata, not just symbol fallback."""
+
+    def test_holding_context_passed_per_ticker(self, monkeypatch):
+        from app.services.intelligence.v3.intel_v3_evidence_lane_orchestrator_v1 import (
+            run_enabled_evidence_lanes_for_portfolio,
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_runner(user_id, ticker, db_client, parent_intel_run_id=None,
+                        holding_context=None, settings=None, **kwargs):
+            captured[ticker] = holding_context
+            return {}
+
+        import app.services.intelligence.research_workers.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "run_evidence_lanes_for_ticker", fake_runner)
+
+        ctx = {
+            "AAPL": {"category": "Core"},
+            "SCHD": {"category": "ETF"},
+            "BTC": {"category": "Crypto"},
+        }
+        run_enabled_evidence_lanes_for_portfolio(
+            user_id="u",
+            tickers=["AAPL", "SCHD", "BTC"],
+            db_client=FakeSupabaseClient(),
+            settings=_settings_on(),
+            holding_context_by_ticker=ctx,
+        )
+        assert captured["AAPL"] == {"category": "Core"}
+        assert captured["SCHD"] == {"category": "ETF"}
+        assert captured["BTC"] == {"category": "Crypto"}
+
+    def test_missing_context_passes_none(self, monkeypatch):
+        from app.services.intelligence.v3.intel_v3_evidence_lane_orchestrator_v1 import (
+            run_enabled_evidence_lanes_for_portfolio,
+        )
+        captured: dict[str, Any] = {}
+
+        def fake_runner(user_id, ticker, db_client, parent_intel_run_id=None,
+                        holding_context=None, settings=None, **kwargs):
+            captured[ticker] = holding_context
+            return {}
+
+        import app.services.intelligence.research_workers.runner as runner_mod
+        monkeypatch.setattr(runner_mod, "run_evidence_lanes_for_ticker", fake_runner)
+
+        run_enabled_evidence_lanes_for_portfolio(
+            user_id="u", tickers=["AAPL"], db_client=FakeSupabaseClient(),
+            settings=_settings_on(),
+        )
+        assert captured["AAPL"] is None
+
+
+# ── 5c. Metadata-only crypto / fund tickers (not in static fallback) skipped ──
+
+class TestUnknownSymbolWithMetadataSkipped:
+    """Tickers NOT in KNOWN_CRYPTO_TICKERS or KNOWN_FUND_OR_ETF_TICKERS must
+    still be skipped when holding_context metadata says Crypto/ETF."""
+
+    def test_unknown_crypto_symbol_with_metadata_skipped(self):
+        called: list = []
+        db = FakeSupabaseClient()
+
+        def _prov(t):
+            called.append(t)
+            raise AssertionError("provider must not be called")
+
+        artifact_id = run_sec_companyfacts_evidence(
+            user_id="u", ticker="NOTLISTEDCOIN", db_client=db,
+            settings=_settings_on(),
+            holding_context={"category": "Crypto"},
+            _provider_fn=_prov,
+        )
+        assert artifact_id is None
+        assert called == []
+
+    def test_unknown_etf_symbol_with_metadata_skipped(self):
+        called: list = []
+        db = FakeSupabaseClient()
+
+        def _prov(t):
+            called.append(t)
+            raise AssertionError("provider must not be called")
+
+        artifact_id = run_sec_companyfacts_evidence(
+            user_id="u", ticker="NOTLISTEDETF", db_client=db,
+            settings=_settings_on(),
+            holding_context={"asset_type": "ETF"},
+            _provider_fn=_prov,
+        )
+        assert artifact_id is None
+        assert called == []
+
+    def test_skip_source_log_marks_metadata(self, caplog):
+        caplog.set_level(logging.INFO)
+        db = FakeSupabaseClient()
+        run_sec_companyfacts_evidence(
+            user_id="u", ticker="NOTLISTEDCOIN", db_client=db,
+            settings=_settings_on(),
+            holding_context={"category": "Crypto"},
+            _provider_fn=lambda t: (_ for _ in ()).throw(AssertionError("never")),
+        )
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("sec_companyfacts_skip_non_equity" in m
+                   and "skip_source=metadata" in m for m in msgs), msgs
+
+    def test_skip_source_log_marks_symbol_fallback(self, caplog):
+        caplog.set_level(logging.INFO)
+        db = FakeSupabaseClient()
+        run_sec_companyfacts_evidence(
+            user_id="u", ticker="BTC", db_client=db,
+            settings=_settings_on(),
+            holding_context=None,
+            _provider_fn=lambda t: (_ for _ in ()).throw(AssertionError("never")),
+        )
+        msgs = [r.getMessage() for r in caplog.records]
+        assert any("sec_companyfacts_skip_non_equity" in m
+                   and "skip_source=symbol_fallback" in m for m in msgs), msgs
+
+
 # ── 6. Parse → adapt → detect on real-shaped XBRL payload ─────────────────────
 
 class TestRuntimeShapeParseAdaptDetect:

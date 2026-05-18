@@ -414,12 +414,14 @@ def run_sec_companyfacts_evidence(
                 break
     classification = classify_sec_metric_candidate(ticker, category)
     if not classification["is_sec_company_candidate"]:
+        skip_source = "metadata" if category else "symbol_fallback"
         logger.info(
             "sec_companyfacts_skip_non_equity ticker=%s classification=%s "
-            "category=%s reason_codes=%s",
+            "category=%s skip_source=%s reason_codes=%s",
             ticker.upper().strip(),
             classification["classification"],
             category or "unspecified",
+            skip_source,
             ",".join(classification.get("blocking_reason_codes", [])) or "none",
         )
         return None

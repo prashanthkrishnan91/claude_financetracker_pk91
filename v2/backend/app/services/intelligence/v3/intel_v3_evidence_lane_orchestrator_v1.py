@@ -33,6 +33,7 @@ def run_enabled_evidence_lanes_for_portfolio(
     db_client: Any,
     parent_intel_run_id: Optional[str] = None,
     settings: Optional[Settings] = None,
+    holding_context_by_ticker: Optional[dict[str, dict[str, Any]]] = None,
 ) -> dict[str, dict[str, Optional[str]]]:
     """Run all enabled evidence lanes for every portfolio ticker.
 
@@ -73,6 +74,7 @@ def run_enabled_evidence_lanes_for_portfolio(
     total_artifacts_written = 0
     total_skipped = 0
 
+    ctx_map = holding_context_by_ticker or {}
     for ticker in tickers:
         try:
             results = run_evidence_lanes_for_ticker(
@@ -80,6 +82,7 @@ def run_enabled_evidence_lanes_for_portfolio(
                 ticker=ticker,
                 db_client=db_client,
                 parent_intel_run_id=parent_intel_run_id,
+                holding_context=ctx_map.get(ticker) or ctx_map.get(ticker.upper().strip()),
                 settings=settings,
             )
             all_results[ticker] = results

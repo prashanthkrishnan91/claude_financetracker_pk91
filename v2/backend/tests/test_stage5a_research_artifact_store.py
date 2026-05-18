@@ -67,6 +67,7 @@ class _FakeTable:
         self._payload: Optional[dict] = None
         self._filters: dict[str, Any] = {}
         self._neg_filters: dict[str, Any] = {}
+        self._null_filters: dict[str, bool] = {}  # columns that must be None (IS NULL)
         self._select_cols: Optional[str] = None
         self._limit_n: Optional[int] = None
         self._order_col: Optional[str] = None
@@ -95,6 +96,11 @@ class _FakeTable:
         self._neg_filters[col] = val
         return self
 
+    def is_(self, col: str, val: str) -> "_FakeTable":
+        if val == "null":
+            self._null_filters[col] = True
+        return self
+
     def order(self, col: str, desc: bool = False) -> "_FakeTable":
         self._order_col = col
         self._order_desc = desc
@@ -119,7 +125,11 @@ class _FakeTable:
             update_op = _UpdateOp(
                 table=self._name,
                 patch=dict(self._payload),
-                filters={**self._filters, "_neq": self._neg_filters},
+                filters={
+                    **self._filters,
+                    "_neq": self._neg_filters,
+                    "_is_null": list(self._null_filters.keys()),
+                },
             )
             self._shared.updates.append(update_op)
             # Apply to in-memory rows.
@@ -159,6 +169,9 @@ class _FakeTable:
                 return False
         for k, v in self._neg_filters.items():
             if row.get(k) == v:
+                return False
+        for k in self._null_filters:
+            if row.get(k) is not None:
                 return False
         return True
 
@@ -201,7 +214,8 @@ def _make_output(
     *,
     artifact_type: str = "filing_risk",
     skill_pack: str = "test_pack",
-    ticker: str = _TICKER,
+    ticker: Optional[str] = _TICKER,
+    scope_kind: str = "ticker",
     key_suffix: str = "v1",
     payload: Optional[dict] = None,
     sources: Optional[list[SourceRecord]] = None,
@@ -211,14 +225,20 @@ def _make_output(
     expires_at: Optional[str] = None,
     parent_intel_run_id: Optional[str] = None,
 ) -> WorkerOutput:
-    idempotency_key = _make_key(key_suffix)
+    idempotency_key = compute_replay_idempotency_key(
+        skill_pack=skill_pack,
+        scope_kind=scope_kind,
+        ticker=ticker or "",
+        source_refs_fingerprint=f"fp_{key_suffix}",
+        model_version="none",
+    )
     input_fp = compute_input_fingerprint({"ticker": ticker, "suffix": key_suffix})
     return WorkerOutput(
         worker_run_id=str(uuid.uuid4()),
         ticker=ticker,
         artifact_type=artifact_type,
         skill_pack=skill_pack,
-        scope_kind="ticker",
+        scope_kind=scope_kind,
         artifact_payload=payload or {"evidence_summary": "test evidence"},
         sources=sources or [],
         facts=facts or [],
@@ -368,6 +388,151 @@ class TestCleanReplacement:
         }
         assert "filing_risk" not in technical_deactivation_targets, (
             "Deactivation triggered by technical_signal write must not target filing_risk"
+        )
+
+
+# ── Tests: Scope-aware clean replacement ─────────────────────────────────────
+
+class TestScopeAwareCleanReplacement:
+    def test_portfolio_scope_clean_replacement(self) -> None:
+        """Portfolio-scope artifact (ticker=None, scope_kind='portfolio') is deactivated
+        when a new artifact for the same lane is written with a different key."""
+        service, db = _make_service()
+
+        first = _make_output(
+            artifact_type="portfolio_exposure",
+            scope_kind="portfolio",
+            ticker=None,
+            key_suffix="port_v1",
+        )
+        first_id = service.write_artifact(first)
+        assert first_id is not None
+
+        second = _make_output(
+            artifact_type="portfolio_exposure",
+            scope_kind="portfolio",
+            ticker=None,
+            key_suffix="port_v2",
+        )
+        second_id = service.write_artifact(second)
+        assert second_id is not None
+        assert second_id != first_id
+
+        # First portfolio artifact must be deactivated in-memory.
+        portfolio_arts = [
+            r for r in db.tables.get("research_artifacts", [])
+            if r.get("scope_kind") == "portfolio"
+        ]
+        active = [r for r in portfolio_arts if r.get("is_active")]
+        inactive = [r for r in portfolio_arts if not r.get("is_active")]
+        assert len(active) == 1, "Exactly one active portfolio artifact expected"
+        assert len(inactive) == 1, "First portfolio artifact must be deactivated"
+        assert active[0]["id"] == second_id
+
+    def test_portfolio_scope_deactivation_filter_uses_is_null(self) -> None:
+        """Deactivation UPDATE for portfolio-scope must use IS NULL (not eq) for ticker."""
+        service, db = _make_service()
+
+        service.write_artifact(
+            _make_output(
+                artifact_type="portfolio_exposure",
+                scope_kind="portfolio",
+                ticker=None,
+                key_suffix="port_v1",
+            )
+        )
+        service.write_artifact(
+            _make_output(
+                artifact_type="portfolio_exposure",
+                scope_kind="portfolio",
+                ticker=None,
+                key_suffix="port_v2",
+            )
+        )
+
+        portfolio_deactivations = [
+            u for u in db.updates
+            if u.patch.get("is_active") is False
+            and u.filters.get("scope_kind") == "portfolio"
+        ]
+        assert portfolio_deactivations, "Expected a deactivation UPDATE for portfolio scope"
+        u = portfolio_deactivations[0]
+        assert "ticker" in u.filters.get("_is_null", []), (
+            "Portfolio deactivation must use IS NULL for ticker, not eq"
+        )
+        assert "ticker" not in u.filters, (
+            "Portfolio deactivation must not use .eq('ticker', ...) — ticker is NULL"
+        )
+
+    def test_deactivation_filter_includes_scope_kind(self) -> None:
+        """Every deactivation UPDATE must include scope_kind in its filter."""
+        service, db = _make_service()
+        service.write_artifact(_make_output(key_suffix="sk_v1"))
+        service.write_artifact(_make_output(key_suffix="sk_v2"))
+
+        deactivations = [u for u in db.updates if u.patch.get("is_active") is False]
+        assert deactivations, "Expected at least one deactivation update"
+        for u in deactivations:
+            assert "scope_kind" in u.filters, (
+                "Every deactivation UPDATE must filter by scope_kind"
+            )
+
+    def test_ticker_scope_deactivation_uses_eq_ticker(self) -> None:
+        """Deactivation for ticker-scope must use .eq('ticker', ticker) — not IS NULL."""
+        service, db = _make_service()
+        service.write_artifact(_make_output(key_suffix="t_v1"))
+        service.write_artifact(_make_output(key_suffix="t_v2"))
+
+        ticker_deactivations = [
+            u for u in db.updates
+            if u.patch.get("is_active") is False
+            and u.filters.get("scope_kind") == "ticker"
+        ]
+        assert ticker_deactivations, "Expected a deactivation UPDATE for ticker scope"
+        u = ticker_deactivations[0]
+        assert u.filters.get("ticker") == _TICKER, (
+            "Ticker-scope deactivation must use .eq('ticker', ticker)"
+        )
+        assert "ticker" not in u.filters.get("_is_null", []), (
+            "Ticker-scope deactivation must not use IS NULL for ticker"
+        )
+
+    def test_portfolio_scope_does_not_deactivate_ticker_scope_artifacts(self) -> None:
+        """Writing a portfolio-scope artifact must not deactivate ticker-scope artifacts."""
+        service, db = _make_service()
+
+        ticker_art = _make_output(
+            artifact_type="portfolio_exposure",
+            scope_kind="ticker",
+            ticker=_TICKER,
+            key_suffix="tick_v1",
+        )
+        ticker_id = service.write_artifact(ticker_art)
+        assert ticker_id is not None
+
+        _make_output(
+            artifact_type="portfolio_exposure",
+            scope_kind="portfolio",
+            ticker=None,
+            key_suffix="port_v1",
+        )
+        service.write_artifact(
+            _make_output(
+                artifact_type="portfolio_exposure",
+                scope_kind="portfolio",
+                ticker=None,
+                key_suffix="port_v1",
+            )
+        )
+
+        # The ticker-scope artifact must still be active.
+        ticker_rows = [
+            r for r in db.tables.get("research_artifacts", [])
+            if r.get("scope_kind") == "ticker" and r.get("artifact_type") == "portfolio_exposure"
+        ]
+        assert len(ticker_rows) == 1
+        assert ticker_rows[0].get("is_active") is True, (
+            "ticker-scope artifact must not be deactivated by a portfolio-scope write"
         )
 
 
@@ -891,7 +1056,7 @@ class TestFetchedAtProvenance:
         fetched = "2026-03-01T08:30:00+00:00"
         sources = [
             SourceRecord(
-                source_kind="api_call",
+                source_kind="vendor_fundamentals",
                 provider_name="market_data",
                 fetched_at=fetched,
                 source_url=None,   # other optional fields absent

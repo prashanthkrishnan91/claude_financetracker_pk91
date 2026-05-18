@@ -18,11 +18,12 @@ Write policies (explicit):
 
   Clean replacement:
     When a new artifact is written with a *different* idempotency key for the
-    same (user_id, ticker, artifact_type, skill_pack), all previously active
-    artifacts for that combination are deactivated (is_active=False,
-    invalidated_at=now, invalidation_reason='superseded_by_new_write') before
-    the new artifact row is inserted. This ensures at most one active artifact
-    per (user_id, ticker, artifact_type, skill_pack) combination at any time.
+    same evidence lane (user_id, artifact_type, skill_pack, scope_kind,
+    COALESCE(ticker, '')), all previously active artifacts for that lane are
+    deactivated (is_active=False, invalidated_at=now,
+    invalidation_reason='superseded_by_new_write') before the new artifact row
+    is inserted. This ensures at most one active artifact per lane at any time.
+    Covers ticker-scope (ticker IS NOT NULL) and portfolio-scope (ticker IS NULL).
 
   No-source writes:
     Workers MAY write artifacts with no sources or facts (for scaffold/dark-run
@@ -88,8 +89,9 @@ class ResearchArtifactServiceV1:
           1. Validate payload has no forbidden decision-authority keys.
           2. Check idempotency: if active artifact with same replay_idempotency_key
              already exists, return its id (skip).
-          3. Deactivate previous active artifacts for (user_id, ticker, artifact_type,
-             skill_pack) that have a different idempotency key (clean replacement).
+          3. Deactivate previous active artifacts for the same evidence lane
+             (user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))
+             that have a different idempotency key (clean replacement).
           4. Delegate insert to ArtifactStoreWriter.
         """
         try:
@@ -117,26 +119,26 @@ class ResearchArtifactServiceV1:
                 )
                 return existing_id
 
-            # Step 3: Fail-closed clean replacement — deactivate superseded active artifacts.
-            # If deactivation fails we abort the write (return None) so we never insert
-            # a new active row while a stale active row still exists.
-            if output.ticker:
-                try:
-                    self._deactivate_superseded(
-                        ticker=output.ticker,
-                        artifact_type=output.artifact_type,
-                        skill_pack=output.skill_pack,
-                        new_idempotency_key=output.replay_idempotency_key,
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    logger.error(
-                        "research_artifact_service_deactivation_failed_abort_write "
-                        "ticker=%s type=%s error=%s",
-                        output.ticker,
-                        output.artifact_type,
-                        exc,
-                    )
-                    return None
+            # Step 3: Fail-closed clean replacement — always deactivate superseded
+            # artifacts for the full evidence lane before insert. Portfolio-scope
+            # artifacts (ticker=None) are correctly handled via IS NULL filter.
+            try:
+                self._deactivate_superseded(
+                    artifact_type=output.artifact_type,
+                    skill_pack=output.skill_pack,
+                    scope_kind=output.scope_kind,
+                    ticker=output.ticker if output.ticker else None,
+                    new_idempotency_key=output.replay_idempotency_key,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "research_artifact_service_deactivation_failed_abort_write "
+                    "ticker=%s type=%s error=%s",
+                    output.ticker,
+                    output.artifact_type,
+                    exc,
+                )
+                return None
 
             # Step 4: Insert the new artifact.
             artifact_id = self._writer.write(output)
@@ -219,19 +221,24 @@ class ResearchArtifactServiceV1:
 
     def _deactivate_superseded(
         self,
-        ticker: str,
         artifact_type: str,
         skill_pack: str,
+        scope_kind: str,
         new_idempotency_key: str,
+        ticker: Optional[str] = None,
     ) -> None:
-        """Deactivate all active artifacts for (user_id, ticker, artifact_type, skill_pack)
-        that do NOT have the new idempotency key.
+        """Deactivate all active artifacts in the same evidence lane that do NOT have
+        the new idempotency key.
+
+        Evidence lane: (user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))
+        Matches the DB partial unique index uq_research_artifacts_active_lane.
+        Handles ticker-scope (ticker IS NOT NULL) and portfolio-scope (ticker IS NULL).
 
         Fail-closed: exceptions propagate to write_artifact, which catches them and
         returns None without proceeding to insert.
         """
         now_iso = datetime.now(timezone.utc).isoformat()
-        result = (
+        q = (
             self._client.table("research_artifacts")
             .update({
                 "is_active": False,
@@ -239,13 +246,17 @@ class ResearchArtifactServiceV1:
                 "invalidation_reason": "superseded_by_new_write",
             })
             .eq("user_id", self._user_id)
-            .eq("ticker", ticker)
             .eq("artifact_type", artifact_type)
             .eq("skill_pack", skill_pack)
+            .eq("scope_kind", scope_kind)
             .eq("is_active", True)
             .neq("replay_idempotency_key", new_idempotency_key)
-            .execute()
         )
+        if ticker is not None:
+            q = q.eq("ticker", ticker)
+        else:
+            q = q.is_("ticker", "null")
+        result = q.execute()
         deactivated = len(result.data or [])
         if deactivated > 0:
             logger.info(

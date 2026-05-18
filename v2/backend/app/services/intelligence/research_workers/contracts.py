@@ -180,7 +180,7 @@ class AuditEventRecord:
 class WorkerOutput:
     """Everything the DB writer needs to persist one artifact + supporting rows."""
     worker_run_id: str
-    ticker: str
+    ticker: Optional[str]  # None for portfolio-scope (scope_kind='portfolio')
     artifact_type: str
     skill_pack: str
     scope_kind: str

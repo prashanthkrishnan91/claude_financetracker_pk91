@@ -1,4 +1,4 @@
-"""Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility integrated).
+"""Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility; Stage 5C: contradiction detection).
 
 Public, narrow, typed API for writing evidence-only research artifacts into
 the Research Artifact Store (migration 017 + 023).
@@ -25,16 +25,24 @@ Write policies (explicit):
     is inserted. This ensures at most one active artifact per lane at any time.
     Covers ticker-scope (ticker IS NOT NULL) and portfolio-scope (ticker IS NULL).
 
-  No-source writes:
+  No-source / no-fact writes:
     Workers MAY write artifacts with no sources or facts (for scaffold/dark-run
     testing). No-source artifacts receive an UNKNOWN/INSUFFICIENT source
-    credibility assessment automatically (Stage 5B).
+    credibility assessment automatically (Stage 5B). No-fact artifacts receive
+    a not_evaluable contradiction assessment (Stage 5C).
 
   Source credibility (Stage 5B):
     Every newly-written artifact receives a deterministic source credibility
     assessment injected into its payload under key
     'source_credibility_assessment'. The assessment is produced by
     source_credibility_registry_v1 and is always replayable.
+
+  Contradiction detection (Stage 5C):
+    Every newly-written artifact receives a deterministic contradiction
+    assessment injected into its payload under key 'contradiction_assessment'.
+    The assessment is produced by contradiction_detector_v1 and is always
+    replayable. No-fact or non-comparable-fact artifacts are marked not evaluable
+    — not "no contradictions." Contradiction resolution is deferred to Stage 5E.
 
 Read helpers (safe, read-only):
   query_active_artifacts() — returns a compact summary list of active artifact
@@ -59,6 +67,9 @@ from app.services.intelligence.research_workers.contracts import (
     SourceRecord,
     WorkerOutput,
     validate_payload,
+)
+from app.services.intelligence.v3.contradiction_detector_v1 import (
+    detect_contradictions,
 )
 from app.services.intelligence.v3.source_credibility_registry_v1 import (
     assess_artifact_sources,
@@ -104,7 +115,9 @@ class ResearchArtifactServiceV1:
              that have a different idempotency key (clean replacement).
           4. Inject deterministic source credibility assessment into payload
              (Stage 5B — source_credibility_registry_v1).
-          5. Delegate insert to ArtifactStoreWriter.
+          5. Inject deterministic contradiction assessment into payload
+             (Stage 5C — contradiction_detector_v1).
+          6. Delegate insert to ArtifactStoreWriter.
         """
         try:
             # Step 1: App-level forbidden-key guard (DB trigger also enforces this).
@@ -155,24 +168,37 @@ class ResearchArtifactServiceV1:
             # Step 4: Inject source credibility assessment (Stage 5B).
             # Assessment is deterministic and replayable; no-source artifacts
             # receive UNKNOWN/INSUFFICIENT. Never adds forbidden keys.
-            assessment = assess_artifact_sources(output.sources)
+            credibility = assess_artifact_sources(output.sources)
             enriched_payload = {
                 **output.artifact_payload,
-                "source_credibility_assessment": assessment.to_dict(),
+                "source_credibility_assessment": credibility.to_dict(),
             }
+
+            # Step 5: Inject contradiction assessment (Stage 5C).
+            # Assessment is deterministic and replayable; no-fact or
+            # non-comparable-fact artifacts are marked not_evaluable.
+            # Never says "no contradictions" when evidence is not comparable.
+            # Contradiction resolution is deferred to Stage 5E truth adapter.
+            contradiction = detect_contradictions(output.facts)
+            enriched_payload["contradiction_assessment"] = contradiction.to_dict()
+
             output = _dc_replace(output, artifact_payload=enriched_payload)
 
-            # Step 5: Insert the new artifact.
+            # Step 6: Insert the new artifact.
             artifact_id = self._writer.write(output)
             if artifact_id:
                 logger.info(
                     "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s "
-                    "credibility_strongest=%s is_insufficient=%s",
+                    "credibility_strongest=%s is_insufficient=%s "
+                    "contradiction_evaluable=%s has_contradictions=%s contradiction_count=%d",
                     output.ticker,
                     output.artifact_type,
                     artifact_id,
-                    assessment.strongest_authority_level,
-                    assessment.is_insufficient,
+                    credibility.strongest_authority_level,
+                    credibility.is_insufficient,
+                    contradiction.is_evaluable,
+                    contradiction.has_contradictions,
+                    contradiction.contradiction_count,
                 )
             return artifact_id
 

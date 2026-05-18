@@ -6,10 +6,9 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Now (active)
 
-- **Stage 5C** — Contradiction detection.
+- **Stage 5D** — Evidence completeness scoring.
 
 ## Later (Stage 5 backend)
-- Stage 5C — Contradiction detection.
 - Stage 5D — Evidence completeness scoring.
 - Stage 5E — Truth adapter.
 - Stage 5F – Stage 5L — Finance research workers (filings, sentiment, technical, fundamental, company strategy, pattern detection, Radar candidates).
@@ -30,6 +29,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 - Real tax-lot / wash-sale guardrail logic on top of the per-item finalization + plan-rollup contract. Design-dependent: requires explicit tax-lot / trade-history source decisions before any build can start; do not auto-promote into Now.
 
 ## Completed
+
+- **Stage 5C — Contradiction Detector v1** (PR open 2026-05-18). Pure deterministic backend module. Groups comparable facts by (claim_key/metric_name, fact_kind, period, as_of). Detects numeric (1% tolerance), boolean, and text-exact conflicts. No-fact/non-comparable → not_evaluable (honest). `contradiction_assessment` injected into every new artifact payload. 41 tests. No SQL.
 
 - **Stage 5B — Source Credibility Registry v1** (PR open 2026-05-18). Deterministic backend registry classifying all 10 source_kinds into 5 authority bands. Injected into `write_artifact()` — every new artifact payload includes `source_credibility_assessment`. 83 tests. No SQL.
 

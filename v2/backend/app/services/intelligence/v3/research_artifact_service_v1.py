@@ -1,5 +1,6 @@
 """Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility;
-Stage 5C: contradiction detection; Stage 5D: evidence completeness scoring).
+Stage 5C: contradiction detection; Stage 5D: evidence completeness scoring;
+Stage 5E: truth/usability assessment).
 
 Public, narrow, typed API for writing evidence-only research artifacts into
 the Research Artifact Store (migration 017 + 023).
@@ -54,6 +55,16 @@ Write policies (explicit):
     contradiction assessments from the same write. Bands: COMPLETE / PARTIAL /
     THIN / NOT_EVALUABLE. No fake numeric scores. No LLM calls. Replayable.
 
+  Truth/usability assessment (Stage 5E):
+    Every newly-written artifact receives a deterministic usability assessment
+    injected into its payload under key 'truth_usability_assessment'. The
+    assessment is produced by artifact_truth_adapter_v1 consuming the credibility,
+    contradiction, and completeness assessments from the same write.
+    Labels: USABLE / USABLE_WITH_LIMITATIONS / SUPPRESSED_INCOMPLETE /
+    SUPPRESSED_CONTRADICTED / SUPPRESSED_UNKNOWN_SOURCE / NOT_EVALUABLE.
+    No LLM calls. No fake confidence. Replayable. Does not affect
+    safe_for_decision (remains False).
+
 Read helpers (safe, read-only):
   query_active_artifacts() — returns a compact summary list of active artifact
     fields for validation harness and future worker use. Never returns raw
@@ -80,6 +91,9 @@ from app.services.intelligence.research_workers.contracts import (
 )
 from app.services.intelligence.v3.contradiction_detector_v1 import (
     detect_contradictions,
+)
+from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+    assess_artifact_usability,
 )
 from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
     score_evidence_completeness,
@@ -133,7 +147,10 @@ class ResearchArtifactServiceV1:
           6. Inject deterministic evidence completeness assessment into payload
              (Stage 5D — evidence_completeness_scorer_v1). Consumes credibility
              and contradiction assessments from Steps 4–5.
-          7. Delegate insert to ArtifactStoreWriter.
+          7. Inject deterministic truth/usability assessment into payload
+             (Stage 5E — artifact_truth_adapter_v1). Consumes credibility,
+             contradiction, and completeness assessments from Steps 4–6.
+          8. Delegate insert to ArtifactStoreWriter.
         """
         try:
             # Step 1: App-level forbidden-key guard (DB trigger also enforces this).
@@ -210,16 +227,25 @@ class ResearchArtifactServiceV1:
             )
             enriched_payload["evidence_completeness_assessment"] = completeness.to_dict()
 
+            # Step 7: Inject truth/usability assessment (Stage 5E).
+            # Consumes credibility (5B), contradiction (5C), completeness (5D).
+            # Labels: USABLE / USABLE_WITH_LIMITATIONS / SUPPRESSED_INCOMPLETE /
+            # SUPPRESSED_CONTRADICTED / SUPPRESSED_UNKNOWN_SOURCE / NOT_EVALUABLE.
+            # Never sets safe_for_decision=True. No LLM calls. Replayable.
+            usability = assess_artifact_usability(credibility, contradiction, completeness)
+            enriched_payload["truth_usability_assessment"] = usability.to_dict()
+
             output = _dc_replace(output, artifact_payload=enriched_payload)
 
-            # Step 7: Insert the new artifact.
+            # Step 8: Insert the new artifact.
             artifact_id = self._writer.write(output)
             if artifact_id:
                 logger.info(
                     "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s "
                     "credibility_strongest=%s is_insufficient=%s "
                     "contradiction_evaluable=%s has_contradictions=%s contradiction_count=%d "
-                    "completeness_band=%s completeness_evaluable=%s",
+                    "completeness_band=%s completeness_evaluable=%s "
+                    "usability_label=%s is_usable=%s",
                     output.ticker,
                     output.artifact_type,
                     artifact_id,
@@ -230,6 +256,8 @@ class ResearchArtifactServiceV1:
                     contradiction.contradiction_count,
                     completeness.completeness_band,
                     completeness.is_evaluable,
+                    usability.usability_label,
+                    usability.is_usable,
                 )
             return artifact_id
 

@@ -116,24 +116,22 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5E0 — Research Worker Contract Reconciliation (current PR)
+## Stage 5E — Deterministic Research Artifact Truth Adapter v1 (current PR)
 
-**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** is in PR (branch `claude/finance-tracker-v3-continue-xSJMk`).
+**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** merged (branch `claude/finance-tracker-v3-continue-xSJMk`). **Stage 5E** is the current PR (branch `claude/finance-tracker-intel-v3-eKyVW`).
 
 **SQL for migrations 017 and 023**: Both applied to Supabase. Migration 017 creates the artifact tables; 023 extends the `artifact_type` CHECK and adds uniqueness indexes.
 
-**Stage 5E0 status**: PR open (2026-05-18).
+**What changed in Stage 5E:**
+- **`artifact_truth_adapter_v1.py`** (new) — Pure deterministic usability adapter. Consumes `SourceCredibilityAssessment` (5B), `ContradictionAssessment` (5C), and `EvidenceCompletenessAssessment` (5D) to produce an `ArtifactUsabilityAssessment`. Six labels: `USABLE`, `USABLE_WITH_LIMITATIONS`, `SUPPRESSED_INCOMPLETE`, `SUPPRESSED_CONTRADICTED`, `SUPPRESSED_UNKNOWN_SOURCE`, `NOT_EVALUABLE`. Priority order: NOT_EVALUABLE → SUPPRESSED_CONTRADICTED → SUPPRESSED_UNKNOWN_SOURCE → SUPPRESSED_INCOMPLETE → USABLE_WITH_LIMITATIONS → USABLE. No IO, no LLM, no DB, replayable.
+- **`research_artifact_service_v1.py`** — Added Step 7 (truth/usability assessment injection) into `write_artifact()`. Every newly-written artifact now carries all four enrichment layers in `payload`: `source_credibility_assessment` (5B), `contradiction_assessment` (5C), `evidence_completeness_assessment` (5D), `truth_usability_assessment` (5E). Step 8 is now the insert delegate. Log line extended with `usability_label` and `is_usable`.
+- **`test_stage5e_truth_adapter.py`** — **37 new tests** proving: all 6 labels reachable, missing metadata → NOT_EVALUABLE, malformed metadata no crash, contradiction suppression priority, unknown source suppression deterministic, incomplete suppression deterministic, USABLE_WITH_LIMITATIONS distinct from USABLE, earnings reviewer artifacts include all 4 enrichment layers, safe_for_decision still False, no intel_v3_snapshots writes, no decide() import.
 
-**What changed in Stage 5E0:**
-- **`runner.py`** — Replaced direct `ArtifactStoreWriter` usage with `ResearchArtifactServiceV1.write_artifact()`. Every artifact written by the earnings reviewer dark-run worker now receives all three Stage 5 quality assessments: `source_credibility_assessment` (5B), `contradiction_assessment` (5C), `evidence_completeness_assessment` (5D). No behavior change to any kill-switch or env-gate logic. No new LLM calls, no new providers, no SQL.
-- **`test_intel_v3_phase3_research_workers.py`, `test_intel_v3_phase3_5_validation_harness.py`, `test_intel_v3_phase3_7_artifact_idempotency.py`** — `FakeTableQuery` variants updated to support `update()`, `neq()`, `is_()` methods needed by `ResearchArtifactServiceV1._deactivate_superseded()`. All 158 existing Phase 3 tests still pass.
-- **`test_stage5e0_worker_contract_reconciliation.py`** — **23 new tests** proving: enriched assessments in payload, runner uses service path, no ArtifactStoreWriter bypass, safe_for_decision=False, no intel_v3_snapshots writes, no decide() import, idempotent rerun, compact diagnostic summary.
+**SQL required**: NO. All enrichment stored in existing `payload` JSONB column.
 
-**SQL required**: NO. No schema changes. All enrichment stored in existing `payload` JSONB column.
+**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell or recommendation authority. Env kill-switches unchanged. No new workers, no new providers, no LLM calls. `truth_usability_assessment.is_usable` does NOT propagate to `safe_for_decision`.
 
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell or recommendation authority. Env kill-switches unchanged. No new workers created. No Truth Adapter yet.
-
-**Stage 5E Truth Adapter next**: consumes Stage 5D completeness assessment to determine whether artifact claims are usable as structured evidence inputs for Intel v3 decision support.
+**Stage 5F next**: SEC filings / filing evidence worker or adapter expansion.
 
 ## Stage 5C — Contradiction Detector v1 (merged PR #370)
 

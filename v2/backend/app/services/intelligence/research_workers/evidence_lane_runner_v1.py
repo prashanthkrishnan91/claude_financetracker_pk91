@@ -50,6 +50,7 @@ from .evidence_provider_router_v1 import (
 )
 from .evidence_provider_registry_v1 import LANE_SEC_COMPANY_FACTS
 from .sec_companyfacts_adapter_v1 import build_sec_companyfacts_worker_output
+from .sec_metric_candidate_classifier import classify_sec_metric_candidate
 from app.services.intelligence.v3.research_artifact_service_v1 import (
     ResearchArtifactServiceV1,
 )
@@ -399,6 +400,32 @@ def run_sec_companyfacts_evidence(
         )
         return None
 
+    # Stage 5H.3 — Non-equity / non-company-ticker eligibility guard.
+    # Prevents SEC ticker-symbol collisions from mapping crypto/ETF/fund
+    # symbols to unrelated public companies. Uses holding_context metadata
+    # when available; falls back to a conservative known-symbol list for
+    # common portfolio crypto symbols (BTC, XRP) and ETF symbols.
+    category = ""
+    if holding_context:
+        for k in ("category", "asset_type", "security_type", "instrument_type", "asset_class"):
+            v = holding_context.get(k)
+            if isinstance(v, str) and v.strip():
+                category = v.strip()
+                break
+    classification = classify_sec_metric_candidate(ticker, category)
+    if not classification["is_sec_company_candidate"]:
+        skip_source = "metadata" if category else "symbol_fallback"
+        logger.info(
+            "sec_companyfacts_skip_non_equity ticker=%s classification=%s "
+            "category=%s skip_source=%s reason_codes=%s",
+            ticker.upper().strip(),
+            classification["classification"],
+            category or "unspecified",
+            skip_source,
+            ",".join(classification.get("blocking_reason_codes", [])) or "none",
+        )
+        return None
+
     # Consult provider registry/router — ensures free-first selection.
     route = resolve_provider_for_lane(LANE_SEC_COMPANY_FACTS)
     if route.reason == ROUTE_REASON_NO_PROVIDER:
@@ -490,6 +517,46 @@ def run_sec_companyfacts_evidence(
             output.confidence_or_trust_level,
             output.freshness_status,
         )
+
+        # Stage 5H.3 — Compact, deterministic SEC CompanyFacts usability
+        # summary for runtime debugging. Replays detect_contradictions on the
+        # same facts (deterministic, no IO) so we can log the SEC-specific
+        # group-key shape without parsing the persisted payload.
+        try:
+            from app.services.intelligence.v3.contradiction_detector_v1 import (
+                detect_contradictions,
+            )
+            from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+                assess_artifact_usability,
+            )
+            from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+                score_evidence_completeness,
+            )
+            from app.services.intelligence.v3.source_credibility_registry_v1 import (
+                assess_artifact_sources,
+            )
+            cred = assess_artifact_sources(output.sources)
+            contra = detect_contradictions(output.facts)
+            comp = score_evidence_completeness(
+                sources=output.sources, facts=output.facts,
+                credibility_assessment=cred, contradiction_assessment=contra,
+            )
+            usab = assess_artifact_usability(cred, contra, comp)
+            sample_keys = [g.get("group_key", "") for g in contra.contradiction_groups[:3]]
+            logger.info(
+                "sec_companyfacts_usability_summary ticker=%s observation_count=%d "
+                "contradiction_count=%d usability_label=%s sample_group_keys=%s",
+                ticker_upper,
+                payload.get("observation_count", 0),
+                contra.contradiction_count,
+                usab.usability_label,
+                ";".join(sample_keys) or "none",
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug(
+                "sec_companyfacts_usability_summary_failed ticker=%s error=%s",
+                ticker_upper, _exc,
+            )
     else:
         logger.warning(
             "evidence_lane_no_artifact lane=sec_company_facts ticker=%s", ticker_upper

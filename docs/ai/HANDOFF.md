@@ -54,15 +54,20 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence lane production wiring status (Stage 5H.2)
+## Current evidence lane production wiring status (Stage 5H.3)
 
-**Stage 5H.2 fix merged (PR pending):** SEC CompanyFacts usability classification corrected.
+**Stage 5H.3 fix (current PR):** SEC CompanyFacts contradiction grouping and non-equity ticker eligibility guard.
 
-**Root cause of false SUPPRESSED_CONTRADICTED:** SEC XBRL 10-Q filings report the same metric (e.g., Revenue) for the same `fy+fp` (e.g., fy=2023, fp=Q3) TWICE — once as the 3-month quarterly figure (start=Apr) and once as the 9-month YTD figure (start=Oct prior year). Both share the same `accn`, `filed`, `fy`, and `fp`. The contradiction detector grouped them identically and flagged the value difference (Q3 quarterly ≠ Q3 YTD) as a contradiction.
+**Root cause of remaining false SUPPRESSED_CONTRADICTED after PR #378:** the generic contradiction detector groups by `(claim_key, fact_kind, period, as_of)` only. For SEC XBRL `metric_observation` facts that grouping is too coarse — it ignores `unit`, `fiscal_year`, `fiscal_period`, `period_start`, `period_end`, and `frame` structured-payload fields. Any combination of those that hashes into the same coarse group can produce a false contradiction when the parser legitimately keeps distinct XBRL observations (e.g., instant balance-sheet values with no `period_start`, or quarterly vs YTD durations under unusual `fy/fp` shapes). Separately, BTC and XRP were being mapped to unrelated SEC companies by ticker-symbol collision because no instrument guard ran before SEC EDGAR lookup.
 
-**Fix:** Parser deduplicates by `(accn, fy, fp)` before period selection, keeping the entry with the most recent `start` date (shortest duration = most specific quarterly figure). YTD entries with older start dates are dropped. ETFs/crypto/no-CIK/no-facts tickers no longer write NOT_EVALUABLE placeholder artifacts (runner skips write when `observation_count == 0`).
+**Fix:**
+- `contradiction_detector_v1` adds a SEC-specific group key for `metric_observation` facts whose `structured_payload.provider == "sec_edgar"`. The key includes `provider + metric_name + unit + fiscal_year + fiscal_period + period_start + period_end + frame + filed`. Different metrics, units, fiscal periods, durations, or filings cannot collide. `accession_number` is intentionally excluded so two filings asserting different values for the same identity (restatement) still flag as a true contradiction.
+- `evidence_lane_runner_v1.run_sec_companyfacts_evidence()` runs `sec_metric_candidate_classifier.classify_sec_metric_candidate(ticker, category)` before any SEC lookup, using `holding_context` (`category` / `asset_type` / `security_type` / `instrument_type` / `asset_class`) when present. ETFs/funds/crypto are skipped — no provider call, no artifact, no fabricated SEC identity. Conservative fallback skips known portfolio crypto symbols (BTC, XRP) and ETFs when metadata is missing.
+- New structured log `sec_companyfacts_usability_summary ticker=... observation_count=... contradiction_count=... usability_label=... sample_group_keys=...` for runtime diagnosis. Plus `sec_companyfacts_skip_non_equity ticker=... classification=... category=... reason_codes=...` when the guard skips a ticker.
 
-**Next runtime validation:** Re-run Intel v3 with flags enabled and confirm SEC CompanyFacts artifacts are no longer predominantly SUPPRESSED_CONTRADICTED or NOT_EVALUABLE. Expect real companies → USABLE or USABLE_WITH_LIMITATIONS.
+**Next runtime validation:** Re-run Intel v3 (`POST /intel/v3/run`) and confirm in Railway:
+- SEC CompanyFacts written artifacts are mostly `usability_label=USABLE` or `USABLE_WITH_LIMITATIONS` (not `SUPPRESSED_CONTRADICTED`).
+- `sec_companyfacts_skip_non_equity ticker=BTC` and `ticker=XRP` appear; no SEC artifact rows are written for BTC/XRP.
 
 **Stage 5H.1 background:** `POST /intel/v3/run` dispatches all enabled evidence lanes via `run_enabled_evidence_lanes_for_portfolio()`. Fire-and-forget. Page-load contract preserved.
 
@@ -82,6 +87,8 @@ Key structured logs to confirm in production:
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-18 — **Stage 5H.3: Fix SEC CompanyFacts contradiction grouping and ticker eligibility** — SEC-specific contradiction group key in `contradiction_detector_v1` (provider+metric+unit+fy+fp+start+end+frame+filed) prevents distinct XBRL observations from being flagged as contradictions while preserving true conflict detection across filings. Runner adds non-equity guard via `classify_sec_metric_candidate(ticker, category)` before SEC EDGAR lookup; ETF/crypto/fund skipped (BTC, XRP, SPY, etc.) with `sec_companyfacts_skip_non_equity` log. New `sec_companyfacts_usability_summary` runtime diagnostic log. **Patch (same PR):** plumb `holding_context_by_ticker` (`{ticker: {"category": ...}}`) from `IntelV3Service._get_active_holding_context_by_ticker()` → `run_enabled_evidence_lanes_for_portfolio()` → `run_evidence_lanes_for_ticker()` → SEC runner so the guard prefers actual portfolio metadata; the static BTC/XRP/ETF symbol fallback is now only a safety net. Skip log includes `skip_source=metadata|symbol_fallback`. 24 new tests (17 + 7 patch); 431 total stage 5C/5D/5F/5G/5H/5H.1/5H.2/5H.3 tests pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
 
 - 2026-05-18 — **Stage 5H.1: Wire enabled evidence lanes into Intel v3 run path** — `intel_v3_evidence_lane_orchestrator_v1.py` new; `intel_v3_service.enqueue_run_v3()` wired with fire-and-forget `create_task(to_thread(run_enabled_evidence_lanes_for_portfolio, ...))` dispatching after status computation. Runs for ALL tickers even when `analyst_evidence_current`. 28 new tests; 307 stage5e/5f/5g/5h tests still pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
 

@@ -1,4 +1,4 @@
-"""Stage 5A — Research Artifact Service v1.
+"""Stage 5A — Research Artifact Service v1 (Stage 5B: source credibility integrated).
 
 Public, narrow, typed API for writing evidence-only research artifacts into
 the Research Artifact Store (migration 017 + 023).
@@ -27,8 +27,14 @@ Write policies (explicit):
 
   No-source writes:
     Workers MAY write artifacts with no sources or facts (for scaffold/dark-run
-    testing). The DB does not enforce a minimum source count. The truth adapter
-    (Stage 5B+) enforces source requirements at consumption time.
+    testing). No-source artifacts receive an UNKNOWN/INSUFFICIENT source
+    credibility assessment automatically (Stage 5B).
+
+  Source credibility (Stage 5B):
+    Every newly-written artifact receives a deterministic source credibility
+    assessment injected into its payload under key
+    'source_credibility_assessment'. The assessment is produced by
+    source_credibility_registry_v1 and is always replayable.
 
 Read helpers (safe, read-only):
   query_active_artifacts() — returns a compact summary list of active artifact
@@ -38,6 +44,7 @@ Read helpers (safe, read-only):
 from __future__ import annotations
 
 import logging
+from dataclasses import replace as _dc_replace
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -52,6 +59,9 @@ from app.services.intelligence.research_workers.contracts import (
     SourceRecord,
     WorkerOutput,
     validate_payload,
+)
+from app.services.intelligence.v3.source_credibility_registry_v1 import (
+    assess_artifact_sources,
 )
 
 # Fields returned by query_active_artifacts (safe subset — no payloads, URLs, excerpts).
@@ -92,7 +102,9 @@ class ResearchArtifactServiceV1:
           3. Deactivate previous active artifacts for the same evidence lane
              (user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))
              that have a different idempotency key (clean replacement).
-          4. Delegate insert to ArtifactStoreWriter.
+          4. Inject deterministic source credibility assessment into payload
+             (Stage 5B — source_credibility_registry_v1).
+          5. Delegate insert to ArtifactStoreWriter.
         """
         try:
             # Step 1: App-level forbidden-key guard (DB trigger also enforces this).
@@ -140,14 +152,27 @@ class ResearchArtifactServiceV1:
                 )
                 return None
 
-            # Step 4: Insert the new artifact.
+            # Step 4: Inject source credibility assessment (Stage 5B).
+            # Assessment is deterministic and replayable; no-source artifacts
+            # receive UNKNOWN/INSUFFICIENT. Never adds forbidden keys.
+            assessment = assess_artifact_sources(output.sources)
+            enriched_payload = {
+                **output.artifact_payload,
+                "source_credibility_assessment": assessment.to_dict(),
+            }
+            output = _dc_replace(output, artifact_payload=enriched_payload)
+
+            # Step 5: Insert the new artifact.
             artifact_id = self._writer.write(output)
             if artifact_id:
                 logger.info(
-                    "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s",
+                    "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s "
+                    "credibility_strongest=%s is_insufficient=%s",
                     output.ticker,
                     output.artifact_type,
                     artifact_id,
+                    assessment.strongest_authority_level,
+                    assessment.is_insufficient,
                 )
             return artifact_id
 

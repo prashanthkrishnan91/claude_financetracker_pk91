@@ -116,24 +116,28 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 - SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **NOT YET APPLIED**. Apply after 017. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
 - Research artifact UX is intentionally deferred until decision/action loop is stable.
 
-## Stage 5B — Source Credibility Registry (current PR)
+## Stage 5C — Contradiction Detector v1 (current PR)
 
-**Stage 4 is COMPLETE** (Stage 4H merged as PR #366). **Stage 5A is COMPLETE** (merged PR #367 on 2026-05-18). **Stage 5B is in PR** (branch `claude/merge-pr-367-6jZc3`). **Stage 5C** is next.
+**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** is in PR (branch `claude/finance-tracker-v3-continue-WJCzK`). **Stage 5D** is next.
 
-**Stage 5B status**: PR open (2026-05-18).
+**Stage 5C status**: PR open (2026-05-18).
 
-**What landed in Stage 5B:**
-- `v2/backend/app/services/intelligence/v3/source_credibility_registry_v1.py` — Deterministic source credibility registry. Pure module: no IO, no LLM, no external calls. Classifies all 10 source_kinds from migration 017 (`sec_filing`, `company_disclosure`, `press_release`, `transcript`, `vendor_fundamentals`, `vendor_estimates`, `vendor_calendar`, `peer_set_def`, `news`, `other`) into 5 named authority bands: `PRIMARY_AUTHORITY`, `COMPANY_AUTHORED`, `VENDOR_DERIVED`, `EDITORIAL_CONTEXT`, `UNKNOWN`. Includes source authorship categories, claim categories supported/never-supported, limitations, registry version, replayability guarantee. No numeric scores.
-- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — Injected `assess_artifact_sources()` into `write_artifact()` Step 4 (before insert). Every new artifact payload now includes `source_credibility_assessment` dict with: `registry_version`, `has_sources`, `is_insufficient`, `source_count`, `source_kind_counts`, `strongest_authority_level`, `per_source_assessments`, `aggregate_limitations`, `claim_categories_any_source_supports`, `claim_categories_no_source_can_support`. No-source artifacts receive UNKNOWN/INSUFFICIENT assessment. Idempotency skip path unaffected. All existing behavior intact.
-- `v2/backend/tests/test_stage5b_source_credibility_registry.py` — **83 tests** covering all source_kind classifications, authority ordering, replayability, no-source scaffold, write-path integration, idempotent replay, clean replacement, no intel_v3_snapshots writes, forbidden-key safety, JSON serialization.
+**What landed in Stage 5C:**
+- `v2/backend/app/services/intelligence/v3/contradiction_detector_v1.py` — Pure deterministic contradiction detector. No IO, no LLM, no external calls. Analyzes `WorkerOutput.facts` for comparable structured contradictions. Grouping key: `(claim_key/metric_name, fact_kind, period, as_of)`. Detects: numeric conflicts (1% relative tolerance), boolean true/false conflicts, text-exact case-insensitive mismatches. No-fact → `not_evaluable_reason=no_facts_provided`. Non-comparable → `not_evaluable_reason=insufficient_comparable_facts`. `no_guessing=True` always.
+- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — Injected `detect_contradictions()` into `write_artifact()` Step 5 (after Stage 5B source credibility, before insert). Every new artifact payload now includes `contradiction_assessment`. Existing `source_credibility_assessment` (Step 4) intact.
+- `v2/backend/tests/test_stage5c_contradiction_detector.py` — **41 tests** covering all acceptance criteria. Stage 5A (60 tests) and 5B (83 tests) regression: all pass.
 
-**SQL required**: NO — Stage 5B is pure backend logic. Source credibility is stored in the existing `payload` JSONB column of `research_artifacts`. No schema changes required.
+**SQL required**: NO — `contradiction_assessment` stored in the existing `payload` JSONB column. No schema changes.
 
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell, price target, conviction, allocation, or broker action emitted. Assessment is evidence-only metadata.
+**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell, price target, conviction, or allocation emitted. Contradiction resolution deferred to Stage 5E truth adapter.
 
-**Stage 5C next**: Contradiction detection — identify conflicting claims across sources for same artifact lane.
+**Stage 5D next**: Evidence completeness scoring.
 
-## Stage 5A — Research Artifact Store (merged PR #367)
+## Stage 5B — Source Credibility Registry (merged PR #369)
+
+**What landed:** `source_credibility_registry_v1.py` — 10 source_kinds → 5 authority bands (no numeric scores). Injected into `write_artifact()` Step 4. 83 tests. No SQL.
+
+## Stage 5A — Research Artifact Store (merged PR #367, SQL migrations 017+023 pending Supabase)
 
 **Stage 4 is COMPLETE** (Stage 4H merged as PR #366 on 2026-05-17). **Stage 5A is COMPLETE** (merged PR #367 on 2026-05-18).
 

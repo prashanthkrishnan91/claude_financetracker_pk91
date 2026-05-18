@@ -884,8 +884,8 @@ class TestRunnerIntegration:
         )
         assert len(db.fact_inserts()) >= 1
 
-    def test_no_data_ticker_writes_thin_artifact(self):
-        """No-CIK result writes a thin honest artifact, not nothing and not fabricated."""
+    def test_no_data_ticker_skips_artifact_write(self):
+        """No-CIK result skips artifact write to avoid NOT_EVALUABLE placeholder noise."""
         db = FakeSupabaseClient()
         no_cik_result = SecEdgarProviderResult(
             ticker="AAPL", fetch_status="no_cik",
@@ -899,12 +899,10 @@ class TestRunnerIntegration:
             settings=_settings_sec_on(),
             _provider_fn=lambda t: no_cik_result,
         )
-        assert artifact_id is not None
-        assert len(db.artifact_inserts()) == 1
-        payload = db.artifact_inserts()[0]["payload"]
-        assert payload.get("observation_count") == 0
+        assert artifact_id is None
+        assert len(db.artifact_inserts()) == 0
 
-    def test_no_data_no_facts_written_for_no_cik(self):
+    def test_no_cik_no_facts_not_written(self):
         db = FakeSupabaseClient()
         no_cik_result = SecEdgarProviderResult(
             ticker="AAPL", fetch_status="no_cik",
@@ -917,6 +915,7 @@ class TestRunnerIntegration:
             settings=_settings_sec_on(),
             _provider_fn=lambda t: no_cik_result,
         )
+        assert db.artifact_inserts() == []
         assert db.fact_inserts() == []
 
     def test_no_artifactstore_writer_import_in_runner(self):

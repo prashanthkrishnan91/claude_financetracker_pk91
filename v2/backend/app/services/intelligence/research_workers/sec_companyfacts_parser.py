@@ -264,6 +264,31 @@ def _parse(
         if not candidates:
             continue
 
+        # Deduplicate by (accn, fy, fp): the same SEC filing can report the same
+        # metric for the same fiscal period (fy+fp) with different start/end dates —
+        # e.g., a 10-Q reports both the quarterly (Q3, 3 months) and the YTD figure
+        # (Q3 label, 9 months) under the same fy and fp. Both share the same accn and
+        # filed date. Keeping both would cause the contradiction detector to flag a
+        # false contradiction since only period/as_of are used as the group key.
+        # Fix: for each (accn, fy, fp) group, keep only the entry with the most
+        # recent start date, which selects the shortest (most specific) period
+        # measurement — e.g., Q3 quarterly over Q3 YTD.
+        seen_filing_period: dict[tuple, dict] = {}
+        for entry in candidates:
+            dedup_key = (
+                str(entry.get("accn") or ""),
+                entry.get("fy"),
+                entry.get("fp"),
+            )
+            if dedup_key not in seen_filing_period:
+                seen_filing_period[dedup_key] = entry
+            else:
+                existing = seen_filing_period[dedup_key]
+                # Prefer the entry with the more recent start date (shorter duration).
+                if str(entry.get("start") or "") > str(existing.get("start") or ""):
+                    seen_filing_period[dedup_key] = entry
+        candidates = list(seen_filing_period.values())
+
         # Sort by filed date descending (most recent first).
         candidates.sort(key=lambda e: str(e.get("filed") or ""), reverse=True)
 

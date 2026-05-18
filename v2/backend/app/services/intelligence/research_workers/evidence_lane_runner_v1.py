@@ -460,15 +460,35 @@ def run_sec_companyfacts_evidence(
         )
 
     output = build_sec_companyfacts_worker_output(worker_input, provider_result, fetched_at)
+
+    # Do not write a placeholder NOT_EVALUABLE artifact when there are no XBRL
+    # observations. This covers: ETFs, funds, crypto, non-company tickers (no CIK),
+    # tickers where companyfacts was not fetched, and parse errors. Writing a zero-
+    # observation artifact produces only noise — the evidence gap is already logged.
+    obs_count = output.artifact_payload.get("observation_count", 0)
+    if obs_count == 0:
+        skip_reason = output.artifact_payload.get("fetch_status", "no_observations")
+        logger.info(
+            "sec_companyfacts_skip_no_artifact ticker=%s reason=%s cik=%s",
+            ticker_upper,
+            skip_reason,
+            output.artifact_payload.get("cik"),
+        )
+        return None
+
     service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
     artifact_id = service.write_artifact(output)
 
     if artifact_id:
+        payload = output.artifact_payload
         logger.info(
-            "evidence_lane_complete lane=sec_company_facts ticker=%s artifact_id=%s "
-            "confidence=%s freshness=%s",
+            "sec_companyfacts_artifact_written ticker=%s artifact_id=%s "
+            "observation_count=%d tag_count=%d confidence=%s freshness=%s",
             ticker_upper, artifact_id,
-            output.confidence_or_trust_level, output.freshness_status,
+            payload.get("observation_count", 0),
+            payload.get("tag_count", 0),
+            output.confidence_or_trust_level,
+            output.freshness_status,
         )
     else:
         logger.warning(

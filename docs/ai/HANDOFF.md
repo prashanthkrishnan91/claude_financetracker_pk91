@@ -118,7 +118,7 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Stage 5H — SEC CompanyFacts Official Fundamentals Adapter v1 (current PR)
 
-**Stage 5H** is the current PR (branch `claude/sec-companyfacts-adapter-v1-ebkW4`).
+**Stage 5H** is the current PR #376 (branch `claude/sec-companyfacts-adapter-v1-ebkW4`).
 
 **What changed in Stage 5H:**
 - **`sec_companyfacts_adapter_v1.py`** (new) — Pure, no-IO adapter. Converts `SecEdgarProviderResult` (with parsed XBRL `CompanyFactsParseResult`) → `WorkerOutput`. artifact_type=`fundamental_quality` (existing constraint), skill_pack=`sec_companyfacts_evidence_v1`, model_version=`sec_xbrl_companyfacts_v1`. One `SourceRecord` per unique filing accession (with EDGAR URL, form type, date). One `FactRecord` per `MetricObservation` (preserving period/unit/fiscal_year/fiscal_period/filed/accession_number). Honest thin-evidence on no_cik/timeout/error/no_facts — no fabrication.

@@ -293,6 +293,30 @@ _FRED_MACRO_OVERRIDE = SourceKindDefinition(
     ),
 )
 
+# yfinance price-history override — narrow, allowlisted match for technicals artifacts.
+# source_kind="other" is the honest choice for yfinance price/history data because no
+# dedicated DB enum value exists for price-history/technical data. Without an override,
+# the registry would classify this as UNKNOWN authority, suppressing all yfinance
+# technicals as SUPPRESSED_UNKNOWN_SOURCE even though the data is fresh, provider-
+# derived price history. This override maps it to VENDOR_DERIVED (not higher) so the
+# completeness scorer can reach PARTIAL → USABLE_WITH_LIMITATIONS (LIMITED).
+# Technicals remain corroborating/auxiliary context only — never primary decision authority.
+_YFINANCE_PRICE_HISTORY_OVERRIDE = SourceKindDefinition(
+    source_kind="other",
+    authority_level=AuthorityLevel.VENDOR_DERIVED,
+    authorship=SourceAuthorship.THIRD_PARTY_VENDOR,
+    claim_categories_supported=frozenset({
+        CLAIM_VENDOR_DERIVED_METRIC,
+    }),
+    limitations=(
+        "yfinance price history is vendor-derived market data (3-month window). "
+        "Coverage: price, returns, moving averages, volatility. Auxiliary and "
+        "corroborating context only — does not establish fundamental quality, "
+        "constitute regulatory evidence, or support Buy/Hold/Trim/Sell authority. "
+        "Real-time data not available; yfinance may have intraday/overnight delay."
+    ),
+)
+
 
 def _normalize_provider_name(provider: Any) -> str:
     return (str(provider) if provider is not None else "").strip().lower()
@@ -300,6 +324,30 @@ def _normalize_provider_name(provider: Any) -> str:
 
 def _normalize_source_id(source_id: Any) -> str:
     return (str(source_id) if source_id is not None else "").strip().upper()
+
+
+def _matches_yfinance_price_history_source(
+    source_kind: str,
+    provider_name: Any,
+    section_reference: Any,
+) -> bool:
+    """Strict narrow match for yfinance price-history carried as source_kind='other'.
+
+    All of the following must hold:
+      - source_kind is "other"
+      - provider_name normalizes to "yfinance"
+      - section_reference contains "history" (matches the 'yfinance.Ticker.history'
+        pattern written by evidence_lane_adapter_v1.adapt_technicals)
+
+    Returns False for generic "other" sources from non-yfinance providers,
+    and for yfinance sources without a history section_reference.
+    """
+    if (source_kind or "").strip() != "other":
+        return False
+    if _normalize_provider_name(provider_name) != "yfinance":
+        return False
+    ref = (str(section_reference) if section_reference is not None else "").lower()
+    return "history" in ref
 
 
 def _matches_fred_macro_source(
@@ -338,11 +386,15 @@ def _matches_fred_macro_source(
     return False
 
 
-def _resolve_definition_for_source(source: Any) -> tuple[SourceKindDefinition, bool]:
-    """Return (definition, provider_aware_override_applied).
+def _resolve_definition_for_source(
+    source: Any,
+) -> tuple[SourceKindDefinition, bool, Optional[str]]:
+    """Return (definition, provider_aware_override_applied, override_id).
 
-    Applies the narrow FRED-macro override when its match conditions hold.
-    Falls back to the source_kind registry otherwise.
+    Checks overrides in priority order:
+      1. FRED official macro — PRIMARY_AUTHORITY for allowlisted FRED series.
+      2. yfinance price history — VENDOR_DERIVED for yfinance Ticker.history data.
+    Falls back to the source_kind registry when no override matches.
     """
     sk = (getattr(source, "source_kind", None) or "other").strip() or "other"
     if _matches_fred_macro_source(
@@ -351,8 +403,14 @@ def _resolve_definition_for_source(source: Any) -> tuple[SourceKindDefinition, b
         source_id=getattr(source, "source_id", None),
         source_url=getattr(source, "source_url", None),
     ):
-        return _FRED_MACRO_OVERRIDE, True
-    return get_source_kind_definition(sk), False
+        return _FRED_MACRO_OVERRIDE, True, "fred_macro_official_v1"
+    if _matches_yfinance_price_history_source(
+        source_kind=sk,
+        provider_name=getattr(source, "provider_name", None),
+        section_reference=getattr(source, "section_reference", None),
+    ):
+        return _YFINANCE_PRICE_HISTORY_OVERRIDE, True, "yfinance_price_history_vendor_v1"
+    return get_source_kind_definition(sk), False, None
 
 
 # ── Assessment dataclasses ────────────────────────────────────────────────────
@@ -444,7 +502,7 @@ def assess_artifact_sources(
         sk = (getattr(source, "source_kind", None) or "other").strip() or "other"
         provider = getattr(source, "provider_name", None)
 
-        defn, override_applied = _resolve_definition_for_source(source)
+        defn, override_applied, override_id = _resolve_definition_for_source(source)
         authority_levels.append(defn.authority_level)
         kind_counts[sk] = kind_counts.get(sk, 0) + 1
         all_supported.update(defn.claim_categories_supported)
@@ -464,7 +522,7 @@ def assess_artifact_sources(
             "limitations": defn.limitations,
             "is_known_source_kind": sk in KNOWN_SOURCE_KINDS,
             "provider_aware_override_applied": override_applied,
-            "provider_aware_override_id": "fred_macro_official_v1" if override_applied else None,
+            "provider_aware_override_id": override_id,
         })
 
     strongest = max(authority_levels, key=lambda lvl: _AUTHORITY_RANK.get(lvl, 0))

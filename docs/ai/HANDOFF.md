@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-19 (Stage 6 Evidence Activation Fix — branch `claude/review-baseline-docs-axQ51`; root cause confirmed: per-ticker evidence workers never activated; diagnostic improvement: `LaneCoverage.missing_reason` added; 36 new regression tests; next: enable per-ticker evidence lane flags in Railway, run `POST /intel/v3/run`, re-run Stage 6 diagnostics to confirm tickers_with_any_usable_axis > 0)
+Last updated: 2026-05-19 (Stage 6 Governance Calibration — branch `claude/review-architecture-docs-HEX61`; root causes fixed: yfinance technicals now VENDOR_DERIVED (not SUPPRESSED_UNKNOWN_SOURCE); Priority 4b calibrated THIN→OK so limited fundamentals enable BUY; 5 new diagnostic fields on EvidenceGovernanceResult; 70 calibration tests + 267 Stage 5/6 tests passing; next: enable per-ticker evidence lane flags, run evidence workers, validate action diversity)
 
 ## Purpose
 
@@ -54,22 +54,32 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current: Stage 6 Evidence Activation Fix (branch `claude/review-baseline-docs-axQ51`)
+## Current: Stage 6 Governance Calibration (branch `claude/review-architecture-docs-HEX61`)
 
-**Root cause confirmed:** `tickers_with_any_usable_axis=0` / `tickers_fully_missing=34` because per-ticker evidence lane flags all default to False in Railway. Only FRED macro was explicitly activated → `macro_context=READY`. The code pipeline is correct for existing artifacts — no code bug prevents usable artifacts from reaching Stage 6 when they exist.
+**Root causes fixed (two separate issues):**
+
+1. **yfinance technicals always `SUPPRESSED_UNKNOWN_SOURCE`:** yfinance price history uses `source_kind="other"` → source credibility registry mapped this to `AuthorityLevel.UNKNOWN` → truth adapter P3 → `SUPPRESSED_UNKNOWN_SOURCE`. Fix: narrow provider-aware override `_YFINANCE_PRICE_HISTORY_OVERRIDE` in `source_credibility_registry_v1.py` maps yfinance+history → `VENDOR_DERIVED`. Sentinel: `_matches_yfinance_price_history_source(source_kind, provider_name, section_reference)` — only fires when `source_kind="other"` AND `provider_name="yfinance"` AND `"history" in section_reference`. Override ID `"yfinance_price_history_vendor_v1"`. No other source_kind="other" artifacts are affected.
+
+2. **Zero `safe_for_visible_decision` tickers:** Both SEC and yfinance fundamentals produce PARTIAL completeness → `USABLE_WITH_LIMITATIONS` → `STATUS_LIMITED`. With technicals and sentiment both suppressed, Priority 4b (`fund_limited + not corroborated`) returned `AxisBand.THIN` → `safe_for_visible_decision=False` for all 33 tickers. Fix: Priority 4b calibrated to return `AxisBand.OK` (reason code `"limited_fundamentals_no_corroboration_ok_with_cap"`). Conviction cap remains. Sentiment stays `SUPPRESSED_INCOMPLETE` — editorial-only headlines are intentionally thin; no change.
 
 **What landed in this PR:**
-- `research_evidence_coverage_read_model_v1.py` (modified) — `LaneCoverage` gains `missing_reason: Optional[str]` field. `_classify_status` now returns `(status, missing_reason)` tuple. Values: `"no_active_artifact"` (most common — lane flags never enabled in Railway), `"freshness_stale"`, `"freshness_unknown"`, `"usability_suppressed"`, `"usability_not_evaluable"`. `None` when status is READY/LIMITED. Included in `to_dict()` response.
-- `tests/test_stage6_evidence_activation_regression.py` (new) — 36 end-to-end regression tests locking Stage 5J → 5K → Stage 6 pipeline behavior with fixtures. Covers: usable artifacts reaching Stage 6, all-missing state, FRED macro portfolio-scope-only, STALE/SUPPRESSED/UNKNOWN blocked, ETF/crypto SEC not_applicable, Stage 6 STRONG/THIN governance with fixture axes, flag-off no-op, no payload/secret leakage.
+- `source_credibility_registry_v1.py` — `_YFINANCE_PRICE_HISTORY_OVERRIDE` (VENDOR_DERIVED) + `_matches_yfinance_price_history_source()` sentinel + `_resolve_definition_for_source()` returns 3-tuple `(defn, override_applied, override_id)` (was 2-tuple). `assess_artifact_sources()` unpacks 3-tuple and includes `override_id` in per_source dict.
+- `intel_v3_evidence_aware_governance_v1.py` — Priority 4b returns `AxisBand.OK` (was `THIN`). `_derive_governed_evidence_quality` returns 4-tuple adding priority string (was 3-tuple). Five new diagnostic fields on `EvidenceGovernanceResult`: `primary_evidence_readiness`, `auxiliary_evidence_readiness`, `corroboration_gap`, `governance_priority_applied`, `safe_for_visible_decision_reason`. All priorities return named priority strings (p1, p2_stale_no_usable_axes, p3a, p3b, p4a, p4b_limited_no_corroboration, p5, fallback). `_build_safe_reason()` helper.
+- `tests/test_stage6_evidence_aware_governance.py` — All `_derive_governed_evidence_quality` call sites updated from 3-tuple to 4-tuple. `test_fund_limited_no_corroboration_returns_thin` → `test_fund_limited_no_corroboration_returns_ok_with_cap`.
+- `tests/test_stage6_governance_calibration.py` (new) — 70 tests across 14 sections (A–N): yfinance source override, technicals completeness, P4b calibration, flag-off unchanged, production 33-ticker scenario (safe_count=33), suppression regression guards, ETF/crypto honesty, macro advisory-only, no IO/leaks, sentiment honest suppression, diagnostic fields, priority strings.
 
-**Previous Stage 6 (merged — branch `claude/review-baseline-docs-UUvbm`):** `intel_v3_evidence_aware_governance_v1.py` + `intel_v3_service.py` wiring + diagnostics endpoint + 75 tests. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False), `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False). No SQL, no UI, no LLM, no providers, no visible decision changes.
+**Test results:** 70 calibration pass, 267 Stage 5/6 tests pass (2 pre-existing `TestStage6KeywordArgIntegration` failures: missing `pydantic_settings` + `intel_v3_service` import in test env — unrelated to these changes).
+
+**Previous: Stage 6 Evidence Activation Fix (branch `claude/review-baseline-docs-axQ51`):** `LaneCoverage.missing_reason` added to Stage 5J read model; 36 regression tests. Root cause was per-ticker evidence lane flags all defaulting to False in Railway.
+
+**Previous Stage 6 (merged — branch `claude/review-baseline-docs-UUvbm`):** `intel_v3_evidence_aware_governance_v1.py` + `intel_v3_service.py` wiring + diagnostics endpoint + 75 tests. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False), `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False).
 
 **Production next steps (in order):**
 1. Enable per-ticker evidence lanes in Railway: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` (+ `SEC_EDGAR_USER_AGENT`). Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
 2. Run `POST /intel/v3/run` to dispatch evidence workers for all tickers.
-3. Re-run `POST /diagnostics/finance-intel/stage6-evidence-governance` — now the `per_ticker[*].company_fundamentals_readiness` should show READY/LIMITED for equity tickers, `tickers_with_any_usable_axis` > 0, `missing_reason` will show `"no_active_artifact"` only for lanes where workers intentionally weren't run.
-4. Once diagnostics show healthy coverage, enable `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true` and validate before/after action distribution.
-5. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` only after production diagnostics prove governance produces correct action diversity. Never implicit.
+3. Re-run `POST /diagnostics/finance-intel/stage6-evidence-governance` — expect `technical_signals_readiness` to advance from `SUPPRESSED_UNKNOWN_SOURCE` to `LIMITED/READY`, `safe_for_visible_decision_count` to be nonzero, and `governance_priority_applied` to show `p4b_limited_no_corroboration` or better for most tickers.
+4. Once diagnostics show nonzero safe_for_visible_decision count with realistic action diversity, enable `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true` and validate before/after action distribution.
+5. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` only after production diagnostics prove governance produces correct action diversity (not HOLD-collapse). Never implicit.
 
 ## Previous evidence-readiness bridge (Stage 5K)
 

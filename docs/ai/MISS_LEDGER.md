@@ -225,6 +225,23 @@ Follow-up needed: Yes — add "USAGE_LEDGER row committed?" to pre-pr-self-audit
 
 ---
 
+### 2026-05-19 — pre-pr-self-audit not run before initial push (PR #386, 10th+ occurrence)
+
+Repo: claude_financetracker_pk91
+Area: PR authoring / workflow compliance
+Severity: Level 1 — caught by CI readiness gate before merge
+Miss: PR #386 (Stage 6 evidence activation fix) opened without running `pre-pr-self-audit`. PR body used non-template headings (## Root Cause, ## Changes, ## Test results, ## AI usage) instead of the required sections (## Summary, ## Severity, ## Validation, SQL / env / providers / UI, AI usage note, AI PR readiness). USAGE_LEDGER row was also not committed in the initial push. Required a follow-up commit + PR body update.
+Impact: One preventable CI failure cycle; ~10-min delay per occurrence; ledger marks it preventable-follow-up.
+What caught it: AI PR Readiness Check CI gate.
+Root cause: `pre-pr-self-audit` skill has the correct checklist (USAGE_LEDGER row + exact template sections + readiness check script) but was not invoked before the first push. The skill exists; the execution discipline is missing.
+What should catch it next time: The skill checklist already covers this. The gap is execution — the skill must be run as part of the commit/push sequence, not optionally. A hook or mandatory step before `git push` to a PR branch would enforce it.
+One-off or repeated: 10th+ occurrence. Promoted to KNOWN_FAILURE_MODES. Previous entries: #338, #344, #350, #352, #353, #354, #355, #356, #367, #372, #373, #383, #386.
+Promotion target: `docs/ai/KNOWN_FAILURE_MODES.md` — add entry: "Pre-PR self-audit not run before initial push → missing template sections + missing ledger row." Mitigation: treat `/pre-pr-self-audit` as a blocking gate before any `git push` that opens a new PR.
+Action taken: Added this MISS_LEDGER entry. KNOWN_FAILURE_MODES update deferred to next PR.
+Follow-up needed: Add to KNOWN_FAILURE_MODES in a future PR touching docs.
+
+---
+
 ## Seed entries
 
 ### 2026-05-07 — Old-format prompt after OS v2

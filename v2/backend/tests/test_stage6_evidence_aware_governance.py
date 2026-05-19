@@ -95,6 +95,7 @@ def _make_ticker_readiness(
     tech: str = READINESS_MISSING,
     sent: str = READINESS_MISSING,
     sec_lane_applicable: bool = True,
+    instrument_category: str = "equity",
 ) -> TickerDecisionReadiness:
     axes = {
         AXIS_COMPANY_FUNDAMENTALS: _make_axis(fund),
@@ -105,6 +106,7 @@ def _make_ticker_readiness(
     return TickerDecisionReadiness(
         ticker=ticker,
         sec_lane_applicable=sec_lane_applicable,
+        instrument_category=instrument_category,
         axes=axes,
         any_axis_usable=usable > 0,
         usable_axis_count=usable,
@@ -1199,15 +1201,44 @@ class TestDeriveGovernedEvidenceQuality:
         band, _, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.OK
 
-    def test_fund_limited_no_corroboration_returns_ok_with_cap(self):
-        # Calibrated 2026-05-19: limited fundamentals without corroboration → OK
-        # (not THIN). Conviction will be capped to MEDIUM by decide() guardrail.
-        r = _make_ticker_readiness("X", fund=READINESS_LIMITED)
+    def test_fund_limited_no_corroboration_equity_returns_ok_with_cap(self):
+        # Equity: limited fundamentals without corroboration → OK with conviction cap.
+        r = _make_ticker_readiness("X", fund=READINESS_LIMITED, instrument_category="equity")
         band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.OK
-        assert "limited_fundamentals_no_corroboration_ok_with_cap" in codes
-        assert not blocks  # no hard action block
+        assert "limited_equity_fundamentals_ok_with_cap" in codes
+        assert not blocks
         assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_etf_returns_ok_with_cap(self):
+        # ETF: limited fundamentals without corroboration → OK with conviction cap.
+        r = _make_ticker_readiness("SPY", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="etf")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.OK
+        assert "limited_etf_evidence_ok_with_cap" in codes
+        assert not blocks
+        assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_crypto_returns_thin(self):
+        # Crypto: generic yfinance LIMITED fundamentals without corroboration → THIN.
+        r = _make_ticker_readiness("BTC", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="crypto")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.THIN
+        assert "limited_crypto_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
+
+    def test_fund_limited_no_corroboration_unknown_returns_thin(self):
+        # Unknown instrument: conservative → THIN.
+        r = _make_ticker_readiness("XYZ", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="unknown")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.THIN
+        assert "limited_unknown_instrument_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
 
     def test_no_fund_tech_only_returns_thin(self):
         r = _make_ticker_readiness("X", tech=READINESS_READY)

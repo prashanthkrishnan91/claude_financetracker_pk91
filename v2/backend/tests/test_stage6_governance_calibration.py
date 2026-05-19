@@ -107,6 +107,7 @@ def _make_readiness(
     tech: str = READINESS_MISSING,
     sent: str = READINESS_MISSING,
     sec_applicable: bool = True,
+    instrument_category: str = "equity",
 ) -> TickerDecisionReadiness:
     axes = {
         AXIS_COMPANY_FUNDAMENTALS: _make_axis(fund),
@@ -117,6 +118,7 @@ def _make_readiness(
     return TickerDecisionReadiness(
         ticker=ticker,
         sec_lane_applicable=sec_applicable,
+        instrument_category=instrument_category,
         axes=axes,
         any_axis_usable=usable > 0,
         usable_axis_count=usable,
@@ -295,15 +297,44 @@ class TestTechnicalsCompletenessAfterOverride:
 
 
 class TestPriority4bCalibration:
-    """Core calibration change: fund_limited alone → OK (BUY allowed with cap)."""
+    """P4b calibration: equity/ETF fund_limited alone → OK; crypto/unknown → THIN."""
 
-    def test_fund_limited_no_tech_no_sent_returns_ok(self):
-        r = _make_readiness("X", fund=READINESS_LIMITED)
+    def test_fund_limited_no_tech_no_sent_equity_returns_ok(self):
+        r = _make_readiness("X", fund=READINESS_LIMITED, instrument_category="equity")
         band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.OK
-        assert "limited_fundamentals_no_corroboration_ok_with_cap" in codes
+        assert "limited_equity_fundamentals_ok_with_cap" in codes
         assert not blocks
         assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_etf_returns_ok(self):
+        r = _make_readiness("SPY", fund=READINESS_LIMITED,
+                            sec_applicable=False, instrument_category="etf")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.OK
+        assert "limited_etf_evidence_ok_with_cap" in codes
+        assert not blocks
+        assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_crypto_returns_thin(self):
+        """BTC with only LIMITED yfinance fundamentals must NOT become BUY-safe."""
+        r = _make_readiness("BTC", fund=READINESS_LIMITED,
+                            sec_applicable=False, instrument_category="crypto")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.THIN
+        assert "limited_crypto_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
+
+    def test_fund_limited_no_corroboration_unknown_returns_thin(self):
+        """Unknown instrument category is conservative → THIN."""
+        r = _make_readiness("XYZ", fund=READINESS_LIMITED,
+                            sec_applicable=False, instrument_category="unknown")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.THIN
+        assert "limited_unknown_instrument_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
 
     def test_fund_limited_no_corroboration_allows_buy_with_medium_conviction(self):
         """Priority 4b: fund_limited → OK → BUY allowed, conviction capped to MEDIUM."""
@@ -537,10 +568,11 @@ class TestMissingFundamentalsStillBlock:
 class TestEtfCryptoNotPenalized:
 
     def test_etf_fund_limited_no_sec_not_penalized(self):
-        """ETF with fund=LIMITED + sec_applicable=False → Priority 4b → OK (not THIN)."""
+        """ETF with fund=LIMITED + sec_applicable=False → P4b ETF branch → OK (not THIN)."""
         readiness = TickerDecisionReadiness(
             ticker="SPY",
             sec_lane_applicable=False,
+            instrument_category="etf",
             axes={
                 AXIS_COMPANY_FUNDAMENTALS: _make_axis(READINESS_LIMITED),
                 AXIS_TECHNICAL_SIGNALS: _make_axis(READINESS_MISSING),
@@ -551,13 +583,15 @@ class TestEtfCryptoNotPenalized:
         )
         band, codes, blocks, priority = _derive_governed_evidence_quality(readiness)
         assert band == AxisBand.OK  # not penalized for missing SEC
+        assert "limited_etf_evidence_ok_with_cap" in codes
         assert not blocks
 
     def test_etf_fund_ready_no_sec_not_penalized(self):
-        """ETF with fund=READY + no SEC → Priority 3b → OK."""
+        """ETF with fund=READY + no SEC → Priority 3b → OK (not penalized)."""
         readiness = TickerDecisionReadiness(
             ticker="QQQ",
             sec_lane_applicable=False,
+            instrument_category="etf",
             axes={
                 AXIS_COMPANY_FUNDAMENTALS: _make_axis(READINESS_READY),
                 AXIS_TECHNICAL_SIGNALS: _make_axis(READINESS_MISSING),
@@ -574,11 +608,39 @@ class TestEtfCryptoNotPenalized:
         """Crypto with all axes MISSING → THIN (honest, no fabricated SEC)."""
         readiness = _make_readiness(
             "BTC", fund=READINESS_MISSING, tech=READINESS_MISSING,
-            sent=READINESS_MISSING, sec_applicable=False,
+            sent=READINESS_MISSING, sec_applicable=False, instrument_category="crypto",
         )
         band, codes, blocks, priority = _derive_governed_evidence_quality(readiness)
         assert band == AxisBand.THIN
         assert "buy_blocked_missing_evidence" in blocks
+
+    def test_crypto_limited_fundamentals_no_corroboration_stays_thin(self):
+        """Regression guard: BTC/crypto with fund=LIMITED, no tech/sent → THIN, not BUY-safe.
+
+        This test would FAIL against the pre-patch Priority 4b (which returned OK
+        unconditionally for fund_limited + no corroboration).
+        """
+        readiness = _make_readiness(
+            "BTC", fund=READINESS_LIMITED, tech=READINESS_MISSING,
+            sent=READINESS_MISSING, sec_applicable=False, instrument_category="crypto",
+        )
+        band, codes, blocks, priority = _derive_governed_evidence_quality(readiness)
+        assert band == AxisBand.THIN, "Crypto with LIMITED yfinance fundamentals alone must not be BUY-safe"
+        assert "limited_crypto_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
+
+    def test_crypto_limited_fundamentals_no_corroboration_buy_blocked(self):
+        """End-to-end: BTC with fund=LIMITED, no corroboration → governance blocks BUY → HOLD."""
+        readiness = _make_readiness(
+            "BTC", fund=READINESS_LIMITED, sec_applicable=False, instrument_category="crypto",
+        )
+        inp = _make_inp("BTC", evidence_quality=AxisBand.SUPPRESSED, raw_action="BUY")
+        result = apply_evidence_governance(inp, readiness, None, flag_enabled=True)
+        decision = decide(inp)
+        assert result.governed_evidence_quality == AxisBand.THIN.value
+        assert result.safe_for_visible_decision is False
+        assert decision.action == ActionV3.HOLD
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -36,11 +36,12 @@ Evidence governance rules (flag on):
                → AxisBand.OK (MEDIUM conviction BUY; single-signal discipline)
   Priority 4a: Fundamentals LIMITED + corroboration
                → AxisBand.OK (MEDIUM conviction BUY allowed)
-  Priority 4b: Fundamentals LIMITED + no corroboration
-               → AxisBand.OK (MEDIUM conviction BUY; technicals/sentiment gap noted)
-               [Calibrated 2026-05-19: limited evidence (SEC PARTIAL/yfinance) can
-                support BUY with conviction cap; auxiliary absence caps but does not
-                hard-block BUY when fundamentals are real and usable.]
+  Priority 4b: Fundamentals LIMITED + no corroboration, asset-type conditional:
+               equity or ETF → AxisBand.OK (MEDIUM conviction BUY; conviction cap)
+               crypto or unknown → AxisBand.THIN (BUY blocked; yfinance-only
+               fundamentals not adequate basis without corroboration)
+               [Calibrated 2026-05-19: equity/ETF limited evidence can support BUY
+                with cap; crypto/unknown requires corroboration or READY fundamentals.]
   Priority 5:  No usable fundamentals + other signals only
                → AxisBand.THIN (BUY blocked; no fundamental anchor)
   Fallback:    AxisBand.THIN (conservative)
@@ -68,6 +69,9 @@ from .research_evidence_decision_input_adapter_v1 import (
     AXIS_COMPANY_FUNDAMENTALS,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL_SIGNALS,
+    INSTRUMENT_CATEGORY_CRYPTO,
+    INSTRUMENT_CATEGORY_ETF,
+    INSTRUMENT_CATEGORY_EQUITY,
     READINESS_INSUFFICIENT,
     READINESS_LIMITED,
     READINESS_MISSING,
@@ -407,16 +411,19 @@ def _derive_governed_evidence_quality(
     Priority order is defined in the module docstring.
 
     Calibration (2026-05-19):
-      Priority 4b relaxed: fund_limited + no corroboration → OK (was THIN).
-      Rationale: limited-quality company evidence (SEC PARTIAL / yfinance
-      VENDOR_DERIVED) can support BUY with conviction cap when no technicals
-      or sentiment corroboration is present. Missing auxiliary lanes cap
-      conviction (OK → MEDIUM max) but do not hard-block BUY.
-      Missing/suppressed fundamentals still block BUY (Priority 1 / Priority 2).
+      Priority 4b conditional: fund_limited + no corroboration is asset-type gated.
+      Equity and ETF/fund: limited-quality company evidence (SEC PARTIAL / yfinance
+      VENDOR_DERIVED) supports BUY with conviction cap — adequate primary-evidence
+      basis exists even without auxiliary corroboration.
+      Crypto and unknown instruments: yfinance-only LIMITED fundamentals alone are
+      not an adequate basis for BUY without auxiliary corroboration → THIN.
+      Missing/suppressed fundamentals still hard-block BUY (Priority 1 / 2).
 
     ETF/crypto: SEC not_applicable is not penalized. The company_fundamentals
     axis for non-equity already excludes the SEC lane in Stage 5K, so the
     yfinance fundamentals lane can reach READY independently.
+    ETF at READY fundamentals: reaches OK or STRONG via P3a/P3b/P4a.
+    Crypto at LIMITED fundamentals, no corroboration: THIN (P4b crypto branch).
 
     TRIM/SELL paths are not touched by evidence governance; those are governed
     by portfolio_fit and risk_band which belong to deterministic policy.
@@ -482,14 +489,32 @@ def _derive_governed_evidence_quality(
         reason_codes.append("limited_fundamentals_with_supporting_signal")
         return AxisBand.OK, reason_codes, action_blocks, "p4a_limited_corroborated"
 
-    # Priority 4b: Limited fundamentals, no corroboration → OK with conviction cap.
-    # Calibrated: limited company evidence (SEC PARTIAL or yfinance VENDOR_DERIVED)
-    # can support BUY with conviction cap when auxiliary lanes are absent/degraded.
-    # Conviction will be capped to MEDIUM by decide() guardrail (Cap 5 for OK band).
-    # TRIM/SELL paths are not governed here; those belong to portfolio_fit/risk_band.
+    # Priority 4b: Limited fundamentals, no corroboration.
+    # Asset-type conditional: equity and ETF/fund have an acceptable primary-evidence
+    # basis even when fundamentals are only LIMITED → OK with conviction cap.
+    # Crypto and unknown instruments may reach LIMITED only via generic yfinance
+    # data — not an adequate basis for BUY without corroboration → THIN.
+    # Conviction for OK band is capped to MEDIUM by decide() guardrail (Cap 5).
     if fund_limited and not corroborated:
-        reason_codes.append("limited_fundamentals_no_corroboration_ok_with_cap")
-        return AxisBand.OK, reason_codes, action_blocks, "p4b_limited_no_corroboration"
+        inst_cat = ticker_readiness.instrument_category
+        if inst_cat in (INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF):
+            code = (
+                "limited_equity_fundamentals_ok_with_cap"
+                if inst_cat == INSTRUMENT_CATEGORY_EQUITY
+                else "limited_etf_evidence_ok_with_cap"
+            )
+            reason_codes.append(code)
+            return AxisBand.OK, reason_codes, action_blocks, "p4b_limited_no_corroboration"
+        else:
+            # crypto or unknown: generic yfinance LIMITED not sufficient for BUY.
+            code = (
+                "limited_crypto_fundamentals_not_safe"
+                if inst_cat == INSTRUMENT_CATEGORY_CRYPTO
+                else "limited_unknown_instrument_fundamentals_not_safe"
+            )
+            reason_codes.append(code)
+            action_blocks.append("buy_blocked_insufficient_evidence_basis")
+            return AxisBand.THIN, reason_codes, action_blocks, "p4b_crypto_or_unknown_thin"
 
     # Priority 5: No usable fundamentals, other signals only → THIN.
     if usable_count > 0 and not fund_usable:

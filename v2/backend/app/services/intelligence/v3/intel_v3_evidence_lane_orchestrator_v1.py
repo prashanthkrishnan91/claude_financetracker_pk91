@@ -142,4 +142,25 @@ def run_enabled_evidence_lanes_for_portfolio(
         parent_intel_run_id or "none",
     )
 
+    # Stage 5J — optional compact coverage summary log (read-only, fail-soft).
+    # Gated by intel_v3_evidence_coverage_dispatch_log_enabled. Never raises into
+    # the orchestrator path. Never triggers an evidence run.
+    if getattr(settings, "intel_v3_evidence_coverage_dispatch_log_enabled", False):
+        try:
+            from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+                compute_research_evidence_coverage,
+                log_coverage_summary,
+            )
+            summary = compute_research_evidence_coverage(
+                user_id=user_id,
+                tickers=tickers,
+                db_client=db_client,
+            )
+            log_coverage_summary(summary)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "intel_v3_evidence_coverage_dispatch_log_error error=%s",
+                exc,
+            )
+
     return all_results

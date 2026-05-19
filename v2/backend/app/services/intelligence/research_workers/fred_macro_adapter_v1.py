@@ -283,12 +283,22 @@ def adapt_fred_macro(
                     "realtime_start": obs.realtime_start,
                     "realtime_end": obs.realtime_end,
                     "fred_category": series.category,
+                    "macro_category": series.category,
                     "fred_last_updated": last_updated,
                     "fred_observation_start": observation_start,
                     "fred_observation_end": observation_end,
                     "provider": _PROVIDER_NAME,
+                    "series_id": series.series_id,
+                    "lane": "macro",
                 },
-                axis_hint="macro",
+                # DB CHECK constraint on research_artifact_facts.axis_hint allows only
+                # {'evidence','risk','price','quality','catalyst','exposure'} or NULL
+                # (migration 017). Stage 5I originally used 'macro' which violated the
+                # constraint and failed the artifact write. Stage 5I.1 stores axis_hint
+                # as NULL — true macro identity is preserved in structured_payload
+                # (provider="fred", macro_category, series_id, metric_name,
+                # observation_date) and in skill_pack="fred_macro_evidence_v1".
+                axis_hint=None,
                 period=obs.date,
                 as_of=obs.date,
                 is_quote_grounded=True,

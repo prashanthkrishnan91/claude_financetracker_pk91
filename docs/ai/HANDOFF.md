@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-19 (Stage 5K — Research Evidence Decision Input Adapter v1, shadow-only; branch `claude/review-baseline-docs-psqJR`; next: validate shadow output in production diagnostics, then governance gate to allow safe_for_decision=True when evidence contract matures)
+Last updated: 2026-05-19 (Stage 6 — Evidence-Aware Intel v3 Decision Engine Certification; branch `claude/review-baseline-docs-UUvbm`; next: enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` in Railway diagnostics env, run stage6-evidence-governance diagnostics endpoint, validate action diversity in production)
 
 ## Purpose
 
@@ -54,21 +54,30 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence-readiness bridge (Stage 5K — current PR)
+## Current: Stage 6 — Evidence-Aware Intel v3 Decision Engine Certification
 
-**Stage 5K (current PR):** Research Evidence Decision Input Adapter v1 — shadow-only, backend-only.
+**Stage 6 (current PR — branch `claude/review-baseline-docs-UUvbm`):** Connects Stage 5K `ResearchEvidenceDecisionInputShadow` to Intel v3 decision governance via deterministic, flag-gated rules. Proves whether Intel v3 can produce action diversity beyond HOLD when evidence supports it.
 
-**What landed in Stage 5K:**
-- `research_evidence_decision_input_adapter_v1.py` (new) — Pure, no-I/O adapter. Input: `ResearchEvidenceCoverageSummary` (Stage 5J). Output: `ResearchEvidenceDecisionInputShadow`. Maps evidence lanes to four Intel v3 axis readiness signals: `company_fundamentals`, `technical_signals`, `sentiment`, and portfolio-scope `macro_context`. Readiness values: READY | LIMITED | INSUFFICIENT | MISSING | NOT_APPLICABLE. ETF/crypto tickers with no SEC artifact are marked `sec_lane_applicable=False` and `not_applicable` for the SEC lane — never penalized as missing-evidence failures. `safe_for_decision=False` and `shadow_only=True` are immutable constants. No DB reads/writes, no LLM calls, no provider calls.
-- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/research-evidence-decision-readiness` (cert-gated + `INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED=true`). Calls Stage 5J coverage read model then Stage 5K adapter. Falls back to positions for tickers when none supplied; fetches `category` field for SEC lane applicability. Capped at 200 tickers. Read-only; no provider/LLM/decision calls.
-- `config.py` (modified) — new flag: `intel_v3_evidence_decision_readiness_diagnostics_enabled` (default False).
-- `test_stage5k_evidence_decision_input_adapter.py` (new) — 39 tests: READY/LIMITED/SUPPRESSED/STALE/MISSING SEC contribution; ETF/crypto not_applicable (symbol + holding context); FRED macro ready/missing/limited; technicals/sentiment/news contribute only when usable; safe_for_decision/shadow_only/no_guessing invariants; read-only (no DB writes, no extra DB calls); cert/flag gating; no raw payload/secret leaks; aggregate counters.
+**What landed in Stage 6:**
+- `intel_v3_evidence_aware_governance_v1.py` (new) — Pure, no-IO governance module. Main entry: `apply_evidence_governance(inp, ticker_readiness, portfolio_macro, *, flag_enabled)`. When `flag_enabled=False`: complete no-op; `governance_applied=False`. When `flag_enabled=True`: derives `AxisBand` (STRONG/OK/THIN/SUPPRESSED) from Stage 5K readiness signals and mutates `inp.evidence_quality` in-place; adds macro advisory note to `inp.suppression_reasons` only (macro never forces/blocks action). Priority rules: suppressed/insufficient fundamentals → SUPPRESSED; 0 usable axes → THIN; READY fund + corroboration → STRONG; READY fund alone → OK; LIMITED fund + corroboration → OK; LIMITED fund alone → THIN; no fundamentals → THIN. ETF/crypto `sec_lane_applicable=False` not penalized. `GOVERNANCE_VERSION = "intel_v3_evidence_aware_governance.v1"`.
+- `intel_v3_service.py` (modified) — `_get_evidence_shadow_for_governance()` helper: returns `None` (no-op) when flag off; otherwise reads Stage 5J+5K via `asyncio.to_thread()` and returns shadow. Wired into `run_v3()` and `run_prewarm_snapshot()` immediately before `decide(inp)` call. `s6_active = evidence_shadow is not None` prevents any mutation when flag off.
+- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/stage6-evidence-governance` (cert-gated + `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true`). Builds `DecisionInputV3` for each ticker twice (flag-off and flag-on), calls `decide()` twice for before/after comparison. Returns `PortfolioGovernanceSummary.to_dict()` with `diagnostics_only: True`. Never writes DB, never calls LLM/provider, never runs on page load.
+- `config.py` (modified) — two new flags: `intel_v3_evidence_aware_policy_enabled` (default False) and `intel_v3_stage6_governance_diagnostics_enabled` (default False).
+- `test_stage6_evidence_aware_governance.py` (new) — 75 tests across 9 classes: `TestGoldenScenarios` (11 golden proof tests), `TestFlagSafetyContracts` (9), `TestConvictionCapping` (10), `TestEtfCryptoHandling` (4), `TestMacroContextAdvisoryOnly` (5), `TestHoldCollapseDetection` (8), `TestSafetyInvariants` (10), `TestPortfolioGovernanceSummary` (6), `TestDeriveGovernedEvidenceQuality` (12). All 75 pass.
 
-**Providers actually called**: none (read-only adapter over Stage 5J read model). **SQL required**: NO. **UI**: none. **LLM**: none. **safe_for_decision**: False (immutable). **Page-load**: never. **Visible decision changes**: none.
+**Flag names:**
+- `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False) — governs visible behavior; off = complete no-op
+- `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False) — enables diagnostics endpoint
 
-**Validation:** 39 Stage 5K tests + 25 Stage 5J tests pass.
+**Providers actually called**: none. **SQL required**: NO. **UI**: none. **LLM**: none. **Visible decision changes**: none when flag off. **Page-load**: never.
 
-**Next stage:** Enable `INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED=true` in Railway diagnostics env, run against live portfolio to validate shadow readiness signals match expected artifact state. When evidence coverage contract is proven stable, open explicit governance gate to allow `safe_for_decision=True` — this is a separate future PR, never implicit.
+**Validation:** 75 Stage 6 tests + 1,078 related Stage 5/existing tests pass with no regressions.
+
+**Next stage (production validation):** Enable `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true` in Railway diagnostics env; run `POST /diagnostics/finance-intel/stage6-evidence-governance` to validate before/after action distribution. Once governance contract is proven stable in production diagnostics, enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` on the main service — this is a separate explicit Railway env change, never implicit.
+
+## Previous evidence-readiness bridge (Stage 5K)
+
+**Stage 5K (merged):** Research Evidence Decision Input Adapter v1 — shadow-only, backend-only. Maps Stage 5J coverage lanes to four Intel v3 axis readiness signals: `company_fundamentals`, `technical_signals`, `sentiment`, `macro_context`. Readiness values: READY | LIMITED | INSUFFICIENT | MISSING | NOT_APPLICABLE. ETF/crypto: `sec_lane_applicable=False`, never penalized. `safe_for_decision=False` and `shadow_only=True` immutable. 39 tests. No SQL, no UI, no LLM, no providers, no decision changes.
 
 ## Previous evidence-readiness bridge (Stage 5J)
 

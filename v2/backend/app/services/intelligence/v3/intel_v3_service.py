@@ -292,6 +292,10 @@ class IntelV3Service:
                         self.user_id, run_id, val_gate_reason,
                     )
 
+            # Stage 6 — evidence-aware governance shadow (computed once; no-op when flag off).
+            evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
+            s6_active = evidence_shadow is not None
+
             # Step 3: build decisions for each card.
             decisions = []
             card_metas = []
@@ -394,6 +398,17 @@ class IntelV3Service:
                         has_market_price=has_price,
                     )
                     apply_valuation_context_to_decision_input(inp, val_signal)
+
+                # Stage 6 — apply evidence-aware governance (no-op when flag off).
+                if s6_active:
+                    from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
+                    _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
+                    apply_evidence_governance(
+                        inp,
+                        _s6_readiness,
+                        evidence_shadow.portfolio_macro,
+                        flag_enabled=True,
+                    )
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -1035,6 +1050,10 @@ class IntelV3Service:
             from .valuation_context_adapter_v1 import check_governance_gate as _p13_gate
             val_gate_passed, _ = _p13_gate()
 
+        # Stage 6 — evidence-aware governance shadow (computed once; no-op when flag off).
+        evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
+        s6_active = evidence_shadow is not None
+
         # Step 3: build decisions (identical to run_v3 card loop).
         decisions = []
         card_metas = []
@@ -1129,6 +1148,17 @@ class IntelV3Service:
                     has_market_price=ticker.upper() in weight_map,
                 )
                 apply_valuation_context_to_decision_input(inp, val_signal)
+
+            # Stage 6 — apply evidence-aware governance (no-op when flag off).
+            if s6_active:
+                from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
+                _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
+                apply_evidence_governance(
+                    inp,
+                    _s6_readiness,
+                    evidence_shadow.portfolio_macro,
+                    flag_enabled=True,
+                )
 
             decision = decide(inp)
             decisions.append(decision)
@@ -1795,6 +1825,75 @@ class IntelV3Service:
                 "intel_v3.weight_map_failed user_id=%s error=%s", self.user_id, exc
             )
             return {}
+
+    async def _get_evidence_shadow_for_governance(
+        self,
+        cards: list,
+    ) -> "Optional[Any]":
+        """Compute Stage 5K evidence shadow for Stage 6 governance.
+
+        Returns ResearchEvidenceDecisionInputShadow when the Stage 6 flag is on
+        and coverage data can be computed. Returns None when the flag is off or
+        when the computation fails. Never raises.
+
+        Called once per run — not per ticker. No provider/LLM calls. No DB writes.
+        Stage 5J coverage read is sync; wrapped in asyncio.to_thread.
+        """
+        settings = get_settings()
+        if not getattr(settings, "intel_v3_evidence_aware_policy_enabled", False):
+            return None
+
+        try:
+            from .research_evidence_coverage_read_model_v1 import (
+                compute_research_evidence_coverage,
+            )
+            from .research_evidence_decision_input_adapter_v1 import (
+                compute_decision_input_readiness,
+            )
+
+            tickers = [
+                c.ticker.upper()
+                for c in cards
+                if hasattr(c, "ticker") and c.ticker
+            ]
+            if not tickers:
+                return None
+
+            holding_context_by_ticker = {
+                c.ticker.upper(): {"category": (getattr(c, "category", "") or "")}
+                for c in cards
+                if hasattr(c, "ticker") and c.ticker
+            }
+
+            coverage = await asyncio.to_thread(
+                compute_research_evidence_coverage,
+                str(self.user_id),
+                tickers,
+                self.client,
+            )
+
+            shadow = compute_decision_input_readiness(
+                coverage,
+                holding_context_by_ticker=holding_context_by_ticker,
+            )
+
+            logger.info(
+                "stage6_evidence_shadow_computed user_id=%s ticker_count=%d "
+                "tickers_with_any_usable_axis=%d tickers_fully_missing=%d",
+                self.user_id,
+                shadow.portfolio_ticker_count,
+                shadow.tickers_with_any_usable_axis,
+                shadow.tickers_fully_missing,
+            )
+            return shadow
+
+        except Exception as exc:
+            logger.warning(
+                "stage6_evidence_shadow_failed user_id=%s error=%s — "
+                "proceeding without Stage 6 evidence governance",
+                self.user_id, exc,
+            )
+            return None
 
     async def _get_sec_readiness_for_adapters(self) -> "Optional[Any]":
         """Fetch Phase 9 SEC metric readiness for Phase 11 and/or Phase 13.

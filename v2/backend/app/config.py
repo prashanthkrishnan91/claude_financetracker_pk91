@@ -331,6 +331,26 @@ class Settings(BaseSettings):
     # safe_for_decision stays False. Cert-gated + this flag required.
     intel_v3_evidence_decision_readiness_diagnostics_enabled: bool = False
 
+    # ── Stage 6 — Evidence-Aware Intel v3 Decision Engine Governance (off by default) ──
+    # When True, applies Stage 5K evidence-readiness signals to Intel v3 decision
+    # input (evidence_quality axis) before decide() is called. Deterministic policy
+    # remains the final authority. No LLM, no provider, no SQL, no UI changes.
+    # BUY allowed only when research evidence axes are usable enough.
+    # HOLD is the safe default when evidence is weak, missing, stale, or suppressed.
+    # TRIM/SELL remain governed by portfolio_fit/risk_band (existing policy).
+    # Macro context adds advisory context only; never independently forces action.
+    # ETF/crypto SEC not_applicable is not penalized.
+    # When False: existing visible Intel v3 behavior is unchanged.
+    intel_v3_evidence_aware_policy_enabled: bool = False
+
+    # When True, enables the cert-gated Stage 6 diagnostics endpoint that returns
+    # before/after decision comparison, action distribution, HOLD-collapse risk
+    # indicator, and per-ticker evidence governance diagnostics.
+    # Read-only: no snapshot writes, no LLM, no provider, no page-load execution.
+    # Independent of intel_v3_evidence_aware_policy_enabled — can be enabled for
+    # comparison analysis regardless of whether the policy flag is on.
+    intel_v3_stage6_governance_diagnostics_enabled: bool = False
+
     # ── Deploy v3 sizing policy config (optional; policy is UNSUPPORTED if absent) ──
     # When both are set, the sizing source adapter certifies the policy for exact-dollar math.
     # deploy_minimum_trade_usd: minimum dollar threshold below which a trade is suppressed.

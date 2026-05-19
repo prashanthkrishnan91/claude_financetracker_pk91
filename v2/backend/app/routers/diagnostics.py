@@ -3421,3 +3421,241 @@ async def get_research_evidence_decision_readiness(
     )
 
     return shadow.to_dict()
+
+
+# ── Stage 6 — Evidence-Aware Governance Diagnostics ──────────────────────────
+
+
+@router.post("/stage6-evidence-governance")
+async def get_stage6_evidence_governance_diagnostics(
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 6 — evidence-aware governance diagnostics.
+
+    Required env:
+      finance_runtime_cert_enabled=true + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true
+
+    What this does:
+      1. Loads existing portfolio cards (read-only, no LLM, no provider).
+      2. Computes Stage 5J coverage read model (read-only DB read).
+      3. Computes Stage 5K shadow adapter (pure, no I/O).
+      4. For each ticker: builds DecisionInputV3, applies Stage 6 governance,
+         calls decide() deterministically for before/after comparison.
+      5. Returns portfolio governance summary: action distribution, HOLD-collapse
+         risk, evidence-blocked action counts, per-ticker diagnostics.
+
+    Hard guarantees:
+      - READ-ONLY. Does NOT run Intel v3, does NOT write snapshots, artifacts,
+        recommendations, or any DB row.
+      - Does NOT call LLMs, providers, or evidence workers.
+      - Does NOT run on page load. Never called from GET /intel/v3/snapshot.
+      - No raw artifact payloads, source URLs, API keys, secrets, or PII.
+      - flag_enabled reflects the current INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED
+        setting. Governance is simulated for both off and on states so the
+        before/after comparison is always available regardless of flag state.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_stage6_governance_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED is not enabled. "
+                "Set this flag in the environment to enable Stage 6 governance diagnostics."
+            ),
+        )
+
+    import asyncio as _asyncio
+
+    from ..services.intelligence.v3.read_only_evidence_adapter import ReadOnlyEvidenceAdapter
+    from ..services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+        compute_research_evidence_coverage,
+    )
+    from ..services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+        compute_decision_input_readiness,
+    )
+    from ..services.intelligence.v3.intel_v3_evidence_aware_governance_v1 import (
+        apply_evidence_governance,
+        compute_portfolio_governance_summary,
+    )
+    from ..services.intelligence.v3.existing_signal_adapter import (
+        build_truth_aware_decision_input,
+    )
+    from ..services.intelligence.v3.decision_policy_v1 import decide
+    from ..services.intelligence.v3.portfolio_governor_lite import (
+        build_weight_map,
+        compute_portfolio_fit,
+    )
+
+    db_client = get_supabase_client()
+    user_id = str(user.id)
+    flag_enabled = settings.intel_v3_evidence_aware_policy_enabled
+
+    # Step 1: load existing portfolio cards (read-only; no LLM, no provider).
+    evidence_adapter = ReadOnlyEvidenceAdapter(user_id=user_id)
+    try:
+        cards, _evidence_stats = await evidence_adapter.load_cards()
+    except Exception as exc:
+        logger.warning(
+            "stage6_governance_diagnostics_load_cards_failed user_id=%s error=%s",
+            user_id, exc,
+        )
+        return {
+            "error": "Failed to load portfolio cards",
+            "diagnostics_only": True,
+            "flag_name": "INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED",
+            "flag_enabled": flag_enabled,
+        }
+
+    if not cards:
+        return {
+            "diagnostics_only": True,
+            "flag_name": "INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED",
+            "flag_enabled": flag_enabled,
+            "portfolio_ticker_count": 0,
+            "message": "No active portfolio cards found.",
+        }
+
+    # Step 2: build portfolio weight map (read-only).
+    weight_map: dict = {}
+    try:
+        positions_result = await _asyncio.to_thread(
+            lambda: db_client.table("positions")
+            .select("ticker,shares,avg_cost")
+            .eq("user_id", user_id)
+            .execute()
+        )
+        raw_positions = [
+            {"ticker": r["ticker"], "market_value": float(r.get("shares") or 0) * float(r.get("avg_cost") or 0)}
+            for r in (positions_result.data or [])
+            if isinstance(r, dict) and r.get("ticker")
+        ]
+        weight_map = build_weight_map(raw_positions)
+    except Exception as exc:
+        logger.warning(
+            "stage6_governance_diagnostics_weight_map_failed user_id=%s error=%s",
+            user_id, exc,
+        )
+
+    # Step 3: compute Stage 5J coverage + Stage 5K shadow.
+    tickers = [c.ticker.upper() for c in cards if hasattr(c, "ticker") and c.ticker]
+    holding_context_by_ticker = {
+        c.ticker.upper(): {"category": (getattr(c, "category", "") or "")}
+        for c in cards
+        if hasattr(c, "ticker") and c.ticker
+    }
+
+    try:
+        coverage = await _asyncio.to_thread(
+            lambda: compute_research_evidence_coverage(
+                user_id=user_id,
+                tickers=tickers,
+                db_client=db_client,
+            )
+        )
+        shadow = compute_decision_input_readiness(
+            coverage,
+            holding_context_by_ticker=holding_context_by_ticker,
+        )
+    except Exception as exc:
+        logger.warning(
+            "stage6_governance_diagnostics_shadow_failed user_id=%s error=%s",
+            user_id, exc,
+        )
+        return {
+            "error": "Failed to compute evidence shadow",
+            "diagnostics_only": True,
+            "flag_name": "INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED",
+            "flag_enabled": flag_enabled,
+        }
+
+    # Step 4: build before/after decisions for each card.
+    import json as _json
+
+    per_ticker_results = []
+    action_distribution_off: dict[str, int] = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+    action_distribution_on: dict[str, int] = {"BUY": 0, "HOLD": 0, "TRIM": 0, "SELL": 0}
+
+    for card in cards:
+        ticker = card.ticker
+        category = getattr(card, "category", None) or "stock"
+        current_pct = weight_map.get(ticker.upper())
+
+        def _safe_json(val):
+            if isinstance(val, str):
+                try:
+                    return _json.loads(val)
+                except Exception:
+                    return None
+            return val
+
+        intel_read = _safe_json(getattr(card, "intel_read", None))
+        thesis_v2 = _safe_json(getattr(card, "thesis_v2", None))
+        analyst_risks = _safe_json(getattr(card, "analyst_risks", None)) or []
+        analyst_drivers = _safe_json(getattr(card, "analyst_drivers", None)) or []
+
+        suppression_reasons: dict = {}
+
+        # Build DecisionInputV3 — same as run_v3 path.
+        def _build_inp():
+            _inp, _, _ = build_truth_aware_decision_input(
+                ticker=ticker,
+                action=getattr(card, "action", None),
+                analyst_action=getattr(card, "analyst_action", None),
+                conviction_level=getattr(card, "conviction_level", None),
+                technical_signal=getattr(card, "technical_signal", None),
+                risk_flag=getattr(card, "risk_flag", None),
+                analyst_risks=analyst_risks,
+                category=category,
+                data_quality_label=getattr(card, "data_quality_label", None),
+                intel_read=intel_read,
+                thesis_v2=thesis_v2,
+                analyst_used_fallback=getattr(card, "analyst_used_fallback", None),
+                primary_driver=getattr(card, "primary_driver", None),
+                risk_flag_text=getattr(card, "risk_flag", None),
+                action_reason=getattr(card, "action_reason", None),
+                analyst_drivers=analyst_drivers,
+                asset_type_hint=category,
+            )
+            if current_pct is not None:
+                _inp.portfolio_fit = compute_portfolio_fit(
+                    ticker=ticker,
+                    category=category,
+                    current_pct=current_pct,
+                    suppression_reasons=suppression_reasons,
+                )
+            return _inp
+
+        # Flag-off decision (unchanged).
+        inp_off = _build_inp()
+        decision_off = decide(inp_off)
+        _off_action = decision_off.action.value
+        action_distribution_off[_off_action] = action_distribution_off.get(_off_action, 0) + 1
+
+        # Flag-on decision (with governance applied).
+        inp_on = _build_inp()
+        ticker_readiness = shadow.ticker_readiness.get(ticker.upper())
+        gov_result = apply_evidence_governance(
+            inp_on,
+            ticker_readiness,
+            shadow.portfolio_macro,
+            flag_enabled=True,  # always simulate governance ON for comparison
+        )
+        decision_on = decide(inp_on)
+        _on_action = decision_on.action.value
+        action_distribution_on[_on_action] = action_distribution_on.get(_on_action, 0) + 1
+
+        per_ticker_results.append(gov_result)
+
+    # Step 5: build portfolio governance summary.
+    summary = compute_portfolio_governance_summary(
+        shadow,
+        flag_enabled=flag_enabled,
+        per_ticker_results=per_ticker_results,
+        action_distribution_off=action_distribution_off,
+        action_distribution_on=action_distribution_on,
+    )
+
+    result = summary.to_dict()
+    result["diagnostics_only"] = True
+    return result

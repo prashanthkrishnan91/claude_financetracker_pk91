@@ -3547,10 +3547,11 @@ async def get_stage6_evidence_governance_diagnostics(
 
     try:
         coverage = await _asyncio.to_thread(
-            compute_research_evidence_coverage,
-            user_id,
-            tickers,
-            db_client,
+            lambda: compute_research_evidence_coverage(
+                user_id=user_id,
+                tickers=tickers,
+                db_client=db_client,
+            )
         )
         shadow = compute_decision_input_readiness(
             coverage,

@@ -1866,10 +1866,11 @@ class IntelV3Service:
             }
 
             coverage = await asyncio.to_thread(
-                compute_research_evidence_coverage,
-                str(self.user_id),
-                tickers,
-                self.client,
+                lambda: compute_research_evidence_coverage(
+                    user_id=str(self.user_id),
+                    tickers=tickers,
+                    db_client=self.client,
+                )
             )
 
             shadow = compute_decision_input_readiness(

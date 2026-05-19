@@ -313,6 +313,17 @@ class Settings(BaseSettings):
     # Default off — set INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true to enable.
     intel_v3_priceband_visible_context_v1_enabled: bool = False
 
+    # ── Stage 5J — Research Evidence Coverage Read Model v1 (off by default) ──
+    # When True, exposes a protected diagnostics endpoint that summarizes which
+    # research artifacts exist per user/lane/ticker and which are missing,
+    # suppressed, or stale. READ-ONLY: never triggers an evidence run, never
+    # writes artifacts, never touches intel_v3_snapshots or recommendations.
+    # safe_for_decision stays False. Independent of any worker/observability flag.
+    intel_v3_evidence_coverage_diagnostics_enabled: bool = False
+    # When True, the explicit-run evidence lane orchestrator emits a compact
+    # post-dispatch coverage summary log (read-only, fail-soft). No raw payloads.
+    intel_v3_evidence_coverage_dispatch_log_enabled: bool = False
+
     # ── Deploy v3 sizing policy config (optional; policy is UNSUPPORTED if absent) ──
     # When both are set, the sizing source adapter certifies the policy for exact-dollar math.
     # deploy_minimum_trade_usd: minimum dollar threshold below which a trade is suppressed.

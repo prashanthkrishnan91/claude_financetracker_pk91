@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-19 (Stage 5I.1 — FRED macro write-contract fix + API-key log redaction; branch `claude/fix-fred-api-key-fFKo9`; next: Stage 5J)
+Last updated: 2026-05-19 (Stage 5J — Research Evidence Coverage Read Model v1; branch `claude/finance-tracker-research-pipeline-XCEai`; next: deterministic evidence-to-decision adapter integration planning)
 
 ## Purpose
 
@@ -54,9 +54,26 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence lane production wiring status (Stage 5I)
+## Current evidence-readiness bridge (Stage 5J)
 
-**Stage 5I (current PR):** FRED Official Macro Evidence Lane v1.
+**Stage 5J (current PR):** Research Evidence Coverage Read Model v1 — deterministic, read-only summary over previously-written Stage 5A–5I research artifacts.
+
+**What landed in Stage 5J:**
+- `research_evidence_coverage_read_model_v1.py` (new) — `compute_research_evidence_coverage(user_id, tickers, db_client) -> ResearchEvidenceCoverageSummary`. Pure read. Per-ticker lanes: `sec_company_facts` (fundamental_quality + sec_companyfacts_evidence_v1), `fundamentals` (fundamental_quality + fundamentals_evidence_v1), `technicals` (technical_signal + technicals_evidence_v1), `news_sentiment` (sentiment_event + news_sentiment_evidence_v1). Portfolio-scope lane: `macro_context` (portfolio_exposure + fred_macro_evidence_v1). Coverage status set per (lane, ticker): READY / LIMITED / SUPPRESSED / NOT_EVALUABLE / STALE_OR_UNKNOWN / MISSING. Reads `truth_usability_assessment`, `source_credibility_assessment`, `contradiction_assessment`, `evidence_completeness_assessment` from artifact payload but never re-emits raw payload, source URLs, fact contents, or API keys. Defensive: picks latest active by `generated_at` if duplicates ever exist. Fail-soft on DB error.
+- `intel_v3_evidence_lane_orchestrator_v1.py` (modified) — after dispatch, when `intel_v3_evidence_coverage_dispatch_log_enabled=true`, emits one compact `research_evidence_coverage_summary` log via `log_coverage_summary()`. Fail-soft; default off.
+- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/research-evidence-coverage` (cert-gated + `INTEL_V3_EVIDENCE_COVERAGE_DIAGNOSTICS_ENABLED=true`). Falls back to positions when no tickers supplied. Capped at 200 tickers per request. Read-only; never triggers an evidence run.
+- `config.py` (modified) — two new flags: `intel_v3_evidence_coverage_diagnostics_enabled` (default False) and `intel_v3_evidence_coverage_dispatch_log_enabled` (default False).
+- `test_stage5j_evidence_coverage_read_model.py` (new) — 14 tests: usable SEC counted per ticker; usable FRED macro counted at portfolio level; missing lanes honest; suppressed excluded from ready; duplicates pick latest active; read-only (no inserts/updates); no payload/secret leakage; safe_for_decision=False; USABLE_WITH_LIMITATIONS → LIMITED; STALE freshness overrides; NOT_EVALUABLE; ticker normalization/dedup; DB error fail-soft; compact log no payload leak.
+
+**Providers actually called**: none (read-only). **SQL required**: NO (no schema change). **UI**: none. **LLM**: none. **safe_for_decision**: False. **Page-load**: never (`GET /intel/v3/snapshot` does not call this). **Visible decision changes**: none.
+
+**Validation:** 380 stage 5A/5E/5H/5H.1/5H.2/5H.3/5I/5J tests pass.
+
+**Next stage:** plan deterministic evidence-to-decision adapter integration (Stage 5K candidate) using the Stage 5J coverage read model — backend only, no visible decision change until contract is proven.
+
+## Previous evidence lane production wiring status (Stage 5I)
+
+**Stage 5I (merged):** FRED Official Macro Evidence Lane v1.
 
 **What changed in Stage 5I:**
 - `fred_provider_v1.py` (new) — typed, deterministic, sync FRED API client. Bounded per-session request budget; two requests per series (metadata + recent observations). Honest fail-closed on no_api_key / timeout / rate_limit / malformed / no_observations. Allowlisted series only: `FEDFUNDS`, `DFF`, `DGS10`, `DGS2`, `T10Y2Y`, `CPIAUCSL`, `UNRATE`, `PAYEMS`, `GDP`, `GDPC1`. Never raises.

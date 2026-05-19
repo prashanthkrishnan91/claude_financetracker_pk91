@@ -324,6 +324,13 @@ class Settings(BaseSettings):
     # post-dispatch coverage summary log (read-only, fail-soft). No raw payloads.
     intel_v3_evidence_coverage_dispatch_log_enabled: bool = False
 
+    # ── Stage 5K — Research Evidence Decision Input Adapter v1 (off by default) ──
+    # When True, exposes a protected diagnostics endpoint that runs the Stage 5K
+    # shadow adapter over the Stage 5J coverage read model. Shadow/diagnostic only:
+    # no visible Buy/Hold/Trim/Sell change, no provider calls, no LLM calls, no writes.
+    # safe_for_decision stays False. Cert-gated + this flag required.
+    intel_v3_evidence_decision_readiness_diagnostics_enabled: bool = False
+
     # ── Deploy v3 sizing policy config (optional; policy is UNSUPPORTED if absent) ──
     # When both are set, the sizing source adapter certifies the policy for exact-dollar math.
     # deploy_minimum_trade_usd: minimum dollar threshold below which a trade is suppressed.

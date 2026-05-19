@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-19 (Stage 5J — Research Evidence Coverage Read Model v1; branch `claude/finance-tracker-research-pipeline-XCEai`; next: deterministic evidence-to-decision adapter integration planning)
+Last updated: 2026-05-19 (Stage 5K — Research Evidence Decision Input Adapter v1, shadow-only; branch `claude/review-baseline-docs-psqJR`; next: validate shadow output in production diagnostics, then governance gate to allow safe_for_decision=True when evidence contract matures)
 
 ## Purpose
 
@@ -54,7 +54,23 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence-readiness bridge (Stage 5J)
+## Current evidence-readiness bridge (Stage 5K — current PR)
+
+**Stage 5K (current PR):** Research Evidence Decision Input Adapter v1 — shadow-only, backend-only.
+
+**What landed in Stage 5K:**
+- `research_evidence_decision_input_adapter_v1.py` (new) — Pure, no-I/O adapter. Input: `ResearchEvidenceCoverageSummary` (Stage 5J). Output: `ResearchEvidenceDecisionInputShadow`. Maps evidence lanes to four Intel v3 axis readiness signals: `company_fundamentals`, `technical_signals`, `sentiment`, and portfolio-scope `macro_context`. Readiness values: READY | LIMITED | INSUFFICIENT | MISSING | NOT_APPLICABLE. ETF/crypto tickers with no SEC artifact are marked `sec_lane_applicable=False` and `not_applicable` for the SEC lane — never penalized as missing-evidence failures. `safe_for_decision=False` and `shadow_only=True` are immutable constants. No DB reads/writes, no LLM calls, no provider calls.
+- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/research-evidence-decision-readiness` (cert-gated + `INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED=true`). Calls Stage 5J coverage read model then Stage 5K adapter. Falls back to positions for tickers when none supplied; fetches `category` field for SEC lane applicability. Capped at 200 tickers. Read-only; no provider/LLM/decision calls.
+- `config.py` (modified) — new flag: `intel_v3_evidence_decision_readiness_diagnostics_enabled` (default False).
+- `test_stage5k_evidence_decision_input_adapter.py` (new) — 39 tests: READY/LIMITED/SUPPRESSED/STALE/MISSING SEC contribution; ETF/crypto not_applicable (symbol + holding context); FRED macro ready/missing/limited; technicals/sentiment/news contribute only when usable; safe_for_decision/shadow_only/no_guessing invariants; read-only (no DB writes, no extra DB calls); cert/flag gating; no raw payload/secret leaks; aggregate counters.
+
+**Providers actually called**: none (read-only adapter over Stage 5J read model). **SQL required**: NO. **UI**: none. **LLM**: none. **safe_for_decision**: False (immutable). **Page-load**: never. **Visible decision changes**: none.
+
+**Validation:** 39 Stage 5K tests + 25 Stage 5J tests pass.
+
+**Next stage:** Enable `INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED=true` in Railway diagnostics env, run against live portfolio to validate shadow readiness signals match expected artifact state. When evidence coverage contract is proven stable, open explicit governance gate to allow `safe_for_decision=True` — this is a separate future PR, never implicit.
+
+## Previous evidence-readiness bridge (Stage 5J)
 
 **Stage 5J (current PR):** Research Evidence Coverage Read Model v1 — deterministic, read-only summary over previously-written Stage 5A–5I research artifacts.
 
@@ -69,7 +85,7 @@ Key structured logs to confirm in production:
 
 **Validation:** 380 stage 5A/5E/5H/5H.1/5H.2/5H.3/5I/5J tests pass.
 
-**Next stage:** plan deterministic evidence-to-decision adapter integration (Stage 5K candidate) using the Stage 5J coverage read model — backend only, no visible decision change until contract is proven.
+**Next stage:** Stage 5K (see above) has now consumed Stage 5J as its input — complete.
 
 ## Previous evidence lane production wiring status (Stage 5I)
 

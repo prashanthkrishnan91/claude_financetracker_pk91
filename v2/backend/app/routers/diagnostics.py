@@ -3320,3 +3320,104 @@ async def get_research_evidence_coverage(
         db_client=db_client,
     )
     return summary.to_dict()
+
+
+# ── Stage 5K — Research Evidence Decision Input Adapter (shadow-only) ─────────
+
+
+class ResearchEvidenceDecisionReadinessRequest(BaseModel):
+    """Stage 5K — operator request body for shadow decision readiness diagnostics.
+
+    tickers: optional explicit ticker list. When omitted/empty, falls back to
+    the cert user's active portfolio positions. Max 200 tickers per request.
+    """
+    tickers: list[str] = []
+
+
+@router.post("/research-evidence-decision-readiness")
+async def get_research_evidence_decision_readiness(
+    payload: ResearchEvidenceDecisionReadinessRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 5K — shadow evidence readiness signals for Intel v3 decision axes.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED=true
+
+    Shadow/diagnostic only. Hard guarantees:
+      - READ-ONLY. Calls Stage 5J read model (read-only) then Stage 5K adapter
+        (pure, no I/O). No evidence runs, LLM calls, provider calls triggered.
+      - NEVER writes to intel_v3_snapshots, recommendations, or research_*.
+      - NEVER calls decide() or imports decision_policy_v1.
+      - NEVER returns raw artifact payloads, source URLs, fact contents,
+        API keys, secrets, or user PII.
+      - safe_for_decision is ALWAYS False. shadow_only is ALWAYS True.
+      - No visible Buy/Hold/Trim/Sell change.
+      - Never called from GET /intel/v3/snapshot or any page-load path.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_evidence_decision_readiness_diagnostics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_EVIDENCE_DECISION_READINESS_DIAGNOSTICS_ENABLED is not enabled",
+        )
+
+    from ..services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+        compute_research_evidence_coverage,
+    )
+    from ..services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+        compute_decision_input_readiness,
+    )
+
+    db_client = get_supabase_client()
+
+    requested_raw = payload.tickers or []
+    normalized = list(
+        dict.fromkeys(t.upper().strip() for t in requested_raw if isinstance(t, str) and t.strip())
+    )
+
+    # Fallback: derive tickers + optional holding context from positions.
+    holding_context_by_ticker: dict[str, dict] = {}
+    if not normalized:
+        try:
+            pos_result = (
+                db_client.table("positions")
+                .select("ticker,category")
+                .eq("user_id", str(user.id))
+                .execute()
+            )
+            for row in (pos_result.data or []):
+                if not isinstance(row, dict):
+                    continue
+                t = row.get("ticker")
+                if isinstance(t, str) and t.strip():
+                    norm = t.strip().upper()
+                    if norm not in normalized:
+                        normalized.append(norm)
+                    holding_context_by_ticker[norm] = {
+                        "category": row.get("category") or "",
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "research_evidence_decision_readiness_positions_lookup_failed user_id=%s error=%s",
+                user.id,
+                exc,
+            )
+
+    tickers = normalized[:_MAX_COVERAGE_TICKERS_PER_REQUEST]
+
+    # Stage 5J: compute coverage read model (read-only).
+    coverage = compute_research_evidence_coverage(
+        user_id=str(user.id),
+        tickers=tickers,
+        db_client=db_client,
+    )
+
+    # Stage 5K: derive shadow axis readiness from coverage (pure, no I/O).
+    shadow = compute_decision_input_readiness(
+        coverage,
+        holding_context_by_ticker=holding_context_by_ticker or None,
+    )
+
+    return shadow.to_dict()

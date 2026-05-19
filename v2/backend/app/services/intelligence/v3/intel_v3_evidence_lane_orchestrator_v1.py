@@ -1,8 +1,8 @@
-"""Stage 5H.1 — Intel v3 explicit-run evidence lane orchestrator.
+"""Stage 5H.1 + Stage 5I — Intel v3 explicit-run evidence lane orchestrator.
 
 Called fire-and-forget from enqueue_run_v3() on every explicit POST /intel/v3/run.
-Runs all enabled evidence lanes (5F + 5H) for all portfolio tickers, regardless of
-whether analyst evidence is already current.
+Runs all enabled evidence lanes (5F + 5H per-ticker + 5I portfolio macro),
+regardless of whether analyst evidence is already current.
 
 Contract:
   - Sync function; the caller wraps in asyncio.to_thread for non-blocking dispatch.
@@ -12,10 +12,17 @@ Contract:
   - Never calls decide().
   - No paid providers. No LLM calls.
 
+Stage 5I — FRED macro lane:
+  - Portfolio-scope, ticker-agnostic — runs once per explicit dispatch, not per ticker.
+  - Gated by settings.intel_v3_macro_evidence_enabled + settings.fred_api_key.
+  - Failure is fail-soft; per-ticker lane dispatch is unaffected.
+
 Log keys emitted:
   intel_v3_evidence_lanes_dispatch_start   total_tickers=N user_id=... parent_intel_run_id=...
   intel_v3_evidence_lanes_dispatch_complete tickers_attempted=N artifacts_written=N skipped=N
+                                            macro_artifact_id=...
   evidence_lane_start/complete              (emitted by per-lane runners in evidence_lane_runner_v1)
+  fred_macro_evidence_start/complete        (emitted by run_fred_macro_evidence)
 """
 from __future__ import annotations
 
@@ -54,10 +61,6 @@ def run_enabled_evidence_lanes_for_portfolio(
         )
         return {}
 
-    if not tickers:
-        logger.debug("intel_v3_evidence_lanes_dispatch_skip reason=no_tickers")
-        return {}
-
     logger.info(
         "intel_v3_evidence_lanes_dispatch_start total_tickers=%d user_id=%s "
         "parent_intel_run_id=%s",
@@ -66,45 +69,76 @@ def run_enabled_evidence_lanes_for_portfolio(
         parent_intel_run_id or "none",
     )
 
-    from app.services.intelligence.research_workers.runner import (
-        run_evidence_lanes_for_ticker,
-    )
-
     all_results: dict[str, dict[str, Optional[str]]] = {}
     total_artifacts_written = 0
     total_skipped = 0
 
-    ctx_map = holding_context_by_ticker or {}
-    for ticker in tickers:
-        try:
-            results = run_evidence_lanes_for_ticker(
-                user_id=user_id,
-                ticker=ticker,
-                db_client=db_client,
-                parent_intel_run_id=parent_intel_run_id,
-                holding_context=ctx_map.get(ticker) or ctx_map.get(ticker.upper().strip()),
-                settings=settings,
-            )
-            all_results[ticker] = results
-            written = sum(1 for v in results.values() if v is not None)
-            skipped = sum(1 for v in results.values() if v is None)
-            total_artifacts_written += written
-            total_skipped += skipped
-        except Exception as exc:
-            logger.warning(
-                "intel_v3_evidence_lane_ticker_error ticker=%s error=%s",
-                ticker,
-                exc,
-            )
-            all_results[ticker] = {}
+    # Per-ticker lanes run only when at least one ticker is supplied. Stage 5I
+    # portfolio-scope macro lane below still runs even when tickers=[] (e.g.,
+    # empty portfolio explicit run).
+    if tickers:
+        from app.services.intelligence.research_workers.runner import (
+            run_evidence_lanes_for_ticker,
+        )
+
+        ctx_map = holding_context_by_ticker or {}
+        for ticker in tickers:
+            try:
+                results = run_evidence_lanes_for_ticker(
+                    user_id=user_id,
+                    ticker=ticker,
+                    db_client=db_client,
+                    parent_intel_run_id=parent_intel_run_id,
+                    holding_context=ctx_map.get(ticker) or ctx_map.get(ticker.upper().strip()),
+                    settings=settings,
+                )
+                all_results[ticker] = results
+                written = sum(1 for v in results.values() if v is not None)
+                skipped = sum(1 for v in results.values() if v is None)
+                total_artifacts_written += written
+                total_skipped += skipped
+            except Exception as exc:
+                logger.warning(
+                    "intel_v3_evidence_lane_ticker_error ticker=%s error=%s",
+                    ticker,
+                    exc,
+                )
+                all_results[ticker] = {}
+                total_skipped += 1
+
+    # Stage 5I — Portfolio-scope macro lane (FRED). Dispatched once per explicit
+    # run, not per ticker. Fail-soft: per-ticker lanes above are unaffected by any
+    # macro-lane failure here. Gate-checked inside run_fred_macro_evidence — safe
+    # to call unconditionally (returns None when flag off or api key missing).
+    macro_artifact_id: Optional[str] = None
+    try:
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_fred_macro_evidence,
+        )
+        macro_artifact_id = run_fred_macro_evidence(
+            user_id=user_id,
+            db_client=db_client,
+            parent_intel_run_id=parent_intel_run_id,
+            settings=settings,
+        )
+        if macro_artifact_id is not None:
+            total_artifacts_written += 1
+        else:
             total_skipped += 1
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "intel_v3_evidence_lane_macro_error error=%s",
+            exc,
+        )
+        total_skipped += 1
 
     logger.info(
         "intel_v3_evidence_lanes_dispatch_complete tickers_attempted=%d "
-        "artifacts_written=%d skipped=%d parent_intel_run_id=%s",
+        "artifacts_written=%d skipped=%d macro_artifact_id=%s parent_intel_run_id=%s",
         len(tickers),
         total_artifacts_written,
         total_skipped,
+        macro_artifact_id or "none",
         parent_intel_run_id or "none",
     )
 

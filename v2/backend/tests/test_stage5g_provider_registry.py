@@ -325,17 +325,19 @@ class TestFredClassification:
         p = get_provider("fred")
         assert p.trust_tier == TrustTier.OFFICIAL
 
-    def test_fred_not_default_enabled(self):
+    def test_fred_default_enabled_stage5i(self):
+        # Stage 5I enabled FRED as the default macro provider.
         p = get_provider("fred")
-        assert p.default_enabled is False
+        assert p.default_enabled is True
 
     def test_fred_supports_macro_lane(self):
         assert LANE_MACRO in get_provider("fred").supported_lanes
 
-    def test_fred_not_in_enabled_providers_for_macro(self):
+    def test_fred_in_enabled_providers_for_macro_stage5i(self):
+        # Stage 5I — FRED is the enabled FREE/OFFICIAL macro provider.
         enabled = enabled_providers_for_lane(LANE_MACRO)
         ids = {p.provider_id for p in enabled}
-        assert "fred" not in ids
+        assert "fred" in ids
 
 
 class TestPaidProvidersClassification:
@@ -414,10 +416,10 @@ class TestLaneCoverageQueries:
         assert "sec_edgar" in enabled
         assert "yfinance" not in enabled
 
-    def test_enabled_providers_for_macro_is_empty(self):
-        # FRED is the only macro provider and it's disabled.
+    def test_enabled_providers_for_macro_is_fred_stage5i(self):
+        # Stage 5I enables FRED as the macro provider.
         enabled = enabled_providers_for_lane(LANE_MACRO)
-        assert enabled == []
+        assert [p.provider_id for p in enabled] == ["fred"]
 
     def test_enabled_providers_for_analyst_revisions_is_empty(self):
         # No enabled analyst_revisions provider in default registry.
@@ -458,12 +460,12 @@ class TestEvidenceProviderRouterPolicy:
         assert result.provider_id == "sec_edgar"
         assert result.reason == ROUTE_REASON_FREE_OFFICIAL
 
-    def test_macro_returns_no_provider(self):
-        # No enabled macro provider (FRED is disabled).
+    def test_macro_returns_free_official_fred_stage5i(self):
+        # Stage 5I — macro lane resolves to FRED as FREE/OFFICIAL.
         result = resolve_provider_for_lane(LANE_MACRO)
-        assert result.provider_id is None
-        assert result.reason == ROUTE_REASON_NO_PROVIDER
-        assert result.provider_entry is None
+        assert result.provider_id == "fred"
+        assert result.reason == ROUTE_REASON_FREE_OFFICIAL
+        assert result.provider_entry is not None
 
     def test_analyst_revisions_returns_no_provider(self):
         result = resolve_provider_for_lane(LANE_ANALYST_REVISIONS)
@@ -492,7 +494,9 @@ class TestEvidenceProviderRouterPolicy:
         assert result.provider_entry.provider_id == result.provider_id
 
     def test_route_result_no_provider_entry_is_none(self):
-        result = resolve_provider_for_lane(LANE_MACRO)
+        # analyst_revisions has no enabled provider after Stage 5I; use it
+        # to probe the no-provider path.
+        result = resolve_provider_for_lane(LANE_ANALYST_REVISIONS)
         assert result.provider_entry is None
 
 
@@ -559,11 +563,13 @@ class TestNoProviderHonestBehavior:
     """No provider available → honest no-provider result, not fake evidence."""
 
     def test_no_provider_result_has_none_provider_id(self):
-        result = resolve_provider_for_lane(LANE_MACRO)
+        # analyst_revisions has no enabled provider after Stage 5I; use it
+        # to probe the no-provider path.
+        result = resolve_provider_for_lane(LANE_ANALYST_REVISIONS)
         assert result.provider_id is None
 
     def test_no_provider_reason_code(self):
-        result = resolve_provider_for_lane(LANE_MACRO)
+        result = resolve_provider_for_lane(LANE_ANALYST_REVISIONS)
         assert result.reason == ROUTE_REASON_NO_PROVIDER
 
     def test_no_provider_result_not_a_fabricated_provider(self):
@@ -594,10 +600,10 @@ class TestRegistrySummary:
     def test_summary_provider_counts(self):
         summary = build_registry_summary()
         assert summary["total_providers"] == 6
-        # sec_edgar, yfinance = 2 enabled.
-        assert summary["enabled_providers"] == 2
-        # fred, fmp, eodhd, alpha_vantage = 4 disabled.
-        assert summary["disabled_providers"] == 4
+        # Stage 5I: sec_edgar + yfinance + fred = 3 enabled.
+        assert summary["enabled_providers"] == 3
+        # fmp, eodhd, alpha_vantage = 3 disabled.
+        assert summary["disabled_providers"] == 3
 
     def test_summary_paid_disabled_candidates(self):
         summary = build_registry_summary()
@@ -618,11 +624,13 @@ class TestRegistrySummary:
         # Only yfinance is enabled for fundamentals; it's free but not official.
         assert coverage["has_free_official"] is False
 
-    def test_summary_lane_coverage_macro_no_enabled(self):
+    def test_summary_lane_coverage_macro_fred_primary_stage5i(self):
+        # Stage 5I — FRED is the enabled macro provider.
         summary = build_registry_summary()
         coverage = summary["lane_coverage"][LANE_MACRO]
-        assert coverage["enabled_providers"] == 0
-        assert coverage["primary_provider"] is None
+        assert coverage["enabled_providers"] == 1
+        assert coverage["primary_provider"] == "fred"
+        assert coverage["has_free_official"] is True
 
     def test_summary_cost_tier_counts(self):
         summary = build_registry_summary()
@@ -852,7 +860,9 @@ class TestRunnerSkipsHonestlyWhenNoProvider:
 
     def test_router_no_provider_path_can_be_exercised(self):
         # Directly verify the router path for a lane with no enabled providers.
-        result = resolve_provider_for_lane(LANE_MACRO)
+        # Stage 5I enabled FRED for the macro lane, so probe via analyst_revisions
+        # which has no enabled provider.
+        result = resolve_provider_for_lane(LANE_ANALYST_REVISIONS)
         assert result.reason == ROUTE_REASON_NO_PROVIDER
         assert result.provider_id is None
 

@@ -1,10 +1,12 @@
-"""Stage 5F + Stage 5H — Multi-lane evidence population runner (dispatcher/registry).
+"""Stage 5F + Stage 5H + Stage 5I — Multi-lane evidence population runner.
 
-Wires four feasible evidence lanes into ResearchArtifactServiceV1:
+Wires feasible evidence lanes into ResearchArtifactServiceV1:
   - fundamentals      → fundamental_quality artifact (yfinance sync)          [Stage 5F]
   - technicals        → technical_signal artifact   (yfinance sync)           [Stage 5F]
   - news_sentiment    → sentiment_event artifact     (yfinance sync)          [Stage 5F]
   - sec_company_facts → fundamental_quality artifact (SEC EDGAR XBRL sync)   [Stage 5H]
+  - macro             → portfolio-scope macro evidence artifact (FRED sync)   [Stage 5I]
+                       (ticker-agnostic; one artifact per explicit run)
 
 Each lane is independently kill-switched via Settings. All writes go through
 ResearchArtifactServiceV1.write_artifact(), which injects all four Stage 5
@@ -48,7 +50,14 @@ from .evidence_provider_router_v1 import (
     ROUTE_REASON_NO_PROVIDER,
     resolve_provider_for_lane,
 )
-from .evidence_provider_registry_v1 import LANE_SEC_COMPANY_FACTS
+from .evidence_provider_registry_v1 import LANE_MACRO, LANE_SEC_COMPANY_FACTS
+from .fred_macro_adapter_v1 import build_fred_macro_worker_output
+from .fred_provider_v1 import (
+    ALLOWED_MACRO_SERIES,
+    FredProviderConfig,
+    FredProviderResult,
+    fetch_macro_series,
+)
 from .sec_companyfacts_adapter_v1 import build_sec_companyfacts_worker_output
 from .sec_metric_candidate_classifier import classify_sec_metric_candidate
 from app.services.intelligence.v3.research_artifact_service_v1 import (
@@ -83,6 +92,13 @@ def _is_sec_companyfacts_enabled(s: Settings) -> bool:
     return (
         s.intel_v3_research_workers_enabled
         and s.intel_v3_sec_companyfacts_evidence_enabled
+    )
+
+
+def _is_fred_macro_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_macro_evidence_enabled
     )
 
 
@@ -560,6 +576,197 @@ def run_sec_companyfacts_evidence(
     else:
         logger.warning(
             "evidence_lane_no_artifact lane=sec_company_facts ticker=%s", ticker_upper
+        )
+    return artifact_id
+
+
+def run_fred_macro_evidence(
+    user_id: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    settings: Optional[Settings] = None,
+    series_ids: Optional[list[str]] = None,
+    _provider_fn: Optional[Callable[[list[str]], FredProviderResult]] = None,
+) -> Optional[str]:
+    """Run the FRED official macro evidence lane (Stage 5I).
+
+    Portfolio-scope: one artifact per explicit Intel v3 run, NOT one per ticker.
+    Returns artifact_id when written, None when disabled / no api key / no
+    usable observations / on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      2. settings.intel_v3_macro_evidence_enabled
+      3. settings.fred_api_key must be non-empty
+
+    Args:
+        series_ids:  Optional override for the macro series to fetch. Defaults to
+                     the full Stage 5I allowlist (see ALLOWED_MACRO_SERIES). Any id
+                     not in the allowlist is silently skipped by the provider.
+        _provider_fn: Injectable callable for tests.
+                     Signature: (series_ids: list[str]) -> FredProviderResult.
+                     Defaults to fetch_macro_series with httpx.Client.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    if not _is_fred_macro_enabled(settings):
+        logger.debug(
+            "evidence_lane_skip lane=macro reason=flag_off"
+        )
+        return None
+
+    series_list = list(series_ids) if series_ids is not None else list(ALLOWED_MACRO_SERIES.keys())
+    if not series_list:
+        logger.info("fred_macro_series_skip series_id=none reason=empty_series_list")
+        return None
+
+    # Consult provider registry/router — ensures FRED is enabled and FREE/OFFICIAL.
+    route = resolve_provider_for_lane(LANE_MACRO)
+    if route.reason == ROUTE_REASON_NO_PROVIDER or route.provider_id != "fred":
+        logger.warning(
+            "evidence_lane_no_provider lane=macro reason=%s provider=%s",
+            route.reason, route.provider_id,
+        )
+        return None
+    logger.debug(
+        "evidence_lane_provider_resolved lane=macro provider=%s reason=%s",
+        route.provider_id, route.reason,
+    )
+
+    api_key = (settings.fred_api_key or "").strip()
+    if not api_key and _provider_fn is None:
+        logger.warning(
+            "evidence_lane_skip lane=macro reason=no_fred_api_key"
+        )
+        return None
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=None,                                  # portfolio-scope
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=None,
+    )
+
+    logger.info(
+        "fred_macro_evidence_start series_count=%d worker_run_id=%s",
+        len(series_list), worker_run_id,
+    )
+
+    if _provider_fn is not None:
+        provider_fn = _provider_fn
+    else:
+        cfg = FredProviderConfig(api_key=api_key)
+        provider_fn = lambda sids: fetch_macro_series(sids, cfg)  # noqa: E731
+
+    try:
+        provider_result = provider_fn(series_list)
+    except Exception as exc:
+        logger.warning(
+            "evidence_lane_fetch_error lane=macro error=%s", exc
+        )
+        provider_result = FredProviderResult(
+            fetch_status="error",
+            error_message=f"runner_catch: {exc}",
+            fetched_at=fetched_at,
+        )
+
+    # Per-series compact logs for runtime debugging — no values, only metadata.
+    for sres in provider_result.series_results:
+        if sres.is_success:
+            latest_date = ""
+            if sres.observations:
+                latest_date = max(o.date for o in sres.observations if o.date)
+            logger.info(
+                "fred_macro_series_fetched series_id=%s observation_count=%d latest_date=%s",
+                sres.series_id, len(sres.observations), latest_date or "none",
+            )
+        else:
+            logger.info(
+                "fred_macro_series_skip series_id=%s reason=%s",
+                sres.series_id, sres.fetch_status,
+            )
+
+    output = build_fred_macro_worker_output(worker_input, provider_result, fetched_at)
+    series_attempted = output.artifact_payload.get("series_attempted", 0)
+
+    # Honest no-artifact when nothing usable came back. Avoids writing a
+    # placeholder that would only carry SUPPRESSED_INCOMPLETE noise.
+    obs_count = output.artifact_payload.get("observation_count", 0)
+    if obs_count == 0:
+        skip_reason = output.artifact_payload.get("fetch_status", "no_observations")
+        logger.info(
+            "fred_macro_evidence_complete series_attempted=%d series_written=0 "
+            "artifact_id=none reason=%s",
+            series_attempted, skip_reason,
+        )
+        return None
+
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        logger.info(
+            "fred_macro_evidence_complete series_attempted=%d series_written=%d "
+            "artifact_id=%s confidence=%s freshness=%s",
+            series_attempted,
+            output.artifact_payload.get("series_succeeded", 0),
+            artifact_id,
+            output.confidence_or_trust_level,
+            output.freshness_status,
+        )
+
+        # Stage 5I patch — emit a deterministic usability summary so Railway
+        # logs confirm the provider-aware FRED credibility override produced
+        # an officially-authoritative, truth-usable artifact. Replays the
+        # Stage 5B/5C/5D/5E chain on the same in-memory objects (no IO).
+        try:
+            from app.services.intelligence.v3.contradiction_detector_v1 import (
+                detect_contradictions,
+            )
+            from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+                assess_artifact_usability,
+            )
+            from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+                score_evidence_completeness,
+            )
+            from app.services.intelligence.v3.source_credibility_registry_v1 import (
+                assess_artifact_sources,
+            )
+            cred = assess_artifact_sources(output.sources)
+            contra = detect_contradictions(output.facts)
+            comp = score_evidence_completeness(
+                sources=output.sources, facts=output.facts,
+                credibility_assessment=cred, contradiction_assessment=contra,
+            )
+            usab = assess_artifact_usability(cred, contra, comp)
+            override_count = sum(
+                1 for s in cred.per_source_assessments
+                if s.get("provider_aware_override_applied")
+            )
+            logger.info(
+                "fred_macro_usability_summary observation_count=%d "
+                "strongest_authority=%s is_insufficient=%s completeness_band=%s "
+                "usability_label=%s provider_aware_override_count=%d",
+                output.artifact_payload.get("observation_count", 0),
+                cred.strongest_authority_level,
+                cred.is_insufficient,
+                comp.completeness_band,
+                usab.usability_label,
+                override_count,
+            )
+        except Exception as _exc:  # noqa: BLE001
+            logger.debug(
+                "fred_macro_usability_summary_failed error=%s", _exc,
+            )
+    else:
+        logger.warning(
+            "fred_macro_evidence_complete series_attempted=%d series_written=0 "
+            "artifact_id=none reason=service_write_failed",
+            series_attempted,
         )
     return artifact_id
 

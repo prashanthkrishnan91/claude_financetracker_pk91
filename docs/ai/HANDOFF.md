@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-18 (Stage 5A — Research Artifact Store substrate + writer scaffolding + scope-aware clean replacement; **merged PR #367**; next: Stage 5B)
+Last updated: 2026-05-18 (Stage 5I — FRED Official Macro Evidence Lane v1; branch `claude/add-fred-macro-evidence-zQg8t`; next: Stage 5J)
 
 ## Purpose
 
@@ -54,9 +54,34 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current evidence lane production wiring status (Stage 5H.3)
+## Current evidence lane production wiring status (Stage 5I)
 
-**Stage 5H.3 fix (current PR):** SEC CompanyFacts contradiction grouping and non-equity ticker eligibility guard.
+**Stage 5I (current PR):** FRED Official Macro Evidence Lane v1.
+
+**What changed in Stage 5I:**
+- `fred_provider_v1.py` (new) — typed, deterministic, sync FRED API client. Bounded per-session request budget; two requests per series (metadata + recent observations). Honest fail-closed on no_api_key / timeout / rate_limit / malformed / no_observations. Allowlisted series only: `FEDFUNDS`, `DFF`, `DGS10`, `DGS2`, `T10Y2Y`, `CPIAUCSL`, `UNRATE`, `PAYEMS`, `GDP`, `GDPC1`. Never raises.
+- `fred_macro_adapter_v1.py` (new) — pure, no-IO adapter. Converts `FredProviderResult` → portfolio-scope `WorkerOutput`. artifact_type=`portfolio_exposure` (existing DB enum; TODO documented to extend to `macro_context` in a future SQL migration), skill_pack=`fred_macro_evidence_v1`, model_version=`fred_official_macro_v1`. One `SourceRecord` per FRED series (provider_name=`fred`, source_url=`https://fred.stlouisfed.org/series/<id>`, source_kind=`other`). One `FactRecord` per observation, preserving `series_id`, `metric_label`, `value`, `unit`, `frequency`, `observation_date`, `realtime_start/end`, `fred_category`, `fred_last_updated`. Confidence band from successful-series count; freshness from latest observation date.
+- `evidence_lane_runner_v1.py` (modified) — added `_is_fred_macro_enabled()` + `run_fred_macro_evidence()` (portfolio-scope, ticker-agnostic; one artifact per explicit run). Compact logs: `fred_macro_evidence_start`, `fred_macro_series_fetched`, `fred_macro_series_skip`, `fred_macro_evidence_complete`. Router-consulted (must resolve to FRED FREE/OFFICIAL).
+- `evidence_provider_registry_v1.py` (modified) — FRED flipped to `default_enabled=True` with `requires_api_key=True`. priority=2 (above yfinance, below sec_edgar).
+- `intel_v3_evidence_lane_orchestrator_v1.py` (modified) — runs FRED macro lane once per explicit dispatch (not per ticker). Fail-soft: macro failure does not break per-ticker dispatch. Empty-ticker early-return removed so macro can still fire on empty portfolios. `macro_artifact_id` added to dispatch-complete log.
+- `config.py` (modified) — new flags `intel_v3_macro_evidence_enabled: bool = False` and `fred_api_key: Optional[str] = None`.
+- `test_stage5i_fred_macro_evidence.py` (new) — 80 tests: registry/router, provider client, adapter, WorkerOutput builder, runner integration through `ResearchArtifactServiceV1`, orchestrator wiring, safety/boundary invariants.
+
+**Providers actually called**: fred (Stage 5I) when flag on + api key set; sec_edgar (Stage 5H), yfinance (Stage 5F) — unchanged. Paid providers remain disabled.
+**SQL required**: NO. Used least-misleading existing `portfolio_exposure` artifact_type and existing `other` source_kind (TODO in adapter notes the future `macro_context` artifact_type + dedicated macro source_kind migration).
+**UI changes**: No.
+**Per-run cost**: at most 2 HTTP requests × 10 allowlisted series = 20 FRED requests per explicit Intel v3 run. Macro lane runs only on explicit `POST /intel/v3/run`, never on page load.
+**safe_for_decision**: stays False. Macro evidence is portfolio context, never visible Buy/Hold/Trim/Sell authority.
+**Next runtime validation:** set `FRED_API_KEY=<your free key>` and `INTEL_V3_MACRO_EVIDENCE_ENABLED=true` in Railway, run `POST /intel/v3/run`, confirm in Railway logs:
+- `fred_macro_evidence_start series_count=10 worker_run_id=...`
+- `fred_macro_series_fetched series_id=DGS10 observation_count=12 latest_date=2026-05-...`
+- `fred_macro_evidence_complete series_attempted=10 series_written=N artifact_id=<uuid>`
+- `intel_v3_evidence_lanes_dispatch_complete ... macro_artifact_id=<uuid>`
+- Exactly one new active `portfolio_exposure` row with `skill_pack='fred_macro_evidence_v1'` per explicit run.
+
+## Previous evidence lane wiring status (Stage 5H.3)
+
+**Stage 5H.3 fix (merged):** SEC CompanyFacts contradiction grouping and non-equity ticker eligibility guard.
 
 **Root cause of remaining false SUPPRESSED_CONTRADICTED after PR #378:** the generic contradiction detector groups by `(claim_key, fact_kind, period, as_of)` only. For SEC XBRL `metric_observation` facts that grouping is too coarse — it ignores `unit`, `fiscal_year`, `fiscal_period`, `period_start`, `period_end`, and `frame` structured-payload fields. Any combination of those that hashes into the same coarse group can produce a false contradiction when the parser legitimately keeps distinct XBRL observations (e.g., instant balance-sheet values with no `period_start`, or quarterly vs YTD durations under unusual `fy/fp` shapes). Separately, BTC and XRP were being mapped to unrelated SEC companies by ticker-symbol collision because no instrument guard ran before SEC EDGAR lookup.
 
@@ -80,6 +105,7 @@ Key structured logs to confirm in production:
 **Flags required:**
 - `INTEL_V3_RESEARCH_WORKERS_ENABLED=true` (global kill switch)
 - `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT=<agent>` for SEC lane
+- `INTEL_V3_MACRO_EVIDENCE_ENABLED=true` + `FRED_API_KEY=<free key>` for FRED macro lane (Stage 5I)
 - Per-lane: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED`
 
 **Page-load contract preserved:** `GET /intel/v3/snapshot` does NOT call the orchestrator.
@@ -87,6 +113,8 @@ Key structured logs to confirm in production:
 ## Recent meaningful PRs
 
 Keep this section small. Only entries that affect future work; replace older lines as they age out.
+
+- 2026-05-18 — **Stage 5I: Add FRED official macro evidence lane v1** — New `fred_provider_v1.py` (typed sync FRED API client, allowlisted 10 macro series, fail-closed on no_api_key/timeout/rate_limit/no_observations) and `fred_macro_adapter_v1.py` (portfolio-scope adapter; artifact_type=`portfolio_exposure`, skill_pack=`fred_macro_evidence_v1`). Macro lane runner `run_fred_macro_evidence()` added to `evidence_lane_runner_v1.py` — one artifact per explicit run, not per ticker. Wired into `intel_v3_evidence_lane_orchestrator_v1.py` fire-and-forget dispatch (fail-soft; empty-ticker early-return removed so macro still fires). Provider registry flips FRED to `default_enabled=True` (requires `FRED_API_KEY`). Two new settings: `intel_v3_macro_evidence_enabled` (default False) + `fred_api_key`. 80 new tests; 109 Stage 5G tests updated to reflect FRED-enabled state (10 assertions retargeted). 724 stage 5A→5I tests pass. No SQL, no UI, no LLM calls, no paid providers, no visible decision changes, no page-load execution. safe_for_decision stays False.
 
 - 2026-05-18 — **Stage 5H.3: Fix SEC CompanyFacts contradiction grouping and ticker eligibility** — SEC-specific contradiction group key in `contradiction_detector_v1` (provider+metric+unit+fy+fp+start+end+frame+filed) prevents distinct XBRL observations from being flagged as contradictions while preserving true conflict detection across filings. Runner adds non-equity guard via `classify_sec_metric_candidate(ticker, category)` before SEC EDGAR lookup; ETF/crypto/fund skipped (BTC, XRP, SPY, etc.) with `sec_companyfacts_skip_non_equity` log. New `sec_companyfacts_usability_summary` runtime diagnostic log. **Patch (same PR):** plumb `holding_context_by_ticker` (`{ticker: {"category": ...}}`) from `IntelV3Service._get_active_holding_context_by_ticker()` → `run_enabled_evidence_lanes_for_portfolio()` → `run_evidence_lanes_for_ticker()` → SEC runner so the guard prefers actual portfolio metadata; the static BTC/XRP/ETF symbol fallback is now only a safety net. Skip log includes `skip_source=metadata|symbol_fallback`. 24 new tests (17 + 7 patch); 431 total stage 5C/5D/5F/5G/5H/5H.1/5H.2/5H.3 tests pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
 

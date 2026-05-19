@@ -618,10 +618,33 @@ class TestAdaptFredMacro:
         res = adapt_fred_macro(provider, provider.fetched_at)
         assert all(f.is_quote_grounded for f in res.facts)
 
-    def test_fact_axis_hint_is_macro(self):
+    def test_fact_axis_hint_is_db_valid(self):
+        # Stage 5I.1 — DB CHECK constraint on research_artifact_facts.axis_hint
+        # allows only {evidence, risk, price, quality, catalyst, exposure} or
+        # NULL. Stage 5I originally used 'macro' which violated the constraint
+        # and caused HTTP 400 on every macro artifact write. The adapter now
+        # uses axis_hint=None and preserves macro identity in structured_payload.
         provider = _success_provider_result(["DGS10"])
         res = adapt_fred_macro(provider, provider.fetched_at)
-        assert all(f.axis_hint == "macro" for f in res.facts)
+        allowed = {None, "evidence", "risk", "price", "quality", "catalyst", "exposure"}
+        for f in res.facts:
+            assert f.axis_hint in allowed, f"invalid axis_hint={f.axis_hint!r}"
+        assert all(f.axis_hint is None for f in res.facts)
+
+    def test_fact_payload_preserves_macro_identity(self):
+        # Stage 5I.1 — with axis_hint=None on the column, macro identity must
+        # remain inside structured_payload so downstream readers can identify
+        # the lane without re-introducing the invalid 'macro' axis_hint.
+        provider = _success_provider_result(["DGS10"])
+        res = adapt_fred_macro(provider, provider.fetched_at)
+        for fact in res.facts:
+            pl = fact.structured_payload
+            assert pl["provider"] == "fred"
+            assert pl["series_id"] == "DGS10"
+            assert pl["metric_name"] == "DGS10"
+            assert pl["observation_date"]
+            assert pl["macro_category"] == "treasury_yield"
+            assert pl["lane"] == "macro"
 
     def test_fact_source_index_matches_series(self):
         provider = _success_provider_result(["DGS10", "DGS2"])
@@ -1069,6 +1092,155 @@ class TestSafetyInvariants:
         with open(mod.__file__) as f:
             content = f.read()
         assert "macro_artifact_id" in content
+
+
+# ── Stage 5I.1 — DB constraint + API-key redaction regression tests ───────────
+
+
+# DB CHECK constraint on research_artifact_facts.axis_hint (migration 017).
+_DB_VALID_AXIS_HINTS = {None, "evidence", "risk", "price", "quality", "catalyst", "exposure"}
+
+
+class TestFredMacroDbAxisHintConstraint:
+    """Regression: Stage 5I emitted axis_hint='macro' which violated the DB
+    CHECK constraint research_artifact_facts_axis_hint_check, producing HTTP
+    400 on every FRED macro fact insert. Stage 5I.1 fixes the contract."""
+
+    def test_worker_output_facts_use_db_valid_axis_hint(self):
+        provider = _success_provider_result(["DGS10", "DGS2", "FEDFUNDS"])
+        output = build_fred_macro_worker_output(
+            _worker_input(), provider, provider.fetched_at,
+        )
+        assert output.facts
+        for fact in output.facts:
+            assert fact.axis_hint in _DB_VALID_AXIS_HINTS, (
+                f"axis_hint={fact.axis_hint!r} would violate DB CHECK constraint"
+            )
+
+    def test_runner_persists_facts_with_db_valid_axis_hint(self):
+        db = _FakeSupabase()
+        run_fred_macro_evidence(
+            user_id="user-5I1", db_client=db,
+            settings=_settings_macro_on(),
+            _provider_fn=lambda sids: _success_provider_result(
+                ["DGS10", "DGS2", "FEDFUNDS"]
+            ),
+        )
+        facts = db.fact_inserts()
+        assert facts, "facts should have been written"
+        for row in facts:
+            assert row.get("axis_hint", None) in _DB_VALID_AXIS_HINTS
+
+    def test_runner_writes_artifact_and_all_facts(self):
+        """If axis_hint had been 'macro', the writer would have raised on insert
+        and tests would have seen no facts persisted (or an exception)."""
+        db = _FakeSupabase()
+        provider = _success_provider_result(["DGS10", "DGS2"])
+        # 2 series × 3 obs per series in the fixture → 6 facts.
+        expected_obs = sum(len(s.observations) for s in provider.series_results)
+        run_fred_macro_evidence(
+            user_id="user-5I1", db_client=db,
+            settings=_settings_macro_on(),
+            _provider_fn=lambda sids: provider,
+        )
+        assert len(db.artifact_inserts()) == 1
+        assert len(db.source_inserts()) == 2
+        assert len(db.fact_inserts()) == expected_obs
+
+    def test_usability_label_becomes_usable_when_observations_exist(self):
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+        )
+        from app.services.intelligence.v3.contradiction_detector_v1 import (
+            detect_contradictions,
+        )
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+            score_evidence_completeness,
+        )
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import (
+            assess_artifact_usability,
+        )
+        provider = _success_provider_result(["DGS10", "DGS2", "FEDFUNDS"])
+        output = build_fred_macro_worker_output(
+            _worker_input(), provider, provider.fetched_at,
+        )
+        cred = assess_artifact_sources(output.sources)
+        contra = detect_contradictions(output.facts)
+        comp = score_evidence_completeness(
+            sources=output.sources, facts=output.facts,
+            credibility_assessment=cred, contradiction_assessment=contra,
+        )
+        usab = assess_artifact_usability(cred, contra, comp)
+        assert usab.usability_label in ("USABLE", "USABLE_WITH_LIMITATIONS"), (
+            f"unexpected usability_label={usab.usability_label!r}"
+        )
+
+
+class TestFredApiKeyLogRedaction:
+    """Stage 5I.1 hygiene — FRED_API_KEY must never appear in app/provider logs."""
+
+    def test_redaction_filter_scrubs_api_key_from_record(self):
+        import logging as _logging
+        from app.services.intelligence.research_workers.fred_provider_v1 import (
+            _ApiKeyRedactingFilter,
+        )
+        flt = _ApiKeyRedactingFilter()
+        record = _logging.LogRecord(
+            name="httpx", level=_logging.INFO, pathname="x", lineno=1,
+            msg="HTTP Request: GET https://api.stlouisfed.org/fred/series?series_id=DGS10&api_key=sekret-abc123&file_type=json",
+            args=None, exc_info=None,
+        )
+        flt.filter(record)
+        assert "sekret-abc123" not in record.getMessage()
+        assert "api_key=[REDACTED]" in record.getMessage()
+
+    def test_redaction_filter_scrubs_api_key_in_args(self):
+        import logging as _logging
+        from app.services.intelligence.research_workers.fred_provider_v1 import (
+            _ApiKeyRedactingFilter,
+        )
+        flt = _ApiKeyRedactingFilter()
+        record = _logging.LogRecord(
+            name="httpx", level=_logging.INFO, pathname="x", lineno=1,
+            msg="HTTP Request: GET %s",
+            args=("https://api.stlouisfed.org/fred/series?api_key=topsecret-xyz",),
+            exc_info=None,
+        )
+        flt.filter(record)
+        assert "topsecret-xyz" not in record.getMessage()
+        assert "api_key=[REDACTED]" in record.getMessage()
+
+    def test_httpx_logger_has_redaction_filter_installed(self):
+        import logging as _logging
+        # Importing the provider module installs the filter at import time.
+        import app.services.intelligence.research_workers.fred_provider_v1  # noqa: F401
+        from app.services.intelligence.research_workers.fred_provider_v1 import (
+            _ApiKeyRedactingFilter,
+        )
+        for name in ("httpx", "httpcore"):
+            lg = _logging.getLogger(name)
+            assert any(isinstance(f, _ApiKeyRedactingFilter) for f in lg.filters), (
+                f"{name} logger missing api_key redaction filter"
+            )
+            assert lg.level >= _logging.WARNING, (
+                f"{name} logger should not log INFO request URLs"
+            )
+
+    def test_no_api_key_in_provider_or_runner_high_level_logs(self, caplog):
+        """End-to-end: a successful FRED run via the runner must not echo the
+        API key anywhere in caplog records."""
+        import logging as _logging
+        secret = "super-secret-fred-key-9999"
+        caplog.set_level(_logging.DEBUG)
+        db = _FakeSupabase()
+        run_fred_macro_evidence(
+            user_id="user-5I1", db_client=db,
+            settings=_settings_macro_on(api_key=secret),
+            _provider_fn=lambda sids: _success_provider_result(["DGS10"]),
+        )
+        for rec in caplog.records:
+            msg = rec.getMessage()
+            assert secret not in msg, f"API key leaked in log: {msg!r}"
 
 
 # ── Stage 5I patch — provider-aware credibility override ─────────────────────

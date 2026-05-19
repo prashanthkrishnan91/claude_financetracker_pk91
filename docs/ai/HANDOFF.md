@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-18 (Stage 5I — FRED Official Macro Evidence Lane v1; branch `claude/add-fred-macro-evidence-zQg8t`; next: Stage 5J)
+Last updated: 2026-05-19 (Stage 5I.1 — FRED macro write-contract fix + API-key log redaction; branch `claude/fix-fred-api-key-fFKo9`; next: Stage 5J)
 
 ## Purpose
 
@@ -72,12 +72,26 @@ Key structured logs to confirm in production:
 **UI changes**: No.
 **Per-run cost**: at most 2 HTTP requests × 10 allowlisted series = 20 FRED requests per explicit Intel v3 run. Macro lane runs only on explicit `POST /intel/v3/run`, never on page load.
 **safe_for_decision**: stays False. Macro evidence is portfolio context, never visible Buy/Hold/Trim/Sell authority.
-**Next runtime validation:** set `FRED_API_KEY=<your free key>` and `INTEL_V3_MACRO_EVIDENCE_ENABLED=true` in Railway, run `POST /intel/v3/run`, confirm in Railway logs:
+**Stage 5I.1 patch (current PR):** Production activation of Stage 5I revealed two issues:
+1. `research_artifact_facts` inserts failed HTTP 400 on `research_artifact_facts_axis_hint_check` because Stage 5I emitted `axis_hint="macro"` while migration 017's CHECK constraint allows only `{evidence, risk, price, quality, catalyst, exposure}` or NULL. Result: artifact wrote, sources wrote, every fact insert failed, `fred_macro_evidence_complete artifact_id=none reason=service_write_failed`.
+2. Railway logs showed live `FRED_API_KEY` inside httpx `HTTP Request: GET …?api_key=…` lines.
+
+Fixes in `fred_macro_adapter_v1.py`:
+- `axis_hint=None` for all FRED FactRecords (writer already only sets the column when truthy). Macro identity preserved in `structured_payload`: `provider="fred"`, `macro_category`, `series_id`, `metric_name`, `observation_date`, `lane="macro"`. skill_pack `fred_macro_evidence_v1` remains the lane discriminator. No SQL.
+
+Fixes in `fred_provider_v1.py`:
+- Added `_ApiKeyRedactingFilter` (regex `api_key=…` → `api_key=[REDACTED]`) installed at module import time on `httpx`, `httpcore`, and this module's loggers. `httpx`/`httpcore` log level raised to WARNING to suppress the request-URL INFO line entirely. High-level runner logs (`fred_macro_series_fetched series_id=… observation_count=… latest_date=…`) are unchanged.
+
+Tests: existing `test_fact_axis_hint_is_macro` replaced with `test_fact_axis_hint_is_db_valid` + `test_fact_payload_preserves_macro_identity`. Added `TestFredMacroDbAxisHintConstraint` (worker-output, runner-persisted, full artifact+sources+facts written, usability label becomes `USABLE` / `USABLE_WITH_LIMITATIONS`) and `TestFredApiKeyLogRedaction` (filter scrubs msg + args, httpx/httpcore filter installed at level ≥ WARNING, end-to-end runner caplog contains no key). 103 Stage 5I tests pass; Stage 5B/5E/5F/5G/5H/5H2/5H3 suites still pass.
+
+**Next runtime validation:** rotate FRED key (the old leaked one), set the new `FRED_API_KEY` in Railway, keep `INTEL_V3_MACRO_EVIDENCE_ENABLED=true`, run `POST /intel/v3/run`, confirm in Railway logs:
 - `fred_macro_evidence_start series_count=10 worker_run_id=...`
 - `fred_macro_series_fetched series_id=DGS10 observation_count=12 latest_date=2026-05-...`
-- `fred_macro_evidence_complete series_attempted=10 series_written=N artifact_id=<uuid>`
+- `fred_macro_evidence_complete series_attempted=10 series_written=N artifact_id=<uuid>` (UUID, not `none`)
+- `fred_macro_usability_summary observation_count=N strongest_authority=PRIMARY_AUTHORITY ... usability_label=USABLE|USABLE_WITH_LIMITATIONS provider_aware_override_count=N`
 - `intel_v3_evidence_lanes_dispatch_complete ... macro_artifact_id=<uuid>`
 - Exactly one new active `portfolio_exposure` row with `skill_pack='fred_macro_evidence_v1'` per explicit run.
+- No `api_key=…` strings anywhere in Railway logs.
 
 ## Previous evidence lane wiring status (Stage 5H.3)
 

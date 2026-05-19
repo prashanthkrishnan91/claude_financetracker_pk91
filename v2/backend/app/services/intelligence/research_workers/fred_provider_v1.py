@@ -25,11 +25,67 @@ is None — i.e., not imported in test paths that supply their own fake.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+# ── Stage 5I.1 — API-key log redaction ────────────────────────────────────────
+# FRED requires api_key as a query parameter (no header-auth alternative). httpx
+# (and httpcore) log every request URL at INFO level, which leaked the live
+# FRED_API_KEY into Railway logs. We install a logging filter that scrubs the
+# key from any log record on the httpx / httpcore loggers, and additionally
+# raise their level to WARNING so the request URL line is suppressed entirely.
+# High-level FRED progress logs (series_id, observation_count, latest_date) are
+# emitted by the runner via this module's own logger and are unaffected.
+
+_API_KEY_QUERY_RE = re.compile(r"(api_key=)[^&\s\"']+", re.IGNORECASE)
+
+
+class _ApiKeyRedactingFilter(logging.Filter):
+    """Scrub api_key query values from log messages and args."""
+
+    def filter(self, record: logging.LogRecord) -> bool:  # noqa: D401
+        try:
+            if isinstance(record.msg, str) and "api_key=" in record.msg.lower():
+                record.msg = _API_KEY_QUERY_RE.sub(r"\1[REDACTED]", record.msg)
+            if record.args:
+                if isinstance(record.args, tuple):
+                    record.args = tuple(
+                        _API_KEY_QUERY_RE.sub(r"\1[REDACTED]", a)
+                        if isinstance(a, str) else a
+                        for a in record.args
+                    )
+                elif isinstance(record.args, dict):
+                    record.args = {
+                        k: (_API_KEY_QUERY_RE.sub(r"\1[REDACTED]", v)
+                            if isinstance(v, str) else v)
+                        for k, v in record.args.items()
+                    }
+        except Exception:  # noqa: BLE001 — never break logging
+            pass
+        return True
+
+
+_REDACTING_FILTER = _ApiKeyRedactingFilter()
+
+
+def _install_api_key_log_redaction() -> None:
+    """Idempotently install api_key redaction on httpx/httpcore + this module's logger."""
+    for name in ("httpx", "httpcore", __name__):
+        lg = logging.getLogger(name)
+        if not any(isinstance(f, _ApiKeyRedactingFilter) for f in lg.filters):
+            lg.addFilter(_REDACTING_FILTER)
+    # httpx logs request URLs at INFO. Suppress that line entirely; the runner
+    # already emits structured per-series logs that do not include the key.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
+
+_install_api_key_log_redaction()
+
 
 _SERIES_URL = "https://api.stlouisfed.org/fred/series"
 _OBSERVATIONS_URL = "https://api.stlouisfed.org/fred/series/observations"

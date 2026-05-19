@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-19 (Stage 6 — Evidence-Aware Intel v3 Decision Engine Certification; branch `claude/review-baseline-docs-UUvbm`; next: enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` in Railway diagnostics env, run stage6-evidence-governance diagnostics endpoint, validate action diversity in production)
+Last updated: 2026-05-19 (Stage 6 Evidence Activation Fix — branch `claude/review-baseline-docs-axQ51`; root cause confirmed: per-ticker evidence workers never activated; diagnostic improvement: `LaneCoverage.missing_reason` added; 36 new regression tests; next: enable per-ticker evidence lane flags in Railway, run `POST /intel/v3/run`, re-run Stage 6 diagnostics to confirm tickers_with_any_usable_axis > 0)
 
 ## Purpose
 
@@ -54,26 +54,22 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current: Stage 6 — Evidence-Aware Intel v3 Decision Engine Certification
+## Current: Stage 6 Evidence Activation Fix (branch `claude/review-baseline-docs-axQ51`)
 
-**Stage 6 (current PR — branch `claude/review-baseline-docs-UUvbm`):** Connects Stage 5K `ResearchEvidenceDecisionInputShadow` to Intel v3 decision governance via deterministic, flag-gated rules. Proves whether Intel v3 can produce action diversity beyond HOLD when evidence supports it.
+**Root cause confirmed:** `tickers_with_any_usable_axis=0` / `tickers_fully_missing=34` because per-ticker evidence lane flags all default to False in Railway. Only FRED macro was explicitly activated → `macro_context=READY`. The code pipeline is correct for existing artifacts — no code bug prevents usable artifacts from reaching Stage 6 when they exist.
 
-**What landed in Stage 6:**
-- `intel_v3_evidence_aware_governance_v1.py` (new) — Pure, no-IO governance module. Main entry: `apply_evidence_governance(inp, ticker_readiness, portfolio_macro, *, flag_enabled)`. When `flag_enabled=False`: complete no-op; `governance_applied=False`. When `flag_enabled=True`: derives `AxisBand` (STRONG/OK/THIN/SUPPRESSED) from Stage 5K readiness signals and mutates `inp.evidence_quality` in-place; adds macro advisory note to `inp.suppression_reasons` only (macro never forces/blocks action). Priority rules: suppressed/insufficient fundamentals → SUPPRESSED; 0 usable axes → THIN; READY fund + corroboration → STRONG; READY fund alone → OK; LIMITED fund + corroboration → OK; LIMITED fund alone → THIN; no fundamentals → THIN. ETF/crypto `sec_lane_applicable=False` not penalized. `GOVERNANCE_VERSION = "intel_v3_evidence_aware_governance.v1"`.
-- `intel_v3_service.py` (modified) — `_get_evidence_shadow_for_governance()` helper: returns `None` (no-op) when flag off; otherwise reads Stage 5J+5K via `asyncio.to_thread()` and returns shadow. Wired into `run_v3()` and `run_prewarm_snapshot()` immediately before `decide(inp)` call. `s6_active = evidence_shadow is not None` prevents any mutation when flag off.
-- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/stage6-evidence-governance` (cert-gated + `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true`). Builds `DecisionInputV3` for each ticker twice (flag-off and flag-on), calls `decide()` twice for before/after comparison. Returns `PortfolioGovernanceSummary.to_dict()` with `diagnostics_only: True`. Never writes DB, never calls LLM/provider, never runs on page load.
-- `config.py` (modified) — two new flags: `intel_v3_evidence_aware_policy_enabled` (default False) and `intel_v3_stage6_governance_diagnostics_enabled` (default False).
-- `test_stage6_evidence_aware_governance.py` (new) — 75 tests across 9 classes: `TestGoldenScenarios` (11 golden proof tests), `TestFlagSafetyContracts` (9), `TestConvictionCapping` (10), `TestEtfCryptoHandling` (4), `TestMacroContextAdvisoryOnly` (5), `TestHoldCollapseDetection` (8), `TestSafetyInvariants` (10), `TestPortfolioGovernanceSummary` (6), `TestDeriveGovernedEvidenceQuality` (12). All 75 pass.
+**What landed in this PR:**
+- `research_evidence_coverage_read_model_v1.py` (modified) — `LaneCoverage` gains `missing_reason: Optional[str]` field. `_classify_status` now returns `(status, missing_reason)` tuple. Values: `"no_active_artifact"` (most common — lane flags never enabled in Railway), `"freshness_stale"`, `"freshness_unknown"`, `"usability_suppressed"`, `"usability_not_evaluable"`. `None` when status is READY/LIMITED. Included in `to_dict()` response.
+- `tests/test_stage6_evidence_activation_regression.py` (new) — 36 end-to-end regression tests locking Stage 5J → 5K → Stage 6 pipeline behavior with fixtures. Covers: usable artifacts reaching Stage 6, all-missing state, FRED macro portfolio-scope-only, STALE/SUPPRESSED/UNKNOWN blocked, ETF/crypto SEC not_applicable, Stage 6 STRONG/THIN governance with fixture axes, flag-off no-op, no payload/secret leakage.
 
-**Flag names:**
-- `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False) — governs visible behavior; off = complete no-op
-- `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False) — enables diagnostics endpoint
+**Previous Stage 6 (merged — branch `claude/review-baseline-docs-UUvbm`):** `intel_v3_evidence_aware_governance_v1.py` + `intel_v3_service.py` wiring + diagnostics endpoint + 75 tests. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False), `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False). No SQL, no UI, no LLM, no providers, no visible decision changes.
 
-**Providers actually called**: none. **SQL required**: NO. **UI**: none. **LLM**: none. **Visible decision changes**: none when flag off. **Page-load**: never.
-
-**Validation:** 75 Stage 6 tests + 1,078 related Stage 5/existing tests pass with no regressions.
-
-**Next stage (production validation):** Enable `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true` in Railway diagnostics env; run `POST /diagnostics/finance-intel/stage6-evidence-governance` to validate before/after action distribution. Once governance contract is proven stable in production diagnostics, enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` on the main service — this is a separate explicit Railway env change, never implicit.
+**Production next steps (in order):**
+1. Enable per-ticker evidence lanes in Railway: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` (+ `SEC_EDGAR_USER_AGENT`). Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
+2. Run `POST /intel/v3/run` to dispatch evidence workers for all tickers.
+3. Re-run `POST /diagnostics/finance-intel/stage6-evidence-governance` — now the `per_ticker[*].company_fundamentals_readiness` should show READY/LIMITED for equity tickers, `tickers_with_any_usable_axis` > 0, `missing_reason` will show `"no_active_artifact"` only for lanes where workers intentionally weren't run.
+4. Once diagnostics show healthy coverage, enable `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED=true` and validate before/after action distribution.
+5. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` only after production diagnostics prove governance produces correct action diversity. Never implicit.
 
 ## Previous evidence-readiness bridge (Stage 5K)
 

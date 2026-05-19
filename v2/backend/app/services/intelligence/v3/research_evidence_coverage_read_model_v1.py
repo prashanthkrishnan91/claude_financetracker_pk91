@@ -140,6 +140,10 @@ class LaneCoverage:
     model_version: Optional[str]
     generated_at: Optional[str]
     expires_at: Optional[str]
+    # Diagnostic: why this lane is not usable. None when status is READY or LIMITED.
+    # Values: "no_active_artifact" | "freshness_stale" | "freshness_unknown" |
+    #         "usability_suppressed" | "usability_not_evaluable"
+    missing_reason: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -161,6 +165,7 @@ class LaneCoverage:
             "model_version": self.model_version,
             "generated_at": self.generated_at,
             "expires_at": self.expires_at,
+            "missing_reason": self.missing_reason,
         }
 
 
@@ -461,6 +466,7 @@ def _build_lane_coverage(
             model_version=None,
             generated_at=None,
             expires_at=None,
+            missing_reason="no_active_artifact",
         )
 
     payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
@@ -490,7 +496,7 @@ def _build_lane_coverage(
     freshness_status = _safe_str(row.get("freshness_status"))
     confidence = _safe_str(row.get("confidence_or_trust_level"))
 
-    status = _classify_status(
+    status, missing_reason = _classify_status(
         usability_label=usability_label,
         is_usable_field=is_usable_field,
         freshness_status=freshness_status,
@@ -515,6 +521,7 @@ def _build_lane_coverage(
         model_version=_safe_str(row.get("model_version")),
         generated_at=_safe_str(row.get("generated_at")),
         expires_at=_safe_str(row.get("expires_at")),
+        missing_reason=missing_reason,
     )
 
 
@@ -523,29 +530,42 @@ def _classify_status(
     usability_label: Optional[str],
     is_usable_field: bool,
     freshness_status: Optional[str],
-) -> str:
-    """Map the Stage 5E label + DB freshness into a single coverage status.
+) -> tuple[str, Optional[str]]:
+    """Map the Stage 5E label + DB freshness into a coverage status + missing_reason.
 
     Freshness STALE/UNKNOWN overrides only the *unsuppressed* available labels
     (USABLE / USABLE_WITH_LIMITATIONS). Suppressed and not-evaluable labels are
     reported as such — re-classifying a SUPPRESSED_CONTRADICTED artifact as
     "stale" would hide the real reason it cannot be consumed.
+
+    Returns: (status, missing_reason). missing_reason is None when status is
+    READY or LIMITED (lane is usable — no reason needed).
     """
     if usability_label is None:
-        return STATUS_NOT_EVALUABLE
+        return STATUS_NOT_EVALUABLE, "usability_not_evaluable"
     if usability_label == _LABEL_USABLE:
         if _is_stale_or_unknown(freshness_status):
-            return STATUS_STALE_OR_UNKNOWN
-        return STATUS_READY if is_usable_field else STATUS_NOT_EVALUABLE
+            reason = (
+                "freshness_stale"
+                if isinstance(freshness_status, str) and freshness_status.upper() == "STALE"
+                else "freshness_unknown"
+            )
+            return STATUS_STALE_OR_UNKNOWN, reason
+        return (STATUS_READY, None) if is_usable_field else (STATUS_NOT_EVALUABLE, "usability_not_evaluable")
     if usability_label == _LABEL_USABLE_WITH_LIMITATIONS:
         if _is_stale_or_unknown(freshness_status):
-            return STATUS_STALE_OR_UNKNOWN
-        return STATUS_LIMITED if is_usable_field else STATUS_NOT_EVALUABLE
+            reason = (
+                "freshness_stale"
+                if isinstance(freshness_status, str) and freshness_status.upper() == "STALE"
+                else "freshness_unknown"
+            )
+            return STATUS_STALE_OR_UNKNOWN, reason
+        return (STATUS_LIMITED, None) if is_usable_field else (STATUS_NOT_EVALUABLE, "usability_not_evaluable")
     if usability_label.startswith(_SUPPRESSED_PREFIX):
-        return STATUS_SUPPRESSED
+        return STATUS_SUPPRESSED, "usability_suppressed"
     if usability_label == _LABEL_NOT_EVALUABLE:
-        return STATUS_NOT_EVALUABLE
-    return STATUS_NOT_EVALUABLE
+        return STATUS_NOT_EVALUABLE, "usability_not_evaluable"
+    return STATUS_NOT_EVALUABLE, "usability_not_evaluable"
 
 
 def _is_stale_or_unknown(freshness_status: Optional[str]) -> bool:

@@ -103,6 +103,13 @@ _KNOWN_ETF_TICKERS: frozenset[str] = frozenset({
 })
 _KNOWN_CRYPTO_TICKERS: frozenset[str] = frozenset({"BTC", "XRP"})
 
+# Instrument category constants — used by Stage 6 governance to distinguish
+# equity/ETF (can reach OK on limited fundamentals) from crypto/unknown (THIN).
+INSTRUMENT_CATEGORY_EQUITY = "equity"
+INSTRUMENT_CATEGORY_ETF = "etf"
+INSTRUMENT_CATEGORY_CRYPTO = "crypto"
+INSTRUMENT_CATEGORY_UNKNOWN = "unknown"
+
 
 # ── Typed output ──────────────────────────────────────────────────────────────
 
@@ -157,6 +164,7 @@ class TickerDecisionReadiness:
     """Shadow decision input readiness for one ticker."""
     ticker: str
     sec_lane_applicable: bool   # False for ETF/fund/crypto
+    instrument_category: str = INSTRUMENT_CATEGORY_EQUITY  # equity|etf|crypto|unknown
     axes: dict[str, AxisReadinessSignal] = field(default_factory=dict)
     any_axis_usable: bool = False
     usable_axis_count: int = 0
@@ -165,6 +173,7 @@ class TickerDecisionReadiness:
         return {
             "ticker": self.ticker,
             "sec_lane_applicable": self.sec_lane_applicable,
+            "instrument_category": self.instrument_category,
             "axes": {k: v.to_dict() for k, v in self.axes.items()},
             "any_axis_usable": self.any_axis_usable,
             "usable_axis_count": self.usable_axis_count,
@@ -252,7 +261,9 @@ def compute_decision_input_readiness(
 
     for ticker, ticker_cov in coverage.ticker_coverage.items():
         lanes = ticker_cov.lanes
-        sec_applicable = _is_sec_lane_applicable(ticker, ctx.get(ticker))
+        holding_ctx = ctx.get(ticker)
+        sec_applicable = _is_sec_lane_applicable(ticker, holding_ctx)
+        instrument_cat = _classify_instrument_category(ticker, holding_ctx)
 
         fund_axis = _build_company_fundamentals_axis(
             ticker=ticker,
@@ -281,6 +292,7 @@ def compute_decision_input_readiness(
         ticker_readiness[ticker] = TickerDecisionReadiness(
             ticker=ticker,
             sec_lane_applicable=sec_applicable,
+            instrument_category=instrument_cat,
             axes=axes,
             any_axis_usable=any_usable,
             usable_axis_count=usable_count,
@@ -462,6 +474,41 @@ def _derive_axis_readiness_with_level(
     if has_ready:
         return READINESS_READY
     return READINESS_LIMITED
+
+
+def _classify_instrument_category(
+    ticker: str,
+    holding_context: Optional[dict],
+) -> str:
+    """Classify ticker instrument category for Stage 6 governance.
+
+    Returns one of: INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF,
+    INSTRUMENT_CATEGORY_CRYPTO, INSTRUMENT_CATEGORY_UNKNOWN.
+
+    Priority:
+      1. Holding context category/asset_type wins (most authoritative).
+      2. Conservative symbol fallback for known ETF/crypto tickers.
+      3. All others → equity (assume equity; SEC applicable).
+    """
+    ticker_upper = (ticker or "").upper().strip()
+
+    if holding_context:
+        cat = (holding_context.get("category") or "").strip()
+        asset_type = (holding_context.get("asset_type") or "").strip()
+        label = cat or asset_type
+        if label == "Crypto":
+            return INSTRUMENT_CATEGORY_CRYPTO
+        if label == "ETF":
+            return INSTRUMENT_CATEGORY_ETF
+        if label in _NON_EQUITY_CATEGORIES:
+            return INSTRUMENT_CATEGORY_UNKNOWN
+
+    if ticker_upper in _KNOWN_CRYPTO_TICKERS:
+        return INSTRUMENT_CATEGORY_CRYPTO
+    if ticker_upper in _KNOWN_ETF_TICKERS:
+        return INSTRUMENT_CATEGORY_ETF
+
+    return INSTRUMENT_CATEGORY_EQUITY
 
 
 def _is_sec_lane_applicable(

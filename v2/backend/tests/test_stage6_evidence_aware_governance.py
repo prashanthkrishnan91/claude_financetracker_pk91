@@ -95,6 +95,7 @@ def _make_ticker_readiness(
     tech: str = READINESS_MISSING,
     sent: str = READINESS_MISSING,
     sec_lane_applicable: bool = True,
+    instrument_category: str = "equity",
 ) -> TickerDecisionReadiness:
     axes = {
         AXIS_COMPANY_FUNDAMENTALS: _make_axis(fund),
@@ -105,6 +106,7 @@ def _make_ticker_readiness(
     return TickerDecisionReadiness(
         ticker=ticker,
         sec_lane_applicable=sec_lane_applicable,
+        instrument_category=instrument_category,
         axes=axes,
         any_axis_usable=usable > 0,
         usable_axis_count=usable,
@@ -429,8 +431,9 @@ class TestGoldenScenarios:
             ("STRONG2", READINESS_READY, READINESS_LIMITED, READINESS_MISSING, AxisBand.STRONG, "BUY"),
             ("OK1", READINESS_READY, READINESS_MISSING, READINESS_MISSING, AxisBand.OK, "BUY"),
             ("OK2", READINESS_LIMITED, READINESS_READY, READINESS_MISSING, AxisBand.OK, "BUY"),
+            # Priority 4b (calibrated): LIMITED + no corroboration → OK (not THIN)
+            ("OK3", READINESS_LIMITED, READINESS_MISSING, READINESS_MISSING, AxisBand.OK, "BUY"),
             ("THIN1", READINESS_MISSING, READINESS_READY, READINESS_READY, AxisBand.THIN, "BUY"),
-            ("THIN2", READINESS_LIMITED, READINESS_MISSING, READINESS_MISSING, AxisBand.THIN, "BUY"),
             ("SUPP1", READINESS_SUPPRESSED, READINESS_READY, READINESS_READY, AxisBand.SUPPRESSED, "BUY"),
         ]
         actions = []
@@ -1156,69 +1159,102 @@ class TestDeriveGovernedEvidenceQuality:
 
     def test_fund_suppressed_returns_suppressed(self):
         r = _make_ticker_readiness("X", fund=READINESS_SUPPRESSED, tech=READINESS_READY)
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.SUPPRESSED
         assert "buy_blocked_suppressed_fundamentals" in blocks
 
     def test_fund_insufficient_returns_suppressed(self):
         r = _make_ticker_readiness("X", fund=READINESS_INSUFFICIENT, tech=READINESS_READY)
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.SUPPRESSED
 
     def test_all_missing_returns_thin(self):
         r = _make_ticker_readiness("X")
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
         assert "buy_blocked_missing_evidence" in blocks
 
     def test_fund_stale_no_others_returns_thin_stale(self):
         r = _make_ticker_readiness("X", fund=READINESS_STALE_OR_UNKNOWN)
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
         assert "buy_blocked_stale_evidence" in blocks
 
     def test_fund_ready_tech_ready_returns_strong(self):
         r = _make_ticker_readiness("X", fund=READINESS_READY, tech=READINESS_READY)
-        band, _, _ = _derive_governed_evidence_quality(r)
+        band, _, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.STRONG
 
     def test_fund_ready_sent_limited_returns_strong(self):
         r = _make_ticker_readiness("X", fund=READINESS_READY, sent=READINESS_LIMITED)
-        band, _, _ = _derive_governed_evidence_quality(r)
+        band, _, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.STRONG
 
     def test_fund_ready_no_corroboration_returns_ok(self):
         r = _make_ticker_readiness("X", fund=READINESS_READY)
-        band, codes, _ = _derive_governed_evidence_quality(r)
+        band, codes, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.OK
         assert "ready_fundamentals_no_signal_corroboration" in codes
 
     def test_fund_limited_tech_ready_returns_ok(self):
         r = _make_ticker_readiness("X", fund=READINESS_LIMITED, tech=READINESS_READY)
-        band, _, _ = _derive_governed_evidence_quality(r)
+        band, _, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.OK
 
-    def test_fund_limited_no_corroboration_returns_thin(self):
-        r = _make_ticker_readiness("X", fund=READINESS_LIMITED)
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+    def test_fund_limited_no_corroboration_equity_returns_ok_with_cap(self):
+        # Equity: limited fundamentals without corroboration → OK with conviction cap.
+        r = _make_ticker_readiness("X", fund=READINESS_LIMITED, instrument_category="equity")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.OK
+        assert "limited_equity_fundamentals_ok_with_cap" in codes
+        assert not blocks
+        assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_etf_returns_ok_with_cap(self):
+        # ETF: limited fundamentals without corroboration → OK with conviction cap.
+        r = _make_ticker_readiness("SPY", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="etf")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.OK
+        assert "limited_etf_evidence_ok_with_cap" in codes
+        assert not blocks
+        assert priority == "p4b_limited_no_corroboration"
+
+    def test_fund_limited_no_corroboration_crypto_returns_thin(self):
+        # Crypto: generic yfinance LIMITED fundamentals without corroboration → THIN.
+        r = _make_ticker_readiness("BTC", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="crypto")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
-        assert "buy_blocked_insufficient_evidence_breadth" in blocks
+        assert "limited_crypto_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
+
+    def test_fund_limited_no_corroboration_unknown_returns_thin(self):
+        # Unknown instrument: conservative → THIN.
+        r = _make_ticker_readiness("XYZ", fund=READINESS_LIMITED,
+                                   sec_lane_applicable=False, instrument_category="unknown")
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
+        assert band == AxisBand.THIN
+        assert "limited_unknown_instrument_fundamentals_not_safe" in codes
+        assert "buy_blocked_insufficient_evidence_basis" in blocks
+        assert priority == "p4b_crypto_or_unknown_thin"
 
     def test_no_fund_tech_only_returns_thin(self):
         r = _make_ticker_readiness("X", tech=READINESS_READY)
-        band, codes, blocks = _derive_governed_evidence_quality(r)
+        band, codes, blocks, priority = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
         assert "buy_blocked_no_fundamental_evidence" in blocks
 
     def test_no_fund_sent_only_returns_thin(self):
         r = _make_ticker_readiness("X", sent=READINESS_READY)
-        band, _, blocks = _derive_governed_evidence_quality(r)
+        band, _, blocks, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
         assert "buy_blocked_no_fundamental_evidence" in blocks
 
     def test_fund_not_evaluable_returns_thin_not_evaluable(self):
         r = _make_ticker_readiness("X", fund=READINESS_NOT_EVALUABLE)
-        band, codes, _ = _derive_governed_evidence_quality(r)
+        band, codes, _, _ = _derive_governed_evidence_quality(r)
         assert band == AxisBand.THIN
         assert "evidence_not_evaluable" in codes
 

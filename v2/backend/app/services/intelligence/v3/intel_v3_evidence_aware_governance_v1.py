@@ -36,8 +36,12 @@ Evidence governance rules (flag on):
                → AxisBand.OK (MEDIUM conviction BUY; single-signal discipline)
   Priority 4a: Fundamentals LIMITED + corroboration
                → AxisBand.OK (MEDIUM conviction BUY allowed)
-  Priority 4b: Fundamentals LIMITED + no corroboration
-               → AxisBand.THIN (BUY blocked; insufficient breadth)
+  Priority 4b: Fundamentals LIMITED + no corroboration, asset-type conditional:
+               equity or ETF → AxisBand.OK (MEDIUM conviction BUY; conviction cap)
+               crypto or unknown → AxisBand.THIN (BUY blocked; yfinance-only
+               fundamentals not adequate basis without corroboration)
+               [Calibrated 2026-05-19: equity/ETF limited evidence can support BUY
+                with cap; crypto/unknown requires corroboration or READY fundamentals.]
   Priority 5:  No usable fundamentals + other signals only
                → AxisBand.THIN (BUY blocked; no fundamental anchor)
   Fallback:    AxisBand.THIN (conservative)
@@ -65,6 +69,9 @@ from .research_evidence_decision_input_adapter_v1 import (
     AXIS_COMPANY_FUNDAMENTALS,
     AXIS_SENTIMENT,
     AXIS_TECHNICAL_SIGNALS,
+    INSTRUMENT_CATEGORY_CRYPTO,
+    INSTRUMENT_CATEGORY_ETF,
+    INSTRUMENT_CATEGORY_EQUITY,
     READINESS_INSUFFICIENT,
     READINESS_LIMITED,
     READINESS_MISSING,
@@ -97,6 +104,13 @@ class EvidenceGovernanceResult:
     """Per-ticker Stage 6 evidence governance diagnostics.
 
     Backend-safe: no raw artifacts, source URLs, fact contents, API keys.
+
+    Diagnostic fields (added 2026-05-19 for calibration visibility):
+      primary_evidence_readiness:  readiness of company_fundamentals axis (the anchor).
+      auxiliary_evidence_readiness: dict {tech: readiness, sentiment: readiness}.
+      corroboration_gap:           True when fundamentals usable but no tech/sent usable.
+      governance_priority_applied: which priority rule determined the governed band.
+      safe_for_visible_decision_reason: brief reason why safe=True or safe=False.
     """
     ticker: str
     flag_enabled: bool
@@ -122,6 +136,13 @@ class EvidenceGovernanceResult:
     safe_for_visible_decision: bool = False
     reason_codes: list[str] = field(default_factory=list)
 
+    # Calibration diagnostics (2026-05-19)
+    primary_evidence_readiness: str = "MISSING"
+    auxiliary_evidence_readiness: dict[str, Any] = field(default_factory=dict)
+    corroboration_gap: bool = False
+    governance_priority_applied: str = "unknown"
+    safe_for_visible_decision_reason: str = ""
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ticker": self.ticker,
@@ -143,6 +164,11 @@ class EvidenceGovernanceResult:
             "action_blocks_applied": list(self.action_blocks_applied),
             "safe_for_visible_decision": self.safe_for_visible_decision,
             "reason_codes": list(self.reason_codes),
+            "primary_evidence_readiness": self.primary_evidence_readiness,
+            "auxiliary_evidence_readiness": dict(self.auxiliary_evidence_readiness),
+            "corroboration_gap": self.corroboration_gap,
+            "governance_priority_applied": self.governance_priority_applied,
+            "safe_for_visible_decision_reason": self.safe_for_visible_decision_reason,
         }
 
 
@@ -213,6 +239,7 @@ def apply_evidence_governance(
     if not flag_enabled or ticker_readiness is None:
         status = "inactive" if not flag_enabled else "no_readiness_data"
         axes = ticker_readiness.axes if ticker_readiness else {}
+        fund_r = _axis_readiness(axes, AXIS_COMPANY_FUNDAMENTALS)
         return EvidenceGovernanceResult(
             ticker=inp.ticker,
             flag_enabled=flag_enabled,
@@ -226,7 +253,7 @@ def apply_evidence_governance(
             missing_axis_count=_count_axis(axes, "missing"),
             degraded_axis_count=_count_axis(axes, "degraded"),
             not_applicable_axis_count=_count_axis(axes, "not_applicable"),
-            company_fundamentals_readiness=_axis_readiness(axes, AXIS_COMPANY_FUNDAMENTALS),
+            company_fundamentals_readiness=fund_r,
             technical_signals_readiness=_axis_readiness(axes, AXIS_TECHNICAL_SIGNALS),
             sentiment_readiness=_axis_readiness(axes, AXIS_SENTIMENT),
             portfolio_macro_readiness=macro_readiness,
@@ -235,12 +262,20 @@ def apply_evidence_governance(
             reason_codes=[
                 "governance_flag_off" if not flag_enabled else "no_readiness_data"
             ],
+            primary_evidence_readiness=fund_r,
+            auxiliary_evidence_readiness={
+                "technical_signals": _axis_readiness(axes, AXIS_TECHNICAL_SIGNALS),
+                "sentiment": _axis_readiness(axes, AXIS_SENTIMENT),
+            },
+            corroboration_gap=False,
+            governance_priority_applied="governance_inactive",
+            safe_for_visible_decision_reason="governance_not_active",
         )
 
     # Governance active: derive governed evidence quality from Stage 5K readiness.
     axes = ticker_readiness.axes
-    governed_band, reason_codes, action_blocks = _derive_governed_evidence_quality(
-        ticker_readiness
+    governed_band, reason_codes, action_blocks, priority_applied = (
+        _derive_governed_evidence_quality(ticker_readiness)
     )
     governed_str = governed_band.value
 
@@ -264,10 +299,25 @@ def apply_evidence_governance(
         and governed_band not in {AxisBand.SUPPRESSED, AxisBand.THIN}
     )
 
+    fund_r = _axis_readiness(axes, AXIS_COMPANY_FUNDAMENTALS)
+    tech_r = _axis_readiness(axes, AXIS_TECHNICAL_SIGNALS)
+    sent_r = _axis_readiness(axes, AXIS_SENTIMENT)
+
+    fund_ax = axes.get(AXIS_COMPANY_FUNDAMENTALS)
+    tech_ax = axes.get(AXIS_TECHNICAL_SIGNALS)
+    sent_ax = axes.get(AXIS_SENTIMENT)
+    fund_usable = bool(fund_ax and fund_ax.is_usable)
+    tech_usable = bool(tech_ax and tech_ax.is_usable)
+    sent_usable = bool(sent_ax and sent_ax.is_usable)
+    corroboration_gap = fund_usable and not tech_usable and not sent_usable
+
+    safe_reason = _build_safe_reason(safe, governed_band, supported, action_blocks)
+
     logger.info(
         "evidence_governance_applied ticker=%s original=%s governed=%s "
-        "supported_axes=%d reason_codes=%s action_blocks=%s",
-        inp.ticker, original_str, governed_str, supported, reason_codes, action_blocks,
+        "supported_axes=%d priority=%s corroboration_gap=%s safe=%s reason_codes=%s",
+        inp.ticker, original_str, governed_str, supported,
+        priority_applied, corroboration_gap, safe, reason_codes,
     )
 
     return EvidenceGovernanceResult(
@@ -283,13 +333,18 @@ def apply_evidence_governance(
         missing_axis_count=missing,
         degraded_axis_count=degraded,
         not_applicable_axis_count=not_applicable,
-        company_fundamentals_readiness=_axis_readiness(axes, AXIS_COMPANY_FUNDAMENTALS),
-        technical_signals_readiness=_axis_readiness(axes, AXIS_TECHNICAL_SIGNALS),
-        sentiment_readiness=_axis_readiness(axes, AXIS_SENTIMENT),
+        company_fundamentals_readiness=fund_r,
+        technical_signals_readiness=tech_r,
+        sentiment_readiness=sent_r,
         portfolio_macro_readiness=macro_readiness,
         action_blocks_applied=action_blocks,
         safe_for_visible_decision=safe,
         reason_codes=reason_codes,
+        primary_evidence_readiness=fund_r,
+        auxiliary_evidence_readiness={"technical_signals": tech_r, "sentiment": sent_r},
+        corroboration_gap=corroboration_gap,
+        governance_priority_applied=priority_applied,
+        safe_for_visible_decision_reason=safe_reason,
     )
 
 
@@ -348,16 +403,27 @@ def compute_portfolio_governance_summary(
 
 def _derive_governed_evidence_quality(
     ticker_readiness: TickerDecisionReadiness,
-) -> tuple[AxisBand, list[str], list[str]]:
+) -> tuple[AxisBand, list[str], list[str], str]:
     """Map Stage 5K axis readiness to a single AxisBand.
 
-    Returns: (governed_band, reason_codes, action_blocks).
+    Returns: (governed_band, reason_codes, action_blocks, priority_applied).
 
     Priority order is defined in the module docstring.
+
+    Calibration (2026-05-19):
+      Priority 4b conditional: fund_limited + no corroboration is asset-type gated.
+      Equity and ETF/fund: limited-quality company evidence (SEC PARTIAL / yfinance
+      VENDOR_DERIVED) supports BUY with conviction cap — adequate primary-evidence
+      basis exists even without auxiliary corroboration.
+      Crypto and unknown instruments: yfinance-only LIMITED fundamentals alone are
+      not an adequate basis for BUY without auxiliary corroboration → THIN.
+      Missing/suppressed fundamentals still hard-block BUY (Priority 1 / 2).
 
     ETF/crypto: SEC not_applicable is not penalized. The company_fundamentals
     axis for non-equity already excludes the SEC lane in Stage 5K, so the
     yfinance fundamentals lane can reach READY independently.
+    ETF at READY fundamentals: reaches OK or STRONG via P3a/P3b/P4a.
+    Crypto at LIMITED fundamentals, no corroboration: THIN (P4b crypto branch).
 
     TRIM/SELL paths are not touched by evidence governance; those are governed
     by portfolio_fit and risk_band which belong to deterministic policy.
@@ -391,52 +457,75 @@ def _derive_governed_evidence_quality(
     if fund_suppressed:
         reason_codes.append("fundamentals_suppressed_or_contradicted")
         action_blocks.append("buy_blocked_suppressed_fundamentals")
-        return AxisBand.SUPPRESSED, reason_codes, action_blocks
+        return AxisBand.SUPPRESSED, reason_codes, action_blocks, "p1_suppressed_fundamentals"
 
     # Priority 2: Zero usable axes → THIN (safe HOLD default).
     if usable_count == 0:
         if fund_stale:
             reason_codes.append("fundamentals_stale_no_usable_axes")
             action_blocks.append("buy_blocked_stale_evidence")
+            return AxisBand.THIN, reason_codes, action_blocks, "p2_stale_no_usable_axes"
         elif fund_not_evaluable:
             reason_codes.append("evidence_not_evaluable")
             action_blocks.append("buy_blocked_not_evaluable_evidence")
+            return AxisBand.THIN, reason_codes, action_blocks, "p2_not_evaluable"
         else:
             reason_codes.append("all_evidence_axes_missing_or_degraded")
             action_blocks.append("buy_blocked_missing_evidence")
-        return AxisBand.THIN, reason_codes, action_blocks
+            return AxisBand.THIN, reason_codes, action_blocks, "p2_all_missing_or_degraded"
 
     # Priority 3a: Strong fundamentals with corroboration → STRONG.
     if fund_ready and corroborated:
         reason_codes.append("strong_fundamentals_with_corroboration")
-        return AxisBand.STRONG, reason_codes, action_blocks
+        return AxisBand.STRONG, reason_codes, action_blocks, "p3a_ready_corroborated"
 
     # Priority 3b: Strong fundamentals, no corroboration → OK.
     if fund_ready and not corroborated:
         reason_codes.append("ready_fundamentals_no_signal_corroboration")
-        return AxisBand.OK, reason_codes, action_blocks
+        return AxisBand.OK, reason_codes, action_blocks, "p3b_ready_no_corroboration"
 
     # Priority 4a: Limited fundamentals + corroboration → OK.
     if fund_limited and corroborated:
         reason_codes.append("limited_fundamentals_with_supporting_signal")
-        return AxisBand.OK, reason_codes, action_blocks
+        return AxisBand.OK, reason_codes, action_blocks, "p4a_limited_corroborated"
 
-    # Priority 4b: Limited fundamentals only → THIN.
+    # Priority 4b: Limited fundamentals, no corroboration.
+    # Asset-type conditional: equity and ETF/fund have an acceptable primary-evidence
+    # basis even when fundamentals are only LIMITED → OK with conviction cap.
+    # Crypto and unknown instruments may reach LIMITED only via generic yfinance
+    # data — not an adequate basis for BUY without corroboration → THIN.
+    # Conviction for OK band is capped to MEDIUM by decide() guardrail (Cap 5).
     if fund_limited and not corroborated:
-        reason_codes.append("limited_fundamentals_no_corroboration")
-        action_blocks.append("buy_blocked_insufficient_evidence_breadth")
-        return AxisBand.THIN, reason_codes, action_blocks
+        inst_cat = ticker_readiness.instrument_category
+        if inst_cat in (INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF):
+            code = (
+                "limited_equity_fundamentals_ok_with_cap"
+                if inst_cat == INSTRUMENT_CATEGORY_EQUITY
+                else "limited_etf_evidence_ok_with_cap"
+            )
+            reason_codes.append(code)
+            return AxisBand.OK, reason_codes, action_blocks, "p4b_limited_no_corroboration"
+        else:
+            # crypto or unknown: generic yfinance LIMITED not sufficient for BUY.
+            code = (
+                "limited_crypto_fundamentals_not_safe"
+                if inst_cat == INSTRUMENT_CATEGORY_CRYPTO
+                else "limited_unknown_instrument_fundamentals_not_safe"
+            )
+            reason_codes.append(code)
+            action_blocks.append("buy_blocked_insufficient_evidence_basis")
+            return AxisBand.THIN, reason_codes, action_blocks, "p4b_crypto_or_unknown_thin"
 
     # Priority 5: No usable fundamentals, other signals only → THIN.
     if usable_count > 0 and not fund_usable:
         reason_codes.append("no_fundamental_anchor_technicals_sentiment_only")
         action_blocks.append("buy_blocked_no_fundamental_evidence")
-        return AxisBand.THIN, reason_codes, action_blocks
+        return AxisBand.THIN, reason_codes, action_blocks, "p5_no_fundamental_anchor"
 
     # Fallback (should not normally be reached).
     reason_codes.append("governance_fallback_insufficient")
     action_blocks.append("buy_blocked_governance_fallback")
-    return AxisBand.THIN, reason_codes, action_blocks
+    return AxisBand.THIN, reason_codes, action_blocks, "fallback"
 
 
 def _apply_macro_advisory(
@@ -513,6 +602,26 @@ def _hold_pct(distribution: dict[str, int]) -> float:
     if total == 0:
         return 1.0
     return distribution.get("HOLD", 0) / total
+
+
+def _build_safe_reason(
+    safe: bool,
+    governed_band: AxisBand,
+    supported: int,
+    action_blocks: list[str],
+) -> str:
+    """Return a brief string explaining why safe_for_visible_decision is True/False."""
+    if safe:
+        return f"primary_evidence_usable:band={governed_band.value}"
+    if governed_band == AxisBand.SUPPRESSED:
+        return "hard_blocked:fundamentals_suppressed"
+    if governed_band == AxisBand.THIN:
+        if action_blocks:
+            return f"hard_blocked:{action_blocks[0]}"
+        return "hard_blocked:thin_evidence"
+    if supported == 0:
+        return "no_usable_axes"
+    return f"band={governed_band.value}:supported={supported}"
 
 
 def _classify_hold_collapse_risk(hold_pct: float) -> str:

@@ -1,0 +1,383 @@
+/**
+ * Stage 7B — IntelV3Drawer clarity contracts.
+ *
+ * Tests at the view-model (helper function) layer — no React rendering required.
+ * Covers:
+ * - deduplicateTexts: identical text not repeated across sections
+ * - buildWhyActionExplanation: decision-specific, no raw keys, BTC/XRP-style blocked
+ * - buildSupportingEvidenceSentences: usable lanes show as supporting, missing/suppressed do not
+ * - buildIncompleteEvidenceSentences: incomplete lanes clearly labeled, not shown as supporting
+ * - COMING_LATER_CANONICAL_CAPTION not present in any new helper output
+ * - Raw metric keys do not appear in any helper output
+ * - BUY/HOLD/TRIM/SELL labels are the only visible actions mentioned
+ */
+
+import {
+  deduplicateTexts,
+  buildWhyActionExplanation,
+  buildSupportingEvidenceSentences,
+  buildIncompleteEvidenceSentences,
+  RAW_KEYS_BANNED,
+  buildSafetyDisplay,
+} from "./intel-v3-explanation";
+import type { IntelV3EvidenceExplanation } from "./api";
+import { COMING_LATER_CANONICAL_CAPTION } from "../components/cards/IntelV3PrimitivesData";
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function makeEx(overrides: Partial<IntelV3EvidenceExplanation> = {}): IntelV3EvidenceExplanation {
+  return {
+    primary_evidence_status: "LIMITED",
+    technical_signals_status: "MISSING",
+    sentiment_status: "MISSING",
+    conviction_cap_applied: true,
+    conviction_cap_reason: "ok_cap_medium",
+    safe_for_visible_decision: true,
+    safe_for_visible_decision_reason: "limited_fundamentals_no_corroboration_ok_with_cap",
+    governance_priority: "p4b_limited_no_corroboration",
+    corroboration_gap: true,
+    action_blocks: [],
+    ...overrides,
+  };
+}
+
+function assertNoRawKeys(text: string) {
+  for (const key of RAW_KEYS_BANNED) {
+    if (text.includes(key)) {
+      throw new Error(`Raw key leaked: "${key}" in "${text}"`);
+    }
+  }
+}
+
+function assertNoComingLaterCaption(text: string) {
+  if (text.includes(COMING_LATER_CANONICAL_CAPTION) || text.includes("intelligence module is being prepared")) {
+    throw new Error(`Stale placeholder text found in: "${text}"`);
+  }
+}
+
+function assertNoStaleGovernancePlaceholder(text: string) {
+  if (text.toLowerCase().includes("will appear here once the evidence governance engine is active")) {
+    throw new Error(`Stale governance placeholder found in: "${text}"`);
+  }
+}
+
+// ── deduplicateTexts ──────────────────────────────────────────────────────────
+
+describe("deduplicateTexts", () => {
+  it("removes exact duplicate strings", () => {
+    const result = deduplicateTexts(["Same text.", "Same text."]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe("Same text.");
+  });
+
+  it("removes case-insensitive duplicates", () => {
+    const result = deduplicateTexts(["Hello world.", "hello world."]);
+    expect(result).toHaveLength(1);
+  });
+
+  it("removes whitespace-only and null/undefined entries", () => {
+    const result = deduplicateTexts([null, undefined, "  ", "Real text."]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toBe("Real text.");
+  });
+
+  it("preserves distinct texts in order", () => {
+    const result = deduplicateTexts(["First.", "Second.", "Third."]);
+    expect(result).toEqual(["First.", "Second.", "Third."]);
+  });
+
+  it("MSFT-like: thesis text repeated 3 times → shown only once", () => {
+    const thesis = "Solid fundamentals and strong recurring revenue.";
+    const result = deduplicateTexts([thesis, thesis, thesis]);
+    expect(result).toHaveLength(1);
+  });
+
+  it("returns empty array for all-null input", () => {
+    expect(deduplicateTexts([null, null, undefined])).toHaveLength(0);
+  });
+});
+
+// ── buildWhyActionExplanation ─────────────────────────────────────────────────
+
+describe("buildWhyActionExplanation", () => {
+  const ALL_ACTIONS = ["BUY", "HOLD", "TRIM", "SELL"];
+
+  it("returns a non-empty string for all standard actions", () => {
+    for (const action of ALL_ACTIONS) {
+      const text = buildWhyActionExplanation(action, null);
+      expect(text.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("BUY without evidence_explanation → mentions positive evidence or justify", () => {
+    const text = buildWhyActionExplanation("BUY", null);
+    expect(text.toLowerCase()).toMatch(/evidence|positive|justify|adding/);
+  });
+
+  it("BUY with limited evidence → mentions conviction cap or corroboration", () => {
+    const text = buildWhyActionExplanation("BUY", makeEx({ corroboration_gap: true }));
+    expect(text.toLowerCase()).toMatch(/conviction|corroboration|enough/);
+  });
+
+  it("BUY with stronger evidence → mentions corroborated or confirms", () => {
+    const text = buildWhyActionExplanation(
+      "BUY",
+      makeEx({ safe_for_visible_decision: true, corroboration_gap: false, primary_evidence_status: "READY", action_blocks: [] })
+    );
+    expect(text.toLowerCase()).toMatch(/corroborat|signal|enough/);
+  });
+
+  it("BTC/XRP-style BUY blocked → mentions quality issues, not raw codes", () => {
+    const text = buildWhyActionExplanation(
+      "BUY",
+      makeEx({ action_blocks: ["buy_blocked_suppressed_evidence"], safe_for_visible_decision: false })
+    );
+    assertNoRawKeys(text);
+    expect(text.toLowerCase()).toMatch(/quality|issue|data/);
+  });
+
+  it("HOLD → mentions holding or thesis, no raw keys", () => {
+    const text = buildWhyActionExplanation("HOLD", makeEx());
+    assertNoRawKeys(text);
+    expect(text.toLowerCase()).toMatch(/hold|thesis|weight/);
+  });
+
+  it("TRIM → mentions reducing or exposure", () => {
+    const text = buildWhyActionExplanation("TRIM", makeEx());
+    assertNoRawKeys(text);
+    expect(text.toLowerCase()).toMatch(/reduc|exposure|trim/);
+  });
+
+  it("SELL → mentions exit or negative signals", () => {
+    const text = buildWhyActionExplanation("SELL", makeEx());
+    assertNoRawKeys(text);
+    expect(text.toLowerCase()).toMatch(/exit|sell|signal|negative/);
+  });
+
+  it("no raw keys in any action explanation", () => {
+    for (const action of ALL_ACTIONS) {
+      assertNoRawKeys(buildWhyActionExplanation(action, null));
+      assertNoRawKeys(buildWhyActionExplanation(action, makeEx()));
+      assertNoRawKeys(buildWhyActionExplanation(action, makeEx({ action_blocks: ["buy_blocked"] })));
+    }
+  });
+
+  it("no ComingLater placeholder text in any explanation", () => {
+    for (const action of ALL_ACTIONS) {
+      const text = buildWhyActionExplanation(action, makeEx());
+      assertNoComingLaterCaption(text);
+      assertNoStaleGovernancePlaceholder(text);
+    }
+  });
+
+  it("does not mention WATCH or AVOID (radar-only actions)", () => {
+    for (const action of ALL_ACTIONS) {
+      const text = buildWhyActionExplanation(action, makeEx());
+      expect(text).not.toMatch(/\bWATCH\b|\bAVOID\b/);
+    }
+  });
+});
+
+// ── buildSupportingEvidenceSentences ─────────────────────────────────────────
+
+describe("buildSupportingEvidenceSentences", () => {
+  it("READY fundamentals → sentence shown in supporting evidence", () => {
+    const sentences = buildSupportingEvidenceSentences(
+      makeEx({ primary_evidence_status: "READY" })
+    );
+    expect(sentences.length).toBeGreaterThan(0);
+    expect(sentences.some(s => s.toLowerCase().includes("fundamental"))).toBe(true);
+  });
+
+  it("MISSING technicals → NOT shown as supporting evidence", () => {
+    const sentences = buildSupportingEvidenceSentences(
+      makeEx({ technical_signals_status: "MISSING" })
+    );
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeUndefined();
+  });
+
+  it("SUPPRESSED sentiment → NOT shown as supporting evidence", () => {
+    const sentences = buildSupportingEvidenceSentences(
+      makeEx({ sentiment_status: "SUPPRESSED" })
+    );
+    const sentSentence = sentences.find(s => s.toLowerCase().includes("sentiment") || s.toLowerCase().includes("news"));
+    expect(sentSentence).toBeUndefined();
+  });
+
+  it("all MISSING → returns empty array", () => {
+    const sentences = buildSupportingEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "MISSING",
+        technical_signals_status: "MISSING",
+        sentiment_status: "MISSING",
+      })
+    );
+    expect(sentences).toHaveLength(0);
+  });
+
+  it("all READY → returns 3 sentences", () => {
+    const sentences = buildSupportingEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "READY",
+        technical_signals_status: "READY",
+        sentiment_status: "READY",
+        action_blocks: [],
+      })
+    );
+    expect(sentences).toHaveLength(3);
+  });
+
+  it("no raw keys in any supporting evidence sentence", () => {
+    const sentences = buildSupportingEvidenceSentences(makeEx({
+      primary_evidence_status: "READY",
+      technical_signals_status: "LIMITED",
+      sentiment_status: "READY",
+    }));
+    for (const s of sentences) {
+      assertNoRawKeys(s);
+    }
+  });
+
+  it("no stale placeholder text in supporting sentences", () => {
+    const sentences = buildSupportingEvidenceSentences(makeEx({ primary_evidence_status: "READY" }));
+    for (const s of sentences) {
+      assertNoComingLaterCaption(s);
+      assertNoStaleGovernancePlaceholder(s);
+    }
+  });
+});
+
+// ── buildIncompleteEvidenceSentences ──────────────────────────────────────────
+
+describe("buildIncompleteEvidenceSentences", () => {
+  it("MISSING technicals → shown in incomplete evidence", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({ technical_signals_status: "MISSING" })
+    );
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeDefined();
+  });
+
+  it("SUPPRESSED sentiment → shown in incomplete with 'suppressed' language, not as supporting", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({ sentiment_status: "SUPPRESSED" })
+    );
+    const sentSentence = sentences.find(s => s.toLowerCase().includes("sentiment") || s.toLowerCase().includes("news"));
+    expect(sentSentence).toBeDefined();
+    expect(sentSentence!.toLowerCase()).toMatch(/suppressed|quality|blocked/);
+  });
+
+  it("READY fundamentals → NOT shown in incomplete evidence", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({ primary_evidence_status: "READY" })
+    );
+    const fundSentence = sentences.find(s => s.toLowerCase().includes("fundamental"));
+    expect(fundSentence).toBeUndefined();
+  });
+
+  it("all READY → returns empty array", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "READY",
+        technical_signals_status: "READY",
+        sentiment_status: "READY",
+        action_blocks: [],
+      })
+    );
+    expect(sentences).toHaveLength(0);
+  });
+
+  it("all MISSING → returns 3 incomplete sentences", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "MISSING",
+        technical_signals_status: "MISSING",
+        sentiment_status: "MISSING",
+      })
+    );
+    expect(sentences).toHaveLength(3);
+  });
+
+  it("BTC/XRP-style SUPPRESSED fundamentals → blocked language, no raw keys", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "SUPPRESSED",
+        technical_signals_status: "SUPPRESSED",
+        sentiment_status: "SUPPRESSED",
+      })
+    );
+    expect(sentences).toHaveLength(3);
+    for (const s of sentences) {
+      assertNoRawKeys(s);
+      expect(s.toLowerCase()).toMatch(/suppressed|blocked|quality/);
+    }
+  });
+
+  it("no raw keys in any incomplete sentence", () => {
+    const sentences = buildIncompleteEvidenceSentences(
+      makeEx({
+        primary_evidence_status: "MISSING",
+        technical_signals_status: "SUPPRESSED",
+        sentiment_status: "INSUFFICIENT",
+      })
+    );
+    for (const s of sentences) {
+      assertNoRawKeys(s);
+    }
+  });
+
+  it("no stale placeholder text in incomplete sentences", () => {
+    const sentences = buildIncompleteEvidenceSentences(makeEx({ technical_signals_status: "MISSING" }));
+    for (const s of sentences) {
+      assertNoComingLaterCaption(s);
+      assertNoStaleGovernancePlaceholder(s);
+    }
+  });
+});
+
+// ── Cross-section non-repetition contract ─────────────────────────────────────
+
+describe("section non-repetition contract", () => {
+  it("MSFT-like BUY: supporting and incomplete sentences are disjoint (no same sentence in both)", () => {
+    const ex = makeEx({
+      primary_evidence_status: "LIMITED",
+      technical_signals_status: "MISSING",
+      sentiment_status: "MISSING",
+    });
+    const supporting = buildSupportingEvidenceSentences(ex);
+    const incomplete = buildIncompleteEvidenceSentences(ex);
+
+    const supportingSet = new Set(supporting.map(s => s.toLowerCase()));
+    for (const s of incomplete) {
+      expect(supportingSet.has(s.toLowerCase())).toBe(false);
+    }
+  });
+
+  it("why-action explanation is distinct from supporting sentences", () => {
+    const ex = makeEx({ primary_evidence_status: "LIMITED" });
+    const why = buildWhyActionExplanation("BUY", ex);
+    const supporting = buildSupportingEvidenceSentences(ex);
+    for (const s of supporting) {
+      expect(s.toLowerCase()).not.toBe(why.toLowerCase());
+    }
+  });
+});
+
+// ── Action label safety (no WATCH/AVOID) ─────────────────────────────────────
+
+describe("action label safety", () => {
+  it("helper outputs never contain WATCH or AVOID radar-only labels", () => {
+    const radarLabels = ["WATCH", "AVOID"];
+    const allTexts = [
+      ...["BUY", "HOLD", "TRIM", "SELL"].map(a => buildWhyActionExplanation(a, makeEx())),
+      ...buildSupportingEvidenceSentences(makeEx({ primary_evidence_status: "READY" })),
+      ...buildIncompleteEvidenceSentences(makeEx({ technical_signals_status: "MISSING" })),
+    ];
+    for (const text of allTexts) {
+      for (const label of radarLabels) {
+        expect(text).not.toMatch(new RegExp(`\\b${label}\\b`));
+      }
+    }
+  });
+});

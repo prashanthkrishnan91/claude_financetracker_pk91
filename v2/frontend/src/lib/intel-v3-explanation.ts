@@ -230,6 +230,141 @@ export function buildSafetyDisplay(ex: IntelV3EvidenceExplanation): SafetyDispla
   };
 }
 
+// ── Text de-duplication ───────────────────────────────────────────────────────
+
+/**
+ * Remove duplicate strings from an array.
+ * Comparison is case-insensitive and trims whitespace. Nullish/empty strings excluded.
+ */
+export function deduplicateTexts(texts: (string | null | undefined)[]): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const t of texts) {
+    if (!t?.trim()) continue;
+    const key = t.trim().toLowerCase();
+    if (!seen.has(key)) {
+      seen.add(key);
+      result.push(t.trim());
+    }
+  }
+  return result;
+}
+
+// ── Action explanation ────────────────────────────────────────────────────────
+
+/**
+ * Build a plain-English "why this action" explanation from the action + evidence state.
+ * Used when rationale/why_text is absent or to generate a decision-specific fallback.
+ */
+export function buildWhyActionExplanation(
+  action: string,
+  ex: IntelV3EvidenceExplanation | null | undefined
+): string {
+  const safety = ex ? buildSafetyDisplay(ex) : null;
+
+  switch (action) {
+    case "BUY":
+      if (safety?.tier === "stronger") {
+        return "The engine sees positive business evidence, corroborated by other signals — enough to justify adding.";
+      }
+      if (safety?.tier === "blocked") {
+        return "Some positive signals are present, but data quality issues prevent a high-confidence recommendation.";
+      }
+      return "The engine sees enough positive business evidence to justify adding, but not enough corroboration for high conviction.";
+
+    case "HOLD":
+      if (safety?.tier === "stronger") {
+        return "Business fundamentals are intact and well-supported. No reason to add or reduce at this time.";
+      }
+      if (safety?.tier === "blocked") {
+        return "Data quality or completeness concerns prevent a stronger view. Holding conservatively.";
+      }
+      return "The thesis remains intact, but evidence is incomplete. Holding at current weight pending more data.";
+
+    case "TRIM":
+      return "The engine sees signals that warrant reducing exposure — risk is elevated or the valuation is stretched relative to the evidence.";
+
+    case "SELL":
+      if (safety?.tier === "blocked") {
+        return "Evidence quality issues and risk signals together indicate this position should be exited.";
+      }
+      return "The engine sees enough negative signals to recommend exiting this position.";
+
+    default:
+      return "";
+  }
+}
+
+// ── Supporting / incomplete evidence sentences ────────────────────────────────
+
+/**
+ * Return plain-English sentences for usable evidence lanes.
+ * Used in the "Evidence supporting this" drawer section.
+ */
+export function buildSupportingEvidenceSentences(ex: IntelV3EvidenceExplanation): string[] {
+  const sentences: string[] = [];
+  const fund = readinessToDisplay(ex.primary_evidence_status);
+  const tech = readinessToDisplay(ex.technical_signals_status);
+  const sent = readinessToDisplay(ex.sentiment_status);
+
+  if (fund.isUsable) {
+    sentences.push(
+      ex.primary_evidence_status === "READY"
+        ? "Company fundamentals are available and pass quality checks."
+        : "Company fundamentals are partially available."
+    );
+  }
+  if (tech.isUsable) {
+    sentences.push(
+      ex.technical_signals_status === "READY"
+        ? "Market and price behavior data is available."
+        : "Some market and price behavior data is available."
+    );
+  }
+  if (sent.isUsable) {
+    sentences.push(
+      ex.sentiment_status === "READY"
+        ? "News and sentiment data is available."
+        : "Some news and sentiment data is available."
+    );
+  }
+  return sentences;
+}
+
+/**
+ * Return plain-English sentences for incomplete or missing evidence lanes.
+ * Used in the "What is still incomplete" drawer section.
+ */
+export function buildIncompleteEvidenceSentences(ex: IntelV3EvidenceExplanation): string[] {
+  const sentences: string[] = [];
+  const fund = readinessToDisplay(ex.primary_evidence_status);
+  const tech = readinessToDisplay(ex.technical_signals_status);
+  const sent = readinessToDisplay(ex.sentiment_status);
+
+  if (!fund.isUsable) {
+    sentences.push(
+      fund.isBlocked
+        ? "Company fundamentals were blocked due to data quality issues."
+        : "Company fundamentals are not available or insufficient."
+    );
+  }
+  if (!tech.isUsable) {
+    sentences.push(
+      tech.isBlocked
+        ? "Market behavior data was suppressed due to data quality issues."
+        : "Market and price behavior data is not available for this ticker."
+    );
+  }
+  if (!sent.isUsable) {
+    sentences.push(
+      sent.isBlocked
+        ? "News and sentiment data was suppressed due to data quality issues."
+        : "News and sentiment data is thin or not available."
+    );
+  }
+  return sentences;
+}
+
 // ── Portfolio-level evidence summary ─────────────────────────────────────────
 
 export interface PortfolioEvidenceSummary {

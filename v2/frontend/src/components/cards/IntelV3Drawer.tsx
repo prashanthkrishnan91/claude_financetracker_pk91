@@ -1,11 +1,10 @@
 "use client";
 
 /**
- * IntelV3Drawer — "Why this view?" Investment Committee detail room.
+ * IntelV3Drawer — plain-English decision explanation.
  *
- * Stage 4C redesign. Reads ONLY from IntelV3HeldCard and its detail_drawer_payload.
- * Live sections render from current data only. Future modules render as
- * ComingLaterPanel chrome — no fabricated content.
+ * Stage 7B redesign. Sections explain WHY the action, WHAT evidence supports it,
+ * WHAT is incomplete, WHY conviction is capped, risk, what would change, and fit.
  *
  * Accessibility:
  * - role="dialog" + aria-modal + aria-labelledby
@@ -23,7 +22,6 @@ import {
   ConfidenceRing,
   RiskGlyph,
   FreshnessDot,
-  ComingLaterPanel,
   DataMissingPill,
   ACTION_TOKEN_STYLES,
 } from "./IntelV3Primitives";
@@ -39,6 +37,9 @@ import {
   buildSafetyDisplay,
   convictionCapLabel,
   governancePriorityToExplanation,
+  buildWhyActionExplanation,
+  buildSupportingEvidenceSentences,
+  buildIncompleteEvidenceSentences,
 } from "@/lib/intel-v3-explanation";
 
 interface IntelV3DrawerProps {
@@ -69,8 +70,20 @@ function CloseIcon() {
   );
 }
 
+function BulletList({ items }: { items: string[] }) {
+  return (
+    <ul className="space-y-1">
+      {items.map((item, i) => (
+        <li key={i} className="flex items-start gap-1.5 text-sm text-text-secondary leading-relaxed">
+          <span className="shrink-0 mt-0.5 text-text-muted" aria-hidden="true">•</span>
+          <span>{item}</span>
+        </li>
+      ))}
+    </ul>
+  );
+}
 
-// ── Evidence Explanation Section ─────────────────────────────────────────────
+// ── Expandable evidence lane detail ──────────────────────────────────────────
 
 function ReadinessChip({ status, isUsable, isBlocked }: { status: string; isUsable: boolean; isBlocked: boolean }) {
   const style = isBlocked
@@ -85,50 +98,17 @@ function ReadinessChip({ status, isUsable, isBlocked }: { status: string; isUsab
   );
 }
 
-function EvidenceExplanationSection({ ex }: { ex: IntelV3EvidenceExplanation }) {
+function EvidenceLaneDetail({ ex }: { ex: IntelV3EvidenceExplanation }) {
   const [open, setOpen] = useState(false);
-  const safety = buildSafetyDisplay(ex);
-  const capLabel = convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason);
-  const priorityText = governancePriorityToExplanation(ex.governance_priority);
   const lanes = buildEvidenceLaneRows(ex);
-
-  const safetyChipStyle =
-    safety.tier === "blocked"
-      ? "bg-action-trim/10 text-action-trim border-action-trim/30"
-      : safety.tier === "stronger"
-      ? "bg-action-buy/10 text-action-buy border-action-buy/30"
-      : "bg-surface-elevated text-text-secondary border-border";
+  const priorityText = governancePriorityToExplanation(ex.governance_priority);
 
   return (
-    <div className="space-y-3">
-      {/* Support tier + conviction cap */}
-      <div className="flex items-center gap-2 flex-wrap">
-        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold tracking-wide uppercase", safetyChipStyle)}>
-          {safety.label}
-        </span>
-        {ex.conviction_cap_applied && (
-          <span className="text-[10px] px-1.5 py-0.5 rounded border border-action-trim/30 bg-action-trim/10 text-action-trim font-medium uppercase tracking-wide">
-            Conviction capped
-          </span>
-        )}
-      </div>
-
-      {/* Safety detail */}
-      <p className="text-xs text-text-secondary leading-relaxed">{safety.detail}</p>
-
-      {/* Priority explanation — only when meaningful */}
+    <div className="space-y-2">
       {priorityText && (
-        <p className="text-xs text-text-muted leading-relaxed">{priorityText}</p>
+        <p className="text-[11px] text-text-muted leading-relaxed">{priorityText}</p>
       )}
 
-      {/* Conviction cap explanation */}
-      {capLabel && (
-        <div className="rounded-lg border border-action-trim/20 bg-action-trim/5 px-3 py-2">
-          <p className="text-[11px] text-action-trim leading-relaxed">{capLabel}</p>
-        </div>
-      )}
-
-      {/* Expandable lane detail */}
       <button
         onClick={() => setOpen((v) => !v)}
         className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
@@ -157,10 +137,9 @@ function EvidenceExplanationSection({ ex }: { ex: IntelV3EvidenceExplanation }) 
             </div>
           ))}
 
-          {/* Macro note */}
           <div className="pt-1 border-t border-border">
             <p className="text-[10px] text-text-muted leading-snug">
-              <span className="font-medium">Macro backdrop</span> — Macro backdrop is portfolio context. It can shape confidence and caution, but it is not a standalone Buy/Sell reason.
+              <span className="font-medium">Macro backdrop</span> — Portfolio context that can shape confidence and caution, but is not a standalone Buy/Sell reason.
             </p>
           </div>
         </div>
@@ -173,7 +152,6 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const titleId = "intel-v3-drawer-title";
 
-  // Close on Escape
   useEffect(() => {
     if (!card) return;
     const handler = (e: KeyboardEvent) => {
@@ -183,7 +161,6 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
     return () => document.removeEventListener("keydown", handler);
   }, [card, onClose]);
 
-  // Focus the close button when drawer opens — keyboard-accessible entry point
   useEffect(() => {
     if (card) closeRef.current?.focus();
   }, [card]);
@@ -192,23 +169,43 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
   const payload = card.detail_drawer_payload;
   const t = ACTION_TOKEN_STYLES[card.action] ?? ACTION_TOKEN_STYLES.HOLD;
+  const ex = payload.evidence_explanation ?? null;
 
-  const whyView =
-    payload.rationale?.trim() || card.why_text?.trim() || null;
+  // De-duplicate: each text is shown at most once across all sections.
+  const seenTexts = new Set<string>();
+  function onceOnly(text: string | null | undefined): string | null {
+    if (!text?.trim()) return null;
+    const key = text.trim().toLowerCase();
+    if (seenTexts.has(key)) return null;
+    seenTexts.add(key);
+    return text.trim();
+  }
 
-  const thesis =
-    card.why_text?.trim() || card.action_text?.trim() || null;
+  // Section 1: primary decision narrative
+  const primaryNarrative =
+    onceOnly(payload.rationale) ??
+    onceOnly(card.why_text) ??
+    onceOnly(card.action_text);
 
-  const riskText = card.risk_text?.trim() || null;
-  const fitText = card.fit_text?.trim() || null;
+  // Fallback explanation if no narrative text available
+  const fallbackNarrative = primaryNarrative
+    ? null
+    : buildWhyActionExplanation(card.action, ex);
+
+  // Section 5: risk
+  const riskText = onceOnly(card.risk_text);
+  const hasBlockers = payload.blockers && payload.blockers.length > 0;
+  const hasFlags = card.flags && card.flags.length > 0;
+
+  // Section 6: what would change
+  const whatWouldChange = onceOnly(card.what_would_change_view);
+
+  // Section 7: portfolio fit
+  const fitText = onceOnly(card.fit_text);
   const portfolioFitLabel =
     card.portfolio_fit && card.portfolio_fit !== "UNKNOWN"
       ? card.portfolio_fit.replace(/_/g, " ").toLowerCase()
       : null;
-
-  const hasBlockers = payload.blockers && payload.blockers.length > 0;
-  const hasFlags = card.flags && card.flags.length > 0;
-  const whatWouldChange = card.what_would_change_view?.trim() || null;
 
   const convictionLabel =
     card.conviction.charAt(0) + card.conviction.slice(1).toLowerCase();
@@ -216,6 +213,20 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const committeeStatusLabel = committeeStatusToPlainLabel(
     payload.committee?.status ?? ""
   );
+
+  // Evidence sections (Stage 7 active path)
+  const supportingSentences = ex ? buildSupportingEvidenceSentences(ex) : [];
+  const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex) : [];
+  const capLabel = ex ? convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason) : "";
+  const safety = ex ? buildSafetyDisplay(ex) : null;
+
+  const safetyChipStyle = !safety
+    ? "bg-surface-elevated text-text-secondary border-border"
+    : safety.tier === "blocked"
+    ? "bg-action-trim/10 text-action-trim border-action-trim/30"
+    : safety.tier === "stronger"
+    ? "bg-action-buy/10 text-action-buy border-action-buy/30"
+    : "bg-surface-elevated text-text-secondary border-border";
 
   return (
     <>
@@ -232,20 +243,18 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
         aria-modal="true"
         aria-labelledby={titleId}
         className={cn(
-          // Mobile: full-width bottom sheet anchored to viewport bottom
           "fixed inset-x-0 bottom-0 z-50",
           "max-h-[88dvh] rounded-t-2xl",
           "border-t border-border bg-background",
           "overflow-y-auto overscroll-contain",
           "sheet-slide-up",
-          // Desktop: right-side drawer (overrides mobile layout)
           "lg:inset-x-auto lg:right-0 lg:top-0 lg:bottom-0",
           "lg:w-full lg:max-w-md lg:max-h-none",
           "lg:rounded-none lg:border-t-0 lg:border-l",
           "lg:[animation:none]",
         )}
       >
-        {/* Mobile drag handle — visual cue, hidden on desktop */}
+        {/* Mobile drag handle */}
         <div className="lg:hidden flex justify-center pt-3 pb-1" aria-hidden="true">
           <div className="w-8 h-1 rounded-full bg-border-strong opacity-50" />
         </div>
@@ -253,7 +262,6 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
         {/* ── Sticky header ───────────────────────────────────────────────── */}
         <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-border px-5 py-4">
           <div className="flex items-center justify-between gap-3">
-            {/* Identity: action badge + ticker + name */}
             <div className="flex items-center gap-2.5 min-w-0">
               <span
                 className={cn(
@@ -273,7 +281,6 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
               <span className="text-sm text-text-muted truncate">{card.name}</span>
             </div>
 
-            {/* Close button — focused on open */}
             <button
               ref={closeRef}
               onClick={onClose}
@@ -306,10 +313,12 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
         {/* ── Body ────────────────────────────────────────────────────────── */}
         <div className="px-5 py-5 space-y-5">
 
-          {/* Why this view? */}
-          <Section title="Why this view?">
-            {whyView ? (
-              <p>{whyView}</p>
+          {/* Section 1: Why this is a {ACTION} */}
+          <Section title={`Why this is a ${card.action}`}>
+            {primaryNarrative ? (
+              <p>{primaryNarrative}</p>
+            ) : fallbackNarrative ? (
+              <p>{fallbackNarrative}</p>
             ) : (
               <DataMissingPill label="Analysis not yet available" />
             )}
@@ -317,23 +326,69 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* Plain-English thesis */}
-          {thesis && (
+          {/* Section 2: Evidence supporting this */}
+          {ex ? (
             <>
-              <Section title="The thesis">
-                <p>{thesis}</p>
+              <Section title="Evidence supporting this">
+                {supportingSentences.length > 0 ? (
+                  <>
+                    {/* Evidence support tier chip */}
+                    <div className="flex items-center gap-2 flex-wrap mb-2">
+                      <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold tracking-wide uppercase", safetyChipStyle)}>
+                        {safety!.label}
+                      </span>
+                    </div>
+                    <BulletList items={supportingSentences} />
+                  </>
+                ) : (
+                  <p className="text-sm text-text-muted italic">
+                    Evidence is limited — see what&#39;s incomplete below.
+                  </p>
+                )}
               </Section>
-              <Rule />
+
+              {/* Section 3: What is still incomplete */}
+              {incompleteSentences.length > 0 && (
+                <>
+                  <Rule />
+                  <Section title="What is still incomplete">
+                    <BulletList items={incompleteSentences} />
+                  </Section>
+                </>
+              )}
+
+              {/* Section 4: Why conviction is capped */}
+              {ex.conviction_cap_applied && capLabel && (
+                <>
+                  <Rule />
+                  <Section title="Why conviction is capped">
+                    <div className="rounded-lg border border-action-trim/20 bg-action-trim/5 px-3 py-2">
+                      <p className="text-[11px] text-action-trim leading-relaxed">{capLabel}</p>
+                    </div>
+                  </Section>
+                </>
+              )}
             </>
+          ) : (
+            /* Stage 7 not active for this card — show card-level evidence text honestly */
+            <Section title="Evidence supporting this">
+              {card.evidence_text ? (
+                <p>{card.evidence_text}</p>
+              ) : (
+                <DataMissingPill label="Evidence data unavailable" />
+              )}
+            </Section>
           )}
 
-          {/* Risk challenge */}
+          <Rule />
+
+          {/* Section 5: Risk to watch */}
           <Section title="Risk to watch">
             {riskText ? (
               <p>{riskText}</p>
-            ) : (
+            ) : !hasBlockers && !hasFlags ? (
               <DataMissingPill label="No risk data" />
-            )}
+            ) : null}
             {hasBlockers && (
               <ul className="mt-2 space-y-1">
                 {payload.blockers!.map((b, i) => (
@@ -356,7 +411,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
             )}
           </Section>
 
-          {/* What would change this view */}
+          {/* Section 6: What would change this view */}
           {whatWouldChange && (
             <>
               <Rule />
@@ -368,7 +423,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* Portfolio fit */}
+          {/* Section 7: How it fits your portfolio */}
           <Section title="How it fits your portfolio">
             {fitText || portfolioFitLabel ? (
               <p>{fitText || portfolioFitLabel}</p>
@@ -379,9 +434,8 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* Evidence + source shell */}
+          {/* Section 8: Evidence check — source attribution + collapsible lane detail */}
           <Section title="Evidence check">
-            {/* Source row — plainly attributes the snapshot and source-pack status */}
             <div className="rounded-lg border border-border bg-surface/40 px-3 py-2.5 mb-3">
               <p className="text-[10px] text-text-muted uppercase tracking-wide mb-1">Source</p>
               <p className="text-xs font-medium text-text-secondary">
@@ -390,15 +444,8 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
               <p className="text-[10px] text-text-muted mt-0.5">{committeeStatusLabel}</p>
             </div>
 
-            {/* Evidence summary */}
-            {card.evidence_text ? (
-              <p className="mb-3">{card.evidence_text}</p>
-            ) : (
-              <p className="text-xs text-text-muted italic mb-3">No evidence summary available.</p>
-            )}
-
-            {/* Evidence quality grid — beginner language */}
-            <div className="grid grid-cols-2 gap-2 text-xs">
+            {/* Evidence quality grid */}
+            <div className="grid grid-cols-2 gap-2 text-xs mb-3">
               <div className="bg-surface-elevated rounded-lg p-2.5">
                 <span className="text-[10px] text-text-muted block mb-0.5 uppercase tracking-wide">
                   Evidence
@@ -414,9 +461,12 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
                 <span className="font-semibold text-text-primary">{convictionLabel}</span>
               </div>
             </div>
+
+            {/* Expandable lane detail — only when Stage 7 explanation is available */}
+            {ex && <EvidenceLaneDetail ex={ex} />}
           </Section>
 
-          {/* Valuation context — rendered only when present in current data */}
+          {/* Valuation context — rendered only when present */}
           {payload.valuation_context && (
             <>
               <Rule />
@@ -429,41 +479,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
             </>
           )}
 
-          <Rule />
-
-          {/* ── Stage 7: Evidence explanation ──────────────────────────── */}
-          {payload.evidence_explanation ? (
-            <Section title="What drives this recommendation">
-              <EvidenceExplanationSection ex={payload.evidence_explanation} />
-            </Section>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-                Evidence detail
-              </p>
-              <ComingLaterPanel
-                title="Evidence lane breakdown"
-                caption="Detailed evidence source coverage will appear here once the evidence governance engine is active for this portfolio."
-              />
-            </div>
-          )}
-
-          {/* ── Coming-Later: future intelligence modules ─────────────── */}
-          <div className="space-y-3">
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-              Intelligence modules in preparation
-            </p>
-            <ComingLaterPanel title="Source credibility tier" />
-            <ComingLaterPanel title="Contradiction strip" />
-            <ComingLaterPanel title="SEC filing evidence room" />
-            <ComingLaterPanel title="Source snippets & citations" />
-            <ComingLaterPanel
-              title="Ask why / Challenge / Explain"
-              caption="This intelligence module is being prepared. The next intelligence stage will surface it here."
-            />
-          </div>
-
-          {/* ── Snapshot metadata ───────────────────────────────────────── */}
+          {/* ── Snapshot metadata ───────────────────────────────────────────── */}
           <div className="pt-2 border-t border-border">
             <SourceMetadataStrip
               updatedAt={formatUpdatedAtSafe(card.updated_at)}

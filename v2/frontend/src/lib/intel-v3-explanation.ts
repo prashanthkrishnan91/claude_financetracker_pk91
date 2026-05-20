@@ -6,8 +6,8 @@
  *
  * Invariants:
  * - No raw metric keys (fcf_margin, roic_ttm, etc.) are returned by any function.
- * - No raw internal field names (p4b_limited_no_corroboration, SUPPRESSED_UNKNOWN_SOURCE, etc.)
- *   are surfaced in user-facing strings.
+ * - No raw internal governance codes or suppression labels are surfaced in user-facing strings.
+ *   See RAW_KEYS_BANNED for the explicit blocklist.
  * - Action labels remain BUY / HOLD / TRIM / SELL only.
  * - Conviction cap, missing evidence, and blocked states are shown honestly.
  */
@@ -239,6 +239,8 @@ export interface PortfolioEvidenceSummary {
   convictionCappedCount: number;
   technicalUsableCount: number;
   sentimentUsableCount: number;
+  fundamentalsUsableCount: number;
+  cardsWithExplanation: number;
   totalCards: number;
 }
 
@@ -253,6 +255,8 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
   let convictionCappedCount = 0;
   let technicalUsableCount = 0;
   let sentimentUsableCount = 0;
+  let fundamentalsUsableCount = 0;
+  let cardsWithExplanation = 0;
 
   for (const card of cards) {
     const ex = card.detail_drawer_payload?.evidence_explanation;
@@ -260,6 +264,7 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
       limitedCount++;
       continue;
     }
+    cardsWithExplanation++;
     const safety = buildSafetyDisplay(ex);
     if (safety.tier === "blocked") blockedCount++;
     else if (safety.tier === "stronger") safeCount++;
@@ -268,6 +273,7 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
     if (ex.conviction_cap_applied) convictionCappedCount++;
     if (readinessToDisplay(ex.technical_signals_status).isUsable) technicalUsableCount++;
     if (readinessToDisplay(ex.sentiment_status).isUsable) sentimentUsableCount++;
+    if (readinessToDisplay(ex.primary_evidence_status).isUsable) fundamentalsUsableCount++;
   }
 
   return {
@@ -277,6 +283,8 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
     convictionCappedCount,
     technicalUsableCount,
     sentimentUsableCount,
+    fundamentalsUsableCount,
+    cardsWithExplanation,
     totalCards: cards.length,
   };
 }

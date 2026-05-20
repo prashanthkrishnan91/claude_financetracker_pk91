@@ -295,6 +295,18 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
   const technicalUsable = summary.technicalUsableCount > 0;
   const sentimentUsable = summary.sentimentUsableCount > 0;
 
+  const { fundamentalsUsableCount, cardsWithExplanation } = summary;
+  const companyDataLabel =
+    fundamentalsUsableCount === 0
+      ? "Some company data missing or blocked"
+      : fundamentalsUsableCount === cardsWithExplanation
+      ? "Company data available"
+      : `Company data usable for ${fundamentalsUsableCount}/${cardsWithExplanation}`;
+  const companyDataStyle =
+    fundamentalsUsableCount === 0
+      ? "border-action-trim/30 bg-action-trim/10 text-action-trim"
+      : "border-action-buy/30 bg-action-buy/10 text-action-buy";
+
   return (
     <div className="rounded-xl border border-border bg-surface px-4 py-4 space-y-3">
       <div className="flex items-center gap-2">
@@ -337,8 +349,8 @@ function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
           Evidence sources
         </p>
         <div className="flex flex-wrap gap-2">
-          <span className="text-[11px] px-2 py-0.5 rounded border border-action-buy/30 bg-action-buy/10 text-action-buy font-medium">
-            Company data available
+          <span className={cn("text-[11px] px-2 py-0.5 rounded border font-medium", companyDataStyle)}>
+            {companyDataLabel}
           </span>
           <span className={cn(
             "text-[11px] px-2 py-0.5 rounded border font-medium",

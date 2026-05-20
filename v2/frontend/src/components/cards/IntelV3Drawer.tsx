@@ -157,10 +157,10 @@ function EvidenceExplanationSection({ ex }: { ex: IntelV3EvidenceExplanation }) 
             </div>
           ))}
 
-          {/* Macro note — always advisory-only */}
+          {/* Macro note */}
           <div className="pt-1 border-t border-border">
             <p className="text-[10px] text-text-muted leading-snug">
-              <span className="font-medium">Macro backdrop</span> — Macro data is advisory context only and does not directly drive the recommendation.
+              <span className="font-medium">Macro backdrop</span> — Macro backdrop is portfolio context. It can shape confidence and caution, but it is not a standalone Buy/Sell reason.
             </p>
           </div>
         </div>

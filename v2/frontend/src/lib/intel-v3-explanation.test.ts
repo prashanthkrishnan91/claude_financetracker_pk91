@@ -433,4 +433,43 @@ describe("buildPortfolioEvidenceSummary", () => {
     expect(s.blockedCount).toBe(1);
     expect(s.safeCount).toBe(1);
   });
+
+  it("fundamentalsUsableCount counts READY and LIMITED as usable", () => {
+    const ready = makeCard({ primary_evidence_status: "READY", action_blocks: [] });
+    const limited = makeCard({ primary_evidence_status: "LIMITED", action_blocks: [] });
+    const missing = makeCard({ primary_evidence_status: "MISSING", action_blocks: [] });
+    const suppressed = makeCard({ primary_evidence_status: "SUPPRESSED", action_blocks: [] });
+    const s = buildPortfolioEvidenceSummary([ready, limited, missing, suppressed]);
+    expect(s.fundamentalsUsableCount).toBe(2);
+    expect(s.cardsWithExplanation).toBe(4);
+  });
+
+  it("cardsWithExplanation excludes cards with no evidence_explanation", () => {
+    const withEx = makeCard({ action_blocks: [] });
+    const noEx = makeCard({});
+    noEx.detail_drawer_payload.evidence_explanation = null;
+    const s = buildPortfolioEvidenceSummary([withEx, noEx]);
+    expect(s.cardsWithExplanation).toBe(1);
+    expect(s.totalCards).toBe(2);
+  });
+
+  it("all fundamentals usable → fundamentalsUsableCount equals cardsWithExplanation", () => {
+    const cards = [
+      makeCard({ primary_evidence_status: "READY", action_blocks: [] }),
+      makeCard({ primary_evidence_status: "USABLE_WITH_LIMITATIONS", action_blocks: [] }),
+    ];
+    const s = buildPortfolioEvidenceSummary(cards);
+    expect(s.fundamentalsUsableCount).toBe(2);
+    expect(s.cardsWithExplanation).toBe(2);
+  });
+
+  it("no fundamentals usable → fundamentalsUsableCount is zero", () => {
+    const cards = [
+      makeCard({ primary_evidence_status: "MISSING", action_blocks: [] }),
+      makeCard({ primary_evidence_status: "SUPPRESSED", action_blocks: [] }),
+    ];
+    const s = buildPortfolioEvidenceSummary(cards);
+    expect(s.fundamentalsUsableCount).toBe(0);
+    expect(s.cardsWithExplanation).toBe(2);
+  });
 });

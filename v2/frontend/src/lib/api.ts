@@ -1120,6 +1120,30 @@ export interface DepositPlanResult {
 
 // ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────────────────────────────────────────────
 
+/** Stage 7 — evidence explanation from the governance engine. Null when governance inactive. */
+export interface IntelV3EvidenceExplanation {
+  /** Company fundamentals readiness: READY | LIMITED | SUPPRESSED | MISSING | INSUFFICIENT | NOT_APPLICABLE */
+  primary_evidence_status: string;
+  /** Technical/price signals readiness — same set of values */
+  technical_signals_status: string;
+  /** News & sentiment readiness — same set of values */
+  sentiment_status: string;
+  /** True when conviction was capped below what the action would normally allow */
+  conviction_cap_applied: boolean;
+  /** Short reason for the cap, or null */
+  conviction_cap_reason: string | null;
+  /** True when the engine considers this ticker safe for a visible decision */
+  safe_for_visible_decision: boolean;
+  /** Brief reason string for safe_for_visible_decision */
+  safe_for_visible_decision_reason: string;
+  /** Internal priority label (p3a, p4b_limited_no_corroboration, etc.) — translated by the UI */
+  governance_priority: string;
+  /** True when fundamentals exist but no technical/sentiment corroboration */
+  corroboration_gap: boolean;
+  /** List of backend action-block reason codes applied */
+  action_blocks: string[];
+}
+
 /** Actions valid for held positions. Radar labels (WATCH/AVOID) must not appear here. */
 export type IntelV3Action = "BUY" | "HOLD" | "TRIM" | "SELL";
 export type IntelV3Conviction = "LOW" | "MEDIUM" | "HIGH";
@@ -1161,6 +1185,8 @@ export interface IntelV3HeldCard {
     /** Build 3 PR 2B — plain-English valuation context. Null when suppressed or unavailable. */
     valuation_context?: { visible_text: string; limitation_text: string; source_basis: string } | null;
     committee: { status: "deferred" | "ready" | "source_validated" | "pending"; reason?: string };
+    /** Stage 7 — evidence explanation from governance engine. Null when governance inactive. */
+    evidence_explanation?: IntelV3EvidenceExplanation | null;
   };
 }
 

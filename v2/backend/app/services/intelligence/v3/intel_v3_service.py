@@ -400,24 +400,27 @@ class IntelV3Service:
                     apply_valuation_context_to_decision_input(inp, val_signal)
 
                 # Stage 6 — apply evidence-aware governance (no-op when flag off).
+                _gov_result_dict = None
                 if s6_active:
                     from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
                     _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
-                    apply_evidence_governance(
+                    _gov_result = apply_evidence_governance(
                         inp,
                         _s6_readiness,
                         evidence_shadow.portfolio_macro,
                         flag_enabled=True,
                     )
+                    _gov_result_dict = _gov_result.to_dict()
 
                 decision = decide(inp)
                 decisions.append(decision)
 
                 card_metas.append({
-                    "ticker":      ticker,
-                    "name":        card.name or ticker,
-                    "category":    category,
-                    "thesis_state": "intact",
+                    "ticker":           ticker,
+                    "name":             card.name or ticker,
+                    "category":         category,
+                    "thesis_state":     "intact",
+                    "governance_result": _gov_result_dict,
                 })
 
             # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -1150,23 +1153,26 @@ class IntelV3Service:
                 apply_valuation_context_to_decision_input(inp, val_signal)
 
             # Stage 6 — apply evidence-aware governance (no-op when flag off).
+            _gov_result_dict = None
             if s6_active:
                 from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
                 _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
-                apply_evidence_governance(
+                _gov_result = apply_evidence_governance(
                     inp,
                     _s6_readiness,
                     evidence_shadow.portfolio_macro,
                     flag_enabled=True,
                 )
+                _gov_result_dict = _gov_result.to_dict()
 
             decision = decide(inp)
             decisions.append(decision)
             card_metas.append({
-                "ticker":      ticker,
-                "name":        card.name or ticker,
-                "category":    category,
-                "thesis_state": "intact",
+                "ticker":           ticker,
+                "name":             card.name or ticker,
+                "category":         category,
+                "thesis_state":     "intact",
+                "governance_result": _gov_result_dict,
             })
 
         # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).

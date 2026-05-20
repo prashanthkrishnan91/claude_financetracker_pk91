@@ -135,21 +135,32 @@ async def compare_and_republish(
                 evidence_ts is not None and intel_ts is None
             )
 
-        # Step 4: if evidence is not newer AND mapping version is current, no republish needed.
-        # Mapping-version mismatch is treated as a republish trigger even when price evidence
-        # has not changed — ensures old snapshots built before PR #347 are recertified.
+        # Step 4: if evidence is not newer AND mapping version is current AND Stage 7
+        # contract is current, no republish needed. Mapping-version or Stage 7 contract
+        # mismatch is treated as a republish trigger even when price evidence has not
+        # changed — ensures old snapshots built before PR #347 or PR #388 are recertified.
         from .evidence_mapping_version_v1 import (
             EVIDENCE_MAPPING_VERSION as _CURRENT_MAPPING_VER,
             is_snapshot_mapping_current as _mapping_current,
         )
+        from .stage7_snapshot_contract_v1 import (
+            STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
+            is_snapshot_stage7_current as _stage7_current,
+        )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
+        _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
+        _stage7_is_current = _stage7_current(snap_row)
+        _stage7_republish_required = not _stage7_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
             "current_evidence_mapping_version=%s "
             "latest_snapshot_evidence_mapping_version=%s "
             "mapping_version_current=%s "
+            "stage7_explanation_contract_version=%s "
+            "latest_snapshot_stage7_contract_version=%s "
+            "stage7_contract_current=%s "
             "deterministic_republish_required=%s "
             "analyst_jobs_required=false "
             "snapshot_id=%s",
@@ -157,19 +168,27 @@ async def compare_and_republish(
             _CURRENT_MAPPING_VER,
             _snap_mapping_ver or "missing",
             _mapping_is_current,
-            _mapping_republish_required or result.evidence_newer_than_certified_snapshot,
+            _CURRENT_STAGE7_VER,
+            _snap_stage7_ver or "missing",
+            _stage7_is_current,
+            _mapping_republish_required or _stage7_republish_required or result.evidence_newer_than_certified_snapshot,
             result.latest_certified_snapshot_id or "none",
         )
 
-        if not result.evidence_newer_than_certified_snapshot and _mapping_is_current:
+        if (
+            not result.evidence_newer_than_certified_snapshot
+            and _mapping_is_current
+            and _stage7_is_current
+        ):
             result.publish_status = PUBLISH_CERTIFIED_CURRENT
             result.duration_ms = int((time.monotonic() - t0) * 1000)
             _emit_log(user_id, result)
             return result
 
-        # Evidence is newer OR mapping version is stale — trigger deterministic rebuild.
-        # analyst_jobs_queued stays 0: price-only / mapping-version recertification never
-        # enqueues analyst LLM jobs.
+        # Evidence is newer OR mapping version is stale OR Stage 7 contract is missing
+        # — trigger deterministic rebuild.
+        # analyst_jobs_queued stays 0: price-only / mapping-version / stage7 recertification
+        # never enqueues analyst LLM jobs.
         if intel_republish_callable is None:
             result.publish_status = PUBLISH_REPUBLISH_PENDING
             result.duration_ms = int((time.monotonic() - t0) * 1000)
@@ -345,14 +364,24 @@ async def republish_after_analyst_eligibility(
             EVIDENCE_MAPPING_VERSION as _CURRENT_MAPPING_VER,
             is_snapshot_mapping_current as _mapping_current,
         )
+        from .stage7_snapshot_contract_v1 import (
+            STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
+            is_snapshot_stage7_current as _stage7_current,
+        )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
+        _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
+        _stage7_is_current = _stage7_current(snap_row)
+        _stage7_republish_required = not _stage7_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
             "current_evidence_mapping_version=%s "
             "latest_snapshot_evidence_mapping_version=%s "
             "mapping_version_current=%s "
+            "stage7_explanation_contract_version=%s "
+            "latest_snapshot_stage7_contract_version=%s "
+            "stage7_contract_current=%s "
             "deterministic_republish_required=%s "
             "analyst_jobs_required=false "
             "snapshot_id=%s",
@@ -360,11 +389,18 @@ async def republish_after_analyst_eligibility(
             _CURRENT_MAPPING_VER,
             _snap_mapping_ver or "missing",
             _mapping_is_current,
-            _mapping_republish_required or result.evidence_newer_than_certified_snapshot,
+            _CURRENT_STAGE7_VER,
+            _snap_stage7_ver or "missing",
+            _stage7_is_current,
+            _mapping_republish_required or _stage7_republish_required or result.evidence_newer_than_certified_snapshot,
             result.latest_certified_snapshot_id or "none",
         )
 
-        if not result.evidence_newer_than_certified_snapshot and _mapping_is_current:
+        if (
+            not result.evidence_newer_than_certified_snapshot
+            and _mapping_is_current
+            and _stage7_is_current
+        ):
             result.publish_status = PUBLISH_SKIPPED_NO_NEW_EVIDENCE
             result.duration_ms = int((time.monotonic() - t0) * 1000)
             _emit_log(user_id, result)
@@ -451,6 +487,7 @@ async def _fetch_latest_intel_snapshot(user_id: UUID, client: Any) -> Optional[d
             "generated_at": payload.get("generated_at"),
             "snapshot_source": payload.get("snapshot_source"),
             "evidence_mapping_version": payload.get("evidence_mapping_version"),
+            "stage7_explanation_contract_version": payload.get("stage7_explanation_contract_version"),
         }
     except Exception as exc:
         logger.warning(

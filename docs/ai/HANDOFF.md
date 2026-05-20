@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-20 (Stage 7: Plain-English Intelligence Surface — branch `claude/stage-7-intel-explanation-EcAxc`; _build_evidence_explanation() added to snapshot_builder; governance result captured and embedded in card_metas in run_v3() and run_prewarm_snapshot(); IntelV3EvidenceExplanation TypeScript interface; intel-v3-explanation.ts pure translation layer; EvidenceSummaryBand in IntelV3Cockpit; EvidenceExplanationSection in IntelV3Drawer; 31 backend tests + 41 frontend tests; no SQL, no new providers, no policy changes)
+Last updated: 2026-05-20 (Stage 7 production activation gap fix — branch `claude/stage7-snapshot-contract-pvuSN`; stage7_snapshot_contract_v1.py added with STAGE7_EXPLANATION_CONTRACT_VERSION constant + is_snapshot_stage7_current(); snapshot_builder.py stamps new snapshots; watchtower_intel_republisher_v1.py and intel_v3_service.py enqueue_run_v3 check Stage 7 contract alongside mapping version and trigger deterministic republish when pre-Stage-7 snapshot detected; 18 new tests; no SQL, no UI, no LLM, no policy changes)
 
 ## Purpose
 

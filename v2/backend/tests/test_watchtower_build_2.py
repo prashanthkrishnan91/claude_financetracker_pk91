@@ -49,12 +49,17 @@ def _make_client(
     no_intel_snapshot: bool = False,
     no_portfolio_snapshot: bool = False,
     intel_mapping_version: Optional[str] = "analyst_verdict_synthesis_v1",
+    intel_stage7_version: Optional[str] = "stage7_explanation_v1",
 ) -> MagicMock:
     """Build a minimal Supabase client mock with controlled responses.
 
     intel_mapping_version defaults to the current EVIDENCE_MAPPING_VERSION so that
     existing timestamp-based tests continue to test price-freshness behavior without
     triggering the mapping-version guard. Pass None to simulate a pre-PR #347 snapshot.
+
+    intel_stage7_version defaults to the current STAGE7_EXPLANATION_CONTRACT_VERSION
+    so that existing tests test price/mapping behavior without triggering the Stage 7
+    contract guard. Pass None to simulate a pre-Stage-7 snapshot.
     """
     client = MagicMock()
     uid = str(uuid.uuid4())
@@ -87,6 +92,8 @@ def _make_client(
     }
     if intel_mapping_version is not None:
         snap_payload["evidence_mapping_version"] = intel_mapping_version
+    if intel_stage7_version is not None:
+        snap_payload["stage7_explanation_contract_version"] = intel_stage7_version
     intel_rows = [] if no_intel_snapshot else [{"payload": snap_payload}]
 
     port_id = portfolio_snapshot_id or str(uuid.uuid4())

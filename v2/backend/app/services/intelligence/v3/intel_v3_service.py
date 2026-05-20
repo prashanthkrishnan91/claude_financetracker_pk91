@@ -848,15 +848,27 @@ class IntelV3Service:
                 EVIDENCE_MAPPING_VERSION as _CURRENT_MAPPING_VER,
                 is_snapshot_mapping_current as _is_mapping_current,
             )
+            from .stage7_snapshot_contract_v1 import (
+                STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
+                is_snapshot_stage7_complete as _is_stage7_complete,
+            )
             _snap_mapping_ver = (
                 latest_snapshot.get("evidence_mapping_version") if latest_snapshot else None
             )
             _mapping_current = _is_mapping_current(latest_snapshot or {})
+            _snap_stage7_ver = (
+                latest_snapshot.get("stage7_explanation_contract_version") if latest_snapshot else None
+            )
+            # Use is_snapshot_stage7_complete: checks version marker AND card explanation keys.
+            _stage7_current = _is_stage7_complete(latest_snapshot or {})
             logger.info(
                 "intel_v3_evidence_mapping_version_summary user_id=%s "
                 "current_evidence_mapping_version=%s "
                 "latest_snapshot_evidence_mapping_version=%s "
                 "mapping_version_current=%s "
+                "stage7_explanation_contract_version=%s "
+                "latest_snapshot_stage7_contract_version=%s "
+                "stage7_contract_current=%s "
                 "deterministic_republish_required=%s "
                 "analyst_jobs_required=false "
                 "snapshot_id=%s",
@@ -864,12 +876,13 @@ class IntelV3Service:
                 _CURRENT_MAPPING_VER,
                 _snap_mapping_ver or "missing",
                 _mapping_current,
-                not _mapping_current,
+                _CURRENT_STAGE7_VER,
+                _snap_stage7_ver or "missing",
+                _stage7_current,
+                not _mapping_current or not _stage7_current,
                 existing_certified_snapshot_id or "none",
             )
-            if _mapping_current:
-                status = "analyst_evidence_current"
-            else:
+            if not _mapping_current:
                 # Mapping version stale — trigger zero-LLM deterministic recertification.
                 try:
                     _prewarm_id = str(uuid.uuid4())
@@ -882,6 +895,23 @@ class IntelV3Service:
                         self.user_id, _prewarm_exc,
                     )
                     status = "mapping_version_recertification_failed"
+            elif not _stage7_current:
+                # Stage 7 explanation contract missing — trigger zero-LLM deterministic
+                # recertification. No analyst jobs enqueued; only snapshot payload is rebuilt
+                # using existing Stage 6 governance outputs and the Stage 7 explanation path.
+                try:
+                    _prewarm_id = str(uuid.uuid4())
+                    await self.run_prewarm_snapshot(prewarm_run_id=_prewarm_id)
+                    status = "stage7_contract_recertified"
+                except Exception as _prewarm_exc:
+                    logger.warning(
+                        "intel_v3_stage7_contract_recertification_failed "
+                        "user_id=%s error=%s",
+                        self.user_id, _prewarm_exc,
+                    )
+                    status = "stage7_contract_recertification_failed"
+            else:
+                status = "analyst_evidence_current"
         elif enqueue_result_touched > 0 and enqueue_result_created == 0:
             status = "refresh_in_progress"
         else:
@@ -991,6 +1021,9 @@ class IntelV3Service:
                 else "Deterministic recertification failed — evidence mapping version mismatch. "
                 "Retry Run Intel to recertify."
                 if status == "mapping_version_recertification_failed"
+                else "Deterministic recertification failed — Stage 7 explanation contract missing. "
+                "Retry Run Intel to recertify."
+                if status == "stage7_contract_recertification_failed"
                 else "Analyst evidence is current — no refresh needed."
             ),
         }

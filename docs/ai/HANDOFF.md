@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-20 (Stage 7 snapshot contract freshness gate — PR #389 merged; stage7_snapshot_contract_v1.py adds STAGE7_EXPLANATION_CONTRACT_VERSION + is_snapshot_stage7_complete() [checks version marker AND evidence_explanation key presence on all held cards]; snapshot_builder.py stamps new snapshots; all three gate call sites in watchtower_intel_republisher_v1.py and intel_v3_service.py use is_snapshot_stage7_complete(); _fetch_latest_intel_snapshot() pre-computes stage7_explanation_payload_present; 35 tests; no SQL, no UI, no LLM, no policy changes)
+Last updated: 2026-05-20 (Stage 7B — IntelV3Drawer plain-English clarity pass — PR #391 merged; replaced repeated "Why this view?" + "The thesis" sections with 7 decision-specific sections; added deduplication helper onceOnly(); 4 new pure view-model helpers in intel-v3-explanation.ts [deduplicateTexts, buildWhyActionExplanation, buildSupportingEvidenceSentences, buildIncompleteEvidenceSentences]; removed 5 ComingLaterPanel future-module blocks; stale "evidence governance engine active" placeholder replaced with honest fallback; macro copy de-duplicated; Vercel build fix: useOnce renamed onceOnly [react-hooks/rules-of-hooks]; 35 new tests + 93 existing pass; no SQL, no backend, no policy changes)
 
 ## Purpose
 
@@ -63,10 +63,10 @@ Key structured logs to confirm in production:
 - `intel_v3_service.py` — Both `run_v3()` and `run_prewarm_snapshot()` now capture `apply_evidence_governance()` return value (previously discarded), serialize via `.to_dict()`, and store in `card_metas` as `governance_result`. No policy change.
 
 **Frontend (translation layer + UI):**
-- `src/lib/intel-v3-explanation.ts` (new) — Pure deterministic translation layer. No JSX, no IO. Exports: `readinessToDisplay()`, `governancePriorityToExplanation()`, `convictionCapLabel()`, `buildEvidenceLaneRows()`, `buildSafetyDisplay()`, `buildPortfolioEvidenceSummary()`. `RAW_KEYS_BANNED` constant guards against raw metric key leaks.
+- `src/lib/intel-v3-explanation.ts` (new, updated by Stage 7B) — Pure deterministic translation layer. No JSX, no IO. Original exports: `readinessToDisplay()`, `governancePriorityToExplanation()`, `convictionCapLabel()`, `buildEvidenceLaneRows()`, `buildSafetyDisplay()`, `buildPortfolioEvidenceSummary()`. Stage 7B additions: `deduplicateTexts()`, `buildWhyActionExplanation()`, `buildSupportingEvidenceSentences()`, `buildIncompleteEvidenceSentences()`. `RAW_KEYS_BANNED` constant guards against raw metric key leaks.
 - `src/lib/api.ts` — `IntelV3EvidenceExplanation` interface added; `detail_drawer_payload.evidence_explanation` typed as optional.
 - `IntelV3Cockpit.tsx` — `EvidenceSummaryBand` component added above filter rail. Shows decision tier counts (better-supported / evidence-limited / data-issues), conviction-capped count, evidence source chips. Renders nothing when no card has `evidence_explanation`.
-- `IntelV3Drawer.tsx` — "What drives this recommendation" section replaces Coming-Later evidence panel when `evidence_explanation` present. Shows safety tier chip, priority explanation, conviction cap box, expandable 3-lane view (fundamentals / market price / news & sentiment). Gracefully falls back to Coming-Later chrome for pre-governance snapshots.
+- `IntelV3Drawer.tsx` (Stage 7B rewrite, PR #391) — 7 decision-specific sections: "Why this is a BUY/HOLD/TRIM/SELL", "Evidence supporting this", "What is still incomplete", "Why conviction is capped", "Risk to watch", "What would change this view", "How it fits your portfolio". Deduplication via `onceOnly()` prevents same sentence in multiple sections. 5 ComingLaterPanel future-module blocks removed. Stage 7 inactive fallback shows honest evidence_text / DataMissingPill (not stale governance placeholder). Macro copy: "Macro backdrop — Portfolio context that can shape confidence and caution, but is not a standalone Buy/Sell reason."
 
 **Test results:** 31/31 backend tests (`test_stage7_explanation_contract.py`) + 41/41 frontend tests (`intel-v3-explanation.test.ts`). No SQL, no new providers, no policy changes.
 

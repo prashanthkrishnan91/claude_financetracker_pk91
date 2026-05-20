@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-20 (Stage 7 production activation gap fix — branch `claude/stage7-snapshot-contract-pvuSN`; stage7_snapshot_contract_v1.py added with STAGE7_EXPLANATION_CONTRACT_VERSION constant + is_snapshot_stage7_current(); snapshot_builder.py stamps new snapshots; watchtower_intel_republisher_v1.py and intel_v3_service.py enqueue_run_v3 check Stage 7 contract alongside mapping version and trigger deterministic republish when pre-Stage-7 snapshot detected; 18 new tests; no SQL, no UI, no LLM, no policy changes)
+Last updated: 2026-05-20 (Stage 7 snapshot contract freshness gate — PR #389 merged; stage7_snapshot_contract_v1.py adds STAGE7_EXPLANATION_CONTRACT_VERSION + is_snapshot_stage7_complete() [checks version marker AND evidence_explanation key presence on all held cards]; snapshot_builder.py stamps new snapshots; all three gate call sites in watchtower_intel_republisher_v1.py and intel_v3_service.py use is_snapshot_stage7_complete(); _fetch_latest_intel_snapshot() pre-computes stage7_explanation_payload_present; 35 tests; no SQL, no UI, no LLM, no policy changes)
 
 ## Purpose
 
@@ -54,7 +54,7 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Current: Stage 7 Plain-English Intelligence Surface (branch `claude/stage-7-intel-explanation-EcAxc`)
+## Stage 7 Plain-English Intelligence Surface (merged PR #388 + activation fix PR #389)
 
 **What Stage 7 adds:** Exposes the Stage 6 evidence-aware governance result in plain English — no raw metric keys, no fake data, graceful degradation when governance is inactive. Zero backend policy changes.
 
@@ -71,6 +71,8 @@ Key structured logs to confirm in production:
 **Test results:** 31/31 backend tests (`test_stage7_explanation_contract.py`) + 41/41 frontend tests (`intel-v3-explanation.test.ts`). No SQL, no new providers, no policy changes.
 
 **Backwards-compatible:** `evidence_explanation` is `None` / absent when governance flag is off or `governance_result` not in card_metas. All existing pre-governance snapshot reads degrade gracefully to Coming-Later chrome.
+
+**Activation fix (PR #389, merged):** Three-gate deterministic contract-version freshness guard. New `stage7_snapshot_contract_v1.py` — `is_snapshot_stage7_complete()` checks both the contract version marker (`stage7_explanation_contract_version=stage7_explanation_v1`) AND structural presence of `evidence_explanation` key in all `current_holdings` cards with `detail_drawer_payload`. All three gate call sites (`compare_and_republish`, `republish_after_analyst_eligibility`, `enqueue_run_v3`) use the complete check; trigger `run_prewarm_snapshot()` with `status=stage7_contract_recertified` (zero analyst jobs). `_fetch_latest_intel_snapshot()` pre-computes `stage7_explanation_payload_present`. Log key: `stage7_contract_current` in `intel_v3_evidence_mapping_version_summary`. 35 tests.
 
 **Previous: Stage 6 Governance Calibration (merged — branch `claude/review-architecture-docs-HEX61`):** yfinance technicals now VENDOR_DERIVED; Priority 4b calibrated THIN→OK; 5 new diagnostic fields on EvidenceGovernanceResult; 70 calibration tests + 267 Stage 5/6 tests.
 

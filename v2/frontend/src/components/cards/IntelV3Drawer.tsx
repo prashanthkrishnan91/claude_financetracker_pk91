@@ -139,7 +139,7 @@ function EvidenceLaneDetail({ ex }: { ex: IntelV3EvidenceExplanation }) {
 
           <div className="pt-1 border-t border-border">
             <p className="text-[10px] text-text-muted leading-snug">
-              <span className="font-medium">Macro backdrop</span> — Macro backdrop is portfolio context. It can shape confidence and caution, but it is not a standalone Buy/Sell reason.
+              <span className="font-medium">Macro backdrop</span> — Portfolio context that can shape confidence and caution, but is not a standalone Buy/Sell reason.
             </p>
           </div>
         </div>
@@ -173,7 +173,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
   // De-duplicate: each text is shown at most once across all sections.
   const seenTexts = new Set<string>();
-  function useOnce(text: string | null | undefined): string | null {
+  function onceOnly(text: string | null | undefined): string | null {
     if (!text?.trim()) return null;
     const key = text.trim().toLowerCase();
     if (seenTexts.has(key)) return null;
@@ -183,9 +183,9 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
   // Section 1: primary decision narrative
   const primaryNarrative =
-    useOnce(payload.rationale) ??
-    useOnce(card.why_text) ??
-    useOnce(card.action_text);
+    onceOnly(payload.rationale) ??
+    onceOnly(card.why_text) ??
+    onceOnly(card.action_text);
 
   // Fallback explanation if no narrative text available
   const fallbackNarrative = primaryNarrative
@@ -193,15 +193,15 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
     : buildWhyActionExplanation(card.action, ex);
 
   // Section 5: risk
-  const riskText = useOnce(card.risk_text);
+  const riskText = onceOnly(card.risk_text);
   const hasBlockers = payload.blockers && payload.blockers.length > 0;
   const hasFlags = card.flags && card.flags.length > 0;
 
   // Section 6: what would change
-  const whatWouldChange = useOnce(card.what_would_change_view);
+  const whatWouldChange = onceOnly(card.what_would_change_view);
 
   // Section 7: portfolio fit
-  const fitText = useOnce(card.fit_text);
+  const fitText = onceOnly(card.fit_text);
   const portfolioFitLabel =
     card.portfolio_fit && card.portfolio_fit !== "UNKNOWN"
       ? card.portfolio_fit.replace(/_/g, " ").toLowerCase()

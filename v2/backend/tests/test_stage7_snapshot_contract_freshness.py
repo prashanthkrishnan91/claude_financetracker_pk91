@@ -14,6 +14,10 @@ Proves:
      even when evidence timestamps show no newer evidence.
   6. Action distribution and Stage 6 decision policy are unchanged by the
      contract version check (determinism contract).
+  7. Stage 7 contract is not satisfied by marker alone when cards lack the
+     evidence_explanation key in detail_drawer_payload.
+  8. Stage 7 contract is satisfied when marker is present and all cards have
+     evidence_explanation key (value may be None).
 """
 from __future__ import annotations
 
@@ -28,6 +32,7 @@ import pytest
 from app.services.intelligence.v3.stage7_snapshot_contract_v1 import (
     STAGE7_EXPLANATION_CONTRACT_VERSION,
     get_snapshot_stage7_version,
+    is_snapshot_stage7_complete,
     is_snapshot_stage7_current,
 )
 from app.services.intelligence.v3.watchtower_intel_republisher_v1 import (
@@ -49,12 +54,32 @@ COMMON_TS = "2026-05-20T07:00:00+00:00"  # same timestamp for intel + evidence �
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _make_held_card(ticker: str = "AAPL", *, with_explanation_key: bool = True) -> dict:
+    """Build a minimal held card. with_explanation_key controls Stage 7 key presence."""
+    ddp: dict = {
+        "rationale": f"{ticker} solid business.",
+        "why_now": "",
+        "why_not_now": "",
+        "evidence_band": "PARTIAL",
+        "schema_version": "v3.1",
+    }
+    if with_explanation_key:
+        ddp["evidence_explanation"] = None  # key present, value None (governance off)
+    return {
+        "ticker": ticker,
+        "action": "HOLD",
+        "conviction": "MEDIUM",
+        "detail_drawer_payload": ddp,
+    }
+
+
 def _make_snap_payload(
     *,
     stage7_version: Optional[str] = STAGE7_EXPLANATION_CONTRACT_VERSION,
     mapping_version: Optional[str] = EVIDENCE_MAPPING_VERSION,
     generated_at: str = COMMON_TS,
     snapshot_id: Optional[str] = None,
+    holdings: Optional[list] = None,
 ) -> dict:
     payload: dict[str, Any] = {
         "snapshot_id": snapshot_id or str(uuid.uuid4()),
@@ -64,6 +89,8 @@ def _make_snap_payload(
     }
     if stage7_version is not None:
         payload["stage7_explanation_contract_version"] = stage7_version
+    if holdings is not None:
+        payload["current_holdings"] = holdings
     return payload
 
 
@@ -102,7 +129,7 @@ def _make_republish_callable() -> AsyncMock:
     return AsyncMock(return_value={"snapshot_source": "worker_certified"})
 
 
-# ── Section 1: is_snapshot_stage7_current ─────────────────────────────────────
+# ── Section 1: is_snapshot_stage7_current (marker-only check) ─────────────────
 
 class TestIsSnapshotStage7Current:
     def test_none_payload_returns_false(self):
@@ -135,13 +162,86 @@ class TestIsSnapshotStage7Current:
         assert get_snapshot_stage7_version(payload) == STAGE7_EXPLANATION_CONTRACT_VERSION
 
 
-# ── Section 2: compare_and_republish — Stage 7 gate ──────────────────────────
+# ── Section 2: is_snapshot_stage7_complete (marker + payload check) ───────────
+
+class TestIsSnapshotStage7Complete:
+    def test_none_payload_returns_false(self):
+        assert is_snapshot_stage7_complete(None) is False
+
+    def test_missing_marker_returns_false(self):
+        """No marker → False regardless of holdings."""
+        payload = {
+            "snapshot_id": "old",
+            "current_holdings": [_make_held_card(with_explanation_key=True)],
+        }
+        assert is_snapshot_stage7_complete(payload) is False
+
+    def test_marker_and_no_holdings_returns_true(self):
+        """Empty portfolio: marker alone is sufficient."""
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=[])
+        assert is_snapshot_stage7_complete(payload) is True
+
+    def test_marker_and_holdings_missing_explanation_key_returns_false(self):
+        """Current marker but cards lack evidence_explanation key → not Stage 7 complete.
+        This is the exact production failure condition for snapshot b5b68cb8."""
+        cards = [_make_held_card("AAPL", with_explanation_key=False)]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is False
+
+    def test_marker_and_holdings_with_explanation_key_none_returns_true(self):
+        """Explanation key present but value=None (governance off) → Stage 7 complete."""
+        cards = [_make_held_card("AAPL", with_explanation_key=True)]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is True
+
+    def test_marker_and_multiple_holdings_one_missing_key_returns_false(self):
+        """Any card missing the key → not complete."""
+        cards = [
+            _make_held_card("AAPL", with_explanation_key=True),
+            _make_held_card("MSFT", with_explanation_key=False),
+            _make_held_card("GOOGL", with_explanation_key=True),
+        ]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is False
+
+    def test_marker_and_all_holdings_with_key_returns_true(self):
+        """All cards have the key → complete."""
+        cards = [
+            _make_held_card("AAPL", with_explanation_key=True),
+            _make_held_card("MSFT", with_explanation_key=True),
+        ]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is True
+
+    def test_pre_computed_false_flag_returns_false(self):
+        """Slim republisher dict with stage7_explanation_payload_present=False → False."""
+        payload = {
+            "stage7_explanation_contract_version": STAGE7_EXPLANATION_CONTRACT_VERSION,
+            "stage7_explanation_payload_present": False,
+        }
+        assert is_snapshot_stage7_complete(payload) is False
+
+    def test_pre_computed_true_flag_returns_true(self):
+        """Slim republisher dict with stage7_explanation_payload_present=True → True."""
+        payload = {
+            "stage7_explanation_contract_version": STAGE7_EXPLANATION_CONTRACT_VERSION,
+            "stage7_explanation_payload_present": True,
+        }
+        assert is_snapshot_stage7_complete(payload) is True
+
+    def test_card_without_detail_drawer_payload_not_checked(self):
+        """Cards with no detail_drawer_payload are skipped (legacy/malformed card)."""
+        cards = [{"ticker": "AAPL", "action": "HOLD"}]  # no detail_drawer_payload
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is True
+
+
+# ── Section 3: compare_and_republish — Stage 7 gate ──────────────────────────
 
 class TestCompareAndRepublishStage7Gate:
     @pytest.mark.asyncio
     async def test_pre_stage7_snapshot_triggers_republish(self):
-        """A snapshot missing the Stage 7 contract triggers deterministic rebuild
-        even when evidence timestamps show no newer portfolio evidence."""
+        """A snapshot missing the Stage 7 marker triggers deterministic rebuild."""
         pre_stage7_payload = _make_snap_payload(stage7_version=None)
         client = _make_client(pre_stage7_payload, portfolio_snapshot_at=COMMON_TS)
         callable_ = _make_republish_callable()
@@ -154,9 +254,32 @@ class TestCompareAndRepublishStage7Gate:
         callable_.assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
-    async def test_stage7_snapshot_skips_republish_when_evidence_current(self):
-        """A snapshot with Stage 7 contract and current evidence is NOT republished."""
-        stage7_payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION)
+    async def test_marker_present_but_cards_missing_explanation_key_triggers_republish(self):
+        """Current marker but cards lack evidence_explanation key → republish.
+        This is the exact production scenario for b5b68cb8."""
+        cards = [_make_held_card("AAPL", with_explanation_key=False)]
+        stage7_payload_missing_key = _make_snap_payload(
+            stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION,
+            holdings=cards,
+        )
+        client = _make_client(stage7_payload_missing_key, portfolio_snapshot_at=COMMON_TS)
+        callable_ = _make_republish_callable()
+
+        result = await compare_and_republish(
+            USER_ID, client, intel_republish_callable=callable_
+        )
+
+        assert result.publish_status == PUBLISH_REBUILT_AND_PUBLISHED
+        callable_.assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
+    async def test_stage7_complete_snapshot_skips_republish(self):
+        """Marker present + all cards have explanation key → no republish."""
+        cards = [_make_held_card("AAPL", with_explanation_key=True)]
+        stage7_payload = _make_snap_payload(
+            stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION,
+            holdings=cards,
+        )
         client = _make_client(stage7_payload, portfolio_snapshot_at=COMMON_TS)
         callable_ = _make_republish_callable()
 
@@ -181,27 +304,26 @@ class TestCompareAndRepublishStage7Gate:
         assert result.analyst_jobs_queued == 0
 
     @pytest.mark.asyncio
-    async def test_wrong_stage7_version_triggers_republish(self):
-        """A snapshot with an outdated Stage 7 version string triggers republish."""
-        old_version_payload = _make_snap_payload(stage7_version="stage7_explanation_v0")
-        client = _make_client(old_version_payload, portfolio_snapshot_at=COMMON_TS)
+    async def test_missing_explanation_key_analyst_jobs_zero(self):
+        """Republish for missing explanation key also queues zero analyst jobs."""
+        cards = [_make_held_card("AAPL", with_explanation_key=False)]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        client = _make_client(payload, portfolio_snapshot_at=COMMON_TS)
         callable_ = _make_republish_callable()
 
         result = await compare_and_republish(
             USER_ID, client, intel_republish_callable=callable_
         )
 
-        assert result.publish_status == PUBLISH_REBUILT_AND_PUBLISHED
-        callable_.assert_awaited_once()
+        assert result.analyst_jobs_queued == 0
 
 
-# ── Section 3: republish_after_analyst_eligibility — Stage 7 gate ─────────────
+# ── Section 4: republish_after_analyst_eligibility — Stage 7 gate ─────────────
 
 class TestRepublishAfterAnalystEligibilityStage7:
     @pytest.mark.asyncio
     async def test_pre_stage7_snapshot_triggers_republish_after_evidence_lanes(self):
-        """After evidence lanes complete, if the active snapshot lacks Stage 7 contract,
-        republish_after_analyst_eligibility triggers a deterministic rebuild."""
+        """After evidence lanes complete, pre-Stage-7 snapshot triggers republish."""
         pre_stage7_payload = _make_snap_payload(stage7_version=None)
         client = _make_client(pre_stage7_payload)
         callable_ = _make_republish_callable()
@@ -219,16 +341,37 @@ class TestRepublishAfterAnalystEligibilityStage7:
         callable_.assert_awaited_once_with(USER_ID)
 
     @pytest.mark.asyncio
-    async def test_stage7_snapshot_skips_republish_when_no_new_evidence(self):
-        """A Stage 7 snapshot with no newer evidence is skipped (no unnecessary republish)."""
+    async def test_marker_present_missing_explanation_key_triggers_republish(self):
+        """Marker present but cards missing explanation key → republish after evidence lanes."""
+        cards = [_make_held_card("AAPL", with_explanation_key=False)]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        client = _make_client(payload)
+        callable_ = _make_republish_callable()
+        evidence_ts = NOW - timedelta(hours=1)
+
+        result = await republish_after_analyst_eligibility(
+            USER_ID,
+            client,
+            intel_republish_callable=callable_,
+            latest_evidence_at=evidence_ts,
+            now=NOW,
+        )
+
+        assert result.publish_status == PUBLISH_REBUILT_AND_PUBLISHED
+        callable_.assert_awaited_once_with(USER_ID)
+
+    @pytest.mark.asyncio
+    async def test_stage7_complete_snapshot_skips_republish_when_no_new_evidence(self):
+        """Stage 7 complete snapshot with no newer evidence is skipped."""
+        cards = [_make_held_card("AAPL", with_explanation_key=True)]
         stage7_payload = _make_snap_payload(
             stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION,
             generated_at=NOW.isoformat(),
+            holdings=cards,
         )
         client = _make_client(stage7_payload)
         callable_ = _make_republish_callable()
-        # Evidence older than snapshot — nothing new to trigger
-        evidence_ts = NOW - timedelta(hours=2)
+        evidence_ts = NOW - timedelta(hours=2)  # older than snapshot
 
         result = await republish_after_analyst_eligibility(
             USER_ID,
@@ -242,8 +385,8 @@ class TestRepublishAfterAnalystEligibilityStage7:
         callable_.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_pre_stage7_analyst_jobs_queued_zero(self):
-        """Stage 7 contract republish never enqueues analyst jobs."""
+    async def test_stage7_republish_analyst_jobs_queued_zero(self):
+        """Stage 7 contract republish (any trigger) never enqueues analyst jobs."""
         pre_stage7_payload = _make_snap_payload(stage7_version=None)
         client = _make_client(pre_stage7_payload)
         callable_ = _make_republish_callable()
@@ -260,12 +403,11 @@ class TestRepublishAfterAnalystEligibilityStage7:
         assert result.analyst_jobs_queued == 0
 
 
-# ── Section 4: snapshot_builder emits Stage 7 contract version ────────────────
+# ── Section 5: snapshot_builder emits Stage 7 contract version ────────────────
 
 class TestSnapshotBuilderEmitsStage7Contract:
     def test_build_snapshot_includes_stage7_contract_version(self):
-        """build_snapshot() must emit stage7_explanation_contract_version so new
-        snapshots are immediately recognized as Stage 7 current."""
+        """build_snapshot() must emit stage7_explanation_contract_version."""
         from app.services.intelligence.v3.snapshot_builder import build_snapshot
         from app.services.intelligence.v3.decision_contracts import (
             ActionV3, AxisBand, ConvictionV3, DecisionOutputV3, FitBand, PriceBand, RiskBand,
@@ -300,8 +442,8 @@ class TestSnapshotBuilderEmitsStage7Contract:
         assert payload["stage7_explanation_contract_version"] == STAGE7_EXPLANATION_CONTRACT_VERSION
         assert is_snapshot_stage7_current(payload) is True
 
-    def test_new_snapshot_is_immediately_stage7_current(self):
-        """is_snapshot_stage7_current() returns True for any freshly built snapshot."""
+    def test_new_snapshot_is_immediately_stage7_complete(self):
+        """A freshly built snapshot satisfies is_snapshot_stage7_complete."""
         from app.services.intelligence.v3.snapshot_builder import build_snapshot
         from app.services.intelligence.v3.decision_contracts import (
             ActionV3, AxisBand, ConvictionV3, DecisionOutputV3, FitBand, PriceBand, RiskBand,
@@ -332,10 +474,14 @@ class TestSnapshotBuilderEmitsStage7Contract:
             card_metas=[meta],
         )
 
-        assert is_snapshot_stage7_current(payload) is True
+        # Full contract check: marker + evidence_explanation key in all cards.
+        assert is_snapshot_stage7_complete(payload) is True
+        for card in payload["current_holdings"]:
+            ddp = card.get("detail_drawer_payload", {})
+            assert "evidence_explanation" in ddp
 
 
-# ── Section 5: Action distribution unchanged ─────────────────────────────────
+# ── Section 6: Action distribution unchanged ─────────────────────────────────
 
 class TestActionDistributionUnchangedByContractCheck:
     def test_contract_check_does_not_alter_action_distribution(self):
@@ -378,8 +524,8 @@ class TestActionDistributionUnchangedByContractCheck:
 
         payload = build_snapshot(run_id="test-run-003", decisions=decisions, card_metas=metas)
 
-        # Contract version present
-        assert is_snapshot_stage7_current(payload) is True
+        # Full contract satisfied
+        assert is_snapshot_stage7_complete(payload) is True
         # Action counts unchanged
         assert payload["action_counts"]["HOLD"] == 2
         assert payload["action_counts"]["BUY"] == 1

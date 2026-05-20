@@ -16,13 +16,51 @@ STAGE7_EXPLANATION_CONTRACT_VERSION = "stage7_explanation_v1"
 
 
 def is_snapshot_stage7_current(payload: Optional[dict]) -> bool:
-    """Return True when the payload carries the current Stage 7 explanation contract."""
+    """Return True when the payload carries the current Stage 7 explanation contract marker."""
     if not payload:
         return False
     return (
         payload.get("stage7_explanation_contract_version")
         == STAGE7_EXPLANATION_CONTRACT_VERSION
     )
+
+
+def is_snapshot_stage7_complete(payload: Optional[dict]) -> bool:
+    """Return True when the snapshot satisfies the full Stage 7 explanation contract:
+      1. Carries the current Stage 7 contract version marker, AND
+      2. All current_holdings cards with detail_drawer_payload have the
+         evidence_explanation key (value may be None for governance-off cases).
+
+    Accepts either a full snapshot payload (with current_holdings) or the slim
+    dict produced by _fetch_latest_intel_snapshot, which pre-computes
+    stage7_explanation_payload_present as a derived boolean.
+
+    Returns False (triggers deterministic republish) for:
+    - Missing or wrong contract marker
+    - Any card with detail_drawer_payload missing the evidence_explanation key
+    - Malformed or empty payloads (fail-closed → deterministic republish)
+    """
+    if not payload:
+        return False
+    if not is_snapshot_stage7_current(payload):
+        return False
+
+    # Slim republisher dict carries a pre-computed boolean — use it directly.
+    if "stage7_explanation_payload_present" in payload:
+        return bool(payload["stage7_explanation_payload_present"])
+
+    # Full payload path: verify structural presence of evidence_explanation key.
+    holdings = payload.get("current_holdings") or []
+    if not holdings:
+        # Empty portfolio — version marker alone is sufficient; no cards to check.
+        return True
+
+    for card in holdings:
+        ddp = card.get("detail_drawer_payload")
+        if isinstance(ddp, dict) and "evidence_explanation" not in ddp:
+            return False
+
+    return True
 
 
 def get_snapshot_stage7_version(payload: Optional[dict]) -> Optional[str]:

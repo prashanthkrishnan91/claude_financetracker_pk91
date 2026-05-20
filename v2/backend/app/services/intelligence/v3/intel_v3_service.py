@@ -850,7 +850,7 @@ class IntelV3Service:
             )
             from .stage7_snapshot_contract_v1 import (
                 STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
-                is_snapshot_stage7_current as _is_stage7_current,
+                is_snapshot_stage7_complete as _is_stage7_complete,
             )
             _snap_mapping_ver = (
                 latest_snapshot.get("evidence_mapping_version") if latest_snapshot else None
@@ -859,7 +859,8 @@ class IntelV3Service:
             _snap_stage7_ver = (
                 latest_snapshot.get("stage7_explanation_contract_version") if latest_snapshot else None
             )
-            _stage7_current = _is_stage7_current(latest_snapshot or {})
+            # Use is_snapshot_stage7_complete: checks version marker AND card explanation keys.
+            _stage7_current = _is_stage7_complete(latest_snapshot or {})
             logger.info(
                 "intel_v3_evidence_mapping_version_summary user_id=%s "
                 "current_evidence_mapping_version=%s "

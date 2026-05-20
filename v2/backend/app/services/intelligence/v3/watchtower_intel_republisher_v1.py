@@ -145,13 +145,13 @@ async def compare_and_republish(
         )
         from .stage7_snapshot_contract_v1 import (
             STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
-            is_snapshot_stage7_current as _stage7_current,
+            is_snapshot_stage7_complete as _stage7_complete,
         )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
         _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
-        _stage7_is_current = _stage7_current(snap_row)
+        _stage7_is_current = _stage7_complete(snap_row)
         _stage7_republish_required = not _stage7_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
@@ -366,13 +366,13 @@ async def republish_after_analyst_eligibility(
         )
         from .stage7_snapshot_contract_v1 import (
             STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
-            is_snapshot_stage7_current as _stage7_current,
+            is_snapshot_stage7_complete as _stage7_complete,
         )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
         _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
-        _stage7_is_current = _stage7_current(snap_row)
+        _stage7_is_current = _stage7_complete(snap_row)
         _stage7_republish_required = not _stage7_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
@@ -482,12 +482,22 @@ async def _fetch_latest_intel_snapshot(user_id: UUID, client: Any) -> Optional[d
         if not rows:
             return None
         payload = rows[0].get("payload") or {}
+        # Pre-compute explanation payload presence: all cards with detail_drawer_payload
+        # must have the evidence_explanation key (key check, not value truth).
+        holdings = payload.get("current_holdings") or []
+        stage7_explanation_payload_present = True
+        for card in holdings:
+            ddp = card.get("detail_drawer_payload")
+            if isinstance(ddp, dict) and "evidence_explanation" not in ddp:
+                stage7_explanation_payload_present = False
+                break
         return {
             "snapshot_id": payload.get("snapshot_id"),
             "generated_at": payload.get("generated_at"),
             "snapshot_source": payload.get("snapshot_source"),
             "evidence_mapping_version": payload.get("evidence_mapping_version"),
             "stage7_explanation_contract_version": payload.get("stage7_explanation_contract_version"),
+            "stage7_explanation_payload_present": stage7_explanation_payload_present,
         }
     except Exception as exc:
         logger.warning(

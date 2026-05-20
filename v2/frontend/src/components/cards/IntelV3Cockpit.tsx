@@ -27,6 +27,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
 import { buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
+import { buildPortfolioEvidenceSummary } from "@/lib/intel-v3-explanation";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
 import { DataHealthDrawer } from "./DataHealthDrawer";
@@ -281,6 +282,105 @@ function WhatChangedStrip({ items }: { items: string[] }) {
   );
 }
 
+// ── Evidence Summary Band ─────────────────────────────────────────────────────
+
+function EvidenceSummaryBand({ cards }: { cards: IntelV3HeldCard[] }) {
+  const hasAnyExplanation = cards.some(
+    (c) => c.detail_drawer_payload?.evidence_explanation != null
+  );
+
+  if (!hasAnyExplanation) return null;
+
+  const summary = buildPortfolioEvidenceSummary(cards);
+  const technicalUsable = summary.technicalUsableCount > 0;
+  const sentimentUsable = summary.sentimentUsableCount > 0;
+
+  const { fundamentalsUsableCount, cardsWithExplanation } = summary;
+  const companyDataLabel =
+    fundamentalsUsableCount === 0
+      ? "Some company data missing or blocked"
+      : fundamentalsUsableCount === cardsWithExplanation
+      ? "Company data available"
+      : `Company data usable for ${fundamentalsUsableCount}/${cardsWithExplanation}`;
+  const companyDataStyle =
+    fundamentalsUsableCount === 0
+      ? "border-action-trim/30 bg-action-trim/10 text-action-trim"
+      : "border-action-buy/30 bg-action-buy/10 text-action-buy";
+
+  return (
+    <div className="rounded-xl border border-border bg-surface px-4 py-4 space-y-3">
+      <div className="flex items-center gap-2">
+        <h3 className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+          Evidence quality
+        </h3>
+      </div>
+
+      {/* Support tier counts */}
+      <div className="flex items-center gap-4 flex-wrap">
+        {summary.safeCount > 0 && (
+          <div className="flex items-baseline gap-1">
+            <span className="text-sm font-bold text-action-buy">{summary.safeCount}</span>
+            <span className="text-xs text-text-muted">better supported</span>
+          </div>
+        )}
+        {summary.limitedCount > 0 && (
+          <div className="flex items-baseline gap-1">
+            <span className="text-sm font-bold text-text-secondary">{summary.limitedCount}</span>
+            <span className="text-xs text-text-muted">evidence limited</span>
+          </div>
+        )}
+        {summary.blockedCount > 0 && (
+          <div className="flex items-baseline gap-1">
+            <span className="text-sm font-bold text-action-trim">{summary.blockedCount}</span>
+            <span className="text-xs text-text-muted">data issues</span>
+          </div>
+        )}
+        {summary.convictionCappedCount > 0 && (
+          <div className="flex items-baseline gap-1 ml-auto">
+            <span className="text-sm font-semibold text-text-muted">{summary.convictionCappedCount}</span>
+            <span className="text-xs text-text-muted">conviction capped</span>
+          </div>
+        )}
+      </div>
+
+      {/* Evidence lane availability */}
+      <div className="pt-2 border-t border-border space-y-1.5">
+        <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+          Evidence sources
+        </p>
+        <div className="flex flex-wrap gap-2">
+          <span className={cn("text-[11px] px-2 py-0.5 rounded border font-medium", companyDataStyle)}>
+            {companyDataLabel}
+          </span>
+          <span className={cn(
+            "text-[11px] px-2 py-0.5 rounded border font-medium",
+            technicalUsable
+              ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
+              : "border-border bg-surface-elevated text-text-muted"
+          )}>
+            {technicalUsable ? "Price signals contributing" : "Price signals not yet usable"}
+          </span>
+          <span className={cn(
+            "text-[11px] px-2 py-0.5 rounded border font-medium",
+            sentimentUsable
+              ? "border-action-buy/30 bg-action-buy/10 text-action-buy"
+              : "border-border bg-surface-elevated text-text-muted"
+          )}>
+            {sentimentUsable ? "News & sentiment contributing" : "News & sentiment not yet usable"}
+          </span>
+        </div>
+        {(!technicalUsable || !sentimentUsable) && (
+          <p className="text-[10px] text-text-muted leading-snug max-w-md">
+            The engine is conservative when supporting signals are thin. Recommendations
+            still reflect company fundamentals — missing signals cause confidence caps,
+            not false confidence.
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ── Empty states ──────────────────────────────────────────────────────────────
 
 function EmptySnapshotState({
@@ -510,6 +610,9 @@ export function IntelV3Cockpit() {
 
       {/* Portfolio overview */}
       <PortfolioOverview snapshot={snapshot} />
+
+      {/* Stage 7 — Evidence quality summary (when governance data is present) */}
+      <EvidenceSummaryBand cards={allCards} />
 
       {/* Action filter rail — LOCKED: ALL/BUY/HOLD/TRIM/SELL only */}
       <FilterRail filter={filter} setFilter={setFilter} counts={counts} />

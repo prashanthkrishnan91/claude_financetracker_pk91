@@ -79,6 +79,27 @@ def _build_source_pack_status(decision: DecisionOutputV3) -> dict:
     return {"status": "pending", "reason": reason_text}
 
 
+def _build_evidence_explanation(gov: dict) -> dict:
+    """Extract frontend-safe Stage 7 explanation fields from a governance result dict.
+
+    Only safe, translated fields are included. Internal metric keys and raw diagnostic
+    field names never reach this dict.
+    """
+    aux = gov.get("auxiliary_evidence_readiness") or {}
+    return {
+        "primary_evidence_status":          gov.get("primary_evidence_readiness", "MISSING"),
+        "technical_signals_status":         aux.get("technical_signals", "MISSING"),
+        "sentiment_status":                 aux.get("sentiment", "MISSING"),
+        "conviction_cap_applied":           bool(gov.get("conviction_cap_applied", False)),
+        "conviction_cap_reason":            gov.get("conviction_cap_reason"),
+        "safe_for_visible_decision":        bool(gov.get("safe_for_visible_decision", False)),
+        "safe_for_visible_decision_reason": gov.get("safe_for_visible_decision_reason", ""),
+        "governance_priority":              gov.get("governance_priority_applied", "unknown"),
+        "corroboration_gap":                bool(gov.get("corroboration_gap", False)),
+        "action_blocks":                    list(gov.get("action_blocks_applied") or []),
+    }
+
+
 def _build_held_card(
     *,
     decision: DecisionOutputV3,
@@ -115,6 +136,9 @@ def _build_held_card(
 
     # thesis_state: derived from card_meta or default intact.
     thesis_state = card_meta.get("thesis_state") or "intact"
+
+    gov_result = card_meta.get("governance_result")
+    evidence_explanation = _build_evidence_explanation(gov_result) if gov_result else None
 
     return {
         "ticker":              card_meta.get("ticker", ""),
@@ -153,6 +177,8 @@ def _build_held_card(
             "valuation_context":    valuation_context,
             # Source-pack / committee status — computed from real evidence quality.
             "committee":            _build_source_pack_status(decision),
+            # Stage 7 — evidence explanation for plain-English UI (None when governance inactive).
+            "evidence_explanation": evidence_explanation,
         },
     }
 

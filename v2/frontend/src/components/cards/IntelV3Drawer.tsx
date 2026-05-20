@@ -15,9 +15,9 @@
  * - Focus-visible ring on close button
  */
 
-import { useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
-import type { IntelV3HeldCard } from "@/lib/api";
+import type { IntelV3EvidenceExplanation, IntelV3HeldCard } from "@/lib/api";
 import {
   ActionGlyph,
   ConfidenceRing,
@@ -34,6 +34,12 @@ import {
   formatSnapshotIdShort,
   formatUpdatedAtSafe,
 } from "@/lib/intel-v3-evidence";
+import {
+  buildEvidenceLaneRows,
+  buildSafetyDisplay,
+  convictionCapLabel,
+  governancePriorityToExplanation,
+} from "@/lib/intel-v3-explanation";
 
 interface IntelV3DrawerProps {
   card: IntelV3HeldCard | null;
@@ -63,6 +69,105 @@ function CloseIcon() {
   );
 }
 
+
+// ── Evidence Explanation Section ─────────────────────────────────────────────
+
+function ReadinessChip({ status, isUsable, isBlocked }: { status: string; isUsable: boolean; isBlocked: boolean }) {
+  const style = isBlocked
+    ? "bg-action-trim/10 text-action-trim border-action-trim/30"
+    : isUsable
+    ? "bg-action-buy/10 text-action-buy border-action-buy/30"
+    : "bg-surface-elevated text-text-muted border-border";
+  return (
+    <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-medium tracking-wide", style)}>
+      {status}
+    </span>
+  );
+}
+
+function EvidenceExplanationSection({ ex }: { ex: IntelV3EvidenceExplanation }) {
+  const [open, setOpen] = useState(false);
+  const safety = buildSafetyDisplay(ex);
+  const capLabel = convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason);
+  const priorityText = governancePriorityToExplanation(ex.governance_priority);
+  const lanes = buildEvidenceLaneRows(ex);
+
+  const safetyChipStyle =
+    safety.tier === "blocked"
+      ? "bg-action-trim/10 text-action-trim border-action-trim/30"
+      : safety.tier === "stronger"
+      ? "bg-action-buy/10 text-action-buy border-action-buy/30"
+      : "bg-surface-elevated text-text-secondary border-border";
+
+  return (
+    <div className="space-y-3">
+      {/* Support tier + conviction cap */}
+      <div className="flex items-center gap-2 flex-wrap">
+        <span className={cn("text-[10px] px-1.5 py-0.5 rounded border font-semibold tracking-wide uppercase", safetyChipStyle)}>
+          {safety.label}
+        </span>
+        {ex.conviction_cap_applied && (
+          <span className="text-[10px] px-1.5 py-0.5 rounded border border-action-trim/30 bg-action-trim/10 text-action-trim font-medium uppercase tracking-wide">
+            Conviction capped
+          </span>
+        )}
+      </div>
+
+      {/* Safety detail */}
+      <p className="text-xs text-text-secondary leading-relaxed">{safety.detail}</p>
+
+      {/* Priority explanation — only when meaningful */}
+      {priorityText && (
+        <p className="text-xs text-text-muted leading-relaxed">{priorityText}</p>
+      )}
+
+      {/* Conviction cap explanation */}
+      {capLabel && (
+        <div className="rounded-lg border border-action-trim/20 bg-action-trim/5 px-3 py-2">
+          <p className="text-[11px] text-action-trim leading-relaxed">{capLabel}</p>
+        </div>
+      )}
+
+      {/* Expandable lane detail */}
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
+        aria-expanded={open}
+      >
+        {open ? "▲ Hide evidence sources" : "▼ Show evidence sources"}
+      </button>
+
+      {open && (
+        <div className="space-y-2 pt-1">
+          {lanes.map((lane) => (
+            <div key={lane.laneId} className="flex items-start gap-3">
+              <div className="w-[130px] shrink-0 text-[10px] text-text-muted pt-0.5 leading-snug">
+                {lane.label}
+              </div>
+              <div className="flex-1 min-w-0">
+                <ReadinessChip
+                  status={lane.statusDisplay.label}
+                  isUsable={lane.statusDisplay.isUsable}
+                  isBlocked={lane.statusDisplay.isBlocked}
+                />
+                <p className="text-[10px] text-text-muted mt-0.5 leading-snug">
+                  {lane.statusDisplay.detail}
+                </p>
+              </div>
+            </div>
+          ))}
+
+          {/* Macro note */}
+          <div className="pt-1 border-t border-border">
+            <p className="text-[10px] text-text-muted leading-snug">
+              <span className="font-medium">Macro backdrop</span> — Macro backdrop is portfolio context. It can shape confidence and caution, but it is not a standalone Buy/Sell reason.
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
@@ -326,20 +431,31 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
           <Rule />
 
-          {/* ── Coming-Later evidence modules ───────────────────────────── */}
+          {/* ── Stage 7: Evidence explanation ──────────────────────────── */}
+          {payload.evidence_explanation ? (
+            <Section title="What drives this recommendation">
+              <EvidenceExplanationSection ex={payload.evidence_explanation} />
+            </Section>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
+                Evidence detail
+              </p>
+              <ComingLaterPanel
+                title="Evidence lane breakdown"
+                caption="Detailed evidence source coverage will appear here once the evidence governance engine is active for this portfolio."
+              />
+            </div>
+          )}
+
+          {/* ── Coming-Later: future intelligence modules ─────────────── */}
           <div className="space-y-3">
             <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-              Preparing for the next intelligence stage
+              Intelligence modules in preparation
             </p>
             <ComingLaterPanel title="Source credibility tier" />
             <ComingLaterPanel title="Contradiction strip" />
-            <ComingLaterPanel title="Evidence completeness score" />
-            <ComingLaterPanel title="Business story" />
             <ComingLaterPanel title="SEC filing evidence room" />
-            <ComingLaterPanel title="Technical evidence room" />
-            <ComingLaterPanel title="Fundamental evidence room" />
-            <ComingLaterPanel title="Sentiment & news evidence room" />
-            <ComingLaterPanel title="Company strategy evidence room" />
             <ComingLaterPanel title="Source snippets & citations" />
             <ComingLaterPanel
               title="Ask why / Challenge / Explain"

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 2 runtime fix — PR #399. Fixed `FactRecord.fact_kind="sec_catalyst_event"` → `"catalyst_item"` to satisfy `research_artifact_facts_fact_kind_check` DB constraint (error 23514). No SQL. PR #398 wired the lane; PR #399 unblocks artifact writes. Previous: Stage 8C PR 2 — `sec_catalyst_sentiment_adapter_v1.py` new module.)
+Last updated: 2026-05-21 (Stage 8C PR 2 runtime fix — PR #399. Fixed `FactRecord.fact_kind="sec_catalyst_event"` → `"catalyst_item"` to satisfy `research_artifact_facts_fact_kind_check` DB constraint (error 23514). No SQL. PR #398 wired the lane; PR #399 unblocks artifact writes. Readiness gate re-triggered via synchronize event.)
 
 ## Purpose
 

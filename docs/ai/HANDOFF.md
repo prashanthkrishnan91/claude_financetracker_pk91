@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8B — Sentiment quality threshold — `sentiment_quality_threshold_v1.py` new module with explicit quality criteria (freshness+authority+completeness+contradiction); Stage 5J `_classify_sentiment_status()` sub-classifies SUPPRESSED news_sentiment as `editorial_context_present_not_decision_useful` vs `suppressed_data_quality_issue`; EDITORIAL_CONTEXT+THIN stays SUPPRESSED; VENDOR_DERIVED+PARTIAL/COMPLETE path to LIMITED/READY confirmed working; frontend MISSING sentinel updated to "not yet available"; 36 new backend + 1 frontend test update; no SQL, no providers, no LLM, no policy changes)
+Last updated: 2026-05-21 (Stage 8B.1 — Sentiment quality threshold and editorial-context sentinel — PR #396 — `sentiment_quality_threshold_v1.py` new module with explicit quality criteria (freshness+authority+completeness+contradiction); Stage 5J `_classify_sentiment_status()` sub-classifies SUPPRESSED news_sentiment as `editorial_context_present_not_decision_useful` vs `suppressed_data_quality_issue`; EDITORIAL_CONTEXT+THIN stays SUPPRESSED (production behavior unchanged); VENDOR_DERIVED+PARTIAL/COMPLETE path to LIMITED/READY confirmed working for future artifacts; frontend MISSING copy updated to "not yet available"; 36 new backend + 1 frontend test update; no SQL, no providers, no LLM, no policy changes. This does NOT make current yfinance/editorial sentiment decision-useful — it is a conservative quality gate preserving current production suppression.)
 
 ## Purpose
 

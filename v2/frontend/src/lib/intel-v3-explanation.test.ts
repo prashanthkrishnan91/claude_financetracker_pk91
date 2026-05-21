@@ -17,6 +17,8 @@ import {
   buildEvidenceLaneRows,
   buildSafetyDisplay,
   buildPortfolioEvidenceSummary,
+  buildSupportingEvidenceSentences,
+  buildIncompleteEvidenceSentences,
   RAW_KEYS_BANNED,
 } from "./intel-v3-explanation";
 import type { IntelV3EvidenceExplanation, IntelV3HeldCard } from "./api";
@@ -471,5 +473,127 @@ describe("buildPortfolioEvidenceSummary", () => {
     const s = buildPortfolioEvidenceSummary(cards);
     expect(s.fundamentalsUsableCount).toBe(0);
     expect(s.cardsWithExplanation).toBe(2);
+  });
+});
+
+// ── buildSupportingEvidenceSentences ──────────────────────────────────────────
+
+describe("buildSupportingEvidenceSentences", () => {
+  it("READY fundamentals → fundamentals sentence present", () => {
+    const ex = makeExplanation({ primary_evidence_status: "READY" });
+    const sentences = buildSupportingEvidenceSentences(ex);
+    expect(sentences.some(s => s.toLowerCase().includes("fundamentals"))).toBe(true);
+  });
+
+  it("READY technicals → technicals sentence present", () => {
+    const ex = makeExplanation({ technical_signals_status: "READY" });
+    const sentences = buildSupportingEvidenceSentences(ex);
+    expect(sentences.some(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"))).toBe(true);
+  });
+
+  it("READY sentiment → sentiment sentence present", () => {
+    const ex = makeExplanation({ sentiment_status: "READY" });
+    const sentences = buildSupportingEvidenceSentences(ex);
+    expect(sentences.some(s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment"))).toBe(true);
+  });
+
+  it("all MISSING → no supporting sentences", () => {
+    const ex = makeExplanation({
+      primary_evidence_status: "MISSING",
+      technical_signals_status: "MISSING",
+      sentiment_status: "MISSING",
+    });
+    expect(buildSupportingEvidenceSentences(ex)).toHaveLength(0);
+  });
+
+  it("no raw keys in any supporting sentence", () => {
+    const ex = makeExplanation({
+      primary_evidence_status: "READY",
+      technical_signals_status: "LIMITED",
+      sentiment_status: "READY",
+    });
+    buildSupportingEvidenceSentences(ex).forEach(s => assertNoRawKeys(s));
+  });
+});
+
+// ── buildIncompleteEvidenceSentences ──────────────────────────────────────────
+
+describe("buildIncompleteEvidenceSentences", () => {
+  it("all READY → no incomplete sentences", () => {
+    const ex = makeExplanation({
+      primary_evidence_status: "READY",
+      technical_signals_status: "READY",
+      sentiment_status: "READY",
+    });
+    expect(buildIncompleteEvidenceSentences(ex)).toHaveLength(0);
+  });
+
+  it("MISSING technicals → 'not yet available' wording, not 'present but not strong'", () => {
+    const ex = makeExplanation({ technical_signals_status: "MISSING" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeDefined();
+    expect(techSentence).toContain("not yet available");
+    expect(techSentence).not.toContain("not yet strong enough");
+  });
+
+  it("INSUFFICIENT technicals → 'available but not yet strong enough' wording, not 'not yet available'", () => {
+    const ex = makeExplanation({ technical_signals_status: "INSUFFICIENT" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeDefined();
+    expect(techSentence).toContain("not yet strong enough");
+    expect(techSentence).not.toContain("not yet available");
+  });
+
+  it("STALE_OR_UNKNOWN technicals → 'available but not yet strong enough' wording", () => {
+    const ex = makeExplanation({ technical_signals_status: "STALE_OR_UNKNOWN" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeDefined();
+    expect(techSentence).toContain("not yet strong enough");
+  });
+
+  it("SUPPRESSED technicals → blocked wording (quality issues)", () => {
+    const ex = makeExplanation({ technical_signals_status: "SUPPRESSED" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const techSentence = sentences.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"));
+    expect(techSentence).toBeDefined();
+    expect(techSentence).toContain("quality");
+  });
+
+  it("MISSING sentiment → 'thin or not available' wording", () => {
+    const ex = makeExplanation({ sentiment_status: "MISSING" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const sentSentence = sentences.find(s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment"));
+    expect(sentSentence).toBeDefined();
+    expect(sentSentence).not.toContain("not yet strong enough");
+  });
+
+  it("INSUFFICIENT sentiment → 'available but not yet strong enough' wording", () => {
+    const ex = makeExplanation({ sentiment_status: "INSUFFICIENT" });
+    const sentences = buildIncompleteEvidenceSentences(ex);
+    const sentSentence = sentences.find(s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment"));
+    expect(sentSentence).toBeDefined();
+    expect(sentSentence).toContain("not yet strong enough");
+  });
+
+  it("MISSING vs INSUFFICIENT are distinguishable in copy", () => {
+    const missing = buildIncompleteEvidenceSentences(makeExplanation({ technical_signals_status: "MISSING" }));
+    const insufficient = buildIncompleteEvidenceSentences(makeExplanation({ technical_signals_status: "INSUFFICIENT" }));
+    const missingTech = missing.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"))!;
+    const insufficientTech = insufficient.find(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"))!;
+    expect(missingTech).not.toBe(insufficientTech);
+  });
+
+  it("no raw keys in any incomplete sentence", () => {
+    const statuses = ["MISSING", "INSUFFICIENT", "SUPPRESSED", "STALE_OR_UNKNOWN"];
+    for (const status of statuses) {
+      const ex = makeExplanation({
+        technical_signals_status: status,
+        sentiment_status: status,
+      });
+      buildIncompleteEvidenceSentences(ex).forEach(s => assertNoRawKeys(s));
+    }
   });
 });

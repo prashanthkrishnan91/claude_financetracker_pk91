@@ -1086,3 +1086,114 @@ class TestTechnicalsSourceKind:
     def test_news_source_kind_remains_news(self) -> None:
         result = adapt_news_sentiment(_NEWS_ITEMS, "AAPL", _FAKE_AT)
         assert all(s.source_kind == "news" for s in result.sources)
+
+
+# ── Criterion 17: Technicals model version and VENDOR_DERIVED override path ──
+
+class TestTechnicalsModelVersionAndCredibility:
+    """Verifies that the technicals model version is v2 (after the VENDOR_DERIVED
+    override was added) and that the source_credibility_registry correctly grants
+    VENDOR_DERIVED authority to yfinance price history artifacts — enabling
+    BAND_PARTIAL completeness rather than BAND_THIN suppression.
+    """
+
+    def test_technicals_model_version_is_v2(self) -> None:
+        from app.services.intelligence.research_workers.evidence_lane_adapter_v1 import (
+            _TECHNICALS_MODEL_VERSION,
+        )
+        assert _TECHNICALS_MODEL_VERSION == "yfinance_price_history_sync_v2", (
+            "Model version must be v2 to supersede old artifacts that were written "
+            "before the VENDOR_DERIVED override was active."
+        )
+
+    def test_technicals_section_reference_contains_history(self) -> None:
+        # The yfinance price history override in source_credibility_registry_v1 matches
+        # on source_kind="other", provider="yfinance", section_reference contains "history".
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        assert len(result.sources) == 1
+        assert "history" in (result.sources[0].section_reference or "").lower(), (
+            "section_reference must contain 'history' to match the VENDOR_DERIVED override "
+            "in source_credibility_registry_v1."
+        )
+
+    def test_technicals_source_credibility_grants_vendor_derived(self) -> None:
+        from app.services.intelligence.v3.source_credibility_registry_v1 import (
+            assess_artifact_sources,
+            AuthorityLevel,
+        )
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        assessment = assess_artifact_sources(result.sources)
+        assert assessment.strongest_authority_level == AuthorityLevel.VENDOR_DERIVED.value, (
+            "Technicals sources must receive VENDOR_DERIVED authority so they are not "
+            "capped at BAND_THIN and can become USABLE_WITH_LIMITATIONS."
+        )
+        assert not assessment.is_insufficient, (
+            "Technicals credibility must not be flagged as insufficient when yfinance "
+            "price history sources are present."
+        )
+
+    def test_technicals_completeness_is_partial_not_thin(self) -> None:
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import score_evidence_completeness
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        credibility = assess_artifact_sources(result.sources)
+        contradiction = detect_contradictions(result.facts)
+        completeness = score_evidence_completeness(
+            sources=result.sources,
+            facts=result.facts,
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        assert completeness.completeness_band == "PARTIAL", (
+            "Technicals with rich price data must be PARTIAL completeness (not THIN), "
+            "enabling USABLE_WITH_LIMITATIONS usability label."
+        )
+
+    def test_technicals_usability_is_usable_with_limitations(self) -> None:
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import score_evidence_completeness
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import assess_artifact_usability
+        result = adapt_technicals(_TECHNICALS_RAW, "AAPL", _FAKE_AT)
+        credibility = assess_artifact_sources(result.sources)
+        contradiction = detect_contradictions(result.facts)
+        completeness = score_evidence_completeness(
+            sources=result.sources,
+            facts=result.facts,
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        usability = assess_artifact_usability(credibility, contradiction, completeness)
+        assert usability.usability_label == "USABLE_WITH_LIMITATIONS", (
+            "Technicals must be USABLE_WITH_LIMITATIONS so Stage 5J reads them as "
+            "STATUS_LIMITED (is_usable=True) and they contribute to the decision."
+        )
+        assert usability.is_usable, (
+            "Technicals must be marked is_usable=True to contribute to governance."
+        )
+
+    def test_news_sentiment_remains_suppressed_thin(self) -> None:
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import score_evidence_completeness
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import assess_artifact_usability
+        result = adapt_news_sentiment(_NEWS_ITEMS, "AAPL", _FAKE_AT)
+        credibility = assess_artifact_sources(result.sources)
+        contradiction = detect_contradictions(result.facts)
+        completeness = score_evidence_completeness(
+            sources=result.sources,
+            facts=result.facts,
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        usability = assess_artifact_usability(credibility, contradiction, completeness)
+        # News/editorial sources are intentionally conservative: EDITORIAL_CONTEXT → THIN → SUPPRESSED_INCOMPLETE.
+        assert completeness.completeness_band == "THIN", (
+            "News sentiment must remain THIN completeness — editorial-only sources "
+            "should not gain decision-useful status without higher-authority corroboration."
+        )
+        assert not usability.is_usable, (
+            "News sentiment must not be marked usable — headline-only evidence without "
+            "sentiment scoring stays suppressed to prevent overconfidence."
+        )

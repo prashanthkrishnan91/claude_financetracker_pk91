@@ -398,6 +398,34 @@ class TestAdaptSecCatalystSentiment:
                     f"Forbidden key '{key}' found in FactRecord payload"
                 )
 
+    def test_fact_kind_is_schema_valid_catalyst_item(self):
+        """SEC catalyst facts must use fact_kind='catalyst_item' (schema CHECK constraint).
+
+        fact_kind='sec_catalyst_event' violates research_artifact_facts_fact_kind_check.
+        """
+        _SCHEMA_VALID_FACT_KINDS = {
+            "metric_observation", "risk_item", "catalyst_item", "thesis_pillar",
+            "sourced_claim", "event", "peer_context", "quality_observation", "revision_note",
+        }
+        result = adapt_sec_catalyst_sentiment(
+            ticker="MSFT",
+            provider_result=_FakeSecEdgarProviderResult(
+                ticker="MSFT",
+                cik="0000789019",
+                filings=[_recent_10k(), _recent_10q(), _recent_8k()],
+            ),
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+        assert result.has_material_filings is True
+        for fact in result.facts:
+            assert fact.fact_kind in _SCHEMA_VALID_FACT_KINDS, (
+                f"fact_kind='{fact.fact_kind}' is not in DB CHECK constraint allowed list"
+            )
+            assert fact.fact_kind == "catalyst_item", (
+                f"SEC catalyst facts must use fact_kind='catalyst_item', got '{fact.fact_kind}'"
+            )
+            assert fact.axis_hint == "catalyst"
+
     def test_idempotency_same_accessions_same_fingerprint(self):
         provider = _FakeSecEdgarProviderResult(
             ticker="AAPL",

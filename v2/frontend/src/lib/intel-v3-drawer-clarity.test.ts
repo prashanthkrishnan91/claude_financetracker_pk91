@@ -470,6 +470,131 @@ describe("Stage 7C: synthetic evidence_explanation (governance_inactive)", () =>
   });
 });
 
+// ── Stage 8A.3 — Post-lane republish payload contract ────────────────────────
+// Production shape after MSFT technicals complete FRESH (USABLE_WITH_LIMITATIONS):
+//   technical_signals_status = "LIMITED"
+//   sentiment_status = "SUPPRESSED"
+// These tests prove the clean Stage 7/8 drawer renders correctly for this shape.
+
+describe("Stage 8A.3: post-lane republish payload → clean drawer (LIMITED technicals)", () => {
+  const postLaneEx: import("./api").IntelV3EvidenceExplanation = {
+    primary_evidence_status: "LIMITED",
+    technical_signals_status: "LIMITED",   // USABLE_WITH_LIMITATIONS after lane completion
+    sentiment_status: "SUPPRESSED",        // thin/suppressed remains not usable
+    conviction_cap_applied: true,
+    conviction_cap_reason: "ok_cap_medium",
+    safe_for_visible_decision: true,
+    safe_for_visible_decision_reason: "limited_fundamentals_partial_tech",
+    governance_priority: "governance_inactive",
+    corroboration_gap: true,
+    action_blocks: [],
+  };
+
+  it("technical_signals_status=LIMITED appears in supporting sentences", () => {
+    const sentences = buildSupportingEvidenceSentences(postLaneEx);
+    const techSentence = sentences.find(
+      s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price")
+    );
+    expect(techSentence).toBeDefined();
+    expect(sentences.length).toBeGreaterThan(0);
+  });
+
+  it("LIMITED technicals uses 'Some market' language (partial, not full)", () => {
+    const sentences = buildSupportingEvidenceSentences(postLaneEx);
+    const techSentence = sentences.find(
+      s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price")
+    );
+    expect(techSentence).toBeDefined();
+    expect(techSentence!.toLowerCase()).toMatch(/some|partial|available/);
+  });
+
+  it("SUPPRESSED sentiment does NOT appear in supporting sentences", () => {
+    const sentences = buildSupportingEvidenceSentences(postLaneEx);
+    const sentSentence = sentences.find(
+      s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment")
+    );
+    expect(sentSentence).toBeUndefined();
+  });
+
+  it("SUPPRESSED sentiment appears in incomplete sentences", () => {
+    const sentences = buildIncompleteEvidenceSentences(postLaneEx);
+    const sentSentence = sentences.find(
+      s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment")
+    );
+    expect(sentSentence).toBeDefined();
+  });
+
+  it("supporting and incomplete do not overlap for post-lane payload", () => {
+    const supporting = buildSupportingEvidenceSentences(postLaneEx);
+    const incomplete = buildIncompleteEvidenceSentences(postLaneEx);
+    const supportingSet = new Set(supporting.map(s => s.toLowerCase().trim()));
+    for (const s of incomplete) {
+      expect(supportingSet.has(s.toLowerCase().trim())).toBe(false);
+    }
+  });
+
+  it("no raw metric keys in post-lane supporting sentences", () => {
+    for (const s of buildSupportingEvidenceSentences(postLaneEx)) assertNoRawKeys(s);
+  });
+
+  it("no raw metric keys in post-lane incomplete sentences", () => {
+    for (const s of buildIncompleteEvidenceSentences(postLaneEx)) assertNoRawKeys(s);
+  });
+
+  it("no legacy placeholder text in any output", () => {
+    const allTexts = [
+      ...buildSupportingEvidenceSentences(postLaneEx),
+      ...buildIncompleteEvidenceSentences(postLaneEx),
+      buildWhyActionExplanation("HOLD", postLaneEx),
+    ];
+    // Stale placeholder patterns (section-title-style or preparation markers)
+    const legacyPhrases = [
+      "intelligence module is being prepared",
+      "intelligence modules in preparation",
+      "will appear here once",
+    ];
+    for (const text of allTexts) {
+      for (const phrase of legacyPhrases) {
+        expect(text.toLowerCase()).not.toContain(phrase.toLowerCase());
+      }
+      assertNoComingLaterCaption(text);
+      assertNoStaleGovernancePlaceholder(text);
+    }
+  });
+
+  it("safety display for post-lane LIMITED+tech LIMITED is limited tier (not blocked)", () => {
+    const d = buildSafetyDisplay(postLaneEx);
+    expect(d.tier).toBe("limited");
+  });
+});
+
+// ── Stage 8A.3 — null evidence_explanation compact fallback ──────────────────
+
+describe("Stage 8A.3: null evidence_explanation → no legacy repeated sections", () => {
+  // When evidence_explanation is null, the drawer falls back to compact honest text.
+  // Verify the helper outputs (used by the fallback path) don't produce legacy content.
+
+  it("buildWhyActionExplanation(HOLD, null) returns compact text, no legacy placeholder phrases", () => {
+    const text = buildWhyActionExplanation("HOLD", null);
+    const legacyPhrases = [
+      "intelligence module",
+      "will appear here once",
+    ];
+    for (const phrase of legacyPhrases) {
+      expect(text.toLowerCase()).not.toContain(phrase.toLowerCase());
+    }
+    expect(text.length).toBeGreaterThan(0);
+  });
+
+  it("buildWhyActionExplanation does not return COMING_LATER_CANONICAL_CAPTION", () => {
+    const { COMING_LATER_CANONICAL_CAPTION } = require("../components/cards/IntelV3PrimitivesData");
+    for (const action of ["BUY", "HOLD", "TRIM", "SELL"]) {
+      const text = buildWhyActionExplanation(action, null);
+      expect(text).not.toContain(COMING_LATER_CANONICAL_CAPTION);
+    }
+  });
+});
+
 // ── Action label safety (no WATCH/AVOID) ─────────────────────────────────────
 
 describe("action label safety", () => {

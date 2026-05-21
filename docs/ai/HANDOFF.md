@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 1 — Sentiment Event v2 provider-agnostic adapter — `sentiment_event_adapter_v2.py` new module. Provider-agnostic contract/adapter accepting future SEC/company catalyst or vendor-derived sentiment inputs. Normalizes inputs into existing research artifact structures, enforces Stage 8B.1 quality gate, adds editorial-promotion guard, ticker_match_confidence cap, catalyst_category/materiality/ticker_match normalization, dedupe key generation, ineligible-asset guard (crypto/ETF). 76 new backend tests. No SQL, no providers, no LLM, no UI, no policy changes, no new DB columns. Stage 8B.1 quality gate unchanged. Previous: Stage 8B.1 — `sentiment_quality_threshold_v1.py` explicit quality gate; Stage 5J editorial-context sentinel sub-reason.)
+Last updated: 2026-05-21 (Stage 8C PR 2 — SEC/company catalyst sentiment evidence lane — `sec_catalyst_sentiment_adapter_v1.py` new module. Flag-gated (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF) SEC EDGAR filing metadata → `sentiment_event` artifacts via `sentiment_event_adapter_v2.py`. PRIMARY_AUTHORITY source, no polarity, no SQL, no LLM. Stage 5J updated with `sec_catalyst_sentiment` lane. 49 new backend tests. PR #398 open. Previous: Stage 8C PR 1 — `sentiment_event_adapter_v2.py` provider-agnostic adapter.)
 
 ## Purpose
 
@@ -54,23 +54,26 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8C PR 1 — Sentiment Event v2 Provider-Agnostic Adapter (current PR)
+## Stage 8C PR 2 — SEC Catalyst Sentiment Evidence Lane (current PR)
 
-**Before:** Stage 8B.1 had an explicit quality gate, but no normalized v2 artifact contract for future SEC/company catalyst or vendor sentiment sources.
+**Before:** `sentiment_event_adapter_v2.py` existed but no real free source produced LIMITED/READY sentiment artifacts.
 
-**After:** `sentiment_event_adapter_v2.py` (new) — provider-agnostic adapter that classifies synthetic SEC/company and vendor sentiment inputs into NOT_USABLE/LIMITED/READY/INELIGIBLE without adding a provider or changing decisions.
+**After:** Flag-gated SEC/company catalyst evidence lane (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF). Writes honest `COMPANY_AUTHORED`/`PRIMARY_AUTHORITY` `sentiment_event` artifacts from SEC EDGAR filing metadata (10-K, 10-Q, 8-K). `sec_catalyst_sentiment` lane added to Stage 5J registry.
 
 **Key components:**
-- `SentimentEventV2Input` — frozen input contract (ticker, event_id, source_authority, source_kind, provider_name, freshness, source_count, fact_count, completeness_band, sentiment_polarity, catalyst_category_raw, materiality_raw, ticker_match_confidence_raw, source_url, holding_context).
-- `SentimentEventV2Output` — normalized output with decision_usefulness_tier, effective_source_authority, catalyst_category, materiality, ticker_match_confidence, is_polarity_present, dedupe_key, failure_reasons, structured_payload.
-- `normalize_catalyst_category()` / `normalize_materiality()` / `normalize_ticker_match_confidence()` — deterministic normalization helpers.
-- `generate_dedupe_key()` — deterministic SHA-256 dedupe key from ticker+event_id+authority+provider+freshness.
-- `normalize_and_evaluate()` — main adapter: ineligibility check → editorial guard → normalize → dedupe → quality gate (Stage 8B.1) → ticker_match cap → output.
-- Editorial promotion guard: source_kind="news" or provider_name="yfinance" caps effective_source_authority to EDITORIAL_CONTEXT regardless of claimed value.
-- Ticker_match_confidence cap: MEDIUM → LIMITED max; LOW/UNKNOWN → NOT_USABLE.
-- Safe URL filter: only sec_filing/company_disclosure/vendor_/press_release source_kinds may include source_url.
+- `sec_catalyst_sentiment_adapter_v1.py` — pure adapter: `SecEdgarProviderResult` → `WorkerOutput` with `artifact_type=sentiment_event`, `skill_pack=sec_catalyst_sentiment_evidence_v1`. Deterministic form_type→category/materiality/freshness mapping. No polarity.
+- `_FORM_ATTRIBUTES` map — 10-K → earnings/HIGH/COMPLETE/180d, 10-Q → earnings/MEDIUM/PARTIAL/90d, 8-K → corporate_action/HIGH/PARTIAL/30d.
+- `run_sec_catalyst_sentiment_evidence()` — runner in `evidence_lane_runner_v1.py`, reusing existing `sec_edgar_provider`. Equity-only guard via `classify_sec_metric_candidate`. Structured logs: `sentiment_catalyst_evidence_start`, `sentiment_catalyst_evidence_complete`, `sentiment_catalyst_evidence_skipped`.
+- `LANE_SEC_CATALYST_SENTIMENT` — added to `TICKER_LANE_REGISTRY` in `research_evidence_coverage_read_model_v1.py`.
+- Config: `intel_v3_sentiment_catalyst_evidence_enabled: bool = False`.
 
-**Tests:** 76 new backend tests in `test_stage8c_sentiment_event_adapter_v2.py`. No SQL, no providers, no LLM, no UI, no new DB columns. Stage 8B.1 threshold unchanged.
+**Tests:** 49 new tests in `test_stage8c2_sec_catalyst_sentiment.py`. Existing 333 related tests pass. No SQL, no LLM, no new paid provider, no UI, no policy changes.
+
+**Runtime validation:** After enabling flag in Railway, look for `sentiment_catalyst_evidence_complete` log key. Do not claim production success until at least one real eligible equity artifact or an honest all-skipped result appears in logs.
+
+## Stage 8C PR 1 — Sentiment Event v2 Provider-Agnostic Adapter (merged)
+
+`sentiment_event_adapter_v2.py` — provider-agnostic adapter normalizing SEC/company catalyst or vendor inputs into NOT_USABLE/LIMITED/READY/INELIGIBLE without adding a provider or changing decisions. Editorial promotion guard, ticker_match_confidence cap, catalyst_category/materiality/ticker_match normalization, dedupe key, ineligible-asset guard (crypto/ETF), safe URL filter. 76 new backend tests.
 
 ## Stage 8B — Sentiment Evidence Quality Threshold (merged PR #396)
 

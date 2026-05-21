@@ -60,7 +60,11 @@ from app.services.intelligence.v3.sentiment_event_adapter_v2 import (
 
 SEC_CATALYST_SKILL_PACK = "sec_catalyst_sentiment_evidence_v1"
 SEC_CATALYST_ARTIFACT_TYPE = "sentiment_event"
-SEC_CATALYST_MODEL_VERSION = "sec_catalyst_sentiment_adapter.v1"
+# v2: bumped after PR #400 added claim_key+text_value to catalyst_item facts so
+# the Stage 5D comparable_fact_count > 0 requirement is met. Old v1 artifacts
+# would be idempotency-skipped (same source_refs_fingerprint) and re-used even
+# though their payload pre-dates the fix; bumping the version breaks that reuse.
+SEC_CATALYST_MODEL_VERSION = "sec_catalyst_sentiment_adapter.v2"
 _SCOPE_KIND = "ticker"
 
 # ── Form-type deterministic attribute map ─────────────────────────────────────

@@ -1361,3 +1361,373 @@ class TestStage5KSentimentAxis:
             assert out.decision_usefulness_tier == DECISION_USEFULNESS_INELIGIBLE, (
                 f"{ticker} must be INELIGIBLE, got {out.decision_usefulness_tier}"
             )
+
+
+# ── Stage 8C PR 2.3 — idempotency version bump and lane isolation tests ───────
+
+class TestModelVersionBumpPreventsPrePR400Reuse:
+    """SEC_CATALYST_MODEL_VERSION was bumped to .v2 after PR #400 added claim_key+text_value.
+
+    Proves that old v1 artifacts (pre-PR400, scored THIN/SUPPRESSED_INCOMPLETE because
+    they lacked comparable facts) cannot be idempotency-reused when the same source
+    fingerprint is encountered again.
+    """
+
+    def test_model_version_is_v2(self):
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_MODEL_VERSION,
+        )
+        assert SEC_CATALYST_MODEL_VERSION == "sec_catalyst_sentiment_adapter.v2", (
+            "SEC_CATALYST_MODEL_VERSION must be .v2 after PR #400 claim_key+text_value fix. "
+            "Old .v1 artifacts would be idempotency-reused (THIN/SUPPRESSED_INCOMPLETE). "
+            f"Got: {SEC_CATALYST_MODEL_VERSION}"
+        )
+
+    def test_v1_and_v2_produce_different_idempotency_keys(self):
+        """Same source fingerprint + different model version → different replay key."""
+        from app.services.intelligence.research_workers.contracts import (
+            compute_replay_idempotency_key,
+        )
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK,
+        )
+        fingerprint = "abc123def456"
+        key_v1 = compute_replay_idempotency_key(
+            skill_pack=SEC_CATALYST_SKILL_PACK,
+            scope_kind="ticker",
+            ticker="CRM",
+            source_refs_fingerprint=fingerprint,
+            model_version="sec_catalyst_sentiment_adapter.v1",
+        )
+        key_v2 = compute_replay_idempotency_key(
+            skill_pack=SEC_CATALYST_SKILL_PACK,
+            scope_kind="ticker",
+            ticker="CRM",
+            source_refs_fingerprint=fingerprint,
+            model_version="sec_catalyst_sentiment_adapter.v2",
+        )
+        assert key_v1 != key_v2, (
+            "v1 and v2 must produce different idempotency keys so old v1 "
+            "artifacts are not reused when source files haven't changed."
+        )
+
+    def test_current_worker_output_uses_v2_model_version(self):
+        wi = _make_worker_input("CRM")
+        provider = _FakeSecEdgarProviderResult(
+            ticker="CRM", cik="0001108524", filings=[_recent_10k()]
+        )
+        output = build_sec_catalyst_sentiment_worker_output(wi, provider, "2024-01-01T00:00:00Z")
+        assert output is not None
+        assert output.model_version == "sec_catalyst_sentiment_adapter.v2", (
+            f"WorkerOutput model_version must be .v2, got {output.model_version}"
+        )
+
+    def test_current_idempotency_key_differs_from_hypothetical_v1_key(self):
+        """The current write's idempotency key must not match a pre-PR400 .v1 artifact."""
+        from app.services.intelligence.research_workers.contracts import (
+            compute_replay_idempotency_key,
+        )
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK,
+        )
+        wi = _make_worker_input("CRM")
+        provider = _FakeSecEdgarProviderResult(
+            ticker="CRM", cik="0001108524", filings=[_recent_10k()]
+        )
+        output = build_sec_catalyst_sentiment_worker_output(wi, provider, "2024-01-01T00:00:00Z")
+        assert output is not None
+
+        # Simulate what a pre-PR400 .v1 artifact's key would have been
+        pre_pr400_key = compute_replay_idempotency_key(
+            skill_pack=SEC_CATALYST_SKILL_PACK,
+            scope_kind="ticker",
+            ticker="CRM",
+            source_refs_fingerprint=output.sources[0].source_id or "noop",
+            model_version="sec_catalyst_sentiment_adapter.v1",
+        )
+        assert output.replay_idempotency_key != pre_pr400_key, (
+            "Current write key must differ from pre-PR400 v1 key so the artifact "
+            "service does not idempotency-skip to the old artifact."
+        )
+
+
+class TestLaneIsolationNewsVsCatalyst:
+    """news_sentiment and sec_catalyst_sentiment must not deactivate each other.
+
+    Both share artifact_type=sentiment_event, but _deactivate_superseded() filters
+    on (user_id, artifact_type, skill_pack, scope_kind, ticker), so different
+    skill_packs are already isolated. These tests confirm the lane identity contract.
+    """
+
+    def test_skill_packs_are_distinct(self):
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK,
+        )
+        NEWS_SENTIMENT_SKILL_PACK = "news_sentiment_evidence_v1"
+        assert SEC_CATALYST_SKILL_PACK != NEWS_SENTIMENT_SKILL_PACK, (
+            "The two lanes must have distinct skill_packs so clean replacement "
+            "does not deactivate across lanes."
+        )
+
+    def test_idempotency_keys_are_distinct_across_lanes(self):
+        """Same ticker + same accession numbers → different keys for different lanes."""
+        from app.services.intelligence.research_workers.contracts import (
+            compute_replay_idempotency_key,
+        )
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK, SEC_CATALYST_MODEL_VERSION,
+        )
+        fingerprint = "deadbeef12345678"
+        catalyst_key = compute_replay_idempotency_key(
+            skill_pack=SEC_CATALYST_SKILL_PACK,
+            scope_kind="ticker",
+            ticker="AAPL",
+            source_refs_fingerprint=fingerprint,
+            model_version=SEC_CATALYST_MODEL_VERSION,
+        )
+        news_key = compute_replay_idempotency_key(
+            skill_pack="news_sentiment_evidence_v1",
+            scope_kind="ticker",
+            ticker="AAPL",
+            source_refs_fingerprint=fingerprint,
+            model_version="news_sentiment_evidence.v1",
+        )
+        assert catalyst_key != news_key, (
+            "Different skill_packs must produce different idempotency keys."
+        )
+
+    def test_clean_replacement_scope_excludes_news_sentiment(self):
+        """_deactivate_superseded for sec_catalyst lane must not touch news_sentiment rows."""
+        from app.services.intelligence.v3.research_artifact_service_v1 import (
+            ResearchArtifactServiceV1,
+        )
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK,
+        )
+
+        executed_queries: list[dict] = []
+
+        class _FakeTable:
+            def __init__(self, name: str):
+                self._name = name
+                self._filters: dict = {}
+                self._is_update = False
+
+            def select(self, *a, **k): return self
+            def update(self, data: dict):
+                self._is_update = True
+                return self
+            def eq(self, col, val):
+                self._filters[col] = val
+                return self
+            def neq(self, col, val):
+                self._filters[f"neq:{col}"] = val
+                return self
+            def is_(self, col, val):
+                self._filters[f"is:{col}"] = val
+                return self
+            def limit(self, n): return self
+            def order(self, *a, **k): return self
+            def execute(self):
+                if self._is_update:
+                    executed_queries.append({"table": self._name, "filters": dict(self._filters)})
+
+                class _R:
+                    data = []
+                return _R()
+
+        class _FakeClient:
+            def table(self, name): return _FakeTable(name)
+
+        svc = ResearchArtifactServiceV1(_FakeClient(), "user1")
+        # Call _deactivate_superseded for sec_catalyst lane
+        svc._deactivate_superseded(
+            artifact_type="sentiment_event",
+            skill_pack=SEC_CATALYST_SKILL_PACK,
+            scope_kind="ticker",
+            ticker="AAPL",
+            new_idempotency_key="newkey123",
+        )
+
+        # Verify skill_pack filter is sec_catalyst, NOT news_sentiment
+        assert len(executed_queries) == 1
+        filters = executed_queries[0]["filters"]
+        assert filters.get("skill_pack") == SEC_CATALYST_SKILL_PACK, (
+            "Clean replacement must scope to sec_catalyst skill_pack only. "
+            f"Filters captured: {filters}"
+        )
+        assert filters.get("skill_pack") != "news_sentiment_evidence_v1", (
+            "Clean replacement must not touch news_sentiment lane"
+        )
+        assert filters.get("artifact_type") == "sentiment_event"
+        assert filters.get("ticker") == "AAPL"
+
+    def test_lane_registry_has_distinct_skill_packs_for_sentiment_lanes(self):
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            TICKER_LANE_REGISTRY,
+            LANE_NEWS_SENTIMENT,
+            LANE_SEC_CATALYST_SENTIMENT,
+        )
+        sentiment_lanes = {
+            name: skill_pack
+            for name, atype, skill_pack in TICKER_LANE_REGISTRY
+            if atype == "sentiment_event"
+        }
+        assert LANE_NEWS_SENTIMENT in sentiment_lanes
+        assert LANE_SEC_CATALYST_SENTIMENT in sentiment_lanes
+        assert sentiment_lanes[LANE_NEWS_SENTIMENT] != sentiment_lanes[LANE_SEC_CATALYST_SENTIMENT], (
+            "Both sentiment lanes share artifact_type but must have distinct skill_packs "
+            "so Stage 5A clean replacement doesn't cross-contaminate them."
+        )
+
+
+class TestArtifactServiceWriteOkLogContainsLaneFields:
+    """The research_artifact_service_write_ok log must include skill_pack and model_version
+    so logs from news_sentiment and sec_catalyst_sentiment are distinguishable.
+    """
+
+    def test_write_ok_log_includes_skill_pack(self):
+        """Smoke-test: write an artifact and confirm skill_pack appears in the write path."""
+        import logging
+        import io
+        from app.services.intelligence.v3.research_artifact_service_v1 import (
+            ResearchArtifactServiceV1,
+        )
+        from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+            SEC_CATALYST_SKILL_PACK, SEC_CATALYST_MODEL_VERSION,
+        )
+        from app.services.intelligence.research_workers.contracts import (
+            WorkerOutput, SourceRecord, FactRecord, AuditEventRecord,
+            compute_replay_idempotency_key, compute_input_fingerprint,
+        )
+
+        log_stream = io.StringIO()
+        handler = logging.StreamHandler(log_stream)
+        handler.setLevel(logging.INFO)
+        svc_logger = logging.getLogger(
+            "app.services.intelligence.v3.research_artifact_service_v1"
+        )
+        svc_logger.addHandler(handler)
+        original_level = svc_logger.level
+        svc_logger.setLevel(logging.INFO)
+
+        try:
+            class _FakeTable:
+                def select(self, *a, **k): return self
+                def update(self, *a, **k): return self
+                def insert(self, *a, **k): return self
+                def eq(self, *a, **k): return self
+                def neq(self, *a, **k): return self
+                def is_(self, *a, **k): return self
+                def limit(self, n): return self
+                def order(self, *a, **k): return self
+                def execute(self):
+                    class _R:
+                        data = [{"id": "artifact-uuid-001"}]
+                    return _R()
+
+            class _FakeTableNoMatch:
+                def select(self, *a, **k): return self
+                def update(self, *a, **k): return self
+                def insert(self, *a, **k): return self
+                def eq(self, *a, **k): return self
+                def neq(self, *a, **k): return self
+                def is_(self, *a, **k): return self
+                def limit(self, n): return self
+                def order(self, *a, **k): return self
+                def execute(self):
+                    class _R:
+                        data = []
+                    return _R()
+
+            call_seq = [0]
+
+            class _FakeClient:
+                def table(self, name):
+                    call_seq[0] += 1
+                    # First call: idempotency check → no match
+                    # Subsequent calls: deactivate (empty) + insert → returns row
+                    if call_seq[0] <= 1:
+                        return _FakeTableNoMatch()
+                    return _FakeTable()
+
+            fingerprint = "test_fingerprint_001"
+            source = SourceRecord(
+                source_kind="sec_filing",
+                provider_name="sec_edgar",
+                provider_version=SEC_CATALYST_MODEL_VERSION,
+                source_id="0001234000-24-TEST001",
+                source_published_at="2024-01-01",
+            )
+            fact = FactRecord(
+                fact_kind="catalyst_item",
+                structured_payload={
+                    "claim_key": "catalyst_event_type",
+                    "text_value": "earnings",
+                    "decision_usefulness_tier": "LIMITED",
+                    "source_authority": "PRIMARY_AUTHORITY",
+                    "freshness_status": "FRESH",
+                    "source_count": 1,
+                    "fact_count": 1,
+                    "is_contradicted": False,
+                    "completeness_band": "PARTIAL",
+                    "sentiment_polarity": None,
+                    "is_polarity_present": False,
+                    "catalyst_category": "earnings",
+                    "materiality": "MEDIUM",
+                    "ticker_match_confidence": "HIGH",
+                    "failure_reasons": [],
+                    "provider_name": "sec_edgar",
+                    "source_kind": "sec_filing",
+                    "event_published_at": "2024-01-01",
+                    "adapter_version": "sentiment_event_adapter.v2",
+                    "ticker": "CRM",
+                    "event_id": "CRM:0001234000-24-TEST001",
+                    "source_url": None,
+                },
+                axis_hint="catalyst",
+                period="2023-12-31",
+                as_of="2024-01-01",
+            )
+            replay_key = compute_replay_idempotency_key(
+                skill_pack=SEC_CATALYST_SKILL_PACK,
+                scope_kind="ticker",
+                ticker="CRM",
+                source_refs_fingerprint=fingerprint,
+                model_version=SEC_CATALYST_MODEL_VERSION,
+            )
+            output = WorkerOutput(
+                worker_run_id="run-001",
+                ticker="CRM",
+                artifact_type="sentiment_event",
+                skill_pack=SEC_CATALYST_SKILL_PACK,
+                scope_kind="ticker",
+                artifact_payload={"lane": SEC_CATALYST_SKILL_PACK, "reviewed_ticker": "CRM"},
+                sources=[source],
+                facts=[fact],
+                audit_events=[],
+                evidence_summary_plain_english="Test",
+                limitations_or_missing_evidence=[],
+                confidence_or_trust_level="HIGH",
+                freshness_status="FRESH",
+                input_fingerprint=compute_input_fingerprint({"test": True}),
+                replay_idempotency_key=replay_key,
+                model_version=SEC_CATALYST_MODEL_VERSION,
+            )
+
+            svc = ResearchArtifactServiceV1(_FakeClient(), "user1")
+            svc.write_artifact(output)
+
+            log_output = log_stream.getvalue()
+            assert "skill_pack=sec_catalyst_sentiment_evidence_v1" in log_output, (
+                "research_artifact_service_write_ok log must include skill_pack "
+                f"to distinguish lanes. Log output:\n{log_output}"
+            )
+            assert "model_version=sec_catalyst_sentiment_adapter.v2" in log_output, (
+                "research_artifact_service_write_ok log must include model_version "
+                "to detect idempotency reuse of old v1 artifacts. "
+                f"Log output:\n{log_output}"
+            )
+        finally:
+            svc_logger.removeHandler(handler)
+            svc_logger.setLevel(original_level)

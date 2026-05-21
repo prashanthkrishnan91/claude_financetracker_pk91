@@ -169,9 +169,12 @@ class ResearchArtifactServiceV1:
             existing_id = self._find_active_by_idempotency_key(output.replay_idempotency_key)
             if existing_id is not None:
                 logger.info(
-                    "research_artifact_service_idempotency_skip ticker=%s type=%s key=%s existing_id=%s",
+                    "research_artifact_service_idempotency_skip ticker=%s type=%s "
+                    "skill_pack=%s model_version=%s key=%s existing_id=%s",
                     output.ticker,
                     output.artifact_type,
+                    output.skill_pack,
+                    output.model_version or "none",
                     output.replay_idempotency_key,
                     existing_id,
                 )
@@ -241,13 +244,16 @@ class ResearchArtifactServiceV1:
             artifact_id = self._writer.write(output)
             if artifact_id:
                 logger.info(
-                    "research_artifact_service_write_ok ticker=%s type=%s artifact_id=%s "
+                    "research_artifact_service_write_ok ticker=%s type=%s skill_pack=%s "
+                    "model_version=%s artifact_id=%s "
                     "credibility_strongest=%s is_insufficient=%s "
                     "contradiction_evaluable=%s has_contradictions=%s contradiction_count=%d "
                     "completeness_band=%s completeness_evaluable=%s "
                     "usability_label=%s is_usable=%s",
                     output.ticker,
                     output.artifact_type,
+                    output.skill_pack,
+                    output.model_version or "none",
                     artifact_id,
                     credibility.strongest_authority_level,
                     credibility.is_insufficient,
@@ -371,9 +377,11 @@ class ResearchArtifactServiceV1:
         if deactivated > 0:
             logger.info(
                 "research_artifact_service_clean_replacement ticker=%s type=%s "
-                "deactivated_count=%d new_key=%s",
+                "skill_pack=%s scope_kind=%s deactivated_count=%d new_key=%s",
                 ticker,
                 artifact_type,
+                skill_pack,
+                scope_kind,
                 deactivated,
                 new_idempotency_key,
             )

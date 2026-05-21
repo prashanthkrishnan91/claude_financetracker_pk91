@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8B.1 — Sentiment quality threshold and editorial-context sentinel — PR #396 — `sentiment_quality_threshold_v1.py` new module with explicit quality criteria (freshness+authority+completeness+contradiction); Stage 5J `_classify_sentiment_status()` sub-classifies SUPPRESSED news_sentiment as `editorial_context_present_not_decision_useful` vs `suppressed_data_quality_issue`; EDITORIAL_CONTEXT+THIN stays SUPPRESSED (production behavior unchanged); VENDOR_DERIVED+PARTIAL/COMPLETE path to LIMITED/READY confirmed working for future artifacts; frontend MISSING copy updated to "not yet available"; 36 new backend + 1 frontend test update; no SQL, no providers, no LLM, no policy changes. This does NOT make current yfinance/editorial sentiment decision-useful — it is a conservative quality gate preserving current production suppression.)
+Last updated: 2026-05-21 (Stage 8C PR 1 — Sentiment Event v2 provider-agnostic adapter — `sentiment_event_adapter_v2.py` new module. Provider-agnostic contract/adapter accepting future SEC/company catalyst or vendor-derived sentiment inputs. Normalizes inputs into existing research artifact structures, enforces Stage 8B.1 quality gate, adds editorial-promotion guard, ticker_match_confidence cap, catalyst_category/materiality/ticker_match normalization, dedupe key generation, ineligible-asset guard (crypto/ETF). 76 new backend tests. No SQL, no providers, no LLM, no UI, no policy changes, no new DB columns. Stage 8B.1 quality gate unchanged. Previous: Stage 8B.1 — `sentiment_quality_threshold_v1.py` explicit quality gate; Stage 5J editorial-context sentinel sub-reason.)
 
 ## Purpose
 
@@ -54,7 +54,25 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8B — Sentiment Evidence Quality Threshold (current PR)
+## Stage 8C PR 1 — Sentiment Event v2 Provider-Agnostic Adapter (current PR)
+
+**Before:** Stage 8B.1 had an explicit quality gate, but no normalized v2 artifact contract for future SEC/company catalyst or vendor sentiment sources.
+
+**After:** `sentiment_event_adapter_v2.py` (new) — provider-agnostic adapter that classifies synthetic SEC/company and vendor sentiment inputs into NOT_USABLE/LIMITED/READY/INELIGIBLE without adding a provider or changing decisions.
+
+**Key components:**
+- `SentimentEventV2Input` — frozen input contract (ticker, event_id, source_authority, source_kind, provider_name, freshness, source_count, fact_count, completeness_band, sentiment_polarity, catalyst_category_raw, materiality_raw, ticker_match_confidence_raw, source_url, holding_context).
+- `SentimentEventV2Output` — normalized output with decision_usefulness_tier, effective_source_authority, catalyst_category, materiality, ticker_match_confidence, is_polarity_present, dedupe_key, failure_reasons, structured_payload.
+- `normalize_catalyst_category()` / `normalize_materiality()` / `normalize_ticker_match_confidence()` — deterministic normalization helpers.
+- `generate_dedupe_key()` — deterministic SHA-256 dedupe key from ticker+event_id+authority+provider+freshness.
+- `normalize_and_evaluate()` — main adapter: ineligibility check → editorial guard → normalize → dedupe → quality gate (Stage 8B.1) → ticker_match cap → output.
+- Editorial promotion guard: source_kind="news" or provider_name="yfinance" caps effective_source_authority to EDITORIAL_CONTEXT regardless of claimed value.
+- Ticker_match_confidence cap: MEDIUM → LIMITED max; LOW/UNKNOWN → NOT_USABLE.
+- Safe URL filter: only sec_filing/company_disclosure/vendor_/press_release source_kinds may include source_url.
+
+**Tests:** 76 new backend tests in `test_stage8c_sentiment_event_adapter_v2.py`. No SQL, no providers, no LLM, no UI, no new DB columns. Stage 8B.1 threshold unchanged.
+
+## Stage 8B — Sentiment Evidence Quality Threshold (merged PR #396)
 
 **Root cause investigation:** Sentiment artifacts are ALWAYS SUPPRESSED_INCOMPLETE because yfinance news sources are assigned `EDITORIAL_CONTEXT` authority, which is hard-capped to `THIN` completeness band, which triggers `SUPPRESSED_INCOMPLETE` in the truth adapter. This is CORRECT behavior — editorial context is not decision-useful.
 

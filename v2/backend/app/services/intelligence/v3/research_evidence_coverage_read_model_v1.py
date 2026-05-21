@@ -311,6 +311,16 @@ def compute_research_evidence_coverage(
                 ticker=ticker,
                 row=row,
             )
+            if lane_name == LANE_SEC_CATALYST_SENTIMENT:
+                logger.info(
+                    "sec_catalyst_stage5j_readiness ticker=%s status=%s "
+                    "is_usable=%s usability_label=%s completeness_band=%s",
+                    ticker,
+                    cov.status,
+                    cov.is_usable,
+                    cov.usability_label or "none",
+                    cov.completeness_band or "none",
+                )
             ticker_coverage[ticker].lanes[lane_name] = cov
             _accumulate(
                 cov,

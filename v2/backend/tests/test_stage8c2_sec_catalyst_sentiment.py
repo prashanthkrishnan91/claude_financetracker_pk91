@@ -936,3 +936,428 @@ class TestNoPolicyChanges:
         assert not hasattr(result, "safe_for_decision")
         for fact in result.facts:
             assert "safe_for_decision" not in fact.structured_payload
+
+
+# ── Stage 5D/5E completeness and usability tests ──────────────────────────────
+
+class TestCatalystFactComparabilityAndCompleteness:
+    """Stage 8C PR 2.2: catalyst_item facts must produce PARTIAL completeness band.
+
+    Root-cause fix: structured_payload now carries claim_key + text_value so the
+    contradiction detector counts them as comparable_fact_count >= 1, allowing
+    evidence_completeness_scorer._compute_band() to return PARTIAL instead of THIN.
+    """
+
+    def _get_fresh_10k_fact(self):
+        result = adapt_sec_catalyst_sentiment(
+            ticker="CRM",
+            provider_result=_FakeSecEdgarProviderResult(
+                ticker="CRM",
+                cik="0001108524",
+                filings=[_recent_10k()],
+            ),
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+        assert result.has_material_filings is True
+        return result.facts[0], result.sources[0]
+
+    def test_catalyst_item_fact_has_claim_key(self):
+        fact, _ = self._get_fresh_10k_fact()
+        assert "claim_key" in fact.structured_payload
+        assert fact.structured_payload["claim_key"] == "catalyst_event_type"
+
+    def test_catalyst_item_fact_has_text_value(self):
+        fact, _ = self._get_fresh_10k_fact()
+        assert "text_value" in fact.structured_payload
+        # 10-K maps to catalyst_category "earnings"
+        assert fact.structured_payload["text_value"] == "earnings"
+
+    def test_catalyst_item_8k_has_corporate_action_text_value(self):
+        result = adapt_sec_catalyst_sentiment(
+            ticker="CRM",
+            provider_result=_FakeSecEdgarProviderResult(
+                ticker="CRM",
+                cik="0001108524",
+                filings=[_recent_8k()],
+            ),
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+        assert result.has_material_filings is True
+        fact = result.facts[0]
+        assert fact.structured_payload["text_value"] == "corporate_action"
+
+    def test_contradiction_detector_counts_catalyst_fact_as_comparable(self):
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        fact, _ = self._get_fresh_10k_fact()
+        assessment = detect_contradictions([fact])
+        assert assessment.comparable_fact_count >= 1, (
+            "catalyst_item fact with claim_key + text_value must be comparable; "
+            "comparable_fact_count=0 causes BAND_THIN"
+        )
+
+    def test_completeness_scorer_returns_partial_not_thin(self):
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import (
+            score_evidence_completeness,
+            BAND_THIN,
+            BAND_PARTIAL,
+            BAND_COMPLETE,
+        )
+        fact, source = self._get_fresh_10k_fact()
+        credibility = assess_artifact_sources([source])
+        contradiction = detect_contradictions([fact])
+        completeness = score_evidence_completeness(
+            sources=[source],
+            facts=[fact],
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        assert completeness.completeness_band != BAND_THIN, (
+            f"Expected PARTIAL or COMPLETE for SEC catalyst with PRIMARY_AUTHORITY, "
+            f"got {completeness.completeness_band}. "
+            "comparable_fact_count must be >= 1 for catalyst_item facts."
+        )
+        assert completeness.completeness_band in (BAND_PARTIAL, BAND_COMPLETE)
+
+    def test_truth_adapter_returns_usable_for_sec_catalyst(self):
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import score_evidence_completeness
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import assess_artifact_usability
+        fact, source = self._get_fresh_10k_fact()
+        credibility = assess_artifact_sources([source])
+        contradiction = detect_contradictions([fact])
+        completeness = score_evidence_completeness(
+            sources=[source],
+            facts=[fact],
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        usability = assess_artifact_usability(credibility, contradiction, completeness)
+        assert usability.is_usable is True, (
+            f"SEC catalyst artifact must be usable. Got usability_label={usability.usability_label}. "
+            "SUPPRESSED_INCOMPLETE means comparable_fact_count=0 (claim_key/text_value missing)."
+        )
+        assert usability.usability_label in ("USABLE", "USABLE_WITH_LIMITATIONS")
+
+    def test_missing_polarity_does_not_suppress_sec_catalyst(self):
+        """None polarity must not cause SUPPRESSED_INCOMPLETE for SEC catalyst."""
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        from app.services.intelligence.v3.source_credibility_registry_v1 import assess_artifact_sources
+        from app.services.intelligence.v3.evidence_completeness_scorer_v1 import score_evidence_completeness
+        from app.services.intelligence.v3.artifact_truth_adapter_v1 import assess_artifact_usability
+        fact, source = self._get_fresh_10k_fact()
+        # Confirm polarity is None (SEC filings never have scored polarity)
+        assert fact.structured_payload["sentiment_polarity"] is None
+        assert fact.structured_payload["is_polarity_present"] is False
+        credibility = assess_artifact_sources([source])
+        contradiction = detect_contradictions([fact])
+        completeness = score_evidence_completeness(
+            sources=[source],
+            facts=[fact],
+            credibility_assessment=credibility,
+            contradiction_assessment=contradiction,
+        )
+        usability = assess_artifact_usability(credibility, contradiction, completeness)
+        assert usability.is_usable is True, (
+            "Missing sentiment_polarity (None) must not suppress SEC catalyst artifacts. "
+            f"Got usability_label={usability.usability_label}"
+        )
+
+    def test_multiple_fresh_filings_all_counted_as_comparable(self):
+        from app.services.intelligence.v3.contradiction_detector_v1 import detect_contradictions
+        result = adapt_sec_catalyst_sentiment(
+            ticker="MSFT",
+            provider_result=_FakeSecEdgarProviderResult(
+                ticker="MSFT",
+                cik="0000789019",
+                filings=[_recent_10k(), _recent_10q(), _recent_8k()],
+            ),
+            fetched_at=datetime.now(timezone.utc).isoformat(),
+        )
+        assert result.has_material_filings is True
+        assert result.catalyst_count == 3
+        assessment = detect_contradictions(result.facts)
+        assert assessment.comparable_fact_count == 3
+
+
+# ── Stage 5J coverage read model tests ────────────────────────────────────────
+
+class TestStage5JSECCatalystCoverage:
+    """Stage 8C PR 2.2: sec_catalyst_sentiment lane must become LIMITED (not SUPPRESSED)."""
+
+    def _build_fake_artifact_row(
+        self,
+        *,
+        usability_label: str,
+        is_usable: bool,
+        completeness_band: str,
+        source_authority: str = "PRIMARY_AUTHORITY",
+        freshness_status: str = "FRESH",
+        skill_pack: str = "sec_catalyst_sentiment_evidence_v1",
+        ticker: str = "CRM",
+    ) -> dict:
+        return {
+            "id": "artifact-" + ticker,
+            "artifact_type": "sentiment_event",
+            "skill_pack": skill_pack,
+            "scope_kind": "ticker",
+            "ticker": ticker,
+            "confidence_or_trust_level": "HIGH",
+            "freshness_status": freshness_status,
+            "generated_at": "2024-01-01T00:00:00Z",
+            "expires_at": None,
+            "is_active": True,
+            "model_version": "sec_catalyst_sentiment_adapter.v1",
+            "safe_for_decision": False,
+            "payload": {
+                "truth_usability_assessment": {
+                    "usability_label": usability_label,
+                    "is_usable": is_usable,
+                    "suppression_reason": None if is_usable else "evidence_completeness_thin:missing_requirements=has_comparable_fact_when_claim_is_metric_like",
+                },
+                "source_credibility_assessment": {
+                    "strongest_authority_level": source_authority,
+                    "is_insufficient": False,
+                    "source_count": 1,
+                },
+                "contradiction_assessment": {
+                    "is_evaluable": True,
+                    "has_contradictions": False,
+                    "comparable_fact_count": 1,
+                    "non_comparable_fact_count": 0,
+                    "contradiction_count": 0,
+                    "contradiction_groups": [],
+                },
+                "evidence_completeness_assessment": {
+                    "completeness_band": completeness_band,
+                    "is_evaluable": True,
+                    "source_count": 1,
+                    "fact_count": 1,
+                },
+            },
+        }
+
+    def test_usable_with_limitations_artifact_becomes_limited_in_stage5j(self):
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            _build_lane_coverage,
+            LANE_SEC_CATALYST_SENTIMENT,
+            STATUS_LIMITED,
+        )
+        row = self._build_fake_artifact_row(
+            usability_label="USABLE_WITH_LIMITATIONS",
+            is_usable=True,
+            completeness_band="PARTIAL",
+        )
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_CATALYST_SENTIMENT,
+            artifact_type="sentiment_event",
+            skill_pack="sec_catalyst_sentiment_evidence_v1",
+            scope_kind="ticker",
+            ticker="CRM",
+            row=row,
+        )
+        assert cov.status == STATUS_LIMITED, (
+            f"USABLE_WITH_LIMITATIONS artifact must become STATUS_LIMITED in Stage 5J. "
+            f"Got status={cov.status}"
+        )
+        assert cov.is_usable is True
+
+    def test_suppressed_incomplete_artifact_remains_suppressed(self):
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            _build_lane_coverage,
+            LANE_SEC_CATALYST_SENTIMENT,
+            STATUS_SUPPRESSED,
+        )
+        row = self._build_fake_artifact_row(
+            usability_label="SUPPRESSED_INCOMPLETE",
+            is_usable=False,
+            completeness_band="THIN",
+        )
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_CATALYST_SENTIMENT,
+            artifact_type="sentiment_event",
+            skill_pack="sec_catalyst_sentiment_evidence_v1",
+            scope_kind="ticker",
+            ticker="CRM",
+            row=row,
+        )
+        assert cov.status == STATUS_SUPPRESSED
+        assert cov.is_usable is False
+
+    def test_editorial_news_sentiment_suppressed_incomplete_remains_suppressed(self):
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            _build_lane_coverage,
+            LANE_NEWS_SENTIMENT,
+            STATUS_SUPPRESSED,
+        )
+        row = self._build_fake_artifact_row(
+            usability_label="SUPPRESSED_INCOMPLETE",
+            is_usable=False,
+            completeness_band="THIN",
+            source_authority="EDITORIAL_CONTEXT",
+            skill_pack="news_sentiment_evidence_v1",
+        )
+        cov = _build_lane_coverage(
+            lane=LANE_NEWS_SENTIMENT,
+            artifact_type="sentiment_event",
+            skill_pack="news_sentiment_evidence_v1",
+            scope_kind="ticker",
+            ticker="CRM",
+            row=row,
+        )
+        assert cov.status == STATUS_SUPPRESSED
+        assert cov.is_usable is False
+
+
+# ── Stage 5K sentiment axis tests ─────────────────────────────────────────────
+
+class TestStage5KSentimentAxis:
+    """Stage 8C PR 2.2: SEC catalyst lane now contributes to the sentiment axis."""
+
+    def _make_lane_coverage(
+        self,
+        *,
+        lane: str,
+        status: str,
+        is_usable: bool,
+    ):
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import LaneCoverage
+        return LaneCoverage(
+            lane=lane,
+            artifact_type="sentiment_event",
+            skill_pack="sec_catalyst_sentiment_evidence_v1" if "catalyst" in lane else "news_sentiment_evidence_v1",
+            scope_kind="ticker",
+            ticker="CRM",
+            artifact_id="test-id",
+            status=status,
+            usability_label="USABLE_WITH_LIMITATIONS" if is_usable else "SUPPRESSED_INCOMPLETE",
+            is_usable=is_usable,
+            suppression_reason=None if is_usable else "evidence_completeness_thin",
+            source_authority="PRIMARY_AUTHORITY" if "catalyst" in lane else "EDITORIAL_CONTEXT",
+            completeness_band="PARTIAL" if is_usable else "THIN",
+            has_contradictions=False,
+            freshness_status="FRESH",
+            confidence_or_trust_level="HIGH",
+            model_version="v1",
+            generated_at="2024-01-01T00:00:00Z",
+            expires_at=None,
+            missing_reason=None if is_usable else "usability_suppressed",
+        )
+
+    def test_sec_catalyst_limited_makes_sentiment_axis_limited(self):
+        from app.services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+            _build_sentiment_axis,
+            READINESS_LIMITED,
+        )
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            LANE_SEC_CATALYST_SENTIMENT,
+            LANE_NEWS_SENTIMENT,
+            STATUS_LIMITED,
+            STATUS_SUPPRESSED,
+        )
+        lanes = {
+            LANE_SEC_CATALYST_SENTIMENT: self._make_lane_coverage(
+                lane=LANE_SEC_CATALYST_SENTIMENT,
+                status=STATUS_LIMITED,
+                is_usable=True,
+            ),
+            LANE_NEWS_SENTIMENT: self._make_lane_coverage(
+                lane=LANE_NEWS_SENTIMENT,
+                status=STATUS_SUPPRESSED,
+                is_usable=False,
+            ),
+        }
+        axis = _build_sentiment_axis(lanes=lanes)
+        assert axis.is_usable is True, (
+            "Sentiment axis must be usable when SEC catalyst lane is LIMITED."
+        )
+        assert axis.readiness == READINESS_LIMITED
+        assert LANE_SEC_CATALYST_SENTIMENT in axis.contributing_lanes
+        assert LANE_NEWS_SENTIMENT not in axis.contributing_lanes
+        assert LANE_NEWS_SENTIMENT in axis.degraded_lanes
+
+    def test_both_suppressed_news_and_missing_catalyst_yields_insufficient(self):
+        from app.services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+            _build_sentiment_axis,
+            READINESS_INSUFFICIENT,
+            READINESS_MISSING,
+        )
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            LANE_SEC_CATALYST_SENTIMENT,
+            LANE_NEWS_SENTIMENT,
+            STATUS_SUPPRESSED,
+        )
+        lanes = {
+            LANE_NEWS_SENTIMENT: self._make_lane_coverage(
+                lane=LANE_NEWS_SENTIMENT,
+                status=STATUS_SUPPRESSED,
+                is_usable=False,
+            ),
+            # LANE_SEC_CATALYST_SENTIMENT intentionally absent (MISSING)
+        }
+        axis = _build_sentiment_axis(lanes=lanes)
+        assert axis.is_usable is False
+        assert axis.readiness in (READINESS_INSUFFICIENT, READINESS_MISSING)
+
+    def test_both_lanes_usable_yields_strongest(self):
+        from app.services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+            _build_sentiment_axis,
+            READINESS_LIMITED,
+        )
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            LANE_SEC_CATALYST_SENTIMENT,
+            LANE_NEWS_SENTIMENT,
+            STATUS_LIMITED,
+        )
+        lanes = {
+            LANE_SEC_CATALYST_SENTIMENT: self._make_lane_coverage(
+                lane=LANE_SEC_CATALYST_SENTIMENT,
+                status=STATUS_LIMITED,
+                is_usable=True,
+            ),
+            LANE_NEWS_SENTIMENT: self._make_lane_coverage(
+                lane=LANE_NEWS_SENTIMENT,
+                status=STATUS_LIMITED,
+                is_usable=True,
+            ),
+        }
+        axis = _build_sentiment_axis(lanes=lanes)
+        assert axis.is_usable is True
+        assert LANE_SEC_CATALYST_SENTIMENT in axis.contributing_lanes
+        assert LANE_NEWS_SENTIMENT in axis.contributing_lanes
+
+    def test_etf_btc_xrp_skip_unchanged(self):
+        """ETF/BTC/XRP ineligibility is enforced before Stage 5K; INELIGIBLE never reaches axis."""
+        from app.services.intelligence.v3.sentiment_event_adapter_v2 import (
+            SentimentEventV2Input,
+            normalize_and_evaluate,
+            DECISION_USEFULNESS_INELIGIBLE,
+        )
+        for ticker, ctx in [
+            ("BTC", None),
+            ("XRP", None),
+            ("SPY", {"category": "ETF"}),
+        ]:
+            inp = SentimentEventV2Input(
+                ticker=ticker,
+                event_id=f"{ticker}:filing:001",
+                source_authority="PRIMARY_AUTHORITY",
+                source_kind="sec_filing",
+                provider_name="sec_edgar",
+                freshness_status="FRESH",
+                source_count=1,
+                fact_count=1,
+                is_contradicted=False,
+                completeness_band="COMPLETE",
+                sentiment_polarity=None,
+                catalyst_category_raw="earnings",
+                materiality_raw="high",
+                ticker_match_confidence_raw="high",
+                holding_context=ctx,
+            )
+            out = normalize_and_evaluate(inp)
+            assert out.decision_usefulness_tier == DECISION_USEFULNESS_INELIGIBLE, (
+                f"{ticker} must be INELIGIBLE, got {out.decision_usefulness_tier}"
+            )

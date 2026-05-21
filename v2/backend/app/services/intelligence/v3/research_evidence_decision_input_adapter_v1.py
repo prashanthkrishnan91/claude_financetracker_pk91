@@ -62,6 +62,7 @@ from .research_evidence_coverage_read_model_v1 import (
     LANE_FUNDAMENTALS,
     LANE_MACRO_CONTEXT,
     LANE_NEWS_SENTIMENT,
+    LANE_SEC_CATALYST_SENTIMENT,
     LANE_SEC_COMPANY_FACTS,
     LANE_TECHNICALS,
     STATUS_LIMITED,
@@ -275,11 +276,7 @@ def compute_decision_input_readiness(
             lane=LANE_TECHNICALS,
             lanes=lanes,
         )
-        sent_axis = _build_single_lane_axis(
-            axis_name=AXIS_SENTIMENT,
-            lane=LANE_NEWS_SENTIMENT,
-            lanes=lanes,
-        )
+        sent_axis = _build_sentiment_axis(lanes=lanes)
 
         axes = {
             AXIS_COMPANY_FUNDAMENTALS: fund_axis,
@@ -415,6 +412,38 @@ def _build_single_lane_axis(
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _build_sentiment_axis(*, lanes: dict[str, Any]) -> AxisReadinessSignal:
+    """Build the sentiment axis from sec_catalyst_sentiment and news_sentiment lanes.
+
+    Stage 8C PR 2.2: SEC catalyst evidence is a co-contributing lane. Both lanes
+    are evaluated; the strongest usable lane drives the axis readiness. Suppressed
+    editorial/yfinance news does not block a usable SEC catalyst artifact from
+    making the sentiment axis READY or LIMITED.
+    """
+    contributions: list[LaneReadinessContribution] = []
+    contributing: list[str] = []
+    degraded: list[str] = []
+    missing: list[str] = []
+
+    for lane in (LANE_SEC_CATALYST_SENTIMENT, LANE_NEWS_SENTIMENT):
+        cov = lanes.get(lane)
+        c = _classify_lane_contribution(lane, cov)
+        contributions.append(c)
+        _bucket(c, contributing, degraded, missing)
+
+    readiness = _derive_axis_readiness_with_level(contributions, contributing, degraded, missing)
+    return AxisReadinessSignal(
+        axis_name=AXIS_SENTIMENT,
+        readiness=readiness,
+        is_usable=readiness in _USABLE_READINESS,
+        contributing_lanes=contributing,
+        degraded_lanes=degraded,
+        missing_lanes=missing,
+        not_applicable_lanes=[],
+        lane_contributions=contributions,
+    )
 
 
 def _classify_lane_contribution(

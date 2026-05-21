@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-20 (Stage 7B — IntelV3Drawer plain-English clarity pass — PR #391 merged; replaced repeated "Why this view?"/"The thesis" multi-section copy with 7 decision-specific sections; added deduplication helper onceOnly(); 4 new pure view-model helpers in intel-v3-explanation.ts [deduplicateTexts, buildWhyActionExplanation, buildSupportingEvidenceSentences, buildIncompleteEvidenceSentences]; removed 5 ComingLaterPanel future-module blocks from drawer body; stale "evidence governance engine active" placeholder replaced with honest evidence_text fallback or DataMissingPill; macro copy de-duplicated; Vercel build fix: useOnce renamed onceOnly [react-hooks/rules-of-hooks ESLint]; 35 new tests in intel-v3-drawer-clarity.test.ts + 93 existing pass; no SQL, no backend, no policy changes)
+Last updated: 2026-05-21 (Stage 8A.3 — Post-evidence-lane deterministic snapshot republish — PR #395 merged; `compare_and_republish_after_evidence_lanes()` added to `watchtower_intel_republisher_v1.py`; `_run_evidence_lanes_safe()` in `enqueue_run_v3()` calls post-lane republish after successful lane completion; 14 backend + 12 frontend tests; no SQL, no providers, no LLM, no policy changes)
 
 ## Purpose
 
@@ -54,7 +54,7 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8A.3 — Post-evidence-lane deterministic snapshot republish (current PR #395, branch `claude/fix-evidence-lane-republish-Mdhi5`)
+## Stage 8A.3 — Post-evidence-lane deterministic snapshot republish (merged PR #395)
 
 **Root cause:** `enqueue_run_v3()` dispatches evidence lanes fire-and-forget via `asyncio.create_task`. After lanes write fresh technical artifacts to `research_artifacts`, nothing triggers snapshot republish — the Watchtower republisher's `compare_and_republish()` compares `portfolio_snapshots.snapshot_at` (price evidence timestamp), not `research_artifacts.generated_at`. So the certified snapshot stayed stale and the drawer regressed to legacy fallback.
 

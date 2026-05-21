@@ -562,12 +562,13 @@ describe("buildIncompleteEvidenceSentences", () => {
     expect(techSentence).toContain("quality");
   });
 
-  it("MISSING sentiment → 'thin or not available' wording", () => {
+  it("MISSING sentiment → 'not yet available' wording (distinct from INSUFFICIENT)", () => {
     const ex = makeExplanation({ sentiment_status: "MISSING" });
     const sentences = buildIncompleteEvidenceSentences(ex);
     const sentSentence = sentences.find(s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment"));
     expect(sentSentence).toBeDefined();
     expect(sentSentence).not.toContain("not yet strong enough");
+    expect(sentSentence).toContain("not yet available");
   });
 
   it("INSUFFICIENT sentiment → 'available but not yet strong enough' wording", () => {

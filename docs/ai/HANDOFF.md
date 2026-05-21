@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8A.3 — Post-evidence-lane deterministic snapshot republish — PR #395 merged; `compare_and_republish_after_evidence_lanes()` added to `watchtower_intel_republisher_v1.py`; `_run_evidence_lanes_safe()` in `enqueue_run_v3()` calls post-lane republish after successful lane completion; 14 backend + 12 frontend tests; no SQL, no providers, no LLM, no policy changes)
+Last updated: 2026-05-21 (Stage 8B — Sentiment quality threshold — `sentiment_quality_threshold_v1.py` new module with explicit quality criteria (freshness+authority+completeness+contradiction); Stage 5J `_classify_sentiment_status()` sub-classifies SUPPRESSED news_sentiment as `editorial_context_present_not_decision_useful` vs `suppressed_data_quality_issue`; EDITORIAL_CONTEXT+THIN stays SUPPRESSED; VENDOR_DERIVED+PARTIAL/COMPLETE path to LIMITED/READY confirmed working; frontend MISSING sentinel updated to "not yet available"; 36 new backend + 1 frontend test update; no SQL, no providers, no LLM, no policy changes)
 
 ## Purpose
 
@@ -53,6 +53,21 @@ Key structured logs to confirm in production:
 - **Intel v3 all-or-nothing certified intelligence run contract (Stage 3.3).** `POST /intel/v3/run` (Run Intel button) now calls `service.enqueue_run_v3()` — it enqueues background jobs and returns `{status: "refresh_requested"}` immediately. It does NOT build a snapshot or call `decide()`. `GET /intel/v3/snapshot` (page load) returns the latest persisted snapshot with no LLM calls. After the worker completes a full run, `run_prewarm_snapshot()` calls `check_certified_intel_run_contract()` — a pure async read-only validator that checks all 10 conditions per holding (active recommendation, agent_run_id, matching agent_insight by run_id, agent_run completed, analyst_verdict fields non-empty non-template, freshness within SLA). Only if ALL active holdings pass does the snapshot get `snapshot_source="worker_certified"`; otherwise `"certification_failed"`. The frontend polls every 15s after clicking Run Intel until `snapshot_source=worker_certified` or 5-minute timeout. Green banner is shown ONLY when `snapshot_source=worker_certified` AND `certified_holding_count === total_holding_count`. Six UI states: `certified_current` (green), `latest_certified_new_refresh_running` (amber), `refreshing_analyst_intelligence` (grey), `blocked_certification_failed` (red), `unavailable_refresh_failed` (red), `unavailable_evidence_incomplete` (grey). Structured logs: `intel_v3_certified_contract_summary`, `intel_v3_run_request_received`, `intel_v3_full_refresh_enqueued`, `intel_v3_worker_certified_snapshot_published`, `intel_v3_worker_certified_snapshot_rejected`, `intel_v3_ui_status_summary`. Background worker still: `analyst_refresh_worker_v1.AnalystRefreshWorker` → `FullPortfolioAnalystRefreshAdapter` → `AgentOrchestrator` → `analyst_evidence_writer_v1` → `prewarm_intel_v3_snapshot()`. For broader architecture see Stage 3.1–3.2c notes below.
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
+
+## Stage 8B — Sentiment Evidence Quality Threshold (current PR)
+
+**Root cause investigation:** Sentiment artifacts are ALWAYS SUPPRESSED_INCOMPLETE because yfinance news sources are assigned `EDITORIAL_CONTEXT` authority, which is hard-capped to `THIN` completeness band, which triggers `SUPPRESSED_INCOMPLETE` in the truth adapter. This is CORRECT behavior — editorial context is not decision-useful.
+
+**Gap fixed:** No explicit, auditable quality criteria existed for when sentiment could graduate to LIMITED/READY. The suppression was implicit in the `EDITORIAL_CONTEXT → THIN` cap.
+
+**Fix:**
+1. `sentiment_quality_threshold_v1.py` (new) — Explicit quality gate. Defines `evaluate_sentiment_quality()` with five deterministic criteria: freshness=FRESH, source authority NOT in `{EDITORIAL_CONTEXT, UNKNOWN}`, completeness NOT in `{THIN, NOT_EVALUABLE}`, not contradicted, at least one source+fact. Returns `NOT_USABLE` (with reason codes) or `LIMITED`/`READY`. Exports `SENTINEL_EDITORIAL_CONTEXT_REASON` constant.
+2. `research_evidence_coverage_read_model_v1.py` (Stage 5J) — New `_classify_sentiment_status()` function imported in `_build_lane_coverage()` when `lane == LANE_NEWS_SENTIMENT`. Sub-classifies SUPPRESSED reasons: `editorial_context_present_not_decision_useful` (SUPPRESSED_INCOMPLETE with EDITORIAL/UNKNOWN authority — correct by design) vs `suppressed_data_quality_issue` (other suppressions like contradictions).
+3. `intel-v3-explanation.ts` (frontend) — Updated MISSING sentiment copy from "thin or not available" → "not yet available for this ticker." to cleanly distinguish from INSUFFICIENT ("available but not yet strong enough").
+
+**Quality path confirmed:** USABLE_WITH_LIMITATIONS artifacts → STATUS_LIMITED in Stage 5J → READINESS_LIMITED in Stage 5K → `sentiment_status="LIMITED"` in snapshot → "Some news and sentiment data is available." in frontend. No code change needed for propagation — the path already existed.
+
+**Tests:** 36 new backend tests in `test_stage8b_sentiment_quality_threshold.py` covering: quality threshold criteria, Stage 5J sub-reasons, Stage 5K propagation (SUPPRESSED→INSUFFICIENT, MISSING→MISSING, LIMITED→LIMITED, READY→READY), crypto guardrails, non-sentiment lanes unaffected. 1 frontend test updated.
 
 ## Stage 8A.3 — Post-evidence-lane deterministic snapshot republish (merged PR #395)
 

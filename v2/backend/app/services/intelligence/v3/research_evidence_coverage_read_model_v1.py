@@ -65,6 +65,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
+from app.services.intelligence.v3.sentiment_quality_threshold_v1 import (
+    SENTINEL_EDITORIAL_CONTEXT_REASON,
+)
+
 logger = logging.getLogger(__name__)
 
 READ_MODEL_VERSION = "research_evidence_coverage.v1"
@@ -142,7 +146,11 @@ class LaneCoverage:
     expires_at: Optional[str]
     # Diagnostic: why this lane is not usable. None when status is READY or LIMITED.
     # Values: "no_active_artifact" | "freshness_stale" | "freshness_unknown" |
-    #         "usability_suppressed" | "usability_not_evaluable"
+    #         "usability_suppressed" | "usability_not_evaluable" |
+    #         "editorial_context_present_not_decision_useful" (news_sentiment only:
+    #           artifact exists, editorial-context authority, present but not useful) |
+    #         "suppressed_data_quality_issue" (news_sentiment only: suppressed for a
+    #           non-editorial reason such as contradictions or unknown source)
     missing_reason: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -496,11 +504,20 @@ def _build_lane_coverage(
     freshness_status = _safe_str(row.get("freshness_status"))
     confidence = _safe_str(row.get("confidence_or_trust_level"))
 
-    status, missing_reason = _classify_status(
-        usability_label=usability_label,
-        is_usable_field=is_usable_field,
-        freshness_status=freshness_status,
-    )
+    if lane == LANE_NEWS_SENTIMENT:
+        # Stage 8B: use sentiment-specific classifier to sub-classify suppression reasons.
+        status, missing_reason = _classify_sentiment_status(
+            usability_label=usability_label,
+            is_usable_field=is_usable_field,
+            freshness_status=freshness_status,
+            source_authority=source_authority,
+        )
+    else:
+        status, missing_reason = _classify_status(
+            usability_label=usability_label,
+            is_usable_field=is_usable_field,
+            freshness_status=freshness_status,
+        )
 
     return LaneCoverage(
         lane=lane,
@@ -566,6 +583,44 @@ def _classify_status(
     if usability_label == _LABEL_NOT_EVALUABLE:
         return STATUS_NOT_EVALUABLE, "usability_not_evaluable"
     return STATUS_NOT_EVALUABLE, "usability_not_evaluable"
+
+
+# Weak authority levels for sentiment sub-classification (Stage 8B).
+_SENTIMENT_EDITORIAL_AUTHORITY_LEVELS = frozenset({"EDITORIAL_CONTEXT", "UNKNOWN"})
+
+
+def _classify_sentiment_status(
+    *,
+    usability_label: Optional[str],
+    is_usable_field: bool,
+    freshness_status: Optional[str],
+    source_authority: Optional[str],
+) -> tuple[str, Optional[str]]:
+    """Like _classify_status but with sentiment-specific missing_reason sub-classification.
+
+    For SUPPRESSED news_sentiment artifacts, distinguishes:
+      - editorial_context_present_not_decision_useful: SUPPRESSED_INCOMPLETE caused by
+        EDITORIAL_CONTEXT or UNKNOWN authority — the artifact is present but editorial
+        context only, which is correct suppression by design (not a data quality error).
+      - suppressed_data_quality_issue: suppressed for another reason (contradictions,
+        unknown source flagged by a non-editorial route, etc.).
+
+    For USABLE / USABLE_WITH_LIMITATIONS and MISSING / NOT_EVALUABLE cases, delegates
+    to the generic _classify_status — no change in behaviour.
+    """
+    status, missing_reason = _classify_status(
+        usability_label=usability_label,
+        is_usable_field=is_usable_field,
+        freshness_status=freshness_status,
+    )
+    if status == STATUS_SUPPRESSED:
+        if (
+            usability_label == "SUPPRESSED_INCOMPLETE"
+            and source_authority in _SENTIMENT_EDITORIAL_AUTHORITY_LEVELS
+        ):
+            return STATUS_SUPPRESSED, SENTINEL_EDITORIAL_CONTEXT_REASON
+        return STATUS_SUPPRESSED, "suppressed_data_quality_issue"
+    return status, missing_reason
 
 
 def _is_stale_or_unknown(freshness_status: Optional[str]) -> bool:

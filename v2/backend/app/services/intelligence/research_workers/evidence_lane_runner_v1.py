@@ -58,6 +58,7 @@ from .fred_provider_v1 import (
     FredProviderResult,
     fetch_macro_series,
 )
+from .sec_catalyst_sentiment_adapter_v1 import build_sec_catalyst_sentiment_worker_output
 from .sec_companyfacts_adapter_v1 import build_sec_companyfacts_worker_output
 from .sec_metric_candidate_classifier import classify_sec_metric_candidate
 from app.services.intelligence.v3.research_artifact_service_v1 import (
@@ -99,6 +100,13 @@ def _is_fred_macro_enabled(s: Settings) -> bool:
     return (
         s.intel_v3_research_workers_enabled
         and s.intel_v3_macro_evidence_enabled
+    )
+
+
+def _is_sec_catalyst_sentiment_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_sentiment_catalyst_evidence_enabled
     )
 
 
@@ -580,6 +588,144 @@ def run_sec_companyfacts_evidence(
     return artifact_id
 
 
+def run_sec_catalyst_sentiment_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _provider_fn: Optional[Callable] = None,
+) -> Optional[str]:
+    """Run the SEC catalyst sentiment evidence lane for one ticker (Stage 8C PR 2).
+
+    Returns artifact_id if a fresh material filing was found and written.
+    Returns None if disabled, ineligible, no fresh filings, or on error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      2. settings.intel_v3_sentiment_catalyst_evidence_enabled
+      3. settings.sec_edgar_user_agent must be non-empty
+
+    Reuses existing sec_edgar_provider.fetch_for_ticker() — no new HTTP calls
+    beyond what the SEC companyfacts lane already performs.
+
+    Structured log keys emitted:
+      sentiment_catalyst_evidence_start
+      sentiment_catalyst_evidence_complete
+      sentiment_catalyst_evidence_skipped
+
+    Args:
+        _provider_fn: Injectable callable for tests.
+                      Signature: (ticker: str) -> SecEdgarProviderResult.
+                      Defaults to sec_edgar_provider.fetch_for_ticker().
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_sec_catalyst_sentiment_enabled(settings):
+        logger.debug(
+            "sentiment_catalyst_evidence_skipped ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    # Equity-only guard — reuse existing SEC metric candidate classifier.
+    category = ""
+    if holding_context:
+        for k in ("category", "asset_type", "security_type", "instrument_type", "asset_class"):
+            v = holding_context.get(k)
+            if isinstance(v, str) and v.strip():
+                category = v.strip()
+                break
+    classification = classify_sec_metric_candidate(ticker, category)
+    if not classification["is_sec_company_candidate"]:
+        skip_source = "metadata" if category else "symbol_fallback"
+        logger.info(
+            "sentiment_catalyst_evidence_skipped ticker=%s reason=non_equity "
+            "classification=%s skip_source=%s",
+            ticker.upper().strip(),
+            classification["classification"],
+            skip_source,
+        )
+        return None
+
+    ticker_upper = ticker.upper().strip()
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _provider_fn is not None:
+        provider_fn = _provider_fn
+    else:
+        from .sec_edgar_provider import fetch_for_ticker, SecEdgarProviderConfig
+        user_agent = settings.sec_edgar_user_agent or ""
+        if not user_agent.strip():
+            logger.info(
+                "sentiment_catalyst_evidence_skipped ticker=%s reason=no_sec_edgar_user_agent",
+                ticker_upper,
+            )
+            return None
+        _cfg = SecEdgarProviderConfig(user_agent=user_agent)
+        provider_fn = lambda t: fetch_for_ticker(t, _cfg)  # noqa: E731
+
+    logger.info(
+        "sentiment_catalyst_evidence_start ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        from .sec_edgar_provider import SecEdgarProviderResult
+        provider_result: "SecEdgarProviderResult" = provider_fn(ticker_upper)
+    except Exception as exc:
+        logger.warning(
+            "sentiment_catalyst_evidence_skipped ticker=%s reason=provider_error error=%s",
+            ticker_upper, exc,
+        )
+        return None
+
+    output = build_sec_catalyst_sentiment_worker_output(worker_input, provider_result, fetched_at)
+
+    if output is None:
+        payload_extra = getattr(provider_result, "fetch_status", "no_material_filings")
+        logger.info(
+            "sentiment_catalyst_evidence_skipped ticker=%s reason=no_material_fresh_filings "
+            "fetch_status=%s",
+            ticker_upper, payload_extra,
+        )
+        return None
+
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    catalyst_count = output.artifact_payload.get("catalyst_count", 0)
+    best_tier = output.artifact_payload.get("best_decision_usefulness_tier", "unknown")
+    materiality = "high"  # primary source — all material forms
+    if artifact_id:
+        logger.info(
+            "sentiment_catalyst_evidence_complete ticker=%s artifact_id=%s "
+            "catalyst_count=%d category=%s materiality=%s "
+            "decision_usefulness_tier=%s freshness=%s",
+            ticker_upper, artifact_id,
+            catalyst_count,
+            "sec_filing",
+            materiality,
+            best_tier,
+            output.freshness_status,
+        )
+    else:
+        logger.warning(
+            "sentiment_catalyst_evidence_complete ticker=%s artifact_id=none "
+            "catalyst_count=%d reason=service_write_failed",
+            ticker_upper, catalyst_count,
+        )
+    return artifact_id
+
+
 def run_fred_macro_evidence(
     user_id: str,
     db_client: Any,
@@ -784,6 +930,7 @@ def run_all_evidence_lanes(
     _technicals_fetch_fn: Optional[Callable] = None,
     _news_sentiment_fetch_fn: Optional[Callable] = None,
     _sec_companyfacts_provider_fn: Optional[Callable] = None,
+    _sec_catalyst_sentiment_provider_fn: Optional[Callable] = None,
 ) -> dict[str, Optional[str]]:
     """Run all feasible evidence lanes for one ticker.
 
@@ -839,6 +986,15 @@ def run_all_evidence_lanes(
         holding_context=holding_context,
         settings=settings,
         _provider_fn=_sec_companyfacts_provider_fn,
+    )
+    results["sec_catalyst_sentiment"] = run_sec_catalyst_sentiment_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _provider_fn=_sec_catalyst_sentiment_provider_fn,
     )
 
     enabled_count = sum(1 for v in results.values() if v is not None)

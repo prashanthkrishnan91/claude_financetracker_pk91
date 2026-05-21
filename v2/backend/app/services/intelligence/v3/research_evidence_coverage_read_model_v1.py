@@ -24,16 +24,17 @@ Architecture contracts (non-negotiable):
     decision adapter — but does not itself wire any decision.
 
 Lane registry (the canonical map between coverage-lane name and the underlying
-artifact identity tuple, as produced by Stages 5F/5H/5I writers):
+artifact identity tuple, as produced by Stages 5F/5H/5I/8C writers):
 
     Ticker-scope lanes:
-      sec_company_facts -> (fundamental_quality, sec_companyfacts_evidence_v1)
-      fundamentals      -> (fundamental_quality, fundamentals_evidence_v1)
-      technicals        -> (technical_signal,    technicals_evidence_v1)
-      news_sentiment    -> (sentiment_event,     news_sentiment_evidence_v1)
+      sec_company_facts      -> (fundamental_quality, sec_companyfacts_evidence_v1)
+      fundamentals           -> (fundamental_quality, fundamentals_evidence_v1)
+      technicals             -> (technical_signal,    technicals_evidence_v1)
+      news_sentiment         -> (sentiment_event,     news_sentiment_evidence_v1)
+      sec_catalyst_sentiment -> (sentiment_event,     sec_catalyst_sentiment_evidence_v1)
 
     Portfolio-scope lane:
-      macro_context     -> (portfolio_exposure,  fred_macro_evidence_v1)
+      macro_context          -> (portfolio_exposure,  fred_macro_evidence_v1)
 
 Duplicate / idempotency handling:
   Stage 5A's clean-replacement policy already guarantees at most one active
@@ -80,14 +81,16 @@ LANE_SEC_COMPANY_FACTS = "sec_company_facts"
 LANE_FUNDAMENTALS = "fundamentals"
 LANE_TECHNICALS = "technicals"
 LANE_NEWS_SENTIMENT = "news_sentiment"
+LANE_SEC_CATALYST_SENTIMENT = "sec_catalyst_sentiment"
 LANE_MACRO_CONTEXT = "macro_context"
 
 # (lane_name, artifact_type, skill_pack)
 TICKER_LANE_REGISTRY: tuple[tuple[str, str, str], ...] = (
-    (LANE_SEC_COMPANY_FACTS, "fundamental_quality", "sec_companyfacts_evidence_v1"),
-    (LANE_FUNDAMENTALS,      "fundamental_quality", "fundamentals_evidence_v1"),
-    (LANE_TECHNICALS,        "technical_signal",    "technicals_evidence_v1"),
-    (LANE_NEWS_SENTIMENT,    "sentiment_event",     "news_sentiment_evidence_v1"),
+    (LANE_SEC_COMPANY_FACTS,       "fundamental_quality", "sec_companyfacts_evidence_v1"),
+    (LANE_FUNDAMENTALS,            "fundamental_quality", "fundamentals_evidence_v1"),
+    (LANE_TECHNICALS,              "technical_signal",    "technicals_evidence_v1"),
+    (LANE_NEWS_SENTIMENT,          "sentiment_event",     "news_sentiment_evidence_v1"),
+    (LANE_SEC_CATALYST_SENTIMENT,  "sentiment_event",     "sec_catalyst_sentiment_evidence_v1"),
 )
 
 MACRO_LANE_IDENTITY: tuple[str, str, str] = (

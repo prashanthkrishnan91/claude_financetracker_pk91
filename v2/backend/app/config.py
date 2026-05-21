@@ -113,6 +113,18 @@ class Settings(BaseSettings):
     # Tickers with no SEC company facts return honest no-artifact; no fabrication.
     intel_v3_sec_companyfacts_evidence_enabled: bool = False
 
+    # ── Intel v3 Stage 8C PR 2 — SEC catalyst sentiment evidence lane (off by default) ──
+    # SEC EDGAR filing metadata (10-K, 10-Q, 8-K) → sentiment_event artifact via
+    # sec_catalyst_sentiment_adapter_v1 + sentiment_event_adapter_v2.
+    # FREE / OFFICIAL source. No paid providers. No LLM calls.
+    # artifact_type=sentiment_event, skill_pack=sec_catalyst_sentiment_evidence_v1.
+    # source_authority=PRIMARY_AUTHORITY (confirmed CIK match, company-authored docs).
+    # sentiment_polarity=None — SEC filings do not provide scored polarity.
+    # Freshness windows: 10-K=180d, 10-Q=90d, 8-K=30d.
+    # Requires intel_v3_research_workers_enabled AND sec_edgar_user_agent to be set.
+    # Default OFF — no behavior change unless explicitly enabled.
+    intel_v3_sentiment_catalyst_evidence_enabled: bool = False
+
     # ── Intel v3 Stage 5I — FRED official macro evidence lane (off by default) ────
     # FRED (Federal Reserve Economic Data) → portfolio-scope macro evidence artifact
     # via fred_macro_adapter_v1. FREE / OFFICIAL source. No paid providers. No LLM calls.

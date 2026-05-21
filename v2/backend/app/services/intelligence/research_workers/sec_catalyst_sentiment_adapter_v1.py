@@ -271,7 +271,7 @@ def adapt_sec_catalyst_sentiment(
         ))
 
         facts.append(FactRecord(
-            fact_kind="sec_catalyst_event",
+            fact_kind="catalyst_item",
             structured_payload=v2_out.structured_payload,
             axis_hint="catalyst",
             period=filing.report_date,

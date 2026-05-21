@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 2 — SEC/company catalyst sentiment evidence lane — `sec_catalyst_sentiment_adapter_v1.py` new module. Flag-gated (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF) SEC EDGAR filing metadata → `sentiment_event` artifacts via `sentiment_event_adapter_v2.py`. PRIMARY_AUTHORITY source, no polarity, no SQL, no LLM. Stage 5J updated with `sec_catalyst_sentiment` lane. 49 new backend tests. Previous: Stage 8C PR 1 — `sentiment_event_adapter_v2.py` provider-agnostic adapter.)
+Last updated: 2026-05-21 (Stage 8C PR 2 — SEC/company catalyst sentiment evidence lane — `sec_catalyst_sentiment_adapter_v1.py` new module. Flag-gated (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF) SEC EDGAR filing metadata → `sentiment_event` artifacts via `sentiment_event_adapter_v2.py`. PRIMARY_AUTHORITY source, no polarity, no SQL, no LLM. Stage 5J updated with `sec_catalyst_sentiment` lane. 49 new backend tests. PR #398 open. Previous: Stage 8C PR 1 — `sentiment_event_adapter_v2.py` provider-agnostic adapter.)
 
 ## Purpose
 

@@ -41,6 +41,7 @@ from .watchtower_freshness_ledger_v1 import (
     EVIDENCE_TYPE_POSITION,
     EVIDENCE_TYPE_PRICE,
     EVIDENCE_TYPE_RECOMMENDATION,
+    EVIDENCE_TYPE_TECHNICAL,
     FRESHNESS_FRESH,
     FRESHNESS_AGING,
     EvidenceRecord,
@@ -339,6 +340,17 @@ class WatchtowerBackgroundRefreshWorker:
         # trigger a deterministic Intel republish. This catches the
         # post-analyst-drain case where compare_and_republish (price-path only)
         # never fires because price was already fresh.
+        #
+        # latest_ev_at guards against republishing when only PRICE evidence
+        # is present (no analyst/recommendation/technical evidence).
+        latest_ev_at = _max_evidence_at(
+            evidence_records,
+            evidence_types={
+                EVIDENCE_TYPE_ANALYST_LLM,
+                EVIDENCE_TYPE_RECOMMENDATION,
+                EVIDENCE_TYPE_TECHNICAL,  # Stage 5F usable artifacts are decision evidence
+            },
+        )
         _should_republish_on_eligibility = (
             result.intel_eligible_after
             and not plan.stale_by_type
@@ -348,15 +360,15 @@ class WatchtowerBackgroundRefreshWorker:
             # Complete price failure (all failed, none succeeded) is a signal
             # that evidence may still be stale; skip republish in that case.
             and not (result.failed_price_tickers and not result.refreshed_price_tickers)
+            # Only republish when analyst/recommendation/technical evidence exists.
+            # When only PRICE evidence is present, latest_ev_at is None and there
+            # is no decision evidence to trigger a snapshot update.
+            and latest_ev_at is not None
         )
         if _should_republish_on_eligibility:
             try:
                 from .watchtower_intel_republisher_v1 import (
                     republish_after_analyst_eligibility,
-                )
-                latest_ev_at = _max_evidence_at(
-                    evidence_records,
-                    evidence_types={EVIDENCE_TYPE_ANALYST_LLM, EVIDENCE_TYPE_RECOMMENDATION},
                 )
                 republish_res = await republish_after_analyst_eligibility(
                     user_id,

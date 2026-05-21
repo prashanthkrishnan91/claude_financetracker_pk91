@@ -292,9 +292,14 @@ class IntelV3Service:
                         self.user_id, run_id, val_gate_reason,
                     )
 
-            # Stage 6 — evidence-aware governance shadow (computed once; no-op when flag off).
+            # Stage 6 — evidence-aware governance shadow (always computed for explanation).
+            # Governance mutations are gated on intel_v3_evidence_aware_policy_enabled.
             evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
-            s6_active = evidence_shadow is not None
+            settings = get_settings()
+            s6_active = (
+                evidence_shadow is not None
+                and getattr(settings, "intel_v3_evidence_aware_policy_enabled", False)
+            )
 
             # Step 3: build decisions for each card.
             decisions = []
@@ -401,6 +406,7 @@ class IntelV3Service:
 
                 # Stage 6 — apply evidence-aware governance (no-op when flag off).
                 _gov_result_dict = None
+                _research_axis_readiness = None
                 if s6_active:
                     from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
                     _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
@@ -411,16 +417,29 @@ class IntelV3Service:
                         flag_enabled=True,
                     )
                     _gov_result_dict = _gov_result.to_dict()
+                elif evidence_shadow is not None:
+                    # Stage 6 inactive but shadow available: populate axis readiness for
+                    # evidence_explanation (technical_signals_status, sentiment_status).
+                    # No decision inputs are mutated.
+                    _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
+                    if _s6_readiness is not None:
+                        _tech_axis = _s6_readiness.axes.get("technical_signals")
+                        _sent_axis = _s6_readiness.axes.get("sentiment")
+                        _research_axis_readiness = {
+                            "technical_signals": _tech_axis.readiness if _tech_axis else "MISSING",
+                            "sentiment": _sent_axis.readiness if _sent_axis else "MISSING",
+                        }
 
                 decision = decide(inp)
                 decisions.append(decision)
 
                 card_metas.append({
-                    "ticker":           ticker,
-                    "name":             card.name or ticker,
-                    "category":         category,
-                    "thesis_state":     "intact",
-                    "governance_result": _gov_result_dict,
+                    "ticker":             ticker,
+                    "name":               card.name or ticker,
+                    "category":           category,
+                    "thesis_state":       "intact",
+                    "governance_result":  _gov_result_dict,
+                    "research_axis_readiness": _research_axis_readiness,
                 })
 
             # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -1086,9 +1105,14 @@ class IntelV3Service:
             from .valuation_context_adapter_v1 import check_governance_gate as _p13_gate
             val_gate_passed, _ = _p13_gate()
 
-        # Stage 6 — evidence-aware governance shadow (computed once; no-op when flag off).
+        # Stage 6 — evidence-aware governance shadow (always computed for explanation).
+        # Governance mutations are gated on intel_v3_evidence_aware_policy_enabled.
         evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
-        s6_active = evidence_shadow is not None
+        settings = get_settings()
+        s6_active = (
+            evidence_shadow is not None
+            and getattr(settings, "intel_v3_evidence_aware_policy_enabled", False)
+        )
 
         # Step 3: build decisions (identical to run_v3 card loop).
         decisions = []
@@ -1187,6 +1211,7 @@ class IntelV3Service:
 
             # Stage 6 — apply evidence-aware governance (no-op when flag off).
             _gov_result_dict = None
+            _research_axis_readiness = None
             if s6_active:
                 from .intel_v3_evidence_aware_governance_v1 import apply_evidence_governance
                 _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
@@ -1197,15 +1222,28 @@ class IntelV3Service:
                     flag_enabled=True,
                 )
                 _gov_result_dict = _gov_result.to_dict()
+            elif evidence_shadow is not None:
+                # Stage 6 inactive but shadow available: populate axis readiness for
+                # evidence_explanation (technical_signals_status, sentiment_status).
+                # No decision inputs are mutated.
+                _s6_readiness = evidence_shadow.ticker_readiness.get(ticker.upper())
+                if _s6_readiness is not None:
+                    _tech_axis = _s6_readiness.axes.get("technical_signals")
+                    _sent_axis = _s6_readiness.axes.get("sentiment")
+                    _research_axis_readiness = {
+                        "technical_signals": _tech_axis.readiness if _tech_axis else "MISSING",
+                        "sentiment": _sent_axis.readiness if _sent_axis else "MISSING",
+                    }
 
             decision = decide(inp)
             decisions.append(decision)
             card_metas.append({
-                "ticker":           ticker,
-                "name":             card.name or ticker,
-                "category":         category,
-                "thesis_state":     "intact",
-                "governance_result": _gov_result_dict,
+                "ticker":             ticker,
+                "name":               card.name or ticker,
+                "category":           category,
+                "thesis_state":       "intact",
+                "governance_result":  _gov_result_dict,
+                "research_axis_readiness": _research_axis_readiness,
             })
 
         # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -1869,19 +1907,20 @@ class IntelV3Service:
         self,
         cards: list,
     ) -> "Optional[Any]":
-        """Compute Stage 5K evidence shadow for Stage 6 governance.
+        """Compute Stage 5K evidence shadow for Stage 6 governance and evidence explanation.
 
-        Returns ResearchEvidenceDecisionInputShadow when the Stage 6 flag is on
-        and coverage data can be computed. Returns None when the flag is off or
-        when the computation fails. Never raises.
+        Always computes the shadow (Stage 5J/5K read — cheap indexed DB query). This
+        allows evidence_explanation to reflect technical/sentiment readiness regardless
+        of the Stage 6 flag state. Stage 6 governance mutations (inp.evidence_quality
+        changes) are applied only when intel_v3_evidence_aware_policy_enabled=True in
+        the caller; this method does not enforce that gate.
+
+        Returns ResearchEvidenceDecisionInputShadow when coverage can be computed.
+        Returns None only when computation fails or there are no tickers. Never raises.
 
         Called once per run — not per ticker. No provider/LLM calls. No DB writes.
         Stage 5J coverage read is sync; wrapped in asyncio.to_thread.
         """
-        settings = get_settings()
-        if not getattr(settings, "intel_v3_evidence_aware_policy_enabled", False):
-            return None
-
         try:
             from .research_evidence_coverage_read_model_v1 import (
                 compute_research_evidence_coverage,

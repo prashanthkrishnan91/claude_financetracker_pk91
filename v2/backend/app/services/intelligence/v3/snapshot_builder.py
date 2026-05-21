@@ -196,6 +196,14 @@ def _build_held_card(
         # Stage 6 inactive: synthesize evidence explanation from decision signals so the
         # drawer shows structured supporting/incomplete/cap sections instead of generic fallback.
         evidence_explanation = _build_synthetic_evidence_explanation(decision)
+        # Patch technical/sentiment from Stage 5J research axis readiness when available.
+        # Stage 6 inactive means the shadow was computed but governance was not applied —
+        # we still use the readiness signals for UI display without altering any decision.
+        _ra = card_meta.get("research_axis_readiness") or {}
+        if _ra.get("technical_signals"):
+            evidence_explanation["technical_signals_status"] = _ra["technical_signals"]
+        if _ra.get("sentiment"):
+            evidence_explanation["sentiment_status"] = _ra["sentiment"]
 
     return {
         "ticker":              card_meta.get("ticker", ""),

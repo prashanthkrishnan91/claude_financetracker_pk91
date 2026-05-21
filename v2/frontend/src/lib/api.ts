@@ -1185,7 +1185,7 @@ export interface IntelV3HeldCard {
     /** Build 3 PR 2B — plain-English valuation context. Null when suppressed or unavailable. */
     valuation_context?: { visible_text: string; limitation_text: string; source_basis: string } | null;
     committee: { status: "deferred" | "ready" | "source_validated" | "pending"; reason?: string };
-    /** Stage 7 — evidence explanation from governance engine. Null when governance inactive. */
+    /** Stage 7C — evidence explanation. Always present: real from Stage 6 governance, or synthetic from decision band. */
     evidence_explanation?: IntelV3EvidenceExplanation | null;
   };
 }

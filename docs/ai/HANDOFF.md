@@ -54,36 +54,42 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 7 Plain-English Intelligence Surface (merged PR #388 + activation fix PR #389)
+## Stage 7 Plain-English Intelligence Surface (PRs #388, #389, #391 merged; Stage 7C current PR)
 
-**What Stage 7 adds:** Exposes the Stage 6 evidence-aware governance result in plain English — no raw metric keys, no fake data, graceful degradation when governance is inactive. Zero backend policy changes.
+**Stage 7C — Evidence explanation plumbing fix (current PR, branch `claude/fix-intel-drawer-evidence-pyyJK`):**
 
-**Backend changes (minimal typed contract only):**
-- `snapshot_builder.py` — `_build_evidence_explanation(gov: dict) -> dict` extracts 10 frontend-safe fields from the governance result (renames internal keys, never exposes raw metric names). `_build_held_card()` reads `card_meta.get("governance_result")` and embeds `evidence_explanation` in `detail_drawer_payload`. None when governance inactive.
-- `intel_v3_service.py` — Both `run_v3()` and `run_prewarm_snapshot()` now capture `apply_evidence_governance()` return value (previously discarded), serialize via `.to_dict()`, and store in `card_metas` as `governance_result`. No policy change.
+**Root cause:** MSFT BUY drawer showed generic "Some evidence is available; gaps noted where present." because `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` is off in production. When Stage 6 governance is off, `governance_result` is `None` in `card_metas`, so `evidence_explanation` was `None` in `detail_drawer_payload`. The drawer fell back to `card.evidence_text` (generic PARTIAL-band text) instead of structured sections.
 
-**Frontend (translation layer + UI):**
-- `src/lib/intel-v3-explanation.ts` — Pure deterministic translation layer. No JSX, no IO. Original exports: `readinessToDisplay()`, `governancePriorityToExplanation()`, `convictionCapLabel()`, `buildEvidenceLaneRows()`, `buildSafetyDisplay()`, `buildPortfolioEvidenceSummary()`. Stage 7B additions: `deduplicateTexts()`, `buildWhyActionExplanation()`, `buildSupportingEvidenceSentences()`, `buildIncompleteEvidenceSentences()`. `RAW_KEYS_BANNED` constant guards against raw metric key leaks.
-- `src/lib/api.ts` — `IntelV3EvidenceExplanation` interface added; `detail_drawer_payload.evidence_explanation` typed as optional.
-- `IntelV3Cockpit.tsx` — `EvidenceSummaryBand` component added above filter rail. Shows decision tier counts (better-supported / evidence-limited / data-issues), conviction-capped count, evidence source chips. Renders nothing when no card has `evidence_explanation`.
-- `IntelV3Drawer.tsx` — Rewritten Stage 7B: 7 decision-specific sections replacing repeated copy. `onceOnly()` dedup helper (NOT `useOnce` — avoids react-hooks/rules-of-hooks). When `evidence_explanation` present: shows `buildSupportingEvidenceSentences()` and `buildIncompleteEvidenceSentences()` in separate disjoint sections; when absent: shows `card.evidence_text` or `DataMissingPill`. All 5 ComingLaterPanel future-module blocks removed. Fixed macro copy: "Macro backdrop — Portfolio context that can shape confidence and caution, but is not a standalone Buy/Sell reason."
-- `src/lib/intel-v3-drawer-clarity.test.ts` (new) — 35 tests: `deduplicateTexts`, `buildWhyActionExplanation`, `buildSupportingEvidenceSentences`, `buildIncompleteEvidenceSentences`, cross-section disjointness, action label safety.
+**Fix:** `_build_synthetic_evidence_explanation(decision: DecisionOutputV3) -> dict` (new) in `snapshot_builder.py`. Derives frontend-safe evidence_explanation from the decision's `evidence_quality` band when Stage 6 is off:
+- `AxisBand.STRONG` → `primary_evidence_status=READY`, no cap, no corroboration gap
+- `AxisBand.OK` → `LIMITED`, `conviction_cap_applied=True`, `conviction_cap_reason=ok_cap_medium`, corroboration gap
+- `AxisBand.THIN` → `INSUFFICIENT`, cap, `safe_for_visible_decision=False`
+- `AxisBand.SUPPRESSED` → `SUPPRESSED`, cap, not safe, action_blocks from decision.blockers
+- Technical signals and sentiment always `MISSING` (no per-axis data without Stage 6)
+- `governance_priority=governance_inactive` (frontend renders empty string, no noise)
 
-**Test results:** 31/31 backend tests (`test_stage7_explanation_contract.py`) + 41/41 frontend tests (`intel-v3-explanation.test.ts`) + 35 new drawer-clarity tests. No SQL, no new providers, no policy changes.
+`_build_held_card()` now always produces non-None `evidence_explanation` (synthetic when governance inactive, real when Stage 6 active).
 
-**Backwards-compatible:** `evidence_explanation` is `None` / absent when governance flag is off or `governance_result` not in card_metas. All existing pre-governance snapshot reads show honest fallback (evidence_text or DataMissingPill), not stale Coming-Later placeholders.
+**Contract bump:** `STAGE7_EXPLANATION_CONTRACT_VERSION` → `stage7_explanation_v2`. `is_snapshot_stage7_complete()` now requires non-None evidence_explanation (key present + value non-None). Old snapshots (with `evidence_explanation=null`) trigger deterministic recertification on next `enqueue_run_v3()` or watchtower republish.
 
-**Activation fix (PR #389, merged):** Three-gate deterministic contract-version freshness guard. New `stage7_snapshot_contract_v1.py` — `is_snapshot_stage7_complete()` checks both the contract version marker (`stage7_explanation_contract_version=stage7_explanation_v1`) AND structural presence of `evidence_explanation` key in all `current_holdings` cards with `detail_drawer_payload`. All three gate call sites (`compare_and_republish`, `republish_after_analyst_eligibility`, `enqueue_run_v3`) use the complete check; trigger `run_prewarm_snapshot()` with `status=stage7_contract_recertified` (zero analyst jobs). `_fetch_latest_intel_snapshot()` pre-computes `stage7_explanation_payload_present`. Log key: `stage7_contract_current` in `intel_v3_evidence_mapping_version_summary`. 35 tests.
+**After fix for MSFT BUY/MEDIUM/PARTIAL (Stage 6 off):**
+- "Evidence supporting this": "Company fundamentals are partially available."
+- "What is still incomplete": "Market and price behavior data is not available." + "News and sentiment data is thin or not available."
+- "Why conviction is capped": "Conviction is capped at moderate because only partial data is available without corroboration."
 
-**Previous: Stage 6 Governance Calibration (merged — branch `claude/review-architecture-docs-HEX61`):** yfinance technicals now VENDOR_DERIVED; Priority 4b calibrated THIN→OK; 5 new diagnostic fields on EvidenceGovernanceResult; 70 calibration tests + 267 Stage 5/6 tests.
+**Tests:** 49 backend tests in `test_stage7_explanation_contract.py` (21 new) + 31 freshness tests updated (fixture now uses non-None synthetic explanation). 93 frontend tests pass (58 new in drawer-clarity). No SQL, no LLM, no providers, no policy changes.
 
-**Previous Stage 6 (merged — branch `claude/review-baseline-docs-UUvbm`):** `intel_v3_evidence_aware_governance_v1.py` + wiring + diagnostics endpoint + 75 tests. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False), `INTEL_V3_STAGE6_GOVERNANCE_DIAGNOSTICS_ENABLED` (default False).
+**Stage 7B (merged PR #391):** 7 decision-specific drawer sections, `onceOnly()` dedup, `buildSupportingEvidenceSentences()`, `buildIncompleteEvidenceSentences()`, `buildWhyActionExplanation()`, `deduplicateTexts()`. All 5 ComingLaterPanel blocks removed.
+
+**Stages 7/7A (merged PRs #388, #389):** `_build_evidence_explanation()` from Stage 6 governance result; `stage7_snapshot_contract_v1.py` three-gate freshness guard; translation layer (`readinessToDisplay`, `governancePriorityToExplanation`, `convictionCapLabel`, `buildEvidenceLaneRows`, `buildSafetyDisplay`).
+
+**Stage 6 (merged):** `intel_v3_evidence_aware_governance_v1.py`. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False). When enabled, per-ticker governance result replaces synthetic explanation with real per-axis readiness.
 
 **Production next steps (in order):**
-1. Enable per-ticker evidence lanes in Railway: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` (+ `SEC_EDGAR_USER_AGENT`). Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
-2. Run `POST /intel/v3/run` to dispatch evidence workers for all tickers.
-3. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` after confirming nonzero safe_for_visible_decision count via diagnostics.
-4. Stage 7 UI then surfaces real evidence lane status in the drawer (fundamentals READY, technical/sentiment honest state).
+1. Merge Stage 7C PR (this PR) — drawer immediately shows structured sections for all tickers.
+2. Enable evidence lanes: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT`. Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
+3. Run `POST /intel/v3/run` to populate evidence lanes.
+4. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` — Stage 6 governance result replaces synthetic explanation with real per-axis readiness (READY/LIMITED/MISSING per lane).
 
 ## Previous evidence-readiness bridge (Stage 5K)
 

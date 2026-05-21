@@ -364,6 +364,112 @@ describe("section non-repetition contract", () => {
   });
 });
 
+// ── Stage 7C synthetic evidence_explanation (governance_inactive path) ────────
+
+describe("Stage 7C: synthetic evidence_explanation (governance_inactive)", () => {
+  // Simulates what _build_synthetic_evidence_explanation produces for a MSFT-like
+  // BUY/MEDIUM/PARTIAL card when Stage 6 governance is off (AxisBand.OK).
+  const msftSyntheticEx: import("./api").IntelV3EvidenceExplanation = {
+    primary_evidence_status: "LIMITED",
+    technical_signals_status: "MISSING",
+    sentiment_status: "MISSING",
+    conviction_cap_applied: true,
+    conviction_cap_reason: "ok_cap_medium",
+    safe_for_visible_decision: true,
+    safe_for_visible_decision_reason: "",
+    governance_priority: "governance_inactive",
+    corroboration_gap: true,
+    action_blocks: [],
+  };
+
+  it("MSFT-like BUY/PARTIAL: supporting sentences contain fundamentals reference", () => {
+    const sentences = buildSupportingEvidenceSentences(msftSyntheticEx);
+    expect(sentences.length).toBeGreaterThan(0);
+    expect(sentences.some(s => s.toLowerCase().includes("fundamental"))).toBe(true);
+  });
+
+  it("MSFT-like: market/price NOT in supporting (MISSING technical)", () => {
+    const sentences = buildSupportingEvidenceSentences(msftSyntheticEx);
+    expect(sentences.some(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"))).toBe(false);
+  });
+
+  it("MSFT-like: incomplete sentences include market/price reference", () => {
+    const sentences = buildIncompleteEvidenceSentences(msftSyntheticEx);
+    expect(sentences.some(s => s.toLowerCase().includes("market") || s.toLowerCase().includes("price"))).toBe(true);
+  });
+
+  it("MSFT-like: incomplete sentences include news/sentiment reference", () => {
+    const sentences = buildIncompleteEvidenceSentences(msftSyntheticEx);
+    expect(sentences.some(s => s.toLowerCase().includes("news") || s.toLowerCase().includes("sentiment"))).toBe(true);
+  });
+
+  it("MSFT-like: incomplete sentences exist (partial data → not empty)", () => {
+    const sentences = buildIncompleteEvidenceSentences(msftSyntheticEx);
+    expect(sentences.length).toBeGreaterThan(0);
+  });
+
+  it("MSFT-like BUY conviction cap label mentions partial or moderate", () => {
+    const { convictionCapLabel } = require("./intel-v3-explanation");
+    const label = convictionCapLabel(msftSyntheticEx.conviction_cap_applied, msftSyntheticEx.conviction_cap_reason);
+    expect(label.length).toBeGreaterThan(0);
+    expect(label.toLowerCase()).toMatch(/cap|moderate|partial/);
+  });
+
+  it("governance_inactive priority → empty string (no noise in UI)", () => {
+    const { governancePriorityToExplanation } = require("./intel-v3-explanation");
+    expect(governancePriorityToExplanation("governance_inactive")).toBe("");
+  });
+
+  it("supporting and incomplete sentences are disjoint for synthetic MSFT explanation", () => {
+    const supporting = buildSupportingEvidenceSentences(msftSyntheticEx);
+    const incomplete = buildIncompleteEvidenceSentences(msftSyntheticEx);
+    const supportingSet = new Set(supporting.map(s => s.toLowerCase()));
+    for (const s of incomplete) {
+      expect(supportingSet.has(s.toLowerCase())).toBe(false);
+    }
+  });
+
+  it("no raw keys leak in synthetic explanation helper output", () => {
+    for (const s of buildSupportingEvidenceSentences(msftSyntheticEx)) assertNoRawKeys(s);
+    for (const s of buildIncompleteEvidenceSentences(msftSyntheticEx)) assertNoRawKeys(s);
+    assertNoRawKeys(buildWhyActionExplanation("BUY", msftSyntheticEx));
+  });
+
+  it("safety display for synthetic MSFT explanation is limited tier (safe=true, corroboration gap)", () => {
+    const d = buildSafetyDisplay(msftSyntheticEx);
+    expect(d.tier).toBe("limited");
+  });
+
+  it("generic fallback text does not appear in supporting sentences", () => {
+    const genericFallback = "Some evidence is available; gaps noted where present.";
+    const sentences = buildSupportingEvidenceSentences(msftSyntheticEx);
+    expect(sentences.some(s => s === genericFallback)).toBe(false);
+  });
+
+  it("SUPPRESSED synthetic (BTC/XRP-style) renders blocked tier", () => {
+    const btcEx: import("./api").IntelV3EvidenceExplanation = {
+      ...msftSyntheticEx,
+      primary_evidence_status: "SUPPRESSED",
+      safe_for_visible_decision: false,
+      action_blocks: ["buy_blocked_suppressed_evidence"],
+    };
+    const d = buildSafetyDisplay(btcEx);
+    expect(d.tier).toBe("blocked");
+  });
+
+  it("THIN synthetic renders limited and NOT safe", () => {
+    const thinEx: import("./api").IntelV3EvidenceExplanation = {
+      ...msftSyntheticEx,
+      primary_evidence_status: "INSUFFICIENT",
+      safe_for_visible_decision: false,
+      conviction_cap_applied: true,
+      conviction_cap_reason: "band_thin",
+    };
+    const d = buildSafetyDisplay(thinEx);
+    expect(d.tier).toBe("limited");
+  });
+});
+
 // ── Action label safety (no WATCH/AVOID) ─────────────────────────────────────
 
 describe("action label safety", () => {

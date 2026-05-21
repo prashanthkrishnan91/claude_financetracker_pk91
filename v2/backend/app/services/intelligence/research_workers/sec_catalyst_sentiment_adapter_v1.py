@@ -270,9 +270,21 @@ def adapt_sec_catalyst_sentiment(
             section_reference=form_type,
         ))
 
+        # Stage 5D comparable-fact fix: catalyst_item facts must carry claim_key +
+        # text_value so the contradiction detector counts them as comparable
+        # (comparable_fact_count > 0). Without these, _compute_band() returns
+        # BAND_THIN → SUPPRESSED_INCOMPLETE even when the v2 quality gate passes.
+        # catalyst_event_type / catalyst_category are non-metric structured fields —
+        # they do not fabricate sentiment_polarity or trigger a policy action.
+        fact_payload = {
+            **v2_out.structured_payload,
+            "claim_key": "catalyst_event_type",
+            "text_value": v2_out.catalyst_category,
+        }
+
         facts.append(FactRecord(
             fact_kind="catalyst_item",
-            structured_payload=v2_out.structured_payload,
+            structured_payload=fact_payload,
             axis_hint="catalyst",
             period=filing.report_date,
             as_of=filing.filing_date,

@@ -22,6 +22,7 @@ import pytest
 from app.services.intelligence.v3.snapshot_builder import (
     _build_evidence_explanation,
     _build_held_card,
+    _build_synthetic_evidence_explanation,
 )
 from app.services.intelligence.v3.decision_contracts import (
     ActionV3,
@@ -277,10 +278,14 @@ class TestConvictionCap:
         assert ex.get("conviction_cap_reason") is None
 
 
-# ── Section F: None when no governance_result ────────────────────────────────
+# ── Section F: Synthetic explanation when no governance_result ───────────────
 
-class TestNoneWhenNoGovernance:
-    def test_none_governance_result_produces_none_evidence_explanation(self):
+class TestSyntheticWhenNoGovernance:
+    """Stage 7C: when governance is inactive, a synthetic explanation is built
+    from the decision's evidence_quality band so the drawer shows structured
+    sections instead of the generic fallback text."""
+
+    def test_none_governance_result_produces_synthetic_evidence_explanation(self):
         card_meta = _make_card_meta(governance_result=None)
         decision = _make_decision()
         card = _build_held_card(
@@ -290,9 +295,11 @@ class TestNoneWhenNoGovernance:
             run_id="run-001",
             valuation_context=None,
         )
-        assert card["detail_drawer_payload"]["evidence_explanation"] is None
+        ex = card["detail_drawer_payload"]["evidence_explanation"]
+        assert ex is not None
+        assert ex["governance_priority"] == "governance_inactive"
 
-    def test_missing_governance_result_key_produces_none(self):
+    def test_missing_governance_result_key_produces_synthetic(self):
         card_meta = {
             "ticker": "AAPL",
             "name": "Apple Inc.",
@@ -307,7 +314,150 @@ class TestNoneWhenNoGovernance:
             snapshot_id="snap-001",
             run_id="run-001",
         )
-        assert card["detail_drawer_payload"]["evidence_explanation"] is None
+        ex = card["detail_drawer_payload"]["evidence_explanation"]
+        assert ex is not None
+        assert ex["governance_priority"] == "governance_inactive"
+
+    def test_synthetic_technical_and_sentiment_are_missing(self):
+        card_meta = _make_card_meta(governance_result=None)
+        decision = _make_decision()
+        card = _build_held_card(
+            decision=decision,
+            card_meta=card_meta,
+            snapshot_id="snap-001",
+            run_id="run-001",
+        )
+        ex = card["detail_drawer_payload"]["evidence_explanation"]
+        assert ex["technical_signals_status"] == "MISSING"
+        assert ex["sentiment_status"] == "MISSING"
+
+
+# ── Section I: _build_synthetic_evidence_explanation ─────────────────────────
+
+class TestBuildSyntheticEvidenceExplanation:
+    """Covers the synthetic path for all AxisBand values and key properties."""
+
+    def _decision_with_band(self, band: "AxisBand") -> "DecisionOutputV3":
+        return DecisionOutputV3(
+            ticker="MSFT",
+            action=ActionV3.BUY,
+            conviction=ConvictionV3.MEDIUM,
+            evidence_quality=band,
+            attractiveness=AxisBand.OK,
+            price_context=PriceBand.FAIR,
+            portfolio_fit=FitBand.UNDERWEIGHT,
+            risk_band=RiskBand.LOW,
+            rationale_plain_english="Azure growth supports a BUY.",
+            why_now="",
+            why_not_now="",
+            blockers=[],
+            suppression_reasons={},
+            source_signal_summary={},
+            schema_version="v3.1",
+        )
+
+    def test_strong_band_maps_to_ready(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.STRONG))
+        assert ex["primary_evidence_status"] == "READY"
+
+    def test_ok_band_maps_to_limited(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.OK))
+        assert ex["primary_evidence_status"] == "LIMITED"
+
+    def test_thin_band_maps_to_insufficient(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.THIN))
+        assert ex["primary_evidence_status"] == "INSUFFICIENT"
+
+    def test_suppressed_band_maps_to_suppressed(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.SUPPRESSED))
+        assert ex["primary_evidence_status"] == "SUPPRESSED"
+
+    def test_ok_band_has_conviction_cap(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.OK))
+        assert ex["conviction_cap_applied"] is True
+        assert ex["conviction_cap_reason"] == "ok_cap_medium"
+
+    def test_thin_band_has_conviction_cap(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.THIN))
+        assert ex["conviction_cap_applied"] is True
+        assert ex["conviction_cap_reason"] == "band_thin"
+
+    def test_strong_band_no_cap(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.STRONG))
+        assert ex["conviction_cap_applied"] is False
+        assert ex["conviction_cap_reason"] is None
+
+    def test_ok_band_safe_for_visible_decision(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.OK))
+        assert ex["safe_for_visible_decision"] is True
+
+    def test_thin_band_not_safe(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.THIN))
+        assert ex["safe_for_visible_decision"] is False
+
+    def test_suppressed_band_not_safe(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.SUPPRESSED))
+        assert ex["safe_for_visible_decision"] is False
+
+    def test_governance_priority_is_inactive(self):
+        for band in (AxisBand.STRONG, AxisBand.OK, AxisBand.THIN, AxisBand.SUPPRESSED):
+            ex = _build_synthetic_evidence_explanation(self._decision_with_band(band))
+            assert ex["governance_priority"] == "governance_inactive"
+
+    def test_technical_and_sentiment_always_missing(self):
+        for band in (AxisBand.STRONG, AxisBand.OK, AxisBand.THIN, AxisBand.SUPPRESSED):
+            ex = _build_synthetic_evidence_explanation(self._decision_with_band(band))
+            assert ex["technical_signals_status"] == "MISSING"
+            assert ex["sentiment_status"] == "MISSING"
+
+    def test_strong_band_no_corroboration_gap(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.STRONG))
+        assert ex["corroboration_gap"] is False
+
+    def test_ok_band_has_corroboration_gap(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.OK))
+        assert ex["corroboration_gap"] is True
+
+    def test_blockers_from_decision(self):
+        d = self._decision_with_band(AxisBand.SUPPRESSED)
+        d.blockers = ["buy_blocked_suppressed_evidence"]
+        ex = _build_synthetic_evidence_explanation(d)
+        assert "buy_blocked_suppressed_evidence" in ex["action_blocks"]
+
+    def test_no_internal_keys_in_output(self):
+        ex = _build_synthetic_evidence_explanation(self._decision_with_band(AxisBand.OK))
+        internal_keys = ["primary_evidence_readiness", "auxiliary_evidence_readiness", "governance_priority_applied"]
+        for key in internal_keys:
+            assert key not in ex
+
+    def test_msft_like_buy_partial_produces_correct_explanation(self):
+        """MSFT BUY/MEDIUM/PARTIAL → LIMITED fundamentals, MISSING tech/sentiment, cap applied."""
+        d = DecisionOutputV3(
+            ticker="MSFT",
+            action=ActionV3.BUY,
+            conviction=ConvictionV3.MEDIUM,
+            evidence_quality=AxisBand.OK,
+            attractiveness=AxisBand.OK,
+            price_context=PriceBand.FAIR,
+            portfolio_fit=FitBand.UNDERWEIGHT,
+            risk_band=RiskBand.MEDIUM,
+            rationale_plain_english="Azure growth + capex risk.",
+            why_now="",
+            why_not_now="",
+            blockers=[],
+            suppression_reasons={},
+            source_signal_summary={},
+            schema_version="v3.1",
+        )
+        ex = _build_synthetic_evidence_explanation(d)
+        assert ex["primary_evidence_status"] == "LIMITED"
+        assert ex["technical_signals_status"] == "MISSING"
+        assert ex["sentiment_status"] == "MISSING"
+        assert ex["conviction_cap_applied"] is True
+        assert ex["conviction_cap_reason"] == "ok_cap_medium"
+        assert ex["safe_for_visible_decision"] is True
+        assert ex["governance_priority"] == "governance_inactive"
+        assert ex["corroboration_gap"] is True
 
 
 # ── Section G: _build_held_card produces evidence_explanation ────────────────

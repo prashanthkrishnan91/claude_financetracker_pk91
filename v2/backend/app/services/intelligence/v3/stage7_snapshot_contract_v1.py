@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-STAGE7_EXPLANATION_CONTRACT_VERSION = "stage7_explanation_v1"
+STAGE7_EXPLANATION_CONTRACT_VERSION = "stage7_explanation_v2"
 
 
 def is_snapshot_stage7_current(payload: Optional[dict]) -> bool:
@@ -58,6 +58,10 @@ def is_snapshot_stage7_complete(payload: Optional[dict]) -> bool:
     for card in holdings:
         ddp = card.get("detail_drawer_payload")
         if isinstance(ddp, dict) and "evidence_explanation" not in ddp:
+            return False
+        # Stage 7C: evidence_explanation must be non-None (synthetic path ensures this
+        # even when Stage 6 governance is inactive).
+        if isinstance(ddp, dict) and ddp.get("evidence_explanation") is None:
             return False
 
     return True

@@ -101,6 +101,57 @@ def _build_evidence_explanation(gov: dict) -> dict:
     }
 
 
+# Synthetic evidence explanation: maps AxisBand to frontend-readable primary_evidence_status.
+_BAND_TO_PRIMARY_STATUS: dict[str, str] = {
+    AxisBand.STRONG.value:     "READY",
+    AxisBand.OK.value:         "LIMITED",
+    AxisBand.THIN.value:       "INSUFFICIENT",
+    AxisBand.SUPPRESSED.value: "SUPPRESSED",
+}
+
+# Conviction cap reason per band (used when Stage 6 is off).
+_BAND_TO_CAP_REASON: dict[str, str] = {
+    AxisBand.OK.value:         "ok_cap_medium",
+    AxisBand.THIN.value:       "band_thin",
+    AxisBand.SUPPRESSED.value: "suppressed",
+}
+
+
+def _build_synthetic_evidence_explanation(decision: DecisionOutputV3) -> dict:
+    """Build evidence_explanation from decision signals when Stage 6 governance is inactive.
+
+    Synthesizes readiness fields from the final evidence_quality band that decide()
+    already computed. Technical signals and sentiment are MISSING because per-axis
+    coverage data is only available through the Stage 6 evidence shadow.
+
+    This ensures the drawer shows structured evidence sections (supporting lanes,
+    incomplete lanes, conviction-cap reasoning) instead of generic fallback text,
+    even when INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED is off.
+    """
+    band = decision.evidence_quality
+    band_val = band.value
+
+    primary_status = _BAND_TO_PRIMARY_STATUS.get(band_val, "MISSING")
+    cap_applied = band in (AxisBand.OK, AxisBand.THIN, AxisBand.SUPPRESSED)
+    cap_reason = _BAND_TO_CAP_REASON.get(band_val) if cap_applied else None
+    safe = band in (AxisBand.STRONG, AxisBand.OK)
+    # Corroboration gap is true unless evidence is STRONG (single-axis discipline)
+    corroboration_gap = band != AxisBand.STRONG
+
+    return {
+        "primary_evidence_status":          primary_status,
+        "technical_signals_status":         "MISSING",
+        "sentiment_status":                 "MISSING",
+        "conviction_cap_applied":           cap_applied,
+        "conviction_cap_reason":            cap_reason,
+        "safe_for_visible_decision":        safe,
+        "safe_for_visible_decision_reason": "",
+        "governance_priority":              "governance_inactive",
+        "corroboration_gap":                corroboration_gap,
+        "action_blocks":                    list(decision.blockers),
+    }
+
+
 def _build_held_card(
     *,
     decision: DecisionOutputV3,
@@ -139,7 +190,12 @@ def _build_held_card(
     thesis_state = card_meta.get("thesis_state") or "intact"
 
     gov_result = card_meta.get("governance_result")
-    evidence_explanation = _build_evidence_explanation(gov_result) if gov_result else None
+    if gov_result:
+        evidence_explanation = _build_evidence_explanation(gov_result)
+    else:
+        # Stage 6 inactive: synthesize evidence explanation from decision signals so the
+        # drawer shows structured supporting/incomplete/cap sections instead of generic fallback.
+        evidence_explanation = _build_synthetic_evidence_explanation(decision)
 
     return {
         "ticker":              card_meta.get("ticker", ""),
@@ -178,7 +234,8 @@ def _build_held_card(
             "valuation_context":    valuation_context,
             # Source-pack / committee status — computed from real evidence quality.
             "committee":            _build_source_pack_status(decision),
-            # Stage 7 — evidence explanation for plain-English UI (None when governance inactive).
+            # Stage 7C — evidence explanation for plain-English UI.
+            # Always non-None: Stage 6 active → real governance result; Stage 6 off → synthetic.
             "evidence_explanation": evidence_explanation,
         },
     }

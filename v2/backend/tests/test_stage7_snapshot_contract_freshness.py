@@ -54,8 +54,32 @@ COMMON_TS = "2026-05-20T07:00:00+00:00"  # same timestamp for intel + evidence �
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _make_held_card(ticker: str = "AAPL", *, with_explanation_key: bool = True) -> dict:
-    """Build a minimal held card. with_explanation_key controls Stage 7 key presence."""
+_SYNTHETIC_EX = {
+    "primary_evidence_status": "LIMITED",
+    "technical_signals_status": "MISSING",
+    "sentiment_status": "MISSING",
+    "conviction_cap_applied": True,
+    "conviction_cap_reason": "ok_cap_medium",
+    "safe_for_visible_decision": True,
+    "safe_for_visible_decision_reason": "",
+    "governance_priority": "governance_inactive",
+    "corroboration_gap": True,
+    "action_blocks": [],
+}
+
+
+def _make_held_card(
+    ticker: str = "AAPL",
+    *,
+    with_explanation_key: bool = True,
+    explanation_value: object = _SYNTHETIC_EX,
+) -> dict:
+    """Build a minimal held card. with_explanation_key controls Stage 7 key presence.
+
+    Stage 7C: with_explanation_key=True now sets a non-None synthetic explanation by
+    default, because the v2 contract requires evidence_explanation to be non-None.
+    Pass explanation_value=None to test the old None-value case explicitly.
+    """
     ddp: dict = {
         "rationale": f"{ticker} solid business.",
         "why_now": "",
@@ -64,7 +88,7 @@ def _make_held_card(ticker: str = "AAPL", *, with_explanation_key: bool = True) 
         "schema_version": "v3.1",
     }
     if with_explanation_key:
-        ddp["evidence_explanation"] = None  # key present, value None (governance off)
+        ddp["evidence_explanation"] = explanation_value
     return {
         "ticker": ticker,
         "action": "HOLD",
@@ -188,9 +212,16 @@ class TestIsSnapshotStage7Complete:
         payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
         assert is_snapshot_stage7_complete(payload) is False
 
-    def test_marker_and_holdings_with_explanation_key_none_returns_true(self):
-        """Explanation key present but value=None (governance off) → Stage 7 complete."""
-        cards = [_make_held_card("AAPL", with_explanation_key=True)]
+    def test_marker_and_holdings_with_explanation_key_none_returns_false(self):
+        """Stage 7C: explanation key present but value=None → incomplete (v2 requires non-None).
+        Old v1 snapshots with None will trigger deterministic republish to produce synthetic explanation."""
+        cards = [_make_held_card("AAPL", with_explanation_key=True, explanation_value=None)]
+        payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
+        assert is_snapshot_stage7_complete(payload) is False
+
+    def test_marker_and_holdings_with_synthetic_explanation_returns_true(self):
+        """Stage 7C: explanation key present with synthetic dict → complete."""
+        cards = [_make_held_card("AAPL", with_explanation_key=True)]  # uses _SYNTHETIC_EX
         payload = _make_snap_payload(stage7_version=STAGE7_EXPLANATION_CONTRACT_VERSION, holdings=cards)
         assert is_snapshot_stage7_complete(payload) is True
 

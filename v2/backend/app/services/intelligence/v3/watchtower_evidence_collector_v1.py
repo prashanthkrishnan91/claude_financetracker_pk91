@@ -7,9 +7,15 @@ ledger. No new tables required — derives state from:
   - recommendations            → recommendation freshness
   - agent_insights             → analyst_llm freshness
   - intel_v3_snapshots         → snapshot freshness
+  - research_artifacts         → technical evidence freshness (Stage 5F artifacts)
 
-For evidence types not yet collected by this app (technical, fundamental,
-sec_filing, news_sentiment) it returns MISSING records — honestly, not silently.
+For evidence types not yet collected by this app (fundamental, sec_filing,
+news_sentiment) it returns MISSING records — honestly, not silently.
+
+For technical evidence: Stage 5F research artifacts (technical_signal type) with
+is_usable=True are surfaced as FRESH/AGING EvidenceRecords per ticker. Stale or
+absent artifacts fall back to a portfolio-scope MISSING record so the collector
+remains honest about gaps.
 
 Pure async read path. No writes, no LLM calls, no provider calls.
 Fast by design: all reads are indexed queries on existing tables.
@@ -33,6 +39,8 @@ from .watchtower_freshness_ledger_v1 import (
     EVIDENCE_TYPE_SEC_FILING,
     EVIDENCE_TYPE_SNAPSHOT,
     EVIDENCE_TYPE_TECHNICAL,
+    FRESHNESS_AGING,
+    FRESHNESS_FRESH,
     FRESHNESS_MISSING,
     EvidenceRecord,
     build_evidence_record,
@@ -67,12 +75,14 @@ async def collect_evidence_records(
         rec_rows,
         insight_rows,
         snap_rows,
+        usable_technical_arts,
     ) = await asyncio.gather(
         _fetch_tickers(user_id, client),
         _fetch_portfolio_snapshot(user_id, client),
         _fetch_latest_recommendations(user_id, client),
         _fetch_latest_agent_insights(user_id, client),
         _fetch_latest_intel_snapshot(user_id, client),
+        _fetch_latest_usable_research_artifacts(user_id, client, artifact_type="technical_signal"),
         return_exceptions=True,
     )
 
@@ -92,6 +102,9 @@ async def collect_evidence_records(
     if isinstance(snap_rows, Exception):
         logger.warning("watchtower.collect intel_snap_failed err=%s", snap_rows)
         snap_rows = {}
+    if isinstance(usable_technical_arts, Exception):
+        logger.warning("watchtower.collect technical_arts_failed err=%s", usable_technical_arts)
+        usable_technical_arts = {}
 
     # ── Price evidence ────────────────────────────────────────────────────────
     # Derived from portfolio_snapshots.positions_data[*].market_value_certified_at
@@ -191,9 +204,52 @@ async def collect_evidence_records(
         source_quality="worker_certified" if is_certified else snap_source,
     ))
 
+    # ── Technical evidence from Stage 5F research artifacts ──────────────────
+    # For each ticker with a usable (is_usable=True) technical_signal artifact,
+    # emit an EvidenceRecord from the artifact's generated_at timestamp. Only
+    # FRESH and AGING records are emitted — stale artifacts cannot be auto-
+    # refreshed by this worker, so they are treated as absent from the ledger
+    # (a fresh write will surface them again when the next artifact arrives).
+    _any_technical_fresh = False
+    for ticker in (tickers or []):
+        t = (ticker or "").upper()
+        if not t:
+            continue
+        art_ts = usable_technical_arts.get(t)
+        if art_ts is None:
+            continue
+        rec = build_evidence_record(
+            evidence_type=EVIDENCE_TYPE_TECHNICAL,
+            ticker=t,
+            scope="ticker",
+            as_of=art_ts,
+            collected_at=art_ts,
+            source="research_artifacts.technical_signal",
+            now=now,
+        )
+        if rec.freshness_status in (FRESHNESS_FRESH, FRESHNESS_AGING):
+            records.append(rec)
+            _any_technical_fresh = True
+
+    if not _any_technical_fresh:
+        # No usable fresh technical artifacts — honest gap, not an error.
+        records.append(EvidenceRecord(
+            evidence_type=EVIDENCE_TYPE_TECHNICAL,
+            ticker=None,
+            scope="portfolio",
+            as_of=None,
+            collected_at=None,
+            source="not_yet_collected",
+            freshness_status=FRESHNESS_MISSING,
+            freshness_sla_seconds=0,
+            deploy_eligible=True,
+            decision_eligible=True,
+            reason="technical not yet collected by this application",
+        ))
+
     # ── Not-yet-collected types: surface as MISSING ───────────────────────────
     # These are honest gaps, not errors. Future builds will fill them.
-    for etype in (EVIDENCE_TYPE_TECHNICAL, EVIDENCE_TYPE_FUNDAMENTAL,
+    for etype in (EVIDENCE_TYPE_FUNDAMENTAL,
                   EVIDENCE_TYPE_SEC_FILING, EVIDENCE_TYPE_NEWS_SENTIMENT):
         records.append(EvidenceRecord(
             evidence_type=etype,
@@ -319,6 +375,54 @@ async def _fetch_latest_intel_snapshot(
         "created_at": _parse_iso(row.get("created_at")),
         "snapshot_source": payload.get("snapshot_source", "unknown"),
     }
+
+
+async def _fetch_latest_usable_research_artifacts(
+    user_id: UUID,
+    client: Any,
+    *,
+    artifact_type: str,
+) -> dict[str, datetime]:
+    """Return ticker → latest usable artifact generated_at for active artifacts.
+
+    Filters to is_usable=True from payload.truth_usability_assessment in Python
+    (the field is inside the JSONB payload, not a top-level column). Only returns
+    the most-recent usable artifact per ticker (Stage 5A guarantees at most one
+    active row per identity, but we take the latest defensively).
+
+    Returns empty dict on any failure — callers treat absence as MISSING.
+    """
+    try:
+        result = await asyncio.to_thread(
+            lambda: client.table("research_artifacts")
+            .select("ticker,generated_at,payload")
+            .eq("user_id", str(user_id))
+            .eq("artifact_type", artifact_type)
+            .eq("is_active", True)
+            .order("generated_at", desc=True)
+            .execute()
+        )
+        latest: dict[str, datetime] = {}
+        for row in (result.data or []):
+            t = (row.get("ticker") or "").strip().upper()
+            if not t or t in latest:
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            usability = payload.get("truth_usability_assessment")
+            if not isinstance(usability, dict) or not usability.get("is_usable"):
+                continue
+            gen_at = _parse_iso(row.get("generated_at"))
+            if gen_at is not None:
+                latest[t] = gen_at
+        return latest
+    except Exception as exc:
+        logger.warning(
+            "watchtower.collect research_artifacts_failed artifact_type=%s err=%s",
+            artifact_type, exc,
+        )
+        return {}
 
 
 def _parse_iso(ts: Any) -> Optional[datetime]:

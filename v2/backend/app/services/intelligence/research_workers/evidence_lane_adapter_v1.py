@@ -83,7 +83,7 @@ _FUNDAMENTALS_MODEL_VERSION = "yfinance_fundamentals_sync_v1"
 
 _TECHNICALS_ARTIFACT_TYPE = "technical_signal"
 _TECHNICALS_SKILL_PACK = "technicals_evidence_v1"
-_TECHNICALS_MODEL_VERSION = "yfinance_price_history_sync_v1"
+_TECHNICALS_MODEL_VERSION = "yfinance_price_history_sync_v2"
 
 _NEWS_SENTIMENT_ARTIFACT_TYPE = "sentiment_event"
 _NEWS_SENTIMENT_SKILL_PACK = "news_sentiment_evidence_v1"

@@ -349,18 +349,30 @@ export function buildIncompleteEvidenceSentences(ex: IntelV3EvidenceExplanation)
     );
   }
   if (!tech.isUsable) {
-    sentences.push(
-      tech.isBlocked
-        ? "Market behavior data was suppressed due to data quality issues."
-        : "Market and price behavior data is not available for this ticker."
-    );
+    if (tech.isBlocked) {
+      sentences.push("Market behavior data was suppressed due to data quality issues.");
+    } else if (
+      ex.technical_signals_status === "INSUFFICIENT" ||
+      ex.technical_signals_status === "STALE_OR_UNKNOWN" ||
+      ex.technical_signals_status === "NOT_EVALUABLE"
+    ) {
+      sentences.push("Market and price behavior data is available but not yet strong enough to influence the decision.");
+    } else {
+      sentences.push("Market and price behavior data is not yet available for this ticker.");
+    }
   }
   if (!sent.isUsable) {
-    sentences.push(
-      sent.isBlocked
-        ? "News and sentiment data was suppressed due to data quality issues."
-        : "News and sentiment data is thin or not available."
-    );
+    if (sent.isBlocked) {
+      sentences.push("News and sentiment data was suppressed due to data quality issues.");
+    } else if (
+      ex.sentiment_status === "INSUFFICIENT" ||
+      ex.sentiment_status === "STALE_OR_UNKNOWN" ||
+      ex.sentiment_status === "NOT_EVALUABLE"
+    ) {
+      sentences.push("News and sentiment data is available but not yet strong enough to influence the decision.");
+    } else {
+      sentences.push("News and sentiment data is thin or not available.");
+    }
   }
   return sentences;
 }

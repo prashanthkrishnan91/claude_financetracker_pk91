@@ -54,15 +54,22 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8 — Technical evidence decision-useful fix (current PR #393, branch `claude/improve-intel-evidence-Awwd6`)
+## Stage 8A.3 — Post-evidence-lane deterministic snapshot republish (current PR #395, branch `claude/fix-evidence-lane-republish-Mdhi5`)
 
-**Root causes:**
-1. Old technicals artifacts were written before `_YFINANCE_PRICE_HISTORY_OVERRIDE` in `source_credibility_registry_v1` was active, leaving `SUPPRESSED_UNKNOWN_SOURCE` in their stored payload. Idempotency check returned the stale artifact without re-running 5B–5E. Fix: bump `_TECHNICALS_MODEL_VERSION` v1 → v2 in `evidence_lane_adapter_v1.py` to change the replay key and force supersession.
-2. `buildIncompleteEvidenceSentences` showed identical "not available" copy for MISSING (no artifact) and INSUFFICIENT/STALE_OR_UNKNOWN (artifact present but thin). Fix: check `ex.technical_signals_status` / `ex.sentiment_status` directly.
+**Root cause:** `enqueue_run_v3()` dispatches evidence lanes fire-and-forget via `asyncio.create_task`. After lanes write fresh technical artifacts to `research_artifacts`, nothing triggers snapshot republish — the Watchtower republisher's `compare_and_republish()` compares `portfolio_snapshots.snapshot_at` (price evidence timestamp), not `research_artifacts.generated_at`. So the certified snapshot stayed stale and the drawer regressed to legacy fallback.
 
-**After fix:** MSFT technicals lane shows "Some market and price behavior data is available" after next evidence run. INSUFFICIENT shows "available but not yet strong enough to influence the decision" rather than "not available." Sentiment remains THIN/suppressed (editorial-only → BAND_THIN, intentional). BTC/XRP and conviction caps unchanged.
+**Fix:**
+1. `watchtower_intel_republisher_v1.py` — new `compare_and_republish_after_evidence_lanes(user_id, client, *, intel_republish_callable)` queries `research_artifacts` for usable (`is_usable=True`) technical_signal artifacts per ticker and triggers republish if any are newer than the current snapshot by `_EVIDENCE_NEWER_THRESHOLD_SECONDS=10`. Emits `intel_v3_post_lane_republish_check` log. Idempotent: after republish, snapshot `generated_at` is NOW so pre-existing artifacts will be older on the next check → `skipped_no_new_evidence`.
+2. `intel_v3_service.py` — `_run_evidence_lanes_safe()` closure inside `enqueue_run_v3()` calls `compare_and_republish_after_evidence_lanes()` after successful lane completion. Failures are caught and logged as `intel_v3_post_lane_republish_failed` — lane failures skip the republish entirely.
 
-**Tests:** 82 backend pass (6 new: model version, VENDOR_DERIVED authority, PARTIAL completeness, USABLE_WITH_LIMITATIONS, news stays THIN); 59 frontend pass (19 new: MISSING vs INSUFFICIENT/SUPPRESSED/STALE_OR_UNKNOWN wording distinctness).
+**After fix:** MSFT technical evidence completed FRESH after Run Intel → post-lane republish fires → certified snapshot rebuilt with `technical_signals_status=LIMITED` → drawer shows "Some market and price behavior data is available" instead of legacy placeholder. BTC/XRP conservative/blocked behavior preserved.
+
+**Tests:** 14 new backend tests in `test_stage8a3_post_lane_republish.py`; 12 new frontend tests in `intel-v3-drawer-clarity.test.ts`; no SQL, no providers, no LLM, no decision policy changes.
+
+## Stage 8 / 8A.2 — Technical evidence propagation (merged PRs #393, #394)
+
+- **Stage 8A.2 (PR #394):** `watchtower_evidence_collector_v1` queries `research_artifacts` for usable technical_signal artifacts per ticker. `intel_v3_service` always computes Stage 5J/5K shadow; `snapshot_builder` patches `technical_signals_status` from `research_axis_readiness` when Stage 6 off. 18 new tests.
+- **Stage 8 (PR #393):** Bumped `_TECHNICALS_MODEL_VERSION` v1 → v2 to force supersession of stale SUPPRESSED_UNKNOWN_SOURCE artifacts. Fixed `buildIncompleteEvidenceSentences` to distinguish INSUFFICIENT/STALE_OR_UNKNOWN (present but thin) from MISSING (no artifact). 6 backend + 19 frontend tests.
 
 ## Stage 7 Plain-English Intelligence Surface (PRs #388, #389, #391, #392 merged)
 

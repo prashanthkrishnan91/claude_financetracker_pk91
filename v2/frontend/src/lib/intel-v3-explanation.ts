@@ -371,7 +371,7 @@ export function buildIncompleteEvidenceSentences(ex: IntelV3EvidenceExplanation)
     ) {
       sentences.push("News and sentiment data is available but not yet strong enough to influence the decision.");
     } else {
-      sentences.push("News and sentiment data is thin or not available.");
+      sentences.push("News and sentiment data is not yet available for this ticker.");
     }
   }
   return sentences;

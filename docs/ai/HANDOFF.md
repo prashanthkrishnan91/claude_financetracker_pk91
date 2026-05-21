@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 2 — SEC/company catalyst sentiment evidence lane — `sec_catalyst_sentiment_adapter_v1.py` new module. Flag-gated (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF) SEC EDGAR filing metadata → `sentiment_event` artifacts via `sentiment_event_adapter_v2.py`. PRIMARY_AUTHORITY source, no polarity, no SQL, no LLM. Stage 5J updated with `sec_catalyst_sentiment` lane. 49 new backend tests. PR #398 open. Previous: Stage 8C PR 1 — `sentiment_event_adapter_v2.py` provider-agnostic adapter.)
+Last updated: 2026-05-21 (Stage 8C PR 2 runtime fix — PR #399. Fixed `FactRecord.fact_kind="sec_catalyst_event"` → `"catalyst_item"` to satisfy `research_artifact_facts_fact_kind_check` DB constraint (error 23514). No SQL. PR #398 wired the lane; PR #399 unblocks artifact writes. Previous: Stage 8C PR 2 — `sec_catalyst_sentiment_adapter_v1.py` new module.)
 
 ## Purpose
 
@@ -54,7 +54,13 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8C PR 2 — SEC Catalyst Sentiment Evidence Lane (current PR)
+## Stage 8C PR 2 runtime fix — schema-valid fact_kind (PR #399, open)
+
+**Root cause:** `FactRecord.fact_kind="sec_catalyst_event"` violated `research_artifact_facts_fact_kind_check` (Supabase error 23514). Every MSFT/CRM/WMT/COST/QCOM catalyst write failed; `sentiment_catalyst_evidence_complete artifact_id=none reason=service_write_failed`.
+
+**Fix:** `fact_kind="catalyst_item"` — existing schema-valid value; `axis_hint="catalyst"` and all structured_payload fields preserved. 1-line change + 28-line test (`test_fact_kind_is_schema_valid_catalyst_item`). No SQL.
+
+## Stage 8C PR 2 — SEC Catalyst Sentiment Evidence Lane (merged PR #398)
 
 **Before:** `sentiment_event_adapter_v2.py` existed but no real free source produced LIMITED/READY sentiment artifacts.
 

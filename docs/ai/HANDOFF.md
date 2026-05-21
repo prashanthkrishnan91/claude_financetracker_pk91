@@ -54,30 +54,19 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 7 Plain-English Intelligence Surface (PRs #388, #389, #391 merged; Stage 7C current PR)
+## Stage 8 — Technical evidence decision-useful fix (current PR #393, branch `claude/improve-intel-evidence-Awwd6`)
 
-**Stage 7C — Evidence explanation plumbing fix (current PR, branch `claude/fix-intel-drawer-evidence-pyyJK`):**
+**Root causes:**
+1. Old technicals artifacts were written before `_YFINANCE_PRICE_HISTORY_OVERRIDE` in `source_credibility_registry_v1` was active, leaving `SUPPRESSED_UNKNOWN_SOURCE` in their stored payload. Idempotency check returned the stale artifact without re-running 5B–5E. Fix: bump `_TECHNICALS_MODEL_VERSION` v1 → v2 in `evidence_lane_adapter_v1.py` to change the replay key and force supersession.
+2. `buildIncompleteEvidenceSentences` showed identical "not available" copy for MISSING (no artifact) and INSUFFICIENT/STALE_OR_UNKNOWN (artifact present but thin). Fix: check `ex.technical_signals_status` / `ex.sentiment_status` directly.
 
-**Root cause:** MSFT BUY drawer showed generic "Some evidence is available; gaps noted where present." because `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` is off in production. When Stage 6 governance is off, `governance_result` is `None` in `card_metas`, so `evidence_explanation` was `None` in `detail_drawer_payload`. The drawer fell back to `card.evidence_text` (generic PARTIAL-band text) instead of structured sections.
+**After fix:** MSFT technicals lane shows "Some market and price behavior data is available" after next evidence run. INSUFFICIENT shows "available but not yet strong enough to influence the decision" rather than "not available." Sentiment remains THIN/suppressed (editorial-only → BAND_THIN, intentional). BTC/XRP and conviction caps unchanged.
 
-**Fix:** `_build_synthetic_evidence_explanation(decision: DecisionOutputV3) -> dict` (new) in `snapshot_builder.py`. Derives frontend-safe evidence_explanation from the decision's `evidence_quality` band when Stage 6 is off:
-- `AxisBand.STRONG` → `primary_evidence_status=READY`, no cap, no corroboration gap
-- `AxisBand.OK` → `LIMITED`, `conviction_cap_applied=True`, `conviction_cap_reason=ok_cap_medium`, corroboration gap
-- `AxisBand.THIN` → `INSUFFICIENT`, cap, `safe_for_visible_decision=False`
-- `AxisBand.SUPPRESSED` → `SUPPRESSED`, cap, not safe, action_blocks from decision.blockers
-- Technical signals and sentiment always `MISSING` (no per-axis data without Stage 6)
-- `governance_priority=governance_inactive` (frontend renders empty string, no noise)
+**Tests:** 82 backend pass (6 new: model version, VENDOR_DERIVED authority, PARTIAL completeness, USABLE_WITH_LIMITATIONS, news stays THIN); 59 frontend pass (19 new: MISSING vs INSUFFICIENT/SUPPRESSED/STALE_OR_UNKNOWN wording distinctness).
 
-`_build_held_card()` now always produces non-None `evidence_explanation` (synthetic when governance inactive, real when Stage 6 active).
+## Stage 7 Plain-English Intelligence Surface (PRs #388, #389, #391, #392 merged)
 
-**Contract bump:** `STAGE7_EXPLANATION_CONTRACT_VERSION` → `stage7_explanation_v2`. `is_snapshot_stage7_complete()` now requires non-None evidence_explanation (key present + value non-None). Old snapshots (with `evidence_explanation=null`) trigger deterministic recertification on next `enqueue_run_v3()` or watchtower republish.
-
-**After fix for MSFT BUY/MEDIUM/PARTIAL (Stage 6 off):**
-- "Evidence supporting this": "Company fundamentals are partially available."
-- "What is still incomplete": "Market and price behavior data is not available." + "News and sentiment data is thin or not available."
-- "Why conviction is capped": "Conviction is capped at moderate because only partial data is available without corroboration."
-
-**Tests:** 49 backend tests in `test_stage7_explanation_contract.py` (21 new) + 31 freshness tests updated (fixture now uses non-None synthetic explanation). 93 frontend tests pass (58 new in drawer-clarity). No SQL, no LLM, no providers, no policy changes.
+**Stage 7C (merged PR #392):** `_build_synthetic_evidence_explanation()` in `snapshot_builder.py` derives structured `evidence_explanation` from `evidence_quality` band when Stage 6 off. `STAGE7_EXPLANATION_CONTRACT_VERSION` → `stage7_explanation_v2`. Old snapshots with `evidence_explanation=null` trigger deterministic recertification. 49 backend + 93 frontend tests.
 
 **Stage 7B (merged PR #391):** 7 decision-specific drawer sections, `onceOnly()` dedup, `buildSupportingEvidenceSentences()`, `buildIncompleteEvidenceSentences()`, `buildWhyActionExplanation()`, `deduplicateTexts()`. All 5 ComingLaterPanel blocks removed.
 
@@ -86,7 +75,7 @@ Key structured logs to confirm in production:
 **Stage 6 (merged):** `intel_v3_evidence_aware_governance_v1.py`. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False). When enabled, per-ticker governance result replaces synthetic explanation with real per-axis readiness.
 
 **Production next steps (in order):**
-1. Merge Stage 7C PR (this PR) — drawer immediately shows structured sections for all tickers.
+1. Merge Stage 8 PR (#393) — technicals artifacts re-enriched on next evidence run; INSUFFICIENT wording corrected immediately.
 2. Enable evidence lanes: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT`. Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
 3. Run `POST /intel/v3/run` to populate evidence lanes.
 4. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` — Stage 6 governance result replaces synthetic explanation with real per-axis readiness (READY/LIMITED/MISSING per lane).

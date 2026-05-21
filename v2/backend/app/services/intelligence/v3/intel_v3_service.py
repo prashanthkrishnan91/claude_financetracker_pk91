@@ -998,6 +998,11 @@ class IntelV3Service:
             _evidence_run_id,
         )
 
+        # Build the post-lane republish callable here — same callable used by Watchtower.
+        # Captured before the background task runs to avoid any request-lifetime concerns.
+        from .watchtower_callables_v1 import build_default_intel_republish_callable as _build_republish
+        _post_lane_republish_callable = _build_republish(_evidence_client)
+
         async def _run_evidence_lanes_safe() -> None:
             try:
                 await _asyncio.to_thread(
@@ -1016,6 +1021,31 @@ class IntelV3Service:
                     _evidence_user_id,
                     _evidence_run_id,
                     _exc,
+                )
+                return  # do not attempt republish if lanes failed
+
+            # Stage 8A.3 — Post-lane completion republish.
+            # If any usable technical artifact written by the lanes is newer than the
+            # active certified snapshot, trigger deterministic snapshot rebuild. This
+            # closes the timing gap where evidence lanes complete async after the 202
+            # response but Watchtower (which uses portfolio_snapshots timestamps) has
+            # no visibility into research_artifacts timestamps.
+            try:
+                from .watchtower_intel_republisher_v1 import (
+                    compare_and_republish_after_evidence_lanes as _post_lane_republish,
+                )
+                await _post_lane_republish(
+                    _evidence_user_id,
+                    _evidence_client,
+                    intel_republish_callable=_post_lane_republish_callable,
+                )
+            except Exception as _repr_exc:
+                logger.warning(
+                    "intel_v3_post_lane_republish_failed user_id=%s "
+                    "parent_intel_run_id=%s error=%s",
+                    _evidence_user_id,
+                    _evidence_run_id,
+                    _repr_exc,
                 )
 
         _asyncio.create_task(_run_evidence_lanes_safe())

@@ -464,6 +464,134 @@ async def republish_after_analyst_eligibility(
     return result
 
 
+async def compare_and_republish_after_evidence_lanes(
+    user_id: Any,
+    client: Any,
+    *,
+    intel_republish_callable: Optional[Callable] = None,
+) -> WatchtowerRepublishResult:
+    """Post-evidence-lane republish: check if any usable technical artifact is newer.
+
+    Called after evidence lane completion from the fire-and-forget background task
+    in enqueue_run_v3(). Unlike compare_and_republish() (which uses
+    portfolio_snapshots.snapshot_at as the evidence timestamp), this function reads
+    research_artifacts.generated_at — the timestamp written by evidence lane runners.
+
+    This bridges the timing gap where:
+    1. Run Intel returns immediately (202) after dispatching lanes async.
+    2. Evidence lanes complete minutes later writing fresh technical artifacts.
+    3. Nothing previously triggered snapshot republish to incorporate those artifacts.
+
+    Idempotency: after a successful republish, the new snapshot.generated_at is current.
+    The next evidence lane completion check finds no artifacts newer → skips republish.
+
+    Does NOT enqueue analyst LLM jobs. analyst_jobs_queued stays 0.
+    """
+    t0 = time.monotonic()
+    result = WatchtowerRepublishResult(
+        publish_status=PUBLISH_REPUBLISH_PENDING,
+        watchtower_refresh_triggered=False,
+        analyst_jobs_queued=0,
+    )
+
+    try:
+        # Step 1: read current Intel snapshot
+        snap_row = await _fetch_latest_intel_snapshot(user_id, client)
+        if snap_row is None:
+            result.publish_status = PUBLISH_NO_SNAPSHOT_EXISTS
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_post_lane_log(user_id, result)
+            return result
+
+        result.latest_certified_snapshot_id = snap_row.get("snapshot_id")
+        result.latest_certified_snapshot_generated_at = snap_row.get("generated_at")
+        intel_ts = _parse_iso(result.latest_certified_snapshot_generated_at)
+
+        # Step 2: read latest usable technical artifact timestamps from research_artifacts.
+        # This is the evidence written by the evidence lane runners — not portfolio_snapshots.
+        usable_arts = await _fetch_latest_usable_technical_artifacts(user_id, client)
+
+        if usable_arts:
+            newest_art_ts = max(usable_arts.values())
+            result.latest_decision_evidence_snapshot_at = _to_iso(newest_art_ts)
+
+            if intel_ts is not None:
+                diff_seconds = (newest_art_ts - intel_ts).total_seconds()
+                result.evidence_newer_than_certified_snapshot = (
+                    diff_seconds > _EVIDENCE_NEWER_THRESHOLD_SECONDS
+                )
+            else:
+                # Snapshot has no parseable timestamp — treat artifact as newer.
+                result.evidence_newer_than_certified_snapshot = True
+
+        # Step 3: check mapping and Stage 7 contract versions (same logic as compare_and_republish).
+        from .evidence_mapping_version_v1 import (
+            is_snapshot_mapping_current as _mapping_current,
+        )
+        from .stage7_snapshot_contract_v1 import (
+            is_snapshot_stage7_complete as _stage7_complete,
+        )
+        _mapping_is_current = _mapping_current(snap_row)
+        _stage7_is_current = _stage7_complete(snap_row)
+
+        if (
+            not result.evidence_newer_than_certified_snapshot
+            and _mapping_is_current
+            and _stage7_is_current
+        ):
+            result.publish_status = PUBLISH_SKIPPED_NO_NEW_EVIDENCE
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_post_lane_log(user_id, result)
+            return result
+
+        # Step 4: trigger deterministic republish (zero LLM calls, zero analyst jobs).
+        if intel_republish_callable is None:
+            result.publish_status = PUBLISH_REPUBLISH_PENDING
+            result.duration_ms = int((time.monotonic() - t0) * 1000)
+            _emit_post_lane_log(user_id, result)
+            return result
+
+        result.watchtower_refresh_triggered = True
+        try:
+            returned_payload = await intel_republish_callable(user_id)
+            snapshot_source = None
+            if isinstance(returned_payload, dict):
+                snapshot_source = returned_payload.get("snapshot_source")
+            if snapshot_source == "worker_certified":
+                result.publish_status = PUBLISH_REBUILT_AND_PUBLISHED
+            else:
+                result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+                result.error = (
+                    f"republish ran but snapshot_source={snapshot_source!r}; "
+                    "certification contract not satisfied"
+                )
+                logger.warning(
+                    "watchtower_intel_republisher.post_lane_republish_not_certified "
+                    "user_id=%s snapshot_source=%s",
+                    user_id, snapshot_source,
+                )
+        except Exception as exc:
+            result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+            result.error = str(exc)
+            logger.warning(
+                "watchtower_intel_republisher.post_lane_republish_callable_failed "
+                "user_id=%s error=%s",
+                user_id, exc,
+            )
+
+    except Exception as outer_exc:
+        result.publish_status = PUBLISH_CERTIFICATION_BLOCKED
+        result.error = str(outer_exc)
+        logger.warning(
+            "watchtower_intel_republisher.post_lane_compare_failed user_id=%s error=%s",
+            user_id, outer_exc,
+        )
+
+    result.duration_ms = int((time.monotonic() - t0) * 1000)
+    _emit_post_lane_log(user_id, result)
+    return result
+
+
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 async def _fetch_latest_intel_snapshot(user_id: UUID, client: Any) -> Optional[dict]:
@@ -545,7 +673,51 @@ def _to_iso(val: Any) -> Optional[str]:
     return str(val)
 
 
-def _emit_log(user_id: UUID, result: WatchtowerRepublishResult) -> None:
+async def _fetch_latest_usable_technical_artifacts(
+    user_id: Any,
+    client: Any,
+) -> dict[str, datetime]:
+    """Query research_artifacts for the latest usable technical_signal per ticker.
+
+    Mirrors the logic in watchtower_evidence_collector_v1._fetch_latest_usable_research_artifacts
+    but lives here so compare_and_republish_after_evidence_lanes() has no cross-module
+    dependency on the collector. Returns ticker → latest usable artifact generated_at.
+    """
+    try:
+        result = await asyncio.to_thread(
+            lambda: client.table("research_artifacts")
+            .select("ticker,generated_at,payload")
+            .eq("user_id", str(user_id))
+            .eq("artifact_type", "technical_signal")
+            .eq("is_active", True)
+            .order("generated_at", desc=True)
+            .execute()
+        )
+        latest: dict[str, datetime] = {}
+        for row in (result.data or []):
+            t = (row.get("ticker") or "").strip().upper()
+            if not t or t in latest:
+                continue
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            usability = payload.get("truth_usability_assessment")
+            if not isinstance(usability, dict) or not usability.get("is_usable"):
+                continue
+            gen_at = _parse_iso(row.get("generated_at"))
+            if gen_at is not None:
+                latest[t] = gen_at
+        return latest
+    except Exception as exc:
+        logger.warning(
+            "watchtower_intel_republisher.fetch_usable_artifacts_failed "
+            "user_id=%s err=%s",
+            user_id, exc,
+        )
+        return {}
+
+
+def _emit_log(user_id: Any, result: WatchtowerRepublishResult) -> None:
     logger.info(
         "watchtower_intel_republisher.publish_decision user_id=%s "
         "publish_status=%s "
@@ -563,6 +735,31 @@ def _emit_log(user_id: UUID, result: WatchtowerRepublishResult) -> None:
         result.latest_certified_snapshot_id,
         result.latest_certified_snapshot_generated_at,
         result.latest_decision_evidence_snapshot_id,
+        result.latest_decision_evidence_snapshot_at,
+        result.evidence_newer_than_certified_snapshot,
+        result.analyst_jobs_queued,
+        result.watchtower_refresh_triggered,
+        result.duration_ms,
+        result.error or "none",
+    )
+
+
+def _emit_post_lane_log(user_id: Any, result: WatchtowerRepublishResult) -> None:
+    logger.info(
+        "intel_v3_post_lane_republish_check user_id=%s "
+        "publish_status=%s "
+        "latest_certified_snapshot_id=%s "
+        "latest_certified_snapshot_generated_at=%s "
+        "newest_usable_artifact_at=%s "
+        "evidence_newer_than_certified_snapshot=%s "
+        "analyst_jobs_queued=%d "
+        "watchtower_refresh_triggered=%s "
+        "duration_ms=%d "
+        "error=%s",
+        user_id,
+        result.publish_status,
+        result.latest_certified_snapshot_id,
+        result.latest_certified_snapshot_generated_at,
         result.latest_decision_evidence_snapshot_at,
         result.evidence_newer_than_certified_snapshot,
         result.analyst_jobs_queued,

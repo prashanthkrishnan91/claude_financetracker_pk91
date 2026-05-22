@@ -28,6 +28,7 @@ from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 impor
     LANE_FUNDAMENTALS,
     LANE_MACRO_CONTEXT,
     LANE_NEWS_SENTIMENT,
+    LANE_SEC_CATALYST_SENTIMENT,
     LANE_SEC_COMPANY_FACTS,
     LANE_TECHNICALS,
     READ_MODEL_VERSION,
@@ -604,3 +605,146 @@ class TestDispatchLogFlag:
         messages = " ".join(rec.getMessage() for rec in caplog.records)
         assert "SECRET_DISPATCH_LOG" not in messages
         assert "source_url" not in messages
+
+
+# ── SEC catalyst sentiment lane tests (Stage 8C PR 2.4) ──────────────────────
+
+
+def _sec_catalyst_sentiment_row(ticker: str, **kw) -> dict[str, Any]:
+    return _make_artifact_row(
+        artifact_type="sentiment_event",
+        skill_pack="sec_catalyst_sentiment_evidence_v1",
+        scope_kind="ticker",
+        ticker=ticker,
+        **kw,
+    )
+
+
+def _news_sentiment_row(ticker: str, **kw) -> dict[str, Any]:
+    return _make_artifact_row(
+        artifact_type="sentiment_event",
+        skill_pack="news_sentiment_evidence_v1",
+        scope_kind="ticker",
+        ticker=ticker,
+        **kw,
+    )
+
+
+class TestSecCatalystSentimentLane:
+    """Stage 5J correctly classifies SEC catalyst sentiment as a distinct lane."""
+
+    def test_usable_sec_catalyst_artifact_marks_lane_limited(self) -> None:
+        db = _FakeDB(rows=[_sec_catalyst_sentiment_row(
+            "CRM",
+            usability_label="USABLE_WITH_LIMITATIONS",
+            is_usable=True,
+            completeness_band="PARTIAL",
+            strongest_authority_level="PRIMARY_AUTHORITY",
+        )])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+        )
+        cov = summary.ticker_coverage["CRM"].lanes[LANE_SEC_CATALYST_SENTIMENT]
+        assert cov.status == STATUS_LIMITED
+        assert cov.is_usable is True
+        assert cov.artifact_id is not None
+        assert cov.skill_pack == "sec_catalyst_sentiment_evidence_v1"
+
+    def test_usable_sec_catalyst_counted_as_ready(self) -> None:
+        db = _FakeDB(rows=[_sec_catalyst_sentiment_row(
+            "SNOW",
+            usability_label="USABLE_WITH_LIMITATIONS",
+            is_usable=True,
+            completeness_band="PARTIAL",
+        )])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["SNOW"], db_client=_FakeClient(db),
+        )
+        assert summary.ready_artifact_count >= 1
+        assert summary.lane_counts.get(LANE_SEC_CATALYST_SENTIMENT) == 1
+
+    def test_editorial_news_sentiment_remains_suppressed(self) -> None:
+        db = _FakeDB(rows=[_news_sentiment_row(
+            "CRM",
+            usability_label="SUPPRESSED_INCOMPLETE",
+            is_usable=False,
+            suppression_reason="evidence_completeness_thin",
+            completeness_band="THIN",
+            strongest_authority_level="EDITORIAL_CONTEXT",
+        )])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+        )
+        news_cov = summary.ticker_coverage["CRM"].lanes[LANE_NEWS_SENTIMENT]
+        assert news_cov.status == STATUS_SUPPRESSED
+        assert news_cov.is_usable is False
+
+    def test_both_lanes_independent_suppressed_news_does_not_override_usable_sec_catalyst(self) -> None:
+        db = _FakeDB(rows=[
+            _sec_catalyst_sentiment_row(
+                "CRM",
+                usability_label="USABLE_WITH_LIMITATIONS",
+                is_usable=True,
+                completeness_band="PARTIAL",
+            ),
+            _news_sentiment_row(
+                "CRM",
+                usability_label="SUPPRESSED_INCOMPLETE",
+                is_usable=False,
+                completeness_band="THIN",
+                strongest_authority_level="EDITORIAL_CONTEXT",
+            ),
+        ])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+        )
+        sec_cov = summary.ticker_coverage["CRM"].lanes[LANE_SEC_CATALYST_SENTIMENT]
+        news_cov = summary.ticker_coverage["CRM"].lanes[LANE_NEWS_SENTIMENT]
+        assert sec_cov.status == STATUS_LIMITED
+        assert sec_cov.is_usable is True
+        assert news_cov.status == STATUS_SUPPRESSED
+        assert news_cov.is_usable is False
+
+    def test_sec_catalyst_log_includes_artifact_id(self, caplog) -> None:
+        artifact_id = "test-artifact-uuid-1234"
+        db = _FakeDB(rows=[_sec_catalyst_sentiment_row(
+            "CRM",
+            artifact_id=artifact_id,
+            usability_label="USABLE_WITH_LIMITATIONS",
+            is_usable=True,
+            completeness_band="PARTIAL",
+        )])
+        with caplog.at_level("INFO"):
+            compute_research_evidence_coverage(
+                user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+            )
+        messages = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "sec_catalyst_stage5j_readiness" in messages
+        assert artifact_id in messages
+        assert "status=LIMITED" in messages
+        assert "is_usable=True" in messages
+
+    def test_missing_sec_catalyst_reported_as_missing(self) -> None:
+        db = _FakeDB(rows=[])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+        )
+        cov = summary.ticker_coverage["CRM"].lanes[LANE_SEC_CATALYST_SENTIMENT]
+        assert cov.status == STATUS_MISSING
+        assert cov.is_usable is False
+        assert cov.artifact_id is None
+
+    def test_sec_catalyst_no_raw_payload_in_summary(self) -> None:
+        db = _FakeDB(rows=[_sec_catalyst_sentiment_row(
+            "CRM",
+            usability_label="USABLE_WITH_LIMITATIONS",
+            is_usable=True,
+            secret_field="SEC_CATALYST_SECRET",
+        )])
+        summary = compute_research_evidence_coverage(
+            user_id=_USER_ID, tickers=["CRM"], db_client=_FakeClient(db),
+        )
+        import json
+        blob = json.dumps(summary.to_dict())
+        assert "SEC_CATALYST_SECRET" not in blob
+        assert "api_key" not in blob

@@ -774,6 +774,63 @@ class TestSnapshotEvidenceExplanationTechnicalStatus:
         # governance_result takes priority; research_axis_readiness is ignored
         assert expl["technical_signals_status"] == "LIMITED"
 
+    def test_sec_catalyst_sentiment_limited_surfaces_in_snapshot(self):
+        """Usable SEC catalyst sentiment propagates as LIMITED in snapshot evidence_explanation."""
+        from app.services.intelligence.v3.snapshot_builder import _build_held_card
+
+        decision = self._make_synthetic_decision()
+        card_meta = {
+            "ticker": "CRM",
+            "name": "Salesforce",
+            "category": "stock",
+            "thesis_state": "intact",
+            "governance_result": None,
+            "research_axis_readiness": {
+                "technical_signals": "MISSING",
+                "sentiment": "LIMITED",   # SEC catalyst is usable → LIMITED
+            },
+        }
+        card = _build_held_card(
+            decision=decision,
+            card_meta=card_meta,
+            snapshot_id="snap-sec-001",
+            run_id="run-sec-001",
+        )
+        expl = card["detail_drawer_payload"]["evidence_explanation"]
+        assert expl["sentiment_status"] == "LIMITED", \
+            "Usable SEC catalyst sentiment must surface as LIMITED in evidence_explanation"
+        # No raw internal keys in the explanation payload.
+        import json
+        blob = json.dumps(expl)
+        for bad_key in ("sec_catalyst_sentiment_evidence_v1", "skill_pack", "api_key"):
+            assert bad_key not in blob, f"Internal key {bad_key} must not leak into explanation"
+
+    def test_suppressed_editorial_sentiment_does_not_show_limited(self):
+        """Suppressed editorial sentiment must not show as LIMITED or READY."""
+        from app.services.intelligence.v3.snapshot_builder import _build_held_card
+
+        decision = self._make_synthetic_decision()
+        card_meta = {
+            "ticker": "CRM",
+            "name": "Salesforce",
+            "category": "stock",
+            "thesis_state": "intact",
+            "governance_result": None,
+            "research_axis_readiness": {
+                "technical_signals": "MISSING",
+                "sentiment": "INSUFFICIENT",  # suppressed editorial → INSUFFICIENT
+            },
+        }
+        card = _build_held_card(
+            decision=decision,
+            card_meta=card_meta,
+            snapshot_id="snap-sec-002",
+            run_id="run-sec-002",
+        )
+        expl = card["detail_drawer_payload"]["evidence_explanation"]
+        assert expl.get("sentiment_status") not in ("LIMITED", "READY"), \
+            "Suppressed editorial must not show as usable in evidence_explanation"
+
 
 # ── 7. Action distribution unchanged ─────────────────────────────────────────
 

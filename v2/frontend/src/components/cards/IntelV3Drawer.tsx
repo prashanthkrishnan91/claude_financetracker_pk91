@@ -40,6 +40,7 @@ import {
   buildWhyActionExplanation,
   buildSupportingEvidenceSentences,
   buildIncompleteEvidenceSentences,
+  buildCatalystEvidenceDisplay,
 } from "@/lib/intel-v3-explanation";
 
 interface IntelV3DrawerProps {
@@ -142,6 +143,50 @@ function EvidenceLaneDetail({ ex }: { ex: IntelV3EvidenceExplanation }) {
               <span className="font-medium">Macro backdrop</span> — Portfolio context that can shape confidence and caution, but is not a standalone Buy/Sell reason.
             </p>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Stage 8D: Catalyst evidence module ───────────────────────────────────────
+
+function CatalystEvidenceModule({ ex }: { ex: import("@/lib/api").IntelV3EvidenceExplanation }) {
+  const display = buildCatalystEvidenceDisplay(ex.sec_catalyst_evidence);
+  if (!display.show) return null;
+
+  return (
+    <div className="mt-3 space-y-2" data-testid="catalyst-evidence-module">
+      {display.official_catalyst && (
+        <div className="rounded-lg border border-action-buy/20 bg-action-buy/5 px-3 py-2.5">
+          <p className="text-[10px] font-semibold text-action-buy uppercase tracking-wide mb-1">
+            {display.official_catalyst.title}
+          </p>
+          <p className="text-[11px] text-text-secondary leading-relaxed">
+            {display.official_catalyst.body}
+          </p>
+          <p className="text-[10px] text-text-muted mt-1.5">
+            {display.official_catalyst.source_label}
+          </p>
+          <p className="text-[10px] text-text-muted mt-0.5 italic">
+            {display.official_catalyst.limitation_note}
+          </p>
+          <p className="text-[10px] text-text-muted mt-1 font-medium">
+            {display.official_catalyst.decision_authority_note}
+          </p>
+        </div>
+      )}
+      {display.editorial_suppressed && (
+        <div className="rounded-lg border border-border bg-surface/40 px-3 py-2.5">
+          <p className="text-[10px] font-semibold text-text-secondary uppercase tracking-wide mb-1">
+            {display.editorial_suppressed.title}
+          </p>
+          <p className="text-[11px] text-text-muted leading-relaxed">
+            {display.editorial_suppressed.body}
+          </p>
+          <p className="text-[10px] text-text-muted mt-1.5 italic">
+            {display.editorial_suppressed.limitation_note}
+          </p>
         </div>
       )}
     </div>
@@ -464,6 +509,9 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
 
             {/* Expandable lane detail — only when Stage 7 explanation is available */}
             {ex && <EvidenceLaneDetail ex={ex} />}
+
+            {/* Stage 8D: SEC/company catalyst evidence readiness */}
+            {ex && <CatalystEvidenceModule ex={ex} />}
           </Section>
 
           {/* Valuation context — rendered only when present */}

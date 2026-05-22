@@ -46,6 +46,7 @@ from .portfolio_governor_lite import build_weight_map, compute_portfolio_fit
 from .snapshot_builder import build_snapshot
 from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
+from .catalyst_display_adapter_v1 import build_catalyst_display_fields as _build_catalyst_display_fields
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
 # Stage 3.1 — analyst refresh-request seam opt-in. Defaults to enabled so the
@@ -417,6 +418,12 @@ class IntelV3Service:
                         flag_enabled=True,
                     )
                     _gov_result_dict = _gov_result.to_dict()
+                    # Stage 8D: catalyst display available even on the Stage 6 active path.
+                    # Governance result drives decisions; this is display-only metadata.
+                    if _s6_readiness is not None:
+                        _research_axis_readiness = {
+                            "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
+                        }
                 elif evidence_shadow is not None:
                     # Stage 6 inactive but shadow available: populate axis readiness for
                     # evidence_explanation (technical_signals_status, sentiment_status).
@@ -441,6 +448,10 @@ class IntelV3Service:
                                 _sent_axis.readiness,
                                 _sent_source,
                             )
+                        # Stage 8D: safe catalyst display fields for UI (no raw codes).
+                        _research_axis_readiness["sec_catalyst_display"] = (
+                            _build_catalyst_display_fields(_s6_readiness)
+                        )
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -1264,6 +1275,11 @@ class IntelV3Service:
                     flag_enabled=True,
                 )
                 _gov_result_dict = _gov_result.to_dict()
+                # Stage 8D: catalyst display available even on the Stage 6 active path.
+                if _s6_readiness is not None:
+                    _research_axis_readiness = {
+                        "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
+                    }
             elif evidence_shadow is not None:
                 # Stage 6 inactive but shadow available: populate axis readiness for
                 # evidence_explanation (technical_signals_status, sentiment_status).
@@ -1288,6 +1304,10 @@ class IntelV3Service:
                             _sent_axis.readiness,
                             _sent_source,
                         )
+                    # Stage 8D: safe catalyst display fields for UI (no raw codes).
+                    _research_axis_readiness["sec_catalyst_display"] = (
+                        _build_catalyst_display_fields(_s6_readiness)
+                    )
 
             decision = decide(inp)
             decisions.append(decision)

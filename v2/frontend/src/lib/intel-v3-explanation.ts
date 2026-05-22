@@ -12,7 +12,7 @@
  * - Conviction cap, missing evidence, and blocked states are shown honestly.
  */
 
-import type { IntelV3EvidenceExplanation, IntelV3HeldCard } from "./api";
+import type { IntelV3EvidenceExplanation, IntelV3HeldCard, SecCatalystEvidenceDisplay } from "./api";
 
 // ── Raw-key leak guard ────────────────────────────────────────────────────────
 
@@ -434,4 +434,65 @@ export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): Portfol
     cardsWithExplanation,
     totalCards: cards.length,
   };
+}
+
+// ── Stage 8D: SEC catalyst evidence display ──────────────────────────────────
+
+export interface CatalystEvidenceItem {
+  title: string;
+  body: string;
+  source_label: string;
+  limitation_note: string;
+  decision_authority_note: string;
+}
+
+export interface CatalystEvidenceDisplayResult {
+  /** Whether to show the module at all */
+  show: boolean;
+  /** Optional: official company filing activity card */
+  official_catalyst?: CatalystEvidenceItem;
+  /** Optional: editorial sources suppressed card */
+  editorial_suppressed?: CatalystEvidenceItem;
+}
+
+/**
+ * Build plain-English catalyst evidence display items from the raw flags.
+ *
+ * Rules:
+ * - ETFs/crypto (sec_lane_applicable=false): show=false, no content.
+ * - SEC catalyst found: show official company filing card.
+ * - Editorial suppressed (and no SEC catalyst): show editorial-not-trusted card.
+ * - Neither: show=false.
+ * - No raw backend codes appear in any returned string.
+ */
+export function buildCatalystEvidenceDisplay(
+  cat: SecCatalystEvidenceDisplay | null | undefined
+): CatalystEvidenceDisplayResult {
+  if (!cat) return { show: false };
+  if (!cat.sec_lane_applicable) return { show: false };
+  if (!cat.sec_catalyst_found && !cat.editorial_suppressed) return { show: false };
+
+  const result: CatalystEvidenceDisplayResult = { show: true };
+
+  if (cat.sec_catalyst_found) {
+    result.official_catalyst = {
+      title: "Official company catalyst evidence found",
+      body: "Recent activity from official company filings — such as earnings reports or corporate announcements — was found and contributed to the sentiment picture.",
+      source_label: "Source: Official company filings (SEC EDGAR)",
+      limitation_note: "Useful but limited — covers company-authored events only, not general market opinion.",
+      decision_authority_note: "This did not determine Buy, Hold, Trim, or Sell by itself.",
+    };
+  }
+
+  if (cat.editorial_suppressed) {
+    result.editorial_suppressed = {
+      title: "General news sources not trusted",
+      body: "News from general editorial sources was found but did not meet the quality bar this app requires for investment decisions.",
+      source_label: "Sources: General news and editorial outlets",
+      limitation_note: "Editorial news can reflect opinion rather than verified company facts, so it is held to a higher standard.",
+      decision_authority_note: "Only official company sources qualify for the sentiment picture.",
+    };
+  }
+
+  return result;
 }

@@ -257,3 +257,57 @@ class TestSnapshotBuilderCatalystEvidence:
         cata = ex["sec_catalyst_evidence"]
         for val in cata.values():
             assert str(val) not in forbidden, f"Raw code in display: {val}"
+
+    def _make_card_meta_with_gov(self, *, sec_catalyst_found: bool = False) -> dict:
+        """Build card_meta with governance_result set (simulates Stage 6 active path)."""
+        # Minimal governance dict matching what _build_evidence_explanation() reads.
+        gov = {
+            "primary_evidence_readiness": "LIMITED",
+            "auxiliary_evidence_readiness": {
+                "technical_signals": "MISSING",
+                "sentiment": "LIMITED" if sec_catalyst_found else "MISSING",
+            },
+            "conviction_cap_applied": True,
+            "conviction_cap_reason": "ok_cap_medium",
+            "safe_for_visible_decision": True,
+            "safe_for_visible_decision_reason": "",
+            "governance_priority_applied": "p4b_limited_no_corroboration",
+            "corroboration_gap": True,
+            "action_blocks_applied": [],
+        }
+        return {
+            "ticker": "MSFT",
+            "name": "Microsoft",
+            "category": "stock",
+            "thesis_state": "intact",
+            "governance_result": gov,
+            "research_axis_readiness": {
+                "sec_catalyst_display": {
+                    "sec_catalyst_found": sec_catalyst_found,
+                    "editorial_suppressed": False,
+                    "sec_lane_applicable": True,
+                },
+            },
+        }
+
+    def test_sec_catalyst_evidence_injected_when_stage6_active(self):
+        """When governance_result is present (Stage 6 active path), sec_catalyst_evidence
+        must still be injected from research_axis_readiness. This test fails on the original
+        PR where _research_axis_readiness was None for s6_active=True."""
+        meta = self._make_card_meta_with_gov(sec_catalyst_found=True)
+        card = self._run_builder(meta)
+        ex = card["detail_drawer_payload"]["evidence_explanation"]
+        assert "sec_catalyst_evidence" in ex, (
+            "sec_catalyst_evidence missing — Stage 6 active path not wired"
+        )
+        assert ex["sec_catalyst_evidence"]["sec_catalyst_found"] is True
+
+    def test_governance_result_not_mutated_by_catalyst_display(self):
+        """Injecting sec_catalyst_evidence must not change governance-derived fields."""
+        meta = self._make_card_meta_with_gov(sec_catalyst_found=True)
+        card = self._run_builder(meta)
+        ex = card["detail_drawer_payload"]["evidence_explanation"]
+        # governance-derived fields must still reflect the governance dict
+        assert ex["primary_evidence_status"] == "LIMITED"
+        assert ex["governance_priority"] == "p4b_limited_no_corroboration"
+        assert ex["conviction_cap_applied"] is True

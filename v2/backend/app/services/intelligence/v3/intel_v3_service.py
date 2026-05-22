@@ -418,6 +418,12 @@ class IntelV3Service:
                         flag_enabled=True,
                     )
                     _gov_result_dict = _gov_result.to_dict()
+                    # Stage 8D: catalyst display available even on the Stage 6 active path.
+                    # Governance result drives decisions; this is display-only metadata.
+                    if _s6_readiness is not None:
+                        _research_axis_readiness = {
+                            "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
+                        }
                 elif evidence_shadow is not None:
                     # Stage 6 inactive but shadow available: populate axis readiness for
                     # evidence_explanation (technical_signals_status, sentiment_status).
@@ -1269,6 +1275,11 @@ class IntelV3Service:
                     flag_enabled=True,
                 )
                 _gov_result_dict = _gov_result.to_dict()
+                # Stage 8D: catalyst display available even on the Stage 6 active path.
+                if _s6_readiness is not None:
+                    _research_axis_readiness = {
+                        "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
+                    }
             elif evidence_shadow is not None:
                 # Stage 6 inactive but shadow available: populate axis readiness for
                 # evidence_explanation (technical_signals_status, sentiment_status).

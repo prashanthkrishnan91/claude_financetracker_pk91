@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-22 (Stage 8C PR 2.4 — PR #402. Certified SEC catalyst sentiment propagation into Stage 5J/5K and snapshot. Added artifact_id to sec_catalyst_stage5j_readiness log; added sentiment_stage5k_source_selection log in Stage 5K; added snapshot_sentiment_readiness log in both intel_v3_service.py paths. 17 new backend tests. No SQL.)
+Last updated: 2026-05-22 (Stage 8C PR 2.5 — post-lane Stage 5J/5K readiness trigger. Evidence lane orchestrator now unconditionally evaluates Stage 5J/5K after lanes complete — reads active artifact set including idempotency-skipped existing SEC catalyst v2 artifacts. sec_catalyst_stage5j_readiness, sentiment_stage5k_source_selection, snapshot_sentiment_readiness logs appear after every Run Intel regardless of republisher skip decision. 29 new backend tests. No SQL.)
 
 ## Purpose
 
@@ -54,21 +54,33 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8C PR 2.4 — Certify SEC catalyst sentiment propagation into Stage 5J/5K and snapshot (PR #402, open)
+## Stage 8C PR 2.5 — Post-lane Stage 5J/5K readiness trigger (current PR, open)
 
-**Before:** SEC catalyst artifacts write as usable (`is_usable=True`, `USABLE_WITH_LIMITATIONS`, `PARTIAL`), but Stage 5J/5K and snapshot propagation had no runtime proof logs.
+**Root cause:** Stage 5J/5K readiness logs never appeared after Run Intel because:
+1. The orchestrator gated Stage 5J behind `intel_v3_evidence_coverage_dispatch_log_enabled` (default False).
+2. Stage 5K (`compute_decision_input_readiness`) was never called from the orchestrator path.
+3. `snapshot_sentiment_readiness` was only emitted during snapshot building — skipped when the republisher returned `skipped_no_new_evidence` (existing SEC catalyst v2 artifacts predate the current snapshot timestamp).
 
-**Fix:**
-- Stage 5J (`research_evidence_coverage_read_model_v1.py`): added `artifact_id=<id>` to `sec_catalyst_stage5j_readiness` log.
-- Stage 5K (`research_evidence_decision_input_adapter_v1.py`): added `_log_sentiment_source_selection()` emitting `sentiment_stage5k_source_selection ticker=<t> selected=<lane> suppressed_editorial_present=<bool>` per ticker.
-- `intel_v3_service.py` (both hot-path and prewarm): added `snapshot_sentiment_readiness ticker=<t> status=<s> source=<lane>` log when sentiment is usable.
-- 17 new backend tests across Stage 5J, 5K, and snapshot contract.
+**Fix (one file):** `intel_v3_evidence_lane_orchestrator_v1.py` — replaced the flag-gated Stage 5J-only block with an unconditional post-lane Stage 5J + 5K evaluation:
+- Calls `compute_research_evidence_coverage` (Stage 5J) → emits `sec_catalyst_stage5j_readiness` per ticker.
+- Calls `compute_decision_input_readiness` (Stage 5K) → emits `sentiment_stage5k_source_selection` per ticker.
+- Emits `snapshot_sentiment_readiness` for usable sec_catalyst_sentiment lanes.
+- Reads the full `is_active=True` artifact set — idempotency-skipped existing artifacts are valid evidence inputs.
+- Fail-soft; never raises into the orchestrator path.
+- Runs after evidence lane completion, before the republisher check, so diagnostics appear regardless of republisher decision.
 
-**Expected Railway logs after enabling `INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true`:**
-- `research_artifact_service_write_ok ... skill_pack=sec_catalyst_sentiment_evidence_v1 model_version=sec_catalyst_sentiment_adapter.v2 completeness_band=PARTIAL usability_label=USABLE_WITH_LIMITATIONS is_usable=True`
-- `sec_catalyst_stage5j_readiness ticker=CRM status=LIMITED is_usable=True artifact_id=<uuid>`
-- `sentiment_stage5k_source_selection ticker=CRM selected=sec_catalyst_sentiment suppressed_editorial_present=True`
-- `snapshot_sentiment_readiness ticker=CRM status=LIMITED source=sec_catalyst_sentiment`
+**Tests:** 29 new backend tests in `test_stage8c2_5_post_lane_readiness.py` (structural source proofs, idempotency cases, Stage 5J LIMITED, Stage 5K source selection, log emission, ETF/crypto skip, no policy mutations). No SQL, no env vars, no providers, no LLM, no UI, no decision policy changes.
+
+**Expected Railway logs after merge (keep INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true):**
+- `sec_catalyst_stage5j_readiness ticker=<t> status=LIMITED is_usable=True artifact_id=<uuid>`
+- `sentiment_stage5k_source_selection ticker=<t> selected=sec_catalyst_sentiment suppressed_editorial_present=<bool>`
+- `snapshot_sentiment_readiness ticker=<t> status=LIMITED source=sec_catalyst_sentiment`
+- Editorial/yfinance sentiment stays suppressed (not selected over usable SEC catalyst).
+- ETF/BTC/XRP conservative skip behavior unchanged.
+
+## Stage 8C PR 2.4 — Certify SEC catalyst sentiment propagation into Stage 5J/5K and snapshot (merged PR #402)
+
+**Fix:** Stage 5J: added `artifact_id` to `sec_catalyst_stage5j_readiness` log. Stage 5K: added `_log_sentiment_source_selection()`. `intel_v3_service.py` (both paths): added `snapshot_sentiment_readiness` log when sentiment is usable. 17 new backend tests. No SQL.
 
 ## Stage 8C PR 2.3 — SEC catalyst idempotency + lane isolation fix (merged PR #401)
 

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 2 runtime fix — PR #399. Fixed `FactRecord.fact_kind="sec_catalyst_event"` → `"catalyst_item"` to satisfy `research_artifact_facts_fact_kind_check` DB constraint (error 23514). No SQL. PR #398 wired the lane; PR #399 unblocks artifact writes. Readiness gate re-triggered via synchronize event.)
+Last updated: 2026-05-21 (Stage 8C PR 2.3 — PR #401. Fixed SEC catalyst sentiment idempotency skip: bumped SEC_CATALYST_MODEL_VERSION .v1→.v2 so pre-PR400 THIN/SUPPRESSED_INCOMPLETE artifacts are not reused. Added skill_pack+model_version to write_ok/idempotency_skip/clean_replacement logs for lane-distinguishable Railway diagnostics. 9 new backend tests. No SQL.)
 
 ## Purpose
 
@@ -53,6 +53,20 @@ Key structured logs to confirm in production:
 - **Intel v3 all-or-nothing certified intelligence run contract (Stage 3.3).** `POST /intel/v3/run` (Run Intel button) now calls `service.enqueue_run_v3()` — it enqueues background jobs and returns `{status: "refresh_requested"}` immediately. It does NOT build a snapshot or call `decide()`. `GET /intel/v3/snapshot` (page load) returns the latest persisted snapshot with no LLM calls. After the worker completes a full run, `run_prewarm_snapshot()` calls `check_certified_intel_run_contract()` — a pure async read-only validator that checks all 10 conditions per holding (active recommendation, agent_run_id, matching agent_insight by run_id, agent_run completed, analyst_verdict fields non-empty non-template, freshness within SLA). Only if ALL active holdings pass does the snapshot get `snapshot_source="worker_certified"`; otherwise `"certification_failed"`. The frontend polls every 15s after clicking Run Intel until `snapshot_source=worker_certified` or 5-minute timeout. Green banner is shown ONLY when `snapshot_source=worker_certified` AND `certified_holding_count === total_holding_count`. Six UI states: `certified_current` (green), `latest_certified_new_refresh_running` (amber), `refreshing_analyst_intelligence` (grey), `blocked_certification_failed` (red), `unavailable_refresh_failed` (red), `unavailable_evidence_incomplete` (grey). Structured logs: `intel_v3_certified_contract_summary`, `intel_v3_run_request_received`, `intel_v3_full_refresh_enqueued`, `intel_v3_worker_certified_snapshot_published`, `intel_v3_worker_certified_snapshot_rejected`, `intel_v3_ui_status_summary`. Background worker still: `analyst_refresh_worker_v1.AnalystRefreshWorker` → `FullPortfolioAnalystRefreshAdapter` → `AgentOrchestrator` → `analyst_evidence_writer_v1` → `prewarm_intel_v3_snapshot()`. For broader architecture see Stage 3.1–3.2c notes below.
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
+
+## Stage 8C PR 2.3 — SEC catalyst idempotency + lane isolation fix (PR #401, open)
+
+**Root cause:** `SEC_CATALYST_MODEL_VERSION` was `.v1` after PR #400 added `claim_key+text_value` to `catalyst_item` facts. Same accession numbers → same `source_refs_fingerprint` → same `replay_idempotency_key` as old pre-PR400 artifacts. The artifact service idempotency check found the pre-PR400 artifact (scored THIN/SUPPRESSED_INCOMPLETE, no comparable facts) and skipped the write. PR #400's fix never ran in production.
+
+**Fix:**
+- `SEC_CATALYST_MODEL_VERSION` bumped to `sec_catalyst_sentiment_adapter.v2` → new idempotency key → Stage 5A clean replacement deactivates old v1 artifact and writes a fresh one with PARTIAL/USABLE_WITH_LIMITATIONS.
+- Added `skill_pack=` + `model_version=` to `research_artifact_service_write_ok` and `idempotency_skip` logs; `skill_pack=` + `scope_kind=` to clean replacement log.
+- 9 new tests: version bump, lane isolation, log field coverage.
+
+**Expected Railway logs after enabling `INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true`:**
+- `research_artifact_service_clean_replacement ticker=CRM type=sentiment_event skill_pack=sec_catalyst_sentiment_evidence_v1 deactivated_count=1`
+- `research_artifact_service_write_ok ... skill_pack=sec_catalyst_sentiment_evidence_v1 model_version=sec_catalyst_sentiment_adapter.v2 completeness_band=PARTIAL usability_label=USABLE_WITH_LIMITATIONS is_usable=True`
+- `sec_catalyst_stage5j_readiness ticker=CRM status=LIMITED is_usable=True`
 
 ## Stage 8C PR 2 runtime fix — schema-valid fact_kind (PR #399, open)
 

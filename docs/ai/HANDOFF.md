@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-21 (Stage 8C PR 2.3 — PR #401. Fixed SEC catalyst sentiment idempotency skip: bumped SEC_CATALYST_MODEL_VERSION .v1→.v2 so pre-PR400 THIN/SUPPRESSED_INCOMPLETE artifacts are not reused. Added skill_pack+model_version to write_ok/idempotency_skip/clean_replacement logs for lane-distinguishable Railway diagnostics. 9 new backend tests. No SQL.)
+Last updated: 2026-05-22 (Stage 8C PR 2.4 — PR #402. Certified SEC catalyst sentiment propagation into Stage 5J/5K and snapshot. Added artifact_id to sec_catalyst_stage5j_readiness log; added sentiment_stage5k_source_selection log in Stage 5K; added snapshot_sentiment_readiness log in both intel_v3_service.py paths. 17 new backend tests. No SQL.)
 
 ## Purpose
 
@@ -54,19 +54,27 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8C PR 2.3 — SEC catalyst idempotency + lane isolation fix (PR #401, open)
+## Stage 8C PR 2.4 — Certify SEC catalyst sentiment propagation into Stage 5J/5K and snapshot (PR #402, open)
 
-**Root cause:** `SEC_CATALYST_MODEL_VERSION` was `.v1` after PR #400 added `claim_key+text_value` to `catalyst_item` facts. Same accession numbers → same `source_refs_fingerprint` → same `replay_idempotency_key` as old pre-PR400 artifacts. The artifact service idempotency check found the pre-PR400 artifact (scored THIN/SUPPRESSED_INCOMPLETE, no comparable facts) and skipped the write. PR #400's fix never ran in production.
+**Before:** SEC catalyst artifacts write as usable (`is_usable=True`, `USABLE_WITH_LIMITATIONS`, `PARTIAL`), but Stage 5J/5K and snapshot propagation had no runtime proof logs.
 
 **Fix:**
-- `SEC_CATALYST_MODEL_VERSION` bumped to `sec_catalyst_sentiment_adapter.v2` → new idempotency key → Stage 5A clean replacement deactivates old v1 artifact and writes a fresh one with PARTIAL/USABLE_WITH_LIMITATIONS.
-- Added `skill_pack=` + `model_version=` to `research_artifact_service_write_ok` and `idempotency_skip` logs; `skill_pack=` + `scope_kind=` to clean replacement log.
-- 9 new tests: version bump, lane isolation, log field coverage.
+- Stage 5J (`research_evidence_coverage_read_model_v1.py`): added `artifact_id=<id>` to `sec_catalyst_stage5j_readiness` log.
+- Stage 5K (`research_evidence_decision_input_adapter_v1.py`): added `_log_sentiment_source_selection()` emitting `sentiment_stage5k_source_selection ticker=<t> selected=<lane> suppressed_editorial_present=<bool>` per ticker.
+- `intel_v3_service.py` (both hot-path and prewarm): added `snapshot_sentiment_readiness ticker=<t> status=<s> source=<lane>` log when sentiment is usable.
+- 17 new backend tests across Stage 5J, 5K, and snapshot contract.
 
 **Expected Railway logs after enabling `INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true`:**
-- `research_artifact_service_clean_replacement ticker=CRM type=sentiment_event skill_pack=sec_catalyst_sentiment_evidence_v1 deactivated_count=1`
 - `research_artifact_service_write_ok ... skill_pack=sec_catalyst_sentiment_evidence_v1 model_version=sec_catalyst_sentiment_adapter.v2 completeness_band=PARTIAL usability_label=USABLE_WITH_LIMITATIONS is_usable=True`
-- `sec_catalyst_stage5j_readiness ticker=CRM status=LIMITED is_usable=True`
+- `sec_catalyst_stage5j_readiness ticker=CRM status=LIMITED is_usable=True artifact_id=<uuid>`
+- `sentiment_stage5k_source_selection ticker=CRM selected=sec_catalyst_sentiment suppressed_editorial_present=True`
+- `snapshot_sentiment_readiness ticker=CRM status=LIMITED source=sec_catalyst_sentiment`
+
+## Stage 8C PR 2.3 — SEC catalyst idempotency + lane isolation fix (merged PR #401)
+
+**Root cause:** `SEC_CATALYST_MODEL_VERSION` was `.v1` — same idempotency key as pre-PR400 THIN artifacts. Idempotency check skipped the write.
+
+**Fix:** Bumped to `sec_catalyst_sentiment_adapter.v2`; added skill_pack/model_version to write_ok/idempotency_skip/clean_replacement logs. 9 new tests.
 
 ## Stage 8C PR 2 runtime fix — schema-valid fact_kind (PR #399, open)
 

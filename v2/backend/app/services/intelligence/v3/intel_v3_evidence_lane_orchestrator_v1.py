@@ -142,25 +142,54 @@ def run_enabled_evidence_lanes_for_portfolio(
         parent_intel_run_id or "none",
     )
 
-    # Stage 5J — optional compact coverage summary log (read-only, fail-soft).
-    # Gated by intel_v3_evidence_coverage_dispatch_log_enabled. Never raises into
-    # the orchestrator path. Never triggers an evidence run.
-    if getattr(settings, "intel_v3_evidence_coverage_dispatch_log_enabled", False):
-        try:
-            from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
-                compute_research_evidence_coverage,
-                log_coverage_summary,
-            )
-            summary = compute_research_evidence_coverage(
-                user_id=user_id,
-                tickers=tickers,
-                db_client=db_client,
-            )
-            log_coverage_summary(summary)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "intel_v3_evidence_coverage_dispatch_log_error error=%s",
-                exc,
-            )
+    # Stage 5J + 5K — post-lane readiness evaluation (unconditional, fail-soft).
+    # Reads active research_artifacts; idempotency-skipped existing artifacts are
+    # in the active set and count as valid evidence inputs even when no new writes
+    # occurred this run. Emits sec_catalyst_stage5j_readiness (Stage 5J),
+    # sentiment_stage5k_source_selection (Stage 5K), and snapshot_sentiment_readiness
+    # for usable sec_catalyst_sentiment lanes. Runs regardless of republisher
+    # decisions — diagnostics appear even when the certified snapshot is current.
+    try:
+        from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+            LANE_SEC_CATALYST_SENTIMENT as _LANE_SEC_CATALYST,
+            compute_research_evidence_coverage,
+            log_coverage_summary,
+        )
+        from app.services.intelligence.v3.research_evidence_decision_input_adapter_v1 import (
+            AXIS_SENTIMENT as _AXIS_SENTIMENT,
+            compute_decision_input_readiness,
+        )
+
+        _coverage = compute_research_evidence_coverage(
+            user_id=user_id,
+            tickers=tickers,
+            db_client=db_client,
+        )
+        log_coverage_summary(_coverage)
+
+        _shadow = compute_decision_input_readiness(
+            _coverage,
+            holding_context_by_ticker=holding_context_by_ticker,
+        )
+
+        for _ticker, _tr in _shadow.ticker_readiness.items():
+            _sent_axis = _tr.axes.get(_AXIS_SENTIMENT)
+            if _sent_axis is not None and _sent_axis.is_usable:
+                _sent_source = (
+                    "sec_catalyst_sentiment"
+                    if _LANE_SEC_CATALYST in (_sent_axis.contributing_lanes or [])
+                    else "news_sentiment"
+                )
+                logger.info(
+                    "snapshot_sentiment_readiness ticker=%s status=%s source=%s",
+                    _ticker,
+                    _sent_axis.readiness,
+                    _sent_source,
+                )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "intel_v3_evidence_stage5j_5k_post_lane_error error=%s",
+            exc,
+        )
 
     return all_results

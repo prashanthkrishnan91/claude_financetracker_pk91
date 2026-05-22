@@ -205,6 +205,12 @@ def _build_held_card(
         if _ra.get("sentiment"):
             evidence_explanation["sentiment_status"] = _ra["sentiment"]
 
+    # Stage 8D: inject SEC catalyst evidence display fields when available.
+    # Safe display fields only — no raw backend codes, no decision authority.
+    _ra = card_meta.get("research_axis_readiness") or {}
+    if _ra.get("sec_catalyst_display") is not None:
+        evidence_explanation["sec_catalyst_evidence"] = _ra["sec_catalyst_display"]
+
     return {
         "ticker":              card_meta.get("ticker", ""),
         "name":                card_meta.get("name", card_meta.get("ticker", "")),

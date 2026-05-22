@@ -1120,6 +1120,16 @@ export interface DepositPlanResult {
 
 // ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────────────────────────────────────────────
 
+/** Stage 8D — SEC/company catalyst evidence display fields. All boolean, no raw backend codes. */
+export interface SecCatalystEvidenceDisplay {
+  /** True when official company filing activity contributed to sentiment readiness */
+  sec_catalyst_found: boolean;
+  /** True when general news/editorial sources were found but did not meet quality bar */
+  editorial_suppressed: boolean;
+  /** False for ETFs, crypto, and non-equity instruments */
+  sec_lane_applicable: boolean;
+}
+
 /** Stage 7 — evidence explanation from the governance engine. Null when governance inactive. */
 export interface IntelV3EvidenceExplanation {
   /** Company fundamentals readiness: READY | LIMITED | SUPPRESSED | MISSING | INSUFFICIENT | NOT_APPLICABLE */
@@ -1142,6 +1152,8 @@ export interface IntelV3EvidenceExplanation {
   corroboration_gap: boolean;
   /** List of backend action-block reason codes applied */
   action_blocks: string[];
+  /** Stage 8D — SEC/company catalyst evidence readiness for plain-English UI. Absent when no shadow available. */
+  sec_catalyst_evidence?: SecCatalystEvidenceDisplay | null;
 }
 
 /** Actions valid for held positions. Radar labels (WATCH/AVOID) must not appear here. */

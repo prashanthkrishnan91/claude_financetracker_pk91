@@ -1120,7 +1120,7 @@ export interface DepositPlanResult {
 
 // ── Intel v3 types (K3 snapshot contract) ────────────────────────────────────────────────────────────────────────────
 
-/** Stage 8D — SEC/company catalyst evidence display fields. All boolean, no raw backend codes. */
+/** Stage 8D/8E — SEC/company catalyst evidence display fields. All boolean flags + optional explanation strings. */
 export interface SecCatalystEvidenceDisplay {
   /** True when official company filing activity contributed to sentiment readiness */
   sec_catalyst_found: boolean;
@@ -1128,6 +1128,18 @@ export interface SecCatalystEvidenceDisplay {
   editorial_suppressed: boolean;
   /** False for ETFs, crypto, and non-equity instruments */
   sec_lane_applicable: boolean;
+  // Stage 8E: optional plain-English explanation fields derived from artifact payload.
+  // Present when backend has sufficient detail; absent when payload is missing or minimal.
+  /** e.g. "Recent official filing activity was found. The filing appears material enough..." */
+  event_summary?: string;
+  /** e.g. "Filing activity is within the relevant reporting window." */
+  freshness_label?: string;
+  /** e.g. "One recent official filing was found." */
+  material_filing_label?: string;
+  /** e.g. "This covers official company/SEC events only, not broad market opinion." */
+  limitation_note?: string;
+  /** e.g. "This is useful context, but it does not decide Buy, Hold, Trim, or Sell by itself." */
+  decision_authority_note?: string;
 }
 
 /** Stage 7 — evidence explanation from the governance engine. Null when governance inactive. */

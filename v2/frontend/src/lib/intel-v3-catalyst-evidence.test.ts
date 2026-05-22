@@ -185,3 +185,173 @@ describe("buildCatalystEvidenceDisplay", () => {
     });
   });
 });
+
+// ── Stage 8E: richer explanation fields ──────────────────────────────────────
+
+const STAGE_8E_RAW_CODES = [
+  "sec_catalyst_sentiment",
+  "SEC_CATALYST_MODEL_VERSION",
+  "skill_pack",
+  "fact_kind",
+  "READY",
+  "LIMITED",
+  "PARTIAL",
+  "USABLE_WITH_LIMITATIONS",
+  "SUPPRESSED_INCOMPLETE",
+  "stage8c_sec_catalyst_sentiment",
+  "Stage 5K",
+  "Stage 5J",
+];
+
+function assertNoStage8ECodes(text: string) {
+  for (const code of STAGE_8E_RAW_CODES) {
+    expect(text).not.toContain(code);
+  }
+  for (const key of RAW_KEYS_BANNED) {
+    expect(text).not.toContain(key);
+  }
+}
+
+function makeEnrichedCat(
+  overrides: Partial<import("@/lib/api").SecCatalystEvidenceDisplay> = {}
+): import("@/lib/api").SecCatalystEvidenceDisplay {
+  return {
+    sec_catalyst_found: true,
+    editorial_suppressed: false,
+    sec_lane_applicable: true,
+    event_summary:
+      "Recent official filing activity was found. The filing appears material enough to support the sentiment evidence lane.",
+    freshness_label: "Filing activity is within the relevant reporting window.",
+    material_filing_label: "One recent official filing was found.",
+    limitation_note: "This covers official company/SEC events only, not broad market opinion.",
+    decision_authority_note:
+      "This is useful context, but it does not decide Buy, Hold, Trim, or Sell by itself.",
+    ...overrides,
+  };
+}
+
+describe("Stage 8E: enriched catalyst explanation", () => {
+  describe("usable SEC catalyst with explanation fields", () => {
+    it("uses event_summary as official_catalyst body", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      expect(result.official_catalyst!.body).toContain("material enough");
+    });
+
+    it("includes material_filing_label in source_label", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      expect(result.official_catalyst!.source_label).toContain("One recent official filing");
+    });
+
+    it("includes freshness_label in limitation_note", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      expect(result.official_catalyst!.limitation_note).toContain(
+        "within the relevant reporting window"
+      );
+    });
+
+    it("uses decision_authority_note from payload field", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      expect(result.official_catalyst!.decision_authority_note).toContain("does not decide");
+    });
+
+    it("no raw codes in any enriched field", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      for (const val of Object.values(result.official_catalyst!)) {
+        assertNoStage8ECodes(String(val));
+      }
+    });
+
+    it("decision_authority_note does not claim authority", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      const note = result.official_catalyst!.decision_authority_note.toLowerCase();
+      expect(note).toMatch(/does not decide|did not determine/);
+    });
+  });
+
+  describe("minimal payload fallback", () => {
+    it("falls back to generic body when event_summary absent", () => {
+      const cat = makeCat({ sec_catalyst_found: true });
+      const result = buildCatalystEvidenceDisplay(cat);
+      expect(result.official_catalyst!.body).toContain("earnings reports or corporate announcements");
+    });
+
+    it("falls back to generic source_label when material_filing_label absent", () => {
+      const cat = makeCat({ sec_catalyst_found: true });
+      const result = buildCatalystEvidenceDisplay(cat);
+      expect(result.official_catalyst!.source_label).toBe(
+        "Source: Official company filings (SEC EDGAR)"
+      );
+    });
+
+    it("falls back to generic limitation_note when freshness_label absent", () => {
+      const cat = makeCat({ sec_catalyst_found: true });
+      const result = buildCatalystEvidenceDisplay(cat);
+      expect(result.official_catalyst!.limitation_note).not.toContain(
+        "within the relevant reporting window"
+      );
+    });
+  });
+
+  describe("suppressed editorial alongside official catalyst evidence", () => {
+    it("editorial body clarifies official filings were used instead", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat({ editorial_suppressed: true })
+      );
+      expect(result.editorial_suppressed!.body).toContain("official company filings were used");
+    });
+
+    it("editorial body without SEC catalyst still says quality bar not met", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeCat({ editorial_suppressed: true, sec_catalyst_found: false })
+      );
+      expect(result.editorial_suppressed!.body).toContain("quality bar");
+    });
+
+    it("no raw codes in editorial body when both flags set", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat({ editorial_suppressed: true })
+      );
+      assertNoStage8ECodes(result.editorial_suppressed!.body);
+    });
+  });
+
+  describe("ETF / non-equity hidden state", () => {
+    it("enriched catalyst still hidden for ETF (sec_lane_applicable=false)", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat({ sec_lane_applicable: false })
+      );
+      expect(result.show).toBe(false);
+    });
+  });
+
+  describe("raw-code leak guard for 8E fields", () => {
+    it("no raw codes in any field of enriched result", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat({ editorial_suppressed: true })
+      );
+      if (result.official_catalyst) {
+        for (const val of Object.values(result.official_catalyst)) {
+          assertNoStage8ECodes(String(val));
+        }
+      }
+      if (result.editorial_suppressed) {
+        for (const val of Object.values(result.editorial_suppressed)) {
+          assertNoStage8ECodes(String(val));
+        }
+      }
+    });
+  });
+
+  describe("no decision authority keys/phrases in enriched output", () => {
+    it("official_catalyst does not contain standalone Buy/Sell/Trim/Hold as authority", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat());
+      const fullText = Object.values(result.official_catalyst!)
+        .map(String)
+        .join(" ")
+        .toLowerCase();
+      // The disclaimer is OK: "does not decide Buy, Hold, Trim, or Sell"
+      // But no standalone authority claim
+      expect(fullText).not.toMatch(/\bbuy now\b|\bsell now\b|\btrim now\b/);
+    });
+  });
+});

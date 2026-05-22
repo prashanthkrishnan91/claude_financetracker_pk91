@@ -456,11 +456,14 @@ export interface CatalystEvidenceDisplayResult {
 }
 
 /**
- * Build plain-English catalyst evidence display items from the raw flags.
+ * Build plain-English catalyst evidence display items from the raw flags and
+ * optional Stage 8E explanation fields.
  *
  * Rules:
  * - ETFs/crypto (sec_lane_applicable=false): show=false, no content.
  * - SEC catalyst found: show official company filing card.
+ *   - When Stage 8E explanation fields are present, use the richer copy.
+ *   - Falls back to generic Stage 8D copy when explanation fields are absent.
  * - Editorial suppressed (and no SEC catalyst): show editorial-not-trusted card.
  * - Neither: show=false.
  * - No raw backend codes appear in any returned string.
@@ -475,19 +478,36 @@ export function buildCatalystEvidenceDisplay(
   const result: CatalystEvidenceDisplayResult = { show: true };
 
   if (cat.sec_catalyst_found) {
+    // Stage 8E: use artifact-backed explanation when available; generic fallback otherwise.
+    const body = cat.event_summary
+      ?? "Recent activity from official company filings — such as earnings reports or corporate announcements — was found and contributed to the sentiment picture.";
+    const limitation = cat.limitation_note
+      ?? "Useful but limited — covers company-authored events only, not general market opinion.";
+    const authority = cat.decision_authority_note
+      ?? "This did not determine Buy, Hold, Trim, or Sell by itself.";
+
     result.official_catalyst = {
       title: "Official company catalyst evidence found",
-      body: "Recent activity from official company filings — such as earnings reports or corporate announcements — was found and contributed to the sentiment picture.",
-      source_label: "Source: Official company filings (SEC EDGAR)",
-      limitation_note: "Useful but limited — covers company-authored events only, not general market opinion.",
-      decision_authority_note: "This did not determine Buy, Hold, Trim, or Sell by itself.",
+      body,
+      source_label: cat.material_filing_label
+        ? `Source: Official company filings (SEC EDGAR) — ${cat.material_filing_label}`
+        : "Source: Official company filings (SEC EDGAR)",
+      limitation_note: cat.freshness_label
+        ? `${limitation} ${cat.freshness_label}`
+        : limitation,
+      decision_authority_note: authority,
     };
   }
 
   if (cat.editorial_suppressed) {
+    // When SEC catalyst is also found, clarify that official filings were used instead.
+    const editorialBody = cat.sec_catalyst_found
+      ? "General news sources were found but not used — official company filings were used for the sentiment picture instead."
+      : "News from general editorial sources was found but did not meet the quality bar this app requires for investment decisions.";
+
     result.editorial_suppressed = {
       title: "General news sources not trusted",
-      body: "News from general editorial sources was found but did not meet the quality bar this app requires for investment decisions.",
+      body: editorialBody,
       source_label: "Sources: General news and editorial outlets",
       limitation_note: "Editorial news can reflect opinion rather than verified company facts, so it is held to a higher standard.",
       decision_authority_note: "Only official company sources qualify for the sentiment picture.",

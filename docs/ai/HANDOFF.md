@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-22 (Stage 8C PR 2.5 — post-lane Stage 5J/5K readiness trigger. Evidence lane orchestrator now unconditionally evaluates Stage 5J/5K after lanes complete — reads active artifact set including idempotency-skipped existing SEC catalyst v2 artifacts. sec_catalyst_stage5j_readiness, sentiment_stage5k_source_selection, snapshot_sentiment_readiness logs appear after every Run Intel regardless of republisher skip decision. 29 new backend tests. No SQL.)
+Last updated: 2026-05-22 (Stage 8C PR 2.5 merged — post-lane Stage 5J/5K readiness trigger. Evidence lane orchestrator now unconditionally evaluates Stage 5J/5K after lanes complete — reads active artifact set including idempotency-skipped existing SEC catalyst v2 artifacts. sec_catalyst_stage5j_readiness, sentiment_stage5k_source_selection, snapshot_sentiment_readiness logs appear after every Run Intel regardless of republisher skip decision. 29 new backend tests. No SQL.)
 
 ## Purpose
 
@@ -54,7 +54,7 @@ Key structured logs to confirm in production:
 - For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
 - Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
 
-## Stage 8C PR 2.5 — Post-lane Stage 5J/5K readiness trigger (current PR, open)
+## Stage 8C PR 2.5 — Post-lane Stage 5J/5K readiness trigger (merged PR #403)
 
 **Root cause:** Stage 5J/5K readiness logs never appeared after Run Intel because:
 1. The orchestrator gated Stage 5J behind `intel_v3_evidence_coverage_dispatch_log_enabled` (default False).

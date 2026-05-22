@@ -277,6 +277,7 @@ def compute_decision_input_readiness(
             lanes=lanes,
         )
         sent_axis = _build_sentiment_axis(lanes=lanes)
+        _log_sentiment_source_selection(ticker, sent_axis)
 
         axes = {
             AXIS_COMPANY_FUNDAMENTALS: fund_axis,
@@ -443,6 +444,28 @@ def _build_sentiment_axis(*, lanes: dict[str, Any]) -> AxisReadinessSignal:
         missing_lanes=missing,
         not_applicable_lanes=[],
         lane_contributions=contributions,
+    )
+
+
+def _log_sentiment_source_selection(ticker: str, sent_axis: AxisReadinessSignal) -> None:
+    """Emit sentiment_stage5k_source_selection log for runtime diagnostic tracing."""
+    contributing = sent_axis.contributing_lanes
+    degraded = sent_axis.degraded_lanes
+
+    if LANE_SEC_CATALYST_SENTIMENT in contributing:
+        selected = LANE_SEC_CATALYST_SENTIMENT
+    elif LANE_NEWS_SENTIMENT in contributing:
+        selected = LANE_NEWS_SENTIMENT
+    else:
+        selected = "none"
+
+    suppressed_editorial_present = LANE_NEWS_SENTIMENT in degraded
+
+    logger.info(
+        "sentiment_stage5k_source_selection ticker=%s selected=%s suppressed_editorial_present=%s",
+        ticker,
+        selected,
+        suppressed_editorial_present,
     )
 
 

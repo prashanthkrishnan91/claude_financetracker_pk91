@@ -429,6 +429,18 @@ class IntelV3Service:
                             "technical_signals": _tech_axis.readiness if _tech_axis else "MISSING",
                             "sentiment": _sent_axis.readiness if _sent_axis else "MISSING",
                         }
+                        if _sent_axis is not None and _sent_axis.is_usable:
+                            _sent_source = (
+                                "sec_catalyst_sentiment"
+                                if "sec_catalyst_sentiment" in (_sent_axis.contributing_lanes or [])
+                                else "news_sentiment"
+                            )
+                            logger.info(
+                                "snapshot_sentiment_readiness ticker=%s status=%s source=%s",
+                                ticker.upper(),
+                                _sent_axis.readiness,
+                                _sent_source,
+                            )
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -1264,6 +1276,18 @@ class IntelV3Service:
                         "technical_signals": _tech_axis.readiness if _tech_axis else "MISSING",
                         "sentiment": _sent_axis.readiness if _sent_axis else "MISSING",
                     }
+                    if _sent_axis is not None and _sent_axis.is_usable:
+                        _sent_source = (
+                            "sec_catalyst_sentiment"
+                            if "sec_catalyst_sentiment" in (_sent_axis.contributing_lanes or [])
+                            else "news_sentiment"
+                        )
+                        logger.info(
+                            "snapshot_sentiment_readiness ticker=%s status=%s source=%s",
+                            ticker.upper(),
+                            _sent_axis.readiness,
+                            _sent_source,
+                        )
 
             decision = decide(inp)
             decisions.append(decision)

@@ -34,6 +34,7 @@ from app.services.intelligence.v3.research_evidence_coverage_read_model_v1 impor
     LANE_FUNDAMENTALS,
     LANE_MACRO_CONTEXT,
     LANE_NEWS_SENTIMENT,
+    LANE_SEC_CATALYST_SENTIMENT,
     LANE_SEC_COMPANY_FACTS,
     LANE_TECHNICALS,
     STATUS_LIMITED,
@@ -591,3 +592,89 @@ class TestAggregateCounters:
         assert shadow.axis_usable_counts.get(AXIS_TECHNICAL_SIGNALS) == 2
         assert shadow.axis_usable_counts.get(AXIS_SENTIMENT) == 1
         assert shadow.axis_usable_counts.get(AXIS_COMPANY_FUNDAMENTALS, 0) == 0
+
+
+# ── SEC catalyst sentiment axis tests (Stage 8C PR 2.4) ─────────────────────
+
+
+def _sec_catalyst_row(ticker: str, **kw) -> dict[str, Any]:
+    return _make_artifact_row(
+        artifact_type="sentiment_event",
+        skill_pack="sec_catalyst_sentiment_evidence_v1",
+        scope_kind="ticker",
+        ticker=ticker,
+        **kw,
+    )
+
+
+class TestSecCatalystSentimentAxis:
+    """Stage 5K sentiment axis correctly propagates usable SEC catalyst artifacts."""
+
+    def test_usable_sec_catalyst_yields_limited_sentiment_axis(self) -> None:
+        shadow, _ = _run_adapter(
+            [_sec_catalyst_row("CRM", usability_label="USABLE_WITH_LIMITATIONS", is_usable=True)],
+            ["CRM"],
+        )
+        axis = shadow.ticker_readiness["CRM"].axes[AXIS_SENTIMENT]
+        assert axis.readiness == READINESS_LIMITED
+        assert axis.is_usable is True
+        assert LANE_SEC_CATALYST_SENTIMENT in axis.contributing_lanes
+
+    def test_suppressed_editorial_news_does_not_override_usable_sec_catalyst(self) -> None:
+        rows = [
+            _sec_catalyst_row("CRM", usability_label="USABLE_WITH_LIMITATIONS", is_usable=True),
+            _news_row("CRM", usability_label="SUPPRESSED_INCOMPLETE", is_usable=False),
+        ]
+        shadow, _ = _run_adapter(rows, ["CRM"])
+        axis = shadow.ticker_readiness["CRM"].axes[AXIS_SENTIMENT]
+        assert axis.is_usable is True
+        assert axis.readiness == READINESS_LIMITED
+        assert LANE_SEC_CATALYST_SENTIMENT in axis.contributing_lanes
+        assert LANE_NEWS_SENTIMENT in axis.degraded_lanes
+
+    def test_suppressed_news_only_yields_insufficient_not_usable(self) -> None:
+        rows = [_news_row("CRM", usability_label="SUPPRESSED_INCOMPLETE", is_usable=False)]
+        shadow, _ = _run_adapter(rows, ["CRM"])
+        axis = shadow.ticker_readiness["CRM"].axes[AXIS_SENTIMENT]
+        assert axis.is_usable is False
+        assert axis.readiness == READINESS_INSUFFICIENT
+
+    def test_sec_catalyst_sentiment_in_axis_usable_counts(self) -> None:
+        shadow, _ = _run_adapter(
+            [_sec_catalyst_row("CRM", usability_label="USABLE_WITH_LIMITATIONS", is_usable=True)],
+            ["CRM"],
+        )
+        assert shadow.axis_usable_counts.get(AXIS_SENTIMENT) == 1
+
+    def test_etf_missing_sec_catalyst_no_penalty(self) -> None:
+        shadow, _ = _run_adapter([], ["SPY"])
+        tr = shadow.ticker_readiness["SPY"]
+        assert tr.sec_lane_applicable is False
+        axis = tr.axes[AXIS_SENTIMENT]
+        assert axis.readiness == READINESS_MISSING
+        assert axis.is_usable is False
+
+    def test_btc_missing_sec_catalyst_no_penalty(self) -> None:
+        shadow, _ = _run_adapter([], ["BTC"])
+        axis = shadow.ticker_readiness["BTC"].axes[AXIS_SENTIMENT]
+        assert axis.readiness == READINESS_MISSING
+        assert axis.is_usable is False
+
+    def test_no_buy_hold_trim_sell_in_shadow_output(self) -> None:
+        rows = [_sec_catalyst_row("CRM", usability_label="USABLE_WITH_LIMITATIONS", is_usable=True)]
+        shadow, _ = _run_adapter(rows, ["CRM"])
+        blob = json.dumps(shadow.to_dict())
+        for key in ("\"buy\"", "\"hold\"", "\"trim\"", "\"sell\"", "\"action\"", "\"recommendation\""):
+            assert key not in blob.lower(), f"Policy key {key} must not appear in shadow output"
+
+    def test_sentiment_stage5k_source_selection_log_emitted(self, caplog) -> None:
+        rows = [
+            _sec_catalyst_row("CRM", usability_label="USABLE_WITH_LIMITATIONS", is_usable=True),
+            _news_row("CRM", usability_label="SUPPRESSED_INCOMPLETE", is_usable=False),
+        ]
+        with caplog.at_level("INFO"):
+            _run_adapter(rows, ["CRM"])
+        messages = " ".join(rec.getMessage() for rec in caplog.records)
+        assert "sentiment_stage5k_source_selection" in messages
+        assert "selected=sec_catalyst_sentiment" in messages
+        assert "suppressed_editorial_present=True" in messages

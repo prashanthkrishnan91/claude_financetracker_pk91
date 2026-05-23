@@ -9,7 +9,7 @@
  * - Official catalyst card and editorial-suppressed card rendered correctly
  */
 
-import { buildCatalystEvidenceDisplay, RAW_KEYS_BANNED } from "./intel-v3-explanation";
+import { buildCatalystEvidenceDisplay, getCatalystFilingTypeLine, RAW_KEYS_BANNED } from "./intel-v3-explanation";
 import type { SecCatalystEvidenceDisplay } from "./api";
 
 function makeCat(overrides: Partial<SecCatalystEvidenceDisplay> = {}): SecCatalystEvidenceDisplay {
@@ -352,6 +352,243 @@ describe("Stage 8E: enriched catalyst explanation", () => {
       // The disclaimer is OK: "does not decide Buy, Hold, Trim, or Sell"
       // But no standalone authority claim
       expect(fullText).not.toMatch(/\bbuy now\b|\bsell now\b|\btrim now\b/);
+    });
+  });
+});
+
+// ── Stage 8F: filing-type specificity ────────────────────────────────────────
+
+function makeEnrichedCat8F(
+  overrides: Partial<import("@/lib/api").SecCatalystEvidenceDisplay> = {}
+): import("@/lib/api").SecCatalystEvidenceDisplay {
+  return {
+    sec_catalyst_found: true,
+    editorial_suppressed: false,
+    sec_lane_applicable: true,
+    event_summary: "Recent official filing activity was found. The filing appears material enough to support the sentiment evidence lane.",
+    freshness_label: "Filing activity is within the relevant reporting window.",
+    material_filing_label: "One recent official filing was found.",
+    limitation_note: "This covers official company/SEC events only, not broad market opinion.",
+    decision_authority_note: "This is useful context, but it does not decide Buy, Hold, Trim, or Sell by itself.",
+    ...overrides,
+  };
+}
+
+describe("Stage 8F: filing-type specificity", () => {
+  describe("filing_type_label present on official_catalyst card", () => {
+    it("passes through annual-report label when present", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Annual report (10-K)" })
+      );
+      expect(result.official_catalyst!.filing_type_label).toBe("Annual report (10-K)");
+    });
+
+    it("passes through quarterly-report label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Quarterly report (10-Q)" })
+      );
+      expect(result.official_catalyst!.filing_type_label).toBe("Quarterly report (10-Q)");
+    });
+
+    it("passes through company-event-filing label for 8-K", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Company event filing (8-K)" })
+      );
+      expect(result.official_catalyst!.filing_type_label).toBe("Company event filing (8-K)");
+    });
+
+    it("passes through multiple-filings label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Multiple recent official filings" })
+      );
+      expect(result.official_catalyst!.filing_type_label).toBe("Multiple recent official filings");
+    });
+
+    it("passes through generic-fallback label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Official company filing" })
+      );
+      expect(result.official_catalyst!.filing_type_label).toBe("Official company filing");
+    });
+  });
+
+  describe("filing_type_label absent when not provided", () => {
+    it("filing_type_label is undefined when not in input", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat8F());
+      expect(result.official_catalyst!.filing_type_label).toBeUndefined();
+    });
+
+    it("stage 8E fallback still works without filing_type_label", () => {
+      // Existing Stage 8E behavior must be unaffected when 8F field is absent.
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat8F());
+      expect(result.official_catalyst!.body).toContain("material enough");
+      expect(result.show).toBe(true);
+    });
+  });
+
+  describe("raw-code leak guard for 8F labels", () => {
+    const BACKEND_CODES_8F = [
+      "sec_catalyst_sentiment",
+      "READY",
+      "LIMITED",
+      "PARTIAL",
+      "USABLE_WITH_LIMITATIONS",
+      "skill_pack",
+      "fact_kind",
+      "stage8f_filing_type_v1",
+      "stage8f_filing_type_contract_version",
+    ];
+
+    it("no raw backend codes in annual-report label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Annual report (10-K)" })
+      );
+      const label = result.official_catalyst!.filing_type_label ?? "";
+      for (const code of BACKEND_CODES_8F) {
+        expect(label).not.toContain(code);
+      }
+    });
+
+    it("no raw backend codes in multiple-filings label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Multiple recent official filings" })
+      );
+      const label = result.official_catalyst!.filing_type_label ?? "";
+      for (const code of BACKEND_CODES_8F) {
+        expect(label).not.toContain(code);
+      }
+    });
+  });
+
+  describe("ETF / non-equity hidden state unchanged", () => {
+    it("enriched catalyst with filing_type_label still hidden for ETF", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({
+          sec_lane_applicable: false,
+          filing_type_label: "Annual report (10-K)",
+        })
+      );
+      expect(result.show).toBe(false);
+      expect(result.official_catalyst).toBeUndefined();
+    });
+  });
+
+  describe("filing_type_label not set on editorial_suppressed card", () => {
+    it("editorial card never has filing_type_label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({
+          editorial_suppressed: true,
+          filing_type_label: "Annual report (10-K)",
+        })
+      );
+      // filing_type_label should not bleed onto the editorial card.
+      expect((result.editorial_suppressed as Record<string, unknown>)?.filing_type_label)
+        .toBeUndefined();
+    });
+  });
+});
+
+// ── Stage 8F: rendering contract (getCatalystFilingTypeLine) ──────────────────
+//
+// These tests verify the view-model layer that the CatalystEvidenceModule
+// drawer renders. Jest runs in `node` env (no jsdom / @testing-library/react),
+// so component render tests are not feasible with the current setup.
+// getCatalystFilingTypeLine is the pure helper the component consumes;
+// testing it proves the Type-line renders correctly when filing_type_label
+// is present and is absent when not provided.
+//
+// This test suite would have FAILED on the version of PR #406 before this
+// patch because the component did not render filing_type_label at all
+// (the helper did not exist and the field was not in CatalystEvidenceItem).
+
+describe("Stage 8F rendering contract: getCatalystFilingTypeLine", () => {
+  describe("returns 'Type: <label>' when filing_type_label present", () => {
+    it("annual report label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Annual report (10-K)" })
+      );
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBe(
+        "Type: Annual report (10-K)"
+      );
+    });
+
+    it("quarterly report label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Quarterly report (10-Q)" })
+      );
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBe(
+        "Type: Quarterly report (10-Q)"
+      );
+    });
+
+    it("company event filing label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Company event filing (8-K)" })
+      );
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBe(
+        "Type: Company event filing (8-K)"
+      );
+    });
+
+    it("multiple filings label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Multiple recent official filings" })
+      );
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBe(
+        "Type: Multiple recent official filings"
+      );
+    });
+
+    it("generic fallback label", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({ filing_type_label: "Official company filing" })
+      );
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBe(
+        "Type: Official company filing"
+      );
+    });
+  });
+
+  describe("returns null when filing_type_label absent (no blank Type line rendered)", () => {
+    it("returns null when filing_type_label is undefined on item", () => {
+      const result = buildCatalystEvidenceDisplay(makeEnrichedCat8F());
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBeNull();
+    });
+
+    it("returns null for undefined item", () => {
+      expect(getCatalystFilingTypeLine(undefined)).toBeNull();
+    });
+
+    it("returns null for null item", () => {
+      expect(getCatalystFilingTypeLine(null)).toBeNull();
+    });
+
+    it("ETF: show=false means no official_catalyst, typeLine null", () => {
+      const result = buildCatalystEvidenceDisplay(
+        makeEnrichedCat8F({
+          sec_lane_applicable: false,
+          filing_type_label: "Annual report (10-K)",
+        })
+      );
+      expect(result.official_catalyst).toBeUndefined();
+      expect(getCatalystFilingTypeLine(result.official_catalyst)).toBeNull();
+    });
+  });
+
+  describe("type line contains no raw backend codes", () => {
+    const BACKEND_CODES = [
+      "sec_catalyst_sentiment", "READY", "LIMITED", "PARTIAL",
+      "skill_pack", "fact_kind", "stage8f_filing_type_v1",
+    ];
+
+    it("annual report type line is clean", () => {
+      const line = getCatalystFilingTypeLine({
+        title: "", body: "", source_label: "", limitation_note: "",
+        decision_authority_note: "", filing_type_label: "Annual report (10-K)",
+      });
+      for (const code of BACKEND_CODES) {
+        expect(line).not.toContain(code);
+      }
     });
   });
 });

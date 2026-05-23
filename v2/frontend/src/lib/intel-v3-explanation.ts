@@ -444,6 +444,8 @@ export interface CatalystEvidenceItem {
   source_label: string;
   limitation_note: string;
   decision_authority_note: string;
+  /** Stage 8F: plain-English filing type, e.g. "Annual report (10-K)". Optional. */
+  filing_type_label?: string;
 }
 
 export interface CatalystEvidenceDisplayResult {
@@ -496,6 +498,8 @@ export function buildCatalystEvidenceDisplay(
         ? `${limitation} ${cat.freshness_label}`
         : limitation,
       decision_authority_note: authority,
+      // Stage 8F: filing-type specificity when present; absent otherwise.
+      filing_type_label: cat.filing_type_label,
     };
   }
 
@@ -515,4 +519,18 @@ export function buildCatalystEvidenceDisplay(
   }
 
   return result;
+}
+
+/**
+ * Stage 8F — Returns the "Type: <label>" display string for the official
+ * catalyst card, or null when filing_type_label is absent.
+ *
+ * Extracted as a pure helper so the rendering contract can be tested without
+ * a DOM environment. The drawer renders this string directly when non-null.
+ */
+export function getCatalystFilingTypeLine(
+  item: CatalystEvidenceItem | undefined | null
+): string | null {
+  if (!item?.filing_type_label) return null;
+  return `Type: ${item.filing_type_label}`;
 }

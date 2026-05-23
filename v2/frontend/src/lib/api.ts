@@ -1140,6 +1140,10 @@ export interface SecCatalystEvidenceDisplay {
   limitation_note?: string;
   /** e.g. "This is useful context, but it does not decide Buy, Hold, Trim, or Sell by itself." */
   decision_authority_note?: string;
+  // Stage 8F: optional filing-type specificity derived from stored source section_references.
+  // Present when the artifact's source records contain a recognised SEC form type.
+  /** e.g. "Annual report (10-K)" | "Quarterly report (10-Q)" | "Company event filing (8-K)" | "Multiple recent official filings" */
+  filing_type_label?: string;
 }
 
 /** Stage 7 — evidence explanation from the governance engine. Null when governance inactive. */

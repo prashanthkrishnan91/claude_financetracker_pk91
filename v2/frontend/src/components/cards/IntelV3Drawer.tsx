@@ -165,6 +165,11 @@ function CatalystEvidenceModule({ ex }: { ex: import("@/lib/api").IntelV3Evidenc
           <p className="text-[11px] text-text-secondary leading-relaxed">
             {display.official_catalyst.body}
           </p>
+          {display.official_catalyst.filing_type_label && (
+            <p className="text-[10px] text-text-muted mt-1.5" data-testid="catalyst-filing-type">
+              Type: {display.official_catalyst.filing_type_label}
+            </p>
+          )}
           <p className="text-[10px] text-text-muted mt-1.5">
             {display.official_catalyst.source_label}
           </p>

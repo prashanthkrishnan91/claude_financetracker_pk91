@@ -520,3 +520,17 @@ export function buildCatalystEvidenceDisplay(
 
   return result;
 }
+
+/**
+ * Stage 8F — Returns the "Type: <label>" display string for the official
+ * catalyst card, or null when filing_type_label is absent.
+ *
+ * Extracted as a pure helper so the rendering contract can be tested without
+ * a DOM environment. The drawer renders this string directly when non-null.
+ */
+export function getCatalystFilingTypeLine(
+  item: CatalystEvidenceItem | undefined | null
+): string | null {
+  if (!item?.filing_type_label) return null;
+  return `Type: ${item.filing_type_label}`;
+}

@@ -147,12 +147,18 @@ async def compare_and_republish(
             STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
             is_snapshot_stage7_complete as _stage7_complete,
         )
+        from .stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE8E_VER,
+            is_snapshot_stage8e_complete as _stage8e_complete,
+        )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
         _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
         _stage7_is_current = _stage7_complete(snap_row)
         _stage7_republish_required = not _stage7_is_current
+        _stage8e_is_current = _stage8e_complete(snap_row)
+        _stage8e_republish_required = not _stage8e_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
             "current_evidence_mapping_version=%s "
@@ -161,6 +167,8 @@ async def compare_and_republish(
             "stage7_explanation_contract_version=%s "
             "latest_snapshot_stage7_contract_version=%s "
             "stage7_contract_current=%s "
+            "stage8e_catalyst_explanation_contract_version=%s "
+            "stage8e_contract_current=%s "
             "deterministic_republish_required=%s "
             "analyst_jobs_required=false "
             "snapshot_id=%s",
@@ -171,7 +179,9 @@ async def compare_and_republish(
             _CURRENT_STAGE7_VER,
             _snap_stage7_ver or "missing",
             _stage7_is_current,
-            _mapping_republish_required or _stage7_republish_required or result.evidence_newer_than_certified_snapshot,
+            _CURRENT_STAGE8E_VER,
+            _stage8e_is_current,
+            _mapping_republish_required or _stage7_republish_required or _stage8e_republish_required or result.evidence_newer_than_certified_snapshot,
             result.latest_certified_snapshot_id or "none",
         )
 
@@ -179,6 +189,7 @@ async def compare_and_republish(
             not result.evidence_newer_than_certified_snapshot
             and _mapping_is_current
             and _stage7_is_current
+            and _stage8e_is_current
         ):
             result.publish_status = PUBLISH_CERTIFIED_CURRENT
             result.duration_ms = int((time.monotonic() - t0) * 1000)
@@ -368,12 +379,18 @@ async def republish_after_analyst_eligibility(
             STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
             is_snapshot_stage7_complete as _stage7_complete,
         )
+        from .stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE8E_VER,
+            is_snapshot_stage8e_complete as _stage8e_complete,
+        )
         _snap_mapping_ver = snap_row.get("evidence_mapping_version") if snap_row else None
         _mapping_is_current = _mapping_current(snap_row)
         _mapping_republish_required = not _mapping_is_current
         _snap_stage7_ver = snap_row.get("stage7_explanation_contract_version") if snap_row else None
         _stage7_is_current = _stage7_complete(snap_row)
         _stage7_republish_required = not _stage7_is_current
+        _stage8e_is_current = _stage8e_complete(snap_row)
+        _stage8e_republish_required = not _stage8e_is_current
         logger.info(
             "intel_v3_evidence_mapping_version_summary user_id=%s "
             "current_evidence_mapping_version=%s "
@@ -382,6 +399,8 @@ async def republish_after_analyst_eligibility(
             "stage7_explanation_contract_version=%s "
             "latest_snapshot_stage7_contract_version=%s "
             "stage7_contract_current=%s "
+            "stage8e_catalyst_explanation_contract_version=%s "
+            "stage8e_contract_current=%s "
             "deterministic_republish_required=%s "
             "analyst_jobs_required=false "
             "snapshot_id=%s",
@@ -392,7 +411,9 @@ async def republish_after_analyst_eligibility(
             _CURRENT_STAGE7_VER,
             _snap_stage7_ver or "missing",
             _stage7_is_current,
-            _mapping_republish_required or _stage7_republish_required or result.evidence_newer_than_certified_snapshot,
+            _CURRENT_STAGE8E_VER,
+            _stage8e_is_current,
+            _mapping_republish_required or _stage7_republish_required or _stage8e_republish_required or result.evidence_newer_than_certified_snapshot,
             result.latest_certified_snapshot_id or "none",
         )
 
@@ -400,6 +421,7 @@ async def republish_after_analyst_eligibility(
             not result.evidence_newer_than_certified_snapshot
             and _mapping_is_current
             and _stage7_is_current
+            and _stage8e_is_current
         ):
             result.publish_status = PUBLISH_SKIPPED_NO_NEW_EVIDENCE
             result.duration_ms = int((time.monotonic() - t0) * 1000)
@@ -531,13 +553,18 @@ async def compare_and_republish_after_evidence_lanes(
         from .stage7_snapshot_contract_v1 import (
             is_snapshot_stage7_complete as _stage7_complete,
         )
+        from .stage8e_catalyst_explanation_contract_v1 import (
+            is_snapshot_stage8e_complete as _stage8e_complete,
+        )
         _mapping_is_current = _mapping_current(snap_row)
         _stage7_is_current = _stage7_complete(snap_row)
+        _stage8e_is_current = _stage8e_complete(snap_row)
 
         if (
             not result.evidence_newer_than_certified_snapshot
             and _mapping_is_current
             and _stage7_is_current
+            and _stage8e_is_current
         ):
             result.publish_status = PUBLISH_SKIPPED_NO_NEW_EVIDENCE
             result.duration_ms = int((time.monotonic() - t0) * 1000)

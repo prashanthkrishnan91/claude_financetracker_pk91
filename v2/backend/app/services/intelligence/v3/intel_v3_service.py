@@ -47,6 +47,7 @@ from .snapshot_builder import build_snapshot
 from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 from .catalyst_display_adapter_v1 import build_catalyst_display_fields as _build_catalyst_display_fields
+from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation as _build_sec_catalyst_explanation
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
 # Stage 3.1 — analyst refresh-request seam opt-in. Defaults to enabled so the
@@ -296,6 +297,13 @@ class IntelV3Service:
             # Stage 6 — evidence-aware governance shadow (always computed for explanation).
             # Governance mutations are gated on intel_v3_evidence_aware_policy_enabled.
             evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
+            # Stage 8E — SEC catalyst artifact payloads for richer plain-English explanation.
+            _all_tickers = [
+                c.ticker.upper() for c in cards if hasattr(c, "ticker") and c.ticker
+            ]
+            _sec_catalyst_payloads = await self._get_sec_catalyst_artifact_payloads(
+                tickers=_all_tickers,
+            )
             settings = get_settings()
             s6_active = (
                 evidence_shadow is not None
@@ -421,9 +429,15 @@ class IntelV3Service:
                     # Stage 8D: catalyst display available even on the Stage 6 active path.
                     # Governance result drives decisions; this is display-only metadata.
                     if _s6_readiness is not None:
-                        _research_axis_readiness = {
-                            "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
-                        }
+                        _cat_display = _build_catalyst_display_fields(_s6_readiness)
+                        # Stage 8E: merge richer explanation from artifact payload when available.
+                        if _cat_display.get("sec_catalyst_found"):
+                            _cat_display.update(
+                                _build_sec_catalyst_explanation(
+                                    _sec_catalyst_payloads.get(ticker.upper())
+                                )
+                            )
+                        _research_axis_readiness = {"sec_catalyst_display": _cat_display}
                 elif evidence_shadow is not None:
                     # Stage 6 inactive but shadow available: populate axis readiness for
                     # evidence_explanation (technical_signals_status, sentiment_status).
@@ -449,9 +463,15 @@ class IntelV3Service:
                                 _sent_source,
                             )
                         # Stage 8D: safe catalyst display fields for UI (no raw codes).
-                        _research_axis_readiness["sec_catalyst_display"] = (
-                            _build_catalyst_display_fields(_s6_readiness)
-                        )
+                        _cat_display = _build_catalyst_display_fields(_s6_readiness)
+                        # Stage 8E: merge richer explanation from artifact payload when available.
+                        if _cat_display.get("sec_catalyst_found"):
+                            _cat_display.update(
+                                _build_sec_catalyst_explanation(
+                                    _sec_catalyst_payloads.get(ticker.upper())
+                                )
+                            )
+                        _research_axis_readiness["sec_catalyst_display"] = _cat_display
 
                 decision = decide(inp)
                 decisions.append(decision)
@@ -894,6 +914,10 @@ class IntelV3Service:
                 STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
                 is_snapshot_stage7_complete as _is_stage7_complete,
             )
+            from .stage8e_catalyst_explanation_contract_v1 import (
+                STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE8E_VER,
+                is_snapshot_stage8e_complete as _is_stage8e_complete,
+            )
             _snap_mapping_ver = (
                 latest_snapshot.get("evidence_mapping_version") if latest_snapshot else None
             )
@@ -903,6 +927,8 @@ class IntelV3Service:
             )
             # Use is_snapshot_stage7_complete: checks version marker AND card explanation keys.
             _stage7_current = _is_stage7_complete(latest_snapshot or {})
+            # Stage 8E: check catalyst explanation contract — detects Stage 8D-only snapshots.
+            _stage8e_current = _is_stage8e_complete(latest_snapshot or {})
             logger.info(
                 "intel_v3_evidence_mapping_version_summary user_id=%s "
                 "current_evidence_mapping_version=%s "
@@ -911,6 +937,8 @@ class IntelV3Service:
                 "stage7_explanation_contract_version=%s "
                 "latest_snapshot_stage7_contract_version=%s "
                 "stage7_contract_current=%s "
+                "stage8e_catalyst_explanation_contract_version=%s "
+                "stage8e_contract_current=%s "
                 "deterministic_republish_required=%s "
                 "analyst_jobs_required=false "
                 "snapshot_id=%s",
@@ -921,7 +949,9 @@ class IntelV3Service:
                 _CURRENT_STAGE7_VER,
                 _snap_stage7_ver or "missing",
                 _stage7_current,
-                not _mapping_current or not _stage7_current,
+                _CURRENT_STAGE8E_VER,
+                _stage8e_current,
+                not _mapping_current or not _stage7_current or not _stage8e_current,
                 existing_certified_snapshot_id or "none",
             )
             if not _mapping_current:
@@ -952,6 +982,21 @@ class IntelV3Service:
                         self.user_id, _prewarm_exc,
                     )
                     status = "stage7_contract_recertification_failed"
+            elif not _stage8e_current:
+                # Stage 8E catalyst explanation contract missing — trigger zero-LLM deterministic
+                # recertification. Rebuilds snapshot with Stage 8E explanation fields; no analyst
+                # jobs enqueued and no policy change.
+                try:
+                    _prewarm_id = str(uuid.uuid4())
+                    await self.run_prewarm_snapshot(prewarm_run_id=_prewarm_id)
+                    status = "stage8e_contract_recertified"
+                except Exception as _prewarm_exc:
+                    logger.warning(
+                        "intel_v3_stage8e_contract_recertification_failed "
+                        "user_id=%s error=%s",
+                        self.user_id, _prewarm_exc,
+                    )
+                    status = "stage8e_contract_recertification_failed"
             else:
                 status = "analyst_evidence_current"
         elif enqueue_result_touched > 0 and enqueue_result_created == 0:
@@ -1161,6 +1206,13 @@ class IntelV3Service:
         # Stage 6 — evidence-aware governance shadow (always computed for explanation).
         # Governance mutations are gated on intel_v3_evidence_aware_policy_enabled.
         evidence_shadow = await self._get_evidence_shadow_for_governance(cards)
+        # Stage 8E — SEC catalyst artifact payloads for richer plain-English explanation.
+        _all_tickers_pw = [
+            c.ticker.upper() for c in cards if hasattr(c, "ticker") and c.ticker
+        ]
+        _sec_catalyst_payloads = await self._get_sec_catalyst_artifact_payloads(
+            tickers=_all_tickers_pw,
+        )
         settings = get_settings()
         s6_active = (
             evidence_shadow is not None
@@ -1277,9 +1329,15 @@ class IntelV3Service:
                 _gov_result_dict = _gov_result.to_dict()
                 # Stage 8D: catalyst display available even on the Stage 6 active path.
                 if _s6_readiness is not None:
-                    _research_axis_readiness = {
-                        "sec_catalyst_display": _build_catalyst_display_fields(_s6_readiness),
-                    }
+                    _cat_display = _build_catalyst_display_fields(_s6_readiness)
+                    # Stage 8E: merge richer explanation from artifact payload when available.
+                    if _cat_display.get("sec_catalyst_found"):
+                        _cat_display.update(
+                            _build_sec_catalyst_explanation(
+                                _sec_catalyst_payloads.get(ticker.upper())
+                            )
+                        )
+                    _research_axis_readiness = {"sec_catalyst_display": _cat_display}
             elif evidence_shadow is not None:
                 # Stage 6 inactive but shadow available: populate axis readiness for
                 # evidence_explanation (technical_signals_status, sentiment_status).
@@ -1305,9 +1363,15 @@ class IntelV3Service:
                             _sent_source,
                         )
                     # Stage 8D: safe catalyst display fields for UI (no raw codes).
-                    _research_axis_readiness["sec_catalyst_display"] = (
-                        _build_catalyst_display_fields(_s6_readiness)
-                    )
+                    _cat_display = _build_catalyst_display_fields(_s6_readiness)
+                    # Stage 8E: merge richer explanation from artifact payload when available.
+                    if _cat_display.get("sec_catalyst_found"):
+                        _cat_display.update(
+                            _build_sec_catalyst_explanation(
+                                _sec_catalyst_payloads.get(ticker.upper())
+                            )
+                        )
+                    _research_axis_readiness["sec_catalyst_display"] = _cat_display
 
             decision = decide(inp)
             decisions.append(decision)
@@ -2047,6 +2111,53 @@ class IntelV3Service:
                 self.user_id, exc,
             )
             return None
+
+    async def _get_sec_catalyst_artifact_payloads(
+        self,
+        tickers: list[str],
+    ) -> "dict[str, dict]":
+        """Fetch SEC catalyst artifact payloads for the given tickers (Stage 8E).
+
+        Returns dict of {ticker_upper: payload_dict} for active SEC catalyst
+        artifacts. Empty dict on any failure. Fail-soft — never raises.
+
+        Called once per run (not per ticker). Simple SELECT on existing
+        research_artifacts table; no schema changes, no new SQL.
+        """
+        try:
+            if not tickers:
+                return {}
+
+            from app.services.intelligence.research_workers.sec_catalyst_sentiment_adapter_v1 import (
+                SEC_CATALYST_SKILL_PACK,
+            )
+
+            def _query() -> list[dict]:
+                resp = (
+                    self.client
+                    .from_("research_artifacts")
+                    .select("ticker,payload")
+                    .eq("user_id", str(self.user_id))
+                    .eq("skill_pack", SEC_CATALYST_SKILL_PACK)
+                    .eq("is_active", True)
+                    .in_("ticker", [t.upper() for t in tickers])
+                    .execute()
+                )
+                return resp.data or []
+
+            import asyncio
+            rows = await asyncio.to_thread(_query)
+            return {
+                row["ticker"].upper(): row["payload"]
+                for row in rows
+                if row.get("ticker") and isinstance(row.get("payload"), dict)
+            }
+        except Exception as exc:
+            logger.warning(
+                "sec_catalyst_artifact_payload_query_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return {}
 
     async def _get_sec_readiness_for_adapters(self) -> "Optional[Any]":
         """Fetch Phase 9 SEC metric readiness for Phase 11 and/or Phase 13.

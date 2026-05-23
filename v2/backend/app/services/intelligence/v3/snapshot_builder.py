@@ -24,6 +24,7 @@ from typing import Any, Optional
 from .decision_contracts import ActionV3, AxisBand, ConvictionV3, DecisionOutputV3
 from .evidence_mapping_version_v1 import EVIDENCE_MAPPING_VERSION
 from .stage7_snapshot_contract_v1 import STAGE7_EXPLANATION_CONTRACT_VERSION
+from .stage8e_catalyst_explanation_contract_v1 import STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION
 
 _SCHEMA_VERSION = "v3.1"
 
@@ -368,4 +369,5 @@ def build_snapshot(
         "diagnostics":    diagnostics,
         "evidence_mapping_version": EVIDENCE_MAPPING_VERSION,
         "stage7_explanation_contract_version": STAGE7_EXPLANATION_CONTRACT_VERSION,
+        "stage8e_catalyst_explanation_contract_version": STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
     }

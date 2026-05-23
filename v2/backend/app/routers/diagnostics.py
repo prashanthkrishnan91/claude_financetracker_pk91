@@ -3423,6 +3423,118 @@ async def get_research_evidence_decision_readiness(
     return shadow.to_dict()
 
 
+# ── Stage 9A — Coverage & Trust Matrix ───────────────────────────────────────
+
+
+class CoverageTrustMatrixRequest(BaseModel):
+    """Stage 9A — operator request body for Coverage & Trust Matrix diagnostics.
+
+    tickers: optional explicit ticker list. When omitted/empty, falls back to
+    the cert user's active portfolio positions. Max 200 tickers per request.
+    """
+    tickers: list[str] = []
+
+
+@router.post("/coverage-trust-matrix")
+async def get_coverage_trust_matrix(
+    payload: CoverageTrustMatrixRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 9A — per-ticker Coverage & Trust Matrix (STRONG/PARTIAL/WEAK/MISSING/NOT_APPLICABLE).
+
+    Maps existing Stage 5J coverage lane statuses to a deterministic, asset-type-aware
+    per-category trust matrix. This is the foundation diagnostic for Stage 9 — it shows,
+    per ticker, whether each research category is strong enough for future synthesis,
+    without running any synthesis, LLM, or provider call.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_COVERAGE_TRUST_MATRIX_ENABLED=true
+
+    Hard guarantees:
+      - READ-ONLY. Calls Stage 5J read model (read-only DB read) then the Stage 9A
+        matrix mapper (pure, no I/O). No evidence runs, LLM calls, or provider calls.
+      - NEVER writes to intel_v3_snapshots, recommendations, or research_*.
+      - NEVER calls decide() or imports decision_policy_v1.
+      - NEVER returns raw artifact payloads, source URLs, fact contents,
+        API keys, secrets, or user PII.
+      - safe_for_decision is ALWAYS False. synthesis_ready is ALWAYS False.
+      - NOT_APPLICABLE categories do not penalize ETF/crypto coverage.
+      - WEAK/MISSING blocks are always synthesis-suppressed.
+      - No visible Buy/Hold/Trim/Sell change.
+      - Never called from GET /intel/v3/snapshot or any page-load path.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_coverage_trust_matrix_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_COVERAGE_TRUST_MATRIX_ENABLED is not enabled",
+        )
+
+    from ..services.intelligence.v3.research_evidence_coverage_read_model_v1 import (
+        compute_research_evidence_coverage,
+    )
+    from ..services.intelligence.v3.coverage_trust_matrix_v1 import (
+        compute_coverage_trust_matrix,
+    )
+
+    db_client = get_supabase_client()
+
+    requested_raw = payload.tickers or []
+    normalized = list(
+        dict.fromkeys(t.upper().strip() for t in requested_raw if isinstance(t, str) and t.strip())
+    )
+
+    # Fallback: derive tickers + holding context from positions.
+    holding_context_by_ticker: dict[str, dict] = {}
+    if not normalized:
+        try:
+            pos_result = (
+                db_client.table("positions")
+                .select("ticker,category")
+                .eq("user_id", str(user.id))
+                .execute()
+            )
+            for row in (pos_result.data or []):
+                if not isinstance(row, dict):
+                    continue
+                t = row.get("ticker")
+                if isinstance(t, str) and t.strip():
+                    norm = t.strip().upper()
+                    if norm not in normalized:
+                        normalized.append(norm)
+                    holding_context_by_ticker[norm] = {
+                        "category": row.get("category") or "",
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "coverage_trust_matrix_positions_lookup_failed user_id=%s error=%s",
+                user.id,
+                exc,
+            )
+
+    tickers = normalized[:_MAX_COVERAGE_TICKERS_PER_REQUEST]
+
+    # Stage 5J: compute coverage read model (read-only DB).
+    coverage = compute_research_evidence_coverage(
+        user_id=str(user.id),
+        tickers=tickers,
+        db_client=db_client,
+    )
+
+    # Stage 9A: map coverage → trust matrix (pure, no I/O).
+    matrix = compute_coverage_trust_matrix(
+        coverage,
+        holding_context_by_ticker=holding_context_by_ticker or None,
+    )
+
+    result = matrix.to_dict()
+    # Hard-lock safety fields so they cannot drift.
+    result["safe_for_decision"] = False
+    result["synthesis_ready"] = False
+    return result
+
+
 # ── Stage 6 — Evidence-Aware Governance Diagnostics ──────────────────────────
 
 

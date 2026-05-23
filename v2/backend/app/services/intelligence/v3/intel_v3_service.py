@@ -47,6 +47,7 @@ from .snapshot_builder import build_snapshot
 from .snapshot_freshness_diagnostics import build_diagnostics
 from .source_validator_lite import certify_snapshot_cards, validate_snapshot_cards
 from .catalyst_display_adapter_v1 import build_catalyst_display_fields as _build_catalyst_display_fields
+from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation as _build_sec_catalyst_explanation
 
 _FLAG_ENV = "INTEL_V3_VISIBLE_SNAPSHOT_ENABLED"
 # Stage 3.1 — analyst refresh-request seam opt-in. Defaults to enabled so the
@@ -431,9 +432,8 @@ class IntelV3Service:
                         _cat_display = _build_catalyst_display_fields(_s6_readiness)
                         # Stage 8E: merge richer explanation from artifact payload when available.
                         if _cat_display.get("sec_catalyst_found"):
-                            from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation
                             _cat_display.update(
-                                build_sec_catalyst_explanation(
+                                _build_sec_catalyst_explanation(
                                     _sec_catalyst_payloads.get(ticker.upper())
                                 )
                             )
@@ -466,9 +466,8 @@ class IntelV3Service:
                         _cat_display = _build_catalyst_display_fields(_s6_readiness)
                         # Stage 8E: merge richer explanation from artifact payload when available.
                         if _cat_display.get("sec_catalyst_found"):
-                            from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation
                             _cat_display.update(
-                                build_sec_catalyst_explanation(
+                                _build_sec_catalyst_explanation(
                                     _sec_catalyst_payloads.get(ticker.upper())
                                 )
                             )
@@ -915,6 +914,10 @@ class IntelV3Service:
                 STAGE7_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE7_VER,
                 is_snapshot_stage7_complete as _is_stage7_complete,
             )
+            from .stage8e_catalyst_explanation_contract_v1 import (
+                STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION as _CURRENT_STAGE8E_VER,
+                is_snapshot_stage8e_complete as _is_stage8e_complete,
+            )
             _snap_mapping_ver = (
                 latest_snapshot.get("evidence_mapping_version") if latest_snapshot else None
             )
@@ -924,6 +927,8 @@ class IntelV3Service:
             )
             # Use is_snapshot_stage7_complete: checks version marker AND card explanation keys.
             _stage7_current = _is_stage7_complete(latest_snapshot or {})
+            # Stage 8E: check catalyst explanation contract — detects Stage 8D-only snapshots.
+            _stage8e_current = _is_stage8e_complete(latest_snapshot or {})
             logger.info(
                 "intel_v3_evidence_mapping_version_summary user_id=%s "
                 "current_evidence_mapping_version=%s "
@@ -932,6 +937,8 @@ class IntelV3Service:
                 "stage7_explanation_contract_version=%s "
                 "latest_snapshot_stage7_contract_version=%s "
                 "stage7_contract_current=%s "
+                "stage8e_catalyst_explanation_contract_version=%s "
+                "stage8e_contract_current=%s "
                 "deterministic_republish_required=%s "
                 "analyst_jobs_required=false "
                 "snapshot_id=%s",
@@ -942,7 +949,9 @@ class IntelV3Service:
                 _CURRENT_STAGE7_VER,
                 _snap_stage7_ver or "missing",
                 _stage7_current,
-                not _mapping_current or not _stage7_current,
+                _CURRENT_STAGE8E_VER,
+                _stage8e_current,
+                not _mapping_current or not _stage7_current or not _stage8e_current,
                 existing_certified_snapshot_id or "none",
             )
             if not _mapping_current:
@@ -973,6 +982,21 @@ class IntelV3Service:
                         self.user_id, _prewarm_exc,
                     )
                     status = "stage7_contract_recertification_failed"
+            elif not _stage8e_current:
+                # Stage 8E catalyst explanation contract missing — trigger zero-LLM deterministic
+                # recertification. Rebuilds snapshot with Stage 8E explanation fields; no analyst
+                # jobs enqueued and no policy change.
+                try:
+                    _prewarm_id = str(uuid.uuid4())
+                    await self.run_prewarm_snapshot(prewarm_run_id=_prewarm_id)
+                    status = "stage8e_contract_recertified"
+                except Exception as _prewarm_exc:
+                    logger.warning(
+                        "intel_v3_stage8e_contract_recertification_failed "
+                        "user_id=%s error=%s",
+                        self.user_id, _prewarm_exc,
+                    )
+                    status = "stage8e_contract_recertification_failed"
             else:
                 status = "analyst_evidence_current"
         elif enqueue_result_touched > 0 and enqueue_result_created == 0:
@@ -1308,9 +1332,8 @@ class IntelV3Service:
                     _cat_display = _build_catalyst_display_fields(_s6_readiness)
                     # Stage 8E: merge richer explanation from artifact payload when available.
                     if _cat_display.get("sec_catalyst_found"):
-                        from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation
                         _cat_display.update(
-                            build_sec_catalyst_explanation(
+                            _build_sec_catalyst_explanation(
                                 _sec_catalyst_payloads.get(ticker.upper())
                             )
                         )
@@ -1343,9 +1366,8 @@ class IntelV3Service:
                     _cat_display = _build_catalyst_display_fields(_s6_readiness)
                     # Stage 8E: merge richer explanation from artifact payload when available.
                     if _cat_display.get("sec_catalyst_found"):
-                        from .sec_catalyst_explanation_adapter_v1 import build_sec_catalyst_explanation
                         _cat_display.update(
-                            build_sec_catalyst_explanation(
+                            _build_sec_catalyst_explanation(
                                 _sec_catalyst_payloads.get(ticker.upper())
                             )
                         )

@@ -345,3 +345,84 @@ class TestSnapshotBuilderCompatibility:
         cata = ex["sec_catalyst_evidence"]
         for val in cata.values():
             _assert_no_raw_codes(str(val))
+
+
+# ── Stage 8E display-contract staleness detection ────────────────────────────
+
+
+class TestStage8EContractStaleness:
+    """is_snapshot_stage8e_complete must detect stale (Stage 8D-only) snapshots."""
+
+    def _make_snapshot(self, *, with_8e_marker: bool, with_event_summary: bool, sec_catalyst_found: bool = True) -> dict:
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+        )
+        cat = {"sec_catalyst_found": sec_catalyst_found, "editorial_suppressed": False, "sec_lane_applicable": True}
+        if with_event_summary:
+            cat["event_summary"] = "Recent official filing activity was found."
+        card = {
+            "ticker": "MSFT",
+            "detail_drawer_payload": {
+                "evidence_explanation": {"sec_catalyst_evidence": cat}
+            },
+        }
+        snap: dict = {"current_holdings": [card]}
+        if with_8e_marker:
+            snap["stage8e_catalyst_explanation_contract_version"] = STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION
+        return snap
+
+    def test_returns_false_for_none(self):
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import is_snapshot_stage8e_complete
+        assert is_snapshot_stage8e_complete(None) is False
+
+    def test_returns_false_when_marker_missing(self):
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import is_snapshot_stage8e_complete
+        snap = self._make_snapshot(with_8e_marker=False, with_event_summary=True)
+        assert is_snapshot_stage8e_complete(snap) is False
+
+    def test_returns_false_for_stage8d_only_snapshot(self):
+        """Stage 8D snapshot has sec_catalyst_found=True but no event_summary — must be stale."""
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import is_snapshot_stage8e_complete
+        snap = self._make_snapshot(with_8e_marker=True, with_event_summary=False, sec_catalyst_found=True)
+        assert is_snapshot_stage8e_complete(snap) is False
+
+    def test_returns_true_for_stage8e_complete_snapshot(self):
+        """Snapshot with marker and event_summary present is Stage 8E complete."""
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import is_snapshot_stage8e_complete
+        snap = self._make_snapshot(with_8e_marker=True, with_event_summary=True, sec_catalyst_found=True)
+        assert is_snapshot_stage8e_complete(snap) is True
+
+    def test_returns_true_when_sec_catalyst_not_found(self):
+        """Card where sec_catalyst_found=False does not need event_summary."""
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import is_snapshot_stage8e_complete
+        snap = self._make_snapshot(with_8e_marker=True, with_event_summary=False, sec_catalyst_found=False)
+        assert is_snapshot_stage8e_complete(snap) is True
+
+    def test_snapshot_builder_embeds_stage8e_contract_version(self):
+        """build_snapshot output must include stage8e_catalyst_explanation_contract_version."""
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        from app.services.intelligence.v3.decision_contracts import (
+            DecisionOutputV3, ActionV3, ConvictionV3, AxisBand, FitBand, PriceBand, RiskBand,
+        )
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+        )
+        decision = DecisionOutputV3(
+            ticker="MSFT",
+            action=ActionV3.HOLD,
+            conviction=ConvictionV3.LOW,
+            evidence_quality=AxisBand.THIN,
+            portfolio_fit=FitBand.UNKNOWN,
+            risk_band=RiskBand.LOW,
+            attractiveness=AxisBand.THIN,
+            price_context=PriceBand.SUPPRESSED,
+            rationale_plain_english="Holding.",
+            why_now="",
+            why_not_now="",
+            suppression_reasons={},
+            blockers=[],
+            source_signal_summary={},
+            schema_version="test_v1",
+        )
+        snap = build_snapshot(run_id="r1", decisions=[decision], card_metas=[{"ticker": "MSFT"}])
+        assert snap.get("stage8e_catalyst_explanation_contract_version") == STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION

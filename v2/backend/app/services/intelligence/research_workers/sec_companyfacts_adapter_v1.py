@@ -64,7 +64,12 @@ from .sec_companyfacts_parser import (
 
 _ARTIFACT_TYPE = "fundamental_quality"
 _SKILL_PACK = "sec_companyfacts_evidence_v1"
-_MODEL_VERSION = "sec_xbrl_companyfacts_v1"
+# Stage 9C: bumped from v1 → v2 so existing stale artifacts (generated with the
+# pre-5H.3 generic contradiction group key) are superseded by clean replacement
+# on the next POST /intel/v3/run. The idempotency key includes model_version, so
+# any artifact with the old model_version will be superseded and regenerated with
+# the current contradiction-grouping fix.
+_MODEL_VERSION = "sec_xbrl_companyfacts_v2"
 _SCOPE_KIND = "ticker"
 
 # Observations filed within this many days are considered FRESH.

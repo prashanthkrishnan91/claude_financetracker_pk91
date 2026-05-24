@@ -634,6 +634,7 @@ def build_canonical_equity_dataset_row(
 def build_asset_parity_roadmap(
     *,
     equity_canonical_count: int,
+    equity_valuation_count: int = 0,
     equity_total: int,
     equity_edge_case_tickers: list,
     etf_total: int,
@@ -648,10 +649,15 @@ def build_asset_parity_roadmap(
       equity: canonical dataset built for USABLE equities / valuation lane missing
       ETF: fund composition/provider lane missing
       crypto: crypto market context/provider lane missing
+
+    Stage 9E state:
+      equity: canonical dataset built + valuation evidence lane built
+      (synthesis still blocked: ETF/crypto canonical datasets not yet built)
     """
     now_iso = datetime.now(timezone.utc).isoformat()
 
     equity_canonical_built = equity_canonical_count > 0
+    equity_valuation_built = equity_valuation_count > 0
     equity_edge = None
     if equity_edge_case_tickers:
         tickers_str = ", ".join(sorted(equity_edge_case_tickers))
@@ -660,15 +666,18 @@ def build_asset_parity_roadmap(
             f"SEC weak/stale/no-facts: {tickers_str}"
         )
 
+    if equity_valuation_built:
+        equity_synthesis_gate = SYNTHESIS_GATE_BLOCKED
+    elif equity_canonical_built:
+        equity_synthesis_gate = VALUATION_GATE_BLOCKED
+    else:
+        equity_synthesis_gate = SYNTHESIS_GATE_BLOCKED
+
     equity_gap = AssetClassFoundationGap(
         asset_class="equity",
         canonical_dataset_built=equity_canonical_built,
-        valuation_lane_built=False,
-        synthesis_gate=(
-            VALUATION_GATE_BLOCKED
-            if equity_canonical_built
-            else SYNTHESIS_GATE_BLOCKED
-        ),
+        valuation_lane_built=equity_valuation_built,
+        synthesis_gate=equity_synthesis_gate,
         edge_cases=equity_edge,
     )
 

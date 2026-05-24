@@ -351,6 +351,15 @@ class Settings(BaseSettings):
     # synthesis_ready stays False (foundation layer only). Cert-gated + this flag.
     intel_v3_coverage_trust_matrix_enabled: bool = False
 
+    # ── Stage 9B — Intel Data Foundation Forensics v1 (off by default) ──────────
+    # When True, exposes a protected diagnostics endpoint that inspects actual
+    # persisted research artifacts per holding and classifies the primary root cause
+    # explaining missing data foundation (provider gap, CIK mapping, worker gap,
+    # weak artifact, no lane built, etc.). Diagnostic only: no LLM, no providers,
+    # no writes, no visible Buy/Hold/Trim/Sell change. safe_for_decision stays False.
+    # synthesis_ready stays False. Cert-gated + this flag required.
+    intel_v3_data_foundation_forensics_enabled: bool = False
+
     # ── Stage 6 — Evidence-Aware Intel v3 Decision Engine Governance (off by default) ──
     # When True, applies Stage 5K evidence-readiness signals to Intel v3 decision
     # input (evidence_quality axis) before decide() is called. Deterministic policy

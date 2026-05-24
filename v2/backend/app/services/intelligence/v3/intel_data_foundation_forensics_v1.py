@@ -56,6 +56,17 @@ from .canonical_equity_dataset_v1 import (
     build_canonical_equity_dataset_row,
     build_asset_parity_roadmap,
 )
+from .equity_numeric_valuation_inputs_v1 import (
+    FRESHNESS_AGING,
+    FRESHNESS_FRESH,
+    FRESHNESS_STALE,
+    FRESHNESS_UNKNOWN,
+    PRICE_SOURCE_SNAPSHOT_CARRIED,
+    PRICE_SOURCE_SNAPSHOT_CERTIFIED,
+    EquityNumericValuationInputs,
+    TickerPriceSignal,
+    build_equity_numeric_valuation_inputs,
+)
 from .equity_valuation_evidence_v1 import (
     EquityValuationEvidenceRow,
     build_equity_valuation_evidence_row,
@@ -299,6 +310,16 @@ class DataFoundationForensicsResult:
     # Per-missing-reason counts across all equity valuation evidence rows.
     valuation_missing_reason_counts: dict = field(default_factory=dict)
 
+    # Stage 9E.1: equity numeric valuation input counts.
+    # Number of equity holdings where the numeric input adapter ran.
+    equity_numeric_valuation_input_count: int = 0
+    # Number of equity holdings where numeric_inputs_ready=True (all minimum inputs confirmed).
+    equity_numeric_valuation_ready_count: int = 0
+    # Tickers where numeric inputs are degraded (adapter ran but numeric_inputs_ready=False).
+    equity_numeric_valuation_degraded_tickers: list = field(default_factory=list)
+    # Per-missing-reason counts from numeric input adapter across all equity holdings.
+    numeric_valuation_missing_reason_counts: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -324,6 +345,10 @@ class DataFoundationForensicsResult:
             "equity_valuation_ready_count": self.equity_valuation_ready_count,
             "equity_valuation_degraded_tickers": list(self.equity_valuation_degraded_tickers),
             "valuation_missing_reason_counts": dict(self.valuation_missing_reason_counts),
+            "equity_numeric_valuation_input_count": self.equity_numeric_valuation_input_count,
+            "equity_numeric_valuation_ready_count": self.equity_numeric_valuation_ready_count,
+            "equity_numeric_valuation_degraded_tickers": list(self.equity_numeric_valuation_degraded_tickers),
+            "numeric_valuation_missing_reason_counts": dict(self.numeric_valuation_missing_reason_counts),
             "errors": list(self.errors),
         }
 
@@ -341,6 +366,11 @@ class _SupplementalData:
     # Raw values in payloads are consumed internally by the canonical dataset
     # builder and never serialized.
     sec_fact_records: dict  # {sec_artifact_id: list[structured_payload dict]}
+    # Stage 9E.1: ticker-level price signals from the latest portfolio snapshot.
+    # Keyed by normalized uppercase ticker symbol. Populated from portfolio_snapshots
+    # positions_data JSON. Raw market values are NOT stored here — only safe metadata
+    # (source_type, freshness_label, ticker_level_confirmed).
+    ticker_price_signals: dict = field(default_factory=dict)  # {ticker: TickerPriceSignal}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -463,6 +493,12 @@ def compute_data_foundation_forensics(
     equity_valuation_degraded_tickers: list[str] = []
     valuation_missing_reason_counts: dict[str, int] = {}
 
+    # Stage 9E.1: equity numeric valuation input counts.
+    equity_numeric_valuation_input_count = 0
+    equity_numeric_valuation_ready_count = 0
+    equity_numeric_valuation_degraded_tickers: list[str] = []
+    numeric_valuation_missing_reason_counts: dict[str, int] = {}
+
     for h in holdings:
         if h.asset_type == INSTRUMENT_CATEGORY_EQUITY and h.valuation_evidence:
             equity_valuation_evidence_count += 1
@@ -474,6 +510,25 @@ def compute_data_foundation_forensics(
                 valuation_missing_reason_counts[reason_key] = (
                     valuation_missing_reason_counts.get(reason_key, 0) + 1
                 )
+
+        # Stage 9E.1: numeric valuation input counts (from valuation_numeric_ready flag).
+        if h.asset_type == INSTRUMENT_CATEGORY_EQUITY and h.valuation_evidence_model_present:
+            equity_numeric_valuation_input_count += 1
+            if h.valuation_numeric_ready:
+                equity_numeric_valuation_ready_count += 1
+            else:
+                equity_numeric_valuation_degraded_tickers.append(h.ticker)
+            # Collect missing reasons from the numeric inputs (via valuation_evidence proxy).
+            if h.valuation_evidence:
+                numeric_ir = h.valuation_evidence.get("input_readiness", {})
+                if not numeric_ir.get("price_available", True):
+                    numeric_valuation_missing_reason_counts["price_input"] = (
+                        numeric_valuation_missing_reason_counts.get("price_input", 0) + 1
+                    )
+                if not numeric_ir.get("eps_or_earnings_available", True):
+                    numeric_valuation_missing_reason_counts["earnings_input"] = (
+                        numeric_valuation_missing_reason_counts.get("earnings_input", 0) + 1
+                    )
 
     parity_roadmap = build_asset_parity_roadmap(
         equity_canonical_count=equity_canonical_count,
@@ -509,6 +564,10 @@ def compute_data_foundation_forensics(
         equity_valuation_ready_count=equity_valuation_ready_count,
         equity_valuation_degraded_tickers=equity_valuation_degraded_tickers,
         valuation_missing_reason_counts=valuation_missing_reason_counts,
+        equity_numeric_valuation_input_count=equity_numeric_valuation_input_count,
+        equity_numeric_valuation_ready_count=equity_numeric_valuation_ready_count,
+        equity_numeric_valuation_degraded_tickers=equity_numeric_valuation_degraded_tickers,
+        numeric_valuation_missing_reason_counts=numeric_valuation_missing_reason_counts,
         errors=errors,
     )
 
@@ -530,6 +589,7 @@ def _fetch_supplemental_data(
     fact_counts: dict[str, int] = {}
     has_portfolio_snapshot = False
     sec_fact_records: dict[str, list[dict]] = {}
+    ticker_price_signals: dict[str, TickerPriceSignal] = {}
 
     try:
         result = (
@@ -580,12 +640,16 @@ def _fetch_supplemental_data(
     try:
         result = (
             db_client.table("portfolio_snapshots")
-            .select("id")
+            .select("snapshot_at,positions_data")
             .eq("user_id", user_id)
+            .order("snapshot_at", desc=True)
             .limit(1)
             .execute()
         )
         has_portfolio_snapshot = bool(result.data)
+        if result.data:
+            snapshot_row = result.data[0]
+            ticker_price_signals = _extract_ticker_price_signals(snapshot_row)
     except Exception as exc:  # noqa: BLE001
         errors.append(f"portfolio_snapshots_query_failed: {type(exc).__name__}")
 
@@ -617,7 +681,83 @@ def _fetch_supplemental_data(
         fact_counts=fact_counts,
         has_portfolio_snapshot=has_portfolio_snapshot,
         sec_fact_records=sec_fact_records,
+        ticker_price_signals=ticker_price_signals,
     )
+
+
+def _extract_ticker_price_signals(
+    snapshot_row: dict,
+) -> dict:  # dict[str, TickerPriceSignal]
+    """Extract per-ticker price signals from a portfolio_snapshots row.
+
+    Reads positions_data JSONB from the latest portfolio snapshot.
+    For each position:
+      - If market_value_certified_at is present → ticker-level confirmed (AVAILABLE)
+      - If market_value present but no certified_at → carried forward (PARTIAL)
+
+    Freshness is derived from the snapshot's snapshot_at timestamp:
+      - Within 24h → FRESH
+      - Within 72h → AGING
+      - Older → STALE
+
+    NEVER exposes raw market values, prices, or cost basis — only safe metadata.
+    """
+    from datetime import timedelta
+
+    signals: dict[str, TickerPriceSignal] = {}
+    snapshot_at_str = snapshot_row.get("snapshot_at")
+    positions_data = snapshot_row.get("positions_data") or []
+
+    if not isinstance(positions_data, list):
+        return signals
+
+    # Determine snapshot freshness from snapshot_at.
+    freshness_label = FRESHNESS_UNKNOWN
+    if snapshot_at_str:
+        try:
+            snapshot_at = datetime.fromisoformat(
+                snapshot_at_str.replace("Z", "+00:00")
+            )
+            now = datetime.now(timezone.utc)
+            age = now - snapshot_at
+            if age <= timedelta(hours=24):
+                freshness_label = FRESHNESS_FRESH
+            elif age <= timedelta(hours=72):
+                freshness_label = FRESHNESS_AGING
+            else:
+                freshness_label = FRESHNESS_STALE
+        except (ValueError, TypeError, AttributeError):
+            freshness_label = FRESHNESS_UNKNOWN
+
+    for position in positions_data:
+        if not isinstance(position, dict):
+            continue
+        ticker = (position.get("ticker") or "").strip().upper()
+        if not ticker:
+            continue
+
+        has_certified_at = bool(position.get("market_value_certified_at"))
+        has_market_value = position.get("market_value") is not None
+
+        if has_certified_at:
+            source_type = PRICE_SOURCE_SNAPSHOT_CERTIFIED
+            ticker_level_confirmed = True
+            signal_freshness = freshness_label
+        elif has_market_value:
+            source_type = PRICE_SOURCE_SNAPSHOT_CARRIED
+            ticker_level_confirmed = False
+            signal_freshness = freshness_label
+        else:
+            continue
+
+        signals[ticker] = TickerPriceSignal(
+            ticker=ticker,
+            source_type=source_type,
+            freshness_label=signal_freshness,
+            ticker_level_confirmed=ticker_level_confirmed,
+        )
+
+    return signals
 
 
 def _build_holding_row(
@@ -686,12 +826,53 @@ def _build_holding_row(
     if cat_cov and cat_cov.artifact_id:
         cat_count = supplemental.fact_counts.get(cat_cov.artifact_id)
 
-    # Stage 9E: scaffold exists for all equity holdings, but numeric inputs are not yet in scope.
-    # valuation_evidence_model_present = scaffold ran; valuation_numeric_ready = actual numeric gate.
-    # VALUATION_LANE_NOT_BUILT still appears in gaps (valuation_numeric_ready is always False at 9E).
+    # Stage 9E.1: scaffold exists for all equity holdings.
+    # Build canonical dataset and numeric inputs BEFORE gap classification so
+    # valuation_numeric_ready is accurate for _classify_all_gaps.
     valuation_evidence_model_present = (asset_type == INSTRUMENT_CATEGORY_EQUITY)
-    valuation_numeric_ready = False  # always False at Stage 9E — no numeric EPS/price in scope
-    valuation_summary = _get_valuation_summary(asset_type, valuation_lane_built=valuation_evidence_model_present)
+
+    canonical_equity_dataset: Optional[dict] = None
+    valuation_evidence: Optional[dict] = None
+    valuation_numeric_ready = False  # updated below for equity
+
+    if asset_type == INSTRUMENT_CATEGORY_EQUITY:
+        # Stage 9D: build canonical equity dataset row.
+        _sec_art_id = sec_cov.artifact_id if sec_cov else None
+        _sec_facts = (
+            supplemental.sec_fact_records.get(_sec_art_id, [])
+            if _sec_art_id else []
+        )
+        ced_row = build_canonical_equity_dataset_row(
+            ticker=ticker,
+            asset_type=asset_type,
+            lanes=lanes,
+            sec_obs_count=sec_obs_count,
+            cat_count=cat_count,
+            sec_fact_records=_sec_facts if _sec_facts else None,
+        )
+        canonical_equity_dataset = ced_row.to_dict()
+
+        # Stage 9E.1: build numeric valuation inputs.
+        # Ticker-level price signal used when available; falls back to no signal.
+        _ticker_price_signal = supplemental.ticker_price_signals.get(ticker)
+        numeric_inputs_row = build_equity_numeric_valuation_inputs(
+            canonical_row=ced_row,
+            ticker_price_signal=_ticker_price_signal,
+        )
+        valuation_numeric_ready = numeric_inputs_row.numeric_inputs_ready
+
+        # Stage 9E: build valuation evidence using numeric inputs.
+        # price_available fallback is portfolio snapshot existence (proxy).
+        val_row = build_equity_valuation_evidence_row(
+            canonical_row=ced_row,
+            price_available=supplemental.has_portfolio_snapshot,
+            numeric_inputs=numeric_inputs_row,
+        )
+        valuation_evidence = val_row.to_dict()
+
+    valuation_summary = _get_valuation_summary(
+        asset_type, valuation_lane_built=valuation_numeric_ready
+    )
 
     # ETF fund composition — no provider built at Stage 9B
     etf_fund_composition_artifact_exists = False
@@ -702,6 +883,7 @@ def _build_holding_row(
     thesis_history_exists = ticker in supplemental.recommendation_tickers
 
     # Classify all blocking gaps (multi-gap aware).
+    # valuation_lane_exists=True only for tickers with confirmed numeric inputs.
     all_gaps = _classify_all_gaps(
         asset_type=asset_type,
         has_fundamentals_artifact=fund_exists,
@@ -721,35 +903,6 @@ def _build_holding_row(
     next_required_fixes = [g[1] for g in all_gaps]
     root_cause_bucket = blocking_gap_buckets[0]
     next_required_fix = next_required_fixes[0]
-
-    # Stage 9D: build canonical equity dataset row for equity holdings.
-    # ETF and crypto receive None (their own provider lanes are required separately).
-    canonical_equity_dataset: Optional[dict] = None
-    valuation_evidence: Optional[dict] = None
-    if asset_type == INSTRUMENT_CATEGORY_EQUITY:
-        # Get SEC fact records for this ticker's artifact (if available).
-        _sec_art_id = sec_cov.artifact_id if sec_cov else None
-        _sec_facts = (
-            supplemental.sec_fact_records.get(_sec_art_id, [])
-            if _sec_art_id else []
-        )
-        ced_row = build_canonical_equity_dataset_row(
-            ticker=ticker,
-            asset_type=asset_type,
-            lanes=lanes,
-            sec_obs_count=sec_obs_count,
-            cat_count=cat_count,
-            sec_fact_records=_sec_facts if _sec_facts else None,
-        )
-        canonical_equity_dataset = ced_row.to_dict()
-
-        # Stage 9E: build valuation evidence from the canonical dataset row.
-        # price_available is proxied from portfolio snapshot existence.
-        val_row = build_equity_valuation_evidence_row(
-            canonical_row=ced_row,
-            price_available=supplemental.has_portfolio_snapshot,
-        )
-        valuation_evidence = val_row.to_dict()
 
     return HoldingForensicsRow(
         ticker=ticker,

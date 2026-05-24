@@ -1,7 +1,7 @@
 """Stage 9E.1 — Equity Numeric Valuation Input Adapter v1.
 
 Covers:
-  1.  Ticker-level price + earnings + safe canonical → numeric_inputs_ready=True.
+  1.  Ticker-level price (market_price_usd confirmed) + earnings (fact records) → numeric_inputs_ready=True.
   2.  Portfolio-level snapshot alone (no ticker_price_signal) → numeric_inputs_ready=False.
   3.  Missing price (no signal) → numeric_inputs_ready=False, price_input MISSING.
   4.  Carried price (no market_value_certified_at) → numeric_inputs_ready=False.
@@ -13,13 +13,14 @@ Covers:
   10. No raw EPS, price, P/E, XBRL metric names in serialized output.
   11. safe_for_decision=False always.
   12. synthesis_ready=False always.
-  13. to_dict() has all required fields.
-  14. valuation_ready=True in evidence row when numeric_inputs_ready=True.
+  13. to_dict() has all required fields including valuation_input_scaffold_present,
+      ticker_price_metadata_present, numeric_price_confirmed, numeric_earnings_confirmed.
+  14. valuation_ready=False in evidence row (band=UNKNOWN, no thresholds defined at 9E.1).
   15. valuation_ready=False in evidence row when numeric_inputs=None (Stage 9E mode).
   16. valuation_numeric_inputs_in_scope=True when numeric adapter is used.
   17. price_is_portfolio_level_proxy=False when ticker-level confirmed.
   18. price_is_portfolio_level_proxy=True when no ticker-level signal.
-  19. VALUATION_LANE_NOT_BUILT disappears for numeric-ready tickers.
+  19. VALUATION_LANE_NOT_BUILT remains at Stage 9E.1 (valuation_ready=False always).
   20. VALUATION_LANE_NOT_BUILT remains for non-numeric-ready tickers.
   21. cash_flow_input: AVAILABLE when FCF section AVAILABLE.
   22. cash_flow_input: PARTIAL when FCF section PARTIAL.
@@ -41,6 +42,12 @@ Covers:
   38. _extract_ticker_price_signals: empty positions_data → empty signals.
   39. ETF/crypto unaffected by Stage 9E.1.
   40. Stage 9E tests still pass (regression: valuation_ready=False when no numeric_inputs).
+  41. market_value_certified_at alone does not make numeric_price_confirmed=True.
+  42. market_price_usd present → numeric_price_confirmed=True (no raw value serialized).
+  43. Section status alone does not make numeric_earnings_confirmed=True.
+  44. latest_period_identity + source_artifact_id non-None → numeric_earnings_confirmed=True.
+  45. valuation_ready=False while valuation_interpretation_band=UNKNOWN.
+  46. VALUATION_LANE_NOT_BUILT remains even when numeric_inputs_ready=True (band=UNKNOWN).
 """
 from __future__ import annotations
 
@@ -132,12 +139,14 @@ def _make_price_signal(
     source_type: str = PRICE_SOURCE_SNAPSHOT_CERTIFIED,
     freshness_label: str = FRESHNESS_FRESH,
     ticker_level_confirmed: bool = True,
+    numeric_price_confirmed: bool = True,
 ) -> TickerPriceSignal:
     return TickerPriceSignal(
         ticker=ticker,
         source_type=source_type,
         freshness_label=freshness_label,
         ticker_level_confirmed=ticker_level_confirmed,
+        numeric_price_confirmed=numeric_price_confirmed,
     )
 
 
@@ -325,7 +334,10 @@ class TestOutputContract:
         required_keys = {
             "ticker", "asset_type", "input_version", "generated_at",
             "price_input", "earnings_input", "cash_flow_input", "growth_input",
-            "missing_reasons", "numeric_inputs_ready",
+            "missing_reasons",
+            "valuation_input_scaffold_present", "ticker_price_metadata_present",
+            "numeric_price_confirmed", "numeric_earnings_confirmed",
+            "numeric_inputs_ready",
             "safe_for_decision", "synthesis_ready",
         }
         assert required_keys <= d.keys()
@@ -336,7 +348,10 @@ class TestOutputContract:
             ticker_price_signal=_make_price_signal(),
         )
         pi = inputs.to_dict()["price_input"]
-        assert set(pi.keys()) == {"status", "source_type", "freshness_label", "ticker_level_confirmed"}
+        assert set(pi.keys()) == {
+            "status", "source_type", "freshness_label",
+            "ticker_level_confirmed", "numeric_price_confirmed",
+        }
 
     def test_earnings_input_fields(self):
         inputs = build_equity_numeric_valuation_inputs(
@@ -686,8 +701,13 @@ class TestEarningsMetricFamily:
 class TestValuationEvidenceIntegration:
     """valuation_ready=True in evidence row when numeric_inputs_ready=True."""
 
-    def test_valuation_ready_true_with_numeric_inputs(self):
-        """All confirmed numeric inputs → valuation_ready=True in evidence row."""
+    def test_valuation_ready_false_with_numeric_inputs_band_unknown(self):
+        """All confirmed numeric inputs → valuation_ready=False because band=UNKNOWN.
+
+        At Stage 9E.1 no P/E thresholds are defined, so valuation_interpretation_band
+        is always BAND_UNKNOWN and valuation_ready is always False regardless of whether
+        numeric inputs are confirmed. VALUATION_LANE_NOT_BUILT gap remains.
+        """
         canonical_row = _make_canonical_row(safe_for_equity_dataset=True)
         numeric_inputs = build_equity_numeric_valuation_inputs(
             canonical_row=canonical_row,
@@ -697,13 +717,16 @@ class TestValuationEvidenceIntegration:
             ),
         )
         assert numeric_inputs.numeric_inputs_ready is True
+        assert numeric_inputs.numeric_price_confirmed is True
+        assert numeric_inputs.numeric_earnings_confirmed is True
 
         evidence = build_equity_valuation_evidence_row(
             canonical_row=canonical_row,
             price_available=True,
             numeric_inputs=numeric_inputs,
         )
-        assert evidence.valuation_ready is True
+        assert evidence.valuation_ready is False  # band=UNKNOWN, no thresholds
+        assert evidence.valuation_context.valuation_interpretation_band == BAND_UNKNOWN
         assert evidence.valuation_numeric_inputs_in_scope is True
         assert evidence.synthesis_ready is False
         assert evidence.safe_for_decision is False
@@ -777,10 +800,15 @@ class TestValuationEvidenceIntegration:
 
 
 class TestValuationLaneGapBehavior:
-    """VALUATION_LANE_NOT_BUILT disappears only for numeric-ready tickers."""
+    """VALUATION_LANE_NOT_BUILT disappears only when valuation_ready=True.
+
+    At Stage 9E.1, valuation_ready is always False (band=UNKNOWN), so the gap
+    always remains. The _classify_all_gaps function accepts valuation_lane_exists
+    as a parameter; _build_holding_row passes val_row.valuation_ready (False).
+    """
 
     def test_valuation_lane_exists_true_removes_bucket(self):
-        """When valuation_lane_exists=True (numeric ready), gap disappears."""
+        """_classify_all_gaps: when valuation_lane_exists=True, gap disappears."""
         gaps = _classify_all_gaps(
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
             has_fundamentals_artifact=True,
@@ -1126,3 +1154,233 @@ class TestStage9ERegressionGuard:
             numeric_inputs=numeric_inputs,
         )
         assert evidence.safe_for_decision is False
+
+
+# ── Test: semantic correctness — price semantics ──────────────────────────────
+
+
+class TestPriceSemantics:
+    """market_value_certified_at alone does not confirm per-share price."""
+
+    def test_market_value_cert_alone_not_numeric_price_confirmed(self):
+        """market_value_certified_at present but market_price_usd absent → numeric_price_confirmed=False."""
+        signal = TickerPriceSignal(
+            ticker="MSFT",
+            source_type=PRICE_SOURCE_SNAPSHOT_CERTIFIED,
+            freshness_label=FRESHNESS_FRESH,
+            ticker_level_confirmed=True,
+            numeric_price_confirmed=False,  # no market_price_usd
+        )
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
+            ticker_price_signal=signal,
+        )
+        assert inputs.numeric_price_confirmed is False
+        assert inputs.ticker_price_metadata_present is True
+        assert inputs.numeric_inputs_ready is False
+        assert "price_input" in inputs.missing_reasons
+
+    def test_market_value_cert_alone_not_numeric_price_ready(self):
+        """market_value only (no per-share price field) does not make numeric_inputs_ready=True."""
+        signal = TickerPriceSignal(
+            ticker="MSFT",
+            source_type=PRICE_SOURCE_SNAPSHOT_CERTIFIED,
+            freshness_label=FRESHNESS_FRESH,
+            ticker_level_confirmed=True,
+            numeric_price_confirmed=False,
+        )
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
+            ticker_price_signal=signal,
+        )
+        assert inputs.numeric_inputs_ready is False
+
+    def test_market_price_usd_present_makes_numeric_price_confirmed(self):
+        """market_price_usd present in snapshot → numeric_price_confirmed=True (no raw value serialized)."""
+        snapshot_row = {
+            "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            "positions_data": [
+                {
+                    "ticker": "MSFT",
+                    "market_value": 50000.0,
+                    "market_value_certified_at": "2026-05-24T11:00:00+00:00",
+                    "market_price_usd": 415.0,  # per-share price — presence checked, value not serialized
+                }
+            ],
+        }
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import (
+            _extract_ticker_price_signals,
+        )
+        signals = _extract_ticker_price_signals(snapshot_row)
+        assert "MSFT" in signals
+        signal = signals["MSFT"]
+        assert signal.numeric_price_confirmed is True
+        assert signal.ticker_level_confirmed is True
+        # Raw price value must NOT appear in signal serialization.
+        serialized = json.dumps(signal.to_dict())
+        assert "415" not in serialized
+        assert "market_price" not in serialized
+
+    def test_market_value_cert_without_per_share_price_not_numeric_confirmed(self):
+        """market_value_certified_at without market_price_usd → numeric_price_confirmed=False."""
+        snapshot_row = {
+            "snapshot_at": datetime.now(timezone.utc).isoformat(),
+            "positions_data": [
+                {
+                    "ticker": "MSFT",
+                    "market_value": 50000.0,
+                    "market_value_certified_at": "2026-05-24T11:00:00+00:00",
+                    # no market_price_usd
+                }
+            ],
+        }
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import (
+            _extract_ticker_price_signals,
+        )
+        signals = _extract_ticker_price_signals(snapshot_row)
+        signal = signals["MSFT"]
+        assert signal.ticker_level_confirmed is True
+        assert signal.numeric_price_confirmed is False
+
+    def test_scaffold_present_even_when_numeric_price_not_confirmed(self):
+        """valuation_input_scaffold_present=True when canonical safe + signal present, even if numeric not confirmed."""
+        signal = TickerPriceSignal(
+            ticker="MSFT",
+            source_type=PRICE_SOURCE_SNAPSHOT_CERTIFIED,
+            freshness_label=FRESHNESS_FRESH,
+            ticker_level_confirmed=True,
+            numeric_price_confirmed=False,
+        )
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
+            ticker_price_signal=signal,
+        )
+        assert inputs.valuation_input_scaffold_present is True
+        assert inputs.ticker_price_metadata_present is True
+        assert inputs.numeric_price_confirmed is False
+        assert inputs.numeric_inputs_ready is False
+
+
+# ── Test: semantic correctness — earnings semantics ───────────────────────────
+
+
+class TestEarningsSemantics:
+    """Section status alone does not confirm numeric earnings."""
+
+    def test_section_status_alone_not_numeric_earnings_confirmed(self):
+        """AVAILABLE section status with latest_period_identity=None → numeric_earnings_confirmed=False."""
+        from app.services.intelligence.v3.canonical_equity_dataset_v1 import (
+            EvidenceSectionRecord,
+        )
+        # Simulate metadata-only fallback: status=AVAILABLE but no fact records loaded.
+        metadata_only_section = EvidenceSectionRecord(
+            section=SECTION_NET_INCOME_EPS,
+            status=SECTION_STATUS_AVAILABLE,
+            evidence_basis="SEC_COMPANYFACTS",
+            latest_period_identity=None,   # metadata fallback — no fact records
+            comparison_period_identity=None,
+            trend_direction=TREND_UNKNOWN,
+            source_artifact_id=None,       # no fact records
+            missing_reason=None,
+        )
+        from app.services.intelligence.v3.canonical_equity_dataset_v1 import (
+            OperatingTrendSection,
+        )
+        sections = {
+            SECTION_NET_INCOME_EPS: metadata_only_section,
+            SECTION_REVENUE: _make_section_record(SECTION_REVENUE, SECTION_STATUS_AVAILABLE),
+            SECTION_CASH_FLOW_FCF: _make_section_record(SECTION_CASH_FLOW_FCF, SECTION_STATUS_AVAILABLE),
+        }
+        operating_trends = OperatingTrendSection(
+            sections=sections,
+            trend_source="sec_company_facts",
+            observation_count=0,
+            completeness_band="COMPLETE",
+            freshness_status="FRESH",
+            usability_label="USABLE",
+            missing_reason=None,
+        )
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(
+                safe_for_equity_dataset=True,
+                operating_trends=operating_trends,
+            ),
+            ticker_price_signal=_make_price_signal(ticker_level_confirmed=True),
+        )
+        assert inputs.numeric_earnings_confirmed is False
+        assert inputs.earnings_input.status == INPUT_STATUS_AVAILABLE  # status is from section
+        assert inputs.numeric_inputs_ready is False
+        assert "numeric_inputs_ready" in inputs.missing_reasons
+
+    def test_period_identity_and_artifact_id_make_numeric_earnings_confirmed(self):
+        """latest_period_identity non-None + source_artifact_id non-None → numeric_earnings_confirmed=True."""
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
+            ticker_price_signal=_make_price_signal(ticker_level_confirmed=True),
+        )
+        assert inputs.numeric_earnings_confirmed is True
+
+    def test_missing_earnings_section_not_numeric_earnings_confirmed(self):
+        """Missing EPS section → numeric_earnings_confirmed=False."""
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=_make_canonical_row(
+                operating_trends=_make_operating_trends(eps_status=SECTION_STATUS_MISSING),
+            ),
+            ticker_price_signal=_make_price_signal(ticker_level_confirmed=True),
+        )
+        assert inputs.numeric_earnings_confirmed is False
+        assert inputs.numeric_inputs_ready is False
+
+
+# ── Test: semantic correctness — valuation_ready band gate ────────────────────
+
+
+class TestValuationReadyBandGate:
+    """valuation_ready=False while valuation_interpretation_band=UNKNOWN."""
+
+    def test_valuation_ready_false_while_band_unknown(self):
+        """Even with numeric_inputs_ready=True, valuation_ready=False because band=UNKNOWN."""
+        canonical_row = _make_canonical_row(safe_for_equity_dataset=True)
+        inputs = build_equity_numeric_valuation_inputs(
+            canonical_row=canonical_row,
+            ticker_price_signal=_make_price_signal(ticker_level_confirmed=True),
+        )
+        assert inputs.numeric_inputs_ready is True  # confirmed numerics
+        evidence = build_equity_valuation_evidence_row(
+            canonical_row=canonical_row,
+            price_available=True,
+            numeric_inputs=inputs,
+        )
+        assert evidence.valuation_context.valuation_interpretation_band == BAND_UNKNOWN
+        assert evidence.valuation_ready is False
+
+    def test_valuation_lane_not_built_remains_when_numeric_inputs_ready(self):
+        """VALUATION_LANE_NOT_BUILT gap persists even when numeric_inputs_ready=True.
+
+        valuation_lane_exists is driven by val_row.valuation_ready (False because
+        band=UNKNOWN at Stage 9E.1), not by numeric_inputs_ready.
+        """
+        row = _build_holding_row(
+            ticker="MSFT",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_SEC_COMPANY_FACTS: _make_sec_lane(
+                    status=STATUS_READY,
+                    usability_label="USABLE",
+                ),
+            },
+            supplemental=_empty_supplemental(
+                has_portfolio_snapshot=True,
+                ticker_price_signals={
+                    "MSFT": TickerPriceSignal(
+                        ticker="MSFT",
+                        source_type=PRICE_SOURCE_SNAPSHOT_CERTIFIED,
+                        freshness_label=FRESHNESS_FRESH,
+                        ticker_level_confirmed=True,
+                        numeric_price_confirmed=True,
+                    ),
+                },
+            ),
+        )
+        # VALUATION_LANE_NOT_BUILT must remain because valuation_ready=False (band=UNKNOWN).
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets

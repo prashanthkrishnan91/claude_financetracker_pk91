@@ -503,20 +503,20 @@ def _compute_valuation_ready(
     valuation_context: ValuationContext,
     numeric_inputs: Optional[EquityNumericValuationInputs] = None,
 ) -> bool:
-    """True only when numeric inputs are confirmed ready via the Stage 9E.1 adapter.
+    """True only when numeric inputs are confirmed AND valuation band is not UNKNOWN.
 
     Without numeric_inputs (Stage 9E mode): always returns False.
-    With numeric_inputs: returns numeric_inputs.numeric_inputs_ready, which requires:
-      - canonical_equity_dataset_safe=True
-      - ticker-level price confirmed (market_value_certified_at set, FRESH or AGING)
-      - earnings/EPS input AVAILABLE or PARTIAL
+    With numeric_inputs: requires numeric_inputs_ready=True AND band != BAND_UNKNOWN.
 
-    valuation_interpretation_band remains UNKNOWN regardless of valuation_ready status
-    because no deterministic P/E thresholds are defined at Stage 9E.1.
+    At Stage 9E.1, valuation_interpretation_band is always BAND_UNKNOWN (no P/E
+    thresholds defined yet), so valuation_ready is always False at this stage.
+    This ensures VALUATION_LANE_NOT_BUILT gap is not prematurely removed.
     """
     if numeric_inputs is None:
         return False
-    return numeric_inputs.numeric_inputs_ready
+    if not numeric_inputs.numeric_inputs_ready:
+        return False
+    return valuation_context.valuation_interpretation_band != BAND_UNKNOWN
 
 
 def _build_not_applicable_row(

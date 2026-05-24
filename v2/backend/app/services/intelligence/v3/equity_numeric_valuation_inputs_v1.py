@@ -15,11 +15,17 @@ Architecture contracts (non-negotiable):
   - Never serializes raw numeric values (EPS, price, P/E, yield, XBRL keys).
   - metric_family is an abstract label (NET_INCOME / EPS / ...), never a raw name.
   - period_identity exposes only safe metadata (fiscal_year, period, date, unit, form).
-  - numeric_inputs_ready=True only when:
+  - numeric_inputs_ready=True only when ALL of the following hold:
       canonical_equity_dataset_safe=True
-      price_input.ticker_level_confirmed=True
+      price_input.numeric_price_confirmed=True
+        (market_price_usd present in snapshot — per-share field, not just market_value_certified_at)
       price_input.freshness_label in (FRESH, AGING)
-      earnings_input.status in (AVAILABLE, PARTIAL)
+      numeric_earnings_confirmed=True
+        (EvidenceSectionRecord.latest_period_identity is not None
+         AND EvidenceSectionRecord.source_artifact_id is not None,
+         proving actual fact records were loaded — section status alone is not sufficient)
+  - market_value_certified_at alone does NOT confirm per-share price readiness.
+  - canonical section status alone does NOT confirm numeric earnings readiness.
   - ETF/crypto: numeric_inputs_ready=False, all inputs MISSING.
   - valuation_interpretation_band is NOT set here — that is the responsibility
     of the Stage 9E valuation evidence module (and requires external thresholds).
@@ -97,15 +103,19 @@ class TickerPriceSignal:
     ratios. The signal is derived by the forensics layer from portfolio_snapshots
     and passed into this module.
 
-    ticker_level_confirmed=True only when this ticker has a market_value_certified_at
-    timestamp in the latest portfolio snapshot (i.e., price was explicitly refreshed,
-    not just carried forward from a prior snapshot).
+    ticker_level_confirmed=True only when market_value_certified_at is present
+    (i.e., price was explicitly refreshed by Watchtower, not just carried forward).
+
+    numeric_price_confirmed=True only when market_price_usd (the per-share price
+    field) is also present in the snapshot position. market_value_certified_at
+    alone does NOT confirm per-share price.
     """
 
     ticker: str
     source_type: str          # one of PRICE_SOURCE_* constants
     freshness_label: str      # FRESH | AGING | STALE | UNKNOWN
     ticker_level_confirmed: bool  # True only when market_value_certified_at present
+    numeric_price_confirmed: bool = False  # True only when market_price_usd also present
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -127,12 +137,17 @@ class PriceInput:
     status=PARTIAL: ticker appears in snapshot but price was carried forward (not certified).
     status=MISSING: no snapshot or ticker not in snapshot.
     status=STALE: snapshot exists but is too old to be considered fresh enough.
+
+    numeric_price_confirmed=True only when the per-share price field (market_price_usd)
+    is explicitly present in the snapshot position. ticker_level_confirmed=True alone
+    (market_value_certified_at present) does NOT imply numeric_price_confirmed=True.
     """
 
     status: str               # AVAILABLE | PARTIAL | MISSING | STALE
     source_type: str          # PRICE_SOURCE_* constant
     freshness_label: str      # FRESH | AGING | STALE | UNKNOWN
     ticker_level_confirmed: bool  # True only when market_value_certified_at confirmed
+    numeric_price_confirmed: bool = False  # True only when market_price_usd present
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -140,6 +155,7 @@ class PriceInput:
             "source_type": self.source_type,
             "freshness_label": self.freshness_label,
             "ticker_level_confirmed": self.ticker_level_confirmed,
+            "numeric_price_confirmed": self.numeric_price_confirmed,
         }
 
 
@@ -218,11 +234,18 @@ class EquityNumericValuationInputs:
     Safe for diagnostics and downstream adapters. No raw EPS values, no raw
     prices, no P/E ratios, no fair values, no price targets, no XBRL names.
 
-    numeric_inputs_ready=True only when:
+    Readiness fields (coarser → finer):
+      valuation_input_scaffold_present: canonical dataset safe + any price signal exists
+      ticker_price_metadata_present: market_value_certified_at present for this ticker
+      numeric_price_confirmed: market_price_usd (per-share) explicitly present
+      numeric_earnings_confirmed: actual fact records loaded (latest_period_identity non-None
+        AND source_artifact_id non-None); section status alone is NOT sufficient
+
+    numeric_inputs_ready=True only when ALL hold:
       - canonical_equity_dataset_safe=True
-      - price_input.ticker_level_confirmed=True
+      - numeric_price_confirmed=True (market_price_usd present in snapshot position)
       - price_input.freshness_label in (FRESH, AGING)
-      - earnings_input.status in (AVAILABLE, PARTIAL)
+      - numeric_earnings_confirmed=True
 
     safe_for_decision and synthesis_ready are permanently False.
     valuation_interpretation_band is not set here — belongs to the valuation
@@ -240,7 +263,14 @@ class EquityNumericValuationInputs:
     growth_input: GrowthInput
 
     missing_reasons: dict   # dict[str, str] — explicit blockers per sub-section
-    numeric_inputs_ready: bool  # True only when all minimum inputs are confirmed
+
+    # Readiness scaffold (coarser → finer).
+    valuation_input_scaffold_present: bool  # canonical safe + at least a price signal
+    ticker_price_metadata_present: bool     # market_value_certified_at present
+    numeric_price_confirmed: bool           # market_price_usd (per-share) present
+    numeric_earnings_confirmed: bool        # fact records loaded with period_identity
+
+    numeric_inputs_ready: bool  # True only when numeric price AND earnings both confirmed
 
     # Immutable safety gates.
     safe_for_decision: bool = False   # always False
@@ -257,6 +287,10 @@ class EquityNumericValuationInputs:
             "cash_flow_input": self.cash_flow_input.to_dict(),
             "growth_input": self.growth_input.to_dict(),
             "missing_reasons": dict(self.missing_reasons),
+            "valuation_input_scaffold_present": self.valuation_input_scaffold_present,
+            "ticker_price_metadata_present": self.ticker_price_metadata_present,
+            "numeric_price_confirmed": self.numeric_price_confirmed,
+            "numeric_earnings_confirmed": self.numeric_earnings_confirmed,
             "numeric_inputs_ready": self.numeric_inputs_ready,
             "safe_for_decision": self.safe_for_decision,
             "synthesis_ready": self.synthesis_ready,
@@ -292,36 +326,50 @@ def build_equity_numeric_valuation_inputs(
 
     missing_reasons: dict[str, str] = {}
     sections = canonical_row.operating_trends.sections
+    canonical_safe = canonical_row.safe_for_equity_dataset
 
     price_input = _derive_price_input(
         ticker=canonical_row.ticker,
         ticker_price_signal=ticker_price_signal,
-        canonical_safe=canonical_row.safe_for_equity_dataset,
+        canonical_safe=canonical_safe,
         missing_reasons=missing_reasons,
     )
 
     earnings_input = _derive_earnings_input(
         sections=sections,
-        canonical_safe=canonical_row.safe_for_equity_dataset,
+        canonical_safe=canonical_safe,
         missing_reasons=missing_reasons,
     )
 
     cash_flow_input = _derive_cash_flow_input(
         sections=sections,
-        canonical_safe=canonical_row.safe_for_equity_dataset,
+        canonical_safe=canonical_safe,
         missing_reasons=missing_reasons,
     )
 
     growth_input = _derive_growth_input(
         sections=sections,
-        canonical_safe=canonical_row.safe_for_equity_dataset,
+        canonical_safe=canonical_safe,
         missing_reasons=missing_reasons,
     )
 
+    # numeric_earnings_confirmed: requires actual fact records, not just section status.
+    # EvidenceSectionRecord.latest_period_identity is None in the metadata-only fallback path.
+    earnings_section = sections.get(SECTION_NET_INCOME_EPS) if canonical_safe else None
+    numeric_earnings_confirmed = bool(
+        earnings_section is not None
+        and earnings_section.latest_period_identity is not None
+        and earnings_section.source_artifact_id is not None
+    )
+
+    valuation_input_scaffold_present = bool(canonical_safe and ticker_price_signal is not None)
+    ticker_price_metadata_present = price_input.ticker_level_confirmed
+    numeric_price_confirmed = price_input.numeric_price_confirmed
+
     numeric_inputs_ready = _compute_numeric_inputs_ready(
-        canonical_safe=canonical_row.safe_for_equity_dataset,
+        canonical_safe=canonical_safe,
         price_input=price_input,
-        earnings_input=earnings_input,
+        numeric_earnings_confirmed=numeric_earnings_confirmed,
         missing_reasons=missing_reasons,
     )
 
@@ -335,6 +383,10 @@ def build_equity_numeric_valuation_inputs(
         cash_flow_input=cash_flow_input,
         growth_input=growth_input,
         missing_reasons=missing_reasons,
+        valuation_input_scaffold_present=valuation_input_scaffold_present,
+        ticker_price_metadata_present=ticker_price_metadata_present,
+        numeric_price_confirmed=numeric_price_confirmed,
+        numeric_earnings_confirmed=numeric_earnings_confirmed,
         numeric_inputs_ready=numeric_inputs_ready,
         safe_for_decision=False,
         synthesis_ready=False,
@@ -351,7 +403,12 @@ def _derive_price_input(
     canonical_safe: bool,
     missing_reasons: dict,
 ) -> PriceInput:
-    """Derive price input status from a ticker-level price signal."""
+    """Derive price input status from a ticker-level price signal.
+
+    numeric_price_confirmed is propagated from the signal's numeric_price_confirmed flag,
+    which is True only when market_price_usd (per-share) was present in the snapshot
+    position. market_value_certified_at alone does NOT make numeric_price_confirmed=True.
+    """
     if ticker_price_signal is None or not ticker_price_signal.ticker_level_confirmed:
         if ticker_price_signal is not None:
             # Signal exists but not certified (carried forward price).
@@ -366,6 +423,7 @@ def _derive_price_input(
                     source_type=ticker_price_signal.source_type,
                     freshness_label=ticker_price_signal.freshness_label,
                     ticker_level_confirmed=False,
+                    numeric_price_confirmed=False,
                 )
         # No signal at all.
         missing_reasons["price_input"] = (
@@ -377,10 +435,12 @@ def _derive_price_input(
             source_type=PRICE_SOURCE_NONE,
             freshness_label=FRESHNESS_UNKNOWN,
             ticker_level_confirmed=False,
+            numeric_price_confirmed=False,
         )
 
     # ticker_level_confirmed=True below this point.
     freshness = ticker_price_signal.freshness_label
+    numeric_price_confirmed = ticker_price_signal.numeric_price_confirmed
 
     if freshness == FRESHNESS_STALE:
         missing_reasons["price_input"] = (
@@ -392,6 +452,14 @@ def _derive_price_input(
             source_type=ticker_price_signal.source_type,
             freshness_label=freshness,
             ticker_level_confirmed=True,
+            numeric_price_confirmed=False,
+        )
+
+    if not numeric_price_confirmed:
+        # market_value_certified_at is present but market_price_usd is absent.
+        missing_reasons["price_input"] = (
+            "Market value certification exists but per-share price input is not confirmed. "
+            "market_price_usd is absent from the portfolio snapshot position."
         )
 
     return PriceInput(
@@ -399,6 +467,7 @@ def _derive_price_input(
         source_type=ticker_price_signal.source_type,
         freshness_label=freshness,
         ticker_level_confirmed=True,
+        numeric_price_confirmed=numeric_price_confirmed,
     )
 
 
@@ -589,17 +658,19 @@ def _compute_numeric_inputs_ready(
     *,
     canonical_safe: bool,
     price_input: PriceInput,
-    earnings_input: EarningsInput,
+    numeric_earnings_confirmed: bool,
     missing_reasons: dict,
 ) -> bool:
     """Compute whether all minimum numeric valuation inputs are confirmed.
 
     Requires:
       - canonical_equity_dataset_safe=True
-      - price_input.ticker_level_confirmed=True (certified-fresh Watchtower price)
+      - price_input.numeric_price_confirmed=True (market_price_usd present in snapshot)
       - price_input.freshness_label in (FRESH, AGING)
-      - earnings_input.status in (AVAILABLE, PARTIAL)
+      - numeric_earnings_confirmed=True (actual fact records loaded, not just section status)
 
+    market_value_certified_at alone does NOT satisfy the price requirement.
+    Section status alone does NOT satisfy the earnings requirement.
     Cash flow and growth inputs are supplemental and do NOT gate numeric_inputs_ready.
     """
     if not canonical_safe:
@@ -609,11 +680,17 @@ def _compute_numeric_inputs_ready(
         )
         return False
 
-    if not price_input.ticker_level_confirmed:
-        missing_reasons["numeric_inputs_ready"] = (
-            "Ticker-level price is not confirmed (no certified market_value_certified_at "
-            "for this ticker in the latest portfolio snapshot). Run Watchtower price refresh."
-        )
+    if not price_input.numeric_price_confirmed:
+        if price_input.ticker_level_confirmed:
+            missing_reasons["numeric_inputs_ready"] = (
+                "Market value certification exists but per-share price input (market_price_usd) "
+                "is not confirmed in the portfolio snapshot position."
+            )
+        else:
+            missing_reasons["numeric_inputs_ready"] = (
+                "Ticker-level price is not confirmed (no certified market_value_certified_at "
+                "for this ticker in the latest portfolio snapshot). Run Watchtower price refresh."
+            )
         return False
 
     if price_input.freshness_label not in _FRESH_ENOUGH_LABELS:
@@ -624,11 +701,11 @@ def _compute_numeric_inputs_ready(
         )
         return False
 
-    if earnings_input.status not in _USABLE_INPUT_STATUSES:
+    if not numeric_earnings_confirmed:
         missing_reasons["numeric_inputs_ready"] = (
-            "Earnings/EPS section is not available. "
-            "Numeric valuation input requires at least PARTIAL earnings data from "
-            "SEC company facts."
+            "Earnings/EPS numeric data is not confirmed. "
+            "Section status alone is not sufficient — actual fact records with a confirmed "
+            "period identity are required (latest_period_identity must be non-None)."
         )
         return False
 
@@ -698,6 +775,10 @@ def _build_not_applicable_inputs(
         cash_flow_input=not_applicable_cf,
         growth_input=not_applicable_growth,
         missing_reasons={"all": reason},
+        valuation_input_scaffold_present=False,
+        ticker_price_metadata_present=False,
+        numeric_price_confirmed=False,
+        numeric_earnings_confirmed=False,
         numeric_inputs_ready=False,
         safe_for_decision=False,
         synthesis_ready=False,

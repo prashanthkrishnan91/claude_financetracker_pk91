@@ -738,6 +738,10 @@ def _extract_ticker_price_signals(
 
         has_certified_at = bool(position.get("market_value_certified_at"))
         has_market_value = position.get("market_value") is not None
+        # market_price_usd is the per-share price field written atomically by
+        # portfolio_service and watchtower_price_snapshot_writer_v1 when mid > 0.
+        # Its presence (not value) confirms numeric per-share price is available.
+        has_per_share_price = bool(position.get("market_price_usd"))
 
         if has_certified_at:
             source_type = PRICE_SOURCE_SNAPSHOT_CERTIFIED
@@ -755,6 +759,7 @@ def _extract_ticker_price_signals(
             source_type=source_type,
             freshness_label=signal_freshness,
             ticker_level_confirmed=ticker_level_confirmed,
+            numeric_price_confirmed=(has_certified_at and has_per_share_price),
         )
 
     return signals
@@ -834,6 +839,7 @@ def _build_holding_row(
     canonical_equity_dataset: Optional[dict] = None
     valuation_evidence: Optional[dict] = None
     valuation_numeric_ready = False  # updated below for equity
+    val_row = None  # updated below for equity
 
     if asset_type == INSTRUMENT_CATEGORY_EQUITY:
         # Stage 9D: build canonical equity dataset row.
@@ -883,7 +889,9 @@ def _build_holding_row(
     thesis_history_exists = ticker in supplemental.recommendation_tickers
 
     # Classify all blocking gaps (multi-gap aware).
-    # valuation_lane_exists=True only for tickers with confirmed numeric inputs.
+    # valuation_lane_exists=True only when val_row.valuation_ready=True (requires
+    # numeric inputs AND band != UNKNOWN). At Stage 9E.1 band is always UNKNOWN,
+    # so VALUATION_LANE_NOT_BUILT gap remains until thresholds are defined.
     all_gaps = _classify_all_gaps(
         asset_type=asset_type,
         has_fundamentals_artifact=fund_exists,
@@ -895,7 +903,7 @@ def _build_holding_row(
         news_sentiment_usability=news_status,
         has_target_weight=target_weight_available,
         has_thesis_history=thesis_history_exists,
-        valuation_lane_exists=valuation_numeric_ready,
+        valuation_lane_exists=(val_row.valuation_ready if val_row is not None else False),
         valuation_evidence_model_present=valuation_evidence_model_present,
     )
 

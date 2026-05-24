@@ -1460,6 +1460,193 @@ class TestSectionLevelStructure:
         assert rev.status == SECTION_STATUS_MISSING
 
 
+# ── Tests: metric-family compatibility ────────────────────────────────────────
+
+
+class TestMetricFamilyCompatibility:
+    """Trend comparison must never cross incompatible metric families within a section.
+
+    Three canonical incompatibilities:
+      1. EPS (USD/share) vs net income (USD total) — unit mismatch
+      2. Gross profit vs operating income — different economic levels
+      3. Operating cash flow vs capex/investing CF — different flow directions
+
+    In each case, the section must select one consistent metric family and
+    report UNKNOWN trend (not a spurious UP/DOWN/FLAT from cross-family math).
+    """
+
+    def _sec_lane(self) -> LaneCoverage:
+        return _make_sec_lane(usability_label="USABLE", completeness_band="COMPLETE")
+
+    def _row(self, fact_records: list) -> CanonicalEquityDatasetRow:
+        return build_canonical_equity_dataset_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: self._sec_lane()},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+
+    def test_eps_and_net_income_not_compared(self):
+        """EarningsPerShareBasic (FY2024) vs NetIncomeLoss (FY2023) must not be compared.
+
+        Without family isolation, the sort-by-fiscal-year approach would set
+        EPS FY2024 as 'latest' and NetIncomeLoss FY2023 as 'prior', then
+        compute (6.43 - 97_000_000_000) / 97_000_000_000 ≈ -100% → TREND_DOWN.
+        The correct behaviour: pick NetIncomeLoss (preferred), single obs → PARTIAL + UNKNOWN.
+        """
+        fact_records = [
+            {
+                "metric_name": "EarningsPerShareBasic",
+                "value": 6.43,
+                "unit": "USD/shares",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "period_end": "2024-09-28",
+                "form": "10-K",
+            },
+            {
+                "metric_name": "NetIncomeLoss",
+                "value": 97_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_end": "2023-09-30",
+                "form": "10-K",
+            },
+        ]
+        ni = self._row(fact_records).operating_trends.sections[SECTION_NET_INCOME_EPS]
+        # NetIncomeLoss is the preferred family; only FY2023 → PARTIAL, no comparison.
+        assert ni.status == SECTION_STATUS_PARTIAL
+        assert ni.comparison_period_identity is None
+        assert ni.trend_direction == TREND_UNKNOWN
+        assert ni.latest_period_identity is not None
+        assert ni.latest_period_identity.fiscal_year == 2023   # NetIncomeLoss, not EPS
+
+    def test_gross_profit_and_operating_income_not_compared(self):
+        """GrossProfit (FY2024) vs OperatingIncomeLoss (FY2023) must not be compared.
+
+        Without family isolation, sort-by-year gives GrossProfit FY2024 as 'latest'
+        and OperatingIncomeLoss FY2023 as 'prior': (175B - 115B)/115B ≈ +52% → TREND_UP.
+        The correct behaviour: pick OperatingIncomeLoss (preferred), single obs → PARTIAL + UNKNOWN.
+        """
+        fact_records = [
+            {
+                "metric_name": "GrossProfit",
+                "value": 175_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "period_end": "2024-09-28",
+                "form": "10-K",
+            },
+            {
+                "metric_name": "OperatingIncomeLoss",
+                "value": 115_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_end": "2023-09-30",
+                "form": "10-K",
+            },
+        ]
+        prof = self._row(fact_records).operating_trends.sections[SECTION_PROFITABILITY]
+        # OperatingIncomeLoss is preferred; only FY2023 → PARTIAL, no comparison.
+        assert prof.status == SECTION_STATUS_PARTIAL
+        assert prof.comparison_period_identity is None
+        assert prof.trend_direction == TREND_UNKNOWN
+        assert prof.latest_period_identity is not None
+        assert prof.latest_period_identity.fiscal_year == 2023   # OperatingIncomeLoss
+
+    def test_operating_cf_and_capex_not_compared(self):
+        """Operating CF (FY2024) vs capex (FY2023) must not be compared.
+
+        Without family isolation, sort-by-year gives operating CF FY2024 as 'latest'
+        and capex FY2023 as 'prior': (118B - 10B)/10B = +1080% → TREND_UP (nonsense).
+        The correct behaviour: pick operating CF (preferred), single obs → PARTIAL + UNKNOWN.
+        """
+        fact_records = [
+            {
+                "metric_name": "NetCashProvidedByUsedInOperatingActivities",
+                "value": 118_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "period_end": "2024-09-28",
+                "form": "10-K",
+            },
+            {
+                "metric_name": "PaymentsToAcquirePropertyPlantAndEquipment",
+                "value": 10_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_end": "2023-09-30",
+                "form": "10-K",
+            },
+        ]
+        cf = self._row(fact_records).operating_trends.sections[SECTION_CASH_FLOW_FCF]
+        # NetCashProvidedByUsedInOperatingActivities preferred; only FY2024 → PARTIAL.
+        assert cf.status == SECTION_STATUS_PARTIAL
+        assert cf.comparison_period_identity is None
+        assert cf.trend_direction == TREND_UNKNOWN
+        assert cf.latest_period_identity is not None
+        assert cf.latest_period_identity.fiscal_year == 2024   # operating CF, not capex
+
+    def test_same_metric_family_comparison_produces_valid_trend(self):
+        """Two obs from the same metric family → AVAILABLE + correct trend direction."""
+        fact_records = [
+            {
+                "metric_name": "NetIncomeLoss",
+                "value": 100_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "period_end": "2024-09-28",
+                "form": "10-K",
+            },
+            {
+                "metric_name": "NetIncomeLoss",
+                "value": 80_000_000_000,
+                "unit": "USD",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_end": "2023-09-30",
+                "form": "10-K",
+            },
+        ]
+        ni = self._row(fact_records).operating_trends.sections[SECTION_NET_INCOME_EPS]
+        assert ni.status == SECTION_STATUS_AVAILABLE
+        assert ni.trend_direction == TREND_UP     # (100B - 80B)/80B = 25%
+        assert ni.latest_period_identity.fiscal_year == 2024
+        assert ni.comparison_period_identity.fiscal_year == 2023
+
+    def test_preferred_metric_used_when_both_families_have_multiple_obs(self):
+        """When both NetIncomeLoss and EarningsPerShareBasic have 2+ obs,
+        NetIncomeLoss (preferred) is selected and its unit is reflected in the period identity.
+        """
+        fact_records = [
+            # NetIncomeLoss: two annual obs
+            {"metric_name": "NetIncomeLoss", "value": 100, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "NetIncomeLoss", "value": 80, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+            # EarningsPerShareBasic: two annual obs (should NOT be picked)
+            {"metric_name": "EarningsPerShareBasic", "value": 7.0, "unit": "USD/shares",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "EarningsPerShareBasic", "value": 6.0, "unit": "USD/shares",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        ni = self._row(fact_records).operating_trends.sections[SECTION_NET_INCOME_EPS]
+        # NetIncomeLoss wins priority — unit on period identity proves which family was selected.
+        assert ni.status == SECTION_STATUS_AVAILABLE
+        assert ni.latest_period_identity is not None
+        assert ni.latest_period_identity.unit == "USD"        # not "USD/shares"
+        assert ni.comparison_period_identity is not None
+        assert ni.comparison_period_identity.unit == "USD"    # not "USD/shares"
+
+
 # ── Tests: forensics section counts ──────────────────────────────────────────
 
 

@@ -146,6 +146,55 @@ _SECTION_METRIC_MAP: dict[str, str] = {
     "WeightedAverageNumberOfShareOutstandingBasicAndDiluted": SECTION_SHARE_COUNT,
 }
 
+# ── Per-section metric priority order (internal, never serialized) ─────────────
+# Defines which metric is preferred when a section has observations from multiple
+# incompatible metric families (e.g. NetIncomeLoss vs EarningsPerShareBasic).
+# Only one metric family is ever used for period identity extraction and trend
+# comparison within a section — cross-family comparisons are never performed.
+
+_SECTION_METRIC_FAMILIES: dict[str, tuple] = {
+    SECTION_REVENUE: (
+        "Revenues",
+        "RevenueFromContractWithCustomerExcludingAssessedTax",
+        "RevenueFromContractWithCustomerIncludingAssessedTax",
+        "SalesRevenueNet",
+        "SalesRevenueGoodsNet",
+        "SalesRevenueServicesNet",
+        "RevenueFromContractWithCustomer",
+        "RevenueFromRelatedParties",
+    ),
+    SECTION_PROFITABILITY: (
+        # OperatingIncomeLoss is preferred — more comprehensive than GrossProfit.
+        # These measure different economic quantities and must never be compared.
+        "OperatingIncomeLoss",
+        "GrossProfit",
+    ),
+    SECTION_NET_INCOME_EPS: (
+        # NetIncomeLoss (USD total) is preferred over EPS (USD/share).
+        # Mixing them produces nonsense trend direction due to unit incompatibility.
+        "NetIncomeLoss",
+        "NetIncomeLossAvailableToCommonStockholdersBasic",
+        "NetIncomeLossAvailableToCommonStockholdersDiluted",
+        "EarningsPerShareBasic",
+        "EarningsPerShareDiluted",
+    ),
+    SECTION_CASH_FLOW_FCF: (
+        # Operating CF is preferred. Capex/investing CF measures a different flow
+        # direction and cannot be directly compared year-over-year against operating CF.
+        "NetCashProvidedByUsedInOperatingActivities",
+        "NetCashProvidedByUsedInInvestingActivities",
+        "PaymentsToAcquirePropertyPlantAndEquipment",
+    ),
+    SECTION_SHARE_COUNT: (
+        # Weighted-average shares preferred over point-in-time outstanding shares.
+        "WeightedAverageNumberOfSharesOutstandingBasic",
+        "WeightedAverageNumberOfDilutedSharesOutstanding",
+        "WeightedAverageNumberOfShareOutstandingBasicAndDiluted",
+        "CommonStockSharesOutstanding",
+        "CommonStockSharesIssued",
+    ),
+}
+
 
 # ── Period identity dataclass ──────────────────────────────────────────────────
 
@@ -701,6 +750,38 @@ def _compute_trend_direction(v_latest: float, v_prior: float) -> str:
         return TREND_UNKNOWN
 
 
+def _pick_metric_family(
+    obs_by_metric: dict,  # dict[str, list[dict]]
+    section: str,
+) -> tuple:  # (Optional[str], list[dict])
+    """Pick the single best metric family for trend comparison within a section.
+
+    Walks _SECTION_METRIC_FAMILIES priority order. Prefers metrics with ≥ 2
+    annual observations (enables AVAILABLE + trend). Falls back to any metric
+    with ≥ 1 observation (PARTIAL). Only ONE metric is ever returned — this
+    ensures EPS is never compared against net income, gross profit is never
+    compared against operating income, and operating CF is never compared
+    against capex. Internal use only — metric names never leave this function.
+    """
+    priority = _SECTION_METRIC_FAMILIES.get(section, ())
+    # First pass: prefer a metric with ≥ 2 obs (can produce AVAILABLE + trend).
+    for metric in priority:
+        obs = obs_by_metric.get(metric, [])
+        if len(obs) >= 2:
+            return metric, obs
+    # Second pass: accept any metric with ≥ 1 obs (PARTIAL, no trend).
+    for metric in priority:
+        obs = obs_by_metric.get(metric, [])
+        if obs:
+            return metric, obs
+    # Defensive fallback for metric_names not in the priority list (should not occur
+    # if _SECTION_METRIC_MAP and _SECTION_METRIC_FAMILIES are kept in sync).
+    for obs in obs_by_metric.values():
+        if obs:
+            return None, obs
+    return None, []
+
+
 def _compute_section_records_from_facts(
     *,
     sec_fact_records: list[dict],
@@ -737,8 +818,18 @@ def _compute_section_records_from_facts(
     result: dict[str, EvidenceSectionRecord] = {}
     for section in ALL_SECTIONS:
         obs = section_obs[section]
+
+        # Group observations by metric name, then pick one consistent family.
+        # This prevents cross-family comparisons (e.g. EPS vs net income,
+        # gross profit vs operating income, operating CF vs capex).
+        obs_by_metric: dict[str, list] = {}
+        for record in obs:
+            mn = record.get("metric_name", "")
+            obs_by_metric.setdefault(mn, []).append(record)
+        _, family_obs = _pick_metric_family(obs_by_metric, section)
+
         obs_sorted = sorted(
-            obs,
+            family_obs,
             key=lambda r: (r.get("fiscal_year") or 0),
             reverse=True,
         )

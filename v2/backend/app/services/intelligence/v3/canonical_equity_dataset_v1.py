@@ -478,15 +478,19 @@ class AssetClassFoundationGap:
 
     asset_class: str          # "equity" | "etf" | "crypto"
     canonical_dataset_built: bool
-    valuation_lane_built: bool
+    valuation_lane_built: bool          # True only when numeric EPS/price valuation is ready
     synthesis_gate: str       # why synthesis is blocked for this class
     edge_cases: Optional[str] = None   # e.g., "3 equities SEC weak/stale"
+    # True when Stage 9E evidence scaffold ran but numeric inputs are not yet in scope.
+    # valuation_lane_built remains False until a numeric pipeline is confirmed.
+    valuation_evidence_scaffold_present: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "asset_class": self.asset_class,
             "canonical_dataset_built": self.canonical_dataset_built,
             "valuation_lane_built": self.valuation_lane_built,
+            "valuation_evidence_scaffold_present": self.valuation_evidence_scaffold_present,
             "synthesis_gate": self.synthesis_gate,
             "edge_cases": self.edge_cases,
         }
@@ -634,6 +638,8 @@ def build_canonical_equity_dataset_row(
 def build_asset_parity_roadmap(
     *,
     equity_canonical_count: int,
+    equity_valuation_count: int = 0,
+    equity_valuation_ready_count: int = 0,
     equity_total: int,
     equity_edge_case_tickers: list,
     etf_total: int,
@@ -648,10 +654,21 @@ def build_asset_parity_roadmap(
       equity: canonical dataset built for USABLE equities / valuation lane missing
       ETF: fund composition/provider lane missing
       crypto: crypto market context/provider lane missing
+
+    Stage 9E state:
+      equity: valuation evidence scaffold built (equity_valuation_count > 0), but
+      numeric EPS/price inputs are not yet in scope (equity_valuation_ready_count=0).
+      valuation_lane_built remains False until numeric readiness is confirmed.
+      synthesis_gate = VALUATION_GATE_BLOCKED (ETF/crypto also unbuilt).
     """
     now_iso = datetime.now(timezone.utc).isoformat()
 
     equity_canonical_built = equity_canonical_count > 0
+    # Scaffold: Stage 9E ran and produced evidence rows (not necessarily numeric-ready).
+    equity_valuation_scaffold = equity_valuation_count > 0
+    # Numeric ready: actual EPS/price valuation inputs confirmed. Always False at Stage 9E.
+    equity_valuation_built = equity_valuation_ready_count > 0
+
     equity_edge = None
     if equity_edge_case_tickers:
         tickers_str = ", ".join(sorted(equity_edge_case_tickers))
@@ -659,16 +676,26 @@ def build_asset_parity_roadmap(
             f"{len(equity_edge_case_tickers)} of {equity_total} equities "
             f"SEC weak/stale/no-facts: {tickers_str}"
         )
+    if equity_valuation_scaffold and not equity_valuation_built:
+        scaffold_note = (
+            "Stage 9E valuation evidence scaffold exists, but numeric EPS/price "
+            "valuation readiness is still blocked."
+        )
+        equity_edge = f"{equity_edge}. {scaffold_note}" if equity_edge else scaffold_note
+
+    if equity_valuation_built:
+        equity_synthesis_gate = SYNTHESIS_GATE_BLOCKED
+    elif equity_valuation_scaffold or equity_canonical_built:
+        equity_synthesis_gate = VALUATION_GATE_BLOCKED
+    else:
+        equity_synthesis_gate = SYNTHESIS_GATE_BLOCKED
 
     equity_gap = AssetClassFoundationGap(
         asset_class="equity",
         canonical_dataset_built=equity_canonical_built,
-        valuation_lane_built=False,
-        synthesis_gate=(
-            VALUATION_GATE_BLOCKED
-            if equity_canonical_built
-            else SYNTHESIS_GATE_BLOCKED
-        ),
+        valuation_lane_built=equity_valuation_built,
+        valuation_evidence_scaffold_present=equity_valuation_scaffold,
+        synthesis_gate=equity_synthesis_gate,
         edge_cases=equity_edge,
     )
 

@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-24 (Stage 9D patch — PR #411 merged). **What changed:** `canonical_equity_dataset_v1.py` upgraded from metadata-only availability booleans to a section-level normalized evidence dataset. (1) `EvidenceSectionRecord` per section: status (AVAILABLE/PARTIAL/MISSING/NOT_APPLICABLE), evidence_basis (SEC_COMPANYFACTS/UNAVAILABLE), `PeriodIdentity` (fiscal_year/period_end/unit/form — no raw financial values), trend_direction (UP/DOWN/FLAT/MIXED/UNKNOWN). (2) Metric-family compatibility enforcement: `_SECTION_METRIC_FAMILIES` + `_pick_metric_family()` ensure only one metric per section is used for period identity extraction and trend comparison — EPS (USD/share) is never compared against net income (USD total), GrossProfit is never compared against OperatingIncomeLoss, operating CF is never compared against capex. (3) Two-path architecture: fact-records path (research_artifact_facts SELECT, limit 5000, fail-soft) derives real PeriodIdentity and trend direction; metadata fallback uses completeness_band + obs_count proxy with UNKNOWN trend. (4) `_SupplementalData.sec_fact_records` and `DataFoundationForensicsResult.canonical_equity_dataset_section_counts` added to forensics. (5) Backward-compat `@property` booleans on OperatingTrendSection preserved. 175 tests pass (75 Stage 9D incl. 5 `TestMetricFamilyCompatibility` + 100 Stage 9B). No SQL, no LLM, no providers, no UI, no decision_policy_v1 changes. Next blocker: valuation lane (Stage 9E). Prior: Stage 9C — SEC CompanyFacts readiness diagnostic (44 tests, model v1→v2 bump). Prior: Stage 9B — Intel Data Foundation Forensics v1 (11-bucket root cause, 100 tests). Prior: Stage 9A — Coverage & Trust Matrix v1 (80 tests).
+Last updated: 2026-05-24 (Stage 9E — Equity Valuation Evidence Lane v1, PR open). **What changed:** New pure module `equity_valuation_evidence_v1.py` builds a versioned valuation evidence row per equity holding from `CanonicalEquityDatasetRow` + `price_available` flag. Derives three `ValuationContext` signals (earnings_yield_pe, cash_flow, growth) as AVAILABLE/PARTIAL/MISSING with explicit reasons. `valuation_interpretation_band` always UNKNOWN; `synthesis_ready` always False; `safe_for_decision` always False. ETF/crypto: `valuation_applicable=False`, short-circuit. `_compute_valuation_ready`: True only when canonical_safe + price + eps + ≥1 AVAILABLE context. `forensics_v1` extended: `valuation_evidence` field on `HoldingForensicsRow`, Stage 9E aggregate counts on `DataFoundationForensicsResult`, `valuation_lane_exists=True` for all equities (was hardcoded False). `build_asset_parity_roadmap` extended: `equity_valuation_count` param, synthesis_gate logic now tracks valuation lane. 235 tests pass (60 new Stage 9E + 75 Stage 9D + 100 Stage 9B). No SQL, no LLM, no providers, no UI, no decision_policy_v1 changes. Next blocker: ETF canonical dataset + valuation lane (parity gate). Prior: Stage 9D — section-level normalized evidence dataset (75 tests). Prior: Stage 9C — SEC CompanyFacts readiness diagnostic (44 tests). Prior: Stage 9B — Intel Data Foundation Forensics v1 (100 tests).
 
 ## Purpose
 
@@ -318,12 +318,12 @@ Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own th
 
 ## Asset-class parity gate (hard requirement before synthesis)
 
-Stage 9D advances equities only. Before any synthesis can be gated across the portfolio, all three asset classes must have S-grade canonical datasets through their own providers:
-- **Equity:** canonical dataset built (Stage 9D ✓) → valuation lane needed (Stage 9E)
+Stage 9E builds the equity valuation evidence lane. Before any synthesis can be gated across the portfolio, all three asset classes must have S-grade canonical datasets and valuation lanes through their own providers:
+- **Equity:** canonical dataset built (Stage 9D ✓) + valuation evidence lane built (Stage 9E ✓) → synthesis blocked until ETF+crypto parity
 - **ETF:** fund composition/provider lane missing — canonical ETF dataset not yet built
 - **Crypto:** crypto market context/provider lane missing — canonical crypto dataset not yet built
 
-The `AssetParityRoadmap` in forensics output (`asset_parity_roadmap` field) tracks this state machine-readably. Do not open synthesis to any asset class until all three show `synthesis_gate` cleared.
+The `AssetParityRoadmap` in forensics output (`asset_parity_roadmap` field) tracks this. `synthesis_gate` is SYNTHESIS_GATE_BLOCKED (ETF/crypto not ready) for portfolios where equity valuation is built. Do not open synthesis to any asset class until all three show `synthesis_gate` cleared.
 
 ## Known risks / unresolved issues
 

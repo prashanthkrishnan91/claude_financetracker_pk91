@@ -1,4 +1,4 @@
-"""Stage 9B — Intel Data Foundation Forensics v1.
+"""Stage 9B/9E — Intel Data Foundation Forensics v1.
 
 Backend-only, read-only diagnostic. Inspects actual persisted research artifacts,
 portfolio positions, and evidence lane outputs to explain, per holding, where the
@@ -55,6 +55,10 @@ from .canonical_equity_dataset_v1 import (
     CanonicalEquityDatasetRow,
     build_canonical_equity_dataset_row,
     build_asset_parity_roadmap,
+)
+from .equity_valuation_evidence_v1 import (
+    EquityValuationEvidenceRow,
+    build_equity_valuation_evidence_row,
 )
 from .sec_companyfacts_readiness_diagnostic_v1 import (
     diagnose_sec_companyfacts_readiness,
@@ -162,8 +166,9 @@ class HoldingForensicsRow:
     sec_catalyst_status: Optional[str]
     sec_catalyst_count: Optional[int]                # safe count from facts table
 
-    # Valuation (no lane exists in Stage 5J/5K at Stage 9B)
-    valuation_lane_exists: bool                       # always False at Stage 9B
+    # Valuation: split into scaffold presence (Stage 9E ran) and numeric readiness.
+    valuation_evidence_model_present: bool   # True when Stage 9E scaffold ran (all equity); False for ETF/crypto
+    valuation_numeric_ready: bool            # True only when numeric EPS/price are in scope; always False at Stage 9E
     valuation_inputs_available_summary: str
 
     # ETF fund composition (no provider built; always False at Stage 9B)
@@ -196,6 +201,12 @@ class HoldingForensicsRow:
     # safe_for_equity_dataset=True only when sec_company_facts is usable.
     canonical_equity_dataset: Optional[dict] = None
 
+    # Stage 9E: equity valuation evidence row for this holding.
+    # Populated for equity holdings only. ETF/crypto → None (valuation not
+    # applicable; dedicated provider lanes required for those asset classes).
+    # valuation_ready=True only when canonical_equity_dataset_safe + price + EPS available.
+    valuation_evidence: Optional[dict] = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ticker": self.ticker,
@@ -216,7 +227,8 @@ class HoldingForensicsRow:
             "sec_catalyst_artifact_exists": self.sec_catalyst_artifact_exists,
             "sec_catalyst_status": self.sec_catalyst_status,
             "sec_catalyst_count": self.sec_catalyst_count,
-            "valuation_lane_exists": self.valuation_lane_exists,
+            "valuation_evidence_model_present": self.valuation_evidence_model_present,
+            "valuation_numeric_ready": self.valuation_numeric_ready,
             "valuation_inputs_available_summary": self.valuation_inputs_available_summary,
             "etf_fund_composition_artifact_exists": self.etf_fund_composition_artifact_exists,
             "crypto_market_context_artifact_exists": self.crypto_market_context_artifact_exists,
@@ -228,6 +240,7 @@ class HoldingForensicsRow:
             "next_required_fixes": list(self.next_required_fixes),
             "sec_companyfacts_diagnostic": self.sec_companyfacts_diagnostic,
             "canonical_equity_dataset": self.canonical_equity_dataset,
+            "valuation_evidence": self.valuation_evidence,
         }
 
 
@@ -276,6 +289,16 @@ class DataFoundationForensicsResult:
     # Keys are canonical section names (revenue, profitability_or_margin, etc.).
     canonical_equity_dataset_section_counts: dict = field(default_factory=dict)
 
+    # Stage 9E: equity valuation evidence counts.
+    # Number of equity holdings where valuation evidence was built (any quality).
+    equity_valuation_evidence_count: int = 0
+    # Number of equity holdings where valuation_ready=True (defensible evidence exists).
+    equity_valuation_ready_count: int = 0
+    # Tickers where valuation evidence is degraded (built but not valuation_ready).
+    equity_valuation_degraded_tickers: list = field(default_factory=list)
+    # Per-missing-reason counts across all equity valuation evidence rows.
+    valuation_missing_reason_counts: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -297,6 +320,10 @@ class DataFoundationForensicsResult:
             "equity_canonical_dataset_degraded_tickers": list(self.equity_canonical_dataset_degraded_tickers),
             "asset_parity_roadmap": self.asset_parity_roadmap,
             "canonical_equity_dataset_section_counts": dict(self.canonical_equity_dataset_section_counts),
+            "equity_valuation_evidence_count": self.equity_valuation_evidence_count,
+            "equity_valuation_ready_count": self.equity_valuation_ready_count,
+            "equity_valuation_degraded_tickers": list(self.equity_valuation_degraded_tickers),
+            "valuation_missing_reason_counts": dict(self.valuation_missing_reason_counts),
             "errors": list(self.errors),
         }
 
@@ -430,8 +457,28 @@ def compute_data_foundation_forensics(
                 ):
                     section_counts[section_name] = section_counts.get(section_name, 0) + 1
 
+    # Stage 9E: compute equity valuation evidence aggregate counts.
+    equity_valuation_evidence_count = 0
+    equity_valuation_ready_count = 0
+    equity_valuation_degraded_tickers: list[str] = []
+    valuation_missing_reason_counts: dict[str, int] = {}
+
+    for h in holdings:
+        if h.asset_type == INSTRUMENT_CATEGORY_EQUITY and h.valuation_evidence:
+            equity_valuation_evidence_count += 1
+            if h.valuation_evidence.get("valuation_ready"):
+                equity_valuation_ready_count += 1
+            else:
+                equity_valuation_degraded_tickers.append(h.ticker)
+            for reason_key in h.valuation_evidence.get("missing_reasons", {}):
+                valuation_missing_reason_counts[reason_key] = (
+                    valuation_missing_reason_counts.get(reason_key, 0) + 1
+                )
+
     parity_roadmap = build_asset_parity_roadmap(
         equity_canonical_count=equity_canonical_count,
+        equity_valuation_count=equity_valuation_evidence_count,
+        equity_valuation_ready_count=equity_valuation_ready_count,
         equity_total=equity_total,
         equity_edge_case_tickers=equity_degraded_tickers,
         etf_total=etf_total,
@@ -458,6 +505,10 @@ def compute_data_foundation_forensics(
         equity_canonical_dataset_degraded_tickers=equity_degraded_tickers,
         asset_parity_roadmap=parity_roadmap.to_dict(),
         canonical_equity_dataset_section_counts=section_counts,
+        equity_valuation_evidence_count=equity_valuation_evidence_count,
+        equity_valuation_ready_count=equity_valuation_ready_count,
+        equity_valuation_degraded_tickers=equity_valuation_degraded_tickers,
+        valuation_missing_reason_counts=valuation_missing_reason_counts,
         errors=errors,
     )
 
@@ -635,9 +686,12 @@ def _build_holding_row(
     if cat_cov and cat_cov.artifact_id:
         cat_count = supplemental.fact_counts.get(cat_cov.artifact_id)
 
-    # Valuation — no lane built at Stage 9B
-    valuation_lane_exists = False
-    valuation_summary = _get_valuation_summary(asset_type)
+    # Stage 9E: scaffold exists for all equity holdings, but numeric inputs are not yet in scope.
+    # valuation_evidence_model_present = scaffold ran; valuation_numeric_ready = actual numeric gate.
+    # VALUATION_LANE_NOT_BUILT still appears in gaps (valuation_numeric_ready is always False at 9E).
+    valuation_evidence_model_present = (asset_type == INSTRUMENT_CATEGORY_EQUITY)
+    valuation_numeric_ready = False  # always False at Stage 9E — no numeric EPS/price in scope
+    valuation_summary = _get_valuation_summary(asset_type, valuation_lane_built=valuation_evidence_model_present)
 
     # ETF fund composition — no provider built at Stage 9B
     etf_fund_composition_artifact_exists = False
@@ -659,7 +713,8 @@ def _build_holding_row(
         news_sentiment_usability=news_status,
         has_target_weight=target_weight_available,
         has_thesis_history=thesis_history_exists,
-        valuation_lane_exists=valuation_lane_exists,
+        valuation_lane_exists=valuation_numeric_ready,
+        valuation_evidence_model_present=valuation_evidence_model_present,
     )
 
     blocking_gap_buckets = [g[0] for g in all_gaps]
@@ -670,6 +725,7 @@ def _build_holding_row(
     # Stage 9D: build canonical equity dataset row for equity holdings.
     # ETF and crypto receive None (their own provider lanes are required separately).
     canonical_equity_dataset: Optional[dict] = None
+    valuation_evidence: Optional[dict] = None
     if asset_type == INSTRUMENT_CATEGORY_EQUITY:
         # Get SEC fact records for this ticker's artifact (if available).
         _sec_art_id = sec_cov.artifact_id if sec_cov else None
@@ -686,6 +742,14 @@ def _build_holding_row(
             sec_fact_records=_sec_facts if _sec_facts else None,
         )
         canonical_equity_dataset = ced_row.to_dict()
+
+        # Stage 9E: build valuation evidence from the canonical dataset row.
+        # price_available is proxied from portfolio snapshot existence.
+        val_row = build_equity_valuation_evidence_row(
+            canonical_row=ced_row,
+            price_available=supplemental.has_portfolio_snapshot,
+        )
+        valuation_evidence = val_row.to_dict()
 
     return HoldingForensicsRow(
         ticker=ticker,
@@ -706,7 +770,8 @@ def _build_holding_row(
         sec_catalyst_artifact_exists=cat_exists,
         sec_catalyst_status=cat_status,
         sec_catalyst_count=cat_count,
-        valuation_lane_exists=valuation_lane_exists,
+        valuation_evidence_model_present=valuation_evidence_model_present,
+        valuation_numeric_ready=valuation_numeric_ready,
         valuation_inputs_available_summary=valuation_summary,
         etf_fund_composition_artifact_exists=etf_fund_composition_artifact_exists,
         crypto_market_context_artifact_exists=crypto_market_context_exists,
@@ -718,6 +783,7 @@ def _build_holding_row(
         next_required_fixes=next_required_fixes,
         sec_companyfacts_diagnostic=sec_companyfacts_diagnostic,
         canonical_equity_dataset=canonical_equity_dataset,
+        valuation_evidence=valuation_evidence,
     )
 
 
@@ -734,6 +800,7 @@ def _classify_all_gaps(
     has_target_weight: bool,
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
+    valuation_evidence_model_present: bool = False,
 ) -> list[tuple[str, str]]:
     """Return all material data foundation gaps in deterministic priority order.
 
@@ -843,15 +910,29 @@ def _classify_all_gaps(
             ),
         ))
 
-    # 2. Valuation lane (equity-specific; always not built at Stage 9D).
+    # 2. Valuation lane (equity-specific).
     if not valuation_lane_exists:
-        # After Stage 9D, the canonical equity dataset exists for usable equities.
-        # Point the next fix at valuation (Stage 9E) rather than canonical normalization.
         sec_usable_for_gap = bool(
             has_sec_companyfacts_artifact
             and sec_usability in ("USABLE", "USABLE_WITH_LIMITATIONS")
         )
-        if sec_usable_for_gap:
+        if valuation_evidence_model_present:
+            # Stage 9E scaffold exists but numeric EPS/price are not yet in scope.
+            detail = (
+                "Pending: numeric EPS/price pipeline confirmation for Stage 9E."
+                if sec_usable_for_gap
+                else "Blocked by SEC company facts gap above."
+            )
+            gaps.append((
+                BUCKET_VALUATION_NOT_BUILT,
+                (
+                    "Stage 9E evidence scaffold is built for this equity. "
+                    "Numeric EPS/price inputs are intentionally not in scope at this stage; "
+                    "valuation_interpretation_band is UNKNOWN. "
+                    + detail
+                ),
+            ))
+        elif sec_usable_for_gap:
             gaps.append((
                 BUCKET_VALUATION_NOT_BUILT,
                 (
@@ -982,6 +1063,7 @@ def _classify_root_cause(
     has_target_weight: bool,
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
+    valuation_evidence_model_present: bool = False,
 ) -> tuple[str, str]:
     """Return the primary (highest-priority) root cause bucket and fix message.
 
@@ -1001,6 +1083,7 @@ def _classify_root_cause(
         has_target_weight=has_target_weight,
         has_thesis_history=has_thesis_history,
         valuation_lane_exists=valuation_lane_exists,
+        valuation_evidence_model_present=valuation_evidence_model_present,
     )
     return gaps[0]
 
@@ -1063,12 +1146,18 @@ def _get_sec_reason_not_strong(
     return f"Unknown usability label: {usability}."
 
 
-def _get_valuation_summary(asset_type: str) -> str:
+def _get_valuation_summary(asset_type: str, *, valuation_lane_built: bool = False) -> str:
     """Return a plain-English summary of available valuation inputs."""
     if asset_type in (INSTRUMENT_CATEGORY_ETF, INSTRUMENT_CATEGORY_CRYPTO):
         return (
             "Valuation metrics are not applicable for this asset type "
             f"({asset_type}). ETF/crypto holdings do not use single-issuer P/E or EV metrics."
+        )
+    if valuation_lane_built:
+        return (
+            "Equity valuation evidence lane (Stage 9E) is built. "
+            "See valuation_evidence for input_readiness and valuation_context per section. "
+            "valuation_interpretation_band is UNKNOWN until numeric EPS/price inputs are in scope."
         )
     return (
         "No valuation evidence lane built in Stage 5J/5K (Stage 9B baseline). "

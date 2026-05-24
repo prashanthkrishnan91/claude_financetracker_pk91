@@ -43,6 +43,7 @@ from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import (
     _SupplementalData,
     _artifact_exists,
     _build_holding_row,
+    _classify_all_gaps,
     _classify_root_cause,
     _get_sec_reason_not_strong,
     _get_valuation_summary,
@@ -838,6 +839,8 @@ class TestResponseShape:
         "valuation_lane_exists", "valuation_inputs_available_summary",
         "etf_fund_composition_artifact_exists", "crypto_market_context_artifact_exists",
         "thesis_history_exists", "root_cause_bucket", "next_required_fix",
+        # multi-gap fields
+        "blocking_gap_buckets", "blocking_gap_count", "next_required_fixes",
     }
 
     _REQUIRED_RESULT_FIELDS = {
@@ -845,7 +848,7 @@ class TestResponseShape:
         "safe_for_decision", "synthesis_ready", "holdings",
         "holdings_by_asset_type",
         "artifacts_existing_by_lane", "artifacts_usable_by_lane", "artifacts_strong_by_lane",
-        "root_cause_bucket_counts",
+        "root_cause_bucket_counts", "blocking_gap_bucket_counts",
         "provider_limited_count", "implementation_limited_count", "normalization_limited_count",
         "errors",
     }
@@ -1377,3 +1380,382 @@ def _empty_supplemental(
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
     )
+
+
+# ── Multi-gap tests ────────────────────────────────────────────────────────────
+
+
+class TestMultiGapEquity:
+    """Equity holdings expose all applicable blocking gaps simultaneously."""
+
+    def test_equity_usable_sec_no_valuation_no_target_no_thesis_returns_three_gaps(self):
+        """Primary test: usable SEC → [VALUATION_NOT_BUILT, TARGET_WEIGHT, THESIS], primary first."""
+        row = _build_holding_row(
+            ticker="MSFT",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_SEC_COMPANY_FACTS: _make_lane(
+                    LANE_SEC_COMPANY_FACTS, STATUS_READY,
+                    artifact_id="art-sec-001",
+                    usability_label="USABLE",
+                    source_authority="PRIMARY_AUTHORITY",
+                ),
+            },
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_buckets == [
+            BUCKET_VALUATION_NOT_BUILT,
+            BUCKET_TARGET_WEIGHT_NOT_BUILT,
+            BUCKET_THESIS_NOT_BUILT,
+        ]
+        assert row.root_cause_bucket == BUCKET_VALUATION_NOT_BUILT
+        assert row.blocking_gap_count == 3
+        assert len(row.next_required_fixes) == 3
+
+    def test_root_cause_bucket_is_always_first_blocking_gap(self):
+        row = _build_holding_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_SEC_COMPANY_FACTS: _make_lane(
+                    LANE_SEC_COMPANY_FACTS, STATUS_READY,
+                    artifact_id="art-1",
+                    usability_label="USABLE",
+                    source_authority="PRIMARY_AUTHORITY",
+                ),
+            },
+            supplemental=_empty_supplemental(),
+        )
+        assert row.root_cause_bucket == row.blocking_gap_buckets[0]
+        assert row.next_required_fix == row.next_required_fixes[0]
+
+    def test_blocking_gap_count_matches_list_length(self):
+        row = _build_holding_row(
+            ticker="GOOG",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_count == len(row.blocking_gap_buckets)
+        assert row.blocking_gap_count == len(row.next_required_fixes)
+
+    def test_equity_no_sec_artifact_still_exposes_valuation_target_thesis_gaps(self):
+        """Even with SEC missing, valuation + target-weight + thesis gaps are exposed."""
+        row = _build_holding_row(
+            ticker="CRM",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_FUNDAMENTALS: _make_lane(LANE_FUNDAMENTALS, STATUS_READY, usability_label="USABLE"),
+            },
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_buckets[0] == BUCKET_SEC_MISSING_CIK
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_TARGET_WEIGHT_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
+        assert row.blocking_gap_count >= 3
+
+    def test_equity_sec_weak_exposes_valuation_target_thesis_secondary(self):
+        """Weak SEC → SEC_EXISTS_WEAK primary + valuation + target + thesis secondary."""
+        row = _build_holding_row(
+            ticker="NVDA",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_SEC_COMPANY_FACTS: _make_lane(
+                    LANE_SEC_COMPANY_FACTS, STATUS_SUPPRESSED,
+                    artifact_id="art-sec-002",
+                    usability_label="SUPPRESSED_INCOMPLETE",
+                ),
+            },
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_buckets[0] == BUCKET_SEC_EXISTS_WEAK
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_TARGET_WEIGHT_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
+
+    def test_equity_usable_sec_with_target_set_has_two_gaps(self):
+        """SEC usable, target set, no thesis → VALUATION_NOT_BUILT + THESIS_NOT_BUILT."""
+        row = _build_holding_row(
+            ticker="WMT",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={
+                LANE_SEC_COMPANY_FACTS: _make_lane(
+                    LANE_SEC_COMPANY_FACTS, STATUS_READY,
+                    artifact_id="art-3",
+                    usability_label="USABLE",
+                    source_authority="PRIMARY_AUTHORITY",
+                ),
+            },
+            supplemental=_empty_supplemental(target_tickers=frozenset({"WMT"})),
+        )
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_TARGET_WEIGHT_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
+
+    def test_equity_all_resolved_single_normalization_gap(self):
+        """When all other gaps resolved (via valuation_lane_exists=True), only DATA_NEEDS_NORMALIZATION."""
+        gaps = _classify_all_gaps(
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            has_fundamentals_artifact=True,
+            has_technical_artifact=True,
+            has_sec_companyfacts_artifact=True,
+            sec_companyfacts_usability="USABLE",
+            has_sec_catalyst_artifact=True,
+            has_news_sentiment_artifact=False,
+            news_sentiment_usability=None,
+            has_target_weight=True,
+            has_thesis_history=True,
+            valuation_lane_exists=True,
+        )
+        assert len(gaps) == 1
+        assert gaps[0][0] == BUCKET_DATA_NEEDS_NORMALIZATION
+
+
+class TestETFMultiGap:
+    """ETF holdings expose ETF_PROVIDER_NOT_BUILT plus applicable secondary gaps."""
+
+    def test_etf_missing_target_and_thesis_returns_three_gaps(self):
+        row = _build_holding_row(
+            ticker="VTI",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_buckets == [
+            BUCKET_ETF_NOT_BUILT,
+            BUCKET_TARGET_WEIGHT_NOT_BUILT,
+            BUCKET_THESIS_NOT_BUILT,
+        ]
+        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
+        assert row.blocking_gap_count == 3
+
+    def test_etf_with_target_set_returns_two_gaps(self):
+        row = _build_holding_row(
+            ticker="SCHD",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(target_tickers=frozenset({"SCHD"})),
+        )
+        assert BUCKET_ETF_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_TARGET_WEIGHT_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
+        assert row.blocking_gap_count == 2
+
+    def test_etf_both_target_and_thesis_set_only_provider_gap(self):
+        row = _build_holding_row(
+            ticker="SPY",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(
+                target_tickers=frozenset({"SPY"}),
+                recommendation_tickers=frozenset({"SPY"}),
+            ),
+        )
+        assert row.blocking_gap_buckets == [BUCKET_ETF_NOT_BUILT]
+        assert row.blocking_gap_count == 1
+
+    def test_etf_has_no_equity_sec_or_valuation_gaps(self):
+        """SEC, valuation, and fundamentals gaps must NEVER appear for ETF."""
+        row = _build_holding_row(
+            ticker="QQQ",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        equity_only_buckets = {
+            BUCKET_SEC_EXISTS_WEAK,
+            BUCKET_SEC_MISSING_CIK,
+            BUCKET_SEC_MISSING_WORKER,
+            BUCKET_VALUATION_NOT_BUILT,
+        }
+        for bucket in row.blocking_gap_buckets:
+            assert bucket not in equity_only_buckets, (
+                f"ETF must not get equity-specific gap {bucket}"
+            )
+
+
+class TestCryptoMultiGap:
+    """Crypto holdings expose CRYPTO_PROVIDER_NOT_BUILT plus applicable secondary gaps."""
+
+    def test_crypto_missing_target_and_thesis_returns_three_gaps(self):
+        row = _build_holding_row(
+            ticker="BTC",
+            asset_type=INSTRUMENT_CATEGORY_CRYPTO,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        assert row.blocking_gap_buckets == [
+            BUCKET_CRYPTO_NOT_BUILT,
+            BUCKET_TARGET_WEIGHT_NOT_BUILT,
+            BUCKET_THESIS_NOT_BUILT,
+        ]
+        assert row.root_cause_bucket == BUCKET_CRYPTO_NOT_BUILT
+        assert row.blocking_gap_count == 3
+
+    def test_crypto_both_target_and_thesis_set_only_provider_gap(self):
+        row = _build_holding_row(
+            ticker="XRP",
+            asset_type=INSTRUMENT_CATEGORY_CRYPTO,
+            lanes={},
+            supplemental=_empty_supplemental(
+                target_tickers=frozenset({"XRP"}),
+                recommendation_tickers=frozenset({"XRP"}),
+            ),
+        )
+        assert row.blocking_gap_buckets == [BUCKET_CRYPTO_NOT_BUILT]
+        assert row.blocking_gap_count == 1
+
+    def test_crypto_has_no_equity_sec_or_valuation_gaps(self):
+        """SEC, valuation, and fundamentals gaps must NEVER appear for crypto."""
+        row = _build_holding_row(
+            ticker="ETH",
+            asset_type=INSTRUMENT_CATEGORY_CRYPTO,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        equity_only_buckets = {
+            BUCKET_SEC_EXISTS_WEAK,
+            BUCKET_SEC_MISSING_CIK,
+            BUCKET_SEC_MISSING_WORKER,
+            BUCKET_VALUATION_NOT_BUILT,
+        }
+        for bucket in row.blocking_gap_buckets:
+            assert bucket not in equity_only_buckets, (
+                f"Crypto must not get equity-specific gap {bucket}"
+            )
+
+
+class TestBlockingGapBucketCounts:
+    """blocking_gap_bucket_counts aggregates secondary gaps across all holdings."""
+
+    def test_blocking_gap_bucket_counts_includes_secondary_gaps(self):
+        """An ETF holding with 3 gaps contributes 3 entries to blocking_gap_bucket_counts."""
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import _build_aggregates
+        row = _build_holding_row(
+            ticker="VTI",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        mock_coverage = MagicMock()
+        mock_coverage.ticker_coverage = {}
+        aggs = _build_aggregates([row], mock_coverage)
+        bgbc = aggs["blocking_gap_bucket_counts"]
+        assert bgbc.get(BUCKET_ETF_NOT_BUILT, 0) == 1
+        assert bgbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 1
+        assert bgbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 1
+
+    def test_root_cause_bucket_counts_only_primary(self):
+        """root_cause_bucket_counts counts only the primary gap — backward compat."""
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import _build_aggregates
+        row = _build_holding_row(
+            ticker="VTI",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        mock_coverage = MagicMock()
+        mock_coverage.ticker_coverage = {}
+        aggs = _build_aggregates([row], mock_coverage)
+        rcbc = aggs["root_cause_bucket_counts"]
+        assert rcbc.get(BUCKET_ETF_NOT_BUILT, 0) == 1
+        assert rcbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 0
+        assert rcbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 0
+
+    def test_blocking_gap_bucket_counts_accumulates_across_holdings(self):
+        """Two ETF holdings without target/thesis → secondary gaps appear twice."""
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import _build_aggregates
+        row1 = _build_holding_row(
+            ticker="VTI", asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={}, supplemental=_empty_supplemental(),
+        )
+        row2 = _build_holding_row(
+            ticker="SCHD", asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={}, supplemental=_empty_supplemental(),
+        )
+        mock_coverage = MagicMock()
+        mock_coverage.ticker_coverage = {}
+        aggs = _build_aggregates([row1, row2], mock_coverage)
+        bgbc = aggs["blocking_gap_bucket_counts"]
+        assert bgbc.get(BUCKET_ETF_NOT_BUILT, 0) == 2
+        assert bgbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 2
+        assert bgbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 2
+
+
+class TestMultiGapContractShape:
+    """Contract tests for the new multi-gap fields in dict output."""
+
+    def test_holding_dict_has_all_multi_gap_fields(self):
+        row = _build_holding_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        d = row.to_dict()
+        assert "blocking_gap_buckets" in d
+        assert "blocking_gap_count" in d
+        assert "next_required_fixes" in d
+        assert isinstance(d["blocking_gap_buckets"], list)
+        assert isinstance(d["blocking_gap_count"], int)
+        assert isinstance(d["next_required_fixes"], list)
+
+    def test_result_dict_has_blocking_gap_bucket_counts(self):
+        row = _build_holding_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        result = DataFoundationForensicsResult(
+            schema_version=FORENSICS_VERSION,
+            user_id="u-test",
+            generated_at="2026-05-24T00:00:00+00:00",
+            holdings=[row],
+        )
+        d = result.to_dict()
+        assert "blocking_gap_bucket_counts" in d
+        assert isinstance(d["blocking_gap_bucket_counts"], dict)
+
+    def test_all_blocking_gaps_are_valid_bucket_strings(self):
+        """Every bucket in blocking_gap_buckets must be in ALL_BUCKETS."""
+        for asset_type in [
+            INSTRUMENT_CATEGORY_EQUITY,
+            INSTRUMENT_CATEGORY_ETF,
+            INSTRUMENT_CATEGORY_CRYPTO,
+            INSTRUMENT_CATEGORY_UNKNOWN,
+        ]:
+            row = _build_holding_row(
+                ticker="X", asset_type=asset_type,
+                lanes={}, supplemental=_empty_supplemental(),
+            )
+            for bucket in row.blocking_gap_buckets:
+                assert bucket in ALL_BUCKETS, (
+                    f"Unknown bucket {bucket!r} for asset_type={asset_type}"
+                )
+
+    def test_blocking_gap_count_equals_list_lengths(self):
+        for asset_type in [
+            INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF, INSTRUMENT_CATEGORY_CRYPTO,
+        ]:
+            row = _build_holding_row(
+                ticker="X", asset_type=asset_type,
+                lanes={}, supplemental=_empty_supplemental(),
+            )
+            assert row.blocking_gap_count == len(row.blocking_gap_buckets)
+            assert len(row.next_required_fixes) == row.blocking_gap_count
+
+    def test_next_required_fixes_contain_no_forbidden_patterns(self):
+        """next_required_fixes must not leak raw data, URLs bearing secrets, or credentials."""
+        FORBIDDEN = ["raw_payload", "api_key", "password", "secret", "private"]
+        for asset_type in [INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF, INSTRUMENT_CATEGORY_CRYPTO]:
+            row = _build_holding_row(
+                ticker="X", asset_type=asset_type,
+                lanes={}, supplemental=_empty_supplemental(),
+            )
+            for fix in row.next_required_fixes:
+                for pattern in FORBIDDEN:
+                    assert pattern.lower() not in fix.lower(), (
+                        f"next_required_fixes contains {pattern!r}: {fix!r}"
+                    )

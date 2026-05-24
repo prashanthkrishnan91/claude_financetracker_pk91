@@ -5,7 +5,7 @@ portfolio positions, and evidence lane outputs to explain, per holding, where th
 data foundation is missing and why — before any synthesis is attempted.
 
 Goal:
-    Prove, per current holding, which root cause explains the missing data:
+    Prove, per current holding, which root causes explain the missing data:
     - provider/source limitation (ETF fund data, crypto market data)
     - missing CIK/ticker mapping (SEC EDGAR lookup failure)
     - worker/fanout/backfill gap (evidence lane never ran for this ticker)
@@ -167,9 +167,14 @@ class HoldingForensicsRow:
     # Thesis / decision history
     thesis_history_exists: bool
 
-    # Root cause (one of ALL_BUCKETS)
+    # Primary root cause (highest-priority gap; first element of blocking_gap_buckets)
     root_cause_bucket: str
     next_required_fix: str
+
+    # All material blocking gaps (deterministic priority order)
+    blocking_gap_buckets: list   # list[str] — all applicable gap bucket names
+    blocking_gap_count: int      # len(blocking_gap_buckets)
+    next_required_fixes: list    # list[str] — fix message per gap
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -198,6 +203,9 @@ class HoldingForensicsRow:
             "thesis_history_exists": self.thesis_history_exists,
             "root_cause_bucket": self.root_cause_bucket,
             "next_required_fix": self.next_required_fix,
+            "blocking_gap_buckets": list(self.blocking_gap_buckets),
+            "blocking_gap_count": self.blocking_gap_count,
+            "next_required_fixes": list(self.next_required_fixes),
         }
 
 
@@ -224,8 +232,10 @@ class DataFoundationForensicsResult:
     artifacts_usable_by_lane: dict[str, int] = field(default_factory=dict)
     # Per lane: count of holdings where artifact is STRONG (READY + primary authority)
     artifacts_strong_by_lane: dict[str, int] = field(default_factory=dict)
-    # Per root_cause_bucket: count of holdings
+    # Per root_cause_bucket: count of holdings (primary gap only; backward compatible)
     root_cause_bucket_counts: dict[str, int] = field(default_factory=dict)
+    # Per blocking_gap_bucket: count of holdings where that gap appears (multi-gap aware)
+    blocking_gap_bucket_counts: dict[str, int] = field(default_factory=dict)
     # Classification of root causes
     provider_limited_count: int = 0       # ETF_PROVIDER_NOT_BUILT | CRYPTO_PROVIDER_NOT_BUILT
     implementation_limited_count: int = 0  # SEC gaps, valuation, target weight, thesis, news
@@ -246,6 +256,7 @@ class DataFoundationForensicsResult:
             "artifacts_usable_by_lane": dict(self.artifacts_usable_by_lane),
             "artifacts_strong_by_lane": dict(self.artifacts_strong_by_lane),
             "root_cause_bucket_counts": dict(self.root_cause_bucket_counts),
+            "blocking_gap_bucket_counts": dict(self.blocking_gap_bucket_counts),
             "provider_limited_count": self.provider_limited_count,
             "implementation_limited_count": self.implementation_limited_count,
             "normalization_limited_count": self.normalization_limited_count,
@@ -276,7 +287,7 @@ def compute_data_foundation_forensics(
     """Compute Stage 9B data foundation forensics for the given tickers.
 
     Inspects persisted artifacts and supplemental portfolio data to classify each
-    holding's primary root cause for missing data foundation.
+    holding's root causes for missing data foundation.
 
     Args:
         user_id: authenticated user ID.
@@ -353,6 +364,7 @@ def compute_data_foundation_forensics(
         artifacts_usable_by_lane=aggregates["artifacts_usable_by_lane"],
         artifacts_strong_by_lane=aggregates["artifacts_strong_by_lane"],
         root_cause_bucket_counts=aggregates["root_cause_bucket_counts"],
+        blocking_gap_bucket_counts=aggregates["blocking_gap_bucket_counts"],
         provider_limited_count=aggregates["provider_limited_count"],
         implementation_limited_count=aggregates["implementation_limited_count"],
         normalization_limited_count=aggregates["normalization_limited_count"],
@@ -496,7 +508,8 @@ def _build_holding_row(
 
     thesis_history_exists = ticker in supplemental.recommendation_tickers
 
-    root_cause_bucket, next_required_fix = _classify_root_cause(
+    # Classify all blocking gaps (multi-gap aware).
+    all_gaps = _classify_all_gaps(
         asset_type=asset_type,
         has_fundamentals_artifact=fund_exists,
         has_technical_artifact=tech_exists,
@@ -509,6 +522,11 @@ def _build_holding_row(
         has_thesis_history=thesis_history_exists,
         valuation_lane_exists=valuation_lane_exists,
     )
+
+    blocking_gap_buckets = [g[0] for g in all_gaps]
+    next_required_fixes = [g[1] for g in all_gaps]
+    root_cause_bucket = blocking_gap_buckets[0]
+    next_required_fix = next_required_fixes[0]
 
     return HoldingForensicsRow(
         ticker=ticker,
@@ -536,7 +554,240 @@ def _build_holding_row(
         thesis_history_exists=thesis_history_exists,
         root_cause_bucket=root_cause_bucket,
         next_required_fix=next_required_fix,
+        blocking_gap_buckets=blocking_gap_buckets,
+        blocking_gap_count=len(blocking_gap_buckets),
+        next_required_fixes=next_required_fixes,
     )
+
+
+def _classify_all_gaps(
+    *,
+    asset_type: str,
+    has_fundamentals_artifact: bool,
+    has_technical_artifact: bool,
+    has_sec_companyfacts_artifact: bool,
+    sec_companyfacts_usability: Optional[str],
+    has_sec_catalyst_artifact: bool,
+    has_news_sentiment_artifact: bool,
+    news_sentiment_usability: Optional[str],
+    has_target_weight: bool,
+    has_thesis_history: bool,
+    valuation_lane_exists: bool = False,
+) -> list[tuple[str, str]]:
+    """Return all material data foundation gaps in deterministic priority order.
+
+    Returns a list of (bucket, fix_message) pairs. The first element is always
+    the primary/most-blocking gap (same as the legacy root_cause_bucket). All
+    subsequent elements are secondary gaps that should also be addressed.
+
+    Rules:
+    - ETF: ETF_PROVIDER_NOT_BUILT + applicable secondary gaps (target/thesis/news)
+    - Crypto: CRYPTO_PROVIDER_NOT_BUILT + applicable secondary gaps
+    - Unknown: [ASSET_TYPE_NOT_APPLICABLE] only
+    - Equity: SEC gap (if any) + valuation + news + target weight + thesis, in order
+      DATA_PRESENT_NEEDS_CANONICAL_NORMALIZATION only when all others resolved
+    - No equity SEC/fundamentals gaps for ETF or crypto
+    """
+    gaps: list[tuple[str, str]] = []
+
+    # ── Unknown asset type ─────────────────────────────────────────────────────
+    if asset_type == INSTRUMENT_CATEGORY_UNKNOWN:
+        return [
+            (
+                BUCKET_NOT_APPLICABLE,
+                (
+                    "Classify the asset type (equity/ETF/crypto) in portfolio category metadata "
+                    "before data foundation requirements can be determined."
+                ),
+            )
+        ]
+
+    # ── ETF path ───────────────────────────────────────────────────────────────
+    if asset_type == INSTRUMENT_CATEGORY_ETF:
+        gaps.append((
+            BUCKET_ETF_NOT_BUILT,
+            (
+                "Build a dedicated ETF fund-data provider lane for holdings, sector exposure, "
+                "expense ratio, and yield. No fund-data provider exists in Stage 5J/5K; "
+                "ETF composition is MISSING by design until a provider is built (Stage 9C)."
+            ),
+        ))
+        _append_non_equity_secondary_gaps(
+            gaps,
+            has_news_sentiment_artifact=has_news_sentiment_artifact,
+            news_sentiment_usability=news_sentiment_usability,
+            has_sec_catalyst_artifact=has_sec_catalyst_artifact,
+            has_target_weight=has_target_weight,
+            has_thesis_history=has_thesis_history,
+        )
+        return gaps
+
+    # ── Crypto path ─────────────────────────────────────────────────────────────
+    if asset_type == INSTRUMENT_CATEGORY_CRYPTO:
+        gaps.append((
+            BUCKET_CRYPTO_NOT_BUILT,
+            (
+                "Build a dedicated crypto market-data provider lane for market regime, liquidity, "
+                "and correlation inputs. Equity fundamentals and SEC data are NOT_APPLICABLE for "
+                "crypto (Stage 9D). Do not reuse equity fundamentals for crypto."
+            ),
+        ))
+        _append_non_equity_secondary_gaps(
+            gaps,
+            has_news_sentiment_artifact=has_news_sentiment_artifact,
+            news_sentiment_usability=news_sentiment_usability,
+            has_sec_catalyst_artifact=has_sec_catalyst_artifact,
+            has_target_weight=has_target_weight,
+            has_thesis_history=has_thesis_history,
+        )
+        return gaps
+
+    # ── Equity path ─────────────────────────────────────────────────────────────
+
+    # 1. SEC gap (at most one of: WORKER, CIK, or WEAK).
+    sec_usability = sec_companyfacts_usability or ""
+    if not has_sec_companyfacts_artifact:
+        if has_fundamentals_artifact or has_technical_artifact:
+            gaps.append((
+                BUCKET_SEC_MISSING_CIK,
+                (
+                    "Other evidence lanes (fundamentals/technicals) ran for this ticker but "
+                    "SEC company facts were skipped. Likely cause: CIK not found in SEC EDGAR "
+                    "or zero XBRL observations returned. Investigate sec_companyfacts_skip_non_equity "
+                    "or sec_companyfacts_skip_no_artifact logs for this ticker."
+                ),
+            ))
+        else:
+            gaps.append((
+                BUCKET_SEC_MISSING_WORKER,
+                (
+                    "No evidence artifacts found for this ticker. Run POST /intel/v3/run with "
+                    "INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true and SEC_EDGAR_USER_AGENT set. "
+                    "Also enable INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED and "
+                    "INTEL_V3_TECHNICALS_EVIDENCE_ENABLED to populate baseline artifacts."
+                ),
+            ))
+    elif (
+        not sec_usability
+        or sec_usability.startswith(_SUPPRESSED_PREFIX)
+        or sec_usability == "NOT_EVALUABLE"
+    ):
+        gaps.append((
+            BUCKET_SEC_EXISTS_WEAK,
+            (
+                "SEC company facts artifact exists but truth usability is below USABLE "
+                f"(label={sec_usability or 'None'}). Investigate XBRL contradiction grouping, "
+                "completeness assessment (THIN completeness = SUPPRESSED_INCOMPLETE), or "
+                "truth adapter enrichment pipeline for this ticker."
+            ),
+        ))
+
+    # 2. Valuation lane (equity-specific; always not built at Stage 9B).
+    if not valuation_lane_exists:
+        gaps.append((
+            BUCKET_VALUATION_NOT_BUILT,
+            (
+                "No valuation evidence lane exists in Stage 5J/5K (Stage 9B baseline). "
+                "SEC/fundamentals data is present. Next: build the canonical equity research "
+                "dataset adapter to normalize revenue/margin/FCF trends from SEC XBRL facts, "
+                "then wire a valuation normalization layer (Stage 9B proper)."
+            ),
+        ))
+
+    # 3. News sentiment suppressed with no catalyst substitute (equity-specific).
+    news_usability = news_sentiment_usability or ""
+    if (
+        has_news_sentiment_artifact
+        and news_usability.startswith(_SUPPRESSED_PREFIX)
+        and not has_sec_catalyst_artifact
+    ):
+        gaps.append((
+            BUCKET_NEWS_SUPPRESSED,
+            (
+                "News sentiment is suppressed by editorial context (by design — yfinance news "
+                "is EDITORIAL_CONTEXT → THIN → SUPPRESSED_INCOMPLETE). "
+                "Enable INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true to activate the SEC "
+                "catalyst sentiment lane, which provides LIMITED-grade sentiment from real filings."
+            ),
+        ))
+
+    # 4. Target weight.
+    if not has_target_weight:
+        gaps.append((
+            BUCKET_TARGET_WEIGHT_NOT_BUILT,
+            (
+                "Portfolio target weight is not set for this ticker. Add a target allocation "
+                "in target_allocations to enable portfolio-sizing context in synthesis."
+            ),
+        ))
+
+    # 5. Thesis / decision history.
+    if not has_thesis_history:
+        gaps.append((
+            BUCKET_THESIS_NOT_BUILT,
+            (
+                "No recommendation history found for this ticker. Run Intel v3 at least once "
+                "to generate an analyst recommendation and build decision history."
+            ),
+        ))
+
+    # 6. All core data present and usable — normalization is the only remaining gap.
+    if not gaps:
+        gaps.append((
+            BUCKET_DATA_NEEDS_NORMALIZATION,
+            (
+                "Core evidence artifacts exist and are usable. Build the canonical research "
+                "dataset adapter (Stage 9B) to normalize SEC XBRL facts into typed, "
+                "per-asset-type research records ready for synthesis gating."
+            ),
+        ))
+
+    return gaps
+
+
+def _append_non_equity_secondary_gaps(
+    gaps: list[tuple[str, str]],
+    *,
+    has_news_sentiment_artifact: bool,
+    news_sentiment_usability: Optional[str],
+    has_sec_catalyst_artifact: bool,
+    has_target_weight: bool,
+    has_thesis_history: bool,
+) -> None:
+    """Append secondary gaps applicable to ETF and crypto holdings."""
+    news_usability = news_sentiment_usability or ""
+    if (
+        has_news_sentiment_artifact
+        and news_usability.startswith(_SUPPRESSED_PREFIX)
+        and not has_sec_catalyst_artifact
+    ):
+        gaps.append((
+            BUCKET_NEWS_SUPPRESSED,
+            (
+                "News sentiment is suppressed by editorial context (by design — yfinance news "
+                "is EDITORIAL_CONTEXT → THIN → SUPPRESSED_INCOMPLETE). "
+                "Enable INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true to activate the SEC "
+                "catalyst sentiment lane, which provides LIMITED-grade sentiment from real filings."
+            ),
+        ))
+
+    if not has_target_weight:
+        gaps.append((
+            BUCKET_TARGET_WEIGHT_NOT_BUILT,
+            (
+                "Portfolio target weight is not set for this ticker. Add a target allocation "
+                "in target_allocations to enable portfolio-sizing context in synthesis."
+            ),
+        ))
+
+    if not has_thesis_history:
+        gaps.append((
+            BUCKET_THESIS_NOT_BUILT,
+            (
+                "No recommendation history found for this ticker. Run Intel v3 at least once "
+                "to generate an analyst recommendation and build decision history."
+            ),
+        ))
 
 
 def _classify_root_cause(
@@ -553,150 +804,26 @@ def _classify_root_cause(
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
 ) -> tuple[str, str]:
-    """Classify the primary root cause for missing data foundation.
+    """Return the primary (highest-priority) root cause bucket and fix message.
 
-    Deterministic priority order (most blocking first):
-      ETF  → ETF_PROVIDER_NOT_BUILT
-      crypto → CRYPTO_PROVIDER_NOT_BUILT
-      unknown → ASSET_TYPE_NOT_APPLICABLE
-      equity:
-        1. SEC missing + other artifacts exist → SEC_ARTIFACT_MISSING_CIK_OR_MAPPING_UNKNOWN
-        2. SEC missing, no other artifacts → SEC_ARTIFACT_MISSING_WORKER_OR_BACKFILL_GAP
-        3. SEC exists but suppressed/not-evaluable → SEC_ARTIFACT_EXISTS_BUT_READINESS_WEAK
-        4. SEC usable, valuation lane absent → VALUATION_LANE_NOT_BUILT (always at Stage 9B)
-        5. SEC + valuation usable, news suppressed + no sec_catalyst → NEWS_SENTIMENT_SUPPRESSED_THIN
-        6. All evidence present, no target weight → TARGET_WEIGHT_MODEL_NOT_BUILT
-        7. All evidence + target weight, no thesis → THESIS_HISTORY_NOT_BUILT
-        8. All present and usable → DATA_PRESENT_NEEDS_CANONICAL_NORMALIZATION
-
-    Returns:
-        (root_cause_bucket, next_required_fix) — both are safe plain strings.
+    Backward-compatible wrapper around _classify_all_gaps. Returns the first
+    (most blocking) gap from the full gap list. Tests that verify specific
+    single-bucket behavior call this function directly.
     """
-    if asset_type == INSTRUMENT_CATEGORY_ETF:
-        return (
-            BUCKET_ETF_NOT_BUILT,
-            (
-                "Build a dedicated ETF fund-data provider lane for holdings, sector exposure, "
-                "expense ratio, and yield. No fund-data provider exists in Stage 5J/5K; "
-                "ETF composition is MISSING by design until a provider is built (Stage 9C)."
-            ),
-        )
-
-    if asset_type == INSTRUMENT_CATEGORY_CRYPTO:
-        return (
-            BUCKET_CRYPTO_NOT_BUILT,
-            (
-                "Build a dedicated crypto market-data provider lane for market regime, liquidity, "
-                "and correlation inputs. Equity fundamentals and SEC data are NOT_APPLICABLE for "
-                "crypto (Stage 9D). Do not reuse equity fundamentals for crypto."
-            ),
-        )
-
-    if asset_type == INSTRUMENT_CATEGORY_UNKNOWN:
-        return (
-            BUCKET_NOT_APPLICABLE,
-            (
-                "Classify the asset type (equity/ETF/crypto) in portfolio category metadata "
-                "before data foundation requirements can be determined."
-            ),
-        )
-
-    # ── Equity path ───────────────────────────────────────────────────────────
-    # Priority 1: SEC company facts missing (most impactful gap for equity synthesis).
-    if not has_sec_companyfacts_artifact:
-        if has_fundamentals_artifact or has_technical_artifact:
-            return (
-                BUCKET_SEC_MISSING_CIK,
-                (
-                    "Other evidence lanes (fundamentals/technicals) ran for this ticker but "
-                    "SEC company facts were skipped. Likely cause: CIK not found in SEC EDGAR "
-                    "or zero XBRL observations returned. Investigate sec_companyfacts_skip_non_equity "
-                    "or sec_companyfacts_skip_no_artifact logs for this ticker."
-                ),
-            )
-        return (
-            BUCKET_SEC_MISSING_WORKER,
-            (
-                "No evidence artifacts found for this ticker. Run POST /intel/v3/run with "
-                "INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true and SEC_EDGAR_USER_AGENT set. "
-                "Also enable INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED and "
-                "INTEL_V3_TECHNICALS_EVIDENCE_ENABLED to populate baseline artifacts."
-            ),
-        )
-
-    # Priority 2: SEC artifact exists but readiness is below USABLE threshold.
-    usability = sec_companyfacts_usability or ""
-    if not usability or usability.startswith(_SUPPRESSED_PREFIX) or usability == "NOT_EVALUABLE":
-        return (
-            BUCKET_SEC_EXISTS_WEAK,
-            (
-                "SEC company facts artifact exists but truth usability is below USABLE "
-                f"(label={usability or 'None'}). Investigate XBRL contradiction grouping, "
-                "completeness assessment (THIN completeness = SUPPRESSED_INCOMPLETE), or "
-                "truth adapter enrichment pipeline for this ticker."
-            ),
-        )
-
-    # Priority 3: Valuation lane not built.
-    # At Stage 9B this is always True (no valuation evidence lane exists in Stage 5J/5K).
-    if not valuation_lane_exists:
-        return (
-            BUCKET_VALUATION_NOT_BUILT,
-            (
-                "No valuation evidence lane exists in Stage 5J/5K (Stage 9B baseline). "
-                "SEC/fundamentals data is present. Next: build the canonical equity research "
-                "dataset adapter to normalize revenue/margin/FCF trends from SEC XBRL facts, "
-                "then wire a valuation normalization layer (Stage 9B proper)."
-            ),
-        )
-
-    # Priority 4 (reachable in future stages when valuation lane exists):
-    # News sentiment suppressed — fixable by enabling SEC catalyst lane.
-    news_usability = news_sentiment_usability or ""
-    if (
-        has_news_sentiment_artifact
-        and news_usability.startswith(_SUPPRESSED_PREFIX)
-        and not has_sec_catalyst_artifact
-    ):
-        return (
-            BUCKET_NEWS_SUPPRESSED,
-            (
-                "News sentiment is suppressed by editorial context (by design — yfinance news "
-                "is EDITORIAL_CONTEXT → THIN → SUPPRESSED_INCOMPLETE). "
-                "Enable INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true to activate the SEC "
-                "catalyst sentiment lane, which provides LIMITED-grade sentiment from real filings."
-            ),
-        )
-
-    # Priority 5: Target weight not set.
-    if not has_target_weight:
-        return (
-            BUCKET_TARGET_WEIGHT_NOT_BUILT,
-            (
-                "Portfolio target weight is not set for this ticker. Add a target allocation "
-                "in target_allocations to enable portfolio-sizing context in synthesis."
-            ),
-        )
-
-    # Priority 6: No thesis / decision history.
-    if not has_thesis_history:
-        return (
-            BUCKET_THESIS_NOT_BUILT,
-            (
-                "No recommendation history found for this ticker. Run Intel v3 at least once "
-                "to generate an analyst recommendation and build decision history."
-            ),
-        )
-
-    # Priority 7: All core data present and usable — normalization needed.
-    return (
-        BUCKET_DATA_NEEDS_NORMALIZATION,
-        (
-            "Core evidence artifacts exist and are usable. Build the canonical research "
-            "dataset adapter (Stage 9B) to normalize SEC XBRL facts into typed, "
-            "per-asset-type research records ready for synthesis gating."
-        ),
+    gaps = _classify_all_gaps(
+        asset_type=asset_type,
+        has_fundamentals_artifact=has_fundamentals_artifact,
+        has_technical_artifact=has_technical_artifact,
+        has_sec_companyfacts_artifact=has_sec_companyfacts_artifact,
+        sec_companyfacts_usability=sec_companyfacts_usability,
+        has_sec_catalyst_artifact=has_sec_catalyst_artifact,
+        has_news_sentiment_artifact=has_news_sentiment_artifact,
+        news_sentiment_usability=news_sentiment_usability,
+        has_target_weight=has_target_weight,
+        has_thesis_history=has_thesis_history,
+        valuation_lane_exists=valuation_lane_exists,
     )
+    return gaps[0]
 
 
 def _artifact_exists(lane_cov: Optional[LaneCoverage]) -> bool:
@@ -778,6 +905,7 @@ def _build_aggregates(
     """Build portfolio-level aggregate counts from per-holding rows."""
     holdings_by_asset_type: dict[str, int] = {}
     root_cause_bucket_counts: dict[str, int] = {}
+    blocking_gap_bucket_counts: dict[str, int] = {}
     provider_limited = 0
     implementation_limited = 0
     normalization_limited = 0
@@ -791,9 +919,16 @@ def _build_aggregates(
             holdings_by_asset_type.get(row.asset_type, 0) + 1
         )
 
+        # root_cause_bucket_counts: primary gap only (backward compatible)
         root_cause_bucket_counts[row.root_cause_bucket] = (
             root_cause_bucket_counts.get(row.root_cause_bucket, 0) + 1
         )
+
+        # blocking_gap_bucket_counts: all gaps across all holdings
+        for gap_bucket in row.blocking_gap_buckets:
+            blocking_gap_bucket_counts[gap_bucket] = (
+                blocking_gap_bucket_counts.get(gap_bucket, 0) + 1
+            )
 
         if row.root_cause_bucket in _PROVIDER_LIMITED_BUCKETS:
             provider_limited += 1
@@ -824,6 +959,7 @@ def _build_aggregates(
         "artifacts_usable_by_lane": usable,
         "artifacts_strong_by_lane": strong,
         "root_cause_bucket_counts": root_cause_bucket_counts,
+        "blocking_gap_bucket_counts": blocking_gap_bucket_counts,
         "provider_limited_count": provider_limited,
         "implementation_limited_count": implementation_limited,
         "normalization_limited_count": normalization_limited,

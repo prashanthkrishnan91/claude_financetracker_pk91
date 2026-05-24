@@ -70,8 +70,10 @@ from app.services.intelligence.v3.canonical_equity_dataset_v1 import (
     SECTION_STATUS_AVAILABLE,
     SECTION_STATUS_MISSING,
     SECTION_STATUS_PARTIAL,
+    SYNTHESIS_GATE_BLOCKED,
     TREND_UP,
     TREND_UNKNOWN,
+    VALUATION_GATE_BLOCKED,
     CanonicalEquityDatasetRow,
     CatalystContextSection,
     EvidenceSectionRecord,
@@ -964,10 +966,32 @@ class TestValuationLaneGapClassification:
 class TestAssetParityRoadmap:
     """build_asset_parity_roadmap reflects valuation lane status."""
 
-    def test_valuation_built_when_equity_valuation_count_positive(self):
+    def test_valuation_scaffold_count_positive_does_not_set_lane_built(self):
+        """Stage 9E: scaffold rows > 0 but numeric_ready_count=0 → lane_built=False, scaffold=True."""
         roadmap = build_asset_parity_roadmap(
             equity_canonical_count=5,
             equity_valuation_count=5,
+            equity_valuation_ready_count=0,
+            equity_total=5,
+            equity_edge_case_tickers=[],
+            etf_total=0,
+            crypto_total=0,
+        )
+        equity_gap = next(
+            ac for ac in roadmap.asset_classes if ac.asset_class == "equity"
+        )
+        assert equity_gap.valuation_lane_built is False
+        assert equity_gap.valuation_evidence_scaffold_present is True
+        assert equity_gap.synthesis_gate == VALUATION_GATE_BLOCKED
+        assert equity_gap.edge_cases is not None
+        assert "scaffold" in equity_gap.edge_cases.lower()
+
+    def test_valuation_lane_built_requires_ready_count(self):
+        """valuation_lane_built=True only when numeric ready_count > 0."""
+        roadmap = build_asset_parity_roadmap(
+            equity_canonical_count=5,
+            equity_valuation_count=5,
+            equity_valuation_ready_count=5,
             equity_total=5,
             equity_edge_case_tickers=[],
             etf_total=0,
@@ -977,6 +1001,7 @@ class TestAssetParityRoadmap:
             ac for ac in roadmap.asset_classes if ac.asset_class == "equity"
         )
         assert equity_gap.valuation_lane_built is True
+        assert equity_gap.valuation_evidence_scaffold_present is True
 
     def test_valuation_not_built_when_equity_valuation_count_zero(self):
         roadmap = build_asset_parity_roadmap(
@@ -991,6 +1016,7 @@ class TestAssetParityRoadmap:
             ac for ac in roadmap.asset_classes if ac.asset_class == "equity"
         )
         assert equity_gap.valuation_lane_built is False
+        assert equity_gap.valuation_evidence_scaffold_present is False
 
     def test_all_classes_synthesis_ready_always_false(self):
         roadmap = build_asset_parity_roadmap(
@@ -1015,6 +1041,8 @@ class TestAssetParityRoadmap:
         d = roadmap.to_dict()
         classes = {ac["asset_class"] for ac in d["asset_classes"]}
         assert classes == {"equity", "etf", "crypto"}
+        equity_dict = next(ac for ac in d["asset_classes"] if ac["asset_class"] == "equity")
+        assert "valuation_evidence_scaffold_present" in equity_dict
 
     def test_etf_crypto_parity_gaps_unchanged(self):
         roadmap = build_asset_parity_roadmap(

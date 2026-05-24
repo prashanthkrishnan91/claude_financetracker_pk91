@@ -478,6 +478,7 @@ def compute_data_foundation_forensics(
     parity_roadmap = build_asset_parity_roadmap(
         equity_canonical_count=equity_canonical_count,
         equity_valuation_count=equity_valuation_evidence_count,
+        equity_valuation_ready_count=equity_valuation_ready_count,
         equity_total=equity_total,
         equity_edge_case_tickers=equity_degraded_tickers,
         etf_total=etf_total,

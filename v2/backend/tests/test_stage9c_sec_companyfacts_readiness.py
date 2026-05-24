@@ -959,3 +959,198 @@ class TestSafetyAndPolicyInvariants:
         # New keys must be present too
         assert "contradiction_count" in d
         assert "not_evaluable_reason" in d
+        assert "sample_contradiction_groups" in d
+
+
+# ── Group 7: Sample contradiction group identity (Stage 9C patch) ─────────────
+
+
+class TestSampleContradictionGroups:
+    """sample_contradiction_groups exposes sanitized group identity shapes.
+    No raw value_fields. Capped at 3. None for non-contradicted artifacts."""
+
+    def _row_with_groups(self, groups: list) -> dict:
+        """Build a fake row whose contradiction_assessment has the given groups."""
+        row = _fake_lane_row(
+            usability_label="SUPPRESSED_CONTRADICTED",
+            is_usable=False,
+            contradiction_evaluable=True,
+            has_contradictions=True,
+            contradiction_count=len(groups),
+        )
+        row["payload"]["contradiction_assessment"]["contradiction_groups"] = groups
+        return row
+
+    def _sample_group(self, idx: int = 1) -> dict:
+        return {
+            "group_key": (
+                f"provider:sec_edgar|metric:Revenues|fact_kind:metric_observation"
+                f"|unit:USD|fy:2023|fp:FY|start:2023-01-01|end:2023-12-31"
+                f"|frame:CY2023|filed:2024-02-15_{idx}"
+            ),
+            "claim_key": "Revenues",
+            "fact_kind": "metric_observation",
+            "period": "2023-01-01/2023-12-31",
+            "as_of": "2024-02-15",
+            "conflicting_fact_count": 2,
+            "conflicting_facts": [
+                # Intentionally include value_fields to verify they are stripped
+                {"claim_key": "Revenues", "fact_kind": "metric_observation",
+                 "value_fields": {"numeric_value": 12345678}, "source_index": 0},
+                {"claim_key": "Revenues", "fact_kind": "metric_observation",
+                 "value_fields": {"numeric_value": 99999999}, "source_index": 1},
+            ],
+        }
+
+    def test_sample_groups_present_for_contradicted_artifact(self):
+        """When contradiction_groups exist, LaneCoverage populates sample_contradiction_groups."""
+        row = self._row_with_groups([self._sample_group(1)])
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_COMPANY_FACTS,
+            artifact_type="fundamental_quality",
+            skill_pack="sec_companyfacts_evidence_v1",
+            scope_kind="ticker",
+            ticker="CRM",
+            row=row,
+        )
+        assert cov.sample_contradiction_groups is not None
+        assert len(cov.sample_contradiction_groups) == 1
+        g = cov.sample_contradiction_groups[0]
+        assert "group_key" in g
+        assert "claim_key" in g
+        assert "fact_kind" in g
+        assert "period" in g
+        assert "as_of" in g
+        assert "conflicting_fact_count" in g
+
+    def test_no_raw_value_fields_in_sample_groups(self):
+        """value_fields (raw numeric fact values) must NOT appear in sample groups."""
+        row = self._row_with_groups([self._sample_group(1), self._sample_group(2)])
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_COMPANY_FACTS,
+            artifact_type="fundamental_quality",
+            skill_pack="sec_companyfacts_evidence_v1",
+            scope_kind="ticker",
+            ticker="MSFT",
+            row=row,
+        )
+        assert cov.sample_contradiction_groups is not None
+        for g in cov.sample_contradiction_groups:
+            assert "value_fields" not in g, "Raw value_fields must not appear in safe output"
+            assert "conflicting_facts" not in g, "Raw conflicting_facts list must not appear"
+
+    def test_sample_groups_capped_at_3(self):
+        """More than 3 contradiction groups are capped at 3 in the output."""
+        row = self._row_with_groups([self._sample_group(i) for i in range(1, 6)])
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_COMPANY_FACTS,
+            artifact_type="fundamental_quality",
+            skill_pack="sec_companyfacts_evidence_v1",
+            scope_kind="ticker",
+            ticker="NVDA",
+            row=row,
+        )
+        assert cov.sample_contradiction_groups is not None
+        assert len(cov.sample_contradiction_groups) <= 3
+
+    def test_sample_groups_none_for_clean_usable_artifact(self):
+        """USABLE artifacts have no contradiction_groups → sample_contradiction_groups is None."""
+        row = _fake_lane_row(
+            usability_label="USABLE",
+            is_usable=True,
+            contradiction_evaluable=True,
+            has_contradictions=False,
+            contradiction_count=0,
+        )
+        cov = _build_lane_coverage(
+            lane=LANE_SEC_COMPANY_FACTS,
+            artifact_type="fundamental_quality",
+            skill_pack="sec_companyfacts_evidence_v1",
+            scope_kind="ticker",
+            ticker="AAPL",
+            row=row,
+        )
+        assert cov.sample_contradiction_groups is None
+
+    def test_diagnostic_receives_sample_groups(self):
+        """diagnose_sec_companyfacts_readiness propagates sample_contradiction_groups."""
+        groups = [
+            {
+                "group_key": "provider:sec_edgar|metric:Assets|unit:USD|fy:2023|fp:FY",
+                "claim_key": "Assets",
+                "fact_kind": "metric_observation",
+                "period": "2023-12-31",
+                "as_of": "2024-03-01",
+                "conflicting_fact_count": 2,
+            }
+        ]
+        diag = diagnose_sec_companyfacts_readiness(
+            artifact_id="abc-123",
+            generated_at="2026-01-01T00:00:00+00:00",
+            model_version=SEC_COMPANYFACTS_CURRENT_MODEL_VERSION,
+            observation_count=50,
+            freshness_status="FRESH",
+            source_authority="PRIMARY_AUTHORITY",
+            completeness_band="PARTIAL",
+            usability_label="SUPPRESSED_CONTRADICTED",
+            suppression_reason="material_contradiction_detected",
+            contradiction_evaluable=True,
+            contradiction_count=1,
+            not_evaluable_reason=None,
+            sample_contradiction_groups=groups,
+        )
+        assert diag.sample_contradiction_groups is not None
+        assert len(diag.sample_contradiction_groups) == 1
+        assert diag.sample_contradiction_groups[0]["claim_key"] == "Assets"
+
+    def test_diagnostic_to_dict_has_sample_groups_key(self):
+        """to_dict() includes sample_contradiction_groups and no raw values."""
+        groups = [
+            {
+                "group_key": "provider:sec_edgar|metric:Revenues|unit:USD",
+                "claim_key": "Revenues",
+                "fact_kind": "metric_observation",
+                "period": "2023-01-01/2023-12-31",
+                "as_of": "2024-02-15",
+                "conflicting_fact_count": 2,
+            }
+        ]
+        diag = diagnose_sec_companyfacts_readiness(
+            artifact_id="def-456",
+            generated_at="2026-01-01T00:00:00+00:00",
+            model_version=SEC_COMPANYFACTS_CURRENT_MODEL_VERSION,
+            observation_count=40,
+            freshness_status="FRESH",
+            source_authority="PRIMARY_AUTHORITY",
+            completeness_band="PARTIAL",
+            usability_label="SUPPRESSED_CONTRADICTED",
+            suppression_reason="material_contradiction_detected",
+            contradiction_evaluable=True,
+            contradiction_count=1,
+            not_evaluable_reason=None,
+            sample_contradiction_groups=groups,
+        )
+        d = diag.to_dict()
+        assert "sample_contradiction_groups" in d
+        # No raw values in the dict output
+        assert "value_fields" not in str(d)
+        assert "conflicting_facts" not in str(d)
+
+    def test_diagnostic_sample_groups_none_when_not_provided(self):
+        """sample_contradiction_groups defaults to None when not passed."""
+        diag = diagnose_sec_companyfacts_readiness(
+            artifact_id=None,
+            generated_at=None,
+            model_version=None,
+            observation_count=None,
+            freshness_status=None,
+            source_authority=None,
+            completeness_band=None,
+            usability_label=None,
+            suppression_reason=None,
+            contradiction_evaluable=None,
+            contradiction_count=None,
+            not_evaluable_reason=None,
+        )
+        assert diag.sample_contradiction_groups is None
+        assert diag.to_dict()["sample_contradiction_groups"] is None

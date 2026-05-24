@@ -106,6 +106,10 @@ class SecCompanyFactsReadinessDiagnostic:
     contradiction_evaluable: Optional[bool]
     contradiction_count: Optional[int]
     not_evaluable_reason: Optional[str]  # from contradiction_assessment
+    # Sanitized sample contradiction group identity shapes — no value_fields, no raw
+    # fact contents. Each entry: group_key, claim_key, fact_kind, period, as_of,
+    # conflicting_fact_count. At most 3 groups. None when not contradicted.
+    sample_contradiction_groups: Optional[list]
     readiness_category: str              # see CATEGORY_* constants above
     is_stale_model_version: bool
     is_false_contradiction_candidate: bool
@@ -127,6 +131,7 @@ class SecCompanyFactsReadinessDiagnostic:
             "contradiction_evaluable": self.contradiction_evaluable,
             "contradiction_count": self.contradiction_count,
             "not_evaluable_reason": self.not_evaluable_reason,
+            "sample_contradiction_groups": self.sample_contradiction_groups,
             "readiness_category": self.readiness_category,
             "is_stale_model_version": self.is_stale_model_version,
             "is_false_contradiction_candidate": self.is_false_contradiction_candidate,
@@ -149,6 +154,7 @@ def diagnose_sec_companyfacts_readiness(
     contradiction_evaluable: Optional[bool],
     contradiction_count: Optional[int],
     not_evaluable_reason: Optional[str],
+    sample_contradiction_groups: Optional[list] = None,
 ) -> SecCompanyFactsReadinessDiagnostic:
     """Build a safe diagnostic for one SEC CompanyFacts artifact.
 
@@ -189,6 +195,7 @@ def diagnose_sec_companyfacts_readiness(
         contradiction_evaluable=contradiction_evaluable,
         contradiction_count=contradiction_count,
         not_evaluable_reason=not_evaluable_reason,
+        sample_contradiction_groups=sample_contradiction_groups,
         readiness_category=readiness_category,
         is_stale_model_version=is_stale_model,
         is_false_contradiction_candidate=is_false_contradiction_candidate,

@@ -518,6 +518,7 @@ def _build_holding_row(
             ),
             contradiction_count=getattr(sec_cov, "contradiction_count", None),
             not_evaluable_reason=getattr(sec_cov, "not_evaluable_reason", None),
+            sample_contradiction_groups=getattr(sec_cov, "sample_contradiction_groups", None),
         )
         sec_companyfacts_diagnostic = diag.to_dict()
 

@@ -119,6 +119,7 @@ def _empty_supplemental(
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records={},
     )
 
 
@@ -340,10 +341,11 @@ class TestClassifyRootCauseBuckets:
             news_sentiment_usability="SUPPRESSED_INCOMPLETE",
             has_target_weight=True,
             has_thesis_history=True,
-            valuation_lane_exists=False,  # always False at Stage 9B
+            valuation_lane_exists=False,  # always False at Stage 9D
         )
         assert bucket == BUCKET_VALUATION_NOT_BUILT
-        assert "Stage 5J/5K" in fix
+        # Stage 9D: message now references canonical equity dataset as built
+        assert "valuation" in fix.lower()
 
     def test_equity_sec_usable_with_limitations_also_passes_to_valuation(self):
         """USABLE_WITH_LIMITATIONS is considered usable — passes through to next priority."""
@@ -541,6 +543,7 @@ class TestArtifactExistsVsWeak:
             recommendation_tickers=frozenset({"NVDA"}) if has_thesis_history else frozenset(),
             fact_counts={},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
 
 
@@ -639,7 +642,7 @@ class TestValuationLaneNotBuilt:
             supplemental=_empty_supplemental(),
         )
         summary = row.valuation_inputs_available_summary
-        assert "Stage 5J/5K" in summary or "valuation" in summary.lower()
+        assert "valuation" in summary.lower()
 
     def test_valuation_not_applicable_for_etf(self):
         row = _build_holding_row(
@@ -1122,6 +1125,7 @@ class TestObservationCounts:
             recommendation_tickers=frozenset(),
             fact_counts={artifact_id: 42},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
         row = _build_holding_row(
             ticker="CRM",
@@ -1157,6 +1161,7 @@ class TestObservationCounts:
             recommendation_tickers=frozenset(),
             fact_counts={artifact_id: 5},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
         row = _build_holding_row(
             ticker="CRM",
@@ -1379,6 +1384,7 @@ def _empty_supplemental(
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records={},
     )
 
 

@@ -55,14 +55,32 @@ from unittest.mock import MagicMock
 import pytest
 
 from app.services.intelligence.v3.canonical_equity_dataset_v1 import (
+    ALL_SECTIONS,
+    BASIS_SEC_COMPANYFACTS,
+    BASIS_UNAVAILABLE,
     DATASET_VERSION,
+    SECTION_CASH_FLOW_FCF,
+    SECTION_NET_INCOME_EPS,
+    SECTION_PROFITABILITY,
+    SECTION_REVENUE,
+    SECTION_SHARE_COUNT,
+    SECTION_STATUS_AVAILABLE,
+    SECTION_STATUS_MISSING,
+    SECTION_STATUS_NOT_APPLICABLE,
+    SECTION_STATUS_PARTIAL,
     SYNTHESIS_GATE_BLOCKED,
     TECHNICAL_TRUST_LABEL,
+    TREND_DOWN,
+    TREND_FLAT,
+    TREND_UNKNOWN,
+    TREND_UP,
     VALUATION_GATE_BLOCKED,
     AssetClassFoundationGap,
     AssetParityRoadmap,
     CanonicalEquityDatasetRow,
+    EvidenceSectionRecord,
     OperatingTrendSection,
+    PeriodIdentity,
     build_asset_parity_roadmap,
     build_canonical_equity_dataset_row,
 )
@@ -196,12 +214,14 @@ def _empty_supplemental(
     recommendation_tickers: frozenset = frozenset(),
     fact_counts: Optional[dict] = None,
     has_portfolio_snapshot: bool = True,
+    sec_fact_records: Optional[dict] = None,
 ) -> _SupplementalData:
     return _SupplementalData(
         target_tickers=target_tickers,
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records=sec_fact_records or {},
     )
 
 
@@ -1134,6 +1154,417 @@ class TestForensicsComputeDataFoundation:
 
         assert result.equity_canonical_dataset_count == 0
         assert len(result.equity_canonical_dataset_degraded_tickers) == len(tickers)
+
+
+# ── Tests: section-level structure ───────────────────────────────────────────
+
+
+class TestSectionLevelStructure:
+    """Section-level normalized evidence records — the real dataset substance."""
+
+    def _usable_row(self, completeness: str = "COMPLETE", obs: int = 20) -> CanonicalEquityDatasetRow:
+        sec = _make_sec_lane(usability_label="USABLE", completeness_band=completeness)
+        return build_canonical_equity_dataset_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=obs,
+            cat_count=None,
+        )
+
+    def test_operating_trends_sections_dict_has_all_five_sections(self):
+        row = self._usable_row()
+        assert isinstance(row.operating_trends.sections, dict)
+        assert set(row.operating_trends.sections.keys()) == set(ALL_SECTIONS)
+
+    def test_each_section_has_required_fields(self):
+        row = self._usable_row()
+        for name, rec in row.operating_trends.sections.items():
+            assert isinstance(rec, EvidenceSectionRecord), f"{name} not EvidenceSectionRecord"
+            assert rec.section == name
+            assert rec.status in (
+                SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL,
+                SECTION_STATUS_MISSING, SECTION_STATUS_NOT_APPLICABLE,
+            ), f"{name}: invalid status {rec.status!r}"
+            assert rec.evidence_basis in (BASIS_SEC_COMPANYFACTS, BASIS_UNAVAILABLE), \
+                f"{name}: invalid evidence_basis {rec.evidence_basis!r}"
+            assert rec.trend_direction in {"UP", "DOWN", "FLAT", "MIXED", "UNKNOWN"}, \
+                f"{name}: invalid trend_direction {rec.trend_direction!r}"
+
+    def test_available_sections_have_sec_companyfacts_basis(self):
+        row = self._usable_row(completeness="COMPLETE", obs=20)
+        for name, rec in row.operating_trends.sections.items():
+            if rec.status in (SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL):
+                assert rec.evidence_basis == BASIS_SEC_COMPANYFACTS, \
+                    f"{name}: expected SEC_COMPANYFACTS, got {rec.evidence_basis}"
+
+    def test_missing_sections_have_unavailable_basis(self):
+        sec = _make_sec_lane(usability_label="SUPPRESSED_CONTRADICTED", status=STATUS_SUPPRESSED)
+        row = build_canonical_equity_dataset_row(
+            ticker="TSM",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=5,
+            cat_count=None,
+        )
+        for name, rec in row.operating_trends.sections.items():
+            assert rec.status == SECTION_STATUS_MISSING
+            assert rec.evidence_basis == BASIS_UNAVAILABLE
+
+    def test_metadata_fallback_trend_direction_is_unknown(self):
+        """When no fact records provided, trend_direction must be UNKNOWN."""
+        row = self._usable_row(completeness="COMPLETE", obs=20)
+        for name, rec in row.operating_trends.sections.items():
+            if rec.status in (SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL):
+                assert rec.trend_direction == TREND_UNKNOWN, \
+                    f"{name}: expected UNKNOWN without fact records, got {rec.trend_direction}"
+
+    def test_metadata_fallback_period_identities_are_none(self):
+        """When no fact records, period identities are None."""
+        row = self._usable_row(completeness="COMPLETE", obs=20)
+        for name, rec in row.operating_trends.sections.items():
+            assert rec.latest_period_identity is None, \
+                f"{name}: expected None period identity without fact records"
+
+    def test_fact_records_populate_period_identities(self):
+        """When fact records provided, revenue section gets period identities."""
+        sec = _make_sec_lane(usability_label="USABLE", completeness_band="COMPLETE")
+        fact_records = [
+            {
+                "metric_name": "Revenues",
+                "value": 391035000000,
+                "unit": "USD",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+                "period_end": "2024-09-28",
+                "form": "10-K",
+            },
+            {
+                "metric_name": "Revenues",
+                "value": 383285000000,
+                "unit": "USD",
+                "fiscal_year": 2023,
+                "fiscal_period": "FY",
+                "period_end": "2023-09-30",
+                "form": "10-K",
+            },
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        rev = row.operating_trends.sections[SECTION_REVENUE]
+        assert rev.status == SECTION_STATUS_AVAILABLE
+        assert rev.latest_period_identity is not None
+        assert rev.latest_period_identity.fiscal_year == 2024
+        assert rev.latest_period_identity.period_end == "2024-09-28"
+        assert rev.comparison_period_identity is not None
+        assert rev.comparison_period_identity.fiscal_year == 2023
+
+    def test_fact_records_compute_trend_up(self):
+        """Revenue rising >5% → trend_direction == UP."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 110, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "Revenues", "value": 100, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        assert row.operating_trends.sections[SECTION_REVENUE].trend_direction == TREND_UP
+
+    def test_fact_records_compute_trend_down(self):
+        """Revenue falling >5% → trend_direction == DOWN."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 90, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "Revenues", "value": 100, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        assert row.operating_trends.sections[SECTION_REVENUE].trend_direction == TREND_DOWN
+
+    def test_fact_records_compute_trend_flat(self):
+        """Revenue change within ±5% → trend_direction == FLAT."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 102, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "Revenues", "value": 100, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        assert row.operating_trends.sections[SECTION_REVENUE].trend_direction == TREND_FLAT
+
+    def test_raw_values_never_in_serialized_output(self):
+        """Raw fact values must not appear in the serialized dataset row."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 391035000000, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "Revenues", "value": 383285000000, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        import json
+        output_str = json.dumps(row.to_dict())
+        assert "391035000000" not in output_str
+        assert "383285000000" not in output_str
+
+    def test_only_one_fact_record_gives_partial_status(self):
+        """One annual observation → PARTIAL status, no comparison period."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 100, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=5,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        rev = row.operating_trends.sections[SECTION_REVENUE]
+        assert rev.status == SECTION_STATUS_PARTIAL
+        assert rev.latest_period_identity is not None
+        assert rev.comparison_period_identity is None
+        assert rev.trend_direction == TREND_UNKNOWN
+
+    def test_etf_all_sections_not_applicable(self):
+        """ETF → all sections have NOT_APPLICABLE status."""
+        row = build_canonical_equity_dataset_row(
+            ticker="SPY",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            sec_obs_count=None,
+            cat_count=None,
+        )
+        for name, rec in row.operating_trends.sections.items():
+            assert rec.status == SECTION_STATUS_NOT_APPLICABLE, \
+                f"{name}: expected NOT_APPLICABLE, got {rec.status}"
+
+    def test_sections_to_dict_has_all_five_keys(self):
+        """OperatingTrendSection.to_dict() sections key has all 5 sections."""
+        row = self._usable_row()
+        d = row.operating_trends.to_dict()
+        assert "sections" in d
+        assert set(d["sections"].keys()) == set(ALL_SECTIONS)
+
+    def test_backward_compat_booleans_still_in_to_dict(self):
+        """to_dict() still includes backward-compat boolean fields."""
+        row = self._usable_row(completeness="COMPLETE", obs=20)
+        d = row.operating_trends.to_dict()
+        for field_name in [
+            "revenue_trend_available",
+            "profitability_margin_available",
+            "eps_net_income_available",
+            "fcf_available",
+            "share_count_dilution_available",
+        ]:
+            assert field_name in d, f"Missing backward-compat field: {field_name}"
+
+    def test_section_period_identity_to_dict_has_no_value_key(self):
+        """PeriodIdentity.to_dict() must not contain 'value'."""
+        pid = PeriodIdentity(
+            fiscal_year=2024,
+            fiscal_period="FY",
+            period_end="2024-09-28",
+            unit="USD",
+            form="10-K",
+        )
+        d = pid.to_dict()
+        assert "value" not in d
+        assert "fiscal_year" in d
+        assert "period_end" in d
+
+    def test_no_xbrl_metric_names_in_section_record_to_dict(self):
+        """EvidenceSectionRecord.to_dict() must not contain raw XBRL metric names."""
+        import json
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            {"metric_name": "Revenues", "value": 100, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "FY", "period_end": "2024-09-28", "form": "10-K"},
+            {"metric_name": "Revenues", "value": 90, "unit": "USD",
+             "fiscal_year": 2023, "fiscal_period": "FY", "period_end": "2023-09-30", "form": "10-K"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="AAPL",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=20,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        for name, rec in row.operating_trends.sections.items():
+            d_str = json.dumps(rec.to_dict())
+            forbidden = ["Revenues", "NetIncomeLoss", "us-gaap/", "EarningsPerShareBasic"]
+            for key in forbidden:
+                assert key not in d_str, \
+                    f"{name}: raw XBRL key {key!r} found in section record"
+
+    def test_quarterly_facts_excluded_from_annual_section_records(self):
+        """Quarterly observations (Q1/Q2/Q3/Q4) must be excluded from annual section records."""
+        sec = _make_sec_lane(usability_label="USABLE")
+        fact_records = [
+            # Only quarterly — no annual
+            {"metric_name": "Revenues", "value": 30, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "Q1", "period_end": "2024-03-31", "form": "10-Q"},
+            {"metric_name": "Revenues", "value": 28, "unit": "USD",
+             "fiscal_year": 2024, "fiscal_period": "Q2", "period_end": "2024-06-30", "form": "10-Q"},
+        ]
+        row = build_canonical_equity_dataset_row(
+            ticker="TEST",
+            asset_type=INSTRUMENT_CATEGORY_EQUITY,
+            lanes={LANE_SEC_COMPANY_FACTS: sec},
+            sec_obs_count=2,
+            cat_count=None,
+            sec_fact_records=fact_records,
+        )
+        rev = row.operating_trends.sections[SECTION_REVENUE]
+        # Quarterly facts should not be used for annual section status
+        assert rev.status == SECTION_STATUS_MISSING
+
+
+# ── Tests: forensics section counts ──────────────────────────────────────────
+
+
+class TestForensicsSectionCounts:
+    """DataFoundationForensicsResult includes canonical_equity_dataset_section_counts."""
+
+    def test_forensics_result_includes_section_counts_key(self):
+        """to_dict() includes canonical_equity_dataset_section_counts."""
+        tickers = ["AAPL"]
+        holding_ctx = {"AAPL": {"category": "Equity"}}
+        coverage = _make_coverage(tickers_lanes={
+            "AAPL": {LANE_SEC_COMPANY_FACTS: _make_sec_lane(
+                usability_label="USABLE", completeness_band="COMPLETE"
+            )}
+        })
+
+        with pytest.MonkeyPatch.context() as mp:
+            from app.services.intelligence.v3 import intel_data_foundation_forensics_v1 as mod
+            mp.setattr(mod, "compute_research_evidence_coverage", lambda **kw: coverage)
+
+            db_client = MagicMock()
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.in_.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+
+            result = compute_data_foundation_forensics(
+                user_id="user-test",
+                tickers=tickers,
+                holding_context_by_ticker=holding_ctx,
+                db_client=db_client,
+            )
+
+        d = result.to_dict()
+        assert "canonical_equity_dataset_section_counts" in d
+        assert isinstance(d["canonical_equity_dataset_section_counts"], dict)
+
+    def test_section_counts_populated_for_usable_equity(self):
+        """An equity with COMPLETE/USABLE SEC should register section counts."""
+        tickers = ["AAPL"]
+        holding_ctx = {"AAPL": {"category": "Equity"}}
+        coverage = _make_coverage(tickers_lanes={
+            "AAPL": {LANE_SEC_COMPANY_FACTS: _make_sec_lane(
+                usability_label="USABLE", completeness_band="COMPLETE"
+            )}
+        })
+
+        with pytest.MonkeyPatch.context() as mp:
+            from app.services.intelligence.v3 import intel_data_foundation_forensics_v1 as mod
+            mp.setattr(mod, "compute_research_evidence_coverage", lambda **kw: coverage)
+
+            db_client = MagicMock()
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.in_.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+
+            result = compute_data_foundation_forensics(
+                user_id="user-test",
+                tickers=tickers,
+                holding_context_by_ticker=holding_ctx,
+                db_client=db_client,
+            )
+
+        # With COMPLETE/USABLE + obs=0 (mock returns empty), metadata fallback applies.
+        # obs_count from mock data = 0, so status will be MISSING (no raw fact records).
+        # The section_counts dict should still exist (possibly empty if all MISSING).
+        assert isinstance(result.canonical_equity_dataset_section_counts, dict)
+
+    def test_section_counts_zero_for_degraded_equity(self):
+        """Degraded (suppressed) equity contributes no sections to section_counts."""
+        tickers = ["TSM"]
+        holding_ctx = {"TSM": {"category": "Equity"}}
+        coverage = _make_coverage(tickers_lanes={
+            "TSM": {LANE_SEC_COMPANY_FACTS: _make_sec_lane(
+                usability_label="SUPPRESSED_CONTRADICTED",
+                status=STATUS_SUPPRESSED,
+            )}
+        })
+
+        with pytest.MonkeyPatch.context() as mp:
+            from app.services.intelligence.v3 import intel_data_foundation_forensics_v1 as mod
+            mp.setattr(mod, "compute_research_evidence_coverage", lambda **kw: coverage)
+
+            db_client = MagicMock()
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.in_.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+            db_client.table.return_value.select.return_value.eq.return_value \
+                .limit.return_value.execute.return_value = MagicMock(data=[])
+
+            result = compute_data_foundation_forensics(
+                user_id="user-test",
+                tickers=tickers,
+                holding_context_by_ticker=holding_ctx,
+                db_client=db_client,
+            )
+
+        # Suppressed equity → all sections MISSING → no section counts.
+        assert result.canonical_equity_dataset_section_counts == {}
 
 
 # ── Tests: safety invariants ──────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 """Stage 9D — Canonical Equity Research Dataset v1.
 
 Pure, no-IO read model. Converts trusted equity evidence artifact metadata
-(Stage 5J LaneCoverage + supplemental fact counts from Stage 9B forensics)
+(Stage 5J LaneCoverage + optional SEC XBRL fact records from Stage 9B forensics)
 into one normalized, auditable per-ticker equity research dataset row.
 
 This dataset is the required foundation for future equity valuation (Stage 9E)
@@ -15,7 +15,8 @@ Architecture contracts (non-negotiable):
   - synthesis_ready is always False.
   - valuation_ready is False at Stage 9D (valuation lane not built yet).
   - Does NOT expose raw metric keys, fact values, source URLs, or API keys.
-  - Does NOT fabricate availability signals — only derives from trusted metadata.
+  - Does NOT fabricate availability signals — only derives from trusted metadata
+    or from fact records (values consumed internally, never serialized).
   - Equity-only: ETF and crypto return NOT_APPLICABLE rows.
   - TSM/KLAR/BLSH or any ticker with weak/stale SEC facts get honest
     degraded/missing availability signals — no forced parity.
@@ -57,23 +58,12 @@ _USABLE_LABELS = frozenset({"USABLE", "USABLE_WITH_LIMITATIONS"})
 # Freshness labels that indicate data is current enough to use.
 _FRESH_LABELS = frozenset({"FRESH", "AGING"})
 
-# Completeness bands for deriving section availability signals.
+# Completeness bands used in metadata-fallback section derivation.
 _COMPLETENESS_COMPLETE = "COMPLETE"
 _COMPLETENESS_PARTIAL = "PARTIAL"
 _COMPLETENESS_THIN = "THIN"
 
-# Per-section minimum completeness to mark as available.
-# Revenue/EPS/profitability: PARTIAL is enough (they appear in most 10-K/10-Q).
-# FCF: needs COMPLETE (requires both operating cash and CapEx metrics).
-_SECTION_MIN_COMPLETENESS = {
-    "revenue_trend": _COMPLETENESS_PARTIAL,
-    "profitability_margin": _COMPLETENESS_PARTIAL,
-    "eps_net_income": _COMPLETENESS_PARTIAL,
-    "fcf": _COMPLETENESS_COMPLETE,
-    "share_count_dilution": _COMPLETENESS_PARTIAL,
-}
-
-# Minimum observation count proxy for availability (SEC XBRL typically has many observations).
+# Minimum observation count for AVAILABLE status (metadata-fallback path).
 _MIN_OBSERVATIONS_FOR_AVAILABILITY = 3
 
 # Trust label applied to technical context section — always limited trust for decision context.
@@ -85,47 +75,223 @@ SYNTHESIS_GATE_BLOCKED = "BLOCKED_ALL_ASSET_CLASSES_NEED_CANONICAL_DATASETS"
 # Valuation gate for equities at Stage 9D.
 VALUATION_GATE_BLOCKED = "BLOCKED_VALUATION_LANE_NOT_BUILT"
 
+# ── Section identifiers ────────────────────────────────────────────────────────
+
+SECTION_REVENUE = "revenue"
+SECTION_PROFITABILITY = "profitability_or_margin"
+SECTION_NET_INCOME_EPS = "net_income_or_eps"
+SECTION_CASH_FLOW_FCF = "cash_flow_or_fcf"
+SECTION_SHARE_COUNT = "share_count_or_dilution"
+
+ALL_SECTIONS = (
+    SECTION_REVENUE,
+    SECTION_PROFITABILITY,
+    SECTION_NET_INCOME_EPS,
+    SECTION_CASH_FLOW_FCF,
+    SECTION_SHARE_COUNT,
+)
+
+# ── Evidence section status ────────────────────────────────────────────────────
+
+SECTION_STATUS_AVAILABLE = "AVAILABLE"
+SECTION_STATUS_PARTIAL = "PARTIAL"
+SECTION_STATUS_MISSING = "MISSING"
+SECTION_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+# ── Trend direction values (internally computed, only direction label exposed) ─
+
+TREND_UP = "UP"
+TREND_DOWN = "DOWN"
+TREND_FLAT = "FLAT"
+TREND_MIXED = "MIXED"
+TREND_UNKNOWN = "UNKNOWN"
+
+_VALID_TREND_DIRECTIONS = frozenset({TREND_UP, TREND_DOWN, TREND_FLAT, TREND_MIXED, TREND_UNKNOWN})
+
+# ── Evidence basis values ──────────────────────────────────────────────────────
+
+BASIS_SEC_COMPANYFACTS = "SEC_COMPANYFACTS"
+BASIS_UNAVAILABLE = "UNAVAILABLE"
+
+# ── SEC XBRL metric → canonical section mapping (internal, never serialized) ──
+
+_SECTION_METRIC_MAP: dict[str, str] = {
+    # Revenue
+    "Revenues": SECTION_REVENUE,
+    "RevenueFromContractWithCustomerExcludingAssessedTax": SECTION_REVENUE,
+    "RevenueFromContractWithCustomerIncludingAssessedTax": SECTION_REVENUE,
+    "SalesRevenueNet": SECTION_REVENUE,
+    "SalesRevenueGoodsNet": SECTION_REVENUE,
+    "SalesRevenueServicesNet": SECTION_REVENUE,
+    "RevenueFromContractWithCustomer": SECTION_REVENUE,
+    "RevenueFromRelatedParties": SECTION_REVENUE,
+    # Profitability / margin
+    "GrossProfit": SECTION_PROFITABILITY,
+    "OperatingIncomeLoss": SECTION_PROFITABILITY,
+    # Net income / EPS
+    "NetIncomeLoss": SECTION_NET_INCOME_EPS,
+    "NetIncomeLossAvailableToCommonStockholdersBasic": SECTION_NET_INCOME_EPS,
+    "NetIncomeLossAvailableToCommonStockholdersDiluted": SECTION_NET_INCOME_EPS,
+    "EarningsPerShareBasic": SECTION_NET_INCOME_EPS,
+    "EarningsPerShareDiluted": SECTION_NET_INCOME_EPS,
+    # Cash flow / FCF
+    "NetCashProvidedByUsedInOperatingActivities": SECTION_CASH_FLOW_FCF,
+    "NetCashProvidedByUsedInInvestingActivities": SECTION_CASH_FLOW_FCF,
+    "PaymentsToAcquirePropertyPlantAndEquipment": SECTION_CASH_FLOW_FCF,
+    # Share count / dilution
+    "CommonStockSharesOutstanding": SECTION_SHARE_COUNT,
+    "CommonStockSharesIssued": SECTION_SHARE_COUNT,
+    "WeightedAverageNumberOfSharesOutstandingBasic": SECTION_SHARE_COUNT,
+    "WeightedAverageNumberOfDilutedSharesOutstanding": SECTION_SHARE_COUNT,
+    "WeightedAverageNumberOfShareOutstandingBasicAndDiluted": SECTION_SHARE_COUNT,
+}
+
+
+# ── Period identity dataclass ──────────────────────────────────────────────────
+
+
+@dataclass
+class PeriodIdentity:
+    """Safe period identity for one financial observation. No raw fact values."""
+
+    fiscal_year: Optional[int]
+    fiscal_period: Optional[str]   # "FY" | "Q1" | "Q2" | "Q3" | "Q4"
+    period_end: Optional[str]      # ISO date e.g. "2024-09-28"
+    unit: Optional[str]            # "USD" | "shares"
+    form: Optional[str]            # "10-K" | "10-Q"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "fiscal_year": self.fiscal_year,
+            "fiscal_period": self.fiscal_period,
+            "period_end": self.period_end,
+            "unit": self.unit,
+            "form": self.form,
+        }
+
+
+# ── Evidence section record ────────────────────────────────────────────────────
+
+
+@dataclass
+class EvidenceSectionRecord:
+    """Normalized evidence record for one operating-trends section.
+
+    The primary source of truth for one financial category (revenue, margins,
+    etc.) within the canonical equity dataset. Safe for downstream adapters.
+
+    Raw fact values are NEVER stored or serialized here.
+    trend_direction is derived internally from raw values (when available) but
+    only the direction label (UP/DOWN/FLAT/MIXED/UNKNOWN) is retained.
+    """
+
+    section: str
+    status: str            # AVAILABLE | PARTIAL | MISSING | NOT_APPLICABLE
+    evidence_basis: str    # SEC_COMPANYFACTS | UNAVAILABLE
+    latest_period_identity: Optional[PeriodIdentity]
+    comparison_period_identity: Optional[PeriodIdentity]
+    trend_direction: str   # UP | DOWN | FLAT | MIXED | UNKNOWN
+    source_artifact_id: Optional[str]
+    missing_reason: Optional[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "section": self.section,
+            "status": self.status,
+            "evidence_basis": self.evidence_basis,
+            "latest_period_identity": (
+                self.latest_period_identity.to_dict()
+                if self.latest_period_identity else None
+            ),
+            "comparison_period_identity": (
+                self.comparison_period_identity.to_dict()
+                if self.comparison_period_identity else None
+            ),
+            "trend_direction": self.trend_direction,
+            "source_artifact_id": self.source_artifact_id,
+            "missing_reason": self.missing_reason,
+        }
+
 
 # ── Section dataclasses ────────────────────────────────────────────────────────
 
 
 @dataclass
 class OperatingTrendSection:
-    """Availability signals for operating trend inputs derived from SEC artifact metadata.
+    """Section-level normalized evidence records for operating trends.
 
-    These are AVAILABILITY signals, not actual values.
-    Fields indicate whether sufficient artifact metadata exists to derive each
-    signal category — not the actual revenue/EPS/FCF numbers.
+    The primary source of truth is the `sections` dict — one EvidenceSectionRecord
+    per financial category (revenue, profitability, net income/EPS, FCF, share count).
+
+    When sec_fact_records are provided to the builder, sections contain real period
+    identities (fiscal_year, period_end, unit, form) and an internally-computed
+    trend_direction. When only artifact metadata is available (metadata fallback),
+    sections contain derived status/basis but period identities are None and
+    trend_direction is UNKNOWN.
+
+    Backward-compatible boolean properties (revenue_trend_available, etc.) delegate
+    to sections[...].status == AVAILABLE for legacy callers.
+
+    No raw fact values are stored or serialized anywhere in this structure.
     """
 
-    revenue_trend_available: bool
-    profitability_margin_available: bool
-    eps_net_income_available: bool
-    fcf_available: bool
-    share_count_dilution_available: bool
+    # Per-section normalized evidence records (primary source of truth).
+    sections: dict  # dict[str, EvidenceSectionRecord]
 
-    # Metadata that governs the availability signals above.
+    # Artifact-level metadata governing all sections.
     trend_source: str          # "sec_company_facts" | "unavailable"
     observation_count: Optional[int]
     completeness_band: Optional[str]
     freshness_status: Optional[str]
     usability_label: Optional[str]
+    missing_reason: Optional[str]
 
-    missing_reason: Optional[str]  # non-None when trend_source == "unavailable"
+    # ── Backward-compatible availability signals ──────────────────────────────
+    # True only when status == AVAILABLE (not just PARTIAL) to preserve
+    # existing behavior: "sufficient data for this section".
+
+    @property
+    def revenue_trend_available(self) -> bool:
+        s = self.sections.get(SECTION_REVENUE)
+        return s is not None and s.status == SECTION_STATUS_AVAILABLE
+
+    @property
+    def profitability_margin_available(self) -> bool:
+        s = self.sections.get(SECTION_PROFITABILITY)
+        return s is not None and s.status == SECTION_STATUS_AVAILABLE
+
+    @property
+    def eps_net_income_available(self) -> bool:
+        s = self.sections.get(SECTION_NET_INCOME_EPS)
+        return s is not None and s.status == SECTION_STATUS_AVAILABLE
+
+    @property
+    def fcf_available(self) -> bool:
+        s = self.sections.get(SECTION_CASH_FLOW_FCF)
+        return s is not None and s.status == SECTION_STATUS_AVAILABLE
+
+    @property
+    def share_count_dilution_available(self) -> bool:
+        s = self.sections.get(SECTION_SHARE_COUNT)
+        return s is not None and s.status == SECTION_STATUS_AVAILABLE
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "revenue_trend_available": self.revenue_trend_available,
-            "profitability_margin_available": self.profitability_margin_available,
-            "eps_net_income_available": self.eps_net_income_available,
-            "fcf_available": self.fcf_available,
-            "share_count_dilution_available": self.share_count_dilution_available,
+            # Primary: per-section normalized evidence records.
+            "sections": {k: v.to_dict() for k, v in self.sections.items()},
+            # Artifact-level metadata.
             "trend_source": self.trend_source,
             "observation_count": self.observation_count,
             "completeness_band": self.completeness_band,
             "freshness_status": self.freshness_status,
             "usability_label": self.usability_label,
             "missing_reason": self.missing_reason,
+            # Backward-compatible availability signals (derived from sections).
+            "revenue_trend_available": self.revenue_trend_available,
+            "profitability_margin_available": self.profitability_margin_available,
+            "eps_net_income_available": self.eps_net_income_available,
+            "fcf_available": self.fcf_available,
+            "share_count_dilution_available": self.share_count_dilution_available,
         }
 
 
@@ -316,6 +482,7 @@ def build_canonical_equity_dataset_row(
     lanes: dict[str, LaneCoverage],
     sec_obs_count: Optional[int],
     cat_count: Optional[int],
+    sec_fact_records: Optional[list[dict]] = None,
 ) -> CanonicalEquityDatasetRow:
     """Build a canonical equity dataset row for one ticker.
 
@@ -326,6 +493,11 @@ def build_canonical_equity_dataset_row(
         sec_obs_count: COUNT of research_artifact_facts for the SEC company facts
             artifact_id (already fetched by Stage 9B supplemental queries).
         cat_count: COUNT of research_artifact_facts for the SEC catalyst artifact_id.
+        sec_fact_records: Optional list of structured_payload dicts from
+            research_artifact_facts for the SEC company facts artifact. When
+            provided, enables per-section period identities and internally-computed
+            trend directions. When absent, falls back to metadata proxy. Raw
+            values in these records are used internally and never serialized.
 
     Returns:
         CanonicalEquityDatasetRow — always non-None, never raises.
@@ -357,11 +529,12 @@ def build_canonical_equity_dataset_row(
         current_sec_model=SEC_COMPANYFACTS_CURRENT_MODEL_VERSION,
     )
 
-    # Operating trends — derived from SEC company facts metadata.
+    # Operating trends — section-level normalized evidence records from SEC company facts.
     operating_trends = _build_operating_trends(
         sec_cov=sec_cov,
         sec_obs_count=sec_obs_count,
         sec_is_usable=sec_is_usable,
+        sec_fact_records=sec_fact_records,
     )
 
     # Catalyst context — from SEC catalyst sentiment lane.
@@ -483,6 +656,236 @@ def build_asset_parity_roadmap(
 # ── Internal helpers ───────────────────────────────────────────────────────────
 
 
+def _build_missing_section_record(section: str, reason: str) -> EvidenceSectionRecord:
+    return EvidenceSectionRecord(
+        section=section,
+        status=SECTION_STATUS_MISSING,
+        evidence_basis=BASIS_UNAVAILABLE,
+        latest_period_identity=None,
+        comparison_period_identity=None,
+        trend_direction=TREND_UNKNOWN,
+        source_artifact_id=None,
+        missing_reason=reason,
+    )
+
+
+def _build_not_applicable_section_record(section: str, reason: str) -> EvidenceSectionRecord:
+    return EvidenceSectionRecord(
+        section=section,
+        status=SECTION_STATUS_NOT_APPLICABLE,
+        evidence_basis=BASIS_UNAVAILABLE,
+        latest_period_identity=None,
+        comparison_period_identity=None,
+        trend_direction=TREND_UNKNOWN,
+        source_artifact_id=None,
+        missing_reason=reason,
+    )
+
+
+def _compute_trend_direction(v_latest: float, v_prior: float) -> str:
+    """Compute trend direction from two consecutive values. Internal use only.
+
+    Raw values are NEVER exposed outside this function — only the direction
+    string is returned and stored in EvidenceSectionRecord.trend_direction.
+    """
+    try:
+        if v_prior == 0:
+            return TREND_UNKNOWN
+        pct_change = (v_latest - v_prior) / abs(v_prior)
+        if pct_change > 0.05:
+            return TREND_UP
+        if pct_change < -0.05:
+            return TREND_DOWN
+        return TREND_FLAT
+    except (TypeError, ZeroDivisionError, ValueError):
+        return TREND_UNKNOWN
+
+
+def _compute_section_records_from_facts(
+    *,
+    sec_fact_records: list[dict],
+    sec_is_usable: bool,
+    artifact_id: Optional[str],
+    missing_reason: str,
+) -> dict:
+    """Build per-section evidence records from actual SEC XBRL fact records.
+
+    Computes trend_direction internally from raw values in structured_payload.
+    NEVER serializes raw values — only direction strings and period identities.
+
+    Considers only annual observations (fiscal_period == "FY" or form == "10-K").
+    """
+    if not sec_is_usable or not sec_fact_records:
+        return {s: _build_missing_section_record(s, missing_reason) for s in ALL_SECTIONS}
+
+    # Group annual observations by section.
+    section_obs: dict[str, list[dict]] = {s: [] for s in ALL_SECTIONS}
+    for record in sec_fact_records:
+        metric_name = record.get("metric_name", "")
+        section = _SECTION_METRIC_MAP.get(metric_name)
+        if section is None:
+            continue
+        fp = (record.get("fiscal_period") or "").upper()
+        form = (record.get("form") or "").upper()
+        is_annual = (fp == "FY") or ("10-K" in form)
+        if not is_annual:
+            continue
+        if record.get("fiscal_year") is None:
+            continue
+        section_obs[section].append(record)
+
+    result: dict[str, EvidenceSectionRecord] = {}
+    for section in ALL_SECTIONS:
+        obs = section_obs[section]
+        obs_sorted = sorted(
+            obs,
+            key=lambda r: (r.get("fiscal_year") or 0),
+            reverse=True,
+        )
+
+        if not obs_sorted:
+            result[section] = _build_missing_section_record(
+                section,
+                f"No annual observations found for {section} section in SEC facts.",
+            )
+            continue
+
+        latest = obs_sorted[0]
+        latest_period = PeriodIdentity(
+            fiscal_year=latest.get("fiscal_year"),
+            fiscal_period=latest.get("fiscal_period"),
+            period_end=latest.get("period_end"),
+            unit=latest.get("unit"),
+            form=latest.get("form"),
+        )
+
+        comparison_period: Optional[PeriodIdentity] = None
+        trend_direction = TREND_UNKNOWN
+
+        if len(obs_sorted) >= 2:
+            prior = obs_sorted[1]
+            comparison_period = PeriodIdentity(
+                fiscal_year=prior.get("fiscal_year"),
+                fiscal_period=prior.get("fiscal_period"),
+                period_end=prior.get("period_end"),
+                unit=prior.get("unit"),
+                form=prior.get("form"),
+            )
+            # Compute trend direction from raw values — internally only, never serialized.
+            try:
+                v_latest = float(latest.get("value") or 0)
+                v_prior = float(prior.get("value") or 0)
+                trend_direction = _compute_trend_direction(v_latest, v_prior)
+            except (TypeError, ValueError):
+                trend_direction = TREND_UNKNOWN
+
+        status = SECTION_STATUS_AVAILABLE if len(obs_sorted) >= 2 else SECTION_STATUS_PARTIAL
+
+        result[section] = EvidenceSectionRecord(
+            section=section,
+            status=status,
+            evidence_basis=BASIS_SEC_COMPANYFACTS,
+            latest_period_identity=latest_period,
+            comparison_period_identity=comparison_period,
+            trend_direction=trend_direction,
+            source_artifact_id=artifact_id,
+            missing_reason=None,
+        )
+
+    return result
+
+
+def _compute_section_records_from_metadata(
+    *,
+    sec_cov: LaneCoverage,
+    sec_obs_count: Optional[int],
+    sec_is_usable: bool,
+    missing_reason: str,
+) -> dict:
+    """Derive section records from artifact metadata when fact records are unavailable.
+
+    Uses completeness_band + observation_count as proxies for section availability.
+    Period identities and trend directions are UNKNOWN in this path — only the
+    status and evidence_basis can be derived from metadata alone.
+    """
+    if not sec_is_usable:
+        return {s: _build_missing_section_record(s, missing_reason) for s in ALL_SECTIONS}
+
+    completeness = (sec_cov.completeness_band or "").upper()
+    freshness = (sec_cov.freshness_status or "").upper()
+    obs = sec_obs_count or 0
+
+    is_fresh = freshness in {s.upper() for s in _FRESH_LABELS}
+    has_observations = obs >= _MIN_OBSERVATIONS_FOR_AVAILABILITY
+    artifact_id = sec_cov.artifact_id
+
+    result: dict[str, EvidenceSectionRecord] = {}
+    for section in ALL_SECTIONS:
+        if section == SECTION_CASH_FLOW_FCF:
+            # FCF requires COMPLETE completeness + high observation count.
+            sufficient_complete = (
+                completeness == _COMPLETENESS_COMPLETE
+                and is_fresh
+                and obs >= _MIN_OBSERVATIONS_FOR_AVAILABILITY * 3
+            )
+            sufficient_partial = (
+                completeness in (_COMPLETENESS_PARTIAL, _COMPLETENESS_COMPLETE)
+                and is_fresh
+                and has_observations
+            )
+            if sufficient_complete:
+                status = SECTION_STATUS_AVAILABLE
+            elif sufficient_partial:
+                status = SECTION_STATUS_PARTIAL
+            else:
+                status = SECTION_STATUS_MISSING
+        else:
+            # Core sections: PARTIAL or COMPLETE completeness + fresh + sufficient obs.
+            sufficient = (
+                completeness in (_COMPLETENESS_PARTIAL, _COMPLETENESS_COMPLETE)
+                and is_fresh
+                and has_observations
+            )
+            if sufficient:
+                status = SECTION_STATUS_AVAILABLE
+            elif (
+                completeness in (_COMPLETENESS_PARTIAL, _COMPLETENESS_COMPLETE)
+                and is_fresh
+                and obs > 0
+            ):
+                status = SECTION_STATUS_PARTIAL
+            else:
+                status = SECTION_STATUS_MISSING
+
+        result[section] = EvidenceSectionRecord(
+            section=section,
+            status=status,
+            evidence_basis=(
+                BASIS_SEC_COMPANYFACTS
+                if status in (SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL)
+                else BASIS_UNAVAILABLE
+            ),
+            latest_period_identity=None,   # not derivable from metadata alone
+            comparison_period_identity=None,
+            trend_direction=TREND_UNKNOWN,  # not derivable from metadata alone
+            source_artifact_id=(
+                artifact_id
+                if status in (SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL)
+                else None
+            ),
+            missing_reason=(
+                None
+                if status in (SECTION_STATUS_AVAILABLE, SECTION_STATUS_PARTIAL)
+                else (
+                    f"Insufficient XBRL observations for {section} section "
+                    f"(completeness={completeness or 'unknown'})."
+                )
+            ),
+        )
+
+    return result
+
+
 def _build_not_applicable_row(
     ticker: str,
     asset_type: str,
@@ -500,12 +903,9 @@ def _build_not_applicable_row(
             else f"Asset type '{asset_type}' is not applicable for the equity dataset."
         )
     )
+    sections = {s: _build_not_applicable_section_record(s, reason) for s in ALL_SECTIONS}
     unavailable_trends = OperatingTrendSection(
-        revenue_trend_available=False,
-        profitability_margin_available=False,
-        eps_net_income_available=False,
-        fcf_available=False,
-        share_count_dilution_available=False,
+        sections=sections,
         trend_source="unavailable",
         observation_count=None,
         completeness_band=None,
@@ -579,55 +979,55 @@ def _build_operating_trends(
     sec_cov: Optional[LaneCoverage],
     sec_obs_count: Optional[int],
     sec_is_usable: bool,
+    sec_fact_records: Optional[list[dict]] = None,
 ) -> OperatingTrendSection:
-    """Derive operating trend availability signals from SEC company facts metadata.
+    """Build section-level normalized evidence records for operating trends.
 
-    Uses completeness_band + observation_count as proxies for section availability.
-    Does NOT expose actual metric values or raw XBRL keys.
+    When sec_fact_records are provided:
+      - Groups annual observations by section using SEC XBRL metric mapping.
+      - Extracts period identities (fiscal_year, period_end, unit, form).
+      - Computes trend_direction internally from raw values (never serialized).
+
+    When sec_fact_records are absent (metadata fallback):
+      - Derives section status from completeness_band + observation_count proxy.
+      - Period identities are None; trend_direction is UNKNOWN.
+
+    No raw XBRL metric keys, fact values, or accession numbers are serialized.
     """
+    missing_reason_base = _derive_not_safe_reason(
+        sec_cov, (sec_cov.usability_label if sec_cov else None) or ""
+    )
+
     if not sec_is_usable or sec_cov is None:
-        reason = _derive_not_safe_reason(sec_cov, (sec_cov.usability_label if sec_cov else None) or "")
+        reason = missing_reason_base or "SEC company facts artifact is not usable."
+        sections = {s: _build_missing_section_record(s, reason) for s in ALL_SECTIONS}
         return OperatingTrendSection(
-            revenue_trend_available=False,
-            profitability_margin_available=False,
-            eps_net_income_available=False,
-            fcf_available=False,
-            share_count_dilution_available=False,
+            sections=sections,
             trend_source="unavailable",
             observation_count=sec_obs_count,
             completeness_band=sec_cov.completeness_band if sec_cov else None,
             freshness_status=sec_cov.freshness_status if sec_cov else None,
             usability_label=sec_cov.usability_label if sec_cov else None,
-            missing_reason=reason or "SEC company facts artifact is not usable.",
+            missing_reason=reason,
         )
 
-    completeness = (sec_cov.completeness_band or "").upper()
-    freshness = (sec_cov.freshness_status or "").upper()
-    obs = sec_obs_count or 0
-
-    is_fresh = freshness in {s.upper() for s in _FRESH_LABELS}
-    has_observations = obs >= _MIN_OBSERVATIONS_FOR_AVAILABILITY
-
-    # Derive section-level availability:
-    # PARTIAL or COMPLETE completeness + fresh + min observations → available
-    # THIN or stale → limited or unavailable
-    sufficient_for_partial = (
-        completeness in {_COMPLETENESS_PARTIAL, _COMPLETENESS_COMPLETE}
-        and is_fresh
-        and has_observations
-    )
-    sufficient_for_complete = (
-        completeness == _COMPLETENESS_COMPLETE
-        and is_fresh
-        and obs >= _MIN_OBSERVATIONS_FOR_AVAILABILITY * 3
-    )
+    if sec_fact_records:
+        sections = _compute_section_records_from_facts(
+            sec_fact_records=sec_fact_records,
+            sec_is_usable=sec_is_usable,
+            artifact_id=sec_cov.artifact_id,
+            missing_reason=missing_reason_base or "SEC company facts artifact is not usable.",
+        )
+    else:
+        sections = _compute_section_records_from_metadata(
+            sec_cov=sec_cov,
+            sec_obs_count=sec_obs_count,
+            sec_is_usable=sec_is_usable,
+            missing_reason=missing_reason_base or "Fact records not available for section derivation.",
+        )
 
     return OperatingTrendSection(
-        revenue_trend_available=sufficient_for_partial,
-        profitability_margin_available=sufficient_for_partial,
-        eps_net_income_available=sufficient_for_partial,
-        fcf_available=sufficient_for_complete,
-        share_count_dilution_available=sufficient_for_partial,
+        sections=sections,
         trend_source=LANE_SEC_COMPANY_FACTS,
         observation_count=sec_obs_count,
         completeness_band=sec_cov.completeness_band,

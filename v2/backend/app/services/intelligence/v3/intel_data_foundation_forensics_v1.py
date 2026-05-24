@@ -272,6 +272,9 @@ class DataFoundationForensicsResult:
     equity_canonical_dataset_degraded_tickers: list = field(default_factory=list)
     # Asset-parity roadmap: machine-readable gap summary by asset class.
     asset_parity_roadmap: Optional[dict] = None
+    # Per-section count of equity holdings with AVAILABLE or PARTIAL status.
+    # Keys are canonical section names (revenue, profitability_or_margin, etc.).
+    canonical_equity_dataset_section_counts: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -293,6 +296,7 @@ class DataFoundationForensicsResult:
             "equity_canonical_dataset_count": self.equity_canonical_dataset_count,
             "equity_canonical_dataset_degraded_tickers": list(self.equity_canonical_dataset_degraded_tickers),
             "asset_parity_roadmap": self.asset_parity_roadmap,
+            "canonical_equity_dataset_section_counts": dict(self.canonical_equity_dataset_section_counts),
             "errors": list(self.errors),
         }
 
@@ -305,6 +309,11 @@ class _SupplementalData:
     recommendation_tickers: frozenset  # tickers with any recommendation history
     fact_counts: dict[str, int]   # {artifact_id: count of facts from research_artifact_facts}
     has_portfolio_snapshot: bool  # True if any portfolio_snapshot exists for this user
+    # Stage 9D: structured_payload dicts keyed by SEC artifact_id.
+    # Used to derive per-section period identities and trend directions.
+    # Raw values in payloads are consumed internally by the canonical dataset
+    # builder and never serialized.
+    sec_fact_records: dict  # {sec_artifact_id: list[structured_payload dict]}
 
 
 # ── Public API ─────────────────────────────────────────────────────────────────
@@ -353,16 +362,22 @@ def compute_data_foundation_forensics(
 
     # Collect artifact_ids for supplemental fact-count queries.
     artifact_ids_for_counts: set[str] = set()
+    sec_artifact_ids_for_facts: set[str] = set()
     for ticker_cov in coverage.ticker_coverage.values():
         for lane_name in (LANE_SEC_COMPANY_FACTS, LANE_SEC_CATALYST_SENTIMENT):
             lane_cov = ticker_cov.lanes.get(lane_name)
             if lane_cov and lane_cov.artifact_id:
                 artifact_ids_for_counts.add(lane_cov.artifact_id)
+        # Collect SEC artifact IDs separately for structured_payload fetch (Stage 9D).
+        sec_lane = ticker_cov.lanes.get(LANE_SEC_COMPANY_FACTS)
+        if sec_lane and sec_lane.artifact_id:
+            sec_artifact_ids_for_facts.add(sec_lane.artifact_id)
 
     # Fetch supplemental data (all fail-soft).
     supplemental = _fetch_supplemental_data(
         user_id=user_id,
         artifact_ids=artifact_ids_for_counts,
+        sec_artifact_ids=sec_artifact_ids_for_facts,
         db_client=db_client,
         errors=errors,
     )
@@ -392,12 +407,28 @@ def compute_data_foundation_forensics(
     etf_total = aggregates["holdings_by_asset_type"].get(INSTRUMENT_CATEGORY_ETF, 0)
     crypto_total = aggregates["holdings_by_asset_type"].get(INSTRUMENT_CATEGORY_CRYPTO, 0)
 
+    # Per-section count of equity holdings with AVAILABLE or PARTIAL status.
+    _section_available_statuses = {"AVAILABLE", "PARTIAL"}
+    section_counts: dict[str, int] = {}
+
     for h in holdings:
         if h.asset_type == INSTRUMENT_CATEGORY_EQUITY and h.canonical_equity_dataset:
             if h.canonical_equity_dataset.get("safe_for_equity_dataset"):
                 equity_canonical_count += 1
             else:
                 equity_degraded_tickers.append(h.ticker)
+            # Accumulate per-section counts.
+            sections = (
+                h.canonical_equity_dataset
+                .get("operating_trends", {})
+                .get("sections", {})
+            )
+            for section_name, section_data in sections.items():
+                if (
+                    isinstance(section_data, dict)
+                    and section_data.get("status") in _section_available_statuses
+                ):
+                    section_counts[section_name] = section_counts.get(section_name, 0) + 1
 
     parity_roadmap = build_asset_parity_roadmap(
         equity_canonical_count=equity_canonical_count,
@@ -426,6 +457,7 @@ def compute_data_foundation_forensics(
         equity_canonical_dataset_count=equity_canonical_count,
         equity_canonical_dataset_degraded_tickers=equity_degraded_tickers,
         asset_parity_roadmap=parity_roadmap.to_dict(),
+        canonical_equity_dataset_section_counts=section_counts,
         errors=errors,
     )
 
@@ -437,6 +469,7 @@ def _fetch_supplemental_data(
     *,
     user_id: str,
     artifact_ids: set[str],
+    sec_artifact_ids: set[str],
     db_client: Any,
     errors: list[str],
 ) -> _SupplementalData:
@@ -445,6 +478,7 @@ def _fetch_supplemental_data(
     recommendation_tickers: frozenset = frozenset()
     fact_counts: dict[str, int] = {}
     has_portfolio_snapshot = False
+    sec_fact_records: dict[str, list[dict]] = {}
 
     try:
         result = (
@@ -504,11 +538,34 @@ def _fetch_supplemental_data(
     except Exception as exc:  # noqa: BLE001
         errors.append(f"portfolio_snapshots_query_failed: {type(exc).__name__}")
 
+    # Stage 9D: fetch structured_payload for SEC artifacts to enable per-section
+    # period identities and trend directions in the canonical equity dataset.
+    # Raw values in structured_payload are consumed internally and never serialized.
+    if sec_artifact_ids:
+        try:
+            result = (
+                db_client.table("research_artifact_facts")
+                .select("artifact_id,structured_payload")
+                .in_("artifact_id", list(sec_artifact_ids))
+                .limit(5000)
+                .execute()
+            )
+            for row in result.data or []:
+                aid = row.get("artifact_id")
+                payload = row.get("structured_payload")
+                if isinstance(aid, str) and aid and isinstance(payload, dict):
+                    if aid not in sec_fact_records:
+                        sec_fact_records[aid] = []
+                    sec_fact_records[aid].append(payload)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"sec_fact_records_query_failed: {type(exc).__name__}")
+
     return _SupplementalData(
         target_tickers=target_tickers,
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts,
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records=sec_fact_records,
     )
 
 
@@ -614,12 +671,19 @@ def _build_holding_row(
     # ETF and crypto receive None (their own provider lanes are required separately).
     canonical_equity_dataset: Optional[dict] = None
     if asset_type == INSTRUMENT_CATEGORY_EQUITY:
+        # Get SEC fact records for this ticker's artifact (if available).
+        _sec_art_id = sec_cov.artifact_id if sec_cov else None
+        _sec_facts = (
+            supplemental.sec_fact_records.get(_sec_art_id, [])
+            if _sec_art_id else []
+        )
         ced_row = build_canonical_equity_dataset_row(
             ticker=ticker,
             asset_type=asset_type,
             lanes=lanes,
             sec_obs_count=sec_obs_count,
             cat_count=cat_count,
+            sec_fact_records=_sec_facts if _sec_facts else None,
         )
         canonical_equity_dataset = ced_row.to_dict()
 

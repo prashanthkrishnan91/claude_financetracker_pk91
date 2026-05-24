@@ -119,6 +119,7 @@ def _empty_supplemental(
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records={},
     )
 
 
@@ -542,6 +543,7 @@ class TestArtifactExistsVsWeak:
             recommendation_tickers=frozenset({"NVDA"}) if has_thesis_history else frozenset(),
             fact_counts={},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
 
 
@@ -1123,6 +1125,7 @@ class TestObservationCounts:
             recommendation_tickers=frozenset(),
             fact_counts={artifact_id: 42},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
         row = _build_holding_row(
             ticker="CRM",
@@ -1158,6 +1161,7 @@ class TestObservationCounts:
             recommendation_tickers=frozenset(),
             fact_counts={artifact_id: 5},
             has_portfolio_snapshot=True,
+            sec_fact_records={},
         )
         row = _build_holding_row(
             ticker="CRM",
@@ -1380,6 +1384,7 @@ def _empty_supplemental(
         recommendation_tickers=recommendation_tickers,
         fact_counts=fact_counts or {},
         has_portfolio_snapshot=has_portfolio_snapshot,
+        sec_fact_records={},
     )
 
 

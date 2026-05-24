@@ -51,6 +51,11 @@ from .research_evidence_decision_input_adapter_v1 import (
     INSTRUMENT_CATEGORY_UNKNOWN,
     _classify_instrument_category,
 )
+from .canonical_equity_dataset_v1 import (
+    CanonicalEquityDatasetRow,
+    build_canonical_equity_dataset_row,
+    build_asset_parity_roadmap,
+)
 from .sec_companyfacts_readiness_diagnostic_v1 import (
     diagnose_sec_companyfacts_readiness,
 )
@@ -185,6 +190,12 @@ class HoldingForensicsRow:
     # Contains only safe metadata: no raw payloads, no source URLs, no fact values.
     sec_companyfacts_diagnostic: Optional[dict] = None
 
+    # Stage 9D: canonical equity dataset row for this holding.
+    # Populated for equity holdings only. ETF/crypto → None (their own provider
+    # lanes are required, not the equity dataset).
+    # safe_for_equity_dataset=True only when sec_company_facts is usable.
+    canonical_equity_dataset: Optional[dict] = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ticker": self.ticker,
@@ -216,6 +227,7 @@ class HoldingForensicsRow:
             "blocking_gap_count": self.blocking_gap_count,
             "next_required_fixes": list(self.next_required_fixes),
             "sec_companyfacts_diagnostic": self.sec_companyfacts_diagnostic,
+            "canonical_equity_dataset": self.canonical_equity_dataset,
         }
 
 
@@ -253,6 +265,14 @@ class DataFoundationForensicsResult:
 
     errors: list[str] = field(default_factory=list)
 
+    # Stage 9D: equity canonical dataset counts.
+    # Number of equity holdings where safe_for_equity_dataset=True.
+    equity_canonical_dataset_count: int = 0
+    # Tickers where the equity dataset row is NOT safe (weak/stale/missing SEC facts).
+    equity_canonical_dataset_degraded_tickers: list = field(default_factory=list)
+    # Asset-parity roadmap: machine-readable gap summary by asset class.
+    asset_parity_roadmap: Optional[dict] = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -270,6 +290,9 @@ class DataFoundationForensicsResult:
             "provider_limited_count": self.provider_limited_count,
             "implementation_limited_count": self.implementation_limited_count,
             "normalization_limited_count": self.normalization_limited_count,
+            "equity_canonical_dataset_count": self.equity_canonical_dataset_count,
+            "equity_canonical_dataset_degraded_tickers": list(self.equity_canonical_dataset_degraded_tickers),
+            "asset_parity_roadmap": self.asset_parity_roadmap,
             "errors": list(self.errors),
         }
 
@@ -362,6 +385,28 @@ def compute_data_foundation_forensics(
 
     aggregates = _build_aggregates(holdings, coverage)
 
+    # Stage 9D: compute canonical equity dataset stats + asset parity roadmap.
+    equity_canonical_count = 0
+    equity_degraded_tickers: list[str] = []
+    equity_total = aggregates["holdings_by_asset_type"].get(INSTRUMENT_CATEGORY_EQUITY, 0)
+    etf_total = aggregates["holdings_by_asset_type"].get(INSTRUMENT_CATEGORY_ETF, 0)
+    crypto_total = aggregates["holdings_by_asset_type"].get(INSTRUMENT_CATEGORY_CRYPTO, 0)
+
+    for h in holdings:
+        if h.asset_type == INSTRUMENT_CATEGORY_EQUITY and h.canonical_equity_dataset:
+            if h.canonical_equity_dataset.get("safe_for_equity_dataset"):
+                equity_canonical_count += 1
+            else:
+                equity_degraded_tickers.append(h.ticker)
+
+    parity_roadmap = build_asset_parity_roadmap(
+        equity_canonical_count=equity_canonical_count,
+        equity_total=equity_total,
+        equity_edge_case_tickers=equity_degraded_tickers,
+        etf_total=etf_total,
+        crypto_total=crypto_total,
+    )
+
     return DataFoundationForensicsResult(
         schema_version=FORENSICS_VERSION,
         user_id=user_id,
@@ -378,6 +423,9 @@ def compute_data_foundation_forensics(
         provider_limited_count=aggregates["provider_limited_count"],
         implementation_limited_count=aggregates["implementation_limited_count"],
         normalization_limited_count=aggregates["normalization_limited_count"],
+        equity_canonical_dataset_count=equity_canonical_count,
+        equity_canonical_dataset_degraded_tickers=equity_degraded_tickers,
+        asset_parity_roadmap=parity_roadmap.to_dict(),
         errors=errors,
     )
 
@@ -562,6 +610,19 @@ def _build_holding_row(
     root_cause_bucket = blocking_gap_buckets[0]
     next_required_fix = next_required_fixes[0]
 
+    # Stage 9D: build canonical equity dataset row for equity holdings.
+    # ETF and crypto receive None (their own provider lanes are required separately).
+    canonical_equity_dataset: Optional[dict] = None
+    if asset_type == INSTRUMENT_CATEGORY_EQUITY:
+        ced_row = build_canonical_equity_dataset_row(
+            ticker=ticker,
+            asset_type=asset_type,
+            lanes=lanes,
+            sec_obs_count=sec_obs_count,
+            cat_count=cat_count,
+        )
+        canonical_equity_dataset = ced_row.to_dict()
+
     return HoldingForensicsRow(
         ticker=ticker,
         asset_type=asset_type,
@@ -592,6 +653,7 @@ def _build_holding_row(
         blocking_gap_count=len(blocking_gap_buckets),
         next_required_fixes=next_required_fixes,
         sec_companyfacts_diagnostic=sec_companyfacts_diagnostic,
+        canonical_equity_dataset=canonical_equity_dataset,
     )
 
 
@@ -717,17 +779,34 @@ def _classify_all_gaps(
             ),
         ))
 
-    # 2. Valuation lane (equity-specific; always not built at Stage 9B).
+    # 2. Valuation lane (equity-specific; always not built at Stage 9D).
     if not valuation_lane_exists:
-        gaps.append((
-            BUCKET_VALUATION_NOT_BUILT,
-            (
-                "No valuation evidence lane exists in Stage 5J/5K (Stage 9B baseline). "
-                "SEC/fundamentals data is present. Next: build the canonical equity research "
-                "dataset adapter to normalize revenue/margin/FCF trends from SEC XBRL facts, "
-                "then wire a valuation normalization layer (Stage 9B proper)."
-            ),
-        ))
+        # After Stage 9D, the canonical equity dataset exists for usable equities.
+        # Point the next fix at valuation (Stage 9E) rather than canonical normalization.
+        sec_usable_for_gap = bool(
+            has_sec_companyfacts_artifact
+            and sec_usability in ("USABLE", "USABLE_WITH_LIMITATIONS")
+        )
+        if sec_usable_for_gap:
+            gaps.append((
+                BUCKET_VALUATION_NOT_BUILT,
+                (
+                    "Canonical equity research dataset (Stage 9D) is built and usable. "
+                    "Next: build the valuation evidence lane (Stage 9E) to normalize "
+                    "revenue/margin/FCF trends into P/E, EV/EBITDA, and growth-adjusted "
+                    "valuation inputs ready for synthesis gating."
+                ),
+            ))
+        else:
+            gaps.append((
+                BUCKET_VALUATION_NOT_BUILT,
+                (
+                    "No valuation evidence lane exists. SEC/fundamentals data is present "
+                    "but canonical equity research dataset is not yet safe (see SEC gap above). "
+                    "Fix the SEC company facts artifact first, then build the canonical dataset "
+                    "adapter and valuation normalization layer (Stage 9D/9E)."
+                ),
+            ))
 
     # 3. News sentiment suppressed with no catalyst substitute (equity-specific).
     news_usability = news_sentiment_usability or ""
@@ -766,14 +845,15 @@ def _classify_all_gaps(
             ),
         ))
 
-    # 6. All core data present and usable — normalization is the only remaining gap.
+    # 6. All core data present and usable — canonical dataset built, synthesis still blocked.
     if not gaps:
         gaps.append((
             BUCKET_DATA_NEEDS_NORMALIZATION,
             (
-                "Core evidence artifacts exist and are usable. Build the canonical research "
-                "dataset adapter (Stage 9B) to normalize SEC XBRL facts into typed, "
-                "per-asset-type research records ready for synthesis gating."
+                "Core evidence artifacts exist and are usable. Canonical equity research "
+                "dataset (Stage 9D) is built. Synthesis remains blocked until all asset "
+                "classes (equities, ETFs, crypto) have S-grade canonical datasets and "
+                "valuation lanes are wired (Stage 9E+)."
             ),
         ))
 

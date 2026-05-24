@@ -699,7 +699,8 @@ class TestBuildWorkerOutput:
         provider = _success_provider_result()
         wi = _worker_input()
         output = build_sec_companyfacts_worker_output(wi, provider, datetime.now(timezone.utc).isoformat())
-        assert output.model_version == "sec_xbrl_companyfacts_v1"
+        # Stage 9C: bumped to v2 to supersede stale pre-5H.3 artifacts on next run.
+        assert output.model_version == "sec_xbrl_companyfacts_v2"
 
     def test_scope_kind_ticker(self):
         provider = _success_provider_result()
@@ -1067,7 +1068,8 @@ class TestSafetyInvariants:
         assert _SKILL_PACK == "sec_companyfacts_evidence_v1"
 
     def test_model_version_constant(self):
-        assert _MODEL_VERSION == "sec_xbrl_companyfacts_v1"
+        # Stage 9C: bumped to v2 to force clean replacement of pre-5H.3 stale artifacts.
+        assert _MODEL_VERSION == "sec_xbrl_companyfacts_v2"
 
     def test_sec_edgar_priority_is_1(self):
         entry = get_provider("sec_edgar")

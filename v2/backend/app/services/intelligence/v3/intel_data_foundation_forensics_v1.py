@@ -51,6 +51,9 @@ from .research_evidence_decision_input_adapter_v1 import (
     INSTRUMENT_CATEGORY_UNKNOWN,
     _classify_instrument_category,
 )
+from .sec_companyfacts_readiness_diagnostic_v1 import (
+    diagnose_sec_companyfacts_readiness,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +179,12 @@ class HoldingForensicsRow:
     blocking_gap_count: int      # len(blocking_gap_buckets)
     next_required_fixes: list    # list[str] — fix message per gap
 
+    # Stage 9C: safe SEC CompanyFacts readiness diagnostic for weak artifacts.
+    # Populated when sec_companyfacts_artifact_exists=True and artifact is not
+    # USABLE/USABLE_WITH_LIMITATIONS. None otherwise (artifact absent or usable).
+    # Contains only safe metadata: no raw payloads, no source URLs, no fact values.
+    sec_companyfacts_diagnostic: Optional[dict] = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ticker": self.ticker,
@@ -206,6 +215,7 @@ class HoldingForensicsRow:
             "blocking_gap_buckets": list(self.blocking_gap_buckets),
             "blocking_gap_count": self.blocking_gap_count,
             "next_required_fixes": list(self.next_required_fixes),
+            "sec_companyfacts_diagnostic": self.sec_companyfacts_diagnostic,
         }
 
 
@@ -488,6 +498,30 @@ def _build_holding_row(
         sec_obs_count = supplemental.fact_counts.get(sec_cov.artifact_id)
     sec_reason_not_strong = _get_sec_reason_not_strong(sec_cov, asset_type)
 
+    # Stage 9C: build a per-artifact readiness diagnostic for weak SEC artifacts.
+    # Only built for equities with an existing but non-USABLE SEC artifact.
+    sec_companyfacts_diagnostic: Optional[dict] = None
+    _sec_usable = sec_status in _USABLE_LABELS
+    if sec_exists and sec_cov and not _sec_usable and asset_type == INSTRUMENT_CATEGORY_EQUITY:
+        diag = diagnose_sec_companyfacts_readiness(
+            artifact_id=sec_cov.artifact_id,
+            generated_at=sec_cov.generated_at,
+            model_version=sec_cov.model_version,
+            observation_count=sec_obs_count,
+            freshness_status=sec_cov.freshness_status,
+            source_authority=sec_cov.source_authority,
+            completeness_band=sec_cov.completeness_band,
+            usability_label=sec_cov.usability_label,
+            suppression_reason=sec_cov.suppression_reason,
+            contradiction_evaluable=(
+                sec_cov.has_contradictions is not None
+            ),
+            contradiction_count=getattr(sec_cov, "contradiction_count", None),
+            not_evaluable_reason=getattr(sec_cov, "not_evaluable_reason", None),
+            sample_contradiction_groups=getattr(sec_cov, "sample_contradiction_groups", None),
+        )
+        sec_companyfacts_diagnostic = diag.to_dict()
+
     # SEC catalyst sentiment
     cat_cov = lanes.get(LANE_SEC_CATALYST_SENTIMENT)
     cat_exists = _artifact_exists(cat_cov)
@@ -557,6 +591,7 @@ def _build_holding_row(
         blocking_gap_buckets=blocking_gap_buckets,
         blocking_gap_count=len(blocking_gap_buckets),
         next_required_fixes=next_required_fixes,
+        sec_companyfacts_diagnostic=sec_companyfacts_diagnostic,
     )
 
 

@@ -155,6 +155,14 @@ class LaneCoverage:
     #         "suppressed_data_quality_issue" (news_sentiment only: suppressed for a
     #           non-editorial reason such as contradictions or unknown source)
     missing_reason: Optional[str] = None
+    # Stage 9C: safe contradiction metadata for SEC CompanyFacts readiness diagnostics.
+    # contradiction_count: number of detected contradiction groups (when evaluable).
+    # not_evaluable_reason: reason contradiction detection was not evaluable.
+    # sample_contradiction_groups: up to 3 sanitized group identity shapes (no raw values).
+    # All are None when artifact is absent or payload has no contradiction_assessment.
+    contradiction_count: Optional[int] = None
+    not_evaluable_reason: Optional[str] = None
+    sample_contradiction_groups: Optional[list] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -177,6 +185,9 @@ class LaneCoverage:
             "generated_at": self.generated_at,
             "expires_at": self.expires_at,
             "missing_reason": self.missing_reason,
+            "contradiction_count": self.contradiction_count,
+            "not_evaluable_reason": self.not_evaluable_reason,
+            "sample_contradiction_groups": self.sample_contradiction_groups,
         }
 
 
@@ -509,11 +520,38 @@ def _build_lane_coverage(
         _safe_str(completeness.get("completeness_band")) if isinstance(completeness, dict) else None
     )
     has_contradictions: Optional[bool] = None
+    # Stage 9C: extract safe contradiction metadata for SEC CompanyFacts diagnostics.
+    contradiction_count: Optional[int] = None
+    not_evaluable_reason: Optional[str] = None
+    sample_contradiction_groups: Optional[list] = None
     if isinstance(contradiction, dict):
         if contradiction.get("is_evaluable") is False:
             has_contradictions = None
+            not_evaluable_reason = _safe_str(contradiction.get("not_evaluable_reason"))
         else:
             has_contradictions = bool(contradiction.get("has_contradictions"))
+            raw_count = contradiction.get("contradiction_count")
+            contradiction_count = int(raw_count) if raw_count is not None else None
+        # Extract sanitized sample group identity shapes (no value_fields, no raw facts).
+        raw_groups = contradiction.get("contradiction_groups")
+        if isinstance(raw_groups, list) and raw_groups:
+            safe_groups = []
+            for g in raw_groups[:3]:  # cap at 3
+                if not isinstance(g, dict):
+                    continue
+                safe_groups.append({
+                    "group_key": _safe_str(g.get("group_key")),
+                    "claim_key": _safe_str(g.get("claim_key")),
+                    "fact_kind": _safe_str(g.get("fact_kind")),
+                    "period": _safe_str(g.get("period")),
+                    "as_of": _safe_str(g.get("as_of")),
+                    "conflicting_fact_count": (
+                        int(g["conflicting_fact_count"])
+                        if isinstance(g.get("conflicting_fact_count"), int)
+                        else None
+                    ),
+                })
+            sample_contradiction_groups = safe_groups or None
 
     freshness_status = _safe_str(row.get("freshness_status"))
     confidence = _safe_str(row.get("confidence_or_trust_level"))
@@ -553,6 +591,9 @@ def _build_lane_coverage(
         generated_at=_safe_str(row.get("generated_at")),
         expires_at=_safe_str(row.get("expires_at")),
         missing_reason=missing_reason,
+        contradiction_count=contradiction_count,
+        not_evaluable_reason=not_evaluable_reason,
+        sample_contradiction_groups=sample_contradiction_groups,
     )
 
 

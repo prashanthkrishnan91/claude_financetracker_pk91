@@ -28,6 +28,7 @@ Use this file before non-trivial implementation, review, or follow-up prompts. A
 - If changing decision policy/kernel, audit snapshot API, frontend Intel UI, recommendation cards, filters, and logs.
 - If changing evidence adapters or Data Truth contracts, audit downstream decision inputs, suppression behavior, and visible rationale copy.
 - If changing research artifact store/workers, prove artifacts remain supporting evidence only and are safe_for_decision=false unless explicitly promoted by a future approved policy.
+- Scaffold presence vs. numeric readiness conflation: when a pipeline stage builds evidence scaffolds without numeric data (e.g. Stage 9E), the scaffold count is NOT the readiness count. Do not set `lane_built=True` from a scaffold count. Name fields explicitly (`_scaffold_present` vs. `_numeric_ready`) and add a test asserting `lane_built=False` when scaffold_count > 0 but ready_count = 0.
 
 ## Runtime/manual-action failures
 

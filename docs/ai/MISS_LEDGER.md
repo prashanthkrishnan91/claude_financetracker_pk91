@@ -21,6 +21,40 @@ Follow-up needed:
 
 ---
 
+### 2026-05-24 — Stage 9E conflated evidence scaffold presence with numeric valuation readiness
+
+Repo: claude_financetracker_pk91
+Area: backend/intel-v3, valuation evidence
+Severity: Level 2 — semantic blocker caught by user review after PR #412 merged
+Miss: `build_asset_parity_roadmap()` used `equity_valuation_count > 0` as `valuation_lane_built=True`. In Stage 9E, `equity_valuation_count` counts holdings where the valuation evidence scaffold ran — not holdings where numeric EPS/price valuation is ready. This conflated "Stage 9E module ran" with "valuation lane numerically ready", violating the Stage 9E contract (`valuation_ready` always False; numeric EPS/price not in scope). `synthesis_gate` was SYNTHESIS_GATE_BLOCKED instead of VALUATION_GATE_BLOCKED.
+Impact: `AssetClassFoundationGap.valuation_lane_built` was True for all Stage 9E equities when it should be False. Required a post-merge patch PR.
+What caught it: PK review after PR #412 merged.
+Root cause: No enforcement or naming convention distinguished "scaffold presence" (Stage 9E module ran) from "numeric readiness" (always False at Stage 9E). The OS had no failure mode entry for this distinction.
+What should catch it next time: When a stage introduces a readiness split (scaffold ran vs. numeric ready), name the fields explicitly (`_scaffold_present` vs. `_ready`) at implementation time and add a test asserting `lane_built=False` when scaffold count > 0 but ready count = 0.
+One-off or repeated: One-off.
+Promotion target: `docs/ai/KNOWN_FAILURE_MODES.md` — add scaffold-vs-readiness conflation under Contract failures.
+Action taken: Split call site into scaffold vs. ready count; added `valuation_evidence_scaffold_present` field; `valuation_lane_built` now requires `equity_valuation_ready_count > 0`; updated tests. Added KNOWN_FAILURE_MODES.md entry.
+Follow-up needed: No.
+
+---
+
+### 2026-05-24 — PR #412 first push missing `## AI PR readiness` section → CI hard failure
+
+Repo: claude_financetracker_pk91
+Area: PR authoring / workflow compliance
+Severity: Level 1 — caught by CI readiness gate before merge
+Miss: PR #412 (Stage 9E Equity Valuation Evidence) was opened with a body missing the required `## AI PR readiness` terminal section. CI hard-failed and required a body update to pass.
+Impact: One wasted CI cycle.
+What caught it: AI PR Readiness Check CI gate.
+Root cause: PR body drafted from memory without confirming every required section against the template. `## AI PR readiness` is a required terminal marker for the gate.
+What should catch it next time: `pre-pr-self-audit` checklist should include an explicit "Does the PR body contain `## AI PR readiness` as the final section?" item. Run the readiness gate locally before the first push.
+One-off or repeated: Repeated pattern (see 2026-05-17 entries). Gate catches it; miss is in pre-push execution.
+Promotion target: `.claude/skills/pre-pr-self-audit/SKILL.md` — add `## AI PR readiness` section checklist item.
+Action taken: Updated PR body via GitHub MCP; PR passed CI on retry. Added MISS_LEDGER entry.
+Follow-up needed: No.
+
+---
+
 ### 2026-05-15 — Error-swallowing helper masked honest failure state in get_evidence_freshness_state
 
 Repo: claude_financetracker_pk91

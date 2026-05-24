@@ -166,8 +166,9 @@ class HoldingForensicsRow:
     sec_catalyst_status: Optional[str]
     sec_catalyst_count: Optional[int]                # safe count from facts table
 
-    # Valuation (no lane exists in Stage 5J/5K at Stage 9B)
-    valuation_lane_exists: bool                       # always False at Stage 9B
+    # Valuation: split into scaffold presence (Stage 9E ran) and numeric readiness.
+    valuation_evidence_model_present: bool   # True when Stage 9E scaffold ran (all equity); False for ETF/crypto
+    valuation_numeric_ready: bool            # True only when numeric EPS/price are in scope; always False at Stage 9E
     valuation_inputs_available_summary: str
 
     # ETF fund composition (no provider built; always False at Stage 9B)
@@ -226,7 +227,8 @@ class HoldingForensicsRow:
             "sec_catalyst_artifact_exists": self.sec_catalyst_artifact_exists,
             "sec_catalyst_status": self.sec_catalyst_status,
             "sec_catalyst_count": self.sec_catalyst_count,
-            "valuation_lane_exists": self.valuation_lane_exists,
+            "valuation_evidence_model_present": self.valuation_evidence_model_present,
+            "valuation_numeric_ready": self.valuation_numeric_ready,
             "valuation_inputs_available_summary": self.valuation_inputs_available_summary,
             "etf_fund_composition_artifact_exists": self.etf_fund_composition_artifact_exists,
             "crypto_market_context_artifact_exists": self.crypto_market_context_artifact_exists,
@@ -683,11 +685,12 @@ def _build_holding_row(
     if cat_cov and cat_cov.artifact_id:
         cat_count = supplemental.fact_counts.get(cat_cov.artifact_id)
 
-    # Stage 9E: valuation lane now exists for all equity holdings.
-    # valuation_lane_exists=True causes VALUATION_LANE_NOT_BUILT to disappear
-    # from the gap list for equities processed by Stage 9E.
-    valuation_lane_exists = (asset_type == INSTRUMENT_CATEGORY_EQUITY)
-    valuation_summary = _get_valuation_summary(asset_type, valuation_lane_built=valuation_lane_exists)
+    # Stage 9E: scaffold exists for all equity holdings, but numeric inputs are not yet in scope.
+    # valuation_evidence_model_present = scaffold ran; valuation_numeric_ready = actual numeric gate.
+    # VALUATION_LANE_NOT_BUILT still appears in gaps (valuation_numeric_ready is always False at 9E).
+    valuation_evidence_model_present = (asset_type == INSTRUMENT_CATEGORY_EQUITY)
+    valuation_numeric_ready = False  # always False at Stage 9E — no numeric EPS/price in scope
+    valuation_summary = _get_valuation_summary(asset_type, valuation_lane_built=valuation_evidence_model_present)
 
     # ETF fund composition — no provider built at Stage 9B
     etf_fund_composition_artifact_exists = False
@@ -709,7 +712,8 @@ def _build_holding_row(
         news_sentiment_usability=news_status,
         has_target_weight=target_weight_available,
         has_thesis_history=thesis_history_exists,
-        valuation_lane_exists=valuation_lane_exists,
+        valuation_lane_exists=valuation_numeric_ready,
+        valuation_evidence_model_present=valuation_evidence_model_present,
     )
 
     blocking_gap_buckets = [g[0] for g in all_gaps]
@@ -765,7 +769,8 @@ def _build_holding_row(
         sec_catalyst_artifact_exists=cat_exists,
         sec_catalyst_status=cat_status,
         sec_catalyst_count=cat_count,
-        valuation_lane_exists=valuation_lane_exists,
+        valuation_evidence_model_present=valuation_evidence_model_present,
+        valuation_numeric_ready=valuation_numeric_ready,
         valuation_inputs_available_summary=valuation_summary,
         etf_fund_composition_artifact_exists=etf_fund_composition_artifact_exists,
         crypto_market_context_artifact_exists=crypto_market_context_exists,
@@ -794,6 +799,7 @@ def _classify_all_gaps(
     has_target_weight: bool,
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
+    valuation_evidence_model_present: bool = False,
 ) -> list[tuple[str, str]]:
     """Return all material data foundation gaps in deterministic priority order.
 
@@ -903,15 +909,29 @@ def _classify_all_gaps(
             ),
         ))
 
-    # 2. Valuation lane (equity-specific; always not built at Stage 9D).
+    # 2. Valuation lane (equity-specific).
     if not valuation_lane_exists:
-        # After Stage 9D, the canonical equity dataset exists for usable equities.
-        # Point the next fix at valuation (Stage 9E) rather than canonical normalization.
         sec_usable_for_gap = bool(
             has_sec_companyfacts_artifact
             and sec_usability in ("USABLE", "USABLE_WITH_LIMITATIONS")
         )
-        if sec_usable_for_gap:
+        if valuation_evidence_model_present:
+            # Stage 9E scaffold exists but numeric EPS/price are not yet in scope.
+            detail = (
+                "Pending: numeric EPS/price pipeline confirmation for Stage 9E."
+                if sec_usable_for_gap
+                else "Blocked by SEC company facts gap above."
+            )
+            gaps.append((
+                BUCKET_VALUATION_NOT_BUILT,
+                (
+                    "Stage 9E evidence scaffold is built for this equity. "
+                    "Numeric EPS/price inputs are intentionally not in scope at this stage; "
+                    "valuation_interpretation_band is UNKNOWN. "
+                    + detail
+                ),
+            ))
+        elif sec_usable_for_gap:
             gaps.append((
                 BUCKET_VALUATION_NOT_BUILT,
                 (
@@ -1042,6 +1062,7 @@ def _classify_root_cause(
     has_target_weight: bool,
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
+    valuation_evidence_model_present: bool = False,
 ) -> tuple[str, str]:
     """Return the primary (highest-priority) root cause bucket and fix message.
 
@@ -1061,6 +1082,7 @@ def _classify_root_cause(
         has_target_weight=has_target_weight,
         has_thesis_history=has_thesis_history,
         valuation_lane_exists=valuation_lane_exists,
+        valuation_evidence_model_present=valuation_evidence_model_present,
     )
     return gaps[0]
 

@@ -83,6 +83,10 @@ class InputReadiness:
 
     canonical_equity_dataset_safe: bool
     price_available: bool
+    # True when price_available is derived from portfolio-level snapshot existence,
+    # not from a per-ticker price lookup. Portfolio snapshot may be missing for some
+    # tickers even when has_portfolio_snapshot is True.
+    price_is_portfolio_level_proxy: bool
     eps_or_earnings_available: bool
     cash_flow_available: bool
     sector_context_available: bool   # always False at Stage 9E
@@ -91,6 +95,7 @@ class InputReadiness:
         return {
             "canonical_equity_dataset_safe": self.canonical_equity_dataset_safe,
             "price_available": self.price_available,
+            "price_is_portfolio_level_proxy": self.price_is_portfolio_level_proxy,
             "eps_or_earnings_available": self.eps_or_earnings_available,
             "cash_flow_available": self.cash_flow_available,
             "sector_context_available": self.sector_context_available,
@@ -156,9 +161,15 @@ class EquityValuationEvidenceRow:
     # Missing/degraded reasons per valuation subsection.
     missing_reasons: dict[str, str]
 
-    # Forward-policy readiness gates.
-    usable_for_future_policy: bool
+    # Forward readiness gates.
+    # Whether the minimum valuation inputs (canonical + ticker price + EPS) are all present.
+    # Named "valuation_build" not "policy" to avoid implying decision authority.
+    usable_for_future_valuation_build: bool
     valuation_ready: bool
+    # Whether numeric EPS/price values are actually in scope for this read model.
+    # Always False at Stage 9E — raw values are intentionally excluded to prevent
+    # fake precision. valuation_interpretation_band is always UNKNOWN as a result.
+    valuation_numeric_inputs_in_scope: bool = False
 
     # Immutable safety gates.
     synthesis_ready: bool = False    # always False
@@ -176,8 +187,9 @@ class EquityValuationEvidenceRow:
             "input_readiness": self.input_readiness.to_dict(),
             "valuation_context": self.valuation_context.to_dict(),
             "missing_reasons": dict(self.missing_reasons),
-            "usable_for_future_policy": self.usable_for_future_policy,
+            "usable_for_future_valuation_build": self.usable_for_future_valuation_build,
             "valuation_ready": self.valuation_ready,
+            "valuation_numeric_inputs_in_scope": self.valuation_numeric_inputs_in_scope,
             "synthesis_ready": self.synthesis_ready,
             "safe_for_decision": self.safe_for_decision,
         }
@@ -226,6 +238,7 @@ def build_equity_valuation_evidence_row(
     input_readiness = InputReadiness(
         canonical_equity_dataset_safe=canonical_row.safe_for_equity_dataset,
         price_available=price_available,
+        price_is_portfolio_level_proxy=True,  # forensics derives from portfolio snapshot
         eps_or_earnings_available=eps_available,
         cash_flow_available=cash_flow_available,
         sector_context_available=False,
@@ -249,9 +262,12 @@ def build_equity_valuation_evidence_row(
         valuation_context=valuation_context,
     )
 
-    usable_for_future_policy = (
+    # Require all three minimum inputs: canonical safe + actual price + EPS.
+    # (price_available here is a portfolio-level proxy, so this is still conservative.)
+    usable_for_future_valuation_build = (
         canonical_row.safe_for_equity_dataset
-        and (price_available or eps_available)
+        and price_available
+        and eps_available
     )
 
     source_health = [s.to_dict() for s in canonical_row.source_artifacts]
@@ -267,8 +283,9 @@ def build_equity_valuation_evidence_row(
         input_readiness=input_readiness,
         valuation_context=valuation_context,
         missing_reasons=missing_reasons,
-        usable_for_future_policy=usable_for_future_policy,
+        usable_for_future_valuation_build=usable_for_future_valuation_build,
         valuation_ready=valuation_ready,
+        valuation_numeric_inputs_in_scope=False,
         synthesis_ready=False,
         safe_for_decision=False,
     )
@@ -452,20 +469,12 @@ def _compute_valuation_ready(
     eps_available: bool,
     valuation_context: ValuationContext,
 ) -> bool:
-    """True only when canonical dataset is safe, price and EPS exist, and at
-    least one context status is AVAILABLE."""
-    if not (canonical_safe and price_available and eps_available):
-        return False
-    any_available = any(
-        s == CONTEXT_STATUS_AVAILABLE
-        for s in (
-            valuation_context.earnings_yield_status,
-            valuation_context.pe_context_status,
-            valuation_context.cash_flow_context_status,
-            valuation_context.growth_context_status,
-        )
-    )
-    return any_available
+    """Always False at Stage 9E — numeric EPS/price values are not in scope.
+
+    Raw values are intentionally excluded to prevent fake precision. Band will be
+    computed in a future stage when defensible deterministic thresholds are confirmed.
+    """
+    return False
 
 
 def _build_not_applicable_row(
@@ -487,6 +496,7 @@ def _build_not_applicable_row(
     not_applicable_readiness = InputReadiness(
         canonical_equity_dataset_safe=False,
         price_available=False,
+        price_is_portfolio_level_proxy=False,
         eps_or_earnings_available=False,
         cash_flow_available=False,
         sector_context_available=False,
@@ -502,7 +512,7 @@ def _build_not_applicable_row(
         input_readiness=not_applicable_readiness,
         valuation_context=not_applicable_context,
         missing_reasons={"all": reason},
-        usable_for_future_policy=False,
+        usable_for_future_valuation_build=False,
         valuation_ready=False,
         synthesis_ready=False,
         safe_for_decision=False,

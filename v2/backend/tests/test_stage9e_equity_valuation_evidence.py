@@ -17,15 +17,15 @@ Covers:
   14. growth_context: AVAILABLE when revenue+eps both AVAILABLE.
   15. growth_context: PARTIAL when one section is PARTIAL.
   16. growth_context: MISSING when both sections missing.
-  17. usable_for_future_policy: True when canonical_safe + (price OR eps available).
-  18. usable_for_future_policy: False when canonical_safe=False.
+  17. usable_for_future_valuation_build: True only when canonical_safe + price + EPS all present.
+  18. usable_for_future_valuation_build: False when canonical_safe=False.
   19. Forensics includes equity_valuation_evidence_count.
   20. Forensics includes equity_valuation_ready_count.
   21. Forensics includes equity_valuation_degraded_tickers.
   22. Forensics includes valuation_missing_reason_counts.
   23. Forensics to_dict() includes all Stage 9E fields.
-  24. VALUATION_LANE_NOT_BUILT disappears for equity in gap classification.
-  25. Asset parity roadmap shows valuation_lane_built=True when evidence built.
+  24. VALUATION_LANE_NOT_BUILT still appears for equity (scaffold present, numeric not ready at Stage 9E).
+  25. Asset parity roadmap shows valuation_lane_built=True when evidence count > 0.
   26. ETF/crypto unaffected by Stage 9E (valuation_applicable=False).
   27. visible decision policy is unchanged (no decide() import in module).
   28. EquityValuationEvidenceRow.to_dict() has all required fields.
@@ -268,8 +268,8 @@ class TestValuationEvidenceOutputContract:
             "ticker", "asset_type", "valuation_applicable",
             "valuation_evidence_version", "skill_pack", "generated_at",
             "source_health", "input_readiness", "valuation_context",
-            "missing_reasons", "usable_for_future_policy", "valuation_ready",
-            "synthesis_ready", "safe_for_decision",
+            "missing_reasons", "usable_for_future_valuation_build", "valuation_ready",
+            "valuation_numeric_inputs_in_scope", "synthesis_ready", "safe_for_decision",
         }
         assert required_keys <= d.keys(), (
             f"Missing keys: {required_keys - d.keys()}"
@@ -283,6 +283,7 @@ class TestValuationEvidenceOutputContract:
         ir = row.to_dict()["input_readiness"]
         assert set(ir.keys()) == {
             "canonical_equity_dataset_safe", "price_available",
+            "price_is_portfolio_level_proxy",
             "eps_or_earnings_available", "cash_flow_available",
             "sector_context_available",
         }
@@ -546,14 +547,18 @@ class TestGrowthContext:
 
 
 class TestValuationReadyGate:
-    """valuation_ready=True only when canonical_safe + price + EPS + ≥1 AVAILABLE context."""
+    """valuation_ready=False always at Stage 9E — no numeric EPS/price values in scope."""
 
-    def test_all_inputs_ready_valuation_ready_true(self):
+    def test_all_inputs_ready_valuation_ready_still_false(self):
+        """Even with canonical_safe + price + EPS, valuation_ready is False at Stage 9E.
+
+        Raw numeric values are not in scope; band is always UNKNOWN.
+        """
         row = build_equity_valuation_evidence_row(
             canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
             price_available=True,
         )
-        assert row.valuation_ready is True
+        assert row.valuation_ready is False
 
     def test_degraded_canonical_valuation_ready_false(self):
         row = build_equity_valuation_evidence_row(
@@ -597,31 +602,32 @@ class TestValuationReadyGate:
 # ── Test: usable_for_future_policy ────────────────────────────────────────────
 
 
-class TestUsableForFuturePolicy:
-    """usable_for_future_policy reflects whether there's a useful evidence foundation."""
+class TestUsableForFutureValuationBuild:
+    """usable_for_future_valuation_build requires canonical_safe + price + EPS all present."""
 
-    def test_canonical_safe_and_price_usable(self):
+    def test_canonical_safe_and_price_and_eps_usable(self):
+        """All three present → usable_for_future_valuation_build=True."""
         row = build_equity_valuation_evidence_row(
             canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
             price_available=True,
         )
-        assert row.usable_for_future_policy is True
+        # EPS section is AVAILABLE by default in _make_operating_trends
+        assert row.usable_for_future_valuation_build is True
 
-    def test_canonical_safe_price_unavailable_but_eps_available(self):
-        """Even without price, if EPS is available, usable_for_future_policy can be True."""
+    def test_canonical_safe_price_unavailable_eps_available_usable_false(self):
+        """Missing price → False even with canonical_safe + EPS (AND gate, not OR)."""
         row = build_equity_valuation_evidence_row(
             canonical_row=_make_canonical_row(safe_for_equity_dataset=True),
             price_available=False,
         )
-        # EPS section is AVAILABLE (default in _make_operating_trends)
-        assert row.usable_for_future_policy is True
+        assert row.usable_for_future_valuation_build is False
 
     def test_canonical_not_safe_usable_false(self):
         row = build_equity_valuation_evidence_row(
             canonical_row=_make_canonical_row(safe_for_equity_dataset=False),
             price_available=True,
         )
-        assert row.usable_for_future_policy is False
+        assert row.usable_for_future_valuation_build is False
 
     def test_canonical_not_safe_no_price_no_eps_usable_false(self):
         row = build_equity_valuation_evidence_row(
@@ -634,7 +640,7 @@ class TestUsableForFuturePolicy:
             ),
             price_available=False,
         )
-        assert row.usable_for_future_policy is False
+        assert row.usable_for_future_valuation_build is False
 
 
 # ── Test: ETF/crypto not applicable ───────────────────────────────────────────
@@ -696,12 +702,12 @@ class TestNonEquityNotApplicable:
         assert vc.cash_flow_context_status == CONTEXT_STATUS_MISSING
         assert vc.growth_context_status == CONTEXT_STATUS_MISSING
 
-    def test_etf_usable_for_future_policy_false(self):
+    def test_etf_usable_for_future_valuation_build_false(self):
         row = build_equity_valuation_evidence_row(
             canonical_row=self._make_etf_canonical_row(),
             price_available=True,
         )
-        assert row.usable_for_future_policy is False
+        assert row.usable_for_future_valuation_build is False
 
 
 # ── Test: source health provenance ────────────────────────────────────────────
@@ -922,33 +928,34 @@ class TestValuationLaneGapClassification:
         bucket_names = [g[0] for g in gaps]
         assert BUCKET_VALUATION_NOT_BUILT in bucket_names
 
-    def test_equity_holding_has_valuation_lane_exists_true(self):
-        """_build_holding_row sets valuation_lane_exists=True for all equity holdings."""
+    def test_equity_holding_valuation_evidence_model_present_true_numeric_ready_false(self):
+        """Stage 9E scaffold present for all equity; numeric inputs not in scope → numeric_ready=False."""
         row = _build_holding_row(
             ticker="AAPL",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
             lanes={},
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is True
+        assert row.valuation_evidence_model_present is True
+        assert row.valuation_numeric_ready is False
 
-    def test_etf_holding_valuation_lane_exists_false(self):
+    def test_etf_holding_valuation_evidence_model_present_false(self):
         row = _build_holding_row(
             ticker="VTI",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes={},
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is False
+        assert row.valuation_evidence_model_present is False
 
-    def test_crypto_holding_valuation_lane_exists_false(self):
+    def test_crypto_holding_valuation_evidence_model_present_false(self):
         row = _build_holding_row(
             ticker="BTC",
             asset_type=INSTRUMENT_CATEGORY_CRYPTO,
             lanes={},
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is False
+        assert row.valuation_evidence_model_present is False
 
 
 # ── Test: asset parity roadmap ────────────────────────────────────────────────
@@ -1026,13 +1033,13 @@ class TestAssetParityRoadmap:
         assert crypto_gap.canonical_dataset_built is False
 
 
-# ── Test: valuation_lane_exists in forensics row ──────────────────────────────
+# ── Test: valuation_evidence_model_present in forensics row ───────────────────
 
 
-class TestValuationLaneExistsInHoldingRow:
-    """HoldingForensicsRow.valuation_lane_exists reflects Stage 9E state."""
+class TestValuationEvidenceModelPresent:
+    """HoldingForensicsRow.valuation_evidence_model_present reflects Stage 9E scaffold state."""
 
-    def test_equity_valuation_lane_exists_true(self):
+    def test_equity_valuation_evidence_model_present_true(self):
         row = _build_holding_row(
             ticker="MSFT",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1045,10 +1052,11 @@ class TestValuationLaneExistsInHoldingRow:
             },
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is True
+        assert row.valuation_evidence_model_present is True
+        assert row.valuation_numeric_ready is False
 
-    def test_equity_weak_sec_valuation_lane_exists_true(self):
-        """Even with weak SEC, equity valuation lane exists (but evidence is degraded)."""
+    def test_equity_weak_sec_valuation_evidence_model_present_true(self):
+        """Even with weak SEC, scaffold is present (evidence is degraded but built)."""
         row = _build_holding_row(
             ticker="KLAR",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1061,7 +1069,8 @@ class TestValuationLaneExistsInHoldingRow:
             },
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is True
+        assert row.valuation_evidence_model_present is True
+        assert row.valuation_numeric_ready is False
         assert row.valuation_evidence is not None
         assert row.valuation_evidence["valuation_ready"] is False
 

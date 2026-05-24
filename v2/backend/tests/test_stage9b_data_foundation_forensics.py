@@ -511,8 +511,11 @@ class TestArtifactExistsVsWeak:
         assert row.sec_companyfacts_status == "SUPPRESSED_INCOMPLETE"
         assert row.root_cause_bucket == BUCKET_SEC_EXISTS_WEAK
 
-    def test_sec_artifact_usable_with_target_and_thesis_reaches_normalization(self):
-        """Stage 9E: USABLE SEC + target + thesis → DATA_NEEDS_NORMALIZATION (not VALUATION_NOT_BUILT)."""
+    def test_sec_artifact_usable_with_target_and_thesis_has_valuation_gap(self):
+        """Stage 9E: USABLE SEC + target + thesis → VALUATION_NOT_BUILT (numeric inputs pending).
+
+        Scaffold is present but numeric EPS/price inputs are not yet in scope at Stage 9E.
+        """
         row = _build_holding_row(
             ticker="NVDA",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -530,8 +533,8 @@ class TestArtifactExistsVsWeak:
             ),
         )
         assert row.sec_companyfacts_artifact_exists is True
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
-        assert row.root_cause_bucket == BUCKET_DATA_NEEDS_NORMALIZATION
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
+        assert row.root_cause_bucket == BUCKET_VALUATION_NOT_BUILT
 
     def _empty_supplemental(
         self,
@@ -604,8 +607,8 @@ class TestETFClassification:
 class TestValuationLaneNotBuilt:
     """Stage 9E: valuation lane is now built for all equity holdings."""
 
-    def test_valuation_lane_exists_true_for_equity(self):
-        """valuation_lane_exists=True for equity at Stage 9E — lane is now built."""
+    def test_valuation_evidence_model_present_true_for_equity(self):
+        """valuation_evidence_model_present=True for equity at Stage 9E (scaffold built)."""
         row = _build_holding_row(
             ticker="CRM",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -617,12 +620,12 @@ class TestValuationLaneNotBuilt:
             },
             supplemental=_empty_supplemental(),
         )
-        assert row.valuation_lane_exists is True
+        assert row.valuation_evidence_model_present is True
+        assert row.valuation_numeric_ready is False  # always False at Stage 9E
 
-    def test_equity_with_usable_sec_and_no_target_no_thesis_gets_target_thesis_buckets(self):
-        """Stage 9E: VALUATION_NOT_BUILT no longer appears for equity with usable SEC.
-        With target and thesis set, row moves to DATA_NEEDS_NORMALIZATION.
-        Without target/thesis, primary gap is TARGET_WEIGHT_NOT_BUILT."""
+    def test_equity_with_usable_sec_gets_valuation_not_built_bucket(self):
+        """Stage 9E: VALUATION_NOT_BUILT still appears (scaffold present, numeric not ready).
+        With usable SEC, no target, no thesis: VALUATION_NOT_BUILT is root cause."""
         row = _build_holding_row(
             ticker="NVDA",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -635,8 +638,8 @@ class TestValuationLaneNotBuilt:
             },
             supplemental=_empty_supplemental(),
         )
-        assert row.root_cause_bucket != BUCKET_VALUATION_NOT_BUILT
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
+        assert row.root_cause_bucket == BUCKET_VALUATION_NOT_BUILT
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
 
     def test_valuation_summary_explains_no_lane_for_equity(self):
         row = _build_holding_row(
@@ -843,7 +846,7 @@ class TestResponseShape:
         "sec_companyfacts_artifact_exists", "sec_companyfacts_status",
         "sec_companyfacts_observation_count", "sec_companyfacts_reason_not_strong",
         "sec_catalyst_artifact_exists", "sec_catalyst_status", "sec_catalyst_count",
-        "valuation_lane_exists", "valuation_inputs_available_summary",
+        "valuation_evidence_model_present", "valuation_numeric_ready", "valuation_inputs_available_summary",
         "etf_fund_composition_artifact_exists", "crypto_market_context_artifact_exists",
         "thesis_history_exists", "root_cause_bucket", "next_required_fix",
         # multi-gap fields
@@ -919,9 +922,9 @@ class TestResponseShape:
                 f"root_cause_bucket '{row.root_cause_bucket}' not in ALL_BUCKETS"
             )
 
-    def test_valuation_lane_exists_true_for_equity_false_for_etf_crypto(self):
-        """Stage 9E: valuation_lane_exists=True for equity, False for ETF/crypto."""
-        for asset_type, expected in (
+    def test_valuation_evidence_model_present_for_equity_false_for_etf_crypto(self):
+        """Stage 9E: scaffold present for equity; not for ETF/crypto. numeric_ready always False."""
+        for asset_type, expected_model_present in (
             (INSTRUMENT_CATEGORY_EQUITY, True),
             (INSTRUMENT_CATEGORY_ETF, False),
             (INSTRUMENT_CATEGORY_CRYPTO, False),
@@ -932,8 +935,11 @@ class TestResponseShape:
                 lanes={},
                 supplemental=_empty_supplemental(),
             )
-            assert row.valuation_lane_exists is expected, (
-                f"Expected valuation_lane_exists={expected} for {asset_type}"
+            assert row.valuation_evidence_model_present is expected_model_present, (
+                f"Expected valuation_evidence_model_present={expected_model_present} for {asset_type}"
+            )
+            assert row.valuation_numeric_ready is False, (
+                f"Expected valuation_numeric_ready=False for {asset_type}"
             )
 
     def test_etf_fund_composition_always_false_in_output(self):
@@ -1216,7 +1222,7 @@ class TestExampleFixtureOutputs:
         assert row.yfinance_fundamentals_artifact_exists is True
         assert row.sec_companyfacts_artifact_exists is False
         assert row.root_cause_bucket == BUCKET_SEC_MISSING_CIK
-        assert row.valuation_lane_exists is True  # Stage 9E: lane built for all equities
+        assert row.valuation_evidence_model_present is True  # Stage 9E: scaffold built for all equities
         assert row.etf_fund_composition_artifact_exists is False
 
     def test_nvda_equity_sec_suppressed_gets_exists_weak(self):
@@ -1404,8 +1410,8 @@ def _empty_supplemental(
 class TestMultiGapEquity:
     """Equity holdings expose all applicable blocking gaps simultaneously."""
 
-    def test_equity_usable_sec_no_target_no_thesis_returns_two_gaps(self):
-        """Stage 9E: VALUATION_NOT_BUILT gone → [TARGET_WEIGHT, THESIS] for usable SEC equity."""
+    def test_equity_usable_sec_no_target_no_thesis_returns_three_gaps(self):
+        """Stage 9E: scaffold present, numeric not ready → [VALUATION_NOT_BUILT, TARGET_WEIGHT, THESIS]."""
         row = _build_holding_row(
             ticker="MSFT",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1419,14 +1425,15 @@ class TestMultiGapEquity:
             },
             supplemental=_empty_supplemental(),
         )
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
         assert row.blocking_gap_buckets == [
+            BUCKET_VALUATION_NOT_BUILT,
             BUCKET_TARGET_WEIGHT_NOT_BUILT,
             BUCKET_THESIS_NOT_BUILT,
         ]
-        assert row.root_cause_bucket == BUCKET_TARGET_WEIGHT_NOT_BUILT
-        assert row.blocking_gap_count == 2
-        assert len(row.next_required_fixes) == 2
+        assert row.root_cause_bucket == BUCKET_VALUATION_NOT_BUILT
+        assert row.blocking_gap_count == 3
+        assert len(row.next_required_fixes) == 3
 
     def test_root_cause_bucket_is_always_first_blocking_gap(self):
         row = _build_holding_row(
@@ -1455,8 +1462,11 @@ class TestMultiGapEquity:
         assert row.blocking_gap_count == len(row.blocking_gap_buckets)
         assert row.blocking_gap_count == len(row.next_required_fixes)
 
-    def test_equity_no_sec_artifact_exposes_target_thesis_gaps_not_valuation(self):
-        """Stage 9E: SEC missing → SEC_MISSING_CIK + TARGET_WEIGHT + THESIS (no VALUATION bucket)."""
+    def test_equity_no_sec_artifact_exposes_valuation_target_thesis_gaps(self):
+        """Stage 9E: SEC missing → SEC_MISSING_CIK + VALUATION_NOT_BUILT + TARGET + THESIS.
+
+        Scaffold present but SEC gap blocked numeric inputs; VALUATION_NOT_BUILT still appears.
+        """
         row = _build_holding_row(
             ticker="CRM",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1466,13 +1476,16 @@ class TestMultiGapEquity:
             supplemental=_empty_supplemental(),
         )
         assert row.blocking_gap_buckets[0] == BUCKET_SEC_MISSING_CIK
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
         assert BUCKET_TARGET_WEIGHT_NOT_BUILT in row.blocking_gap_buckets
         assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
-        assert row.blocking_gap_count >= 2
+        assert row.blocking_gap_count >= 3
 
-    def test_equity_sec_weak_exposes_target_thesis_secondary_not_valuation(self):
-        """Stage 9E: Weak SEC → SEC_EXISTS_WEAK primary + target + thesis (no VALUATION_NOT_BUILT)."""
+    def test_equity_sec_weak_exposes_valuation_target_thesis_secondary(self):
+        """Stage 9E: Weak SEC → SEC_EXISTS_WEAK primary + VALUATION_NOT_BUILT + target + thesis.
+
+        Scaffold present but numeric inputs blocked by SEC gap.
+        """
         row = _build_holding_row(
             ticker="NVDA",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1486,12 +1499,15 @@ class TestMultiGapEquity:
             supplemental=_empty_supplemental(),
         )
         assert row.blocking_gap_buckets[0] == BUCKET_SEC_EXISTS_WEAK
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
         assert BUCKET_TARGET_WEIGHT_NOT_BUILT in row.blocking_gap_buckets
         assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
 
-    def test_equity_usable_sec_with_target_set_has_one_gap(self):
-        """Stage 9E: SEC usable, target set, no thesis → only THESIS_NOT_BUILT gap."""
+    def test_equity_usable_sec_with_target_set_has_valuation_and_thesis_gaps(self):
+        """Stage 9E: SEC usable, target set → VALUATION_NOT_BUILT + THESIS_NOT_BUILT.
+
+        Numeric inputs not yet in scope; VALUATION_NOT_BUILT remains until numeric pipeline added.
+        """
         row = _build_holding_row(
             ticker="WMT",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
@@ -1505,7 +1521,7 @@ class TestMultiGapEquity:
             },
             supplemental=_empty_supplemental(target_tickers=frozenset({"WMT"})),
         )
-        assert BUCKET_VALUATION_NOT_BUILT not in row.blocking_gap_buckets
+        assert BUCKET_VALUATION_NOT_BUILT in row.blocking_gap_buckets
         assert BUCKET_TARGET_WEIGHT_NOT_BUILT not in row.blocking_gap_buckets
         assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
 

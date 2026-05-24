@@ -3535,6 +3535,105 @@ async def get_coverage_trust_matrix(
     return result
 
 
+# ── Stage 9B — Intel Data Foundation Forensics ────────────────────────────────
+
+
+class DataFoundationForensicsRequest(BaseModel):
+    """Stage 9B — operator request body for Data Foundation Forensics.
+
+    tickers: optional explicit ticker list. When omitted/empty, falls back to
+    the cert user's active portfolio positions. Max 200 tickers per request.
+    """
+    tickers: list[str] = []
+
+
+@router.post("/data-foundation-forensics")
+async def get_data_foundation_forensics(
+    payload: DataFoundationForensicsRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 9B — per-holding data foundation forensics (root cause classification).
+
+    Inspects actual persisted research artifacts and portfolio data to explain,
+    per holding, whether missing data is caused by a provider gap, CIK mapping
+    failure, worker/backfill gap, weak readiness, no lane built, or missing
+    canonical normalization.
+
+    Required env:
+      finance_runtime_cert_enabled=true  + X-Finance-Runtime-Cert-Secret header
+      INTEL_V3_DATA_FOUNDATION_FORENSICS_ENABLED=true
+
+    Hard guarantees:
+      - READ-ONLY. No evidence runs, LLM calls, or provider calls.
+      - NEVER writes to intel_v3_snapshots, recommendations, or research_*.
+      - NEVER calls decide() or imports decision_policy_v1.
+      - NEVER returns raw artifact payloads, source URLs, fact contents,
+        API keys, secrets, or user PII.
+      - safe_for_decision is ALWAYS False. synthesis_ready is ALWAYS False.
+      - No visible Buy/Hold/Trim/Sell change.
+      - Never called from GET /intel/v3/snapshot or any page-load path.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_data_foundation_forensics_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="INTEL_V3_DATA_FOUNDATION_FORENSICS_ENABLED is not enabled",
+        )
+
+    from ..services.intelligence.v3.intel_data_foundation_forensics_v1 import (
+        compute_data_foundation_forensics,
+    )
+
+    db_client = get_supabase_client()
+
+    requested_raw = payload.tickers or []
+    normalized = list(
+        dict.fromkeys(t.upper().strip() for t in requested_raw if isinstance(t, str) and t.strip())
+    )
+
+    holding_context_by_ticker: dict[str, dict] = {}
+    if not normalized:
+        try:
+            pos_result = (
+                db_client.table("positions")
+                .select("ticker,category")
+                .eq("user_id", str(user.id))
+                .execute()
+            )
+            for row in (pos_result.data or []):
+                if not isinstance(row, dict):
+                    continue
+                t = row.get("ticker")
+                if isinstance(t, str) and t.strip():
+                    norm = t.strip().upper()
+                    if norm not in normalized:
+                        normalized.append(norm)
+                    holding_context_by_ticker[norm] = {
+                        "category": row.get("category") or "",
+                    }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "data_foundation_forensics_positions_lookup_failed user_id=%s error=%s",
+                user.id,
+                exc,
+            )
+
+    tickers = normalized[:_MAX_COVERAGE_TICKERS_PER_REQUEST]
+
+    result = compute_data_foundation_forensics(
+        user_id=str(user.id),
+        tickers=tickers,
+        holding_context_by_ticker=holding_context_by_ticker,
+        db_client=db_client,
+    )
+
+    output = result.to_dict()
+    # Hard-lock safety fields so they cannot drift.
+    output["safe_for_decision"] = False
+    output["synthesis_ready"] = False
+    return output
+
+
 # ── Stage 6 — Evidence-Aware Governance Diagnostics ──────────────────────────
 
 

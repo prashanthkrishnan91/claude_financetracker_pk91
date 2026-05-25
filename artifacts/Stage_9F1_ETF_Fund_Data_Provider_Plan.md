@@ -2,7 +2,11 @@
 
 Status: planning/spec only. No code in this PR. Roadmap: ETF parity lane (follows Stage 9F honest scaffold). Severity: Level 2.
 
-> **v2 revision (provider-research-driven).** The earlier draft was yfinance-first. This revision broadens it into a best-value, S-grade ETF data-source evaluation. Headline correction: **Massive's API does provide real ETF fund intelligence** (full constituents, exposure, profiles, taxonomies, fund flows, analytics) via its ETF Global partnership — it is **not** price/reference-only. The honest bottom line is in §8: there is **no confirmed self-serve low-cost provider that guarantees full S-grade coverage today**, so the corrected next step is a **provider decision checkpoint**, not coding.
+> **v2 (provider-research-driven).** Broadened the earlier yfinance-first draft into a best-value S-grade evaluation. Headline correction: **Massive's API does provide real ETF fund intelligence** (full constituents, exposure, profiles, taxonomies, fund flows, analytics) via its ETF Global partnership — **not** price/reference-only (§4).
+>
+> **v3 (free-tier audit).** Audited a "free FMP + free Massive" hybrid for a personal 2-user app (§11). Verdict: **not certifiable as S-grade as-is** — Massive free almost certainly excludes ETF Global data, FMP free ETF endpoints are unverified, and FMP's individual/free license restricts displaying data to end users.
+>
+> **v4 (DECISION LOCKED — this revision).** The owner approved proceeding **without free-tier testing**. That is sound because the chosen S-grade authority is **keyless and PRIMARY_AUTHORITY by construction** and needs no testing to certify: **SEC NPORT-P (official full holdings) + issuer-official files (daily)** for ETF composition, layered on the repo's already-wired official sources for the other asset classes. FMP/Massive are demoted to **optional future convenience layers** (wire only if/when keys + the §11 ToS check are accepted). §12 locks the full-app S-grade data architecture + the synthesis-readiness contract; §13 is the build sequence. The next build slice (§ prompt) is keyless and fixture-testable today.
 
 ## 1. Problem & current state
 
@@ -173,55 +177,126 @@ Fixture-based unit tests (recorded provider responses for SPY/VOO/QQQ/SCHD/**VXU
 
 Until 1–3 are answered with real responses, **the free-tier hybrid cannot be certified S-grade** — proceed to the spike below, not to a build.
 
+## 12. LOCKED S-grade data architecture (all asset classes) + synthesis-readiness contract
+
+This is the committed data foundation for the app. Everything the app synthesizes into actionable insight must trace to a source at or above the credibility tier below, with provenance and an as-of date, and may never be fabricated.
+
+### 12.1 S-grade data contract (the bar every datum must meet)
+A datum may be marked `synthesis_ready` only if **all** hold:
+- **Authority** ≥ the tier required for its domain (§12.2). ETF composition requires PRIMARY_AUTHORITY (issuer/SEC); equity fundamentals require OFFICIAL (SEC); macro requires OFFICIAL (FRED).
+- **Completeness** — required fields present. For ETF holdings this means **full constituents (not top-N)**; for VXUS it means **country/geography present**; for equity it means the needed XBRL facts.
+- **Freshness** within the domain SLA, with an explicit as-of/holdings date.
+- **Provenance** recorded internally (source id, url, as-of). No raw provider payloads, source URLs, or keys in diagnostics.
+- **No fabrication** — missing data is explicit `MISSING` + reason, never invented or inferred.
+- **safe_for_decision stays False at the data/evidence layer** — readiness gates feed the deterministic policy; the data layer never asserts Buy/Hold/Trim/Sell.
+
+### 12.2 Locked source map (domain × asset class → certified source)
+
+| Domain | Asset class | Certified source (authority) | Freshness | Feeds | Status |
+|---|---|---|---|---|---|
+| Fundamentals / financials | Equity | **SEC EDGAR CompanyFacts** (PRIMARY/OFFICIAL); yfinance metadata fallback | ≤7d filings | `canonical_equity_dataset`, valuation | **wired** |
+| Valuation inputs (EPS/price) | Equity | `portfolio_snapshots` certified price + SEC facts | price ≤5min; EPS ≤7d | `equity_valuation_evidence` (9E/9E.1) | **wired** |
+| Technicals / price history | Equity, ETF | yfinance history (UNOFFICIAL — context only, not authority) | ≤24h | technicals lane | **wired** |
+| News / catalyst | Equity | SEC filing catalyst lane (OFFICIAL) | ≤30d | sentiment/catalyst lanes | **wired** |
+| **Holdings / weights** | **ETF** | **SEC NPORT-P (PRIMARY, periodic) + issuer-official files (PRIMARY, daily)** | NPORT quarterly+lag; issuer daily | `canonical_etf_fund_dataset` | **BUILD (9F.2)** |
+| **Sector exposure** | **ETF** | issuer-official files / derive from NPORT constituents | daily / quarterly | ETF dataset | **BUILD** |
+| **Geography / country** | **ETF** | issuer-official (Vanguard region for **VXUS**) / derive from NPORT | daily / quarterly | ETF dataset | **BUILD** |
+| Expense / yield / AUM / issuer / category | ETF | issuer product data (PRIMARY) | daily/near | ETF dataset | **BUILD** |
+| Holdings (commodity) | ETF (**GLD**) | SSGA/SPDR sponsor (PRIMARY) — bullion + expense/AUM only; composition **N/A** | daily | ETF dataset (special-case) | **BUILD** |
+| Market / supply / fundamentals | Crypto | **CoinGecko** (keyless, free) | ≤15min | `canonical_crypto_dataset` | source wired; **dataset BUILD (9G)** |
+| Macro context | Portfolio | **FRED** (OFFICIAL) | ≤24h | macro lane | **wired** |
+| Convenience normalization (optional) | Equity/ETF | **FMP** (LOW_COST) — only after §11 free-endpoint + display-ToS check | per-tier | normalization layer | **optional/deferred** |
+| Fallback / metadata only | All | **yfinance** (UNOFFICIAL) — never S-grade primary | n/a | fallback | wired |
+
+Massive + ETF Global remain a **paid** alternative (~$79/mo, SPECIALIST_ETF) that could replace the NPORT+issuer ETF backbone with one REST source — adopt only if the owner later prefers paying over maintaining issuer parsers.
+
+### 12.3 Synthesis-readiness contract (data → actionable insight, authority preserved)
+- Each asset class has a **canonical dataset**: equity ✅, ETF scaffold ✅ (to be filled by 9F.2/9F.3), crypto ❌ (build at 9G). Parity across all three is the goal so synthesis treats every holding uniformly.
+- A canonical row is `synthesis_ready=True` only when its required S-grade domains (§12.2) are `AVAILABLE` and within freshness; otherwise it stays degraded with explicit reasons (no silent gaps).
+- Synthesis-ready canonical datasets feed the **existing deterministic Intel v3 evidence + decision layers**. They make insights *grounded and complete*; they do **not** relocate decision authority.
+- **INVARIANT (unchanged, non-negotiable):** the deterministic backend policy owns the final visible **Buy/Hold/Trim/Sell** authority. Research/synthesis/LLM layers produce evidence + plain-English explanation only; `safe_for_decision` stays False at the data layer. The "actionable insight you act on" = the deterministic policy verdict + evidence-grounded explanation, fed by S-grade complete data — never an LLM's unilateral call. (See Deterministic Decision Authority Pack + `NORTH_STAR.md`.)
+- Net effect for the owner: every holding (stock, ETF, crypto) reaches a complete, high-credibility, fresh canonical dataset → the deterministic engine can explain *why* an action is recommended with no missing-data blind spots, which is what makes the recommendation safe to act on.
+
+## 13. Build sequence (capability slices — keyless first, no testing dependency)
+
+1. **9F.2a — SEC NPORT-P ETF holdings lane (keyless, build first).** Provider + pure adapter + flag-gated lane → `etf_fund_note` artifacts (full constituents + weights; sector/geography derivable from constituents). Fixtures from a real NPORT-P XML. PRIMARY_AUTHORITY, no key, fully unit-testable now. No SQL (`etf_fund_note` already in enum).
+2. **9F.2b — issuer-official daily adapters (one issuer per slice, fixture-tested).** Add daily freshness + native geography. Start with the cleanest stable endpoint (SSGA SPY/XLE/GLD XLSX; Vanguard region data for **VXUS**); GLD handled as commodity special-case. Named stable endpoints only; never blind scraping.
+3. **9F.3 — canonical ETF normalization.** Wire 9F.2 artifacts into `canonical_etf_fund_dataset_v1` (flip composition `MISSING → AVAILABLE/PARTIAL`), update forensics bucket + readiness gate. Separate from provider work.
+4. **9G — canonical crypto dataset.** `canonical_crypto_dataset_v1` from CoinGecko (keyless) for asset-class parity.
+5. **(optional, later) FMP/Massive convenience layer.** Only after the §11 free-endpoint + display-ToS verification (FMP) or a paid decision (Massive). Not required for S-grade — the keyless backbone already meets the bar.
+
+Every slice: flag-gated (default OFF), fixture tests, `safe_for_decision=False`, no decision-policy change, no SQL, HANDOFF updated.
+
 ---
 
-## Corrected next implementation prompt (free-tier S-grade verification spike — research/spike only)
+## Next implementation prompt (9F.2a — SEC NPORT-P ETF holdings lane; keyless build)
 
-> The previous yfinance-first build prompt is **withdrawn**. Per §11, the next action verifies whether the chosen free-tier hybrid is actually S-grade before any lane is built. Research/spike only — no production code.
+> Decision locked (§12, v4). The free-tier verification spike is **deferred/optional** — the keyless PRIMARY_AUTHORITY backbone needs no testing to certify. The first real build slice is the SEC NPORT-P ETF holdings lane.
 
 ```md
 Repo: prashanthkrishnan91/claude_financetracker_pk91
-Branch: claude/stage-9f1-checkpoint-free-tier-verification
+Branch: claude/stage-9f2a-etf-nport-holdings-lane
 
-Task: Stage 9F.1-checkpoint — free-tier S-grade verification spike for a personal 2-user
-investment-intelligence app (stocks + ETFs + crypto). Research/spike only.
-Severity: Level 2. NO production code, NO SQL, NO UI, NO provider lane yet. Output is a short
-"## 12. Free-tier verification results" section appended to
-artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md plus ONE decision line.
+Task: Stage 9F.2a — SEC NPORT-P ETF holdings evidence lane v1 (keyless, fixture-tested).
+Severity: Level 2. One capability slice. No SQL (etf_fund_note already in the migration-023 enum),
+no UI, no decision-policy changes, no canonical-dataset/forensics edits (that is 9F.3).
 
-Why: §11 concludes "free FMP + free Massive" is NOT a certified S-grade path as specified —
-Massive free almost certainly excludes ETF Global data, FMP free ETF endpoints are unverified,
-and FMP's individual/free license restricts displaying data to end users. The certifiable cheap
-backbone is SEC NPORT-P + issuer-official files, with FMP as a convenience layer. This spike
-settles the three open verifications before any build.
+Safety packs / archetype: Data Truth / Evidence Suppression Pack; free-first evidence-lane
+archetype (model the FRED lane, Stage 5I). PRIMARY_AUTHORITY source, keyless — no API key, no
+free-tier uncertainty, fully unit-testable from a recorded NPORT-P XML fixture.
 
 Read first:
-- artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md (§2 S-grade bar, §4 evaluation, §11 audit)
+- artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md (§2 S-grade bar, §5 contract, §12 locked
+  architecture, §13 build sequence)
+- v2/backend/app/services/intelligence/research_workers/fred_provider_v1.py (provider template)
+- v2/backend/app/services/intelligence/research_workers/fred_macro_adapter_v1.py (adapter template)
+- v2/backend/app/services/intelligence/research_workers/evidence_lane_runner_v1.py (runner + flag)
+- v2/backend/app/services/intelligence/research_workers/evidence_provider_registry_v1.py
+- v2/backend/app/services/intelligence/research_workers/contracts.py (WorkerOutput/Source/Fact)
+- v2/backend/app/services/intelligence/v3/canonical_etf_fund_dataset_v1.py (downstream consumer; do NOT edit)
 
-Do (verification only; the spike needs API keys the user must supply — do NOT commit any key;
-read keys from env at runtime only; if keys are unavailable, report that and stop):
-1. FMP free key: call ETF holdings + sector-weighting + country-weighting for SPY, VXUS, QQQ.
-   Record: does each return on the FREE tier? full holdings (not top-N)? weights? VXUS country
-   breakdown present? holdings as-of date + freshness (daily vs NPORT-quarterly)? 250/day adequate?
-2. Massive: confirm whether ETF Global endpoints (constituents, profiles/exposure) are reachable
-   on ANY free tier or only paid; if paid, record the exact tier/price. Mark "sales/contact
-   required" if not self-serve.
-3. Confirm FMP display-ToS implication for private 2-user use (state it plainly; do not waive it).
-4. Confirm the free certifiable backbone is reachable: one SEC NPORT-P filing pull for an
-   in-universe fund (full holdings + geography derivable) and one issuer-official holdings file
-   (e.g. SSGA SPY XLSX or Vanguard VXUS region data) — confirm the named endpoint is stable.
+How SEC NPORT-P works (ground the implementation): a fund's NPORT-P filings are on SEC EDGAR
+(submissions API → filing index → primary_doc.xml). The XML lists every portfolio holding
+(name, identifiers, value, pctVal weight) plus issuer country, enabling FULL holdings + weights +
+geography derivation. Public disclosure is the 3rd month of each quarter with a lag → treat as
+PRIMARY but periodic/stale (record the report period + as-of). Map our ETF tickers to the filing
+entity CIK (SPY/XLE/GLD = SSGA trusts; VOO/VTI/VGT/VHT/VIS/VXUS/VYM = Vanguard; QQQ = Invesco;
+SCHD = Schwab). GLD is a commodity trust → may have no equity holdings; handle as composition
+NOT_APPLICABLE (bullion + expense/AUM only), never fabricated.
 
-Record findings, then state ONE decision line, choosing the cheapest CERTIFIABLE path:
-  "CERTIFIED S-GRADE PATH = <FMP-free-spine | FMP-paid-spine | NPORT+issuer-backbone> + CoinGecko
-   (crypto) + SEC EDGAR/yfinance (stock fundamentals); Massive = <drop | pay $79/mo>."
+Build (mirror the FRED lane shape):
+1. nport_provider_v1.py — keyless EDGAR client: ticker→CIK→latest NPORT-P→parse holdings.
+   Injectable http_get_fn; deferred httpx import on the real path; SEC User-Agent header; bounded
+   request budget; fail-closed (never raises) returning a typed NportProviderResult with report
+   period/as-of, full holdings [{name, cusip/isin/ticker?, weight_pct, value, country}], and a
+   status (success | not_found | no_holdings | error). Never fabricates.
+2. etf_nport_adapter_v1.py — PURE, no IO. NportProviderResult → WorkerOutput.
+   artifact_type="etf_fund_note", skill_pack="etf_nport_holdings_evidence_v1",
+   model_version="etf_nport_holdings_v1", scope_kind="ticker",
+   source_kind="sec_filing", provider_name="sec_edgar",
+   source_url=SEC filing URL. One FactRecord per holding (fact_kind="metric_observation",
+   axis_hint="exposure"). Derive sector? (only if present) and geography from holding countries.
+   No raw payload dump; no forbidden keys; deterministic replay key; honest NOT_APPLICABLE for GLD.
+3. evidence_lane_runner_v1.py — _is_etf_nport_enabled(settings) + run_etf_nport_holdings_evidence(...)
+   (ETF-only guard using holding_context asset_type/category; skip non-ETF honestly). Compact logs:
+   etf_nport_evidence_start/_written/_skip/_complete. Persist via ResearchArtifactServiceV1.
+4. evidence_provider_registry_v1.py — add LANE_ETF_FUND_DATA="etf_fund_data" to ALL_LANES; extend
+   the sec_edgar entry supported_lanes + max_stale_age_hours {etf_fund_data: 2160.0 (~90d, periodic)}.
+5. config.py — intel_v3_etf_nport_evidence_enabled: bool = False.
 
-Hard constraints: do not recommend yfinance as primary; top-10 holdings is NOT full composition;
-missing geography is NOT S-grade for VXUS; price/reference data is NOT fund intelligence; do not
-hand-wave pricing (mark sales/contact when unavailable); no blind scraping (named stable endpoints
-+ fixture-tested parsers only); do not claim a path is "certified S-grade" without real responses.
+Tests (fixture-based, no network): recorded NPORT-P XML for a real Vanguard/SSGA fund → full
+holdings + weights + geography; GLD-style no-equity-holdings → NOT_APPLICABLE composition; non-ETF
+ticker → skip; not_found/parse-error → honest no-data artifact, no crash; adapter asserts no
+forbidden keys, no raw payload leak, geography derived (not fabricated), deterministic replay key,
+safe_for_decision False, report period/as-of recorded.
 
-Stop condition: stop after the decision line + plan-doc update + PR. Do NOT build any provider
-lane (that becomes 9F.2 once the certified path is confirmed).
+Acceptance: new tests pass; existing Stage 5I/9F suites still pass; flag default OFF; no SQL; no
+canonical_etf_fund_dataset_v1.py / forensics / decision-policy edits. Update docs/ai/HANDOFF.md
+(replace/summarize) — new lane, flag, "9F.2b issuer-official daily adapters + 9F.3 canonical
+normalization" as next. Fill the PR template; Supabase SQL requirement = NONE.
+
+Stop condition: stop after the lane PR is opened. Do NOT build issuer adapters, canonical
+normalization, or the crypto dataset (those are 9F.2b / 9F.3 / 9G).
 
 Execution principles: before coding, state assumptions and success criteria; keep changes simple
 and surgical; every changed line must trace to this task; fix root cause not symptom; if the

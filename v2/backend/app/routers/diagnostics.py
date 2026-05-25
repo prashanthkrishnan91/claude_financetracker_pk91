@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
@@ -3869,4 +3870,78 @@ async def get_stage6_evidence_governance_diagnostics(
 
     result = summary.to_dict()
     result["diagnostics_only"] = True
+    return result
+
+
+# ── Stage 9F.2a — ETF NPORT-P live diagnostic endpoint ──────────────────────
+
+
+class EtfNportLiveCheckRequest(BaseModel):
+    """Stage 9F.2a — operator request body for ETF NPORT-P live diagnostic."""
+    tickers: list[str] = []
+
+
+@router.post("/etf-nport-live-check")
+async def etf_nport_live_check(
+    payload: EtfNportLiveCheckRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9F.2a — operator-only diagnostic for SEC EDGAR NPORT-P ETF holdings.
+
+    Calls the same fetch_etf_nport_holdings() provider used in production but
+    does NOT write artifacts, does NOT alter decisions or snapshots, and does NOT
+    require intel_v3_etf_nport_evidence_enabled=true.
+
+    Required env vars:
+      INTEL_V3_NPORT_DIAGNOSTIC_ENDPOINT_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+      SEC_EDGAR_USER_AGENT=<AppName/version email>
+
+    Returns compact per-ticker JSON with status, CIK, holdings count, sample
+    holding names (max 5), and diagnostic fields. Never returns raw XML, raw
+    filing body, or the full holdings payload.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_nport_diagnostic_endpoint_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    from ..services.intelligence.research_workers.nport_diagnostic_runner import (
+        _NPORT_DIAG_DEFAULT_TICKERS,
+        _NPORT_DIAG_MAX_TICKERS,
+        run_nport_live_check,
+    )
+
+    if not settings.sec_edgar_user_agent:
+        return {
+            "error": "SEC_EDGAR_USER_AGENT not configured.",
+            "safe_for_decision": False,
+            "visible_snapshot_unchanged": True,
+            "diagnostics_only": True,
+            "artifact_writes": 0,
+        }
+
+    tickers = [t.strip().upper() for t in (payload.tickers or []) if t.strip()]
+    if not tickers:
+        tickers = list(_NPORT_DIAG_DEFAULT_TICKERS)
+    if len(tickers) > _NPORT_DIAG_MAX_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Maximum {_NPORT_DIAG_MAX_TICKERS} tickers per request.",
+        )
+
+    # run_nport_live_check is sync; use asyncio.to_thread so the SEC rate-limit
+    # sleep does not block the event loop for this operator-only endpoint.
+    result = await asyncio.to_thread(
+        run_nport_live_check,
+        tickers,
+        settings.sec_edgar_user_agent,
+    )
+    logger.info(
+        "nport_live_diagnostic_complete total=%d success=%d no_data=%d error=%d user=%s",
+        result["tickers_requested"],
+        result["tickers_succeeded"],
+        result["tickers_no_data"],
+        result["tickers_error"],
+        getattr(user, "email", "unknown"),
+    )
     return result

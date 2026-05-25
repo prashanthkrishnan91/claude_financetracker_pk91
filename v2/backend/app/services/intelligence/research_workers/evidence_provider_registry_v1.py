@@ -68,6 +68,7 @@ LANE_ANALYST_REVISIONS = "analyst_revisions"
 LANE_COMPANY_STRATEGY = "company_strategy"
 LANE_TRANSCRIPTS = "transcripts"
 LANE_INSIDER_13F = "insider_13f"
+LANE_ETF_FUND_DATA = "etf_fund_data"          # Stage 9F.2a: SEC NPORT-P ETF holdings lane
 
 ALL_LANES: FrozenSet[str] = frozenset({
     LANE_FUNDAMENTALS,
@@ -80,6 +81,7 @@ ALL_LANES: FrozenSet[str] = frozenset({
     LANE_COMPANY_STRATEGY,
     LANE_TRANSCRIPTS,
     LANE_INSIDER_13F,
+    LANE_ETF_FUND_DATA,
 })
 
 
@@ -123,13 +125,14 @@ _REGISTRY: Dict[str, EvidenceProviderEntry] = {
 
     "sec_edgar": EvidenceProviderEntry(
         provider_id="sec_edgar",
-        display_name="SEC EDGAR (public filings API + XBRL CompanyFacts)",
+        display_name="SEC EDGAR (public filings API + XBRL CompanyFacts + NPORT-P ETF holdings)",
         cost_tier=CostTier.FREE,
         trust_tier=TrustTier.OFFICIAL,
-        supported_lanes=frozenset({LANE_SEC_FILING, LANE_SEC_COMPANY_FACTS}),
+        supported_lanes=frozenset({LANE_SEC_FILING, LANE_SEC_COMPANY_FACTS, LANE_ETF_FUND_DATA}),
         max_stale_age_hours={
-            LANE_SEC_FILING: 168.0,         # 7 days — filings update quarterly at most
-            LANE_SEC_COMPANY_FACTS: 168.0,  # 7 days — XBRL facts update with new filings
+            LANE_SEC_FILING: 168.0,          # 7 days — filings update quarterly at most
+            LANE_SEC_COMPANY_FACTS: 168.0,   # 7 days — XBRL facts update with new filings
+            LANE_ETF_FUND_DATA: 2160.0,      # 90 days (~quarterly NPORT-P cadence)
         },
         requires_api_key=False,         # public API; User-Agent header required (not a key)
         default_enabled=True,
@@ -137,17 +140,23 @@ _REGISTRY: Dict[str, EvidenceProviderEntry] = {
         limitations=[
             "Requires a declared User-Agent header per SEC terms of service.",
             "Rate-limited to approximately 10 requests/second by SEC.",
-            "Not applicable to ETF/fund/crypto tickers — SEC EDGAR is company-only.",
+            "sec_company_facts lane: not applicable to ETF/fund/crypto tickers.",
             "CompanyFacts XBRL coverage limited to us-gaap allowlisted concepts only.",
             "No real-time data — filings reflect last reported fiscal period.",
             "sec_company_facts lane requires intel_v3_sec_companyfacts_evidence_enabled=True.",
+            "etf_fund_data lane (NPORT-P): ETF-only; periodic/lagged (quarterly + ~60d lag).",
+            "etf_fund_data lane requires intel_v3_etf_nport_evidence_enabled=True.",
+            "NPORT-P: sector labels MISSING; geography from countryOfRisk when present.",
+            "GLD and commodity trusts: no equity holdings in NPORT; handled as commodity_trust.",
         ],
         notes=(
             "Stage 5H: sec_company_facts lane wired via sec_companyfacts_adapter_v1.py. "
             "Uses existing sec_edgar_provider.py (request 3: companyfacts XBRL). "
             "sec_filing lane: wired via earnings_reviewer path (intel_v3_earnings_reviewer_sec_enabled). "
-            "Provider distinction: yfinance=FREE/UNOFFICIAL baseline fundamentals; "
-            "sec_edgar=FREE/OFFICIAL official company-facts lane."
+            "Stage 9F.2a: etf_fund_data lane wired via nport_provider_v1.py + "
+            "etf_nport_adapter_v1.py. Fetches NPORT-P/NPORT-EX filings from EDGAR. "
+            "Provider distinction: yfinance=FREE/UNOFFICIAL baseline; "
+            "sec_edgar=FREE/OFFICIAL for equity facts + ETF NPORT-P holdings."
         ),
     ),
 

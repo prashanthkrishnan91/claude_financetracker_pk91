@@ -125,6 +125,18 @@ class Settings(BaseSettings):
     # Default OFF — no behavior change unless explicitly enabled.
     intel_v3_sentiment_catalyst_evidence_enabled: bool = False
 
+    # ── Intel v3 Stage 9F.2a — SEC NPORT-P ETF holdings evidence lane (off by default) ──
+    # SEC EDGAR NPORT-P regulatory filings → per-ticker ETF fund holdings artifact
+    # via nport_provider_v1.py + etf_nport_adapter_v1.py.
+    # FREE / OFFICIAL source (SEC EDGAR). No API key required. No paid providers. No LLM.
+    # artifact_type=etf_fund_note (existing DB enum), skill_pack=etf_sec_nport_holdings_evidence_v1.
+    # ETF-only guard: non-ETF tickers are skipped honestly (not written as failures).
+    # NPORT-P is official but periodic/lagged (quarterly + ~60-day filing lag).
+    # safe_for_decision stays False. synthesis_ready stays False.
+    # Requires intel_v3_research_workers_enabled AND sec_edgar_user_agent to be set.
+    # Default OFF — no behavior change unless explicitly enabled.
+    intel_v3_etf_nport_evidence_enabled: bool = False
+
     # ── Intel v3 Stage 5I — FRED official macro evidence lane (off by default) ────
     # FRED (Federal Reserve Economic Data) → portfolio-scope macro evidence artifact
     # via fred_macro_adapter_v1. FREE / OFFICIAL source. No paid providers. No LLM calls.

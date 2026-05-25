@@ -1,4 +1,4 @@
-"""Stage 5F + Stage 5H + Stage 5I — Multi-lane evidence population runner.
+"""Stage 5F + Stage 5H + Stage 5I + Stage 9F.2a — Multi-lane evidence population runner.
 
 Wires feasible evidence lanes into ResearchArtifactServiceV1:
   - fundamentals      → fundamental_quality artifact (yfinance sync)          [Stage 5F]
@@ -7,6 +7,7 @@ Wires feasible evidence lanes into ResearchArtifactServiceV1:
   - sec_company_facts → fundamental_quality artifact (SEC EDGAR XBRL sync)   [Stage 5H]
   - macro             → portfolio-scope macro evidence artifact (FRED sync)   [Stage 5I]
                        (ticker-agnostic; one artifact per explicit run)
+  - etf_fund_data     → etf_fund_note artifact (SEC NPORT-P sync, ETF-only)  [Stage 9F.2a]
 
 Each lane is independently kill-switched via Settings. All writes go through
 ResearchArtifactServiceV1.write_artifact(), which injects all four Stage 5
@@ -50,7 +51,7 @@ from .evidence_provider_router_v1 import (
     ROUTE_REASON_NO_PROVIDER,
     resolve_provider_for_lane,
 )
-from .evidence_provider_registry_v1 import LANE_MACRO, LANE_SEC_COMPANY_FACTS
+from .evidence_provider_registry_v1 import LANE_ETF_FUND_DATA, LANE_MACRO, LANE_SEC_COMPANY_FACTS
 from .fred_macro_adapter_v1 import build_fred_macro_worker_output
 from .fred_provider_v1 import (
     ALLOWED_MACRO_SERIES,
@@ -107,6 +108,13 @@ def _is_sec_catalyst_sentiment_enabled(s: Settings) -> bool:
     return (
         s.intel_v3_research_workers_enabled
         and s.intel_v3_sentiment_catalyst_evidence_enabled
+    )
+
+
+def _is_etf_nport_enabled(s: Settings) -> bool:
+    return (
+        s.intel_v3_research_workers_enabled
+        and s.intel_v3_etf_nport_evidence_enabled
     )
 
 
@@ -917,6 +925,208 @@ def run_fred_macro_evidence(
     return artifact_id
 
 
+def run_etf_nport_holdings_evidence(
+    user_id: str,
+    ticker: str,
+    db_client: Any,
+    parent_intel_run_id: Optional[str] = None,
+    holding_context: Optional[dict[str, Any]] = None,
+    settings: Optional[Settings] = None,
+    _provider_fn: Optional[Callable] = None,
+) -> Optional[str]:
+    """Run the SEC NPORT-P ETF holdings evidence lane for one ticker (Stage 9F.2a).
+
+    ETF-only: non-ETF tickers are skipped honestly (not written as failures).
+    Returns artifact_id if holdings written, None if disabled/non-ETF/no data/error.
+
+    Kill-switch hierarchy:
+      1. settings.intel_v3_research_workers_enabled  (global kill switch)
+      2. settings.intel_v3_etf_nport_evidence_enabled
+      3. settings.sec_edgar_user_agent must be non-empty
+      4. holding_context must indicate ETF asset type (or be absent for skip)
+
+    Structured log keys emitted:
+      sec_nport_etf_holdings_start
+      sec_nport_etf_holdings_written
+      sec_nport_etf_holdings_skip
+      sec_nport_etf_holdings_complete
+
+    Args:
+        _provider_fn: Injectable callable for tests.
+                      Signature: (ticker: str) -> NportProviderResult.
+                      Defaults to nport_provider_v1.fetch_etf_nport_holdings().
+    """
+    if settings is None:
+        settings = get_settings()
+    if not _is_etf_nport_enabled(settings):
+        logger.debug(
+            "sec_nport_etf_holdings_skip ticker=%s reason=flag_off", ticker
+        )
+        return None
+
+    ticker_upper = ticker.upper().strip()
+
+    # ETF-only guard: use holding_context category/asset_type when available.
+    # Non-ETF tickers are skipped honestly — not written as failures.
+    is_etf = _classify_holding_as_etf(ticker_upper, holding_context)
+    if not is_etf:
+        logger.info(
+            "sec_nport_etf_holdings_skip ticker=%s reason=non_etf_ticker",
+            ticker_upper,
+        )
+        return None
+
+    # Consult provider registry/router — ensures sec_edgar is enabled + FREE/OFFICIAL.
+    route = resolve_provider_for_lane(LANE_ETF_FUND_DATA)
+    if route.reason == ROUTE_REASON_NO_PROVIDER:
+        logger.warning(
+            "sec_nport_etf_holdings_skip ticker=%s reason=no_provider lane=etf_fund_data",
+            ticker_upper,
+        )
+        return None
+
+    fetched_at = datetime.now(timezone.utc).isoformat()
+    worker_run_id = str(uuid.uuid4())
+    worker_input = WorkerInput(
+        user_id=user_id,
+        ticker=ticker_upper,
+        worker_run_id=worker_run_id,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+    )
+
+    if _provider_fn is not None:
+        provider_fn = _provider_fn
+    else:
+        from .nport_provider_v1 import NportProviderConfig, fetch_etf_nport_holdings
+        user_agent = (settings.sec_edgar_user_agent or "").strip()
+        if not user_agent:
+            logger.info(
+                "sec_nport_etf_holdings_skip ticker=%s reason=no_sec_edgar_user_agent",
+                ticker_upper,
+            )
+            return None
+        _cfg = NportProviderConfig(user_agent=user_agent)
+        provider_fn = lambda t: fetch_etf_nport_holdings(t, _cfg)  # noqa: E731
+
+    logger.info(
+        "sec_nport_etf_holdings_start ticker=%s worker_run_id=%s",
+        ticker_upper, worker_run_id,
+    )
+
+    try:
+        from .nport_provider_v1 import NportProviderResult
+        provider_result: "NportProviderResult" = provider_fn(ticker_upper)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "sec_nport_etf_holdings_skip ticker=%s reason=provider_error error=%s",
+            ticker_upper, exc,
+        )
+        return None
+
+    # Import adapter here to keep the top-level import list clean.
+    from .etf_nport_adapter_v1 import build_etf_nport_worker_output
+    output = build_etf_nport_worker_output(worker_input, provider_result, fetched_at)
+
+    holdings_count = output.artifact_payload.get("holdings_count", 0)
+    fetch_status = output.artifact_payload.get("fetch_status", "unknown")
+
+    if holdings_count == 0:
+        # Persistent no-data statuses (structural, not transient) → write a thin
+        # diagnostic artifact so GLD/missing-CIK/no-filing outcomes are inspectable.
+        # Transient errors (sec_error, timeout, error) → skip to avoid persisting
+        # a stale diagnostic that may clear on retry.
+        _PERSISTENT_NO_DATA: frozenset[str] = frozenset({
+            "missing_cik",
+            "no_nport_filing",
+            "filing_not_parseable",
+            "no_holdings_found",
+            "commodity_trust_or_no_nport_data",
+        })
+        if fetch_status not in _PERSISTENT_NO_DATA:
+            logger.info(
+                "sec_nport_etf_holdings_skip ticker=%s reason=%s cik=%s",
+                ticker_upper, fetch_status,
+                output.artifact_payload.get("cik"),
+            )
+            return None
+        # Fall through to write thin no-data artifact (zero facts, zero sources).
+        logger.info(
+            "sec_nport_etf_holdings_no_data_artifact ticker=%s fetch_status=%s cik=%s",
+            ticker_upper, fetch_status,
+            output.artifact_payload.get("cik"),
+        )
+
+    service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
+    artifact_id = service.write_artifact(output)
+
+    if artifact_id:
+        if holdings_count > 0:
+            logger.info(
+                "sec_nport_etf_holdings_written ticker=%s artifact_id=%s "
+                "holdings_count=%d weights_available=%s weights_derived=%s "
+                "geography_status=%s confidence=%s freshness=%s",
+                ticker_upper, artifact_id,
+                holdings_count,
+                output.artifact_payload.get("weights_available"),
+                output.artifact_payload.get("weights_derived"),
+                output.artifact_payload.get("geography_status"),
+                output.confidence_or_trust_level,
+                output.freshness_status,
+            )
+        logger.info(
+            "sec_nport_etf_holdings_complete ticker=%s artifact_id=%s "
+            "holdings_count=%d fetch_status=%s report_period=%s filing_date=%s form_type=%s",
+            ticker_upper, artifact_id,
+            holdings_count, fetch_status,
+            output.artifact_payload.get("report_period_date"),
+            output.artifact_payload.get("filing_date"),
+            output.artifact_payload.get("form_type"),
+        )
+    else:
+        logger.warning(
+            "sec_nport_etf_holdings_complete ticker=%s artifact_id=none "
+            "holdings_count=%d fetch_status=%s reason=service_write_failed",
+            ticker_upper, holdings_count, fetch_status,
+        )
+    return artifact_id
+
+
+def _classify_holding_as_etf(
+    ticker_upper: str,
+    holding_context: Optional[dict[str, Any]],
+) -> bool:
+    """Return True if holding_context identifies this ticker as an ETF.
+
+    Uses holding_context metadata (category/asset_type keys) when present.
+    Falls back to a conservative known-ETF symbol list for common portfolio ETFs
+    when metadata is absent. Non-ETF tickers return False (skip, not fail).
+    """
+    _KNOWN_ETF_SYMBOLS: frozenset[str] = frozenset({
+        "SPY", "VOO", "VTI", "QQQ", "VGT", "VHT", "VIS",
+        "XLE", "VXUS", "SCHD", "VYM", "GLD",
+    })
+
+    if holding_context:
+        for key in ("category", "asset_type", "security_type", "instrument_type", "asset_class"):
+            val = holding_context.get(key)
+            if isinstance(val, str) and val.strip():
+                val_lower = val.strip().lower()
+                # Accept common ETF category labels.
+                if val_lower in ("etf", "fund", "exchange_traded_fund",
+                                 "exchange traded fund", "etf/fund"):
+                    return True
+                # Explicitly non-ETF: equity, crypto, bond.
+                if val_lower in ("equity", "stock", "crypto", "cryptocurrency",
+                                 "bond", "fixed_income", "cash"):
+                    return False
+        # holding_context present but no recognized ETF/non-ETF label —
+        # fall through to symbol fallback.
+
+    # Conservative symbol fallback: skip if not in known ETF list.
+    return ticker_upper in _KNOWN_ETF_SYMBOLS
+
+
 # ── Dispatcher: run all feasible lanes ───────────────────────────────────────
 
 def run_all_evidence_lanes(
@@ -931,6 +1141,7 @@ def run_all_evidence_lanes(
     _news_sentiment_fetch_fn: Optional[Callable] = None,
     _sec_companyfacts_provider_fn: Optional[Callable] = None,
     _sec_catalyst_sentiment_provider_fn: Optional[Callable] = None,
+    _etf_nport_provider_fn: Optional[Callable] = None,
 ) -> dict[str, Optional[str]]:
     """Run all feasible evidence lanes for one ticker.
 
@@ -947,6 +1158,7 @@ def run_all_evidence_lanes(
             _technicals_fetch_fn=lambda t: {...},
             _news_sentiment_fetch_fn=lambda t: [...],
             _sec_companyfacts_provider_fn=lambda t: <SecEdgarProviderResult>,
+            _etf_nport_provider_fn=lambda t: <NportProviderResult>,
         )
     """
     results: dict[str, Optional[str]] = {}
@@ -995,6 +1207,15 @@ def run_all_evidence_lanes(
         holding_context=holding_context,
         settings=settings,
         _provider_fn=_sec_catalyst_sentiment_provider_fn,
+    )
+    results[LANE_ETF_FUND_DATA] = run_etf_nport_holdings_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _provider_fn=_etf_nport_provider_fn,
     )
 
     enabled_count = sum(1 for v in results.values() if v is not None)

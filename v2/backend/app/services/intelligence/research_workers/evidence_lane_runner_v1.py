@@ -1028,37 +1028,57 @@ def run_etf_nport_holdings_evidence(
     from .etf_nport_adapter_v1 import build_etf_nport_worker_output
     output = build_etf_nport_worker_output(worker_input, provider_result, fetched_at)
 
-    # Skip write when no holdings were parsed — honest no-data, not a noisy placeholder.
     holdings_count = output.artifact_payload.get("holdings_count", 0)
+    fetch_status = output.artifact_payload.get("fetch_status", "unknown")
+
     if holdings_count == 0:
-        skip_reason = output.artifact_payload.get("fetch_status", "no_holdings")
+        # Persistent no-data statuses (structural, not transient) → write a thin
+        # diagnostic artifact so GLD/missing-CIK/no-filing outcomes are inspectable.
+        # Transient errors (sec_error, timeout, error) → skip to avoid persisting
+        # a stale diagnostic that may clear on retry.
+        _PERSISTENT_NO_DATA: frozenset[str] = frozenset({
+            "missing_cik",
+            "no_nport_filing",
+            "filing_not_parseable",
+            "no_holdings_found",
+            "commodity_trust_or_no_nport_data",
+        })
+        if fetch_status not in _PERSISTENT_NO_DATA:
+            logger.info(
+                "sec_nport_etf_holdings_skip ticker=%s reason=%s cik=%s",
+                ticker_upper, fetch_status,
+                output.artifact_payload.get("cik"),
+            )
+            return None
+        # Fall through to write thin no-data artifact (zero facts, zero sources).
         logger.info(
-            "sec_nport_etf_holdings_skip ticker=%s reason=%s cik=%s",
-            ticker_upper, skip_reason,
+            "sec_nport_etf_holdings_no_data_artifact ticker=%s fetch_status=%s cik=%s",
+            ticker_upper, fetch_status,
             output.artifact_payload.get("cik"),
         )
-        return None
 
     service = ResearchArtifactServiceV1(supabase_client=db_client, user_id=user_id)
     artifact_id = service.write_artifact(output)
 
     if artifact_id:
-        logger.info(
-            "sec_nport_etf_holdings_written ticker=%s artifact_id=%s "
-            "holdings_count=%d weights_available=%s weights_derived=%s "
-            "geography_status=%s confidence=%s freshness=%s",
-            ticker_upper, artifact_id,
-            holdings_count,
-            output.artifact_payload.get("weights_available"),
-            output.artifact_payload.get("weights_derived"),
-            output.artifact_payload.get("geography_status"),
-            output.confidence_or_trust_level,
-            output.freshness_status,
-        )
+        if holdings_count > 0:
+            logger.info(
+                "sec_nport_etf_holdings_written ticker=%s artifact_id=%s "
+                "holdings_count=%d weights_available=%s weights_derived=%s "
+                "geography_status=%s confidence=%s freshness=%s",
+                ticker_upper, artifact_id,
+                holdings_count,
+                output.artifact_payload.get("weights_available"),
+                output.artifact_payload.get("weights_derived"),
+                output.artifact_payload.get("geography_status"),
+                output.confidence_or_trust_level,
+                output.freshness_status,
+            )
         logger.info(
             "sec_nport_etf_holdings_complete ticker=%s artifact_id=%s "
-            "report_period=%s filing_date=%s form_type=%s",
+            "holdings_count=%d fetch_status=%s report_period=%s filing_date=%s form_type=%s",
             ticker_upper, artifact_id,
+            holdings_count, fetch_status,
             output.artifact_payload.get("report_period_date"),
             output.artifact_payload.get("filing_date"),
             output.artifact_payload.get("form_type"),
@@ -1066,8 +1086,8 @@ def run_etf_nport_holdings_evidence(
     else:
         logger.warning(
             "sec_nport_etf_holdings_complete ticker=%s artifact_id=none "
-            "holdings_count=%d reason=service_write_failed",
-            ticker_upper, holdings_count,
+            "holdings_count=%d fetch_status=%s reason=service_write_failed",
+            ticker_upper, holdings_count, fetch_status,
         )
     return artifact_id
 
@@ -1121,6 +1141,7 @@ def run_all_evidence_lanes(
     _news_sentiment_fetch_fn: Optional[Callable] = None,
     _sec_companyfacts_provider_fn: Optional[Callable] = None,
     _sec_catalyst_sentiment_provider_fn: Optional[Callable] = None,
+    _etf_nport_provider_fn: Optional[Callable] = None,
 ) -> dict[str, Optional[str]]:
     """Run all feasible evidence lanes for one ticker.
 
@@ -1137,6 +1158,7 @@ def run_all_evidence_lanes(
             _technicals_fetch_fn=lambda t: {...},
             _news_sentiment_fetch_fn=lambda t: [...],
             _sec_companyfacts_provider_fn=lambda t: <SecEdgarProviderResult>,
+            _etf_nport_provider_fn=lambda t: <NportProviderResult>,
         )
     """
     results: dict[str, Optional[str]] = {}
@@ -1185,6 +1207,15 @@ def run_all_evidence_lanes(
         holding_context=holding_context,
         settings=settings,
         _provider_fn=_sec_catalyst_sentiment_provider_fn,
+    )
+    results[LANE_ETF_FUND_DATA] = run_etf_nport_holdings_evidence(
+        user_id=user_id,
+        ticker=ticker,
+        db_client=db_client,
+        parent_intel_run_id=parent_intel_run_id,
+        holding_context=holding_context,
+        settings=settings,
+        _provider_fn=_etf_nport_provider_fn,
     )
 
     enabled_count = sum(1 for v in results.values() if v is not None)

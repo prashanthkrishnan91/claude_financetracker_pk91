@@ -967,21 +967,53 @@ class TestRunnerEtfNport:
         assert _classify_holding_as_etf("SPY", {"category": "equity"}) is False
         assert _classify_holding_as_etf("QQQ", {"asset_type": "stock"}) is False
 
-    def test_46_zero_holdings_skips_write(self):
-        """Provider returns non-success (no holdings) → runner skips write, returns None."""
+    def test_46_persistent_no_data_writes_thin_artifact(self):
+        """Persistent no-data statuses for known ETFs write thin diagnostic artifact."""
         from app.services.intelligence.research_workers.nport_provider_v1 import (
             NportProviderResult,
         )
 
-        pr = NportProviderResult(
-            ticker="SPY",
-            fetch_status="no_nport_filing",
-            error_message="No filing found.",
+        for status in (
+            "no_nport_filing",
+            "missing_cik",
+            "filing_not_parseable",
+            "no_holdings_found",
+            "commodity_trust_or_no_nport_data",
+        ):
+            pr = NportProviderResult(
+                ticker="SPY",
+                fetch_status=status,
+                error_message=f"Test no-data: {status}",
+            )
+            with patch(
+                "app.services.intelligence.research_workers.evidence_lane_runner_v1"
+                ".ResearchArtifactServiceV1"
+            ) as MockService:
+                mock_svc = MockService.return_value
+                mock_svc.write_artifact.return_value = f"diag-artifact-{status}"
+                result = self._call_runner(ticker="SPY", provider_result=pr)
+
+            assert result == f"diag-artifact-{status}", (
+                f"Expected thin artifact write for persistent status {status!r}"
+            )
+            mock_svc.write_artifact.assert_called_once()
+
+    def test_46b_transient_error_skips_write(self):
+        """Transient errors (sec_error, timeout, error) skip write, return None."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportProviderResult,
         )
-        db_client = MagicMock()
-        result = self._call_runner(ticker="SPY", provider_result=pr, db_client=db_client)
-        assert result is None
-        db_client.table.assert_not_called()
+
+        for status in ("sec_error", "timeout", "error"):
+            pr = NportProviderResult(
+                ticker="SPY",
+                fetch_status=status,
+                error_message=f"Transient: {status}",
+            )
+            db_client = MagicMock()
+            result = self._call_runner(ticker="SPY", provider_result=pr, db_client=db_client)
+            assert result is None, f"Expected None for transient status {status!r}"
+            db_client.table.assert_not_called()
 
     def test_47_success_path_calls_write_artifact(self):
         """Success path: provider returns holdings → write_artifact called."""
@@ -1015,6 +1047,125 @@ class TestRunnerEtfNport:
         assert out1.replay_idempotency_key == out2.replay_idempotency_key
 
 
+# ── Dispatcher reachability tests ─────────────────────────────────────────────
+
+
+class TestDispatcherReachability:
+    """Tests proving run_all_evidence_lanes() calls run_etf_nport_holdings_evidence()."""
+
+    def _make_all_disabled_settings(self, etf_nport_on: bool = False):
+        s = MagicMock()
+        s.intel_v3_research_workers_enabled = etf_nport_on
+        s.intel_v3_etf_nport_evidence_enabled = etf_nport_on
+        s.intel_v3_fundamentals_evidence_enabled = False
+        s.intel_v3_technicals_evidence_enabled = False
+        s.intel_v3_news_sentiment_evidence_enabled = False
+        s.intel_v3_sec_companyfacts_evidence_enabled = False
+        s.intel_v3_sentiment_catalyst_evidence_enabled = False
+        s.sec_edgar_user_agent = "test/1.0"
+        return s
+
+    def test_51_dispatcher_includes_lane_etf_fund_data_key(self):
+        """run_all_evidence_lanes() result dict always contains LANE_ETF_FUND_DATA key."""
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_all_evidence_lanes,
+        )
+        from app.services.intelligence.research_workers.evidence_provider_registry_v1 import (
+            LANE_ETF_FUND_DATA,
+        )
+
+        settings = self._make_all_disabled_settings(etf_nport_on=False)
+        result = run_all_evidence_lanes(
+            user_id="test-user",
+            ticker="SPY",
+            db_client=MagicMock(),
+            settings=settings,
+        )
+        assert LANE_ETF_FUND_DATA in result, (
+            f"LANE_ETF_FUND_DATA missing from dispatcher result; keys={list(result)}"
+        )
+
+    def test_52_dispatcher_etf_lane_none_when_flag_off(self):
+        """With flag OFF, dispatcher sets LANE_ETF_FUND_DATA → None."""
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_all_evidence_lanes,
+        )
+        from app.services.intelligence.research_workers.evidence_provider_registry_v1 import (
+            LANE_ETF_FUND_DATA,
+        )
+
+        settings = self._make_all_disabled_settings(etf_nport_on=False)
+        result = run_all_evidence_lanes(
+            user_id="test-user",
+            ticker="SPY",
+            db_client=MagicMock(),
+            settings=settings,
+        )
+        assert result[LANE_ETF_FUND_DATA] is None
+
+    def test_53_dispatcher_routes_etf_ticker_to_nport_lane_when_enabled(self):
+        """With workers ON + ETF flag ON + SPY → dispatcher writes artifact via ETF lane."""
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_all_evidence_lanes,
+        )
+        from app.services.intelligence.research_workers.evidence_provider_registry_v1 import (
+            LANE_ETF_FUND_DATA,
+        )
+
+        settings = self._make_all_disabled_settings(etf_nport_on=True)
+        pr = _make_provider_result_success(ticker="SPY")
+
+        with patch(
+            "app.services.intelligence.research_workers.evidence_lane_runner_v1"
+            ".ResearchArtifactServiceV1"
+        ) as MockService:
+            mock_svc = MockService.return_value
+            mock_svc.write_artifact.return_value = "nport-artifact-spy"
+            result = run_all_evidence_lanes(
+                user_id="test-user",
+                ticker="SPY",
+                db_client=MagicMock(),
+                settings=settings,
+                _etf_nport_provider_fn=lambda t: pr,
+            )
+
+        assert result[LANE_ETF_FUND_DATA] == "nport-artifact-spy"
+
+    def test_54_dispatcher_non_etf_ticker_etf_lane_none(self):
+        """Non-ETF ticker (equity) → LANE_ETF_FUND_DATA remains None in dispatcher."""
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_all_evidence_lanes,
+        )
+        from app.services.intelligence.research_workers.evidence_provider_registry_v1 import (
+            LANE_ETF_FUND_DATA,
+        )
+
+        settings = self._make_all_disabled_settings(etf_nport_on=True)
+        pr = _make_provider_result_success(ticker="AAPL")
+
+        result = run_all_evidence_lanes(
+            user_id="test-user",
+            ticker="AAPL",
+            db_client=MagicMock(),
+            settings=settings,
+            holding_context={"category": "equity"},
+            _etf_nport_provider_fn=lambda t: pr,
+        )
+        assert result[LANE_ETF_FUND_DATA] is None
+
+    def test_55_dispatcher_accepts_etf_nport_provider_fn_param(self):
+        """run_all_evidence_lanes() signature accepts _etf_nport_provider_fn."""
+        import inspect
+        from app.services.intelligence.research_workers.evidence_lane_runner_v1 import (
+            run_all_evidence_lanes,
+        )
+
+        sig = inspect.signature(run_all_evidence_lanes)
+        assert "_etf_nport_provider_fn" in sig.parameters, (
+            "Dispatcher missing _etf_nport_provider_fn parameter — ETF NPORT lane not injectable"
+        )
+
+
 # ── Regression tests ──────────────────────────────────────────────────────────
 
 
@@ -1023,7 +1174,6 @@ class TestRegressionImports:
 
     def test_49_no_import_break_from_new_modules(self):
         """Importing new lane modules does not break existing imports."""
-        # Re-import to force any import-time errors to surface.
         import importlib
 
         importlib.import_module(

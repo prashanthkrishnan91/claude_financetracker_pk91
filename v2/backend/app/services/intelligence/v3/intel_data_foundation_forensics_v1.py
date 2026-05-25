@@ -56,6 +56,10 @@ from .canonical_equity_dataset_v1 import (
     build_canonical_equity_dataset_row,
     build_asset_parity_roadmap,
 )
+from .canonical_etf_fund_dataset_v1 import (
+    CanonicalEtfFundDatasetRow,
+    build_canonical_etf_fund_dataset_row,
+)
 from .equity_numeric_valuation_inputs_v1 import (
     FRESHNESS_AGING,
     FRESHNESS_FRESH,
@@ -86,6 +90,9 @@ BUCKET_SEC_MISSING_CIK = "SEC_ARTIFACT_MISSING_CIK_OR_MAPPING_UNKNOWN"
 BUCKET_SEC_MISSING_WORKER = "SEC_ARTIFACT_MISSING_WORKER_OR_BACKFILL_GAP"
 BUCKET_VALUATION_NOT_BUILT = "VALUATION_LANE_NOT_BUILT"
 BUCKET_ETF_NOT_BUILT = "ETF_PROVIDER_NOT_BUILT"
+# Stage 9F: replaces ETF_PROVIDER_NOT_BUILT when the canonical ETF scaffold is present
+# but fund composition/holdings data is still unavailable.
+BUCKET_ETF_FUND_COMPOSITION_NOT_READY = "ETF_FUND_COMPOSITION_NOT_READY"
 BUCKET_CRYPTO_NOT_BUILT = "CRYPTO_PROVIDER_NOT_BUILT"
 BUCKET_TARGET_WEIGHT_NOT_BUILT = "TARGET_WEIGHT_MODEL_NOT_BUILT"
 BUCKET_THESIS_NOT_BUILT = "THESIS_HISTORY_NOT_BUILT"
@@ -99,6 +106,7 @@ ALL_BUCKETS: frozenset[str] = frozenset({
     BUCKET_SEC_MISSING_WORKER,
     BUCKET_VALUATION_NOT_BUILT,
     BUCKET_ETF_NOT_BUILT,
+    BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
     BUCKET_CRYPTO_NOT_BUILT,
     BUCKET_TARGET_WEIGHT_NOT_BUILT,
     BUCKET_THESIS_NOT_BUILT,
@@ -107,7 +115,11 @@ ALL_BUCKETS: frozenset[str] = frozenset({
     BUCKET_NOT_APPLICABLE,
 })
 
-_PROVIDER_LIMITED_BUCKETS = frozenset({BUCKET_ETF_NOT_BUILT, BUCKET_CRYPTO_NOT_BUILT})
+_PROVIDER_LIMITED_BUCKETS = frozenset({
+    BUCKET_ETF_NOT_BUILT,
+    BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
+    BUCKET_CRYPTO_NOT_BUILT,
+})
 _IMPLEMENTATION_LIMITED_BUCKETS = frozenset({
     BUCKET_SEC_EXISTS_WEAK,
     BUCKET_SEC_MISSING_CIK,
@@ -218,6 +230,12 @@ class HoldingForensicsRow:
     # valuation_ready=True only when canonical_equity_dataset_safe + price + EPS available.
     valuation_evidence: Optional[dict] = None
 
+    # Stage 9F: canonical ETF fund intelligence dataset row for this holding.
+    # Populated for ETF holdings only. Equity/crypto → None.
+    # etf_fund_intelligence_ready=True only when real ETF-specific fund composition
+    # inputs exist. Always False at Stage 9F — no fund composition provider built.
+    canonical_etf_dataset: Optional[dict] = None
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "ticker": self.ticker,
@@ -252,6 +270,7 @@ class HoldingForensicsRow:
             "sec_companyfacts_diagnostic": self.sec_companyfacts_diagnostic,
             "canonical_equity_dataset": self.canonical_equity_dataset,
             "valuation_evidence": self.valuation_evidence,
+            "canonical_etf_dataset": self.canonical_etf_dataset,
         }
 
 
@@ -320,6 +339,18 @@ class DataFoundationForensicsResult:
     # Per-missing-reason counts from numeric input adapter across all equity holdings.
     numeric_valuation_missing_reason_counts: dict = field(default_factory=dict)
 
+    # Stage 9F: ETF canonical fund intelligence dataset counts.
+    # Number of ETF holdings where canonical_etf_scaffold_present=True (scaffold built).
+    # canonical_etf_dataset_safe is always False at Stage 9F — scaffold present ≠ dataset safe.
+    etf_canonical_dataset_count: int = 0
+    # Number of ETF holdings where etf_fund_intelligence_ready=True (always 0 at Stage 9F).
+    etf_fund_intelligence_ready_count: int = 0
+    # ETF tickers where canonical_etf_scaffold_present=False (should not occur for ETF
+    # tickers at Stage 9F, but tracked for auditability).
+    etf_canonical_dataset_degraded_tickers: list = field(default_factory=list)
+    # Per-missing-reason-key counts across all ETF canonical dataset rows.
+    etf_missing_reason_counts: dict = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "schema_version": self.schema_version,
@@ -349,6 +380,10 @@ class DataFoundationForensicsResult:
             "equity_numeric_valuation_ready_count": self.equity_numeric_valuation_ready_count,
             "equity_numeric_valuation_degraded_tickers": list(self.equity_numeric_valuation_degraded_tickers),
             "numeric_valuation_missing_reason_counts": dict(self.numeric_valuation_missing_reason_counts),
+            "etf_canonical_dataset_count": self.etf_canonical_dataset_count,
+            "etf_fund_intelligence_ready_count": self.etf_fund_intelligence_ready_count,
+            "etf_canonical_dataset_degraded_tickers": list(self.etf_canonical_dataset_degraded_tickers),
+            "etf_missing_reason_counts": dict(self.etf_missing_reason_counts),
             "errors": list(self.errors),
         }
 
@@ -530,6 +565,27 @@ def compute_data_foundation_forensics(
                         numeric_valuation_missing_reason_counts.get("earnings_input", 0) + 1
                     )
 
+    # Stage 9F: ETF canonical dataset aggregate counts.
+    etf_canonical_dataset_count = 0
+    etf_fund_intelligence_ready_count = 0
+    etf_canonical_dataset_degraded_tickers: list[str] = []
+    etf_missing_reason_counts: dict[str, int] = {}
+
+    for h in holdings:
+        if h.asset_type == INSTRUMENT_CATEGORY_ETF and h.canonical_etf_dataset:
+            # Count scaffold rows (canonical_etf_scaffold_present=True).
+            # canonical_etf_dataset_safe is always False at Stage 9F (composition MISSING).
+            if h.canonical_etf_dataset.get("canonical_etf_scaffold_present"):
+                etf_canonical_dataset_count += 1
+            else:
+                etf_canonical_dataset_degraded_tickers.append(h.ticker)
+            if h.canonical_etf_dataset.get("etf_fund_intelligence_ready"):
+                etf_fund_intelligence_ready_count += 1
+            for reason_key in h.canonical_etf_dataset.get("missing_reasons", {}):
+                etf_missing_reason_counts[reason_key] = (
+                    etf_missing_reason_counts.get(reason_key, 0) + 1
+                )
+
     parity_roadmap = build_asset_parity_roadmap(
         equity_canonical_count=equity_canonical_count,
         equity_valuation_count=equity_valuation_evidence_count,
@@ -537,6 +593,8 @@ def compute_data_foundation_forensics(
         equity_total=equity_total,
         equity_edge_case_tickers=equity_degraded_tickers,
         etf_total=etf_total,
+        etf_canonical_count=etf_canonical_dataset_count,
+        etf_fund_intelligence_ready_count=etf_fund_intelligence_ready_count,
         crypto_total=crypto_total,
     )
 
@@ -568,6 +626,10 @@ def compute_data_foundation_forensics(
         equity_numeric_valuation_ready_count=equity_numeric_valuation_ready_count,
         equity_numeric_valuation_degraded_tickers=equity_numeric_valuation_degraded_tickers,
         numeric_valuation_missing_reason_counts=numeric_valuation_missing_reason_counts,
+        etf_canonical_dataset_count=etf_canonical_dataset_count,
+        etf_fund_intelligence_ready_count=etf_fund_intelligence_ready_count,
+        etf_canonical_dataset_degraded_tickers=etf_canonical_dataset_degraded_tickers,
+        etf_missing_reason_counts=etf_missing_reason_counts,
         errors=errors,
     )
 
@@ -880,8 +942,21 @@ def _build_holding_row(
         asset_type, valuation_lane_built=valuation_numeric_ready
     )
 
-    # ETF fund composition — no provider built at Stage 9B
-    etf_fund_composition_artifact_exists = False
+    # Stage 9F: build canonical ETF fund intelligence dataset for ETF holdings.
+    canonical_etf_dataset: Optional[dict] = None
+    etf_canonical_scaffold_present = False
+
+    if asset_type == INSTRUMENT_CATEGORY_ETF:
+        etf_row = build_canonical_etf_fund_dataset_row(
+            ticker=ticker,
+            asset_type=asset_type,
+            lanes=lanes,
+        )
+        canonical_etf_dataset = etf_row.to_dict()
+        etf_canonical_scaffold_present = etf_row.canonical_etf_scaffold_present
+
+    # ETF fund composition — now tracked via canonical_etf_dataset (Stage 9F).
+    etf_fund_composition_artifact_exists = etf_canonical_scaffold_present
 
     # Crypto market context proxy: technical artifact for crypto tickers
     crypto_market_context_exists = tech_exists if asset_type == INSTRUMENT_CATEGORY_CRYPTO else False
@@ -905,6 +980,7 @@ def _build_holding_row(
         has_thesis_history=thesis_history_exists,
         valuation_lane_exists=(val_row.valuation_ready if val_row is not None else False),
         valuation_evidence_model_present=valuation_evidence_model_present,
+        etf_canonical_scaffold_present=etf_canonical_scaffold_present,
     )
 
     blocking_gap_buckets = [g[0] for g in all_gaps]
@@ -945,6 +1021,7 @@ def _build_holding_row(
         sec_companyfacts_diagnostic=sec_companyfacts_diagnostic,
         canonical_equity_dataset=canonical_equity_dataset,
         valuation_evidence=valuation_evidence,
+        canonical_etf_dataset=canonical_etf_dataset,
     )
 
 
@@ -962,6 +1039,7 @@ def _classify_all_gaps(
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
     valuation_evidence_model_present: bool = False,
+    etf_canonical_scaffold_present: bool = False,
 ) -> list[tuple[str, str]]:
     """Return all material data foundation gaps in deterministic priority order.
 
@@ -970,7 +1048,8 @@ def _classify_all_gaps(
     subsequent elements are secondary gaps that should also be addressed.
 
     Rules:
-    - ETF: ETF_PROVIDER_NOT_BUILT + applicable secondary gaps (target/thesis/news)
+    - ETF (with Stage 9F scaffold): ETF_FUND_COMPOSITION_NOT_READY + secondary gaps
+    - ETF (no scaffold): ETF_PROVIDER_NOT_BUILT + secondary gaps
     - Crypto: CRYPTO_PROVIDER_NOT_BUILT + applicable secondary gaps
     - Unknown: [ASSET_TYPE_NOT_APPLICABLE] only
     - Equity: SEC gap (if any) + valuation + news + target weight + thesis, in order
@@ -993,14 +1072,26 @@ def _classify_all_gaps(
 
     # ── ETF path ───────────────────────────────────────────────────────────────
     if asset_type == INSTRUMENT_CATEGORY_ETF:
-        gaps.append((
-            BUCKET_ETF_NOT_BUILT,
-            (
-                "Build a dedicated ETF fund-data provider lane for holdings, sector exposure, "
-                "expense ratio, and yield. No fund-data provider exists in Stage 5J/5K; "
-                "ETF composition is MISSING by design until a provider is built (Stage 9C)."
-            ),
-        ))
+        if etf_canonical_scaffold_present:
+            # Stage 9F: canonical ETF scaffold built but fund composition is MISSING.
+            gaps.append((
+                BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
+                (
+                    "Canonical ETF fund intelligence scaffold (Stage 9F) is built. "
+                    "Fund composition, holdings, sector/geography exposure, and concentration "
+                    "data are MISSING — no dedicated ETF fund data provider is built. "
+                    "Add a fund holdings/composition provider to advance ETF intelligence readiness."
+                ),
+            ))
+        else:
+            gaps.append((
+                BUCKET_ETF_NOT_BUILT,
+                (
+                    "Build a dedicated ETF fund-data provider lane for holdings, sector exposure, "
+                    "expense ratio, and yield. No fund-data provider exists in Stage 5J/5K; "
+                    "ETF composition is MISSING by design until a provider is built (Stage 9C)."
+                ),
+            ))
         _append_non_equity_secondary_gaps(
             gaps,
             has_news_sentiment_artifact=has_news_sentiment_artifact,
@@ -1225,6 +1316,7 @@ def _classify_root_cause(
     has_thesis_history: bool,
     valuation_lane_exists: bool = False,
     valuation_evidence_model_present: bool = False,
+    etf_canonical_scaffold_present: bool = False,
 ) -> tuple[str, str]:
     """Return the primary (highest-priority) root cause bucket and fix message.
 
@@ -1245,6 +1337,7 @@ def _classify_root_cause(
         has_thesis_history=has_thesis_history,
         valuation_lane_exists=valuation_lane_exists,
         valuation_evidence_model_present=valuation_evidence_model_present,
+        etf_canonical_scaffold_present=etf_canonical_scaffold_present,
     )
     return gaps[0]
 

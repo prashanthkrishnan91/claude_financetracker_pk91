@@ -1090,7 +1090,11 @@ class TestForensicsComputeDataFoundation:
             )
 
         etf_row = next(h for h in result.holdings if h.ticker == "SPY")
-        assert etf_row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
+        # Stage 9F: ETF scaffold built → primary bucket is ETF_FUND_COMPOSITION_NOT_READY
+        from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import (
+            BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
+        )
+        assert etf_row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
         assert etf_row.canonical_equity_dataset is None
 
     def test_forensics_result_to_dict_has_new_fields(self):

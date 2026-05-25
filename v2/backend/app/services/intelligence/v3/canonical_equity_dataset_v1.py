@@ -643,6 +643,8 @@ def build_asset_parity_roadmap(
     equity_total: int,
     equity_edge_case_tickers: list,
     etf_total: int,
+    etf_canonical_count: int = 0,
+    etf_fund_intelligence_ready_count: int = 0,
     crypto_total: int,
 ) -> AssetParityRoadmap:
     """Build the portfolio-level asset-class parity roadmap.
@@ -699,15 +701,24 @@ def build_asset_parity_roadmap(
         edge_cases=equity_edge,
     )
 
+    etf_canonical_built = etf_canonical_count > 0
+    if etf_canonical_built and etf_total > 0:
+        etf_edge = (
+            f"{etf_canonical_count} of {etf_total} ETF(s) have canonical scaffold "
+            f"(Stage 9F) — fund composition/provider still MISSING. "
+            f"etf_fund_intelligence_ready_count={etf_fund_intelligence_ready_count}."
+        )
+    elif etf_total > 0:
+        etf_edge = f"{etf_total} ETF(s) need fund composition/provider lane"
+    else:
+        etf_edge = None
+
     etf_gap = AssetClassFoundationGap(
         asset_class="etf",
-        canonical_dataset_built=False,
+        canonical_dataset_built=etf_canonical_built,
         valuation_lane_built=False,
         synthesis_gate=SYNTHESIS_GATE_BLOCKED,
-        edge_cases=(
-            f"{etf_total} ETF(s) need fund composition/provider lane"
-            if etf_total > 0 else None
-        ),
+        edge_cases=etf_edge,
     )
 
     crypto_gap = AssetClassFoundationGap(

@@ -137,6 +137,13 @@ class Settings(BaseSettings):
     # Default OFF — no behavior change unless explicitly enabled.
     intel_v3_etf_nport_evidence_enabled: bool = False
 
+    # Stage 9F.2a diagnostic — NPORT-P live-check HTTP endpoint (default OFF).
+    # When enabled, POST /api/v1/diagnostics/finance-intel/etf-nport-live-check is
+    # available to operators (requires finance_runtime_cert_enabled + cert secret).
+    # Does NOT write artifacts, does NOT alter decisions or snapshots.
+    # Requires sec_edgar_user_agent to be set.
+    intel_v3_nport_diagnostic_endpoint_enabled: bool = False
+
     # ── Intel v3 Stage 5I — FRED official macro evidence lane (off by default) ────
     # FRED (Federal Reserve Economic Data) → portfolio-scope macro evidence artifact
     # via fred_macro_adapter_v1. FREE / OFFICIAL source. No paid providers. No LLM calls.

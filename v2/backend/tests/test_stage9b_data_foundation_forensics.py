@@ -28,6 +28,7 @@ from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import (
     ALL_BUCKETS,
     BUCKET_CRYPTO_NOT_BUILT,
     BUCKET_DATA_NEEDS_NORMALIZATION,
+    BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
     BUCKET_ETF_NOT_BUILT,
     BUCKET_NEWS_SUPPRESSED,
     BUCKET_NOT_APPLICABLE,
@@ -455,19 +456,23 @@ class TestClassifyRootCauseBuckets:
 
 
 class TestAllBucketsReachable:
-    """Verify all 11 defined buckets appear in the test matrix above."""
+    """Verify all defined buckets appear in the test matrix above.
+    Stage 9F adds BUCKET_ETF_FUND_COMPOSITION_NOT_READY (12 buckets total).
+    """
 
     def test_all_buckets_are_distinct_strings(self):
-        assert len(ALL_BUCKETS) == 11
+        assert len(ALL_BUCKETS) == 12
 
     def test_no_bucket_string_duplicates_in_all_buckets(self):
         bucket_list = [
             BUCKET_SEC_EXISTS_WEAK, BUCKET_SEC_MISSING_CIK, BUCKET_SEC_MISSING_WORKER,
-            BUCKET_VALUATION_NOT_BUILT, BUCKET_ETF_NOT_BUILT, BUCKET_CRYPTO_NOT_BUILT,
+            BUCKET_VALUATION_NOT_BUILT, BUCKET_ETF_NOT_BUILT,
+            BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
+            BUCKET_CRYPTO_NOT_BUILT,
             BUCKET_TARGET_WEIGHT_NOT_BUILT, BUCKET_THESIS_NOT_BUILT, BUCKET_NEWS_SUPPRESSED,
             BUCKET_DATA_NEEDS_NORMALIZATION, BUCKET_NOT_APPLICABLE,
         ]
-        assert len(set(bucket_list)) == 11
+        assert len(set(bucket_list)) == 12
         assert set(bucket_list) == ALL_BUCKETS
 
 
@@ -555,9 +560,16 @@ class TestArtifactExistsVsWeak:
 
 
 class TestETFClassification:
-    """ETF holdings always get ETF_PROVIDER_NOT_BUILT regardless of available artifacts."""
+    """ETF holdings — Stage 9F builds canonical ETF scaffold.
 
-    def test_etf_holding_gets_etf_provider_bucket(self):
+    Stage 9F change: ETFs now have a canonical ETF scaffold built for them.
+    Primary gap changes from ETF_PROVIDER_NOT_BUILT to ETF_FUND_COMPOSITION_NOT_READY
+    (scaffold built but fund composition data is still missing).
+    etf_fund_composition_artifact_exists is now True (scaffold = artifact present).
+    """
+
+    def test_etf_holding_gets_etf_fund_composition_not_ready_bucket(self):
+        """Stage 9F: ETF gets ETF_FUND_COMPOSITION_NOT_READY (scaffold built)."""
         row = _build_holding_row(
             ticker="VTI",
             asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -567,21 +579,22 @@ class TestETFClassification:
             supplemental=_empty_supplemental(target_tickers=frozenset({"VTI"})),
         )
         assert row.asset_type == INSTRUMENT_CATEGORY_ETF
-        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
-        assert row.etf_fund_composition_artifact_exists is False
+        assert row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
+        assert row.etf_fund_composition_artifact_exists is True  # Stage 9F: scaffold built
         assert row.sec_companyfacts_artifact_exists is False
 
-    def test_schd_etf_gets_etf_provider_bucket(self):
+    def test_schd_etf_gets_etf_fund_composition_not_ready_bucket(self):
+        """Stage 9F: SCHD ETF gets ETF_FUND_COMPOSITION_NOT_READY."""
         row = _build_holding_row(
             ticker="SCHD",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes={},
             supplemental=_empty_supplemental(),
         )
-        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
+        assert row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
 
-    def test_etf_fund_composition_artifact_always_false(self):
-        """No ETF fund data provider exists — etf_fund_composition_artifact_exists is always False."""
+    def test_etf_fund_composition_artifact_exists_true_stage9f(self):
+        """Stage 9F: canonical ETF scaffold built → etf_fund_composition_artifact_exists=True."""
         for ticker in ("VTI", "SCHD", "QQQ", "SPY"):
             row = _build_holding_row(
                 ticker=ticker,
@@ -589,7 +602,7 @@ class TestETFClassification:
                 lanes={},
                 supplemental=_empty_supplemental(),
             )
-            assert row.etf_fund_composition_artifact_exists is False
+            assert row.etf_fund_composition_artifact_exists is True
 
     def test_etf_next_required_fix_mentions_provider(self):
         row = _build_holding_row(
@@ -942,16 +955,27 @@ class TestResponseShape:
                 f"Expected valuation_numeric_ready=False for {asset_type}"
             )
 
-    def test_etf_fund_composition_always_false_in_output(self):
-        for asset_type in (INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_ETF,
-                           INSTRUMENT_CATEGORY_CRYPTO):
+    def test_etf_fund_composition_artifact_behavior_by_asset_type(self):
+        """Stage 9F: ETF=True (scaffold built), equity/crypto=False (scaffold not applicable)."""
+        # Equity and crypto: no ETF scaffold built
+        for asset_type in (INSTRUMENT_CATEGORY_EQUITY, INSTRUMENT_CATEGORY_CRYPTO):
             row = _build_holding_row(
                 ticker="T",
                 asset_type=asset_type,
                 lanes={},
                 supplemental=_empty_supplemental(),
             )
-            assert row.etf_fund_composition_artifact_exists is False
+            assert row.etf_fund_composition_artifact_exists is False, (
+                f"Expected False for {asset_type}"
+            )
+        # ETF: canonical ETF scaffold built (Stage 9F)
+        etf_row = _build_holding_row(
+            ticker="T",
+            asset_type=INSTRUMENT_CATEGORY_ETF,
+            lanes={},
+            supplemental=_empty_supplemental(),
+        )
+        assert etf_row.etf_fund_composition_artifact_exists is True
 
 
 # ── Portfolio aggregate tests ─────────────────────────────────────────────────
@@ -1247,8 +1271,8 @@ class TestExampleFixtureOutputs:
         assert row.root_cause_bucket == BUCKET_SEC_EXISTS_WEAK
         assert row.sec_companyfacts_reason_not_strong is not None
 
-    def test_vti_etf_gets_etf_provider_bucket(self):
-        """VTI ETF → ETF_PROVIDER_NOT_BUILT, etf_fund_composition_artifact_exists=False."""
+    def test_vti_etf_gets_etf_fund_composition_not_ready_bucket(self):
+        """Stage 9F: VTI ETF → ETF_FUND_COMPOSITION_NOT_READY, scaffold present."""
         row = _build_holding_row(
             ticker="VTI",
             asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -1259,18 +1283,19 @@ class TestExampleFixtureOutputs:
         )
         assert row.ticker == "VTI"
         assert row.asset_type == INSTRUMENT_CATEGORY_ETF
-        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
-        assert row.etf_fund_composition_artifact_exists is False
+        assert row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
+        assert row.etf_fund_composition_artifact_exists is True  # Stage 9F: scaffold built
         assert row.sec_companyfacts_artifact_exists is False
 
-    def test_schd_etf_gets_etf_provider_bucket(self):
+    def test_schd_etf_gets_etf_fund_composition_not_ready_bucket(self):
+        """Stage 9F: SCHD ETF → ETF_FUND_COMPOSITION_NOT_READY."""
         row = _build_holding_row(
             ticker="SCHD",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes={},
             supplemental=_empty_supplemental(),
         )
-        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
+        assert row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
 
     def test_btc_crypto_gets_crypto_provider_bucket(self):
         """BTC crypto → CRYPTO_PROVIDER_NOT_BUILT, crypto context uses technical proxy."""
@@ -1545,9 +1570,12 @@ class TestMultiGapEquity:
 
 
 class TestETFMultiGap:
-    """ETF holdings expose ETF_PROVIDER_NOT_BUILT plus applicable secondary gaps."""
+    """ETF holdings expose ETF_FUND_COMPOSITION_NOT_READY (Stage 9F scaffold built)
+    plus applicable secondary gaps.
+    """
 
     def test_etf_missing_target_and_thesis_returns_three_gaps(self):
+        """Stage 9F: primary gap is ETF_FUND_COMPOSITION_NOT_READY."""
         row = _build_holding_row(
             ticker="VTI",
             asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -1555,26 +1583,28 @@ class TestETFMultiGap:
             supplemental=_empty_supplemental(),
         )
         assert row.blocking_gap_buckets == [
-            BUCKET_ETF_NOT_BUILT,
+            BUCKET_ETF_FUND_COMPOSITION_NOT_READY,
             BUCKET_TARGET_WEIGHT_NOT_BUILT,
             BUCKET_THESIS_NOT_BUILT,
         ]
-        assert row.root_cause_bucket == BUCKET_ETF_NOT_BUILT
+        assert row.root_cause_bucket == BUCKET_ETF_FUND_COMPOSITION_NOT_READY
         assert row.blocking_gap_count == 3
 
     def test_etf_with_target_set_returns_two_gaps(self):
+        """Stage 9F: ETF_FUND_COMPOSITION_NOT_READY + THESIS gap."""
         row = _build_holding_row(
             ticker="SCHD",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes={},
             supplemental=_empty_supplemental(target_tickers=frozenset({"SCHD"})),
         )
-        assert BUCKET_ETF_NOT_BUILT in row.blocking_gap_buckets
+        assert BUCKET_ETF_FUND_COMPOSITION_NOT_READY in row.blocking_gap_buckets
         assert BUCKET_TARGET_WEIGHT_NOT_BUILT not in row.blocking_gap_buckets
         assert BUCKET_THESIS_NOT_BUILT in row.blocking_gap_buckets
         assert row.blocking_gap_count == 2
 
-    def test_etf_both_target_and_thesis_set_only_provider_gap(self):
+    def test_etf_both_target_and_thesis_set_only_composition_gap(self):
+        """Stage 9F: only ETF_FUND_COMPOSITION_NOT_READY when target+thesis set."""
         row = _build_holding_row(
             ticker="SPY",
             asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -1584,7 +1614,7 @@ class TestETFMultiGap:
                 recommendation_tickers=frozenset({"SPY"}),
             ),
         )
-        assert row.blocking_gap_buckets == [BUCKET_ETF_NOT_BUILT]
+        assert row.blocking_gap_buckets == [BUCKET_ETF_FUND_COMPOSITION_NOT_READY]
         assert row.blocking_gap_count == 1
 
     def test_etf_has_no_equity_sec_or_valuation_gaps(self):
@@ -1662,7 +1692,7 @@ class TestBlockingGapBucketCounts:
     """blocking_gap_bucket_counts aggregates secondary gaps across all holdings."""
 
     def test_blocking_gap_bucket_counts_includes_secondary_gaps(self):
-        """An ETF holding with 3 gaps contributes 3 entries to blocking_gap_bucket_counts."""
+        """Stage 9F: ETF with 3 gaps uses ETF_FUND_COMPOSITION_NOT_READY as primary."""
         from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import _build_aggregates
         row = _build_holding_row(
             ticker="VTI",
@@ -1674,7 +1704,7 @@ class TestBlockingGapBucketCounts:
         mock_coverage.ticker_coverage = {}
         aggs = _build_aggregates([row], mock_coverage)
         bgbc = aggs["blocking_gap_bucket_counts"]
-        assert bgbc.get(BUCKET_ETF_NOT_BUILT, 0) == 1
+        assert bgbc.get(BUCKET_ETF_FUND_COMPOSITION_NOT_READY, 0) == 1
         assert bgbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 1
         assert bgbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 1
 
@@ -1691,12 +1721,12 @@ class TestBlockingGapBucketCounts:
         mock_coverage.ticker_coverage = {}
         aggs = _build_aggregates([row], mock_coverage)
         rcbc = aggs["root_cause_bucket_counts"]
-        assert rcbc.get(BUCKET_ETF_NOT_BUILT, 0) == 1
+        assert rcbc.get(BUCKET_ETF_FUND_COMPOSITION_NOT_READY, 0) == 1
         assert rcbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 0
         assert rcbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 0
 
     def test_blocking_gap_bucket_counts_accumulates_across_holdings(self):
-        """Two ETF holdings without target/thesis → secondary gaps appear twice."""
+        """Stage 9F: Two ETF holdings → ETF_FUND_COMPOSITION_NOT_READY appears twice."""
         from app.services.intelligence.v3.intel_data_foundation_forensics_v1 import _build_aggregates
         row1 = _build_holding_row(
             ticker="VTI", asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -1710,7 +1740,7 @@ class TestBlockingGapBucketCounts:
         mock_coverage.ticker_coverage = {}
         aggs = _build_aggregates([row1, row2], mock_coverage)
         bgbc = aggs["blocking_gap_bucket_counts"]
-        assert bgbc.get(BUCKET_ETF_NOT_BUILT, 0) == 2
+        assert bgbc.get(BUCKET_ETF_FUND_COMPOSITION_NOT_READY, 0) == 2
         assert bgbc.get(BUCKET_TARGET_WEIGHT_NOT_BUILT, 0) == 2
         assert bgbc.get(BUCKET_THESIS_NOT_BUILT, 0) == 2
 

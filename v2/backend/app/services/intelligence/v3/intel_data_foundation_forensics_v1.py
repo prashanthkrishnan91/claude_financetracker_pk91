@@ -340,12 +340,13 @@ class DataFoundationForensicsResult:
     numeric_valuation_missing_reason_counts: dict = field(default_factory=dict)
 
     # Stage 9F: ETF canonical fund intelligence dataset counts.
-    # Number of ETF holdings where canonical_etf_dataset_safe=True (scaffold built).
+    # Number of ETF holdings where canonical_etf_scaffold_present=True (scaffold built).
+    # canonical_etf_dataset_safe is always False at Stage 9F — scaffold present ≠ dataset safe.
     etf_canonical_dataset_count: int = 0
     # Number of ETF holdings where etf_fund_intelligence_ready=True (always 0 at Stage 9F).
     etf_fund_intelligence_ready_count: int = 0
-    # ETF tickers where canonical_etf_dataset_safe=False (should not occur at Stage 9F
-    # since the scaffold is always built for ETF tickers, but tracked for auditability).
+    # ETF tickers where canonical_etf_scaffold_present=False (should not occur for ETF
+    # tickers at Stage 9F, but tracked for auditability).
     etf_canonical_dataset_degraded_tickers: list = field(default_factory=list)
     # Per-missing-reason-key counts across all ETF canonical dataset rows.
     etf_missing_reason_counts: dict = field(default_factory=dict)
@@ -572,7 +573,9 @@ def compute_data_foundation_forensics(
 
     for h in holdings:
         if h.asset_type == INSTRUMENT_CATEGORY_ETF and h.canonical_etf_dataset:
-            if h.canonical_etf_dataset.get("canonical_etf_dataset_safe"):
+            # Count scaffold rows (canonical_etf_scaffold_present=True).
+            # canonical_etf_dataset_safe is always False at Stage 9F (composition MISSING).
+            if h.canonical_etf_dataset.get("canonical_etf_scaffold_present"):
                 etf_canonical_dataset_count += 1
             else:
                 etf_canonical_dataset_degraded_tickers.append(h.ticker)
@@ -950,7 +953,7 @@ def _build_holding_row(
             lanes=lanes,
         )
         canonical_etf_dataset = etf_row.to_dict()
-        etf_canonical_scaffold_present = etf_row.canonical_etf_dataset_safe
+        etf_canonical_scaffold_present = etf_row.canonical_etf_scaffold_present
 
     # ETF fund composition — now tracked via canonical_etf_dataset (Stage 9F).
     etf_fund_composition_artifact_exists = etf_canonical_scaffold_present

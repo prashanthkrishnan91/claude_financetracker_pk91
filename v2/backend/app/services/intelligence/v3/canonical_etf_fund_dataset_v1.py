@@ -25,11 +25,19 @@ Architecture contracts (non-negotiable):
   - Does NOT serialize raw provider payloads.
   - All composition/holdings/exposure statuses are MISSING because no
     dedicated fund-data provider is built at Stage 9F.
-  - Fund identity / cost / yield statuses are PARTIAL at best (from yfinance
-    fundamentals lane metadata when usable — yfinance ETF info contains some
-    fund metadata but we do not ETF-specifically extract or validate it).
-  - canonical_etf_dataset_safe is True when etf_applicable=True and the
-    scaffold row was successfully built (even if all composition is MISSING).
+  - Fund identity fields (fund_name_available, issuer_available,
+    category_or_index_strategy_available) are False at Stage 9F because
+    ETF-specific fields are not extracted or validated from yfinance artifacts
+    even when the fundamentals lane is usable. A usable lane means equity
+    fundamentals arrived; it does NOT mean ETF-specific fund metadata was
+    extracted or verified.
+  - Cost/yield statuses are PARTIAL at best when the fundamentals lane is
+    usable, with an explicit reason that these fields are not ETF-specifically
+    extracted or validated at Stage 9F.
+  - canonical_etf_scaffold_present=True for all ETF rows (Stage 9F built the
+    scaffold). canonical_etf_dataset_safe=False always — the dataset is not
+    safe/verified because composition is always MISSING and no ETF-specific
+    fields are extracted. Scaffold present ≠ dataset safe.
 """
 from __future__ import annotations
 
@@ -224,8 +232,14 @@ class CanonicalEtfFundDatasetRow:
     # Missing/degraded reasons by subsection key.
     missing_reasons: dict[str, str]
 
+    # Scaffold presence vs dataset safety — these are distinct.
+    # canonical_etf_scaffold_present: True when Stage 9F built a scaffold row for this ETF.
+    # canonical_etf_dataset_safe: always False at Stage 9F — composition is MISSING and
+    #   no ETF-specific fields are extracted/validated. Scaffold present ≠ dataset safe.
+    canonical_etf_scaffold_present: bool  # True for ETF rows built by Stage 9F
+    canonical_etf_dataset_safe: bool = False  # always False at Stage 9F
+
     # Readiness gates (immutable — cannot be True at Stage 9F).
-    canonical_etf_dataset_safe: bool     # True when etf_applicable + scaffold built
     etf_fund_intelligence_ready: bool = False   # always False at Stage 9F
     valuation_ready: bool = False               # always False
     synthesis_ready: bool = False               # always False
@@ -247,6 +261,7 @@ class CanonicalEtfFundDatasetRow:
             "composition": self.composition.to_dict(),
             "trading_and_risk_support": self.trading_and_risk_support.to_dict(),
             "missing_reasons": dict(self.missing_reasons),
+            "canonical_etf_scaffold_present": self.canonical_etf_scaffold_present,
             "canonical_etf_dataset_safe": self.canonical_etf_dataset_safe,
             "etf_fund_intelligence_ready": self.etf_fund_intelligence_ready,
             "valuation_ready": self.valuation_ready,
@@ -333,7 +348,8 @@ def build_canonical_etf_fund_dataset_row(
         composition=composition,
         trading_and_risk_support=trading_and_risk,
         missing_reasons=missing_reasons,
-        canonical_etf_dataset_safe=True,
+        canonical_etf_scaffold_present=True,
+        canonical_etf_dataset_safe=False,
         etf_fund_intelligence_ready=False,
         valuation_ready=False,
         synthesis_ready=False,
@@ -401,6 +417,7 @@ def _build_not_applicable_row(
         composition=na_composition,
         trading_and_risk_support=na_trading,
         missing_reasons={"all": reason},
+        canonical_etf_scaffold_present=False,
         canonical_etf_dataset_safe=False,
         etf_fund_intelligence_ready=False,
         valuation_ready=False,
@@ -436,19 +453,28 @@ def _build_etf_source_health(
 def _build_fund_identity(*, fund_usable: bool) -> EtfFundIdentitySection:
     """Derive fund identity availability from fundamentals lane metadata.
 
-    When the yfinance fundamentals artifact is usable, fund name, issuer
-    (fund family), and category are available in yfinance ETF info. We mark
-    these as available (True) since yfinance consistently provides these for
-    ETF tickers with usable fundamentals artifacts.
+    At Stage 9F, all fund identity fields (fund_name, issuer, category) are
+    False regardless of lane usability. A usable yfinance fundamentals artifact
+    confirms equity-grade fundamentals arrived; it does NOT mean ETF-specific
+    fund metadata (fund name, issuer/fund family, index/strategy category) was
+    extracted or validated. No ETF-specific field extraction is implemented at
+    Stage 9F. Never infer field presence from lane usability.
 
-    When fundamentals is not usable or missing, all identity fields are False.
+    When fundamentals is usable, the missing_reason distinguishes the cause
+    ("lane usable but fields not extracted") from the no-lane case.
     """
     if fund_usable:
         return EtfFundIdentitySection(
-            fund_name_available=True,
-            issuer_available=True,
-            category_or_index_strategy_available=True,
-            missing_reason=None,
+            fund_name_available=False,
+            issuer_available=False,
+            category_or_index_strategy_available=False,
+            missing_reason=(
+                "Fund identity not extracted: fundamentals lane is usable but "
+                "ETF-specific fund identity fields (fund name, issuer/fund family, "
+                "index/strategy category) are not extracted or validated at Stage 9F. "
+                "A dedicated ETF fund data provider or ETF-specific field extraction "
+                "is required."
+            ),
         )
     return EtfFundIdentitySection(
         fund_name_available=False,
@@ -457,7 +483,8 @@ def _build_fund_identity(*, fund_usable: bool) -> EtfFundIdentitySection:
         missing_reason=(
             "Fund identity not available: yfinance fundamentals artifact is missing "
             "or not usable for this ETF. Enable INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true "
-            "to populate fund metadata."
+            "to populate the fundamentals lane; then a dedicated ETF fund data provider "
+            "or ETF-specific field extraction is still required for fund identity."
         ),
     )
 
@@ -466,8 +493,11 @@ def _build_cost_and_yield(*, fund_usable: bool) -> EtfCostAndYieldSection:
     """Derive cost and yield status from fundamentals lane metadata.
 
     When the yfinance fundamentals artifact is usable, expense ratio and
-    distribution yield fields are likely present in yfinance ETF info —
-    marked PARTIAL because we do not ETF-specifically extract or validate them.
+    distribution yield are marked PARTIAL — not because values were extracted
+    and validated, but because the lane exists and these fields may be present
+    in the raw artifact. PARTIAL here means "lane signal present but ETF-specific
+    cost/yield fields not extracted or validated at Stage 9F". Never AVAILABLE
+    without dedicated ETF fund data provider validation.
 
     When fundamentals is not usable or missing, all statuses are MISSING.
     """
@@ -475,7 +505,11 @@ def _build_cost_and_yield(*, fund_usable: bool) -> EtfCostAndYieldSection:
         return EtfCostAndYieldSection(
             expense_ratio_status=ETF_STATUS_PARTIAL,
             dividend_or_distribution_yield_status=ETF_STATUS_PARTIAL,
-            missing_reason=None,
+            missing_reason=(
+                "Cost/yield PARTIAL: fundamentals lane usable but ETF-specific expense "
+                "ratio and distribution yield are not extracted or validated at Stage 9F. "
+                "A dedicated ETF fund data provider is required for verified cost/yield data."
+            ),
         )
     return EtfCostAndYieldSection(
         expense_ratio_status=ETF_STATUS_MISSING,

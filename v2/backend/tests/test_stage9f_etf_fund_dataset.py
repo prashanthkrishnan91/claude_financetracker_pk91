@@ -18,9 +18,12 @@ Covers:
   12. synthesis_ready always False for ETF dataset rows.
   13. valuation_ready always False for ETF dataset rows.
   14. etf_fund_intelligence_ready always False at Stage 9F.
-  15. canonical_etf_dataset_safe=True for ETF tickers (scaffold built).
-  16. canonical_etf_dataset_safe=False for NOT_APPLICABLE (equity/crypto) rows.
-  17. ETF with usable fundamentals: fund_name_available=True, expense_ratio_status=PARTIAL.
+  15. canonical_etf_scaffold_present=True for ETF tickers (scaffold built);
+      canonical_etf_dataset_safe=False always (composition MISSING, fields unverified).
+  16. canonical_etf_scaffold_present=False and canonical_etf_dataset_safe=False for
+      NOT_APPLICABLE (equity/crypto) rows.
+  17. ETF with usable fundamentals: fund_name/issuer/category False (not extracted at Stage 9F);
+      expense_ratio_status=PARTIAL (lane usable but not ETF-specifically validated).
   18. ETF with usable technicals: liquidity_proxy_status=PARTIAL.
   19. ETF with no artifact: all fund_identity False, all statuses MISSING.
   20. ETF dataset row serializes all required contract fields.
@@ -166,6 +169,7 @@ class TestEtfApplicability:
             lanes={},
         )
         assert row.etf_applicable is False
+        assert row.canonical_etf_scaffold_present is False
         assert row.canonical_etf_dataset_safe is False
         assert "not applicable for equity" in (row.not_applicable_reason or "").lower()
 
@@ -177,6 +181,7 @@ class TestEtfApplicability:
             lanes={},
         )
         assert row.etf_applicable is False
+        assert row.canonical_etf_scaffold_present is False
         assert row.canonical_etf_dataset_safe is False
         assert "not applicable for crypto" in (row.not_applicable_reason or "").lower()
 
@@ -217,26 +222,38 @@ class TestImmutableGates:
         )
         assert row.etf_fund_intelligence_ready is False
 
-    def test_canonical_etf_dataset_safe_true_for_etf(self):
-        """Case 15: canonical_etf_dataset_safe=True for ETF scaffold."""
-        assert self.row.canonical_etf_dataset_safe is True
+    def test_canonical_etf_scaffold_present_true_for_etf(self):
+        """Case 15: canonical_etf_scaffold_present=True for ETF scaffold rows."""
+        assert self.row.canonical_etf_scaffold_present is True
 
-    def test_canonical_etf_dataset_safe_false_for_equity(self):
-        """Case 16: canonical_etf_dataset_safe=False for equity NOT_APPLICABLE row."""
+    def test_canonical_etf_dataset_safe_always_false_for_etf(self):
+        """Case 15b: canonical_etf_dataset_safe=False always — scaffold != dataset safe.
+        Composition is always MISSING and ETF-specific fields are not extracted."""
+        assert self.row.canonical_etf_dataset_safe is False
+
+    def test_scaffold_present_does_not_equal_dataset_safe(self):
+        """Case 15c: scaffold_present=True while dataset_safe=False is the correct state."""
+        assert self.row.canonical_etf_scaffold_present is True
+        assert self.row.canonical_etf_dataset_safe is False
+
+    def test_canonical_etf_scaffold_present_false_for_equity(self):
+        """Case 16: canonical_etf_scaffold_present=False for equity NOT_APPLICABLE row."""
         row = build_canonical_etf_fund_dataset_row(
             ticker="MSFT",
             asset_type=INSTRUMENT_CATEGORY_EQUITY,
             lanes={},
         )
+        assert row.canonical_etf_scaffold_present is False
         assert row.canonical_etf_dataset_safe is False
 
-    def test_canonical_etf_dataset_safe_false_for_crypto(self):
-        """Case 16b: canonical_etf_dataset_safe=False for crypto NOT_APPLICABLE row."""
+    def test_canonical_etf_scaffold_present_false_for_crypto(self):
+        """Case 16b: canonical_etf_scaffold_present=False for crypto NOT_APPLICABLE row."""
         row = build_canonical_etf_fund_dataset_row(
             ticker="XRP",
             asset_type=INSTRUMENT_CATEGORY_CRYPTO,
             lanes={},
         )
+        assert row.canonical_etf_scaffold_present is False
         assert row.canonical_etf_dataset_safe is False
 
 
@@ -244,17 +261,21 @@ class TestImmutableGates:
 
 
 class TestFundIdentity:
-    def test_fund_name_available_when_fundamentals_usable(self):
-        """Case 17: usable fundamentals → fund_name_available=True."""
+    def test_fund_name_not_available_even_when_fundamentals_usable(self):
+        """Case 17: usable fundamentals → fund_name_available=False at Stage 9F.
+        A usable yfinance lane does not prove ETF-specific fund identity fields
+        (fund name, issuer, category) were extracted or validated."""
         row = build_canonical_etf_fund_dataset_row(
             ticker="SPY",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes=_make_etf_lanes(fund_usability="USABLE"),
         )
-        assert row.fund_identity.fund_name_available is True
-        assert row.fund_identity.issuer_available is True
-        assert row.fund_identity.category_or_index_strategy_available is True
-        assert row.fund_identity.missing_reason is None
+        assert row.fund_identity.fund_name_available is False
+        assert row.fund_identity.issuer_available is False
+        assert row.fund_identity.category_or_index_strategy_available is False
+        # missing_reason must explain the distinction (lane usable but not extracted)
+        assert row.fund_identity.missing_reason is not None
+        assert "not extracted" in row.fund_identity.missing_reason.lower()
 
     def test_fund_identity_false_when_fundamentals_missing(self):
         """Case 5/19: missing fundamentals → all fund_identity fields False."""
@@ -280,14 +301,31 @@ class TestFundIdentity:
         )
         assert row.fund_identity.fund_name_available is False
 
-    def test_fund_identity_available_with_limitations(self):
-        """USABLE_WITH_LIMITATIONS fundamentals → fund identity still available."""
+    def test_fund_identity_false_with_limitations(self):
+        """USABLE_WITH_LIMITATIONS fundamentals → fund identity still False at Stage 9F.
+        Lane usability (even with limitations) does not validate fund-specific fields."""
         row = build_canonical_etf_fund_dataset_row(
             ticker="GLD",
             asset_type=INSTRUMENT_CATEGORY_ETF,
             lanes=_make_etf_lanes(fund_usability="USABLE_WITH_LIMITATIONS"),
         )
-        assert row.fund_identity.fund_name_available is True
+        assert row.fund_identity.fund_name_available is False
+        assert row.fund_identity.issuer_available is False
+        assert row.fund_identity.category_or_index_strategy_available is False
+
+    def test_lane_usability_never_implies_fund_identity_available(self):
+        """No lane state makes fund_name/issuer/category True at Stage 9F."""
+        for usability in ("USABLE", "USABLE_WITH_LIMITATIONS"):
+            row = build_canonical_etf_fund_dataset_row(
+                ticker="SPY",
+                asset_type=INSTRUMENT_CATEGORY_ETF,
+                lanes=_make_etf_lanes(fund_usability=usability),
+            )
+            assert row.fund_identity.fund_name_available is False, (
+                f"fund_name_available must be False for usability={usability}"
+            )
+            assert row.fund_identity.issuer_available is False
+            assert row.fund_identity.category_or_index_strategy_available is False
 
 
 # ── Section 4: Cost and yield derivation ──────────────────────────────────────
@@ -295,7 +333,8 @@ class TestFundIdentity:
 
 class TestCostAndYield:
     def test_expense_ratio_partial_when_fundamentals_usable(self):
-        """Case 17b: expense_ratio_status=PARTIAL when fundamentals usable."""
+        """Case 17b: expense_ratio_status=PARTIAL when fundamentals usable.
+        PARTIAL means lane signal exists but fields not ETF-specifically validated."""
         row = build_canonical_etf_fund_dataset_row(
             ticker="SPY",
             asset_type=INSTRUMENT_CATEGORY_ETF,
@@ -303,7 +342,9 @@ class TestCostAndYield:
         )
         assert row.cost_and_yield.expense_ratio_status == ETF_STATUS_PARTIAL
         assert row.cost_and_yield.dividend_or_distribution_yield_status == ETF_STATUS_PARTIAL
-        assert row.cost_and_yield.missing_reason is None
+        # missing_reason always present — explicitly states "not extracted/validated"
+        assert row.cost_and_yield.missing_reason is not None
+        assert "not extracted" in row.cost_and_yield.missing_reason.lower()
 
     def test_expense_ratio_missing_when_fundamentals_absent(self):
         """Case 9/19: no fundamentals → expense_ratio_status=MISSING (not fabricated)."""
@@ -478,7 +519,8 @@ class TestSerializationContract:
             "etf_applicable", "source_artifacts",
             "fund_identity", "cost_and_yield", "composition",
             "trading_and_risk_support", "missing_reasons",
-            "canonical_etf_dataset_safe", "etf_fund_intelligence_ready",
+            "canonical_etf_scaffold_present", "canonical_etf_dataset_safe",
+            "etf_fund_intelligence_ready",
             "valuation_ready", "synthesis_ready", "safe_for_decision",
             "not_applicable_reason",
         ]
@@ -537,6 +579,12 @@ class TestSerializationContract:
     def test_etf_row_not_applicable_reason_none(self):
         """ETF row has not_applicable_reason=None."""
         assert self.row.not_applicable_reason is None
+
+    def test_etf_row_scaffold_present_true_dataset_safe_false_in_dict(self):
+        """ETF scaffold present=True, dataset_safe=False in serialized output."""
+        d = self.row.to_dict()
+        assert d["canonical_etf_scaffold_present"] is True
+        assert d["canonical_etf_dataset_safe"] is False
 
     def test_not_applicable_row_statuses(self):
         """Equity NOT_APPLICABLE row has ETF_STATUS_NOT_APPLICABLE statuses."""
@@ -814,6 +862,7 @@ class TestSafetyInvariants:
             ticker="SPY", asset_type=INSTRUMENT_CATEGORY_ETF, lanes=lanes
         )
         assert row1.etf_applicable == row2.etf_applicable
+        assert row1.canonical_etf_scaffold_present == row2.canonical_etf_scaffold_present
         assert row1.canonical_etf_dataset_safe == row2.canonical_etf_dataset_safe
         assert row1.composition.holdings_composition_status == row2.composition.holdings_composition_status
 

@@ -1922,3 +1922,321 @@ class TestFilingIndexDocumentSelector:
         assert row["candidate_doc_count"] == 1
         assert row["primary_doc_attempted"] == "0000884394-25-001234.txt"
         assert row["parse_failure_stage"] is None
+
+
+# ── Stage 9F.2a fallback chain tests (tests 84-91) ───────────────────────────
+#
+# These tests prove the robust filing-index fallback chain introduced to fix the
+# production failure where acc_raw-index.json returned 404 for SPY/QQQ/XLE.
+#
+# Fallback chain (deterministic order):
+#   A. {folder}/index.json        — SEC EDGAR folder listing (directory.item format)
+#   B. {folder}/{acc_raw}-index.html — HTML filing index
+#   C. {folder}/{acc_nodash}.txt  — complete submission SGML text (direct parse)
+#
+# Fixtures
+# ────────
+
+# Directory listing JSON (SEC EDGAR index.json format) — returned by {folder}/index.json.
+# Uses the "directory.item" shape, NOT the "documents" shape from acc_raw-index.json.
+_DIRECTORY_INDEX_WITH_XML = {
+    "directory": {
+        "name": "000088439425001234",
+        "parent-dir": "/Archives/edgar/data/884394/",
+        "item": [
+            {
+                "last-modified": "2025-11-15 10:00:00",
+                "name": "xslFormNPORT-P_X01",
+                "type": "text/html",
+                "href": "xslFormNPORT-P_X01/",
+                "size": "",
+            },
+            {
+                "last-modified": "2025-11-15 10:00:00",
+                "name": "nport-primary.xml",
+                "type": "application/xml",
+                "href": "nport-primary.xml",
+                "size": "8000000",
+            },
+        ],
+    }
+}
+
+# Directory listing where the only non-XSL file is a complete submission .txt.
+# Uses the same accession number as _SUBMISSIONS_BODY_XSL_PRIMARY for URL consistency.
+_DIRECTORY_INDEX_WITH_TXT_ONLY = {
+    "directory": {
+        "name": "000088439425001234",
+        "parent-dir": "/Archives/edgar/data/884394/",
+        "item": [
+            {
+                "last-modified": "2025-11-15 10:00:00",
+                "name": "xslFormNPORT-P_X01",
+                "type": "text/html",
+                "href": "xslFormNPORT-P_X01/",
+                "size": "",
+            },
+            {
+                "last-modified": "2025-11-15 10:00:00",
+                "name": "000088439425001234.txt",
+                "type": "text/plain",
+                "href": "000088439425001234.txt",
+                "size": "15000000",
+            },
+        ],
+    }
+}
+
+# HTML filing index with a real XML document link.
+_HTML_FILING_INDEX_WITH_XML = """\
+<HTML><HEAD><TITLE>Filing Detail</TITLE></HEAD>
+<BODY>
+<TABLE>
+<TR><TD>1</TD><TD>NPORT-P Holdings</TD>
+<TD><A href="nport-primary.xml">nport-primary.xml</A></TD><TD>NPORT-P</TD></TR>
+<TR><TD>-</TD><TD>XSL View</TD>
+<TD><A href="xslFormNPORT-P_X01/primary_doc.xml">xslFormNPORT-P_X01/primary_doc.xml</A></TD>
+<TD>NPORT-P.XSL</TD></TR>
+</TABLE></BODY></HTML>
+"""
+
+# HTML filing index where the only real file is a complete submission .txt.
+_HTML_FILING_INDEX_WITH_TXT = """\
+<HTML><HEAD><TITLE>Filing Detail</TITLE></HEAD>
+<BODY>
+<TABLE>
+<TR><TD>1</TD><TD>Complete Submission</TD>
+<TD><A href="0000884394-25-001234.txt">0000884394-25-001234.txt</A></TD>
+<TD>NPORT-P</TD></TR>
+<TR><TD>-</TD><TD>XSL View</TD>
+<TD><A href="xslFormNPORT-P_X01/primary_doc.xml">xslFormNPORT-P_X01/primary_doc.xml</A></TD>
+<TD>NPORT-P.XSL</TD></TR>
+</TABLE></BODY></HTML>
+"""
+
+
+def _make_url_routing_get(url_responses: list[tuple[str, Any]]):
+    """Build a URL-aware mock HTTP GET that matches by URL substring."""
+    def _get(url: str) -> Any:
+        for pattern, resp in url_responses:
+            if pattern in url:
+                return resp
+        raise RuntimeError(f"No mock response configured for URL: {url!r}")
+    return _get
+
+
+class TestFilingIndexFallbackChain:
+    """Tests 84-91: robust fallback chain for XSL primaryDocument document discovery.
+
+    Each test uses URL-aware mocking to simulate specific production failure scenarios.
+    Tests 84-86 prove each step of the chain works independently.
+    Test 87 is the canonical acceptance: xslForm → directory index.json → holdings > 0.
+    Tests 88-91 prove helper functions and diagnostic fields.
+    """
+
+    _ACC_RAW = "0000884394-25-001234"
+    _ACC_NODASH = "000088439425001234"
+    _CIK_INT = 884394
+
+    def _call_with_url_routing(self, url_responses: list[tuple[str, Any]], ticker="SPY"):
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportProviderConfig,
+            fetch_etf_nport_holdings,
+        )
+
+        cfg = NportProviderConfig(user_agent="FinanceTrackerTest test@example.com")
+        url_log: list[str] = []
+
+        def _logged_get(url: str) -> Any:
+            url_log.append(url)
+            for pattern, resp in url_responses:
+                if pattern in url:
+                    return resp
+            raise RuntimeError(f"No mock response for URL: {url!r}")
+
+        result = fetch_etf_nport_holdings(
+            ticker, cfg,
+            http_get_fn=_logged_get,
+            cik_lookup_fn=lambda t: "0000884394",
+        )
+        return result, url_log
+
+    # ── Helper unit tests ─────────────────────────────────────────────────────
+
+    def test_88_select_best_doc_from_directory_json_xml(self):
+        """_select_best_nport_doc_from_index handles directory.item XML entry."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _select_best_nport_doc_from_index,
+        )
+
+        doc, count = _select_best_nport_doc_from_index(_DIRECTORY_INDEX_WITH_XML, self._ACC_RAW)
+        assert doc == "nport-primary.xml"
+        assert count == 1  # XSL folder excluded
+
+    def test_89_select_best_doc_from_directory_json_txt_only(self):
+        """_select_best_nport_doc_from_index handles directory.item with .txt only."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _select_best_nport_doc_from_index,
+        )
+
+        doc, count = _select_best_nport_doc_from_index(
+            _DIRECTORY_INDEX_WITH_TXT_ONLY, self._ACC_RAW
+        )
+        assert doc is not None
+        assert doc.endswith(".txt")
+        assert count == 1
+
+    def test_90_parse_index_html_links_extracts_xml_excludes_xsl(self):
+        """_parse_index_html_links returns .xml hrefs and excludes XSL viewer paths."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _is_xsl_viewer_path,
+            _parse_index_html_links,
+        )
+
+        links = _parse_index_html_links(_HTML_FILING_INDEX_WITH_XML)
+        assert "nport-primary.xml" in links
+        assert not any(_is_xsl_viewer_path(h) for h in links), (
+            f"XSL path leaked into HTML links: {links}"
+        )
+
+    def test_91_select_best_doc_from_html_links_prefers_xml(self):
+        """_select_best_nport_doc_from_html_links prefers XML over .txt."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _parse_index_html_links,
+            _select_best_nport_doc_from_html_links,
+        )
+
+        links_xml = _parse_index_html_links(_HTML_FILING_INDEX_WITH_XML)
+        doc_xml, count_xml = _select_best_nport_doc_from_html_links(links_xml)
+        assert doc_xml == "nport-primary.xml"
+        assert count_xml == 1
+
+        links_txt = _parse_index_html_links(_HTML_FILING_INDEX_WITH_TXT)
+        doc_txt, count_txt = _select_best_nport_doc_from_html_links(links_txt)
+        assert doc_txt is not None
+        assert doc_txt.endswith(".txt")
+
+    # ── Integration tests (full provider pipeline) ────────────────────────────
+
+    def test_84_directory_index_json_succeeds_where_acc_raw_pattern_would_404(self):
+        """New code tries {folder}/index.json first; old acc_raw-index.json is never attempted.
+
+        Production failure (PR #419): provider tried acc_raw-index.json → 404.
+        Fix: provider tries {folder}/index.json → parses directory.item → holdings.
+        URL-aware mock returns 404 for old pattern, success for new pattern.
+        """
+        acc_raw = self._ACC_RAW
+        result, url_log = self._call_with_url_routing([
+            ("submissions/CIK", _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY)),
+            # If old code ran, it would call acc_raw-index.json → 404 → failure.
+            (acc_raw + "-index.json", _make_mock_response(status_code=404)),
+            # New code calls /index.json → directory.item format → success.
+            ("/index.json", _make_mock_response(json_body=_DIRECTORY_INDEX_WITH_XML)),
+            ("nport-primary.xml", _make_mock_response(text_body=_NPORT_XML_TWO_HOLDINGS)),
+        ])
+
+        assert result.fetch_status == "success", (
+            f"Expected success from directory index.json; got {result.fetch_status!r}: "
+            f"{result.error_message}\nURLs tried: {url_log}"
+        )
+        assert result.is_success
+        assert len(result.holdings) == 2
+        assert result.selected_doc_source == "index_json"
+        assert result.primary_doc_from_submissions == "xslFormNPORT-P_X01/primary_doc.xml"
+        assert result.primary_doc_attempted == "nport-primary.xml"
+        assert result.index_urls_attempted_count == 1
+
+        # The old URL pattern must NOT have been called (proves no regression to old behavior).
+        old_url_tried = any(acc_raw + "-index.json" in u for u in url_log)
+        assert not old_url_tried, (
+            f"Old acc_raw-index.json URL was attempted — would 404 in production. "
+            f"URLs tried: {url_log}"
+        )
+
+    def test_85_fallback_to_index_html_when_index_json_404s(self):
+        """When {folder}/index.json returns 404, provider falls back to acc_raw-index.html.
+
+        Simulates a filing where index.json is absent but the HTML index is available.
+        """
+        acc_raw = self._ACC_RAW
+        result, url_log = self._call_with_url_routing([
+            ("submissions/CIK", _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY)),
+            ("/index.json", _make_mock_response(status_code=404)),
+            ("-index.html", _make_mock_response(text_body=_HTML_FILING_INDEX_WITH_XML)),
+            ("nport-primary.xml", _make_mock_response(text_body=_NPORT_XML_TWO_HOLDINGS)),
+        ])
+
+        assert result.fetch_status == "success", (
+            f"Expected success via HTML index fallback; got {result.fetch_status!r}: "
+            f"{result.error_message}\nURLs tried: {url_log}"
+        )
+        assert result.is_success
+        assert len(result.holdings) == 2
+        assert result.selected_doc_source == "index_html"
+        assert result.index_urls_attempted_count == 2  # A (404) + B (success)
+
+    def test_86_fallback_to_complete_txt_when_a_and_b_both_fail(self):
+        """When A and B both fail, provider fetches complete submission text directly.
+
+        Simulates the case where no index is available; the accession .txt SGML
+        file is fetched and parsed directly (is both discovery and document).
+        """
+        acc_nodash = self._ACC_NODASH
+        result, url_log = self._call_with_url_routing([
+            ("submissions/CIK", _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY)),
+            ("/index.json", _make_mock_response(status_code=404)),
+            ("-index.html", _make_mock_response(status_code=404)),
+            (acc_nodash + ".txt", _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY)),
+        ])
+
+        assert result.fetch_status == "success", (
+            f"Expected success via complete .txt fallback; got {result.fetch_status!r}: "
+            f"{result.error_message}\nURLs tried: {url_log}"
+        )
+        assert result.is_success
+        assert len(result.holdings) == 3  # SPY SGML fixture has 3 holdings
+        assert result.selected_doc_source == "complete_submission_txt"
+        assert result.index_urls_attempted_count == 3  # A (404) + B (404) + C (success)
+        assert result.filing_meta.xml_extracted_from_sgml is True
+        # C fetches the doc — no extra Step 3 request needed.
+        # Verify the final XML doc URL was NOT called separately.
+        complete_txt_url_calls = sum(1 for u in url_log if acc_nodash + ".txt" in u)
+        assert complete_txt_url_calls == 1, (
+            "Complete .txt should be fetched exactly once (index + doc combined)"
+        )
+
+    def test_87_canonical_acceptance_directory_json_to_holdings_and_fact_records(self):
+        """Canonical acceptance: xslForm submissions → directory index.json → holdings > 0, FactRecords > 0.
+
+        This is the exact SPY/QQQ/XLE failure scenario:
+        PRE-FIX: acc_raw-index.json → 404 → index_fetch_error → 0 holdings.
+        POST-FIX: /index.json (directory format) → XML doc → holdings > 0 → FactRecords > 0.
+        """
+        from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+            build_etf_nport_worker_output,
+        )
+
+        # Use directory-format index JSON leading to an SGML .txt to maximize realism.
+        # The directory listing names "000088439425001234.txt" which Step 3 then fetches.
+        acc_nodash = self._ACC_NODASH  # "000088439425001234"
+        result, url_log = self._call_with_url_routing([
+            ("submissions/CIK", _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY)),
+            ("/index.json", _make_mock_response(json_body=_DIRECTORY_INDEX_WITH_TXT_ONLY)),
+            # Step 3 fetches the .txt file found in the directory listing.
+            (acc_nodash + ".txt", _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY)),
+        ])
+
+        assert result.fetch_status == "success", (
+            f"Expected success from directory index.json → SGML; got {result.fetch_status!r}: "
+            f"{result.error_message}"
+        )
+        assert len(result.holdings) > 0, "Expected holdings_count > 0"
+
+        wi = _make_worker_input("SPY")
+        output = build_etf_nport_worker_output(wi, result, "2026-05-25T12:00:00+00:00")
+        assert output.artifact_payload.get("holdings_count", 0) > 0, (
+            "Expected holdings_count > 0 in artifact payload"
+        )
+        assert len(output.facts) > 0, (
+            f"Expected FactRecords > 0; got {len(output.facts)}"
+        )

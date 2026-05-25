@@ -144,47 +144,84 @@ Therefore the correct next move is **not** to build a provider lane. It is a **p
 
 Fixture-based unit tests (recorded provider responses for SPY/VOO/QQQ/SCHD/**VXUS** + GLD edge + non-fund skip + empty/timeout). Live-provider test gated behind an env flag, excluded from CI default. Forensics expected-output test in 9F.3. Cache/freshness: holdings 24h SLA for daily vendors; NPORT treated as quarterly. Provenance + credibility label per field; no raw payloads; no fabricated MISSING data.
 
+## 11. Audit — is "free FMP + free Massive" a certified S-grade path? (personal 2-user app, stocks+ETFs+crypto)
+
+**Context update:** personal investment-intelligence engine, max 2 users (owner + spouse), all decisions rely on this data → needs S-grade but at low cost. Universe is all **passive index/sector ETFs** (+ GLD commodity trust), so holdings freshness is non-critical (passive funds rebalance with their index, not daily).
+
+**Verdict: NOT a certified S-grade path as specified.** Stacking two free tiers is the wrong model. Honest reasons:
+
+1. **Massive free almost certainly excludes the ETF Global data.** Free tier = delayed stock prices, 5 calls/min. The ETF Global partner endpoints (constituents/profiles/exposure — the actual S-grade ETF intelligence, with a 1–2 business-day processing delay) are premium/partner data; **free-tier availability is undocumented and unverified, and very likely paid.** If paid, "Massive free" adds only delayed prices the repo already gets from yfinance/CoinGecko ⇒ contributes ~nothing to the S-grade goal.
+2. **FMP free ETF endpoints are unverified.** Free = 250 req/day (ample for 2 users), 500 MB/30-day, 5y history / 5q statements. Most endpoints are reportedly free-accessible, but some are paid-gated and **whether ETF holdings/sector/country weighting work on a free key is not publicly documented** — requires a live key test to certify.
+3. **FMP license restricts displaying data to end users — even free/individual.** "Individual plans don't allow the display or distributing of the data to end users or the public"; displaying in an app needs a separate Data Display Licensing Agreement. A spouse viewing the app UI is technically a second end-user ⇒ real ToS grey area to accept knowingly.
+4. **For stocks + crypto, free FMP/Massive add little over the repo's existing free sources:** SEC EDGAR (OFFICIAL fundamentals) + yfinance (prices/metadata) for stocks; CoinGecko (keyless) for crypto are already wired. The unique gap is **ETF composition** — exactly the part most likely gated/paid on both free tiers.
+
+**Certifiable near-zero-cost S-grade backbone (corrected recommendation):**
+- **ETF S-grade authority = SEC NPORT-P (free, official, full holdings) + issuer-official files (free, daily full holdings+weights; iShares AJAX CSV is cleanest, SSGA XLSX, Vanguard region data for VXUS geography).** This is certifiable without depending on any vendor's free-tier whims or display license.
+- **FMP = convenience/normalization layer** for uniform holdings/sector/**country (VXUS)** across all 12 — free **iff** its ETF endpoints test out on a free key (within 250/day easily); else cheapest paid individual plan. Accept the display-ToS caveat for private use.
+- **Massive = only if you pay** for the tier that bundles ETF Global (~$79/mo). Do not rely on Massive free for ETF intelligence.
+- **Crypto = CoinGecko** (already in repo). **Stock fundamentals = SEC EDGAR + yfinance** (already in repo).
+- **yfinance = fallback/metadata only**, never S-grade primary.
+
+**Two cheap, certifiable end states:**
+- **$0/mo:** SEC NPORT-P + issuer-official files (ETF) + CoinGecko (crypto) + SEC EDGAR/yfinance (stocks). S-grade authority; cost is engineering effort (≈5 issuer parsers for a fixed 12-ticker list) + NPORT lag.
+- **~$0–50/mo:** add FMP free/individual as the daily normalization spine over the same free authorities. Lowest effort; carries the display-ToS caveat.
+
+**What must be verified before any build (10-minute spike, no production code):**
+1. Does an FMP **free** key return ETF holdings + sector-weighting + country-weighting for SPY, VXUS, QQQ? (certifies the cheap spine)
+2. Are Massive's ETF Global endpoints reachable on any **free** tier, or only paid? (settles whether Massive free is useful at all)
+3. Confirm FMP display-ToS acceptability for private 2-user use.
+
+Until 1–3 are answered with real responses, **the free-tier hybrid cannot be certified S-grade** — proceed to the spike below, not to a build.
+
 ---
 
-## Corrected next implementation prompt (provider decision checkpoint — research/spike only)
+## Corrected next implementation prompt (free-tier S-grade verification spike — research/spike only)
 
-> The previous yfinance-first build prompt is **withdrawn**. Per §8, the next action is a provider decision checkpoint, not a lane build. Use this prompt next.
+> The previous yfinance-first build prompt is **withdrawn**. Per §11, the next action verifies whether the chosen free-tier hybrid is actually S-grade before any lane is built. Research/spike only — no production code.
 
 ```md
 Repo: prashanthkrishnan91/claude_financetracker_pk91
-Branch: claude/stage-9f1-checkpoint-etf-provider-verification
+Branch: claude/stage-9f1-checkpoint-free-tier-verification
 
-Task: Stage 9F.1-checkpoint — ETF data provider verification spike (research/decision only).
-Severity: Level 2. NO production code, NO SQL, NO UI, NO provider lane yet. Output is a one-line
-provider decision + a short verification note appended to
-artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md.
+Task: Stage 9F.1-checkpoint — free-tier S-grade verification spike for a personal 2-user
+investment-intelligence app (stocks + ETFs + crypto). Research/spike only.
+Severity: Level 2. NO production code, NO SQL, NO UI, NO provider lane yet. Output is a short
+"## 12. Free-tier verification results" section appended to
+artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md plus ONE decision line.
 
-Why: §8 of the plan concludes no affordable self-serve provider is *confirmed* to give full
-S-grade ETF coverage. The whole strategy hinges on one unknown: are Massive's ETF Global
-endpoints (constituents, profiles/exposure) reachable on a <=~$199/mo self-serve tier, full
-(not top-N), with an as-of date — for SPY, VXUS, QQQ?
+Why: §11 concludes "free FMP + free Massive" is NOT a certified S-grade path as specified —
+Massive free almost certainly excludes ETF Global data, FMP free ETF endpoints are unverified,
+and FMP's individual/free license restricts displaying data to end users. The certifiable cheap
+backbone is SEC NPORT-P + issuer-official files, with FMP as a convenience layer. This spike
+settles the three open verifications before any build.
 
 Read first:
-- artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md (§2 S-grade bar, §4 evaluation, §8 decision)
+- artifacts/Stage_9F1_ETF_Fund_Data_Provider_Plan.md (§2 S-grade bar, §4 evaluation, §11 audit)
 
-Do (research/verification only, no repo code changes beyond the plan doc):
-1. Verify Massive + ETF Global: plan/tier that exposes ETF Constituents + Profiles & Exposure;
-   confirm constituents = FULL holdings with weights + holdings as-of date; confirm sector +
-   geography on profiles/exposure; confirm self-serve price (else mark "sales/contact required").
-   Use only free docs / free-tier / trial responses for SPY, VXUS, QQQ. Do NOT commit any API key.
-2. Cross-check the affordable fallback: confirm FMP returns FULL holdings + sector + COUNTRY
-   weighting for VXUS, and assess holdings freshness (daily vs NPORT-quarterly). Confirm current
-   FMP self-serve price tiers and whether a commercial license is required.
-3. Record findings in a new "## 11. Provider verification results" section of the plan doc, then
-   state ONE decision line: either "PRIMARY = Massive/ETF Global (<=$X/mo, full+geo+as-of)" or
-   "PRIMARY = FMP-hybrid spine (FMP + SEC NPORT-P + issuer-official fallback)".
+Do (verification only; the spike needs API keys the user must supply — do NOT commit any key;
+read keys from env at runtime only; if keys are unavailable, report that and stop):
+1. FMP free key: call ETF holdings + sector-weighting + country-weighting for SPY, VXUS, QQQ.
+   Record: does each return on the FREE tier? full holdings (not top-N)? weights? VXUS country
+   breakdown present? holdings as-of date + freshness (daily vs NPORT-quarterly)? 250/day adequate?
+2. Massive: confirm whether ETF Global endpoints (constituents, profiles/exposure) are reachable
+   on ANY free tier or only paid; if paid, record the exact tier/price. Mark "sales/contact
+   required" if not self-serve.
+3. Confirm FMP display-ToS implication for private 2-user use (state it plainly; do not waive it).
+4. Confirm the free certifiable backbone is reachable: one SEC NPORT-P filing pull for an
+   in-universe fund (full holdings + geography derivable) and one issuer-official holdings file
+   (e.g. SSGA SPY XLSX or Vanguard VXUS region data) — confirm the named endpoint is stable.
 
-Hard constraints: do not recommend yfinance as primary; do not accept top-10 holdings as full;
-do not accept missing geography as S-grade for VXUS; do not treat price/reference data as fund
-intelligence; do not hand-wave pricing (mark sales/contact when unavailable); no blind scraping.
+Record findings, then state ONE decision line, choosing the cheapest CERTIFIABLE path:
+  "CERTIFIED S-GRADE PATH = <FMP-free-spine | FMP-paid-spine | NPORT+issuer-backbone> + CoinGecko
+   (crypto) + SEC EDGAR/yfinance (stock fundamentals); Massive = <drop | pay $79/mo>."
 
-Stop condition: stop after the decision line + plan-doc update + PR. Do NOT build the provider
-lane (that becomes 9F.2 once the provider is chosen).
+Hard constraints: do not recommend yfinance as primary; top-10 holdings is NOT full composition;
+missing geography is NOT S-grade for VXUS; price/reference data is NOT fund intelligence; do not
+hand-wave pricing (mark sales/contact when unavailable); no blind scraping (named stable endpoints
++ fixture-tested parsers only); do not claim a path is "certified S-grade" without real responses.
+
+Stop condition: stop after the decision line + plan-doc update + PR. Do NOT build any provider
+lane (that becomes 9F.2 once the certified path is confirmed).
 
 Execution principles: before coding, state assumptions and success criteria; keep changes simple
 and surgical; every changed line must trace to this task; fix root cause not symptom; if the

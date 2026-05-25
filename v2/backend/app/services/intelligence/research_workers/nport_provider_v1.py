@@ -38,6 +38,7 @@ Hard constraints:
 from __future__ import annotations
 
 import logging
+import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -53,48 +54,54 @@ _FILING_URL_TPL = (
     "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/{primary_doc}"
 )
 
-_MAX_REQUESTS_PER_TICKER: int = 3
+_MAX_REQUESTS_PER_TICKER: int = 4   # up from 3: company_tickers + submissions + index + xml
 _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 
 # NPORT form types to search for in EDGAR submissions.
-_NPORT_FORM_TYPES: frozenset[str] = frozenset({"NPORT-P", "NPORT-EX"})
+# Include /A (amended) variants — amended is still valid holdings data.
+_NPORT_FORM_TYPES: frozenset[str] = frozenset({
+    "NPORT-P", "NPORT-EX", "NPORT-P/A", "NPORT-EX/A",
+})
 
 # Maximum holdings to return from one filing (guard against pathological XML).
 _MAX_HOLDINGS: int = 10_000
 
 # ── ETF CIK Seed Map ──────────────────────────────────────────────────────────
-# Bootstrap placeholder — static CIK hints for our 12-ticker ETF universe.
+# Static CIK hints for our ETF universe.  Avoids a company_tickers.json HTTP
+# request for known tickers, keeping us within _MAX_REQUESTS_PER_TICKER.
 #
-# Purpose: fallback when company_tickers.json does not contain a direct ticker
-# match (e.g., some ETF trust registrations differ from their trading ticker).
-# The company_tickers.json dynamic lookup (request 1 in the fetch sequence) is
-# tried FIRST; this map is consulted only when the dynamic lookup fails.
+# IMPORTANT — Vanguard ETF CIK architecture:
+#   Vanguard ETFs are series of parent registrant companies ("VANGUARD INDEX
+#   FUNDS", "VANGUARD SPECIALIZED FUNDS", etc.).  The NPORT-P filer is the
+#   PARENT REGISTRANT entity, not an individual ETF share-class entity.
+#   company_tickers.json often maps a Vanguard ticker to a share-class CIK
+#   that has no NPORT-P filings (→ no_nport_filing status).  The seed map must
+#   store the PARENT REGISTRANT CIK.
 #
-# Provenance: SEC EDGAR full-text company search (company_tickers.json source).
-# Source: public SEC EDGAR records, https://www.sec.gov/files/company_tickers.json.
-# Verify each entry against live SEC EDGAR before relying on production results.
+#   Production diagnostic legend:
+#     no_nport_filing  — CIK resolves but entity files no NPORT-P (wrong CIK type).
+#     sec_error        — HTTP error on submissions fetch (likely 404, wrong CIK).
+#   Use scripts/validation/nport_live_check.py to discover correct CIKs live.
 #
-# CIKs are stored as 10-digit zero-padded strings (canonical SEC CIK format).
-# If a CIK here is incorrect, the submissions fetch at step 2 will return a
-# non-NPORT-P result or 404, and the provider will fail closed (sec_error or
-# no_nport_filing) — never producing fabricated holdings.
+# CIKs are 10-digit zero-padded strings (canonical SEC EDGAR format).
 _ETF_CIK_SEED_MAP: dict[str, str] = {
-    # SSGA/SPDR fund trusts
+    # ── SSGA/SPDR standalone trusts ───────────────────────────────────────────
+    # These trusts are single-series registrants and file NPORT-P directly.
     "SPY": "0000884394",   # SPDR S&P 500 ETF Trust
-    "XLE": "0001168164",   # Energy Select Sector SPDR Fund
-    "GLD": "0001222333",   # SPDR Gold Shares (commodity trust — no equity holdings)
-    # Invesco
-    "QQQ": "0001067839",   # Invesco QQQ Trust
-    # Vanguard index funds / ETF series
-    "VOO": "0001480511",   # Vanguard S&P 500 ETF
-    "VTI": "0000912884",   # Vanguard Total Stock Market ETF
-    "VGT": "0001137774",   # Vanguard Information Technology ETF
-    "VHT": "0001091424",   # Vanguard Health Care ETF
-    "VIS": "0001121411",   # Vanguard Industrials ETF
-    "VXUS": "0001482920",  # Vanguard Total International Stock ETF
-    "VYM": "0001383310",   # Vanguard High Dividend Yield ETF
-    # Schwab
-    "SCHD": "0001510588",  # Schwab U.S. Dividend Equity ETF
+    "XLE": "0001168164",   # Energy Select Sector SPDR Fund (SPDR Series Trust series)
+    "GLD": "0001222333",   # SPDR Gold Shares — commodity trust, no equity holdings
+    # ── Invesco ───────────────────────────────────────────────────────────────
+    "QQQ": "0001067839",   # Invesco QQQ Trust, Series 1
+    # ── Vanguard — PARENT REGISTRANT CIKs required (see note above) ──────────
+    # VOO, VTI are series of "VANGUARD INDEX FUNDS" — CIK needs live verification.
+    "VOO": "0001480511",   # VERIFY: may be series CIK, not parent registrant
+    "VTI": "0000732834",   # VERIFY: Vanguard Total Stock Market — CIK candidate
+    "VGT": "0001137774",   # VERIFY: Vanguard Info Tech ETF — CIK candidate
+    # VHT, VIS, VXUS had confirmed sec_error (wrong CIK) — omitted; falls back
+    # to company_tickers.json for dynamic lookup.
+    "VYM": "0001383310",   # VERIFY: Vanguard High Dividend Yield ETF
+    # ── Schwab ────────────────────────────────────────────────────────────────
+    "SCHD": "0001510588",  # VERIFY: Schwab U.S. Dividend Equity ETF
 }
 
 
@@ -147,8 +154,9 @@ class NportFilingMeta:
     form_type: str                  # "NPORT-P" or "NPORT-EX"
     filing_date: Optional[str]      # YYYY-MM-DD when filed with SEC
     report_period_date: Optional[str]  # YYYY-MM-DD — period the holdings reflect
-    primary_doc: str                # Filename of the primary XML document
+    primary_doc: str                # Filename used to construct the fetch URL
     filing_url: str                 # Public EDGAR URL for the filing index
+    xml_extracted_from_sgml: bool = False  # True when XML was in SGML wrapper
 
 
 @dataclass
@@ -180,6 +188,9 @@ class NportProviderResult:
     weights_available: bool = False             # True when pctVal present on holdings
     weights_derived: bool = False               # True when weights computed from values
     request_count: int = 0
+    # Diagnostic fields — surfaced in thin no-data artifact payloads.
+    primary_doc_attempted: Optional[str] = None   # filename tried for XML fetch
+    parse_failure_stage: Optional[str] = None     # "xml_parse_error" | "no_holdings_container" | None
 
     @property
     def is_success(self) -> bool:
@@ -223,6 +234,58 @@ def _padded_cik(cik_raw: str) -> str:
         return str(int(cik_raw)).zfill(10)
     except (ValueError, TypeError):
         return str(cik_raw).zfill(10)
+
+
+def _extract_xml_from_sgml_submission(sgml_text: str) -> Optional[str]:
+    """Extract NPORT-P XML from an EDGAR complete submission text file (SGML wrapper).
+
+    EDGAR stores the full filing as an SGML document when the filer submits the
+    complete-submission format.  The actual NPORT-P XML is embedded inside the
+    first <DOCUMENT> section whose <TYPE> is NPORT-P (or NPORT-EX / amended
+    variants), between <TEXT> and </TEXT> tags.
+
+    Example shape:
+        <SEC-DOCUMENT>...
+        <DOCUMENT>
+        <TYPE>NPORT-P
+        <SEQUENCE>1
+        <FILENAME>primary_doc.xml
+        <TEXT>
+        <?xml version="1.0"?>
+        <edgarSubmission ...>...</edgarSubmission>
+        </TEXT>
+        </DOCUMENT>
+        </SEC-DOCUMENT>
+
+    Returns the extracted XML string (stripped), or None if content is not
+    an SGML wrapper or contains no NPORT document.  Never raises.
+    """
+    # Fast path: if content starts with XML declaration or NPORT root, not SGML.
+    stripped = sgml_text.strip()
+    if stripped.startswith("<?xml") or stripped.startswith("<edgarSubmission"):
+        return None
+
+    try:
+        # Match a NPORT document section and capture between <TEXT> and </TEXT>.
+        # re.DOTALL so '.' matches newlines in the multi-line XML body.
+        doc_match = re.search(
+            r"<TYPE>\s*NPORT[^\n\r]*[\r\n]+(?:.*?[\r\n]+)*?<TEXT>\s*[\r\n]+(.*?)\s*</TEXT>",
+            sgml_text,
+            re.DOTALL | re.IGNORECASE,
+        )
+        if not doc_match:
+            return None
+
+        candidate = doc_match.group(1).strip()
+        # Only return if the extracted block looks like XML.
+        if candidate.startswith("<?xml") or candidate.startswith("<edgarSubmission"):
+            return candidate
+        # Some filings omit the XML declaration — accept any element start.
+        if candidate.startswith("<") and not candidate.startswith("</"):
+            return candidate
+        return None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def _strip_ns(tag: str) -> str:
@@ -304,18 +367,25 @@ def _parse_float(raw: Any) -> Optional[float]:
         return None
 
 
-def _parse_nport_xml(xml_text: str) -> tuple[list[NportHolding], dict[str, Any]]:
+def _parse_nport_xml(
+    xml_text: str,
+) -> tuple[list[NportHolding], dict[str, Any], str]:
     """Parse NPORT-P primary XML document into structured holdings.
 
-    Returns (holdings_list, fund_metadata_dict). Never raises.
-    fund_metadata_dict has keys: total_assets_usd, net_assets_usd,
-    series_name, report_period_date.
+    Returns (holdings_list, fund_metadata_dict, parse_status).
+    parse_status values:
+      "ok"                  — XML parsed and invstOrSecs container found.
+      "xml_parse_error"     — Content is not parseable XML (even after SGML extraction).
+      "no_holdings_container" — XML parsed but no invstOrSecs element present.
 
-    The NPORT XML namespace is http://www.sec.gov/edgar/nport — we strip
-    namespaces for robustness across different filing versions.
+    Handles:
+      - Standalone NPORT-P XML files (most modern EDGAR filings).
+      - EDGAR complete submission text files (SGML wrappers) — extracts embedded XML.
 
-    Handles both prefixed and non-prefixed namespace formats.
-    Skips individual holdings that cannot be parsed rather than failing.
+    fund_metadata_dict keys: total_assets_usd, net_assets_usd, series_name,
+    report_period_date, xml_extracted_from_sgml.
+
+    Never raises.
     """
     holdings: list[NportHolding] = []
     fund_meta: dict[str, Any] = {
@@ -323,11 +393,26 @@ def _parse_nport_xml(xml_text: str) -> tuple[list[NportHolding], dict[str, Any]]
         "net_assets_usd": None,
         "series_name": None,
         "report_period_date": None,
+        "xml_extracted_from_sgml": False,
     }
+
+    # ── Attempt 1: direct XML parse ───────────────────────────────────────────
+    parse_text = xml_text.strip()
     try:
-        root = ET.fromstring(xml_text.strip())
+        root = ET.fromstring(parse_text)
     except ET.ParseError:
-        return holdings, fund_meta
+        # ── Attempt 2: EDGAR SGML submission wrapper ──────────────────────────
+        # Many EDGAR NPORT-P primaryDocument files are the complete submission text
+        # (SGML format) rather than a standalone XML file.  Extract the embedded XML.
+        extracted = _extract_xml_from_sgml_submission(xml_text)
+        if extracted is None:
+            return holdings, fund_meta, "xml_parse_error"
+        try:
+            root = ET.fromstring(extracted.strip())
+            fund_meta["xml_extracted_from_sgml"] = True
+            parse_text = extracted
+        except ET.ParseError:
+            return holdings, fund_meta, "xml_parse_error"
 
     # ── Build a namespace-stripped helper ────────────────────────────────────
     def _text(parent: ET.Element, *tags: str) -> Optional[str]:
@@ -376,7 +461,7 @@ def _parse_nport_xml(xml_text: str) -> tuple[list[NportHolding], dict[str, Any]]
     # ── invstOrSecs ───────────────────────────────────────────────────────────
     inv_or_secs = _find_child(form_data, "invstOrSecs")
     if inv_or_secs is None:
-        return holdings, fund_meta
+        return holdings, fund_meta, "no_holdings_container"
 
     for inv_elem in _find_all_children(inv_or_secs, "invstOrSec"):
         if len(holdings) >= _MAX_HOLDINGS:
@@ -431,7 +516,7 @@ def _parse_nport_xml(xml_text: str) -> tuple[list[NportHolding], dict[str, Any]]
         except Exception:  # noqa: BLE001 — per-holding fail-soft, never stop the parse
             continue
 
-    return holdings, fund_meta
+    return holdings, fund_meta, "ok"
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -646,14 +731,55 @@ def fetch_etf_nport_holdings(
                 cik=cik_padded,
                 filing_meta=filing_meta,
                 request_count=request_count,
+                primary_doc_attempted=primary_doc,
+                parse_failure_stage="empty_body",
             )
 
-        holdings, fund_meta = _parse_nport_xml(xml_text)
+        holdings, fund_meta, parse_status = _parse_nport_xml(xml_text)
+
+        # Record whether XML was extracted from an SGML wrapper for diagnostics.
+        if filing_meta is not None and fund_meta.get("xml_extracted_from_sgml"):
+            filing_meta.xml_extracted_from_sgml = True
+
+        if parse_status == "xml_parse_error":
+            # Document is neither valid XML nor a parseable SGML+XML wrapper.
+            # Common cause: primaryDocument points to an HTML page or binary file.
+            return NportProviderResult(
+                ticker=ticker_upper,
+                fetch_status="filing_not_parseable",
+                error_message=(
+                    "Document is not valid XML and could not be extracted from SGML "
+                    f"wrapper. Filename attempted: {primary_doc!r}. "
+                    "May be an HTML page or non-XML file — check filing index."
+                ),
+                fetched_at=fetched_at,
+                cik=cik_padded,
+                filing_meta=filing_meta,
+                request_count=request_count,
+                primary_doc_attempted=primary_doc,
+                parse_failure_stage="xml_parse_error",
+            )
+
+        if parse_status == "no_holdings_container":
+            # XML parsed but lacks invstOrSecs element — cover page or wrong file.
+            return NportProviderResult(
+                ticker=ticker_upper,
+                fetch_status="filing_not_parseable",
+                error_message=(
+                    "NPORT-P XML has no invstOrSecs element. "
+                    f"File {primary_doc!r} may be a cover page or non-holdings document."
+                ),
+                fetched_at=fetched_at,
+                cik=cik_padded,
+                filing_meta=filing_meta,
+                request_count=request_count,
+                primary_doc_attempted=primary_doc,
+                parse_failure_stage="no_holdings_container",
+            )
 
         if not holdings:
-            # Distinguish between parse failure and genuinely empty holdings.
-            # An empty list after successful parse is honest — some NPORT
-            # filings (e.g. commodity trusts, cash-only) have no invstOrSec elements.
+            # XML parsed and invstOrSecs found, but zero invstOrSec child elements.
+            # Distinguishes genuinely empty holdings from parse failures above.
             is_commodity_trust = ticker_upper in {"GLD"}
             status = "commodity_trust_or_no_nport_data" if is_commodity_trust else "no_holdings_found"
             return NportProviderResult(
@@ -668,6 +794,7 @@ def fetch_etf_nport_holdings(
                 cik=cik_padded,
                 filing_meta=filing_meta,
                 request_count=request_count,
+                primary_doc_attempted=primary_doc,
             )
 
         # Assess weight/value availability.
@@ -702,6 +829,7 @@ def fetch_etf_nport_holdings(
             weights_available=weights_available,
             weights_derived=weights_derived,
             request_count=request_count,
+            primary_doc_attempted=primary_doc,
         )
 
     except Exception as exc:  # noqa: BLE001 — defence-in-depth outer catch

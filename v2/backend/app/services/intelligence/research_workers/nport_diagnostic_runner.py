@@ -6,6 +6,14 @@ via asyncio.to_thread, or directly from sync contexts and tests.
 
 Accepts an injectable provider_fn and sleep_fn so the logic is fully testable
 without live SEC EDGAR calls or import-time side effects.
+
+Stage 9F.2a identity-certification additions: per-ticker output now includes
+identity_status, identity_verified, identity_basis, candidate_ciks_tried,
+selected_candidate_cik, detected_registrant_name, detected_series_name,
+detected_class_name, detected_series_id, detected_class_id, and
+identity_mismatch_reason.  These fields allow post-deploy validation to confirm
+that each ticker's holdings are identity-certified to the correct ETF/fund/series
+rather than blindly accepted from a parent registrant's filing.
 """
 from __future__ import annotations
 
@@ -31,6 +39,8 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
 
     Never includes raw XML, raw filing body, or the full holdings payload.
     Sample holding names are capped at 5. Error messages are truncated.
+    Identity certification fields (Stage 9F.2a) are included to allow post-deploy
+    validation that holdings are correctly attributed to the requested ETF.
     """
     fm = result.filing_meta
     sample_names = [h.name for h in result.holdings[:5]]
@@ -61,6 +71,18 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
         "sample_holdings_count": len(sample_names),
         "sample_holding_names": sample_names,
         "error_message": error_msg,
+        # Identity certification fields (Stage 9F.2a identity-certification repair)
+        "identity_status": getattr(result, "identity_status", None),
+        "identity_verified": getattr(result, "identity_verified", False),
+        "identity_basis": getattr(result, "identity_basis", None),
+        "candidate_ciks_tried": getattr(result, "candidate_ciks_tried", []),
+        "selected_candidate_cik": getattr(result, "selected_candidate_cik", None),
+        "detected_registrant_name": getattr(result, "detected_registrant_name", None),
+        "detected_series_name": getattr(result, "detected_series_name", None),
+        "detected_class_name": getattr(result, "detected_class_name", None),
+        "detected_series_id": getattr(result, "detected_series_id", None),
+        "detected_class_id": getattr(result, "detected_class_id", None),
+        "identity_mismatch_reason": getattr(result, "identity_mismatch_reason", None),
     }
 
 
@@ -82,6 +104,7 @@ def run_nport_live_check(
     Returns:
         Compact dict with ``per_ticker`` list, aggregate counts, and governance
         invariants. Never includes raw XML, full holdings payload, or secrets.
+        Identity certification fields appear per-ticker for post-deploy validation.
     """
     from .nport_provider_v1 import NportProviderConfig, fetch_etf_nport_holdings
 
@@ -95,6 +118,7 @@ def run_nport_live_check(
     success_count = 0
     no_data_count = 0
     error_count = 0
+    identity_verified_count = 0
 
     for i, ticker in enumerate(tickers):
         if i > 0:
@@ -106,15 +130,18 @@ def run_nport_live_check(
 
         if result.is_success:
             success_count += 1
+            if getattr(result, "identity_verified", False):
+                identity_verified_count += 1
         elif result.fetch_status in ("sec_error", "timeout", "error", "missing_cik"):
             error_count += 1
         else:
             no_data_count += 1
 
     logger.info(
-        "nport_live_diagnostic_complete total=%d success=%d no_data=%d error=%d",
+        "nport_live_diagnostic_complete total=%d success=%d identity_verified=%d no_data=%d error=%d",
         len(tickers),
         success_count,
+        identity_verified_count,
         no_data_count,
         error_count,
     )
@@ -124,6 +151,7 @@ def run_nport_live_check(
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "tickers_requested": len(tickers),
         "tickers_succeeded": success_count,
+        "tickers_identity_verified": identity_verified_count,
         "tickers_no_data": no_data_count,
         "tickers_error": error_count,
         "per_ticker": per_ticker,

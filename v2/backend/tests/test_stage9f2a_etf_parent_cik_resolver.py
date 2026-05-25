@@ -106,6 +106,42 @@ _NPORT_XML_TWO_HOLDINGS = """\
 </edgarSubmission>
 """
 
+# XLE-specific XML fixture: seriesName matches "Energy Select Sector SPDR Fund"
+# so the identity check succeeds for XLE.
+_NPORT_XML_XLE_SERIES = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+  <formData>
+    <genInfo>
+      <seriesName>Energy Select Sector SPDR Fund</seriesName>
+      <repPdDate>2025-09-30</repPdDate>
+    </genInfo>
+    <fundInfo>
+      <totAssets>40000000000.00</totAssets>
+      <netAssets>39900000000.00</netAssets>
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>Exxon Mobil Corp</name>
+        <cusip>302491303</cusip>
+        <valUSD>5000000000.00</valUSD>
+        <pctVal>12.500000</pctVal>
+        <curCd>USD</curCd>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Chevron Corp</name>
+        <cusip>166764100</cusip>
+        <valUSD>3000000000.00</valUSD>
+        <pctVal>7.500000</pctVal>
+        <curCd>USD</curCd>
+        <assetCat>EC</assetCat>
+      </invstOrSec>
+    </invstOrSecs>
+  </formData>
+</edgarSubmission>
+"""
+
 _COMPANY_TICKERS_BODY_UNKNOWN = {
     "0": {"cik_str": 999001, "ticker": "UNKOWN_ONLY", "title": "Some Unknown Corp"},
 }
@@ -456,18 +492,22 @@ class TestProviderWithParentResolver:
         assert result.cik == "0001067839"
         assert result.resolver_source == "etf_parent_map"
 
-    def test_76_xle_success_path_unchanged(self):
-        """XLE: provider still succeeds via parent map (confirmed CIK 0001168164)."""
+    def test_76_xle_success_path_with_identity_verified(self):
+        """XLE: succeeds via parent map when series name matches; identity_verified=True."""
         result = _provider_call(
             ticker="XLE",
             http_responses=[
                 _mock_resp(json_body=_SUBMISSIONS_BODY_NPORT),
-                _mock_resp(text_body=_NPORT_XML_TWO_HOLDINGS),
+                _mock_resp(text_body=_NPORT_XML_XLE_SERIES),
             ],
         )
         assert result.fetch_status == "success"
         assert result.cik == "0001168164"
         assert result.resolver_source == "etf_parent_map"
+        # Identity verification: XLE series name matched expected hints.
+        assert result.identity_verified is True
+        assert result.identity_status == "success_identity_verified"
+        assert result.detected_series_name == "Energy Select Sector SPDR Fund"
 
     def test_77_gld_commodity_trust_path_unchanged(self):
         """GLD: commodity-trust path unchanged; resolves via parent map."""

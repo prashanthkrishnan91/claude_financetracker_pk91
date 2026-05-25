@@ -1612,3 +1612,313 @@ class TestRegressionImports:
 
         assert LANE_ETF_FUND_DATA in ALL_LANES
         assert LANE_ETF_FUND_DATA == "etf_fund_data"
+
+
+# ── Stage 9F.2a document selector tests (tests 77-83) ────────────────────────
+#
+# These tests prove the fix for the SPY/QQQ/XLE runtime failure:
+#   primary_doc_attempted=xslFormNPORT-P_X01/primary_doc.xml → filing_not_parseable
+#
+# Root cause: submissions API primaryDocument is an EDGAR XSL viewer path that
+# serves HTML, not raw XML. Fix: detect XSL path → fetch filing index JSON →
+# select real document → parse holdings.
+#
+# Fixtures
+# ────────
+# Submissions where primaryDocument is an XSL viewer path (the actual failure shape):
+_SUBMISSIONS_BODY_XSL_PRIMARY = {
+    "filings": {
+        "recent": {
+            "form": ["NPORT-P", "10-K"],
+            "filingDate": ["2025-11-15", "2025-03-01"],
+            "accessionNumber": ["0000884394-25-001234", "0000884394-25-000001"],
+            "reportDate": ["2025-09-30", "2024-12-31"],
+            "primaryDocument": ["xslFormNPORT-P_X01/primary_doc.xml", "annual.htm"],
+        }
+    }
+}
+
+# Filing index JSON that contains a directly parseable NPORT-P XML file.
+_FILING_INDEX_WITH_NPORT_XML = {
+    "cik": "884394",
+    "accessionNumber": "0000884394-25-001234",
+    "documents": [
+        {
+            "sequence": "1",
+            "description": "XSL Transform View",
+            "document": "xslFormNPORT-P_X01/primary_doc.xml",
+            "type": "NPORT-P.XSL",
+            "size": 512,
+        },
+        {
+            "sequence": "2",
+            "description": "NPORT-P Holdings",
+            "document": "nport-primary.xml",
+            "type": "NPORT-P",
+            "size": 8_000_000,
+        },
+    ],
+}
+
+# Filing index JSON that contains only a complete submission .txt (SGML wrapper).
+# This matches the shape observed for SPY/QQQ in production.
+_FILING_INDEX_WITH_TXT_ONLY = {
+    "cik": "884394",
+    "accessionNumber": "0000884394-25-001234",
+    "documents": [
+        {
+            "sequence": "1",
+            "description": "XSL Transform View",
+            "document": "xslFormNPORT-P_X01/primary_doc.xml",
+            "type": "NPORT-P.XSL",
+            "size": 512,
+        },
+        {
+            "sequence": "2",
+            "description": "Complete Submission Text",
+            "document": "0000884394-25-001234.txt",
+            "type": "NPORT-P",
+            "size": 15_000_000,
+        },
+    ],
+}
+
+# Filing index with no parseable candidates (only XSL).
+_FILING_INDEX_XSL_ONLY = {
+    "documents": [
+        {
+            "sequence": "1",
+            "document": "xslFormNPORT-P_X01/primary_doc.xml",
+            "type": "NPORT-P.XSL",
+            "size": 512,
+        },
+    ],
+}
+
+
+class TestFilingIndexDocumentSelector:
+    """Tests 77-83: filing index document discovery for xslForm primaryDocument paths.
+
+    Tests 77-79 are unit tests for the helper functions.
+    Tests 80-83 are integration tests through the full provider pipeline.
+    Test 81 is the canonical acceptance criterion: xslForm submissions → index →
+    SGML .txt → SGML extraction → holdings_count > 0, FactRecords > 0.
+    """
+
+    def _call(self, ticker="SPY", http_responses=None, cik_lookup_fn=None):
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportProviderConfig,
+            fetch_etf_nport_holdings,
+        )
+
+        cfg = NportProviderConfig(user_agent="FinanceTrackerTest test@example.com")
+        responses = list(http_responses or [])
+        call_count = [0]
+
+        def _http_get(url):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx >= len(responses):
+                raise RuntimeError(f"Unexpected HTTP call #{idx} to {url}")
+            return responses[idx]
+
+        return fetch_etf_nport_holdings(
+            ticker,
+            cfg,
+            http_get_fn=_http_get,
+            cik_lookup_fn=cik_lookup_fn,
+        )
+
+    # ── Helper unit tests ─────────────────────────────────────────────────────
+
+    def test_77_is_xsl_viewer_path_identification(self):
+        """_is_xsl_viewer_path correctly classifies XSL viewer vs raw document paths."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _is_xsl_viewer_path,
+        )
+
+        # XSL viewer paths (the actual runtime failure shape)
+        assert _is_xsl_viewer_path("xslFormNPORT-P_X01/primary_doc.xml") is True
+        assert _is_xsl_viewer_path("XSLFormNPORT-P_X01/primary_doc.xml") is True
+        assert _is_xsl_viewer_path("xslFormNPORT-EX_X01/primary_doc.xml") is True
+        assert _is_xsl_viewer_path("some/path/xslForm/file.xml") is True
+
+        # Real document paths (should not be classified as XSL viewer)
+        assert _is_xsl_viewer_path("primary_doc.xml") is False
+        assert _is_xsl_viewer_path("0000884394-25-001234.txt") is False
+        assert _is_xsl_viewer_path("nport-holdings.xml") is False
+        assert _is_xsl_viewer_path("primary_doc.xml") is False
+
+    def test_78_select_best_doc_prefers_nport_typed_xml(self):
+        """_select_best_nport_doc_from_index picks NPORT-typed .xml over .txt."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _select_best_nport_doc_from_index,
+        )
+
+        selected, count = _select_best_nport_doc_from_index(
+            _FILING_INDEX_WITH_NPORT_XML, "0000884394-25-001234"
+        )
+        assert selected == "nport-primary.xml"
+        assert count == 1  # 1 non-XSL candidate (the XSL path excluded)
+
+    def test_79_select_best_doc_falls_back_to_txt_when_no_xml(self):
+        """_select_best_nport_doc_from_index falls back to .txt when no XML candidate."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _select_best_nport_doc_from_index,
+        )
+
+        selected, count = _select_best_nport_doc_from_index(
+            _FILING_INDEX_WITH_TXT_ONLY, "0000884394-25-001234"
+        )
+        assert selected == "0000884394-25-001234.txt"
+        assert count == 1
+
+    def test_79b_select_best_doc_returns_none_for_xsl_only_index(self):
+        """_select_best_nport_doc_from_index returns None when only XSL paths present."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _select_best_nport_doc_from_index,
+        )
+
+        selected, count = _select_best_nport_doc_from_index(
+            _FILING_INDEX_XSL_ONLY, "0000884394-25-001234"
+        )
+        assert selected is None
+        assert count == 0
+
+    # ── Integration tests (full provider pipeline) ────────────────────────────
+
+    def test_80_xsl_primary_doc_triggers_index_fetch_selects_xml_parses(self):
+        """XSL primaryDocument → provider fetches index → selects XML → parses holdings.
+
+        PRE-FIX: would fail with xml_parse_error (HTML served at XSL viewer URL).
+        POST-FIX: 3 HTTP calls — submissions + index + real XML → success.
+        """
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY),   # submissions
+                _make_mock_response(json_body=_FILING_INDEX_WITH_NPORT_XML),    # index
+                _make_mock_response(text_body=_NPORT_XML_TWO_HOLDINGS),         # real XML
+            ],
+        )
+        assert result.fetch_status == "success", (
+            f"Expected success after index-based doc selection; got {result.fetch_status!r}: "
+            f"{result.error_message}"
+        )
+        assert result.is_success
+        assert len(result.holdings) == 2
+        # Document selector diagnostics
+        assert result.primary_doc_from_submissions == "xslFormNPORT-P_X01/primary_doc.xml"
+        assert result.selected_doc_source == "index_json"
+        assert result.primary_doc_attempted == "nport-primary.xml"
+        assert result.candidate_doc_count == 1
+        assert result.request_count == 3
+
+    def test_81_xsl_primary_doc_index_txt_produces_holdings_and_fact_records(self):
+        """Canonical acceptance: xslForm submissions → index → SGML .txt → parse.
+
+        This is the exact SPY/QQQ/XLE failure scenario from the runtime diagnostic.
+        PRE-FIX: filing_not_parseable (xml_parse_error on XSL HTML).
+        POST-FIX: 3 HTTP calls — submissions + index + SGML .txt →
+                  holdings_count > 0 and FactRecords > 0.
+        """
+        from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+            build_etf_nport_worker_output,
+        )
+
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY_XSL_PRIMARY),  # submissions
+                _make_mock_response(json_body=_FILING_INDEX_WITH_TXT_ONLY),    # index
+                _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY),        # SGML .txt
+            ],
+        )
+        assert result.fetch_status == "success", (
+            f"Expected success from SGML .txt via index; got {result.fetch_status!r}: "
+            f"{result.error_message}"
+        )
+        assert result.is_success
+        assert len(result.holdings) > 0, "Expected > 0 holdings from SGML fixture"
+        # Document selector diagnostics
+        assert result.primary_doc_from_submissions == "xslFormNPORT-P_X01/primary_doc.xml"
+        assert result.selected_doc_source == "index_json"
+        assert result.primary_doc_attempted == "0000884394-25-001234.txt"
+        assert result.filing_meta.xml_extracted_from_sgml is True
+
+        # Full pipeline: adapter must produce FactRecords > 0
+        wi = _make_worker_input("SPY")
+        output = build_etf_nport_worker_output(wi, result, "2026-03-20T12:00:00+00:00")
+        assert output.artifact_payload.get("holdings_count", 0) > 0, (
+            "Expected holdings_count > 0 in artifact payload"
+        )
+        assert len(output.facts) > 0, (
+            f"Expected FactRecords > 0; got {len(output.facts)}"
+        )
+
+    def test_82_normal_primary_doc_uses_submissions_directly(self):
+        """Non-XSL primaryDocument → selected_doc_source=submissions, no index fetch."""
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),         # primaryDocument="primary_doc.xml"
+                _make_mock_response(text_body=_NPORT_XML_TWO_HOLDINGS),   # exactly 2 requests
+            ],
+        )
+        assert result.fetch_status == "success"
+        assert result.selected_doc_source == "submissions"
+        assert result.primary_doc_from_submissions == "primary_doc.xml"
+        assert result.candidate_doc_count is None
+        assert result.request_count == 2  # submissions + XML doc (no index)
+
+    def test_83_diagnostic_runner_entry_includes_selector_fields(self):
+        """Diagnostic runner per-ticker entry surfaces the new document selector fields."""
+        from app.services.intelligence.research_workers.nport_diagnostic_runner import (
+            run_nport_live_check,
+        )
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportFilingMeta,
+            NportHolding,
+            NportProviderResult,
+        )
+
+        # Build a result that mimics SPY after the fix (index_json path)
+        mock_result = NportProviderResult(
+            ticker="SPY",
+            fetch_status="success",
+            cik="0000884394",
+            holdings=[
+                NportHolding(name="Apple Inc", cusip="037833100", weight_pct=5.0),
+            ],
+            filing_meta=NportFilingMeta(
+                accession_number="0000884394-25-001234",
+                form_type="NPORT-P",
+                filing_date="2025-11-15",
+                report_period_date="2025-09-30",
+                primary_doc="0000884394-25-001234.txt",
+                filing_url="https://www.sec.gov",
+            ),
+            primary_doc_attempted="0000884394-25-001234.txt",
+            primary_doc_from_submissions="xslFormNPORT-P_X01/primary_doc.xml",
+            selected_doc_source="index_json",
+            candidate_doc_count=1,
+        )
+
+        def _mock_provider(ticker, cfg):
+            return mock_result
+
+        out = run_nport_live_check(
+            ["SPY"], "TestApp/1.0 test@example.com",
+            provider_fn=_mock_provider,
+            sleep_fn=lambda s: None,
+        )
+
+        row = out["per_ticker"][0]
+        assert row["primary_doc_from_submissions"] == "xslFormNPORT-P_X01/primary_doc.xml"
+        assert row["selected_doc_source"] == "index_json"
+        assert row["candidate_doc_count"] == 1
+        assert row["primary_doc_attempted"] == "0000884394-25-001234.txt"
+        assert row["parse_failure_stage"] is None

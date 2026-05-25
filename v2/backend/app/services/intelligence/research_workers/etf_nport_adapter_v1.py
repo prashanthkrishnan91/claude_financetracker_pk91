@@ -171,12 +171,40 @@ def _has_geography(holdings: list[NportHolding]) -> bool:
     return any(h.country_of_risk for h in holdings)
 
 
-def _build_no_data_result(
-    ticker: str,
-    fetch_status: str,
-    error_message: Optional[str],
-) -> _AdapterResult:
-    """Return an honest thin-evidence adapter result for non-success provider states."""
+def _build_no_data_result(provider_result: "NportProviderResult") -> _AdapterResult:
+    """Return an honest thin-evidence adapter result for non-success provider states.
+
+    Includes actionable diagnostic fields (resolved CIK, document attempted, parse
+    stage) so the thin artifact can be inspected to understand the failure.
+    """
+    ticker = provider_result.ticker or "UNKNOWN"
+    fetch_status = provider_result.fetch_status
+    error_message = provider_result.error_message
+    # Diagnostic fields — safe short strings, no raw XML or large payloads.
+    diag: dict[str, Any] = {
+        "fetch_status": fetch_status,
+        "holdings_count": 0,
+        "total_reported_value_present": False,
+        "weights_available": False,
+        "weights_derived": False,
+        "geography_status": "MISSING",
+        "sector_status": "MISSING",
+        "report_period_date": None,
+        "filing_date": None,
+    }
+    if provider_result.cik:
+        diag["resolved_cik"] = provider_result.cik
+    if provider_result.primary_doc_attempted:
+        diag["primary_doc_attempted"] = provider_result.primary_doc_attempted
+    if provider_result.parse_failure_stage:
+        diag["parse_failure_stage"] = provider_result.parse_failure_stage
+    if provider_result.filing_meta:
+        meta = provider_result.filing_meta
+        diag["accession_number"] = meta.accession_number
+        diag["form_type"] = meta.form_type
+        diag["filing_date"] = meta.filing_date
+        diag["report_period_date"] = meta.report_period_date
+
     return _AdapterResult(
         source_refs_fingerprint=f"nport_no_data_{ticker}_{fetch_status}",
         summary=(
@@ -185,23 +213,10 @@ def _build_no_data_result(
         ),
         limitations=[
             f"SEC NPORT-P fetch did not produce usable holdings: {error_message or fetch_status}.",
-            "No holdings recorded. This may be because:",
-            "  - Ticker has no NPORT-P/NPORT-EX filing (e.g. commodity trust like GLD).",
-            "  - CIK mapping is missing for this ticker.",
-            "  - SEC EDGAR returned an error or the filing could not be parsed.",
-            "  - The filing has no structured holding elements.",
+            "No holdings recorded. Diagnostic: check fetch_status, resolved_cik, "
+            "primary_doc_attempted, and parse_failure_stage in artifact payload.",
         ],
-        artifact_payload_extra={
-            "fetch_status": fetch_status,
-            "holdings_count": 0,
-            "total_reported_value_present": False,
-            "weights_available": False,
-            "weights_derived": False,
-            "geography_status": "MISSING",
-            "sector_status": "MISSING",
-            "report_period_date": None,
-            "filing_date": None,
-        },
+        artifact_payload_extra=diag,
     )
 
 
@@ -220,11 +235,7 @@ def adapt_etf_nport(
     ticker = provider_result.ticker or "UNKNOWN"
 
     if not provider_result.is_success:
-        return _build_no_data_result(
-            ticker,
-            provider_result.fetch_status,
-            provider_result.error_message,
-        )
+        return _build_no_data_result(provider_result)
 
     holdings = provider_result.holdings
     filing_meta = provider_result.filing_meta

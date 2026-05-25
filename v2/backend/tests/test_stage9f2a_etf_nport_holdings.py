@@ -1166,6 +1166,420 @@ class TestDispatcherReachability:
         )
 
 
+# ── Real filing shapes and SGML extraction ───────────────────────────────────
+
+# Minimal SPY-like EDGAR complete submission text (SGML wrapper) containing
+# an embedded NPORT-P XML.  This shape is what EDGAR's primaryDocument often
+# returns for large ETF trusts — the <TEXT> block contains the actual XML.
+# Tests against this fixture FAIL with the pre-patch code (returns no_holdings_found
+# because ET.fromstring fails on the SGML header) and PASS after the fix.
+_NPORT_SGML_WRAPPER_SPY = """\
+<SEC-DOCUMENT>0000884394-26-001234.txt
+<SEC-HEADER>
+ACCESSION NUMBER:              0000884394-26-001234
+PERIOD OF REPORT:              20260131
+FILED AS OF DATE:              20260315
+FILER:
+ COMPANY DATA:
+  FORM TYPE:             NPORT-P
+  COMPANY CONFORMED NAME: SPDR S&P 500 ETF TRUST
+  CENTRAL INDEX KEY:     0000884394
+</SEC-HEADER>
+<DOCUMENT>
+<TYPE>NPORT-P
+<SEQUENCE>1
+<FILENAME>primary_doc.xml
+<DESCRIPTION>NPORT-P PRIMARY HOLDINGS
+<TEXT>
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <filerInfo>
+      <filer>
+        <credentials><cik>0000884394</cik></credentials>
+        <seriesId>S000001185</seriesId>
+        <period>2026-01-31</period>
+      </filer>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>SPDR S&amp;P 500 ETF Trust</regName>
+      <seriesName>SPDR S&amp;P 500 ETF Trust</seriesName>
+      <repPdDate>2026-01-31</repPdDate>
+    </genInfo>
+    <fundInfo>
+      <totAssets>600000000000.00</totAssets>
+      <netAssets>598000000000.00</netAssets>
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>Apple Inc</name>
+        <lei>HWUPKR0MPOU8FGXBT394</lei>
+        <cusip>037833100</cusip>
+        <identifiers>
+          <isin value="US0378331005"/>
+          <ticker value="AAPL"/>
+        </identifiers>
+        <balance>358000000</balance>
+        <units>NS</units>
+        <curCd>USD</curCd>
+        <valUSD>68000000000.00</valUSD>
+        <pctVal>11.33</pctVal>
+        <payoffProfile>Long</payoffProfile>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <countryOfRisk>US</countryOfRisk>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Microsoft Corp</name>
+        <cusip>594918104</cusip>
+        <identifiers>
+          <isin value="US5949181045"/>
+          <ticker value="MSFT"/>
+        </identifiers>
+        <curCd>USD</curCd>
+        <valUSD>54000000000.00</valUSD>
+        <pctVal>9.0</pctVal>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <countryOfRisk>US</countryOfRisk>
+      </invstOrSec>
+      <invstOrSec>
+        <name>NVIDIA Corp</name>
+        <cusip>67066G104</cusip>
+        <identifiers>
+          <isin value="US67066G1040"/>
+          <ticker value="NVDA"/>
+        </identifiers>
+        <curCd>USD</curCd>
+        <valUSD>42000000000.00</valUSD>
+        <pctVal>7.0</pctVal>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <countryOfRisk>US</countryOfRisk>
+      </invstOrSec>
+    </invstOrSecs>
+  </formData>
+</edgarSubmission>
+</TEXT>
+</DOCUMENT>
+</SEC-DOCUMENT>
+"""
+
+# Vanguard VOO-style XML (same NPORT-P format, Vanguard holdings sample).
+_NPORT_XML_VANGUARD_VOO = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+  <headerData>
+    <submissionType>NPORT-P</submissionType>
+    <filerInfo>
+      <filer>
+        <credentials><cik>0001480511</cik></credentials>
+        <seriesId>S000002277</seriesId>
+        <period>2026-01-31</period>
+      </filer>
+    </filerInfo>
+  </headerData>
+  <formData>
+    <genInfo>
+      <regName>Vanguard Index Funds</regName>
+      <seriesName>Vanguard S&amp;P 500 ETF</seriesName>
+      <repPdDate>2026-01-31</repPdDate>
+    </genInfo>
+    <fundInfo>
+      <totAssets>520000000000.00</totAssets>
+      <netAssets>519000000000.00</netAssets>
+    </fundInfo>
+    <invstOrSecs>
+      <invstOrSec>
+        <name>Apple Inc</name>
+        <cusip>037833100</cusip>
+        <identifiers>
+          <isin value="US0378331005"/>
+          <ticker value="AAPL"/>
+        </identifiers>
+        <curCd>USD</curCd>
+        <valUSD>58000000000.00</valUSD>
+        <pctVal>11.15</pctVal>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <countryOfRisk>US</countryOfRisk>
+      </invstOrSec>
+      <invstOrSec>
+        <name>Alphabet Inc Class A</name>
+        <cusip>02079K305</cusip>
+        <identifiers>
+          <isin value="US02079K3059"/>
+          <ticker value="GOOGL"/>
+        </identifiers>
+        <curCd>USD</curCd>
+        <valUSD>22000000000.00</valUSD>
+        <pctVal>4.23</pctVal>
+        <assetCat>EC</assetCat>
+        <issuerCat>CORP</issuerCat>
+        <invCountry>US</invCountry>
+        <countryOfRisk>US</countryOfRisk>
+      </invstOrSec>
+    </invstOrSecs>
+  </formData>
+</edgarSubmission>
+"""
+
+# NPORT-P/A amended form submission body (same as regular but form is NPORT-P/A).
+_SUBMISSIONS_BODY_NPORT_PA = {
+    "filings": {
+        "recent": {
+            "form": ["NPORT-P/A", "10-K"],
+            "filingDate": ["2026-03-20", "2025-03-01"],
+            "accessionNumber": ["0000884394-26-001234", "0000884394-25-000001"],
+            "reportDate": ["2026-01-31", "2024-12-31"],
+            "primaryDocument": ["primary_doc.xml", "annual.htm"],
+        }
+    }
+}
+
+
+class TestRealFilingShapes:
+    """Tests against realistic EDGAR NPORT-P filing shapes.
+
+    These tests verify the provider handles real-world filing formats:
+    - SGML submission wrappers (complete-submission text files)
+    - Vanguard-style NPORT-P XML
+    - Amended NPORT-P/A form types
+
+    Tests 56-57 explicitly fail on the pre-patch code (returned no_holdings_found
+    for SGML input) and pass after the SGML extraction fix.
+    """
+
+    def _call(
+        self,
+        ticker="SPY",
+        http_responses=None,
+        cik_lookup_fn=None,
+    ):
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportProviderConfig,
+            fetch_etf_nport_holdings,
+        )
+
+        cfg = NportProviderConfig(user_agent="FinanceTrackerTest test@example.com")
+        responses = list(http_responses or [])
+        call_count = [0]
+
+        def _http_get(url):
+            idx = call_count[0]
+            call_count[0] += 1
+            if idx >= len(responses):
+                raise RuntimeError(f"Unexpected HTTP call #{idx} to {url}")
+            return responses[idx]
+
+        return fetch_etf_nport_holdings(
+            ticker,
+            cfg,
+            http_get_fn=_http_get,
+            cik_lookup_fn=cik_lookup_fn,
+        )
+
+    def test_56_sgml_wrapper_extracts_holdings_success(self):
+        """SPY SGML wrapper → XML extracted → 3 holdings parsed → success.
+
+        PRE-PATCH: would fail with no_holdings_found (ET.ParseError on SGML header).
+        POST-PATCH: SGML extraction finds embedded XML → holdings_count=3.
+        """
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY),
+            ],
+        )
+        assert result.fetch_status == "success", (
+            f"Expected success from SGML wrapper; got {result.fetch_status!r}: "
+            f"{result.error_message}"
+        )
+        assert result.is_success
+        assert len(result.holdings) == 3, (
+            f"Expected 3 holdings from SGML SPY fixture; got {len(result.holdings)}"
+        )
+        names = {h.name for h in result.holdings}
+        assert "Apple Inc" in names
+        assert "Microsoft Corp" in names
+        assert "NVIDIA Corp" in names
+
+    def test_57_sgml_wrapper_holdings_gt_zero_and_fact_records_gt_zero(self):
+        """Full pipeline: SGML fixture → provider → adapter → holdings_count>0, FactRecords>0.
+
+        Proves at least one realistic SEC-derived fixture produces non-zero holdings
+        and non-zero FactRecords in the adapter output (required acceptance criterion).
+        """
+        from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+            build_etf_nport_worker_output,
+        )
+
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY),
+            ],
+        )
+        assert result.fetch_status == "success"
+        assert len(result.holdings) > 0
+
+        wi = _make_worker_input("SPY")
+        fetched_at = "2026-03-20T12:00:00+00:00"
+        output = build_etf_nport_worker_output(wi, result, fetched_at)
+
+        assert output.artifact_payload.get("holdings_count", 0) > 0, (
+            "Expected holdings_count > 0 in artifact payload"
+        )
+        assert len(output.facts) > 0, (
+            f"Expected FactRecords > 0; got {len(output.facts)}"
+        )
+        assert output.artifact_payload.get("holdings_count") == len(result.holdings)
+        assert output.artifact_payload.get("holdings_count") == len(output.facts)
+
+    def test_58_vanguard_style_xml_produces_holdings(self):
+        """Vanguard-style NPORT-P XML (headerData + formData structure) → holdings parsed."""
+        result = self._call(
+            ticker="VOO",
+            cik_lookup_fn=lambda t: "0001480511",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=_NPORT_XML_VANGUARD_VOO),
+            ],
+        )
+        assert result.fetch_status == "success"
+        assert len(result.holdings) == 2
+        names = {h.name for h in result.holdings}
+        assert "Apple Inc" in names
+        assert "Alphabet Inc Class A" in names
+        # Verify pctVal parsed directly (weights_derived=False)
+        assert result.weights_available is True
+        assert result.weights_derived is False
+
+    def test_59_nport_pa_amended_form_accepted(self):
+        """NPORT-P/A (amended) form type is accepted and produces holdings."""
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY_NPORT_PA),
+                _make_mock_response(text_body=_NPORT_XML_TWO_HOLDINGS),
+            ],
+        )
+        assert result.fetch_status == "success", (
+            f"NPORT-P/A should be accepted; got {result.fetch_status!r}"
+        )
+        assert result.filing_meta is not None
+        assert result.filing_meta.form_type == "NPORT-P/A"
+
+    def test_60_xml_parse_error_gives_filing_not_parseable(self):
+        """Non-parseable content that is not SGML → filing_not_parseable (not no_holdings_found).
+
+        PRE-PATCH: malformed content silently returned no_holdings_found.
+        POST-PATCH: explicit filing_not_parseable with parse_failure_stage.
+        """
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=_NPORT_XML_MALFORMED),
+            ],
+        )
+        assert result.fetch_status == "filing_not_parseable", (
+            f"Expected filing_not_parseable for malformed XML; got {result.fetch_status!r}"
+        )
+        assert result.parse_failure_stage == "xml_parse_error"
+
+    def test_61_no_invst_container_gives_filing_not_parseable(self):
+        """Valid XML but no invstOrSecs element → filing_not_parseable."""
+        xml_no_container = """\
+<?xml version="1.0" encoding="UTF-8"?>
+<edgarSubmission xmlns="http://www.sec.gov/edgar/nport">
+  <formData>
+    <genInfo><repPdDate>2026-01-31</repPdDate></genInfo>
+    <fundInfo><totAssets>1000000</totAssets></fundInfo>
+  </formData>
+</edgarSubmission>
+"""
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=xml_no_container),
+            ],
+        )
+        assert result.fetch_status == "filing_not_parseable", (
+            f"Expected filing_not_parseable for XML missing invstOrSecs; got {result.fetch_status!r}"
+        )
+        assert result.parse_failure_stage == "no_holdings_container"
+
+    def test_62_diagnostic_fields_in_thin_no_data_artifact(self):
+        """Thin no-data artifact payload includes CIK, primary_doc, parse_failure_stage."""
+        from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+            adapt_etf_nport,
+        )
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            NportFilingMeta,
+            NportProviderResult,
+        )
+
+        pr = NportProviderResult(
+            ticker="SPY",
+            fetch_status="filing_not_parseable",
+            error_message="XML parse failed.",
+            cik="0000884394",
+            primary_doc_attempted="0000884394-26-001234.txt",
+            parse_failure_stage="xml_parse_error",
+            filing_meta=NportFilingMeta(
+                accession_number="0000884394-26-001234",
+                form_type="NPORT-P",
+                filing_date="2026-03-15",
+                report_period_date="2026-01-31",
+                primary_doc="0000884394-26-001234.txt",
+                filing_url="https://www.sec.gov/cgi-bin/browse-edgar",
+            ),
+        )
+        wi = _make_worker_input("SPY")
+        from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+            build_etf_nport_worker_output,
+        )
+        output = build_etf_nport_worker_output(wi, pr, "2026-03-20T12:00:00+00:00")
+        payload = output.artifact_payload
+
+        assert payload.get("fetch_status") == "filing_not_parseable"
+        assert payload.get("resolved_cik") == "0000884394"
+        assert payload.get("primary_doc_attempted") == "0000884394-26-001234.txt"
+        assert payload.get("parse_failure_stage") == "xml_parse_error"
+        assert payload.get("accession_number") == "0000884394-26-001234"
+        assert payload.get("holdings_count") == 0
+
+    def test_63_sgml_meta_flag_set_on_filing_meta(self):
+        """Filing meta records xml_extracted_from_sgml=True for SGML wrapper input."""
+        result = self._call(
+            ticker="SPY",
+            cik_lookup_fn=lambda t: "0000884394",
+            http_responses=[
+                _make_mock_response(json_body=_SUBMISSIONS_BODY),
+                _make_mock_response(text_body=_NPORT_SGML_WRAPPER_SPY),
+            ],
+        )
+        assert result.fetch_status == "success"
+        assert result.filing_meta is not None
+        assert result.filing_meta.xml_extracted_from_sgml is True
+
+
 # ── Regression tests ──────────────────────────────────────────────────────────
 
 

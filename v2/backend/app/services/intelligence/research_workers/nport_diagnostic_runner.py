@@ -51,6 +51,7 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
         "primary_doc_attempted": result.primary_doc_attempted,
         "selected_doc_source": result.selected_doc_source,
         "candidate_doc_count": result.candidate_doc_count,
+        "index_urls_attempted_count": result.index_urls_attempted_count,
         "parse_failure_stage": result.parse_failure_stage,
         "xml_extracted_from_sgml": fm.xml_extracted_from_sgml if fm else None,
         "weights_available": result.weights_available,

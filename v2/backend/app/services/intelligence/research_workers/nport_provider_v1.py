@@ -53,12 +53,13 @@ _SUBMISSIONS_URL_TPL = "https://data.sec.gov/submissions/CIK{cik}.json"
 _FILING_URL_TPL = (
     "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/{primary_doc}"
 )
-# Per-filing document index JSON — queried when primaryDocument is an XSL viewer path.
-_FILING_INDEX_URL_TPL = (
-    "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/{acc_raw}-index.json"
+# Accession folder base URL — used to construct fallback index discovery URLs.
+_FILING_FOLDER_URL_TPL = (
+    "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/"
 )
 
-_MAX_REQUESTS_PER_TICKER: int = 4   # company_tickers + submissions + index + xml
+# Budget: company_tickers(opt) + submissions + fallback chain A/B/C(≤3) + xml_doc = 5 max.
+_MAX_REQUESTS_PER_TICKER: int = 5
 _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 
 # NPORT form types to search for in EDGAR submissions.
@@ -197,8 +198,9 @@ class NportProviderResult:
     parse_failure_stage: Optional[str] = None     # "xml_parse_error" | "no_holdings_container" | "no_parseable_doc_in_index" | None
     # Document selector diagnostics (Stage 9F.2a document discovery fix).
     primary_doc_from_submissions: Optional[str] = None  # raw primaryDocument from submissions API
-    selected_doc_source: Optional[str] = None            # "index_json" | "submissions"
+    selected_doc_source: Optional[str] = None            # "index_json" | "index_html" | "complete_submission_txt" | "submissions"
     candidate_doc_count: Optional[int] = None            # non-XSL doc count in filing index
+    index_urls_attempted_count: Optional[int] = None     # number of index URLs tried in fallback chain
 
     @property
     def is_success(self) -> bool:
@@ -261,6 +263,12 @@ def _select_best_nport_doc_from_index(
 ) -> tuple[Optional[str], int]:
     """Select the best parseable NPORT document from a filing index JSON body.
 
+    Handles two SEC EDGAR JSON index formats:
+    1. Filing-specific ``{acc_raw}-index.json`` → ``{"documents": [...]}``
+       Each item: ``{"document": filename, "type": form-type-string}``
+    2. Folder directory listing ``index.json`` → ``{"directory": {"item": [...]}}``
+       Each item: ``{"name": filename, "type": MIME-type-string}``
+
     Ranking (highest to lowest):
       1. .xml file whose type contains NPORT-P, NPORT-EX, or NPORT
       2. .xml file of any type
@@ -271,19 +279,38 @@ def _select_best_nport_doc_from_index(
     when no parseable candidate exists.  XSL viewer paths are excluded from
     both the selection and the count.
     """
-    docs = index_body.get("documents") or []
-    if not isinstance(docs, list):
-        docs = []
-
     valid: list[tuple[str, str]] = []
-    for doc in docs:
-        if not isinstance(doc, dict):
-            continue
-        name = str(doc.get("document") or "").strip()
-        dtype = str(doc.get("type") or "").upper().strip()
-        if not name or _is_xsl_viewer_path(name):
-            continue
-        valid.append((name, dtype))
+
+    # Format 1: "documents" array (filing-specific index JSON)
+    docs_raw = index_body.get("documents")
+    if isinstance(docs_raw, list) and docs_raw:
+        for doc in docs_raw:
+            if not isinstance(doc, dict):
+                continue
+            name = str(doc.get("document") or "").strip()
+            dtype = str(doc.get("type") or "").upper().strip()
+            if not name or _is_xsl_viewer_path(name):
+                continue
+            valid.append((name, dtype))
+    else:
+        # Format 2: "directory.item" array (EDGAR folder index.json)
+        directory = index_body.get("directory") or {}
+        items = directory.get("item") or []
+        for item in (items if isinstance(items, list) else []):
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or item.get("href") or "").strip()
+            mime = str(item.get("type") or "").lower()
+            if "xml" in mime:
+                dtype = "NPORT" if "nport" in name.lower() else "XML"
+            elif "plain" in mime or "text" in mime:
+                dtype = "TXT"
+            else:
+                dtype = ""
+            # Skip folder entries (end with "/") and XSL paths
+            if not name or name.endswith("/") or _is_xsl_viewer_path(name):
+                continue
+            valid.append((name, dtype))
 
     candidate_count = len(valid)
 
@@ -309,6 +336,50 @@ def _select_best_nport_doc_from_index(
         return valid[0][0], candidate_count
 
     return None, 0
+
+
+def _parse_index_html_links(html_text: str) -> list[str]:
+    """Extract document filenames from a SEC EDGAR filing index HTML page.
+
+    Uses simple regex to find href attributes in <a> tags.  Excludes external
+    links, anchors, directory entries, and XSL viewer paths.  Returns only
+    relative filenames with .xml or .txt extensions.
+    """
+    hrefs = re.findall(r'href=["\']([^"\']+)["\']', html_text, re.IGNORECASE)
+    seen: set[str] = set()
+    result: list[str] = []
+    for href in hrefs:
+        href = href.strip()
+        if not href or href.startswith(("http", "#", "?", "/", "mailto:")):
+            continue
+        if _is_xsl_viewer_path(href):
+            continue
+        lname = href.lower()
+        if lname.endswith((".xml", ".txt")) and href not in seen:
+            seen.add(href)
+            result.append(href)
+    return result
+
+
+def _select_best_nport_doc_from_html_links(hrefs: list[str]) -> tuple[Optional[str], int]:
+    """Select best NPORT document from href filenames extracted from an HTML index page.
+
+    Applies the same priority ordering as _select_best_nport_doc_from_index:
+    NPORT XML > any XML > .txt > first available.
+    """
+    valid = [h for h in hrefs if h and not _is_xsl_viewer_path(h)]
+    count = len(valid)
+
+    for name in valid:
+        if name.lower().endswith(".xml") and "nport" in name.lower():
+            return name, count
+    for name in valid:
+        if name.lower().endswith(".xml"):
+            return name, count
+    for name in valid:
+        if name.lower().endswith(".txt"):
+            return name, count
+    return (valid[0] if valid else None), count
 
 
 def _extract_xml_from_sgml_submission(sgml_text: str) -> Optional[str]:
@@ -749,71 +820,126 @@ def fetch_etf_nport_holdings(
         # ── Step 2.5: Filing index discovery when primaryDocument is XSL viewer ─
         # EDGAR's submissions API sometimes returns primaryDocument as an XSL
         # transform viewer path (e.g. "xslFormNPORT-P_X01/primary_doc.xml").
-        # That path serves an HTML view, not the raw XML.  When detected, fetch
-        # the per-filing document index JSON to locate the real NPORT document.
+        # That path serves an HTML view, not the raw XML or SGML file.
+        #
+        # Robust fallback chain (deterministic order):
+        #   A. {folder}/index.json          — folder directory listing (directory.item)
+        #   B. {folder}/{acc_raw}-index.html — filing-specific HTML index
+        #   C. {folder}/{acc_nodash}.txt     — complete submission text (SGML); direct parse
+        _prefetched_doc_text: Optional[str] = None  # set when Option C already fetched the doc
+        index_urls_attempted_count: Optional[int] = None
+
         if _is_xsl_viewer_path(primary_doc):
-            if request_count >= config.max_requests_per_ticker:
-                return NportProviderResult(
-                    ticker=ticker_upper,
-                    fetch_status="filing_not_parseable",
-                    error_message="Request budget exhausted before filing index fetch.",
-                    fetched_at=fetched_at,
-                    cik=cik_padded,
-                    request_count=request_count,
-                    primary_doc_from_submissions=primary_doc_from_submissions,
-                    parse_failure_stage="budget_exhausted",
-                )
-            index_url = _FILING_INDEX_URL_TPL.format(
-                cik_int=cik_int, acc_nodash=acc_nodash, acc_raw=acc_raw
-            )
-            try:
-                resp_idx = _get(index_url)
-                resp_idx.raise_for_status()
-                request_count += 1
-                idx_body = resp_idx.json() or {}
-                selected_doc, n_candidates = _select_best_nport_doc_from_index(idx_body, acc_raw)
-                candidate_doc_count = n_candidates
-                if selected_doc:
-                    primary_doc = selected_doc
-                    selected_doc_source = "index_json"
-                else:
+            folder_url = _FILING_FOLDER_URL_TPL.format(cik_int=cik_int, acc_nodash=acc_nodash)
+            _index_sources = [
+                (folder_url + "index.json", "index_json"),
+                (folder_url + acc_raw + "-index.html", "index_html"),
+            ]
+            _complete_txt_url = folder_url + acc_nodash + ".txt"
+            index_urls_attempted_count = 0
+
+            for _idx_url, _src_label in _index_sources:
+                if request_count >= config.max_requests_per_ticker:
                     return NportProviderResult(
                         ticker=ticker_upper,
                         fetch_status="filing_not_parseable",
                         error_message=(
-                            f"No parseable NPORT document found in filing index. "
-                            f"Submissions primaryDocument was {primary_doc_from_submissions!r}. "
-                            f"Candidate count: {n_candidates}."
+                            f"Request budget exhausted during index fallback after "
+                            f"{index_urls_attempted_count} URL(s). "
+                            f"XSL primaryDocument: {primary_doc_from_submissions!r}."
                         ),
                         fetched_at=fetched_at,
                         cik=cik_padded,
                         request_count=request_count,
                         primary_doc_from_submissions=primary_doc_from_submissions,
-                        selected_doc_source="index_json",
-                        candidate_doc_count=candidate_doc_count,
-                        parse_failure_stage="no_parseable_doc_in_index",
+                        parse_failure_stage="budget_exhausted",
+                        index_urls_attempted_count=index_urls_attempted_count,
                     )
-            except Exception as exc:  # noqa: BLE001
-                if _is_timeout_exc(exc):
+                index_urls_attempted_count += 1
+                try:
+                    _resp_idx = _get(_idx_url)
+                    _resp_idx.raise_for_status()
+                    request_count += 1
+                except Exception as exc:  # noqa: BLE001
+                    if _is_timeout_exc(exc):
+                        return NportProviderResult(
+                            ticker=ticker_upper,
+                            fetch_status="timeout",
+                            error_message=f"Timeout fetching filing index ({_src_label}): {exc}",
+                            fetched_at=fetched_at,
+                            cik=cik_padded,
+                            request_count=request_count,
+                            primary_doc_from_submissions=primary_doc_from_submissions,
+                            index_urls_attempted_count=index_urls_attempted_count,
+                        )
+                    # Non-timeout (e.g. 404) — try next source in chain.
+                    continue
+
+                # Parse document list from this index source.
+                try:
+                    if _src_label == "index_json":
+                        _idx_body = _resp_idx.json() or {}
+                        _sel_doc, _n_cands = _select_best_nport_doc_from_index(_idx_body, acc_raw)
+                    else:  # index_html
+                        _html_links = _parse_index_html_links(
+                            getattr(_resp_idx, "text", "") or ""
+                        )
+                        _sel_doc, _n_cands = _select_best_nport_doc_from_html_links(_html_links)
+                except Exception:  # noqa: BLE001
+                    _sel_doc, _n_cands = None, 0
+
+                if _sel_doc:
+                    primary_doc = _sel_doc
+                    selected_doc_source = _src_label
+                    candidate_doc_count = _n_cands
+                    break  # found a parseable document via this index source
+            else:
+                # Options A and B yielded no parseable document (loop exhausted without break).
+                # Option C: fetch complete submission text directly — it is both the index
+                # discovery step and the document.  No additional fetch needed after this.
+                if request_count < config.max_requests_per_ticker:
+                    index_urls_attempted_count += 1
+                    try:
+                        _resp_c = _get(_complete_txt_url)
+                        _resp_c.raise_for_status()
+                        request_count += 1
+                        _txt_content = getattr(_resp_c, "text", None) or ""
+                        if _txt_content.strip():
+                            primary_doc = acc_nodash + ".txt"
+                            selected_doc_source = "complete_submission_txt"
+                            candidate_doc_count = 1
+                            _prefetched_doc_text = _txt_content
+                    except Exception as exc:  # noqa: BLE001
+                        if _is_timeout_exc(exc):
+                            return NportProviderResult(
+                                ticker=ticker_upper,
+                                fetch_status="timeout",
+                                error_message=f"Timeout fetching complete submission text: {exc}",
+                                fetched_at=fetched_at,
+                                cik=cik_padded,
+                                request_count=request_count,
+                                primary_doc_from_submissions=primary_doc_from_submissions,
+                                index_urls_attempted_count=index_urls_attempted_count,
+                            )
+                        # Option C also failed — fall through to the failure return below.
+
+                if selected_doc_source is None:
                     return NportProviderResult(
                         ticker=ticker_upper,
-                        fetch_status="timeout",
-                        error_message=f"Timeout fetching filing index for {acc_raw}: {exc}",
+                        fetch_status="filing_not_parseable",
+                        error_message=(
+                            f"No parseable NPORT document found after {index_urls_attempted_count} "
+                            f"index URL(s). Submissions primaryDocument: {primary_doc_from_submissions!r}."
+                        ),
                         fetched_at=fetched_at,
                         cik=cik_padded,
                         request_count=request_count,
                         primary_doc_from_submissions=primary_doc_from_submissions,
+                        selected_doc_source=None,
+                        candidate_doc_count=candidate_doc_count,
+                        parse_failure_stage="no_parseable_doc_in_index",
+                        index_urls_attempted_count=index_urls_attempted_count,
                     )
-                return NportProviderResult(
-                    ticker=ticker_upper,
-                    fetch_status="filing_not_parseable",
-                    error_message=f"Error fetching filing index for {acc_raw}: {exc}",
-                    fetched_at=fetched_at,
-                    cik=cik_padded,
-                    request_count=request_count,
-                    primary_doc_from_submissions=primary_doc_from_submissions,
-                    parse_failure_stage="index_fetch_error",
-                )
         else:
             selected_doc_source = "submissions"
 
@@ -827,36 +953,54 @@ def fetch_etf_nport_holdings(
         )
 
         # ── Step 3: Fetch and parse the primary XML document ──────────────────
-        if request_count >= config.max_requests_per_ticker:
-            return _fail_closed(
-                ticker_upper, "sec_error",
-                "Request budget exhausted before XML document fetch.",
-                request_count, cik=cik_padded,
-            )
+        # Option C prefetch: complete submission text already retrieved as part of
+        # index discovery — reuse it directly without an additional HTTP request.
+        if _prefetched_doc_text is not None:
+            xml_text = _prefetched_doc_text
+        else:
+            if request_count >= config.max_requests_per_ticker:
+                return _fail_closed(
+                    ticker_upper, "sec_error",
+                    "Request budget exhausted before XML document fetch.",
+                    request_count, cik=cik_padded,
+                )
 
-        doc_url = _FILING_URL_TPL.format(
-            cik_int=cik_int,
-            acc_nodash=acc_nodash,
-            primary_doc=primary_doc,
-        )
-        try:
-            resp_doc = _get(doc_url)
-            resp_doc.raise_for_status()
-            request_count += 1
-            # Access raw text — we parse XML ourselves, never store the raw text.
-            xml_text = getattr(resp_doc, "text", None) or ""
-            if not xml_text and hasattr(resp_doc, "json"):
-                # Some HTTP clients may return bytes; attempt text coercion.
-                try:
-                    xml_text = resp_doc.content.decode("utf-8", errors="replace")
-                except Exception:  # noqa: BLE001
-                    xml_text = ""
-        except Exception as exc:  # noqa: BLE001
-            if _is_timeout_exc(exc):
+            doc_url = _FILING_URL_TPL.format(
+                cik_int=cik_int,
+                acc_nodash=acc_nodash,
+                primary_doc=primary_doc,
+            )
+            try:
+                resp_doc = _get(doc_url)
+                resp_doc.raise_for_status()
+                request_count += 1
+                # Access raw text — we parse XML ourselves, never store the raw text.
+                xml_text = getattr(resp_doc, "text", None) or ""
+                if not xml_text and hasattr(resp_doc, "json"):
+                    # Some HTTP clients may return bytes; attempt text coercion.
+                    try:
+                        xml_text = resp_doc.content.decode("utf-8", errors="replace")
+                    except Exception:  # noqa: BLE001
+                        xml_text = ""
+            except Exception as exc:  # noqa: BLE001
+                if _is_timeout_exc(exc):
+                    return NportProviderResult(
+                        ticker=ticker_upper,
+                        fetch_status="timeout",
+                        error_message=f"Timeout fetching filing document: {exc}",
+                        fetched_at=fetched_at,
+                        cik=cik_padded,
+                        filing_meta=filing_meta,
+                        request_count=request_count,
+                        primary_doc_from_submissions=primary_doc_from_submissions,
+                        selected_doc_source=selected_doc_source,
+                        candidate_doc_count=candidate_doc_count,
+                        index_urls_attempted_count=index_urls_attempted_count,
+                    )
                 return NportProviderResult(
                     ticker=ticker_upper,
-                    fetch_status="timeout",
-                    error_message=f"Timeout fetching filing document: {exc}",
+                    fetch_status="filing_not_parseable",
+                    error_message=f"Error fetching filing XML: {exc}",
                     fetched_at=fetched_at,
                     cik=cik_padded,
                     filing_meta=filing_meta,
@@ -864,19 +1008,8 @@ def fetch_etf_nport_holdings(
                     primary_doc_from_submissions=primary_doc_from_submissions,
                     selected_doc_source=selected_doc_source,
                     candidate_doc_count=candidate_doc_count,
+                    index_urls_attempted_count=index_urls_attempted_count,
                 )
-            return NportProviderResult(
-                ticker=ticker_upper,
-                fetch_status="filing_not_parseable",
-                error_message=f"Error fetching filing XML: {exc}",
-                fetched_at=fetched_at,
-                cik=cik_padded,
-                filing_meta=filing_meta,
-                request_count=request_count,
-                primary_doc_from_submissions=primary_doc_from_submissions,
-                selected_doc_source=selected_doc_source,
-                candidate_doc_count=candidate_doc_count,
-            )
 
         if not xml_text.strip():
             return NportProviderResult(
@@ -892,6 +1025,7 @@ def fetch_etf_nport_holdings(
                 primary_doc_from_submissions=primary_doc_from_submissions,
                 selected_doc_source=selected_doc_source,
                 candidate_doc_count=candidate_doc_count,
+                index_urls_attempted_count=index_urls_attempted_count,
             )
 
         holdings, fund_meta, parse_status = _parse_nport_xml(xml_text)
@@ -920,6 +1054,7 @@ def fetch_etf_nport_holdings(
                 primary_doc_from_submissions=primary_doc_from_submissions,
                 selected_doc_source=selected_doc_source,
                 candidate_doc_count=candidate_doc_count,
+                index_urls_attempted_count=index_urls_attempted_count,
             )
 
         if parse_status == "no_holdings_container":
@@ -940,6 +1075,7 @@ def fetch_etf_nport_holdings(
                 primary_doc_from_submissions=primary_doc_from_submissions,
                 selected_doc_source=selected_doc_source,
                 candidate_doc_count=candidate_doc_count,
+                index_urls_attempted_count=index_urls_attempted_count,
             )
 
         if not holdings:
@@ -963,6 +1099,7 @@ def fetch_etf_nport_holdings(
                 primary_doc_from_submissions=primary_doc_from_submissions,
                 selected_doc_source=selected_doc_source,
                 candidate_doc_count=candidate_doc_count,
+                index_urls_attempted_count=index_urls_attempted_count,
             )
 
         # Assess weight/value availability.
@@ -1001,6 +1138,7 @@ def fetch_etf_nport_holdings(
             primary_doc_from_submissions=primary_doc_from_submissions,
             selected_doc_source=selected_doc_source,
             candidate_doc_count=candidate_doc_count,
+            index_urls_attempted_count=index_urls_attempted_count,
         )
 
     except Exception as exc:  # noqa: BLE001 — defence-in-depth outer catch

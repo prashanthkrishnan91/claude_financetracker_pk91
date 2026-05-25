@@ -71,43 +71,16 @@ _NPORT_FORM_TYPES: frozenset[str] = frozenset({
 # Maximum holdings to return from one filing (guard against pathological XML).
 _MAX_HOLDINGS: int = 10_000
 
-# ── ETF CIK Seed Map ──────────────────────────────────────────────────────────
-# Static CIK hints for our ETF universe.  Avoids a company_tickers.json HTTP
-# request for known tickers, keeping us within _MAX_REQUESTS_PER_TICKER.
+# ── ETF CIK Seed Map (superseded) ────────────────────────────────────────────
+# Replaced by etf_parent_cik_resolver.ETFParentRegistrantEntry map (Stage 9F.2a).
+# CIK resolution now uses get_parent_registrant_entry() in Step 1 of
+# fetch_etf_nport_holdings.  This dict is retained only as a historical reference
+# and is NOT consulted during CIK resolution.
 #
-# IMPORTANT — Vanguard ETF CIK architecture:
-#   Vanguard ETFs are series of parent registrant companies ("VANGUARD INDEX
-#   FUNDS", "VANGUARD SPECIALIZED FUNDS", etc.).  The NPORT-P filer is the
-#   PARENT REGISTRANT entity, not an individual ETF share-class entity.
-#   company_tickers.json often maps a Vanguard ticker to a share-class CIK
-#   that has no NPORT-P filings (→ no_nport_filing status).  The seed map must
-#   store the PARENT REGISTRANT CIK.
-#
-#   Production diagnostic legend:
-#     no_nport_filing  — CIK resolves but entity files no NPORT-P (wrong CIK type).
-#     sec_error        — HTTP error on submissions fetch (likely 404, wrong CIK).
-#   Use scripts/validation/nport_live_check.py to discover correct CIKs live.
-#
-# CIKs are 10-digit zero-padded strings (canonical SEC EDGAR format).
-_ETF_CIK_SEED_MAP: dict[str, str] = {
-    # ── SSGA/SPDR standalone trusts ───────────────────────────────────────────
-    # These trusts are single-series registrants and file NPORT-P directly.
-    "SPY": "0000884394",   # SPDR S&P 500 ETF Trust
-    "XLE": "0001168164",   # Energy Select Sector SPDR Fund (SPDR Series Trust series)
-    "GLD": "0001222333",   # SPDR Gold Shares — commodity trust, no equity holdings
-    # ── Invesco ───────────────────────────────────────────────────────────────
-    "QQQ": "0001067839",   # Invesco QQQ Trust, Series 1
-    # ── Vanguard — PARENT REGISTRANT CIKs required (see note above) ──────────
-    # VOO, VTI are series of "VANGUARD INDEX FUNDS" — CIK needs live verification.
-    "VOO": "0001480511",   # VERIFY: may be series CIK, not parent registrant
-    "VTI": "0000732834",   # VERIFY: Vanguard Total Stock Market — CIK candidate
-    "VGT": "0001137774",   # VERIFY: Vanguard Info Tech ETF — CIK candidate
-    # VHT, VIS, VXUS had confirmed sec_error (wrong CIK) — omitted; falls back
-    # to company_tickers.json for dynamic lookup.
-    "VYM": "0001383310",   # VERIFY: Vanguard High Dividend Yield ETF
-    # ── Schwab ────────────────────────────────────────────────────────────────
-    "SCHD": "0001510588",  # VERIFY: Schwab U.S. Dividend Equity ETF
-}
+# Historical note: Vanguard entries in this map were share-class CIKs that
+# produced no_nport_filing.  The correct parent-registrant CIKs are in
+# etf_parent_cik_resolver._ETF_PARENT_REGISTRANT_MAP.
+_ETF_CIK_SEED_MAP: dict[str, str] = {}
 
 
 # ── Provider config ────────────────────────────────────────────────────────────
@@ -201,6 +174,9 @@ class NportProviderResult:
     selected_doc_source: Optional[str] = None            # "index_json" | "index_html" | "complete_submission_txt" | "submissions"
     candidate_doc_count: Optional[int] = None            # non-XSL doc count in filing index
     index_urls_attempted_count: Optional[int] = None     # number of index URLs tried in fallback chain
+    # Parent-registrant resolver diagnostics (Stage 9F.2a CIK resolver).
+    resolver_source: Optional[str] = None                # "etf_parent_map" | "company_tickers" | "injected"
+    parent_registrant_name: Optional[str] = None         # SEC registrant name when parent map used
 
     @property
     def is_success(self) -> bool:
@@ -227,6 +203,8 @@ def _fail_closed(
     message: str,
     request_count: int = 0,
     cik: Optional[str] = None,
+    resolver_source: Optional[str] = None,
+    parent_registrant_name: Optional[str] = None,
 ) -> NportProviderResult:
     return NportProviderResult(
         ticker=ticker,
@@ -235,6 +213,8 @@ def _fail_closed(
         fetched_at=datetime.now(timezone.utc).isoformat(),
         request_count=request_count,
         cik=cik,
+        resolver_source=resolver_source,
+        parent_registrant_name=parent_registrant_name,
     )
 
 
@@ -722,16 +702,28 @@ def fetch_etf_nport_holdings(
 
         # ── Step 1: Resolve CIK ───────────────────────────────────────────────
         cik: Optional[str] = None
+        _resolver_source: Optional[str] = None
+        _parent_registrant_name: Optional[str] = None
 
         if cik_lookup_fn is not None:
             # Caller provides CIK resolution — fully injectable (used in tests).
             cik = cik_lookup_fn(ticker_upper)
+            _resolver_source = "injected"
         else:
-            # Try static seed map first (zero HTTP requests, bootstrap hints).
-            cik = _ETF_CIK_SEED_MAP.get(ticker_upper)
-
-            # Dynamic fallback: company_tickers.json
-            if cik is None:
+            # 1a. ETF parent-registrant resolver (highest priority).
+            #     Covers all known ETFs in our universe and correctly maps Vanguard /
+            #     Schwab tickers to the umbrella registrant that files NPORT-P, not
+            #     to the share-class/series entity returned by company_tickers.json.
+            from .etf_parent_cik_resolver import get_parent_registrant_entry
+            _parent_entry = get_parent_registrant_entry(ticker_upper)
+            if _parent_entry is not None:
+                cik = _parent_entry.parent_cik
+                _parent_registrant_name = _parent_entry.parent_name
+                _resolver_source = "etf_parent_map"
+            else:
+                # 1b. Dynamic fallback: company_tickers.json (for ETFs not in our
+                #     vetted map).  One HTTP request; avoids returning missing_cik
+                #     for tickers we have not yet classified.
                 if request_count >= config.max_requests_per_ticker:
                     return _fail_closed(
                         ticker_upper, "missing_cik",
@@ -744,6 +736,7 @@ def fetch_etf_nport_holdings(
                     request_count += 1
                     tickers_body = resp_tickers.json() or {}
                     cik = _resolve_cik_from_tickers_json(ticker_upper, tickers_body)
+                    _resolver_source = "company_tickers"
                 except Exception as exc:  # noqa: BLE001
                     if _is_timeout_exc(exc):
                         return _fail_closed(
@@ -761,10 +754,11 @@ def fetch_etf_nport_holdings(
             return _fail_closed(
                 ticker_upper, "missing_cik",
                 (
-                    f"Ticker {ticker_upper!r} not found in ETF CIK seed map or "
-                    "company_tickers.json. Add to _ETF_CIK_SEED_MAP or verify SEC EDGAR."
+                    f"Ticker {ticker_upper!r} not found in ETF parent-registrant map or "
+                    "company_tickers.json. Add to etf_parent_cik_resolver or verify SEC EDGAR."
                 ),
                 request_count,
+                resolver_source=_resolver_source,
             )
 
         cik_padded = _padded_cik(cik)
@@ -807,7 +801,11 @@ def fetch_etf_nport_holdings(
                 if is_commodity_trust
                 else f"No NPORT-P or NPORT-EX filing found in EDGAR submissions for CIK {cik_padded}."
             )
-            return _fail_closed(ticker_upper, status, msg, request_count, cik=cik_padded)
+            return _fail_closed(
+                ticker_upper, status, msg, request_count, cik=cik_padded,
+                resolver_source=_resolver_source,
+                parent_registrant_name=_parent_registrant_name,
+            )
 
         acc_raw = filing_info["accession_number"]
         acc_nodash = acc_raw.replace("-", "")
@@ -1139,6 +1137,8 @@ def fetch_etf_nport_holdings(
             selected_doc_source=selected_doc_source,
             candidate_doc_count=candidate_doc_count,
             index_urls_attempted_count=index_urls_attempted_count,
+            resolver_source=_resolver_source,
+            parent_registrant_name=_parent_registrant_name,
         )
 
     except Exception as exc:  # noqa: BLE001 — defence-in-depth outer catch

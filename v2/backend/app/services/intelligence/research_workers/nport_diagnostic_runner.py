@@ -41,6 +41,8 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
     return {
         "ticker": result.ticker,
         "fetch_status": result.fetch_status,
+        "resolver_source": result.resolver_source,
+        "parent_registrant_name": result.parent_registrant_name,
         "resolved_cik": result.cik,
         "holdings_count": len(result.holdings),
         "form_type": fm.form_type if fm else None,

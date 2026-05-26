@@ -3910,6 +3910,9 @@ async def etf_nport_live_check(
         _NPORT_DIAG_MAX_TICKERS,
         run_nport_live_check,
     )
+    from ..services.intelligence.research_workers.etf_nport_candidate_discovery import (
+        discover_nport_candidates,
+    )
 
     if not settings.sec_edgar_user_agent:
         return {
@@ -3931,10 +3934,14 @@ async def etf_nport_live_check(
 
     # run_nport_live_check is sync; use asyncio.to_thread so the SEC rate-limit
     # sleep does not block the event loop for this operator-only endpoint.
+    # discovery_fn=discover_nport_candidates enables SEC EFTS candidate discovery
+    # for tickers where the static parent-registrant map fails identity validation.
+    # Diagnostic lane only — no artifact writes, no production evidence changes.
     result = await asyncio.to_thread(
         run_nport_live_check,
         tickers,
         settings.sec_edgar_user_agent,
+        discovery_fn=discover_nport_candidates,
     )
     logger.info(
         "nport_live_diagnostic_complete total=%d success=%d no_data=%d error=%d user=%s",

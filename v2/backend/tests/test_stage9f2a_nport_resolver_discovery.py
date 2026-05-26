@@ -937,29 +937,41 @@ def test_105_resolver_discovery_enabled_flag_in_output():
     assert out_without["resolver_discovery_enabled"] is False
 
 
-# Test 106 — Diagnostic endpoint source includes resolver_discovery_used (structural)
-def test_106_diagnostic_endpoint_includes_discovery_fields_structural():
-    """Confirm diagnostics.py endpoint propagates discovery fields from runner output.
+# Test 106 — Diagnostic endpoint wires discover_nport_candidates as discovery_fn (structural)
+def test_106_diagnostic_endpoint_wires_discovery_fn():
+    """Confirm diagnostics.py endpoint imports and passes discover_nport_candidates
+    as discovery_fn to run_nport_live_check.
 
     Structural: reads endpoint source; no live SEC calls, no FastAPI startup.
+    This test fails if the endpoint calls run_nport_live_check without discovery_fn —
+    i.e. if Blocker 2 is not fixed.
     """
     import pathlib
 
-    src = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
-    source = src.read_text()
+    src_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+    source = src_path.read_text()
 
-    # Runner is called — its output (with discovery fields) is returned directly
+    # Endpoint must import discover_nport_candidates
+    assert "discover_nport_candidates" in source, (
+        "diagnostics.py must import discover_nport_candidates from etf_nport_candidate_discovery"
+    )
+    # Endpoint must pass discovery_fn=discover_nport_candidates to runner
+    assert "discovery_fn=discover_nport_candidates" in source, (
+        "diagnostics.py must pass discovery_fn=discover_nport_candidates to run_nport_live_check"
+    )
+    # Runner is called and its output returned directly (discovery fields flow through)
     assert "run_nport_live_check" in source
-    # The endpoint returns `result` from run_nport_live_check
     assert "return result" in source
-    # Structural check: runner source includes resolver_discovery_used
+
+    # Runner source includes resolver_discovery_used field
     runner_src = (
         pathlib.Path(__file__).parent.parent
         / "app" / "services" / "intelligence" / "research_workers"
         / "nport_diagnostic_runner.py"
     ).read_text()
     assert "resolver_discovery_used" in runner_src
-    # Ensure the discovery module exists
+
+    # Discovery module must exist
     assert (
         pathlib.Path(__file__).parent.parent
         / "app" / "services" / "intelligence" / "research_workers"

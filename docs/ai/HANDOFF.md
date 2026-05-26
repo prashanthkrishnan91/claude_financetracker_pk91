@@ -1,28 +1,40 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-26 (Stage 9F.2c — source-discovery stop/decision artifact, open PR).
+Last updated: 2026-05-26 (Stage 9F.3a — Alpha Vantage ETF_PROFILE entitlement + shape diagnostic, open PR).
 
-**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. **Fix:** ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
+**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
 
-**What changed (Stage 9F.2c — current PR):** Source-discovery stop/decision artifact. No new runtime code. All known free issuer-official CSV/download URLs are blocked (HTTP 403/404 from all major ETF issuer domains). This PR documents exact URLs attempted, result per issuer/ticker, and a formal stop recommendation. See `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`.
+**What changed (Stage 9F.2c — merged):** Source-discovery stop/decision artifact. All known free issuer-official CSV/download URLs blocked (HTTP 403/404). See `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`.
 
-**Files added (Stage 9F.2c):**
-- `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`: Source-discovery findings. URLs per issuer, HTTP responses, why each path is blocked, current coverage table, recommendation.
+**What changed (Stage 9F.3a — current PR):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic. No canonical adapter built. No SQL. No UI. No LLM. No artifact writes.
 
-**Stage 9F.2c source discovery findings:**
-- Vanguard (VOO/VTI/VGT/VHT/VIS/VXUS/VYM): CSV URL → HTTP 404 at runtime; HTTP 403 from CI.
-- SSGA/SPDR (XLE): CSV URL → HTTP 404 at runtime; HTTP 403 from CI. SPY covered by SEC NPORT.
-- Schwab (SCHD): no confirmed public CSV URL.
-- Invesco (QQQ): already covered by SEC NPORT; issuer URL returns HTML.
-- GLD: `commodity_trust_no_equity_holdings` (unchanged).
-- `issuer_official_selected_count = 0` confirmed from Stage 9F.2b runtime.
+**Files added (Stage 9F.3a):**
+- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_etf_profile_runner_v1.py`: Diagnostic runner — probes Alpha Vantage ETF_PROFILE per ticker, normalizes shape, computes candidate_pass/partial/fail verdict. Injectable http_get_fn for tests.
+- `v2/backend/tests/test_stage9f3a_alpha_vantage_etf_profile.py`: 38 fixture-based tests. No live HTTP.
+- `docs/ai/intel/STAGE_9F3_ALPHA_VANTAGE_PROOF.md`: What the endpoint tests, missing ticker set, pass/fail criteria, quota warning, curl instructions.
 
-**Config flag:** `intel_v3_etf_provider_registry_diagnostics_enabled` (default False).
-**Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated, Stage 9F.2b unchanged).
+**Config flags (Stage 9F.3a):**
+- `intel_v3_alpha_vantage_etf_profile_diagnostics_enabled` (default False) — enables the endpoint.
+- `alpha_vantage_api_key` (Optional[str]) — ALPHA_VANTAGE_API_KEY; never logged or returned.
 
-**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 33 Stage 9F.2b tests pass.
+**Endpoint:** `POST /api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check` (cert-gated).
 
-**Next step (stop recommendation):** Stop free-source issuer-scraping. Evaluate paid providers (Intrinio, FMP paid tier, ETF Global/Massive) before building another issuer-official lane. See findings doc for candidate providers and evaluation criteria.
+**Post-deploy run (curl):**
+```bash
+curl -X POST https://<railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \
+  -H "Content-Type: application/json" \
+  -H "X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>" \
+  -d '{}'
+```
+
+**Env vars required to run:**
+- `INTEL_V3_ALPHA_VANTAGE_ETF_PROFILE_DIAGNOSTICS_ENABLED=true`
+- `FINANCE_RUNTIME_CERT_ENABLED=true` + `FINANCE_RUNTIME_CERT_SECRET=<secret>`
+- `ALPHA_VANTAGE_API_KEY=<key>` — fails closed (HTTP 403) if absent.
+
+**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` always. `artifact_writes=0`. `decision_policy_changed=False`. `synthesis_ready_changed=False`. `visible_snapshot_unchanged=True`. API key never appears in any returned field. Do not run more than once per day on free AV tier (25 req/day limit).
+
+**Stage 9F.2c findings (unchanged):** `issuer_official_selected_count = 0`. GLD: commodity path. Next step: run the 9F.3a endpoint once deployed; interpret verdict to decide whether to build `alpha_vantage_etf_holdings_adapter_v1`.
 
 ## Purpose
 

@@ -4031,3 +4031,88 @@ async def etf_provider_registry_check(
         getattr(user, "email", "unknown"),
     )
     return result
+
+
+# ── Stage 9F.3a — Alpha Vantage ETF_PROFILE entitlement diagnostic ────────────
+
+
+class AlphaVantageEtfProfileCheckRequest(BaseModel):
+    """Stage 9F.3a — operator request body for Alpha Vantage ETF_PROFILE diagnostic."""
+    tickers: list[str] = []
+    include_controls: bool = False
+
+
+@router.post("/alpha-vantage-etf-profile-check")
+async def alpha_vantage_etf_profile_check(
+    payload: AlphaVantageEtfProfileCheckRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9F.3a — operator-only Alpha Vantage ETF_PROFILE entitlement + shape diagnostic.
+
+    Tests whether Alpha Vantage can provide S-grade ETF holdings data for the
+    missing ETF set (XLE, VOO, VTI, VGT, VHT, VIS, VXUS, VYM, SCHD) before
+    any canonical adapter is built.
+
+    Diagnostic-only: no artifact writes, no decision mutations, no SQL, no LLM
+    calls. canonical_ready=False and safe_for_decision=False always. The API key
+    is never logged or returned in any field.
+
+    Fails closed if ALPHA_VANTAGE_API_KEY is not configured.
+
+    Budget guard: at most 11 tickers per run (free quota protection). Default
+    run uses 9 tickers (the missing ETF set only). Set include_controls=true
+    to add SPY and QQQ as known control tickers (uses 11 ticker budget).
+
+    Warning: do not run more than once per day on the free Alpha Vantage tier
+    to avoid burning the per-day API quota.
+
+    Required env vars:
+      INTEL_V3_ALPHA_VANTAGE_ETF_PROFILE_DIAGNOSTICS_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+      ALPHA_VANTAGE_API_KEY=<your key>
+
+    Verdict interpretation:
+      candidate_pass    — XLE, SCHD, and >= 5 Vanguard ETFs return holdings+weights+date.
+      candidate_partial — Some holdings/weights exist but coverage/schema is incomplete.
+      candidate_fail    — Entitlement, rate-limit, no-data, or malformed responses dominate.
+    """
+    from ..services.intelligence.research_workers.alpha_vantage_etf_profile_runner_v1 import (
+        _CONTROL_TICKERS,
+        _DEFAULT_TICKERS,
+        MAX_TICKERS_PER_RUN,
+        run_alpha_vantage_etf_profile_check,
+    )
+
+    settings = get_settings()
+    if not settings.intel_v3_alpha_vantage_etf_profile_diagnostics_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    if not settings.alpha_vantage_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="missing_api_key: ALPHA_VANTAGE_API_KEY is not configured",
+        )
+
+    # Build ticker list: caller-supplied or default missing set.
+    raw_tickers = payload.tickers if payload.tickers else list(_DEFAULT_TICKERS)
+    if payload.include_controls:
+        for ctrl in _CONTROL_TICKERS:
+            if ctrl not in raw_tickers:
+                raw_tickers.append(ctrl)
+
+    # Normalize, deduplicate, cap.
+    normalized = list(dict.fromkeys(t.upper().strip() for t in raw_tickers if t.strip()))
+    tickers = normalized[:MAX_TICKERS_PER_RUN]
+
+    result = run_alpha_vantage_etf_profile_check(
+        api_key=settings.alpha_vantage_api_key,
+        tickers=tickers,
+    )
+
+    logger.info(
+        "alpha_vantage_etf_profile_check_endpoint tickers=%d verdict=%s user=%s",
+        len(tickers),
+        result.get("provider_candidate_verdict", "unknown"),
+        getattr(user, "email", "unknown"),
+    )
+    return result

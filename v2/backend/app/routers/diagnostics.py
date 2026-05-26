@@ -3952,3 +3952,82 @@ async def etf_nport_live_check(
         getattr(user, "email", "unknown"),
     )
     return result
+
+
+# ── Stage 9F.2b — ETF Holdings Provider Registry diagnostic endpoint ──────────
+
+
+class EtfProviderRegistryCheckRequest(BaseModel):
+    """Stage 9F.2b — operator request body for ETF provider registry diagnostic."""
+    tickers: list[str] = []
+
+
+@router.post("/etf-provider-registry-check")
+async def etf_provider_registry_check(
+    payload: EtfProviderRegistryCheckRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9F.2b — operator-only diagnostic for ETF holdings provider registry.
+
+    Runs the provider registry for the requested ETF universe, trying SEC NPORT
+    and issuer-official adapters per ticker. Returns the first identity-verified
+    result per ticker and all provider attempt statuses.
+
+    Diagnostic-only: does NOT write artifacts, does NOT alter decisions or
+    snapshots, does NOT change Buy/Hold/Trim/Sell. canonical_ready=False and
+    safe_for_decision=False for all tickers.
+
+    Required env vars:
+      INTEL_V3_ETF_PROVIDER_REGISTRY_DIAGNOSTICS_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+      SEC_EDGAR_USER_AGENT=<AppName/version email>  (for SEC NPORT calls)
+
+    Returns compact per-ticker JSON with selected_provider_id, providers_attempted,
+    provider_statuses, identity_verified, as_of_date, holdings_count, sample_holding_names,
+    weights_available, weight_basis, freshness_status, canonical_ready, safe_for_decision.
+    """
+    settings = get_settings()
+    if not settings.intel_v3_etf_provider_registry_diagnostics_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    from ..services.intelligence.research_workers.etf_provider_registry_runner_v1 import (
+        _REGISTRY_DEFAULT_TICKERS,
+        _REGISTRY_MAX_TICKERS,
+        run_provider_registry_check,
+    )
+
+    user_agent = settings.sec_edgar_user_agent or ""
+    if not user_agent:
+        return {
+            "error": "SEC_EDGAR_USER_AGENT not configured — SEC NPORT calls will be skipped.",
+            "safe_for_decision": False,
+            "canonical_ready": False,
+            "diagnostics_only": True,
+            "artifact_writes": 0,
+        }
+
+    tickers = [t.strip().upper() for t in (payload.tickers or []) if t.strip()]
+    if not tickers:
+        tickers = list(_REGISTRY_DEFAULT_TICKERS)
+    if len(tickers) > _REGISTRY_MAX_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Maximum {_REGISTRY_MAX_TICKERS} tickers per request.",
+        )
+
+    result = await asyncio.to_thread(
+        run_provider_registry_check,
+        tickers,
+        user_agent,
+    )
+    logger.info(
+        "etf_provider_registry_check_complete total=%d success=%d "
+        "identity_verified=%d no_data=%d error=%d user=%s",
+        result["tickers_requested"],
+        result["tickers_succeeded"],
+        result["tickers_identity_verified"],
+        result["tickers_no_data"],
+        result["tickers_error"],
+        getattr(user, "email", "unknown"),
+    )
+    return result

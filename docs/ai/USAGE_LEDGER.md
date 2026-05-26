@@ -209,3 +209,9 @@ Use this ledger plus GitHub PR history to diagnose token burn:
 - High follow-up patches → unclear contracts or scope at PR time.
 - Recurring efficiency lessons → candidate for `docs/ai/MISS_LEDGER.md` promotion.
 
+## Stage 9F.2b entry
+
+| Date | PR | Prompt ID | Phase | Linked PR | Repo area | Session | Model | Chat | Source | Input tok | Output tok | Cache read | Cache creation | Total tok | Est. cost | Δ input | Δ output | Δ cache read | Δ cache creation | Δ total | Δ cost | Waste | Main drivers | Follow-up patches | Efficiency lesson |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-05-26 | unknown | p01 | initial | n/a | backend/etf-holdings-registry | unknown | claude-sonnet-4-6 | new-chat | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | unavailable | none | registry + issuer-official adapter + runner + 28 fixture tests + endpoint + config flag | 0 | injectable HTTP + injectable providers kept all tests fixture-only with no live HTTP |
+

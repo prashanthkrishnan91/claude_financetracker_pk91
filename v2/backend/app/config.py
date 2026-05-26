@@ -319,6 +319,17 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation.
     intel_v3_fy_eps_raw_trace_v1_diagnostics_enabled: bool = False
 
+    # ── Stage 9F.2b — ETF Holdings Provider Registry Diagnostics (off by default) ──
+    # When True, enables the protected POST /diagnostics/finance-intel/
+    # etf-provider-registry-check endpoint that runs the provider registry
+    # diagnostic for the ETF universe (SPY/QQQ/XLE/GLD/VOO/VTI/VGT/VHT/VIS/
+    # VXUS/VYM/SCHD). Tries SEC NPORT and issuer-official adapters per ticker.
+    # Diagnostic-only: no artifact writes, no decision mutations, no visible
+    # Buy/Hold/Trim/Sell change. canonical_ready=False for all. Cert-gated.
+    # Requires FINANCE_RUNTIME_CERT_ENABLED=true + cert secret header.
+    # SEC NPORT calls also require SEC_EDGAR_USER_AGENT to be set.
+    intel_v3_etf_provider_registry_diagnostics_enabled: bool = False
+
     # ── Intel v3 Phase 14D — PriceBand Shadow Policy v1 (off by default) ──────
     # When True, enables the protected POST /diagnostics/finance-intel/
     # priceband-shadow-v1 endpoint which classifies certified Phase 14C inputs

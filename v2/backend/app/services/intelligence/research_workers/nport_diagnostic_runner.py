@@ -84,6 +84,10 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
         "detected_class_id": getattr(result, "detected_class_id", None),
         "identity_mismatch_reason": getattr(result, "identity_mismatch_reason", None),
         "candidate_identity_failures": getattr(result, "candidate_identity_failures", []),
+        # Scan diagnostic fields (Stage 9F.2a multi-filing scan)
+        "filings_scanned_count": getattr(result, "filings_scanned_count", 0),
+        "matching_filing_rank": getattr(result, "matching_filing_rank", None),
+        "scan_limit_reached": getattr(result, "scan_limit_reached", False),
     }
 
 
@@ -112,7 +116,10 @@ def run_nport_live_check(
     _provider = provider_fn or fetch_etf_nport_holdings
     _sleep = sleep_fn if sleep_fn is not None else time.sleep
 
-    cfg = NportProviderConfig(user_agent=user_agent, timeout_seconds=20.0)
+    # Diagnostic endpoint uses explicit scan cap (12 filings per candidate).
+    # This matches _DEFAULT_FILING_SCAN_CAP but is set explicitly here so that
+    # the diagnostic intent is clear and independent of future production changes.
+    cfg = NportProviderConfig(user_agent=user_agent, timeout_seconds=20.0, max_filings_to_scan=12)
 
     started_at = datetime.now(timezone.utc).isoformat()
     per_ticker: list[dict] = []

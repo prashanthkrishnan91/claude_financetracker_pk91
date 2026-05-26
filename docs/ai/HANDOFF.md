@@ -42,43 +42,12 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 3G** (Alert Center UI v1). Stage 3F merged PR #355 — Railway activation config for email delivery worker (PROCESS_TYPE=email_delivery). Stage 3E merged PR #354 (SQL 022 applied). Stage 3D merged PR #353 (SQL 021 applied). Stage 3C merged PR #352.
-- Stage 3G summary (current — branch `claude/alert-center-ui-v1-cAzJ8`): Read-only Alert Center UI reachable at `/dashboard/alerts`. Shows alert candidates and delivery outbox from existing backend endpoints (`GET /api/v1/alert-candidates`, `GET /api/v1/alert-delivery-outbox`). Navigation item "Alerts" added to BottomNav and SideNav. Dry-run safety banner always visible. Plain-English status labels, severity pills, empty/loading/error states. Pure mapping functions extracted to `src/lib/alert-center.ts` with 28 unit tests. No new SQL, no email delivery changes, no Watchtower/Intel v3 changes.
-- Stage 3E summary (merged PR #354): Resend email delivery worker processing pending `alert_delivery_outbox` rows. Env-gated (default OFF, default dry-run ON). Files: `resend_client_v1.py`, `alert_email_delivery_worker_v1.py` (claim-before-send, fail-soft), `alert_email_delivery_worker_entrypoint.py`. Outbox service methods: `fetch_pending_email_rows`, `claim_for_delivery`, `mark_sent`, `mark_failed`. Config: `ALERT_EMAIL_DELIVERY_ENABLED` (default false), `ALERT_EMAIL_PROVIDER`, `RESEND_API_KEY`, `ALERT_EMAIL_FROM`, `ALERT_EMAIL_TO`, `ALERT_EMAIL_DRY_RUN` (default true). SQL 022 applied. 38 tests. Structured log: `alert_email_delivery_summary scanned=... sent=... failed=... skipped=... status_update_failed=... dry_run=... provider=resend`.
-- Stage 3F Railway activation: Use `PROCESS_TYPE=email_delivery` on a separate Railway service. Do NOT wire into Watchtower. See entrypoint docstring for step-by-step dry-run and real-send instructions.
-- Stage 3D summary (merged PR #353): Provider-neutral alert delivery outbox. SQL migration 021 (`alert_delivery_outbox` table — **applied**). `alert_delivery_policy_v1.py` (pure, no IO), `alert_delivery_outbox_service.py` (idempotent persistence + 24h noisy-repeat suppression, exact-dedupe-before-suppression ordering), `GET /api/v1/alert-delivery-outbox` (read-only, authenticated). Fail-soft Step 5 in `watchtower_alert_candidate_hook_v1.py` — outbox attempted for ALL returned candidate rows (created + deduped) for self-healing. No external delivery, no provider SDKs, no LLM calls, no frontend UI. 109 tests pass.
-- Stage 3C summary (merged PR #352): `watchtower_alert_candidate_hook_v1.py` wires candidate generation after certified Intel v3 snapshot publishes. Hook injected into `compare_and_republish()` and `republish_after_analyst_eligibility()`. Fail-soft. 23 tests pass. No SQL, no delivery, no UI.
-- Stage 3B summary (merged PR #350): Pure deterministic policy module `alert_trigger_policy_v1.py` + `AlertCandidateService` + `watchtower_alert_candidates` table (SQL migration 020 — **applied**) + `GET /api/v1/alert-candidates` (read-only, authenticated). 79 tests pass. Evidence band `_ACTIONABLE_BANDS = {"STRONG","PARTIAL"}` — PARTIAL is the serialized label for AxisBand.OK. Feedback suppression: executed (indefinite), ignored/not_relevant/too_risky (7d), snoozed (14d default or `cooldown_until`). `action_feedback_events.cooldown_until` column added via ALTER TABLE in migration 020.
-- Stage 3A summary (merged PR #349): `action_feedback_events` table, service, router (`POST /api/v1/action-feedback`, `GET /api/v1/action-feedback`). SQL migration 019. 22 tests pass.
-- Current north-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
+- Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
+- Current PR: Stage 9F.3a Alpha Vantage ETF_PROFILE diagnostic-only proof endpoint (PR #429, branch `claude/amazing-edison-4b8zq`).
+- Current ETF coverage: SPY/QQQ via SEC NPORT (identity_verified, holdings > 0); GLD commodity/no-equity; XLE/Vanguard (VOO/VTI/VGT/VHT/VIS/VXUS/VYM)/SCHD uncovered — all free issuer-official URLs blocked (Stage 9F.2c).
+- Next step after merge/deploy: run the Alpha Vantage diagnostic endpoint once (see curl above); interpret `candidate_pass` / `candidate_partial` / `candidate_fail` before building any canonical adapter.
+- North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
-## Current architecture — Build 2 additions
-
-**Build 2: Evidence-grade certification + publish contract** (PR #pending). After Watchtower writes fresh price evidence to `portfolio_snapshots`, the visible Intel v3 snapshot is now automatically re-certified from that evidence without analyst LLM jobs.
-
-New module: `watchtower_intel_republisher_v1.py`
-- `compare_and_republish(user_id, client, *, intel_republish_callable)` — compares `intel_v3_snapshots.payload.generated_at` vs `portfolio_snapshots.snapshot_at`. If evidence is newer (>10s threshold), calls `intel_republish_callable(user_id)` which wraps `IntelV3Service.run_prewarm_snapshot()`. Zero LLM calls; analyst_jobs_queued=0 always.
-- `get_evidence_freshness_state(user_id, client, *, intel_snapshot_generated_at)` — lightweight comparison for API response embedding.
-- `PUBLISH_*` constants: `certified_current` | `rebuilt_and_published` | `republish_pending` | `certification_blocked` | `no_snapshot_exists`
-
-Extended modules:
-- `watchtower_callables_v1.py` — adds `build_default_intel_republish_callable()`, which wraps `IntelV3Service.run_prewarm_snapshot(skip_persist_on_fail=True)` (deferred import preserves boundary; `skip_persist_on_fail=True` prevents failed Watchtower-triggered rebuilds from overwriting a prior `worker_certified` snapshot).
-- `watchtower_background_refresh_worker_v1.py` — `WatchtowerBackgroundRefreshWorker` now accepts `intel_republish_callable`. After `persist_watchtower_price_snapshot()` succeeds, calls `compare_and_republish()`. `WatchtowerRefreshCycleResult` carries `intel_republish_result` dict.
-- `watchtower_worker_entrypoint.py` — wires `build_default_intel_republish_callable()` in the background loop.
-- `intel_v3_service.py` — `get_latest_snapshot()` embeds `evidence_freshness_state` in the API response (non-mutating copy). `enqueue_run_v3()` urgent path now passes `intel_republish_callable` into `run_watchtower_cycle_for_user()`. `run_prewarm_snapshot()` has `skip_persist_on_fail=False` param — when `True` and certification fails, skips `_persist_snapshot()` to preserve the prior `worker_certified` active snapshot.
-
-**compare_and_republish() result semantics (post-patch):** After calling `intel_republish_callable(user_id)`, inspects `returned_payload["snapshot_source"]`. Only `"worker_certified"` → `PUBLISH_REBUILT_AND_PUBLISHED`; `"certification_failed"` or any other value → `PUBLISH_CERTIFICATION_BLOCKED` with source in error field.
-
-**get_evidence_freshness_state() error behavior (post-patch):** DB errors return `PUBLISH_REPUBLISH_PENDING` (honest non-green) — not `certified_current`. The portfolio snapshot DB call is inlined (not delegated to the error-swallowing helper) so errors propagate correctly.
-
-Boundary preserved: `watchtower_background_refresh_worker_v1.py` does NOT import `decide()`. The republish callable is injected, built by `watchtower_callables_v1.py`.
-
-43 tests in `test_watchtower_build_2.py` (28 Build 2 + 15 patch). 91 Build 1D tests still pass.
-
-Key structured logs to confirm in production:
-- `watchtower_intel_republisher.publish_decision user_id=... publish_status=rebuilt_and_published evidence_newer_than_certified_snapshot=True analyst_jobs_queued=0`
-- `intel_v3_snapshot_response_summary ... evidence_freshness_state=certified_current` (after republish completes)
-- `intel_v3_worker_certified_snapshot_published` (from `run_prewarm_snapshot` inside the callable)
 
 ## Current architecture / runtime state
 

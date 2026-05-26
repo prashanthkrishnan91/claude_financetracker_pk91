@@ -220,6 +220,10 @@ class NportProviderResult:
     detected_series_id: Optional[str] = None             # from genInfo.seriesId
     detected_class_id: Optional[str] = None              # from classesContracts classContract
     identity_mismatch_reason: Optional[str] = None       # why identity_status=series_identity_not_proven
+    # Per-candidate identity failure log for multi-candidate resolution diagnostics.
+    # Each entry: {candidate_cik, accession_number, detected_series_name,
+    #              detected_registrant_name, identity_mismatch_reason}
+    candidate_identity_failures: list[dict] = field(default_factory=list)
 
     @property
     def is_success(self) -> bool:
@@ -792,6 +796,14 @@ def fetch_etf_nport_holdings(
         # Track results for diagnostics when all candidates fail
         _last_no_nport_diag: Optional[dict[str, Any]] = None
         _last_error_diag: Optional[dict[str, Any]] = None
+        # Per-candidate identity failure log — populated when a candidate yields
+        # holdings but the series name does not match the requested ETF.
+        _candidate_identity_failures: list[dict] = []
+        # Carry last-parsed identity metadata for series_identity_not_proven response.
+        _last_detected_series_name: Optional[str] = None
+        _last_detected_registrant_name: Optional[str] = None
+        _last_identity_mismatch_reason: Optional[str] = None
+        _last_identity_filing_meta: Optional[NportFilingMeta] = None
 
         for candidate_cik in candidate_ciks:
             candidate_ciks_tried.append(candidate_cik)
@@ -1214,41 +1226,25 @@ def fetch_etf_nport_holdings(
                     )
                 else:
                     # Series name does not match — this filing belongs to a different
-                    # series of the same parent registrant.  Do NOT return holdings.
+                    # series of the same parent registrant.  Record the failure and
+                    # continue to the next candidate if any remain.
                     mismatch_reason = (
                         f"Expected one of {_entry.expected_series_names!r}, "
                         f"detected seriesName={detected_series_name!r} "
                         f"in accession {acc_raw}"
                     )
-                    return NportProviderResult(
-                        ticker=ticker_upper,
-                        fetch_status=_IDENTITY_NOT_PROVEN,
-                        error_message=(
-                            f"Holdings found but series identity not proven for {ticker_upper}: "
-                            f"{mismatch_reason}"
-                        ),
-                        fetched_at=fetched_at,
-                        cik=cik_padded,
-                        filing_meta=filing_meta,
-                        request_count=request_count,
-                        primary_doc_attempted=primary_doc,
-                        primary_doc_from_submissions=primary_doc_from_submissions,
-                        selected_doc_source=selected_doc_source,
-                        candidate_doc_count=candidate_doc_count,
-                        index_urls_attempted_count=index_urls_attempted_count,
-                        resolver_source=_resolver_source,
-                        parent_registrant_name=_parent_registrant_name,
-                        candidate_ciks_tried=candidate_ciks_tried,
-                        selected_candidate_cik=cik_padded,
-                        detected_series_name=detected_series_name,
-                        detected_registrant_name=detected_registrant_name,
-                        detected_series_id=detected_series_id,
-                        detected_class_id=detected_class_id,
-                        detected_class_name=detected_class_name,
-                        identity_status=_IDENTITY_NOT_PROVEN,
-                        identity_verified=False,
-                        identity_mismatch_reason=mismatch_reason,
-                    )
+                    _candidate_identity_failures.append({
+                        "candidate_cik": cik_padded,
+                        "accession_number": acc_raw,
+                        "detected_series_name": detected_series_name,
+                        "detected_registrant_name": detected_registrant_name,
+                        "identity_mismatch_reason": mismatch_reason,
+                    })
+                    _last_detected_series_name = detected_series_name
+                    _last_detected_registrant_name = detected_registrant_name
+                    _last_identity_mismatch_reason = mismatch_reason
+                    _last_identity_filing_meta = filing_meta
+                    continue  # Try next candidate
             else:
                 # entry exists but no expected_series_names configured.
                 identity_status = "no_identity_hints_configured"
@@ -1301,9 +1297,36 @@ def fetch_etf_nport_holdings(
                 identity_verified=identity_verified,
                 identity_basis=identity_basis,
                 identity_mismatch_reason=identity_mismatch_reason,
+                candidate_identity_failures=_candidate_identity_failures,
             )
 
         # ── All candidates exhausted ──────────────────────────────────────────
+        if _candidate_identity_failures:
+            # Every candidate yielded holdings but none matched this ETF's identity.
+            return NportProviderResult(
+                ticker=ticker_upper,
+                fetch_status=_IDENTITY_NOT_PROVEN,
+                error_message=(
+                    f"Holdings found for all {len(_candidate_identity_failures)} CIK candidate(s) "
+                    f"but series identity not proven for {ticker_upper}. "
+                    f"Last mismatch: {_last_identity_mismatch_reason}"
+                ),
+                fetched_at=fetched_at,
+                cik=candidate_ciks_tried[-1] if candidate_ciks_tried else None,
+                filing_meta=_last_identity_filing_meta,
+                request_count=request_count,
+                resolver_source=_resolver_source,
+                parent_registrant_name=_parent_registrant_name,
+                candidate_ciks_tried=candidate_ciks_tried,
+                selected_candidate_cik=None,
+                detected_series_name=_last_detected_series_name,
+                detected_registrant_name=_last_detected_registrant_name,
+                identity_status=_IDENTITY_NOT_PROVEN,
+                identity_verified=False,
+                identity_mismatch_reason=_last_identity_mismatch_reason,
+                candidate_identity_failures=_candidate_identity_failures,
+            )
+
         if _last_error_diag:
             # All candidates returned sec_error/404
             return _fail_closed(

@@ -83,6 +83,7 @@ def _build_ticker_entry(result: Any, error_msg_max_len: int = _NPORT_DIAG_ERROR_
         "detected_series_id": getattr(result, "detected_series_id", None),
         "detected_class_id": getattr(result, "detected_class_id", None),
         "identity_mismatch_reason": getattr(result, "identity_mismatch_reason", None),
+        "candidate_identity_failures": getattr(result, "candidate_identity_failures", []),
     }
 
 

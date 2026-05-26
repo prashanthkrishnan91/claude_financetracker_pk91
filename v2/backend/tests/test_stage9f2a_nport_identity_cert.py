@@ -46,6 +46,13 @@ Coverage (all fixture-based; zero live SEC calls):
  106. identity_mismatch_reason surfaced for series_identity_not_proven.
  107. run_nport_live_check output includes tickers_identity_verified count.
 
+  Multi-candidate identity resolution (Blocker 2 fix):
+ 111. Candidate 1 yields holdings with wrong series; candidate 2 has matching
+      series → result is success with identity_verified=True on candidate 2.
+ 112. Both candidates yield holdings but neither series matches → result is
+      series_identity_not_proven with candidate_identity_failures populated
+      and no holdings.
+
   Invariants:
  108. series_identity_not_proven result never contains holdings.
  109. No live SEC calls in any test (all fixture-based).
@@ -670,6 +677,7 @@ class TestDiagnosticRunnerIdentityFields:
             "detected_series_id",
             "detected_class_id",
             "identity_mismatch_reason",
+            "candidate_identity_failures",
         ]
         for field in required_identity_fields:
             assert field in entry, f"Missing identity field: {field!r}"
@@ -787,3 +795,60 @@ def test_110_detected_identity_fields_parsed_from_xml():
     assert result.detected_series_id == "S000009902"
     assert result.detected_class_id == "C000027032"
     assert result.detected_class_name == "ETF Shares"
+
+
+# ── Tests 111-112: Multi-candidate identity resolution (Blocker 2 fix) ────────
+
+
+class TestMultiCandidateIdentityResolution:
+    """Blocker 2 fix: record identity failure and continue to next candidate."""
+
+    def test_111_candidate1_wrong_series_candidate2_matches_succeeds(self):
+        """Candidate 1 yields holdings with wrong series; candidate 2 has matching
+        series → result is success with identity_verified=True on candidate 2."""
+        result = _provider_call(
+            ticker="VGT",
+            candidate_ciks_override=["0000000001", "0000036405"],
+            http_responses=[
+                _mock_resp(json_body=_SUBMISSIONS_BODY_WITH_NPORT),         # cand1 submissions
+                _mock_resp(text_body=_NPORT_XML_OTHER_VANGUARD_SERIES),     # cand1 XML (wrong series)
+                _mock_resp(json_body=_SUBMISSIONS_BODY_WITH_NPORT),         # cand2 submissions
+                _mock_resp(text_body=_NPORT_XML_VGT_SERIES),                # cand2 XML (VGT series)
+            ],
+        )
+        assert result.fetch_status == "success"
+        assert result.identity_verified is True
+        assert result.identity_status == "success_identity_verified"
+        assert result.selected_candidate_cik == "0000036405"
+        assert result.holdings != []
+        # First candidate's identity failure must be recorded
+        assert len(result.candidate_identity_failures) == 1
+        failure = result.candidate_identity_failures[0]
+        assert failure["candidate_cik"] == "0000000001"
+        assert failure["detected_series_name"] == "Vanguard Consumer Discretionary Index Fund"
+        assert failure["identity_mismatch_reason"] is not None
+
+    def test_112_all_candidates_wrong_series_returns_not_proven(self):
+        """Both candidates yield holdings but neither series matches →
+        series_identity_not_proven with candidate_identity_failures populated, no holdings."""
+        result = _provider_call(
+            ticker="VGT",
+            candidate_ciks_override=["0000000001", "0000000002"],
+            http_responses=[
+                _mock_resp(json_body=_SUBMISSIONS_BODY_WITH_NPORT),         # cand1 submissions
+                _mock_resp(text_body=_NPORT_XML_OTHER_VANGUARD_SERIES),     # cand1 XML (wrong)
+                _mock_resp(json_body=_SUBMISSIONS_BODY_WITH_NPORT),         # cand2 submissions
+                _mock_resp(text_body=_NPORT_XML_OTHER_VANGUARD_SERIES),     # cand2 XML (wrong)
+            ],
+        )
+        assert result.fetch_status == "series_identity_not_proven"
+        assert result.holdings == []
+        assert result.identity_verified is False
+        assert result.identity_status == "series_identity_not_proven"
+        # Both candidates' failures must be recorded
+        assert len(result.candidate_identity_failures) == 2
+        assert "0000000001" in result.candidate_ciks_tried
+        assert "0000000002" in result.candidate_ciks_tried
+        for failure in result.candidate_identity_failures:
+            assert failure["detected_series_name"] == "Vanguard Consumer Discretionary Index Fund"
+            assert failure["identity_mismatch_reason"] is not None

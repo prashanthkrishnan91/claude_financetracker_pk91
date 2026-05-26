@@ -367,6 +367,11 @@ def _parse_csv_holdings(
             except ValueError:
                 pass
 
+        # Skip metadata rows (fund-name row, as-of date row, etc.) — they appear
+        # after the header but have no numeric weight when a weight column exists.
+        if weight_col is not None and weight_pct is None:
+            continue
+
         holdings.append({
             "name": holding_name,
             "ticker": (row[ticker_col].strip() if ticker_col is not None and ticker_col < len(row) else None) or None,
@@ -588,18 +593,27 @@ def fetch_issuer_official_holdings(
                 limitations=["Holdings withheld — identity not proven from file metadata."],
             )
 
-        # Weights.
-        weights_available = any(h["weight_pct"] is not None for h in holdings)
-        weight_basis = "percent" if weights_available else "unavailable"
+        # Fail closed: as-of date required — without it we cannot verify data freshness.
+        if not as_of_date:
+            return _fail(
+                ticker_upper, provider_id,
+                "as_of_date_not_verified",
+                "as-of date not found in CSV metadata — cannot verify data freshness.",
+                source_url=url,
+                limitations=["Holdings withheld — as-of date not present in file metadata."],
+            )
 
-        # Market-value derived weights (if pct absent but market_value present).
+        # Fail closed: percent weights required — market-value derivation not accepted.
+        weights_available = any(h["weight_pct"] is not None for h in holdings)
         if not weights_available:
-            holdings_with_mv = [
-                h for h in holdings
-                if h.get("market_value") and re.sub(r"[,$]", "", h["market_value"]).strip().replace(".", "").isdigit()
-            ]
-            if holdings_with_mv:
-                weight_basis = "market_value_derived"
+            return _fail(
+                ticker_upper, provider_id,
+                "weights_not_verified",
+                "No verified percentage weight column in CSV — holdings cannot be accepted.",
+                source_url=url,
+                limitations=["Holdings withheld — weight column absent or unparseable."],
+            )
+        weight_basis = "percent"
 
         sample_names = [h["name"] for h in holdings[:_MAX_SAMPLE_NAMES]]
         freshness = _freshness_from_date(as_of_date)

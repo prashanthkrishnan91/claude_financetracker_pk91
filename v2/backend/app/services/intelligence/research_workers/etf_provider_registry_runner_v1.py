@@ -276,11 +276,27 @@ def run_provider_registry_check(
             }
             provider_statuses.append(status_entry)
 
-            # Accept first identity-verified result with holdings (or commodity/GLD).
+            # Accept the first result that passes the source-type-specific gate.
             is_commodity = result.fetch_status == "commodity_trust_no_equity_holdings"
-            if result.identity_verified and (result.holdings_count > 0 or is_commodity):
+            if is_commodity:
+                # GLD / commodity trust — identity assumed, no holdings to validate.
                 selected = result
                 break
+            elif provider_record.source_type == "sec_nport":
+                # SEC NPORT: identity + at least one holding is sufficient.
+                if result.identity_verified and result.holdings_count > 0:
+                    selected = result
+                    break
+            else:
+                # Issuer-official: all four attributes must be present and verified.
+                if (result.identity_verified
+                        and result.holdings_count > 0
+                        and result.as_of_date
+                        and result.weights_available
+                        and result.weight_basis == "percent"
+                        and result.source_authority == "issuer_official"):
+                    selected = result
+                    break
 
         _last_was_nport = _this_had_nport
 

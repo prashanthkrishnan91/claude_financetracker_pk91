@@ -32,6 +32,11 @@ Coverage:
   132. Runner — selected_provider_id is None when no provider succeeds.
   133. Registry summary returns correct provider count and etf_universe.
   134. No live HTTP calls occur during any test (verified by fixture fn only approach).
+  135. Adapter — missing as-of date in CSV returns as_of_date_not_verified, no holdings.
+  136. Adapter — no weight column in CSV returns weights_not_verified, no holdings.
+  137. Adapter — metadata rows (fund name, as-of date) are excluded from holdings count.
+  138. Runner — issuer result with as_of_date=None is not selected.
+  139. Runner — issuer result with weights_available=False is not selected.
 """
 from __future__ import annotations
 
@@ -639,6 +644,146 @@ def test_133_registry_summary_correct_counts():
     assert set(summary["etf_universe"]) == set(get_etf_universe())
     assert "SPY" in summary["etf_universe"]
     assert "GLD" in summary["etf_universe"]
+
+
+# ── Fail-closed behavior tests (135–139) ─────────────────────────────────────
+
+_VANGUARD_VOO_NO_DATE_CSV = """\
+Holdings,Ticker Symbol,ISIN,SEDOL,Weight,Shares,Market Value
+Vanguard S&P 500 ETF,,,,,,
+Apple Inc.,AAPL,US0378331005,2046251,7.12,5000000,900000000
+Microsoft Corporation,MSFT,US5949181045,2588173,6.50,4000000,800000000
+"""
+
+_VANGUARD_VOO_NO_WEIGHT_CSV = """\
+Holdings,Ticker Symbol,ISIN,SEDOL,Shares,Market Value
+Vanguard S&P 500 ETF,,,,,
+As of: 12/31/2024,,,,,
+Apple Inc.,AAPL,US0378331005,,5000000,900000000
+Microsoft Corporation,MSFT,US5949181045,,4000000,800000000
+"""
+
+
+def test_135_missing_as_of_date_fails_closed():
+    """CSV with no as-of date → as_of_date_not_verified, holdings_count=0."""
+    from app.services.intelligence.research_workers.etf_issuer_official_adapter_v1 import (
+        fetch_issuer_official_holdings,
+    )
+    result = fetch_issuer_official_holdings(
+        "VOO", "vanguard_official_v1",
+        http_get_fn=_make_http_get_fn(_VANGUARD_VOO_NO_DATE_CSV),
+    )
+    assert result.fetch_status == "as_of_date_not_verified", (
+        f"Expected as_of_date_not_verified, got: {result.fetch_status}"
+    )
+    assert result.holdings_count == 0
+    assert result.safe_for_decision is False
+    assert result.canonical_ready is False
+
+
+def test_136_missing_weight_column_fails_closed():
+    """CSV with no weight column → weights_not_verified, holdings_count=0."""
+    from app.services.intelligence.research_workers.etf_issuer_official_adapter_v1 import (
+        fetch_issuer_official_holdings,
+    )
+    result = fetch_issuer_official_holdings(
+        "VOO", "vanguard_official_v1",
+        http_get_fn=_make_http_get_fn(_VANGUARD_VOO_NO_WEIGHT_CSV),
+    )
+    assert result.fetch_status == "weights_not_verified", (
+        f"Expected weights_not_verified, got: {result.fetch_status}"
+    )
+    assert result.holdings_count == 0
+    assert result.safe_for_decision is False
+    assert result.canonical_ready is False
+
+
+def test_137_metadata_rows_excluded_from_holdings():
+    """Fund-name and as-of-date rows in Vanguard CSV are not counted as holdings."""
+    from app.services.intelligence.research_workers.etf_issuer_official_adapter_v1 import (
+        fetch_issuer_official_holdings,
+    )
+    result = fetch_issuer_official_holdings(
+        "VOO", "vanguard_official_v1",
+        http_get_fn=_make_http_get_fn(_VANGUARD_VOO_CSV),
+    )
+    assert result.fetch_status == "success"
+    assert result.identity_verified is True
+    # Fixture has 6 equity rows after 2 metadata rows.
+    assert result.holdings_count == 6, (
+        f"Expected 6 equity holdings (metadata rows excluded), got {result.holdings_count}"
+    )
+    for name in result.sample_holding_names:
+        assert "Vanguard S&P 500 ETF" not in name, (
+            f"Fund-name metadata row counted as holding: {name!r}"
+        )
+        assert not name.startswith("As of"), (
+            f"As-of-date metadata row counted as holding: {name!r}"
+        )
+
+
+def test_138_runner_rejects_issuer_without_as_of_date():
+    """Runner does not select an issuer-official result that has as_of_date=None."""
+    from app.services.intelligence.research_workers.etf_provider_registry_runner_v1 import (
+        run_provider_registry_check,
+    )
+
+    def _issuer_fn(ticker, provider_id):
+        from app.services.intelligence.research_workers.etf_holdings_provider_registry_v1 import ETFHoldingsResult
+        return ETFHoldingsResult(
+            ticker=ticker, provider_id=provider_id, source_type="issuer_official",
+            source_url="https://example.com/voo.csv", source_authority="issuer_official",
+            as_of_date=None,  # missing — should not be selected
+            holdings_count=6, sample_holding_names=["Apple Inc.", "Microsoft Corp"],
+            weights_available=True, weight_basis="percent",
+            identity_verified=True, identity_basis="fund_name_matched",
+            freshness_status="unknown", fetch_status="success",
+        )
+
+    result = run_provider_registry_check(
+        ["VOO"], "TestApp/1.0 test@example.com",
+        nport_provider_fn=lambda t, c: _make_nport_no_data(t),
+        issuer_provider_fn=_issuer_fn,
+        sleep_fn=_no_sleep,
+    )
+
+    voo_entry = result["per_ticker"][0]
+    assert voo_entry["selected_provider_id"] is None, (
+        f"Runner must not select issuer with as_of_date=None; selected: {voo_entry['selected_provider_id']}"
+    )
+    assert voo_entry["holdings_count"] == 0
+
+
+def test_139_runner_rejects_issuer_without_weights():
+    """Runner does not select an issuer-official result that lacks percent weights."""
+    from app.services.intelligence.research_workers.etf_provider_registry_runner_v1 import (
+        run_provider_registry_check,
+    )
+
+    def _issuer_fn(ticker, provider_id):
+        from app.services.intelligence.research_workers.etf_holdings_provider_registry_v1 import ETFHoldingsResult
+        return ETFHoldingsResult(
+            ticker=ticker, provider_id=provider_id, source_type="issuer_official",
+            source_url="https://example.com/voo.csv", source_authority="issuer_official",
+            as_of_date="2024-12-31",
+            holdings_count=6, sample_holding_names=["Apple Inc.", "Microsoft Corp"],
+            weights_available=False, weight_basis="unavailable",  # no weights — should not be selected
+            identity_verified=True, identity_basis="fund_name_matched",
+            freshness_status="fresh", fetch_status="success",
+        )
+
+    result = run_provider_registry_check(
+        ["VOO"], "TestApp/1.0 test@example.com",
+        nport_provider_fn=lambda t, c: _make_nport_no_data(t),
+        issuer_provider_fn=_issuer_fn,
+        sleep_fn=_no_sleep,
+    )
+
+    voo_entry = result["per_ticker"][0]
+    assert voo_entry["selected_provider_id"] is None, (
+        f"Runner must not select issuer with weights_available=False; selected: {voo_entry['selected_provider_id']}"
+    )
+    assert voo_entry["holdings_count"] == 0
 
 
 def test_134_no_live_http_in_any_test():

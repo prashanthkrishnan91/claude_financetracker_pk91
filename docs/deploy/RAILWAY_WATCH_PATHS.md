@@ -14,6 +14,25 @@ in the TOML file.
 
 ---
 
+## Safe mode vs cost-control mode
+
+Railway watch paths are positive glob patterns only — negation (`!path`) is not supported.
+This limits how narrowly the API service can be scoped, because the API imports from nearly
+all service modules. The table below describes the tradeoff:
+
+| Mode | API Watch Paths | Cost | Risk |
+|---|---|---|---|
+| **Safe** (recommended) | `/v2/backend/app/**` | More deploys | Zero missed deploys |
+| **Cost-control** | Specific paths (see below) | Fewer deploys | Must be maintained; new shared modules require manual update |
+
+**Recommendation for this repo:** Use safe mode for the API service. The meaningful cost
+savings come from the *worker* services (analyst, Watchtower, email delivery) not deploying
+unnecessarily — those services have genuinely narrow, bounded import trees. The API imports
+from nearly every service module, so narrowing its Watch Paths provides limited savings with
+higher maintenance risk.
+
+---
+
 ## Manual Railway setup checklist
 
 For each service listed below:
@@ -36,6 +55,13 @@ For each service listed below:
 
 ### API service (`PROCESS_TYPE` = _not set_ or `api`)
 
+The API service (`app/main.py`) imports all routers, which in turn import from most service
+modules including `app/services/alert/**`, `app/services/intelligence/**`, and others. There
+is no practical way to exclude worker-only entrypoints without per-file enumeration, which
+is fragile as the codebase grows.
+
+**Safe mode (recommended):**
+
 ```
 /v2/backend/app/**
 /v2/backend/requirements*.txt
@@ -46,9 +72,40 @@ For each service listed below:
 /supabase/**
 ```
 
-The API service needs to redeploy when application code, dependencies, Railway config, or
-database schema changes. It does not need to redeploy for docs, frontend, or worker-only
-changes.
+This deploys the API on any backend code change, including worker-only files. It is always
+correct and requires no maintenance.
+
+**Cost-control mode (advanced — requires maintenance):**
+
+The following paths cover what the API directly imports. Known worker-only files excluded:
+`alert_email_delivery_worker_v1.py`, `alert_email_delivery_worker_entrypoint.py`,
+`resend_client_v1.py`, `analyst_refresh_worker_v1.py`, `analyst_refresh_worker_entrypoint.py`.
+Note: `app/services/intelligence/**` still catches Watchtower worker files because the API
+imports `intel_v3_service.py` which lives in that same directory tree.
+
+```
+/v2/backend/app/main.py
+/v2/backend/app/config.py
+/v2/backend/app/database.py
+/v2/backend/app/supabase_client.py
+/v2/backend/app/routers/**
+/v2/backend/app/models/**
+/v2/backend/app/middleware/**
+/v2/backend/app/services/intelligence/**
+/v2/backend/app/services/alert/alert_candidate_service.py
+/v2/backend/app/services/alert/alert_delivery_outbox_service.py
+/v2/backend/app/services/alert/alert_delivery_policy_v1.py
+/v2/backend/app/services/alert/alert_trigger_policy_v1.py
+/v2/backend/requirements*.txt
+/v2/backend/pyproject.toml
+/v2/backend/poetry.lock
+/v2/backend/railway.toml
+/v2/database/**
+/supabase/**
+```
+
+If you add a new router or service module that the API imports, add it here — otherwise the
+API will not redeploy when that module changes.
 
 ---
 
@@ -66,16 +123,19 @@ changes.
 /v2/database/**
 ```
 
-The analyst worker only runs intelligence evidence and analyst refresh paths. It does not
-need to redeploy for alert/email changes, frontend changes, or docs-only changes.
+The analyst worker runs only intelligence evidence and analyst refresh paths. It does not
+need to redeploy for alert/email-only changes, frontend changes, or docs-only changes.
+
+**Shared dependency note:** `app/services/intelligence/**` overlaps with the Watchtower
+service. A change to a shared intelligence module (e.g. `intel_v3_service.py`) may deploy
+both this service and Watchtower. That is correct behaviour — both depend on the shared
+module.
 
 ---
 
 ### Watchtower service (`PROCESS_TYPE=watchtower`)
 
 ```
-/v2/backend/app/services/intelligence/v3/watchtower_worker_entrypoint.py
-/v2/backend/app/services/intelligence/v3/**
 /v2/backend/app/services/intelligence/**
 /v2/backend/app/config.py
 /v2/backend/app/database.py
@@ -87,9 +147,9 @@ need to redeploy for alert/email changes, frontend changes, or docs-only changes
 /v2/database/**
 ```
 
-Watchtower overlaps with the analyst worker in the intelligence module tree because it
-depends on republisher and callables modules within that tree. It does not need to redeploy
-for alert/email, frontend, or docs-only changes.
+Watchtower depends on republisher, callables, and background refresh worker modules that all
+live under `app/services/intelligence/**`. It does not need to redeploy for alert/email,
+frontend, or docs-only changes.
 
 ---
 
@@ -114,23 +174,28 @@ redeploy for intelligence/analyst/Watchtower changes, frontend changes, or docs-
 
 ## Verification matrix
 
-Use this matrix to confirm Watch Paths are working after configuration.
+Use this matrix to confirm Watch Paths are working after configuration. The API column
+assumes **safe mode** (`/v2/backend/app/**`). Where cost-control mode differs, it is noted.
 
 | Change type | API | Analyst worker | Watchtower | Email delivery |
 |---|---|---|---|---|
-| docs-only PR (e.g. `docs/**`, `*.md`) | no deploy | no deploy | no deploy | no deploy |
+| docs-only PR (`docs/**`, `*.md`) | no deploy | no deploy | no deploy | no deploy |
 | frontend-only PR (`src/**`, `v2/frontend/**`) | no deploy | no deploy | no deploy | no deploy |
-| alert email worker change only (`app/services/alert/**`) | no deploy | no deploy | no deploy | **deploys** |
-| Watchtower-only change (`app/services/intelligence/v3/watchtower_*`) | no deploy | may deploy¹ | **deploys** | no deploy |
-| Analyst worker-only change (`app/services/intelligence/v3/analyst_*`) | no deploy | **deploys** | may deploy¹ | no deploy |
-| Shared config/dep change (`config.py`, `requirements*.txt`, `railway.toml`) | **deploys** | **deploys** | **deploys** | **deploys** |
+| email worker files only¹ | **deploys** (safe) / no deploy (cost-control) | no deploy | no deploy | **deploys** |
+| Watchtower-only file (`watchtower_worker_entrypoint.py`) | **deploys** (safe) / **deploys** (cost-control)² | **deploys**² | **deploys** | no deploy |
+| Analyst worker file only (`analyst_refresh_worker_v1.py`) | **deploys** (safe) / **deploys** (cost-control)² | **deploys** | **deploys**² | no deploy |
+| Shared alert service file (`alert_candidate_service.py`) | **deploys** | no deploy | no deploy | **deploys** |
+| Shared intelligence module (`intel_v3_service.py`) | **deploys** | **deploys** | **deploys** | no deploy |
+| Shared config/dep (`config.py`, `requirements*.txt`, `railway.toml`) | **deploys** | **deploys** | **deploys** | **deploys** |
 | Database migration (`v2/database/**`) | **deploys** | **deploys** | **deploys** | **deploys** |
 
-¹ The analyst worker and Watchtower share the `app/services/intelligence/**` watch path because
-Watchtower depends on republisher and callables modules that live under that tree. A change
-touching only `analyst_refresh_worker_v1.py` may therefore also trigger a Watchtower deploy.
-That is a deliberate conservative choice — over-deploying is safer than under-deploying for
-shared dependencies.
+¹ Email worker files: `alert_email_delivery_worker_v1.py`, `alert_email_delivery_worker_entrypoint.py`,
+`resend_client_v1.py`. Under cost-control API mode these are excluded from API Watch Paths, so
+only the email delivery service deploys.
+
+² The analyst worker and Watchtower both watch `app/services/intelligence/**`, which includes all
+v3 worker files. A change to one worker's entrypoint may deploy both. This is conservative but
+safe for shared dependencies.
 
 ---
 

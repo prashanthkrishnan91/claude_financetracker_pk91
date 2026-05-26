@@ -14,7 +14,7 @@ work and evaluate paid provider alternatives.
 | Issuer | Tickers | URL template attempted | Runtime result |
 |---|---|---|---|
 | Vanguard | VOO, VTI, VGT, VHT, VIS, VXUS, VYM | `investor.vanguard.com/content/dam/fas-portspec-images/downloads/etf-shares/{TICKER}_QuantDataFundHoldings.csv` | HTTP 404 (Stage 9F.2b live run) |
-| SSGA/SPDR | XLE, SPY | `ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-{ticker_lower}.csv` | HTTP 404 for XLE (Stage 9F.2b live run); SPY not needed (covered by SEC NPORT) |
+| SSGA/SPDR | XLE, SPY | `ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-{ticker_lower}.csv` | HTTP 404 for XLE (Stage 9F.2b live run); XLE also failed SEC NPORT (series_identity_not_proven); SPY covered by SEC NPORT so issuer URL not tested |
 | Schwab | SCHD | None configured | No confirmed stable public CSV URL found during research |
 | Invesco | QQQ | `invesco.com` holdings page | QQQ is already covered by SEC NPORT; Invesco URL not prioritised |
 | GLD (SPDR Gold Trust) | GLD | N/A | Correctly handled as `commodity_trust_no_equity_holdings`; no equity holdings expected |
@@ -58,7 +58,7 @@ Invesco issuer-official path is deprioritised; its URL returns HTML, not a CSV.
 |---|---|---|
 | SPY | SEC NPORT (sec_nport_v1) | identity_verified, holdings > 0 |
 | QQQ | SEC NPORT (sec_nport_v1) | identity_verified, holdings > 0 |
-| XLE | SEC NPORT (sec_nport_v1) | identity_verified, holdings > 0 |
+| XLE | None | issuer_official: spdr_official_v1 source_url_fetch_error; SEC NPORT: series_identity_not_proven |
 | GLD | commodity_trust (gld_commodity_v1) | commodity_trust_no_equity_holdings |
 | VOO, VTI, VGT, VHT, VIS, VXUS, VYM | None | sec_nport: series_identity_not_proven or scan budget exhausted |
 | SCHD | None | issuer_official_adapter: no_data; SEC NPORT: not attempted for Schwab |
@@ -67,10 +67,10 @@ Invesco issuer-official path is deprioritised; its URL returns HTML, not a CSV.
 
 ## Recommendation
 
-Stop free-source ETF issuer-official holdings work. The keyless path (SEC NPORT-P) works
-for standalone-trust ETFs (SPY, QQQ, XLE). For series-registrant ETFs (all Vanguard funds,
-SCHD), the parent-registrant NPORT filing scan requires further tuning or cannot be
-resolved without a paid provider.
+Stop free-source ETF issuer-official holdings work. The keyless path (SEC NPORT-P) currently
+works only for SPY and QQQ (standalone-trust ETFs). XLE failed SEC NPORT identity verification
+(`series_identity_not_proven`) and its SSGA official URL returns 404. For all Vanguard funds,
+SCHD, and XLE, coverage requires either SEC NPORT identity tuning or a paid provider.
 
 Candidate paid providers to evaluate (from Stage 9F.1 research):
 

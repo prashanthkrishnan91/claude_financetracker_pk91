@@ -1,23 +1,28 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-26 (Stage 9F.2b — ETF issuer-official holdings provider registry v1, merged PR #425).
+Last updated: 2026-05-26 (Stage 9F.2c — source-discovery stop/decision artifact, open PR).
 
-**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. SEC discovery (Stage 9F.2a) found zero usable candidates for XLE/VGT/VHT/VIS/VOO/VTI/VXUS/VYM/SCHD. Root cause: candidate CIK quality + series-based multi-fund registrant ambiguity in NPORT XML. **Fix:** ETF holdings provider registry v1 — central registry that can use issuer-official holdings files as first-class official sources, with SEC NPORT as one identity-certified source. Diagnostic-only. No canonical flip.
+**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. **Fix:** ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
 
-**Files added (merged):**
-- `etf_holdings_provider_registry_v1.py`: Central registry. `ETFHoldingsProviderRecord` (frozen dataclass), `ETFHoldingsResult` (normalized output contract). 6 providers: `sec_nport_v1`, `vanguard_official_v1`, `spdr_official_v1`, `schwab_official_v1`, `invesco_official_v1`, `gld_commodity_v1`. `_TICKER_PROVIDER_PRIORITY` maps each ETF to ordered provider list. All `enabled_for_canonical=False`.
-- `etf_issuer_official_adapter_v1.py`: Issuer-official CSV fetcher/parser. URL resolver, flexible CSV column detection, identity verification from fund name in metadata rows, freshness from as-of date. Injectable `http_get_fn`. GLD commodity special case. **Fail-closed gates:** metadata rows (fund-name, as-of date) skipped when no numeric weight; `as_of_date_not_verified` returned when as-of date absent; `weights_not_verified` returned when no percent weight column found; `market_value_derived` fallback removed.
-- `etf_provider_registry_runner_v1.py`: Diagnostic runner. Strengthened selection criterion: GLD selected immediately; SEC NPORT requires identity+holdings_count>0; issuer-official requires all of identity, holdings_count>0, as_of_date, weights_available, weight_basis="percent", source_authority="issuer_official".
-- `tests/test_stage9f2b_etf_provider_registry.py`: 33 fixture-based tests (107–139). No live HTTP. Zero live SEC calls in CI.
+**What changed (Stage 9F.2c — current PR):** Source-discovery stop/decision artifact. No new runtime code. All known free issuer-official CSV/download URLs are blocked (HTTP 403/404 from all major ETF issuer domains). This PR documents exact URLs attempted, result per issuer/ticker, and a formal stop recommendation. See `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`.
+
+**Files added (Stage 9F.2c):**
+- `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`: Source-discovery findings. URLs per issuer, HTTP responses, why each path is blocked, current coverage table, recommendation.
+
+**Stage 9F.2c source discovery findings:**
+- Vanguard (VOO/VTI/VGT/VHT/VIS/VXUS/VYM): CSV URL → HTTP 404 at runtime; HTTP 403 from CI.
+- SSGA/SPDR (XLE): CSV URL → HTTP 404 at runtime; HTTP 403 from CI. SPY covered by SEC NPORT.
+- Schwab (SCHD): no confirmed public CSV URL.
+- Invesco (QQQ): already covered by SEC NPORT; issuer URL returns HTML.
+- GLD: `commodity_trust_no_equity_holdings` (unchanged).
+- `issuer_official_selected_count = 0` confirmed from Stage 9F.2b runtime.
 
 **Config flag:** `intel_v3_etf_provider_registry_diagnostics_enabled` (default False).
-**Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated).
+**Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated, Stage 9F.2b unchanged).
 
-**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. No holdings without `identity_verified=True`. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 250 total tests pass (217 prior + 33 new).
+**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 33 Stage 9F.2b tests pass.
 
-**Runtime validation required post-deploy:** Enable `intel_v3_etf_provider_registry_diagnostics_enabled=True`, run the registry diagnostic endpoint for all 12 tickers. Expected: SPY/QQQ use sec_nport_v1 (proven). XLE/Vanguard/SCHD will show issuer-official URL fetch results — URL validation is the next step. SCHD will show `source_url_not_validated` (URL not confirmed). GLD: `commodity_trust_no_equity_holdings`.
-
-**Next step for ETF holdings:** Post-deploy URL validation for Vanguard/SSGA/Invesco CSV endpoints, then confirm issuer-official selection for XLE/VOO/VTI/VGT etc. Once URL confirmed, issuer path can produce real `holdings_count>0` with identity and weights verified.
+**Next step (stop recommendation):** Stop free-source issuer-scraping. Evaluate paid providers (Intrinio, FMP paid tier, ETF Global/Massive) before building another issuer-official lane. See findings doc for candidate providers and evaluation criteria.
 
 ## Purpose
 

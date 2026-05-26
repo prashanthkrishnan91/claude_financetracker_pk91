@@ -37,10 +37,6 @@ from .etf_holdings_provider_registry_v1 import (
     get_providers_for_ticker,
     registry_summary,
 )
-from .etf_issuer_source_certifier_v1 import (
-    certify_issuer_source,
-    build_certification_dict,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -187,7 +183,6 @@ def run_provider_registry_check(
     *,
     nport_provider_fn: Optional[Callable] = None,
     issuer_provider_fn: Optional[Callable] = None,
-    certifier_fn: Optional[Callable] = None,
     sleep_fn: Optional[Callable] = None,
 ) -> dict:
     """Run the provider registry diagnostic for the given tickers.
@@ -203,8 +198,6 @@ def run_provider_registry_check(
         user_agent:       SEC EDGAR User-Agent string (for NPORT calls).
         nport_provider_fn: Injectable override for fetch_etf_nport_holdings.
         issuer_provider_fn: Injectable override for fetch_issuer_official_holdings.
-        certifier_fn:     Injectable override for certify_issuer_source (Stage 9F.2c).
-                          Signature: fn(ticker, provider_id) -> SourceCertificationResult.
         sleep_fn:         Injectable sleep override (use lambda s: None in tests).
 
     Returns:
@@ -216,7 +209,6 @@ def run_provider_registry_check(
 
     _nport = nport_provider_fn or fetch_etf_nport_holdings
     _issuer = issuer_provider_fn or fetch_issuer_official_holdings
-    _certify = certifier_fn or certify_issuer_source
     _sleep = sleep_fn if sleep_fn is not None else time.sleep
 
     nport_cfg = NportProviderConfig(
@@ -234,7 +226,6 @@ def run_provider_registry_check(
     identity_verified_count = 0
     issuer_official_selected_count = 0
     sec_nport_selected_count = 0
-    issuer_source_certified_count = 0   # Stage 9F.2c: count of CERTIFIED sources found
     _last_was_nport = False
 
     for ticker in tickers:
@@ -265,28 +256,8 @@ def run_provider_registry_check(
             if provider_record.source_type == "sec_nport":
                 raw = _nport(ticker, nport_cfg)
                 result = _normalize_nport_result(raw, pid)
-                source_certification_dict = None
             else:
                 result = _issuer(ticker, pid)
-                # Stage 9F.2c: run source certification for all issuer-official providers.
-                # The certifier probes candidate URLs independently (may differ from adapter URL).
-                try:
-                    cert = _certify(ticker, pid)
-                    source_certification_dict = build_certification_dict(cert)
-                except Exception as _cert_exc:  # noqa: BLE001
-                    source_certification_dict = {
-                        "source_certification_status": "CERT_ERROR",
-                        "source_certification_reason": f"Certifier error: {_cert_exc}",
-                        "candidate_urls_checked": [],
-                        "selected_source_url": None,
-                        "http_status": None,
-                        "content_type": None,
-                        "identity_proof": "not_checked",
-                        "as_of_proof": "not_checked",
-                        "weight_proof": "not_checked",
-                        "canonical_ready": False,
-                        "safe_for_decision": False,
-                    }
 
             status_entry = {
                 "provider_id": pid,
@@ -302,8 +273,6 @@ def run_provider_registry_check(
                     else result.error_message
                 ),
                 "limitations": list(result.limitations),
-                # Stage 9F.2c: source certification fields (None for SEC NPORT).
-                "source_certification": source_certification_dict,
             }
             provider_statuses.append(status_entry)
 
@@ -334,13 +303,6 @@ def run_provider_registry_check(
         entry = _build_per_ticker_entry(ticker, selected, providers_attempted, provider_statuses)
         per_ticker.append(entry)
 
-        # Stage 9F.2c: tally any certified issuer source found for this ticker.
-        for ps in provider_statuses:
-            cert_d = ps.get("source_certification")
-            if cert_d and cert_d.get("source_certification_status") == "CERTIFIED":
-                issuer_source_certified_count += 1
-                break  # Count at most once per ticker.
-
         if selected is not None:
             if selected.fetch_status == "commodity_trust_no_equity_holdings":
                 no_data_count += 1
@@ -368,18 +330,16 @@ def run_provider_registry_check(
     logger.info(
         "etf_provider_registry_check_complete tickers=%d success=%d "
         "identity_verified=%d no_data=%d error=%d "
-        "issuer_official_selected=%d sec_nport_selected=%d "
-        "issuer_source_certified=%d",
+        "issuer_official_selected=%d sec_nport_selected=%d",
         len(tickers), success_count, identity_verified_count,
         no_data_count, error_count,
         issuer_official_selected_count, sec_nport_selected_count,
-        issuer_source_certified_count,
     )
 
     return {
         "started_at": started_at,
         "completed_at": datetime.now(timezone.utc).isoformat(),
-        "registry_version": "stage9f2c_v1",
+        "registry_version": "stage9f2b_v1",
         "tickers_requested": len(tickers),
         "tickers_succeeded": success_count,
         "tickers_identity_verified": identity_verified_count,
@@ -387,8 +347,6 @@ def run_provider_registry_check(
         "tickers_error": error_count,
         "issuer_official_selected_count": issuer_official_selected_count,
         "sec_nport_selected_count": sec_nport_selected_count,
-        # Stage 9F.2c: count of tickers where at least one issuer source was CERTIFIED.
-        "issuer_source_certified_count": issuer_source_certified_count,
         "per_ticker": per_ticker,
         "registry_summary": registry_summary(),
         # Governance invariants — never mutated.

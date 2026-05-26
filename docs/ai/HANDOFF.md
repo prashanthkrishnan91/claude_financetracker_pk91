@@ -1,31 +1,28 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-26 (Stage 9F.2c — ETF issuer source certification layer, open PR).
+Last updated: 2026-05-26 (Stage 9F.2c — source-discovery stop/decision artifact, open PR).
 
 **What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. **Fix:** ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
 
-**What changed (Stage 9F.2c — current PR):** Issuer source certification diagnostic layer. Separate module (`etf_issuer_source_certifier_v1.py`) that probes all candidate URLs per issuer family and reports: HTTP status, content-type, identity proof, as-of proof, weight proof, and a final `CERTIFIED | FETCH_FAILED | IDENTITY_NOT_PROVEN | AS_OF_NOT_PROVEN | WEIGHTS_NOT_PROVEN | SOURCE_NOT_FOUND` status. Provider registry runner extended: each issuer-official `provider_statuses` entry now includes `source_certification` sub-dict. `registry_version` bumped to `stage9f2c_v1`. New aggregate counter `issuer_source_certified_count` in runner output.
+**What changed (Stage 9F.2c — current PR):** Source-discovery stop/decision artifact. No new runtime code. All known free issuer-official CSV/download URLs are blocked (HTTP 403/404 from all major ETF issuer domains). This PR documents exact URLs attempted, result per issuer/ticker, and a formal stop recommendation. See `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`.
 
 **Files added (Stage 9F.2c):**
-- `etf_issuer_source_certifier_v1.py`: Standalone certifier. `SourceCertificationResult` + `CandidateProbeResult` dataclasses. `certify_issuer_source(ticker, provider_id, http_get_fn)` tries all configured candidate URLs per issuer. `build_certification_dict()` converts to diagnostic dict. Injectable `http_get_fn`. Never raises. canonical_ready/safe_for_decision always False.
-- `tests/test_stage9f2c_etf_source_certifier.py`: 37 fixture-based tests (140–170). No live HTTP. All certification paths covered.
+- `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`: Source-discovery findings. URLs per issuer, HTTP responses, why each path is blocked, current coverage table, recommendation.
 
-**Files modified (Stage 9F.2c):**
-- `etf_provider_registry_runner_v1.py`: Imports certifier. Adds `certifier_fn` injectable param. Calls certifier for each issuer-official provider; embeds `source_certification` in `provider_statuses`. Adds `issuer_source_certified_count` to output. `registry_version` = `stage9f2c_v1`.
-
-**Stage 9F.2c source certification findings:**
-- **Vanguard** (VOO/VTI/VGT/VHT/VIS/VXUS/VYM): candidate `investor.vanguard.com/content/dam/fas-portspec-images/downloads/etf-shares/{TICKER}_QuantDataFundHoldings.csv` — returned 404 at runtime in Stage 9F.2b. Certifier will report `FETCH_FAILED` for this URL. No alternative confirmed URL found.
-- **SSGA/SPDR** (XLE/SPY): candidate `ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-{ticker_lower}.csv` — returned 404 for XLE at runtime. Certifier will report `FETCH_FAILED`.
-- **Schwab** (SCHD): no confirmed stable CSV URL. Certifier returns `SOURCE_NOT_FOUND` immediately (no HTTP call).
-- **Invesco** (QQQ): secondary only; QQQ proven via SEC NPORT. Invesco URL may return HTML → certifier reports `FETCH_FAILED`.
-- **Expected `issuer_source_certified_count` post-deploy:** 0 until a new certified issuer URL is found.
+**Stage 9F.2c source discovery findings:**
+- Vanguard (VOO/VTI/VGT/VHT/VIS/VXUS/VYM): CSV URL → HTTP 404 at runtime; HTTP 403 from CI.
+- SSGA/SPDR (XLE): CSV URL → HTTP 404 at runtime; HTTP 403 from CI. SPY covered by SEC NPORT.
+- Schwab (SCHD): no confirmed public CSV URL.
+- Invesco (QQQ): already covered by SEC NPORT; issuer URL returns HTML.
+- GLD: `commodity_trust_no_equity_holdings` (unchanged).
+- `issuer_official_selected_count = 0` confirmed from Stage 9F.2b runtime.
 
 **Config flag:** `intel_v3_etf_provider_registry_diagnostics_enabled` (default False).
-**Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated).
+**Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated, Stage 9F.2b unchanged).
 
-**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 70 tests pass (33 Stage 9F.2b + 37 Stage 9F.2c).
+**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 33 Stage 9F.2b tests pass.
 
-**Next step for ETF holdings:** Post-deploy run certifier endpoint and check per-ticker `source_certification.source_certification_status`. If any issuer source reaches CERTIFIED at runtime, update adapter URL template and wire into canonical path. Until a source is certified, issuer-official path remains blocked and SPY/QQQ via SEC NPORT remain the only proven providers.
+**Next step (stop recommendation):** Stop free-source issuer-scraping. Evaluate paid providers (Intrinio, FMP paid tier, ETF Global/Massive) before building another issuer-official lane. See findings doc for candidate providers and evaluation criteria.
 
 ## Purpose
 

@@ -1,23 +1,31 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-26 (Stage 9F.2b — ETF issuer-official holdings provider registry v1, merged PR #425).
+Last updated: 2026-05-26 (Stage 9F.2c — ETF issuer source certification layer, open PR).
 
-**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. SEC discovery (Stage 9F.2a) found zero usable candidates for XLE/VGT/VHT/VIS/VOO/VTI/VXUS/VYM/SCHD. Root cause: candidate CIK quality + series-based multi-fund registrant ambiguity in NPORT XML. **Fix:** ETF holdings provider registry v1 — central registry that can use issuer-official holdings files as first-class official sources, with SEC NPORT as one identity-certified source. Diagnostic-only. No canonical flip.
+**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. **Fix:** ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
 
-**Files added (merged):**
-- `etf_holdings_provider_registry_v1.py`: Central registry. `ETFHoldingsProviderRecord` (frozen dataclass), `ETFHoldingsResult` (normalized output contract). 6 providers: `sec_nport_v1`, `vanguard_official_v1`, `spdr_official_v1`, `schwab_official_v1`, `invesco_official_v1`, `gld_commodity_v1`. `_TICKER_PROVIDER_PRIORITY` maps each ETF to ordered provider list. All `enabled_for_canonical=False`.
-- `etf_issuer_official_adapter_v1.py`: Issuer-official CSV fetcher/parser. URL resolver, flexible CSV column detection, identity verification from fund name in metadata rows, freshness from as-of date. Injectable `http_get_fn`. GLD commodity special case. **Fail-closed gates:** metadata rows (fund-name, as-of date) skipped when no numeric weight; `as_of_date_not_verified` returned when as-of date absent; `weights_not_verified` returned when no percent weight column found; `market_value_derived` fallback removed.
-- `etf_provider_registry_runner_v1.py`: Diagnostic runner. Strengthened selection criterion: GLD selected immediately; SEC NPORT requires identity+holdings_count>0; issuer-official requires all of identity, holdings_count>0, as_of_date, weights_available, weight_basis="percent", source_authority="issuer_official".
-- `tests/test_stage9f2b_etf_provider_registry.py`: 33 fixture-based tests (107–139). No live HTTP. Zero live SEC calls in CI.
+**What changed (Stage 9F.2c — current PR):** Issuer source certification diagnostic layer. Separate module (`etf_issuer_source_certifier_v1.py`) that probes all candidate URLs per issuer family and reports: HTTP status, content-type, identity proof, as-of proof, weight proof, and a final `CERTIFIED | FETCH_FAILED | IDENTITY_NOT_PROVEN | AS_OF_NOT_PROVEN | WEIGHTS_NOT_PROVEN | SOURCE_NOT_FOUND` status. Provider registry runner extended: each issuer-official `provider_statuses` entry now includes `source_certification` sub-dict. `registry_version` bumped to `stage9f2c_v1`. New aggregate counter `issuer_source_certified_count` in runner output.
+
+**Files added (Stage 9F.2c):**
+- `etf_issuer_source_certifier_v1.py`: Standalone certifier. `SourceCertificationResult` + `CandidateProbeResult` dataclasses. `certify_issuer_source(ticker, provider_id, http_get_fn)` tries all configured candidate URLs per issuer. `build_certification_dict()` converts to diagnostic dict. Injectable `http_get_fn`. Never raises. canonical_ready/safe_for_decision always False.
+- `tests/test_stage9f2c_etf_source_certifier.py`: 37 fixture-based tests (140–170). No live HTTP. All certification paths covered.
+
+**Files modified (Stage 9F.2c):**
+- `etf_provider_registry_runner_v1.py`: Imports certifier. Adds `certifier_fn` injectable param. Calls certifier for each issuer-official provider; embeds `source_certification` in `provider_statuses`. Adds `issuer_source_certified_count` to output. `registry_version` = `stage9f2c_v1`.
+
+**Stage 9F.2c source certification findings:**
+- **Vanguard** (VOO/VTI/VGT/VHT/VIS/VXUS/VYM): candidate `investor.vanguard.com/content/dam/fas-portspec-images/downloads/etf-shares/{TICKER}_QuantDataFundHoldings.csv` — returned 404 at runtime in Stage 9F.2b. Certifier will report `FETCH_FAILED` for this URL. No alternative confirmed URL found.
+- **SSGA/SPDR** (XLE/SPY): candidate `ssga.com/library-content/products/fund-data/etfs/us/holdings-daily-us-en-{ticker_lower}.csv` — returned 404 for XLE at runtime. Certifier will report `FETCH_FAILED`.
+- **Schwab** (SCHD): no confirmed stable CSV URL. Certifier returns `SOURCE_NOT_FOUND` immediately (no HTTP call).
+- **Invesco** (QQQ): secondary only; QQQ proven via SEC NPORT. Invesco URL may return HTML → certifier reports `FETCH_FAILED`.
+- **Expected `issuer_source_certified_count` post-deploy:** 0 until a new certified issuer URL is found.
 
 **Config flag:** `intel_v3_etf_provider_registry_diagnostics_enabled` (default False).
 **Endpoint:** `POST /api/v1/diagnostics/finance-intel/etf-provider-registry-check` (cert-gated).
 
-**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. No holdings without `identity_verified=True`. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 250 total tests pass (217 prior + 33 new).
+**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` for all. SEC NPORT identity gate intact. GLD commodity path preserved. No SQL/UI/LLM/paid provider/decision/synthesis/Deploy changes. 70 tests pass (33 Stage 9F.2b + 37 Stage 9F.2c).
 
-**Runtime validation required post-deploy:** Enable `intel_v3_etf_provider_registry_diagnostics_enabled=True`, run the registry diagnostic endpoint for all 12 tickers. Expected: SPY/QQQ use sec_nport_v1 (proven). XLE/Vanguard/SCHD will show issuer-official URL fetch results — URL validation is the next step. SCHD will show `source_url_not_validated` (URL not confirmed). GLD: `commodity_trust_no_equity_holdings`.
-
-**Next step for ETF holdings:** Post-deploy URL validation for Vanguard/SSGA/Invesco CSV endpoints, then confirm issuer-official selection for XLE/VOO/VTI/VGT etc. Once URL confirmed, issuer path can produce real `holdings_count>0` with identity and weights verified.
+**Next step for ETF holdings:** Post-deploy run certifier endpoint and check per-ticker `source_certification.source_certification_status`. If any issuer source reaches CERTIFIED at runtime, update adapter URL template and wire into canonical path. Until a source is certified, issuer-official path remains blocked and SPY/QQQ via SEC NPORT remain the only proven providers.
 
 ## Purpose
 

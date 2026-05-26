@@ -344,6 +344,18 @@ Stage 9E builds the equity valuation evidence lane. Before any synthesis can be 
 
 The `AssetParityRoadmap` in forensics output (`asset_parity_roadmap` field) tracks this. `synthesis_gate` is SYNTHESIS_GATE_BLOCKED (ETF/crypto not ready) for portfolios where equity valuation is built. Do not open synthesis to any asset class until all three show `synthesis_gate` cleared.
 
+## Railway deploy cost control
+
+Per-service Watch Paths for all four Railway backend services are documented in
+`docs/deploy/RAILWAY_WATCH_PATHS.md`. Each service must have its Watch Paths configured in
+the Railway dashboard (**Settings → Source → Watch Paths**) to avoid unnecessary deployments
+on docs-only or frontend-only pushes. `PROCESS_TYPE` selects the runtime process only — it
+does not control whether a deployment is created. With one shared `v2/backend/railway.toml`,
+per-service watch rules must live in the Railway dashboard, not in the TOML file.
+
+**Action required (manual):** paste the exact Watch Paths from the doc into each service's
+Railway dashboard settings. See `docs/deploy/RAILWAY_WATCH_PATHS.md` for the checklist.
+
 ## Known risks / unresolved issues
 
 - Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).

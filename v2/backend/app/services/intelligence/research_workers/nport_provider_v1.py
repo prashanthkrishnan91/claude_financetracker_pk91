@@ -76,8 +76,9 @@ _FILING_FOLDER_URL_TPL = (
     "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/"
 )
 
-# Budget: company_tickers(opt) + submissions + fallback chain A/B/C(≤3) + xml_doc = 5 max.
-_MAX_REQUESTS_PER_TICKER: int = 5
+# Budget: submissions(1) + up to 12 filing XML fetches + slack = 20 max.
+# Increased from 5 to support multi-filing scan (Stage 9F.2a filing-scan).
+_MAX_REQUESTS_PER_TICKER: int = 20
 _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 
 # NPORT form types to search for in EDGAR submissions.
@@ -88,6 +89,14 @@ _NPORT_FORM_TYPES: frozenset[str] = frozenset({
 
 # Maximum holdings to return from one filing (guard against pathological XML).
 _MAX_HOLDINGS: int = 10_000
+
+# ── Filing scan caps (Stage 9F.2a multi-filing scan) ─────────────────────────
+# Max NPORT-P filings to scan per candidate CIK, newest first.
+# Scanning stops as soon as identity matches or budget/cap is exhausted.
+_DEFAULT_FILING_SCAN_CAP: int = 12  # production and diagnostic default
+
+# Status returned when scan budget is exhausted before identity match.
+_STATUS_SCAN_BUDGET_EXHAUSTED = "series_identity_scan_budget_exhausted"
 
 # ── Identity status constants (Stage 9F.2a) ───────────────────────────────────
 
@@ -119,6 +128,9 @@ class NportProviderConfig:
     user_agent: str                              # Required per SEC terms of service.
     timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS
     max_requests_per_ticker: int = _MAX_REQUESTS_PER_TICKER
+    # Max NPORT filings to scan per candidate CIK (Stage 9F.2a multi-filing scan).
+    # Scanning stops as soon as identity matches or budget/cap is exhausted.
+    max_filings_to_scan: int = _DEFAULT_FILING_SCAN_CAP
 
 
 # ── Result types ──────────────────────────────────────────────────────────────
@@ -221,9 +233,13 @@ class NportProviderResult:
     detected_class_id: Optional[str] = None              # from classesContracts classContract
     identity_mismatch_reason: Optional[str] = None       # why identity_status=series_identity_not_proven
     # Per-candidate identity failure log for multi-candidate resolution diagnostics.
-    # Each entry: {candidate_cik, accession_number, detected_series_name,
+    # Each entry: {candidate_cik, accession_number, filing_rank, detected_series_name,
     #              detected_registrant_name, identity_mismatch_reason}
     candidate_identity_failures: list[dict] = field(default_factory=list)
+    # Scan diagnostic fields (Stage 9F.2a multi-filing scan).
+    filings_scanned_count: int = 0           # total filings scanned across all candidates
+    matching_filing_rank: Optional[int] = None  # 1-based rank in candidate where match found
+    scan_limit_reached: bool = False          # True when budget exhausted before identity match
 
     @property
     def is_success(self) -> bool:
@@ -443,6 +459,24 @@ def _find_latest_nport_filing(
     submissions_body: dict[str, Any],
 ) -> Optional[dict[str, Any]]:
     """Find the latest NPORT-P or NPORT-EX filing in the submissions response."""
+    results = _collect_recent_nport_filings(submissions_body, max_filings=1)
+    return results[0] if results else None
+
+
+def _collect_recent_nport_filings(
+    submissions_body: dict[str, Any],
+    max_filings: int = _DEFAULT_FILING_SCAN_CAP,
+) -> list[dict[str, Any]]:
+    """Collect up to max_filings recent NPORT-P/NPORT-EX filings, newest first.
+
+    Returns a list of filing-info dicts (same shape as _find_latest_nport_filing).
+    The submissions API returns filings ordered newest-first, so index 0 is the
+    most recent.  This function preserves that order.
+
+    Used by the multi-filing identity scan (Stage 9F.2a) to allow the provider
+    to scan past a wrong-series filing (e.g. the latest SPDR China ETF filing
+    under SPDR Series Trust) until it finds the matching series or exhausts the cap.
+    """
     try:
         recent = submissions_body.get("filings", {}).get("recent", {})
         forms = recent.get("form") or []
@@ -451,21 +485,24 @@ def _find_latest_nport_filing(
         report_dates = recent.get("reportDate") or []
         primary_docs = recent.get("primaryDocument") or []
     except (AttributeError, TypeError):
-        return None
+        return []
 
+    results: list[dict[str, Any]] = []
     for i, form in enumerate(forms):
+        if len(results) >= max_filings:
+            break
         if str(form).upper().strip() in _NPORT_FORM_TYPES:
             acc = str(accessions[i]) if i < len(accessions) else ""
             if not acc:
                 continue
-            return {
+            results.append({
                 "accession_number": acc,
                 "form_type": str(form).upper().strip(),
                 "filing_date": str(filing_dates[i]) if i < len(filing_dates) else None,
                 "report_period_date": str(report_dates[i]) if i < len(report_dates) else None,
                 "primary_doc": str(primary_docs[i]) if i < len(primary_docs) else "primary_doc.xml",
-            }
-    return None
+            })
+    return results
 
 
 def _parse_float(raw: Any) -> Optional[float]:
@@ -804,6 +841,9 @@ def fetch_etf_nport_holdings(
         _last_detected_registrant_name: Optional[str] = None
         _last_identity_mismatch_reason: Optional[str] = None
         _last_identity_filing_meta: Optional[NportFilingMeta] = None
+        # Scan state (Stage 9F.2a multi-filing scan).
+        filings_scanned_count: int = 0
+        _scan_limit_reached: bool = False
 
         for candidate_cik in candidate_ciks:
             candidate_ciks_tried.append(candidate_cik)
@@ -840,8 +880,13 @@ def fetch_etf_nport_holdings(
                 }
                 continue  # Try next candidate
 
-            filing_info = _find_latest_nport_filing(sub_body)
-            if filing_info is None:
+            # ── Collect recent NPORT filings and scan for identity match ─────
+            # Stage 9F.2a: scan up to config.max_filings_to_scan filings per
+            # candidate, newest first.  Identity mismatch → continue to next
+            # filing (not next candidate) so a wrong-series latest filing does
+            # not block finding the matching series in an earlier filing.
+            recent_filings = _collect_recent_nport_filings(sub_body, config.max_filings_to_scan)
+            if not recent_filings:
                 # No NPORT filing for this CIK
                 # Check if this is a commodity trust (GLD behavior)
                 is_commodity_trust = (
@@ -862,108 +907,69 @@ def fetch_etf_nport_holdings(
                 _last_no_nport_diag = {"cik": cik_padded}
                 continue  # Try next candidate
 
-            acc_raw = filing_info["accession_number"]
-            acc_nodash = acc_raw.replace("-", "")
-            primary_doc = filing_info.get("primary_doc") or "primary_doc.xml"
-            primary_doc_from_submissions = primary_doc
-            selected_doc_source: Optional[str] = None
-            candidate_doc_count: Optional[int] = None
-            filing_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_int}&type=NPORT-P"
+            # Inner scan loop — try each filing until identity match or exhaustion
+            for _filing_scan_rank, filing_info in enumerate(recent_filings, start=1):
+                # Budget check before each filing document fetch
+                if request_count >= config.max_requests_per_ticker:
+                    _scan_limit_reached = True
+                    break  # inner filing loop
 
-            # ── Step 2.5: Filing index discovery when primaryDocument is XSL viewer ─
-            _prefetched_doc_text: Optional[str] = None
-            index_urls_attempted_count: Optional[int] = None
+                filings_scanned_count += 1
 
-            if _is_xsl_viewer_path(primary_doc):
-                folder_url = _FILING_FOLDER_URL_TPL.format(cik_int=cik_int, acc_nodash=acc_nodash)
-                _index_sources = [
-                    (folder_url + "index.json", "index_json"),
-                    (folder_url + acc_raw + "-index.html", "index_html"),
-                ]
-                _complete_txt_url = folder_url + acc_nodash + ".txt"
-                index_urls_attempted_count = 0
+                acc_raw = filing_info["accession_number"]
+                acc_nodash = acc_raw.replace("-", "")
+                primary_doc = filing_info.get("primary_doc") or "primary_doc.xml"
+                primary_doc_from_submissions = primary_doc
+                selected_doc_source: Optional[str] = None
+                candidate_doc_count: Optional[int] = None
+                filing_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik_int}&type=NPORT-P"
 
-                for _idx_url, _src_label in _index_sources:
-                    if request_count >= config.max_requests_per_ticker:
-                        return NportProviderResult(
-                            ticker=ticker_upper,
-                            fetch_status="filing_not_parseable",
-                            error_message=(
-                                f"Request budget exhausted during index fallback after "
-                                f"{index_urls_attempted_count} URL(s). "
-                                f"XSL primaryDocument: {primary_doc_from_submissions!r}."
-                            ),
-                            fetched_at=fetched_at,
-                            cik=cik_padded,
-                            request_count=request_count,
-                            primary_doc_from_submissions=primary_doc_from_submissions,
-                            parse_failure_stage="budget_exhausted",
-                            index_urls_attempted_count=index_urls_attempted_count,
-                            resolver_source=_resolver_source,
-                            parent_registrant_name=_parent_registrant_name,
-                            candidate_ciks_tried=candidate_ciks_tried,
-                            identity_status="filing_not_parseable",
-                        )
-                    index_urls_attempted_count += 1
-                    try:
-                        _resp_idx = _get(_idx_url)
-                        _resp_idx.raise_for_status()
-                        request_count += 1
-                    except Exception as exc:  # noqa: BLE001
-                        if _is_timeout_exc(exc):
+                # ── Step 2.5: Filing index discovery when primaryDocument is XSL viewer ─
+                _prefetched_doc_text: Optional[str] = None
+                index_urls_attempted_count: Optional[int] = None
+
+                if _is_xsl_viewer_path(primary_doc):
+                    folder_url = _FILING_FOLDER_URL_TPL.format(cik_int=cik_int, acc_nodash=acc_nodash)
+                    _index_sources = [
+                        (folder_url + "index.json", "index_json"),
+                        (folder_url + acc_raw + "-index.html", "index_html"),
+                    ]
+                    _complete_txt_url = folder_url + acc_nodash + ".txt"
+                    index_urls_attempted_count = 0
+
+                    for _idx_url, _src_label in _index_sources:
+                        if request_count >= config.max_requests_per_ticker:
                             return NportProviderResult(
                                 ticker=ticker_upper,
-                                fetch_status="timeout",
-                                error_message=f"Timeout fetching filing index ({_src_label}): {exc}",
+                                fetch_status="filing_not_parseable",
+                                error_message=(
+                                    f"Request budget exhausted during index fallback after "
+                                    f"{index_urls_attempted_count} URL(s). "
+                                    f"XSL primaryDocument: {primary_doc_from_submissions!r}."
+                                ),
                                 fetched_at=fetched_at,
                                 cik=cik_padded,
                                 request_count=request_count,
                                 primary_doc_from_submissions=primary_doc_from_submissions,
+                                parse_failure_stage="budget_exhausted",
                                 index_urls_attempted_count=index_urls_attempted_count,
                                 resolver_source=_resolver_source,
                                 parent_registrant_name=_parent_registrant_name,
                                 candidate_ciks_tried=candidate_ciks_tried,
-                                identity_status="timeout",
+                                identity_status="filing_not_parseable",
+                                filings_scanned_count=filings_scanned_count,
                             )
-                        continue
-
-                    try:
-                        if _src_label == "index_json":
-                            _idx_body = _resp_idx.json() or {}
-                            _sel_doc, _n_cands = _select_best_nport_doc_from_index(_idx_body, acc_raw)
-                        else:
-                            _html_links = _parse_index_html_links(
-                                getattr(_resp_idx, "text", "") or ""
-                            )
-                            _sel_doc, _n_cands = _select_best_nport_doc_from_html_links(_html_links)
-                    except Exception:  # noqa: BLE001
-                        _sel_doc, _n_cands = None, 0
-
-                    if _sel_doc:
-                        primary_doc = _sel_doc
-                        selected_doc_source = _src_label
-                        candidate_doc_count = _n_cands
-                        break
-                else:
-                    # Options A and B yielded no parseable document.
-                    if request_count < config.max_requests_per_ticker:
                         index_urls_attempted_count += 1
                         try:
-                            _resp_c = _get(_complete_txt_url)
-                            _resp_c.raise_for_status()
+                            _resp_idx = _get(_idx_url)
+                            _resp_idx.raise_for_status()
                             request_count += 1
-                            _txt_content = getattr(_resp_c, "text", None) or ""
-                            if _txt_content.strip():
-                                primary_doc = acc_nodash + ".txt"
-                                selected_doc_source = "complete_submission_txt"
-                                candidate_doc_count = 1
-                                _prefetched_doc_text = _txt_content
                         except Exception as exc:  # noqa: BLE001
                             if _is_timeout_exc(exc):
                                 return NportProviderResult(
                                     ticker=ticker_upper,
                                     fetch_status="timeout",
-                                    error_message=f"Timeout fetching complete submission text: {exc}",
+                                    error_message=f"Timeout fetching filing index ({_src_label}): {exc}",
                                     fetched_at=fetched_at,
                                     cik=cik_padded,
                                     request_count=request_count,
@@ -973,77 +979,140 @@ def fetch_etf_nport_holdings(
                                     parent_registrant_name=_parent_registrant_name,
                                     candidate_ciks_tried=candidate_ciks_tried,
                                     identity_status="timeout",
+                                    filings_scanned_count=filings_scanned_count,
                                 )
+                            continue
 
-                    if selected_doc_source is None:
+                        try:
+                            if _src_label == "index_json":
+                                _idx_body = _resp_idx.json() or {}
+                                _sel_doc, _n_cands = _select_best_nport_doc_from_index(_idx_body, acc_raw)
+                            else:
+                                _html_links = _parse_index_html_links(
+                                    getattr(_resp_idx, "text", "") or ""
+                                )
+                                _sel_doc, _n_cands = _select_best_nport_doc_from_html_links(_html_links)
+                        except Exception:  # noqa: BLE001
+                            _sel_doc, _n_cands = None, 0
+
+                        if _sel_doc:
+                            primary_doc = _sel_doc
+                            selected_doc_source = _src_label
+                            candidate_doc_count = _n_cands
+                            break
+                    else:
+                        # Options A and B yielded no parseable document.
+                        if request_count < config.max_requests_per_ticker:
+                            index_urls_attempted_count += 1
+                            try:
+                                _resp_c = _get(_complete_txt_url)
+                                _resp_c.raise_for_status()
+                                request_count += 1
+                                _txt_content = getattr(_resp_c, "text", None) or ""
+                                if _txt_content.strip():
+                                    primary_doc = acc_nodash + ".txt"
+                                    selected_doc_source = "complete_submission_txt"
+                                    candidate_doc_count = 1
+                                    _prefetched_doc_text = _txt_content
+                            except Exception as exc:  # noqa: BLE001
+                                if _is_timeout_exc(exc):
+                                    return NportProviderResult(
+                                        ticker=ticker_upper,
+                                        fetch_status="timeout",
+                                        error_message=f"Timeout fetching complete submission text: {exc}",
+                                        fetched_at=fetched_at,
+                                        cik=cik_padded,
+                                        request_count=request_count,
+                                        primary_doc_from_submissions=primary_doc_from_submissions,
+                                        index_urls_attempted_count=index_urls_attempted_count,
+                                        resolver_source=_resolver_source,
+                                        parent_registrant_name=_parent_registrant_name,
+                                        candidate_ciks_tried=candidate_ciks_tried,
+                                        identity_status="timeout",
+                                        filings_scanned_count=filings_scanned_count,
+                                    )
+
+                        if selected_doc_source is None:
+                            return NportProviderResult(
+                                ticker=ticker_upper,
+                                fetch_status="filing_not_parseable",
+                                error_message=(
+                                    f"No parseable NPORT document found after {index_urls_attempted_count} "
+                                    f"index URL(s). Submissions primaryDocument: {primary_doc_from_submissions!r}."
+                                ),
+                                fetched_at=fetched_at,
+                                cik=cik_padded,
+                                request_count=request_count,
+                                primary_doc_from_submissions=primary_doc_from_submissions,
+                                selected_doc_source=None,
+                                candidate_doc_count=candidate_doc_count,
+                                parse_failure_stage="no_parseable_doc_in_index",
+                                index_urls_attempted_count=index_urls_attempted_count,
+                                resolver_source=_resolver_source,
+                                parent_registrant_name=_parent_registrant_name,
+                                candidate_ciks_tried=candidate_ciks_tried,
+                                identity_status="filing_not_parseable",
+                                filings_scanned_count=filings_scanned_count,
+                            )
+                else:
+                    selected_doc_source = "submissions"
+
+                filing_meta = NportFilingMeta(
+                    accession_number=acc_raw,
+                    form_type=filing_info["form_type"],
+                    filing_date=filing_info.get("filing_date"),
+                    report_period_date=filing_info.get("report_period_date"),
+                    primary_doc=primary_doc,
+                    filing_url=filing_url,
+                )
+
+                # ── Step 3: Fetch and parse the primary XML document ──────────────
+                if _prefetched_doc_text is not None:
+                    xml_text = _prefetched_doc_text
+                else:
+                    if request_count >= config.max_requests_per_ticker:
+                        _scan_limit_reached = True
+                        break  # inner filing loop — budget gone before XML fetch
+
+                    doc_url = _FILING_URL_TPL.format(
+                        cik_int=cik_int,
+                        acc_nodash=acc_nodash,
+                        primary_doc=primary_doc,
+                    )
+                    try:
+                        resp_doc = _get(doc_url)
+                        resp_doc.raise_for_status()
+                        request_count += 1
+                        xml_text = getattr(resp_doc, "text", None) or ""
+                        if not xml_text and hasattr(resp_doc, "json"):
+                            try:
+                                xml_text = resp_doc.content.decode("utf-8", errors="replace")
+                            except Exception:  # noqa: BLE001
+                                xml_text = ""
+                    except Exception as exc:  # noqa: BLE001
+                        if _is_timeout_exc(exc):
+                            return NportProviderResult(
+                                ticker=ticker_upper,
+                                fetch_status="timeout",
+                                error_message=f"Timeout fetching filing document: {exc}",
+                                fetched_at=fetched_at,
+                                cik=cik_padded,
+                                filing_meta=filing_meta,
+                                request_count=request_count,
+                                primary_doc_from_submissions=primary_doc_from_submissions,
+                                selected_doc_source=selected_doc_source,
+                                candidate_doc_count=candidate_doc_count,
+                                index_urls_attempted_count=index_urls_attempted_count,
+                                resolver_source=_resolver_source,
+                                parent_registrant_name=_parent_registrant_name,
+                                candidate_ciks_tried=candidate_ciks_tried,
+                                identity_status="timeout",
+                                filings_scanned_count=filings_scanned_count,
+                            )
                         return NportProviderResult(
                             ticker=ticker_upper,
                             fetch_status="filing_not_parseable",
-                            error_message=(
-                                f"No parseable NPORT document found after {index_urls_attempted_count} "
-                                f"index URL(s). Submissions primaryDocument: {primary_doc_from_submissions!r}."
-                            ),
-                            fetched_at=fetched_at,
-                            cik=cik_padded,
-                            request_count=request_count,
-                            primary_doc_from_submissions=primary_doc_from_submissions,
-                            selected_doc_source=None,
-                            candidate_doc_count=candidate_doc_count,
-                            parse_failure_stage="no_parseable_doc_in_index",
-                            index_urls_attempted_count=index_urls_attempted_count,
-                            resolver_source=_resolver_source,
-                            parent_registrant_name=_parent_registrant_name,
-                            candidate_ciks_tried=candidate_ciks_tried,
-                            identity_status="filing_not_parseable",
-                        )
-            else:
-                selected_doc_source = "submissions"
-
-            filing_meta = NportFilingMeta(
-                accession_number=acc_raw,
-                form_type=filing_info["form_type"],
-                filing_date=filing_info.get("filing_date"),
-                report_period_date=filing_info.get("report_period_date"),
-                primary_doc=primary_doc,
-                filing_url=filing_url,
-            )
-
-            # ── Step 3: Fetch and parse the primary XML document ──────────────
-            if _prefetched_doc_text is not None:
-                xml_text = _prefetched_doc_text
-            else:
-                if request_count >= config.max_requests_per_ticker:
-                    return _fail_closed(
-                        ticker_upper, "sec_error",
-                        "Request budget exhausted before XML document fetch.",
-                        request_count, cik=cik_padded,
-                        resolver_source=_resolver_source,
-                        parent_registrant_name=_parent_registrant_name,
-                        candidate_ciks_tried=candidate_ciks_tried,
-                        selected_candidate_cik=cik_padded,
-                    )
-
-                doc_url = _FILING_URL_TPL.format(
-                    cik_int=cik_int,
-                    acc_nodash=acc_nodash,
-                    primary_doc=primary_doc,
-                )
-                try:
-                    resp_doc = _get(doc_url)
-                    resp_doc.raise_for_status()
-                    request_count += 1
-                    xml_text = getattr(resp_doc, "text", None) or ""
-                    if not xml_text and hasattr(resp_doc, "json"):
-                        try:
-                            xml_text = resp_doc.content.decode("utf-8", errors="replace")
-                        except Exception:  # noqa: BLE001
-                            xml_text = ""
-                except Exception as exc:  # noqa: BLE001
-                    if _is_timeout_exc(exc):
-                        return NportProviderResult(
-                            ticker=ticker_upper,
-                            fetch_status="timeout",
-                            error_message=f"Timeout fetching filing document: {exc}",
+                            error_message=f"Error fetching filing XML: {exc}",
                             fetched_at=fetched_at,
                             cik=cik_padded,
                             filing_meta=filing_meta,
@@ -1055,16 +1124,21 @@ def fetch_etf_nport_holdings(
                             resolver_source=_resolver_source,
                             parent_registrant_name=_parent_registrant_name,
                             candidate_ciks_tried=candidate_ciks_tried,
-                            identity_status="timeout",
+                            identity_status="filing_not_parseable",
+                            filings_scanned_count=filings_scanned_count,
                         )
+
+                if not xml_text.strip():
                     return NportProviderResult(
                         ticker=ticker_upper,
                         fetch_status="filing_not_parseable",
-                        error_message=f"Error fetching filing XML: {exc}",
+                        error_message="Empty document body received from EDGAR.",
                         fetched_at=fetched_at,
                         cik=cik_padded,
                         filing_meta=filing_meta,
                         request_count=request_count,
+                        primary_doc_attempted=primary_doc,
+                        parse_failure_stage="empty_body",
                         primary_doc_from_submissions=primary_doc_from_submissions,
                         selected_doc_source=selected_doc_source,
                         candidate_doc_count=candidate_doc_count,
@@ -1073,107 +1147,197 @@ def fetch_etf_nport_holdings(
                         parent_registrant_name=_parent_registrant_name,
                         candidate_ciks_tried=candidate_ciks_tried,
                         identity_status="filing_not_parseable",
+                        filings_scanned_count=filings_scanned_count,
                     )
 
-            if not xml_text.strip():
+                holdings, fund_meta, parse_status = _parse_nport_xml(xml_text)
+
+                if filing_meta is not None and fund_meta.get("xml_extracted_from_sgml"):
+                    filing_meta.xml_extracted_from_sgml = True
+
+                if parse_status == "xml_parse_error":
+                    return NportProviderResult(
+                        ticker=ticker_upper,
+                        fetch_status="filing_not_parseable",
+                        error_message=(
+                            "Document is not valid XML and could not be extracted from SGML "
+                            f"wrapper. Filename attempted: {primary_doc!r}. "
+                            "May be an HTML page or non-XML file — check filing index."
+                        ),
+                        fetched_at=fetched_at,
+                        cik=cik_padded,
+                        filing_meta=filing_meta,
+                        request_count=request_count,
+                        primary_doc_attempted=primary_doc,
+                        parse_failure_stage="xml_parse_error",
+                        primary_doc_from_submissions=primary_doc_from_submissions,
+                        selected_doc_source=selected_doc_source,
+                        candidate_doc_count=candidate_doc_count,
+                        index_urls_attempted_count=index_urls_attempted_count,
+                        resolver_source=_resolver_source,
+                        parent_registrant_name=_parent_registrant_name,
+                        candidate_ciks_tried=candidate_ciks_tried,
+                        identity_status="filing_not_parseable",
+                        filings_scanned_count=filings_scanned_count,
+                    )
+
+                if parse_status == "no_holdings_container":
+                    return NportProviderResult(
+                        ticker=ticker_upper,
+                        fetch_status="filing_not_parseable",
+                        error_message=(
+                            "NPORT-P XML has no invstOrSecs element. "
+                            f"File {primary_doc!r} may be a cover page or non-holdings document."
+                        ),
+                        fetched_at=fetched_at,
+                        cik=cik_padded,
+                        filing_meta=filing_meta,
+                        request_count=request_count,
+                        primary_doc_attempted=primary_doc,
+                        parse_failure_stage="no_holdings_container",
+                        primary_doc_from_submissions=primary_doc_from_submissions,
+                        selected_doc_source=selected_doc_source,
+                        candidate_doc_count=candidate_doc_count,
+                        index_urls_attempted_count=index_urls_attempted_count,
+                        resolver_source=_resolver_source,
+                        parent_registrant_name=_parent_registrant_name,
+                        candidate_ciks_tried=candidate_ciks_tried,
+                        identity_status="filing_not_parseable",
+                        filings_scanned_count=filings_scanned_count,
+                    )
+
+                # ── Extract detected identity metadata ────────────────────────
+                detected_series_name = fund_meta.get("series_name")
+                detected_registrant_name = fund_meta.get("registrant_name")
+                detected_series_id = fund_meta.get("series_id")
+                detected_class_id = fund_meta.get("class_id")
+                detected_class_name = fund_meta.get("class_name")
+
+                # ── Handle zero holdings ──────────────────────────────────────
+                if not holdings:
+                    is_commodity_trust = (
+                        _entry is not None and _entry.commodity_trust
+                    ) or ticker_upper in {"GLD"}
+                    status = "commodity_trust_or_no_nport_data" if is_commodity_trust else "no_holdings_found"
+                    return NportProviderResult(
+                        ticker=ticker_upper,
+                        fetch_status=status,
+                        error_message=(
+                            "Commodity trust — no equity holding elements in NPORT filing (expected for GLD)."
+                            if is_commodity_trust
+                            else "Filing parsed but no invstOrSec holding elements found."
+                        ),
+                        fetched_at=fetched_at,
+                        cik=cik_padded,
+                        filing_meta=filing_meta,
+                        request_count=request_count,
+                        primary_doc_attempted=primary_doc,
+                        primary_doc_from_submissions=primary_doc_from_submissions,
+                        selected_doc_source=selected_doc_source,
+                        candidate_doc_count=candidate_doc_count,
+                        index_urls_attempted_count=index_urls_attempted_count,
+                        resolver_source=_resolver_source,
+                        parent_registrant_name=_parent_registrant_name,
+                        candidate_ciks_tried=candidate_ciks_tried,
+                        selected_candidate_cik=cik_padded,
+                        detected_series_name=detected_series_name,
+                        detected_registrant_name=detected_registrant_name,
+                        detected_series_id=detected_series_id,
+                        detected_class_id=detected_class_id,
+                        detected_class_name=detected_class_name,
+                        identity_status=status,
+                        filings_scanned_count=filings_scanned_count,
+                    )
+
+                # ── Step 4: Identity verification ─────────────────────────────
+                identity_status: Optional[str] = None
+                identity_verified = False
+                identity_basis: Optional[str] = None
+                identity_mismatch_reason: Optional[str] = None
+
+                if _resolver_source == "injected" or _entry is None:
+                    # No entry = no identity hints; skip identity check.
+                    # (Tests using cik_lookup_fn get this path — backward compatible.)
+                    identity_status = None
+                    identity_verified = False
+                    identity_basis = "cik_injected_no_identity_check"
+
+                elif _entry.commodity_trust:
+                    # Should not reach here (handled above at zero-holdings), but defensive.
+                    identity_status = "commodity_trust_or_no_nport_data"
+
+                elif _entry.standalone_trust:
+                    # Single-series trust — the filing IS this ETF by definition.
+                    identity_status = _IDENTITY_STANDALONE
+                    identity_verified = True
+                    identity_basis = f"standalone_single_series_trust: {_entry.parent_name}"
+
+                elif _entry.expected_series_names:
+                    # Multi-series registrant: must verify series name matches.
+                    if _identity_name_matches(detected_series_name, _entry.expected_series_names):
+                        identity_status = _IDENTITY_VERIFIED
+                        identity_verified = True
+                        identity_basis = (
+                            f"series_name_matched: detected={detected_series_name!r} "
+                            f"against expected={_entry.expected_series_names!r}"
+                        )
+                    else:
+                        # Series name does not match — this filing belongs to a different
+                        # series of the same parent registrant.  Record the failure and
+                        # continue to the next FILING (Stage 9F.2a multi-filing scan).
+                        # This allows scanning past a wrong-series latest filing to find
+                        # the matching series in an earlier filing.
+                        mismatch_reason = (
+                            f"Expected one of {_entry.expected_series_names!r}, "
+                            f"detected seriesName={detected_series_name!r} "
+                            f"in accession {acc_raw} (scan rank {_filing_scan_rank})"
+                        )
+                        _candidate_identity_failures.append({
+                            "candidate_cik": cik_padded,
+                            "accession_number": acc_raw,
+                            "filing_rank": _filing_scan_rank,
+                            "detected_series_name": detected_series_name,
+                            "detected_registrant_name": detected_registrant_name,
+                            "identity_mismatch_reason": mismatch_reason,
+                        })
+                        _last_detected_series_name = detected_series_name
+                        _last_detected_registrant_name = detected_registrant_name
+                        _last_identity_mismatch_reason = mismatch_reason
+                        _last_identity_filing_meta = filing_meta
+                        continue  # Try next filing within this candidate
+                else:
+                    # entry exists but no expected_series_names configured.
+                    identity_status = "no_identity_hints_configured"
+                    identity_basis = f"no_expected_series_names for {ticker_upper}"
+
+                # ── Assess weight/value availability ─────────────────────────
+                weights_available = any(h.weight_pct is not None for h in holdings)
+                total_assets = fund_meta.get("total_assets_usd")
+                total_reported_value_present = total_assets is not None
+
+                weights_derived = False
+                if not weights_available and total_assets and total_assets > 0:
+                    holdings_with_values = [h for h in holdings if h.value_usd is not None]
+                    if holdings_with_values:
+                        for h in holdings_with_values:
+                            if h.value_usd is not None:
+                                h.weight_pct = round((h.value_usd / total_assets) * 100, 6)
+                        weights_derived = True
+                        weights_available = True
+
+                # ── Return success ────────────────────────────────────────────
                 return NportProviderResult(
                     ticker=ticker_upper,
-                    fetch_status="filing_not_parseable",
-                    error_message="Empty document body received from EDGAR.",
+                    fetch_status="success",
                     fetched_at=fetched_at,
                     cik=cik_padded,
                     filing_meta=filing_meta,
-                    request_count=request_count,
-                    primary_doc_attempted=primary_doc,
-                    parse_failure_stage="empty_body",
-                    primary_doc_from_submissions=primary_doc_from_submissions,
-                    selected_doc_source=selected_doc_source,
-                    candidate_doc_count=candidate_doc_count,
-                    index_urls_attempted_count=index_urls_attempted_count,
-                    resolver_source=_resolver_source,
-                    parent_registrant_name=_parent_registrant_name,
-                    candidate_ciks_tried=candidate_ciks_tried,
-                    identity_status="filing_not_parseable",
-                )
-
-            holdings, fund_meta, parse_status = _parse_nport_xml(xml_text)
-
-            if filing_meta is not None and fund_meta.get("xml_extracted_from_sgml"):
-                filing_meta.xml_extracted_from_sgml = True
-
-            if parse_status == "xml_parse_error":
-                return NportProviderResult(
-                    ticker=ticker_upper,
-                    fetch_status="filing_not_parseable",
-                    error_message=(
-                        "Document is not valid XML and could not be extracted from SGML "
-                        f"wrapper. Filename attempted: {primary_doc!r}. "
-                        "May be an HTML page or non-XML file — check filing index."
-                    ),
-                    fetched_at=fetched_at,
-                    cik=cik_padded,
-                    filing_meta=filing_meta,
-                    request_count=request_count,
-                    primary_doc_attempted=primary_doc,
-                    parse_failure_stage="xml_parse_error",
-                    primary_doc_from_submissions=primary_doc_from_submissions,
-                    selected_doc_source=selected_doc_source,
-                    candidate_doc_count=candidate_doc_count,
-                    index_urls_attempted_count=index_urls_attempted_count,
-                    resolver_source=_resolver_source,
-                    parent_registrant_name=_parent_registrant_name,
-                    candidate_ciks_tried=candidate_ciks_tried,
-                    identity_status="filing_not_parseable",
-                )
-
-            if parse_status == "no_holdings_container":
-                return NportProviderResult(
-                    ticker=ticker_upper,
-                    fetch_status="filing_not_parseable",
-                    error_message=(
-                        "NPORT-P XML has no invstOrSecs element. "
-                        f"File {primary_doc!r} may be a cover page or non-holdings document."
-                    ),
-                    fetched_at=fetched_at,
-                    cik=cik_padded,
-                    filing_meta=filing_meta,
-                    request_count=request_count,
-                    primary_doc_attempted=primary_doc,
-                    parse_failure_stage="no_holdings_container",
-                    primary_doc_from_submissions=primary_doc_from_submissions,
-                    selected_doc_source=selected_doc_source,
-                    candidate_doc_count=candidate_doc_count,
-                    index_urls_attempted_count=index_urls_attempted_count,
-                    resolver_source=_resolver_source,
-                    parent_registrant_name=_parent_registrant_name,
-                    candidate_ciks_tried=candidate_ciks_tried,
-                    identity_status="filing_not_parseable",
-                )
-
-            # ── Extract detected identity metadata ────────────────────────────
-            detected_series_name = fund_meta.get("series_name")
-            detected_registrant_name = fund_meta.get("registrant_name")
-            detected_series_id = fund_meta.get("series_id")
-            detected_class_id = fund_meta.get("class_id")
-            detected_class_name = fund_meta.get("class_name")
-
-            # ── Handle zero holdings ──────────────────────────────────────────
-            if not holdings:
-                is_commodity_trust = (
-                    _entry is not None and _entry.commodity_trust
-                ) or ticker_upper in {"GLD"}
-                status = "commodity_trust_or_no_nport_data" if is_commodity_trust else "no_holdings_found"
-                return NportProviderResult(
-                    ticker=ticker_upper,
-                    fetch_status=status,
-                    error_message=(
-                        "Commodity trust — no equity holding elements in NPORT filing (expected for GLD)."
-                        if is_commodity_trust
-                        else "Filing parsed but no invstOrSec holding elements found."
-                    ),
-                    fetched_at=fetched_at,
-                    cik=cik_padded,
-                    filing_meta=filing_meta,
+                    holdings=holdings,
+                    total_assets_usd=total_assets,
+                    net_assets_usd=fund_meta.get("net_assets_usd"),
+                    total_reported_value_present=total_reported_value_present,
+                    weights_available=weights_available,
+                    weights_derived=weights_derived,
                     request_count=request_count,
                     primary_doc_attempted=primary_doc,
                     primary_doc_from_submissions=primary_doc_from_submissions,
@@ -1189,126 +1353,57 @@ def fetch_etf_nport_holdings(
                     detected_series_id=detected_series_id,
                     detected_class_id=detected_class_id,
                     detected_class_name=detected_class_name,
-                    identity_status=status,
+                    identity_status=identity_status,
+                    identity_verified=identity_verified,
+                    identity_basis=identity_basis,
+                    identity_mismatch_reason=identity_mismatch_reason,
+                    candidate_identity_failures=_candidate_identity_failures,
+                    filings_scanned_count=filings_scanned_count,
+                    matching_filing_rank=_filing_scan_rank,
                 )
+            # ── End inner filing scan loop ────────────────────────────────────
+            if _scan_limit_reached:
+                break  # outer candidate loop — budget exhausted during filing scan
 
-            # ── Step 4: Identity verification ─────────────────────────────────
-            identity_status: Optional[str] = None
-            identity_verified = False
-            identity_basis: Optional[str] = None
-            identity_mismatch_reason: Optional[str] = None
-
-            if _resolver_source == "injected" or _entry is None:
-                # No entry = no identity hints; skip identity check.
-                # (Tests using cik_lookup_fn get this path — backward compatible.)
-                identity_status = None
-                identity_verified = False
-                identity_basis = "cik_injected_no_identity_check"
-
-            elif _entry.commodity_trust:
-                # Should not reach here (handled above at zero-holdings), but defensive.
-                identity_status = "commodity_trust_or_no_nport_data"
-
-            elif _entry.standalone_trust:
-                # Single-series trust — the filing IS this ETF by definition.
-                identity_status = _IDENTITY_STANDALONE
-                identity_verified = True
-                identity_basis = f"standalone_single_series_trust: {_entry.parent_name}"
-
-            elif _entry.expected_series_names:
-                # Multi-series registrant: must verify series name matches.
-                if _identity_name_matches(detected_series_name, _entry.expected_series_names):
-                    identity_status = _IDENTITY_VERIFIED
-                    identity_verified = True
-                    identity_basis = (
-                        f"series_name_matched: detected={detected_series_name!r} "
-                        f"against expected={_entry.expected_series_names!r}"
-                    )
-                else:
-                    # Series name does not match — this filing belongs to a different
-                    # series of the same parent registrant.  Record the failure and
-                    # continue to the next candidate if any remain.
-                    mismatch_reason = (
-                        f"Expected one of {_entry.expected_series_names!r}, "
-                        f"detected seriesName={detected_series_name!r} "
-                        f"in accession {acc_raw}"
-                    )
-                    _candidate_identity_failures.append({
-                        "candidate_cik": cik_padded,
-                        "accession_number": acc_raw,
-                        "detected_series_name": detected_series_name,
-                        "detected_registrant_name": detected_registrant_name,
-                        "identity_mismatch_reason": mismatch_reason,
-                    })
-                    _last_detected_series_name = detected_series_name
-                    _last_detected_registrant_name = detected_registrant_name
-                    _last_identity_mismatch_reason = mismatch_reason
-                    _last_identity_filing_meta = filing_meta
-                    continue  # Try next candidate
-            else:
-                # entry exists but no expected_series_names configured.
-                identity_status = "no_identity_hints_configured"
-                identity_basis = f"no_expected_series_names for {ticker_upper}"
-
-            # ── Assess weight/value availability ─────────────────────────────
-            weights_available = any(h.weight_pct is not None for h in holdings)
-            total_assets = fund_meta.get("total_assets_usd")
-            total_reported_value_present = total_assets is not None
-
-            weights_derived = False
-            if not weights_available and total_assets and total_assets > 0:
-                holdings_with_values = [h for h in holdings if h.value_usd is not None]
-                if holdings_with_values:
-                    for h in holdings_with_values:
-                        if h.value_usd is not None:
-                            h.weight_pct = round((h.value_usd / total_assets) * 100, 6)
-                    weights_derived = True
-                    weights_available = True
-
-            # ── Return success ────────────────────────────────────────────────
+        # ── All candidates exhausted ──────────────────────────────────────────
+        if _scan_limit_reached:
             return NportProviderResult(
                 ticker=ticker_upper,
-                fetch_status="success",
+                fetch_status=_STATUS_SCAN_BUDGET_EXHAUSTED,
+                error_message=(
+                    f"Filing scan budget exhausted after scanning {filings_scanned_count} "
+                    f"filing(s) across {len(candidate_ciks_tried)} candidate CIK(s). "
+                    f"No matching series found. "
+                    f"Identity mismatches: {len(_candidate_identity_failures)}. "
+                    f"Increase max_requests_per_ticker or refine candidate CIKs."
+                ),
                 fetched_at=fetched_at,
-                cik=cik_padded,
-                filing_meta=filing_meta,
-                holdings=holdings,
-                total_assets_usd=total_assets,
-                net_assets_usd=fund_meta.get("net_assets_usd"),
-                total_reported_value_present=total_reported_value_present,
-                weights_available=weights_available,
-                weights_derived=weights_derived,
+                cik=candidate_ciks_tried[-1] if candidate_ciks_tried else None,
+                filing_meta=_last_identity_filing_meta,
                 request_count=request_count,
-                primary_doc_attempted=primary_doc,
-                primary_doc_from_submissions=primary_doc_from_submissions,
-                selected_doc_source=selected_doc_source,
-                candidate_doc_count=candidate_doc_count,
-                index_urls_attempted_count=index_urls_attempted_count,
                 resolver_source=_resolver_source,
                 parent_registrant_name=_parent_registrant_name,
                 candidate_ciks_tried=candidate_ciks_tried,
-                selected_candidate_cik=cik_padded,
-                detected_series_name=detected_series_name,
-                detected_registrant_name=detected_registrant_name,
-                detected_series_id=detected_series_id,
-                detected_class_id=detected_class_id,
-                detected_class_name=detected_class_name,
-                identity_status=identity_status,
-                identity_verified=identity_verified,
-                identity_basis=identity_basis,
-                identity_mismatch_reason=identity_mismatch_reason,
+                selected_candidate_cik=None,
+                detected_series_name=_last_detected_series_name,
+                detected_registrant_name=_last_detected_registrant_name,
+                identity_status=_STATUS_SCAN_BUDGET_EXHAUSTED,
+                identity_verified=False,
+                identity_mismatch_reason=_last_identity_mismatch_reason,
                 candidate_identity_failures=_candidate_identity_failures,
+                filings_scanned_count=filings_scanned_count,
+                scan_limit_reached=True,
             )
 
-        # ── All candidates exhausted ──────────────────────────────────────────
         if _candidate_identity_failures:
-            # Every candidate yielded holdings but none matched this ETF's identity.
+            # All filings scanned across all candidates; no series identity match found.
             return NportProviderResult(
                 ticker=ticker_upper,
                 fetch_status=_IDENTITY_NOT_PROVEN,
                 error_message=(
-                    f"Holdings found for all {len(_candidate_identity_failures)} CIK candidate(s) "
-                    f"but series identity not proven for {ticker_upper}. "
+                    f"Scanned {filings_scanned_count} NPORT filing(s) across "
+                    f"{len(candidate_ciks_tried)} CIK candidate(s) — "
+                    f"series identity not proven for {ticker_upper}. "
                     f"Last mismatch: {_last_identity_mismatch_reason}"
                 ),
                 fetched_at=fetched_at,
@@ -1325,6 +1420,7 @@ def fetch_etf_nport_holdings(
                 identity_verified=False,
                 identity_mismatch_reason=_last_identity_mismatch_reason,
                 candidate_identity_failures=_candidate_identity_failures,
+                filings_scanned_count=filings_scanned_count,
             )
 
         if _last_error_diag:

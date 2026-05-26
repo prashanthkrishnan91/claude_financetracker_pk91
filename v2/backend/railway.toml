@@ -2,6 +2,15 @@
 builder = "nixpacks"
 
 [deploy]
+# PROCESS_TYPE selects which process to run at start-up — it does NOT control
+# whether Railway creates a deployment. Deploy triggering is controlled by
+# Watch Paths set per service in the Railway dashboard (Settings → Source →
+# Watch Paths). See docs/deploy/RAILWAY_WATCH_PATHS.md for the exact paths to
+# paste per service.
+#
+# All four backend services share this file, so a shared watchPatterns block
+# here would apply identically to all services. Per-service watch rules must
+# therefore live in the Railway dashboard, not in this file.
 startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"watchtower\" ]; then python -m app.services.intelligence.v3.watchtower_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"email_delivery\" ] || [ \"$PROCESS_TYPE\" = \"alert_email_delivery\" ]; then python -m app.services.alert.alert_email_delivery_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

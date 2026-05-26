@@ -50,6 +50,13 @@ S21. No live SEC calls in any test.
   max_filings_to_scan cap:
 S22. Submissions has 5 NPORT filings; max_filings_to_scan=2 → only 2 scanned.
 S23. _collect_recent_nport_filings returns filings in order, newest first.
+
+  Budget alignment (XSL/index_json path costs 2 requests per filing):
+S24. Default budget=30 can scan 3 XSL filings (needs 1+3*2=7 requests) without
+     premature exhaustion — matching series found on filing #3.
+S25. Intentionally small budget (4) exhausts after 1 complete XSL filing;
+     budget fires at XML-fetch check for filing #2 → series_identity_scan_budget_exhausted.
+S26. _MAX_REQUESTS_PER_TICKER >= 1 + _DEFAULT_FILING_SCAN_CAP * 2 (constant alignment).
 """
 from __future__ import annotations
 
@@ -386,12 +393,48 @@ def _mock_resp(json_body=None, text_body=None, status_code=200):
     return resp
 
 
+def _make_submissions_with_n_nport_xsl(n: int, cik: str = "0001168164") -> dict:
+    """Build submissions with n NPORT-P filings using XSL viewer primaryDocument paths.
+
+    XSL paths trigger the 2-request-per-filing index-discovery step:
+      index.json (1 request) + selected XML document (1 request) = 2 per filing.
+    """
+    forms, dates, accs, rpts, pdocs = [], [], [], [], []
+    for i in range(n):
+        forms.append("NPORT-P")
+        dates.append(f"2026-{3 - i:02d}-15")
+        accs.append(f"{cik}-26-{100 + i:06d}")
+        rpts.append(f"2026-{2 - i:02d}-28")
+        pdocs.append("xslForm.aspx?action=view")  # triggers index discovery
+    forms.append("10-K")
+    dates.append("2025-12-01")
+    accs.append(f"{cik}-25-000001")
+    rpts.append("2025-11-30")
+    pdocs.append("annual.htm")
+    return {
+        "filings": {
+            "recent": {
+                "form": forms,
+                "filingDate": dates,
+                "accessionNumber": accs,
+                "reportDate": rpts,
+                "primaryDocument": pdocs,
+            }
+        }
+    }
+
+
+def _make_index_json_resp(xml_filename: str = "nport.xml") -> dict:
+    """Mock index.json response body that selects xml_filename as the NPORT document."""
+    return {"documents": [{"document": xml_filename, "type": "NPORT-P"}]}
+
+
 def _provider_call(
     ticker: str,
     http_responses: list,
     user_agent: str = "test@example.com",
     max_filings_to_scan: int = 12,
-    max_requests_per_ticker: int = 20,
+    max_requests_per_ticker: int = 30,
     candidate_ciks_override: Optional[list] = None,
 ):
     from app.services.intelligence.research_workers.nport_provider_v1 import (
@@ -961,3 +1004,78 @@ class TestInvariants:
         )
         assert result.fetch_status == "success"
         assert result.filings_scanned_count >= 1
+
+
+# ── S24-S26: Budget alignment (XSL/index_json path) ──────────────────────────
+
+
+class TestBudgetAlignment:
+    """Verify request budget and scan cap are consistent for XSL/index_json NPORT filings.
+
+    Each XSL-path filing costs 2 requests: index.json discovery + selected XML document.
+    Full scan: submissions(1) + max_filings_to_scan * 2 = minimum budget required.
+    Default budget 30 supports 12 filings: 1 + 12*2 = 25 requests, with 5 slack.
+    """
+
+    def test_s24_xsl_path_scan_stays_within_budget_30(self):
+        """Default budget=30 scans 3 XSL/index_json filings without premature exhaustion.
+
+        Request trace: submissions(1) + filing1_index(1) + filing1_xml(1) +
+        filing2_index(1) + filing2_xml(1) + filing3_index(1) + filing3_xml(1) = 7 total.
+        7 < 30 → all 3 filings complete; matching series found on filing #3.
+        """
+        sub = _make_submissions_with_n_nport_xsl(3, cik="0001168164")
+        result = _provider_call(
+            "XLE",
+            http_responses=[
+                _mock_resp(json_body=sub),                                    # submissions (req 1)
+                _mock_resp(json_body=_make_index_json_resp("nport.xml")),     # filing #1 index (req 2)
+                _mock_resp(text_body=_SPDR_CHINA_ETF_XML),                    # filing #1 XML (req 3) — mismatch
+                _mock_resp(json_body=_make_index_json_resp("nport.xml")),     # filing #2 index (req 4)
+                _mock_resp(text_body=_SPDR_CHINA_ETF_XML),                    # filing #2 XML (req 5) — mismatch
+                _mock_resp(json_body=_make_index_json_resp("nport.xml")),     # filing #3 index (req 6)
+                _mock_resp(text_body=_ENERGY_SELECT_SECTOR_XML),              # filing #3 XML (req 7) — match
+            ],
+            max_requests_per_ticker=30,
+        )
+        assert result.fetch_status == "success"
+        assert result.identity_verified is True
+        assert result.matching_filing_rank == 3
+        assert result.filings_scanned_count == 3
+        assert result.scan_limit_reached is False
+
+    def test_s25_xsl_path_budget_exhaustion_fires_correctly(self):
+        """Intentionally small budget exhausts after 1 complete XSL filing.
+
+        Budget=4: submissions(1) + filing1_index(1) + filing1_xml(1) = 3 complete.
+        Filing #2: inner check(3<4)✓, scanned=2, index_fetch→4, XML check(4>=4)→exhausted.
+        """
+        sub = _make_submissions_with_n_nport_xsl(3, cik="0001168164")
+        result = _provider_call(
+            "XLE",
+            http_responses=[
+                _mock_resp(json_body=sub),                                    # submissions (req 1)
+                _mock_resp(json_body=_make_index_json_resp("nport.xml")),     # filing #1 index (req 2)
+                _mock_resp(text_body=_SPDR_CHINA_ETF_XML),                    # filing #1 XML (req 3) — mismatch
+                _mock_resp(json_body=_make_index_json_resp("nport.xml")),     # filing #2 index (req 4)
+                # XML check fires: request_count(4) >= max(4) → budget exhausted
+            ],
+            max_requests_per_ticker=4,
+        )
+        assert result.fetch_status == "series_identity_scan_budget_exhausted"
+        assert result.scan_limit_reached is True
+        assert result.holdings == []
+        assert result.identity_verified is False
+
+    def test_s26_max_requests_constant_supports_full_xsl_scan(self):
+        """_MAX_REQUESTS_PER_TICKER >= 1 + _DEFAULT_FILING_SCAN_CAP * 2 (XSL path math)."""
+        from app.services.intelligence.research_workers.nport_provider_v1 import (
+            _DEFAULT_FILING_SCAN_CAP,
+            _MAX_REQUESTS_PER_TICKER,
+        )
+        xsl_budget_needed = 1 + _DEFAULT_FILING_SCAN_CAP * 2
+        assert _MAX_REQUESTS_PER_TICKER >= xsl_budget_needed, (
+            f"Budget {_MAX_REQUESTS_PER_TICKER} is less than minimum {xsl_budget_needed} "
+            f"required for {_DEFAULT_FILING_SCAN_CAP} XSL/index_json filings "
+            f"(submissions=1 + {_DEFAULT_FILING_SCAN_CAP}*2={_DEFAULT_FILING_SCAN_CAP * 2})"
+        )

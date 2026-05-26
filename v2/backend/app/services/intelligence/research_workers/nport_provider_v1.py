@@ -76,9 +76,12 @@ _FILING_FOLDER_URL_TPL = (
     "https://www.sec.gov/Archives/edgar/data/{cik_int}/{acc_nodash}/"
 )
 
-# Budget: submissions(1) + up to 12 filing XML fetches + slack = 20 max.
-# Increased from 5 to support multi-filing scan (Stage 9F.2a filing-scan).
-_MAX_REQUESTS_PER_TICKER: int = 20
+# Budget: for the common XSL primaryDocument path each scanned filing costs
+# 2 requests (index.json discovery + selected XML document).
+# Full scan cap: submissions(1) + 12 * (index_json + xml_doc)(24) + slack(5) = 30.
+# A budget of 20 could exhaust before completing 12 filings on the XSL path.
+# Increased from 20 to 30 to make max_filings_to_scan=12 realistically reachable.
+_MAX_REQUESTS_PER_TICKER: int = 30
 _DEFAULT_TIMEOUT_SECONDS: float = 15.0
 
 # NPORT form types to search for in EDGAR submissions.

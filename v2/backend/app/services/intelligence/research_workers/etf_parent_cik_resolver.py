@@ -19,8 +19,15 @@ Symptoms of a wrong (series) CIK:
   - fetch_status = "sec_error" / 404   (series CIK may not exist as a filer)
 
 Registrants that file NPORT-P directly (single-series trusts):
-  - SPY, QQQ, XLE are standalone trust registrants that ARE their own filer.
+  - SPY, QQQ are standalone trust registrants that ARE their own filer.
     Their share-class CIK == NPORT-P filing CIK.  No parent lookup needed.
+    Identity is assumed (standalone_trust=True).
+
+Series-based multi-fund registrants (XLE, Vanguard, SCHD):
+  - These ETFs are series of a larger registrant.  The registrant files one
+    NPORT-P per series.  We must verify that the parsed NPORT series name
+    matches the expected series name for the requested ticker before accepting
+    the holdings as identity-certified.  expected_series_names drives this check.
 
 This module provides a static, vetted map from ETF ticker → parent registrant.
 Live SEC calls are NOT made here.  Provenance metadata is attached to every
@@ -30,10 +37,19 @@ Provenance notation:
   "Confirmed" — resolved and validated by a successful diagnostic NPORT-P fetch.
   "Candidate" — best-available parent CIK from SEC EDGAR records; requires
                 post-deploy live validation to confirm.
+
+Identity contract (Stage 9F.2a identity-certification repair):
+  standalone_trust=True   → identity assumed; no expected_series_names check.
+  commodity_trust=True    → commodity trust; no equity holdings expected.
+  expected_series_names   → one or more fund/series names to match in NPORT genInfo.
+                            If the parsed seriesName does not match, the result is
+                            series_identity_not_proven (not safe success).
+  candidate_ciks          → additional CIK candidates to try after the primary fails
+                            with no_nport_filing or retriable sec_error.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -52,6 +68,21 @@ class ETFParentRegistrantEntry:
         expected_status         "confirmed"   — validated by live diagnostic.
                                 "candidate"   — unverified; requires post-deploy check.
                                 "no_nport"    — commodity/non-equity trust; no NPORT-P.
+
+    Identity hint fields (Stage 9F.2a identity-certification):
+        expected_series_names   Tuple of expected fund/series names as they appear
+                                (or should appear) in the NPORT genInfo.seriesName XML
+                                field.  Used for normalized substring matching.  For
+                                standalone trusts, leave empty (standalone_trust=True).
+        standalone_trust        True when the ETF IS the sole registrant (no multi-series
+                                ambiguity).  Identity is assumed without a series name
+                                check.  SPY and QQQ are the current confirmed examples.
+        commodity_trust         True for commodity/bullion trusts with no equity
+                                holdings (GLD).  Expected result is always
+                                commodity_trust_or_no_nport_data.
+        candidate_ciks          Additional CIK candidates to try if the primary
+                                parent_cik fails with no_nport_filing or retriable
+                                sec_error.  Tried in order after parent_cik fails.
     """
 
     ticker: str
@@ -60,6 +91,11 @@ class ETFParentRegistrantEntry:
     provenance: str
     is_parent_registrant: bool
     expected_status: str
+    # Identity hint fields — all have defaults so existing code still compiles.
+    expected_series_names: tuple[str, ...] = ()
+    standalone_trust: bool = False
+    commodity_trust: bool = False
+    candidate_ciks: tuple[str, ...] = ()
 
 
 # ── Static ETF parent-registrant map ──────────────────────────────────────────
@@ -71,9 +107,9 @@ class ETFParentRegistrantEntry:
 
 _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
 
-    # ── SSGA/SPDR — single-series standalone trusts ───────────────────────────
-    # These trusts are themselves the NPORT-P registrant.  No parent required.
-    # Confirmed by successful live diagnostic fetch (holdings_count > 0).
+    # ── SSGA/SPDR — single-series standalone trust ────────────────────────────
+    # SPY is a standalone trust: the trust itself is the NPORT-P registrant.
+    # No multi-series ambiguity. Identity assumed via standalone_trust=True.
     "SPY": ETFParentRegistrantEntry(
         ticker="SPY",
         parent_name="SPDR S&P 500 ETF TRUST",
@@ -85,7 +121,12 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         ),
         is_parent_registrant=False,
         expected_status="confirmed",
+        standalone_trust=True,
+        expected_series_names=(),
     ),
+
+    # XLE is a series of SPDR Series Trust (multi-series registrant).
+    # Identity must be verified via series name match in NPORT genInfo.
     "XLE": ETFParentRegistrantEntry(
         ticker="XLE",
         parent_name="SPDR SERIES TRUST",
@@ -93,13 +134,20 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         provenance=(
             "Confirmed. XLE (Energy Select Sector SPDR Fund) is a series of SPDR"
             " Series Trust; the Trust is the NPORT-P filer. Validated:"
-            " diagnostic holdings_count=1250."
+            " diagnostic holdings_count=1250. Series identity requires verification"
+            " via genInfo.seriesName match against expected_series_names."
         ),
         is_parent_registrant=False,
         expected_status="confirmed",
+        standalone_trust=False,
+        expected_series_names=(
+            "Energy Select Sector SPDR Fund",
+            "Energy Select Sector",
+        ),
     ),
 
     # ── Invesco — standalone trust ────────────────────────────────────────────
+    # QQQ is a standalone trust: the trust itself is the NPORT-P registrant.
     "QQQ": ETFParentRegistrantEntry(
         ticker="QQQ",
         parent_name="INVESCO QQQ TRUST SERIES 1",
@@ -110,6 +158,8 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         ),
         is_parent_registrant=False,
         expected_status="confirmed",
+        standalone_trust=True,
+        expected_series_names=(),
     ),
 
     # ── SPDR Gold Trust — commodity trust, no equity holdings ────────────────
@@ -124,6 +174,8 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         ),
         is_parent_registrant=False,
         expected_status="no_nport",
+        commodity_trust=True,
+        expected_series_names=(),
     ),
 
     # ── Vanguard — PARENT REGISTRANT required ─────────────────────────────────
@@ -133,6 +185,11 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
     #
     # company_tickers.json returns the series/share-class CIK (no NPORT-P).
     # The umbrella parent registrant is the correct NPORT-P filer.
+    #
+    # Identity verification is required: the parent registrant files separate
+    # NPORT-P documents for each series.  expected_series_names provides the
+    # matching hint so we can verify that the found filing belongs to the
+    # specific ETF/fund requested, not another series of the same registrant.
     #
     # Previously observed wrong share-class CIKs → "no_nport_filing":
     #   VOO → 0001480511, VTI → 0000732834, VGT → 0001137774,
@@ -151,10 +208,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
             "Candidate. VOO is ETF share class of Vanguard S&P 500 Index Fund, a"
             " series of VANGUARD INDEX FUNDS (CIK 0000764180). Wrong share-class CIK"
             " 0001480511 produced no_nport_filing. Post-deploy: verify NPORT-P exists"
-            " under 0000764180."
+            " under 0000764180 and series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard S&P 500 Index Fund",
+            "Vanguard 500 Index Fund",
+        ),
     ),
     "VTI": ETFParentRegistrantEntry(
         ticker="VTI",
@@ -164,13 +225,21 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
             "Candidate. VTI is ETF share class of Vanguard Total Stock Market Index"
             " Fund, a series of VANGUARD INDEX FUNDS (CIK 0000764180). Wrong"
             " share-class CIK 0000732834 produced no_nport_filing. Post-deploy:"
-            " verify NPORT-P exists under 0000764180."
+            " verify NPORT-P exists under 0000764180 and series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard Total Stock Market Index Fund",
+            "Vanguard Total Stock Market",
+        ),
     ),
 
     # VANGUARD WORLD FUND — parent for Vanguard sector ETFs
+    # These three ETFs share the same parent CIK.  The parent registrant files
+    # separate NPORT-P filings for each series.  Identity verification is critical
+    # here: without it, all three tickers could blindly succeed from the same
+    # filing (the most recent one) regardless of which series it covers.
     "VGT": ETFParentRegistrantEntry(
         ticker="VGT",
         parent_name="VANGUARD WORLD FUND",
@@ -179,10 +248,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
             "Candidate. VGT is ETF share class of Vanguard Information Technology"
             " Index Fund, a series of VANGUARD WORLD FUND (CIK 0000036405). Wrong"
             " share-class CIK 0001137774 produced no_nport_filing. Post-deploy:"
-            " verify NPORT-P exists under 0000036405."
+            " verify NPORT-P series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard Information Technology Index Fund",
+            "Vanguard IT Index Fund",
+        ),
     ),
     "VHT": ETFParentRegistrantEntry(
         ticker="VHT",
@@ -191,10 +264,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         provenance=(
             "Candidate. VHT is ETF share class of Vanguard Health Care Index Fund, a"
             " series of VANGUARD WORLD FUND (CIK 0000036405). Previously missing_cik"
-            " (not in seed map). Post-deploy: verify NPORT-P exists under 0000036405."
+            " (not in seed map). Post-deploy: verify NPORT-P series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard Health Care Index Fund",
+            "Vanguard Health Care",
+        ),
     ),
     "VIS": ETFParentRegistrantEntry(
         ticker="VIS",
@@ -203,10 +280,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         provenance=(
             "Candidate. VIS is ETF share class of Vanguard Industrials Index Fund, a"
             " series of VANGUARD WORLD FUND (CIK 0000036405). Previously missing_cik"
-            " (not in seed map). Post-deploy: verify NPORT-P exists under 0000036405."
+            " (not in seed map). Post-deploy: verify NPORT-P series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard Industrials Index Fund",
+            "Vanguard Industrials",
+        ),
     ),
 
     # VANGUARD WHITEHALL FUNDS — parent for Vanguard dividend ETFs
@@ -218,16 +299,17 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
             "Candidate. VYM is ETF share class of Vanguard High Dividend Yield Index"
             " Fund, a series of VANGUARD WHITEHALL FUNDS (CIK 0000916548). Wrong"
             " share-class CIK 0001383310 produced no_nport_filing. Post-deploy:"
-            " verify NPORT-P exists under 0000916548."
+            " verify NPORT-P exists under 0000916548 and series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard High Dividend Yield Index Fund",
+            "Vanguard High Dividend Yield",
+        ),
     ),
 
     # Vanguard Total International Stock Index Fund — parent for VXUS
-    # VXUS (Vanguard Total International Stock ETF) is a share class of Vanguard
-    # Total International Stock Index Fund.  The parent registrant CIK is a
-    # candidate that requires live SEC EDGAR verification post-deploy.
     "VXUS": ETFParentRegistrantEntry(
         ticker="VXUS",
         parent_name="VANGUARD INTERNATIONAL EQUITY INDEX FUNDS",
@@ -242,6 +324,10 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Vanguard Total International Stock Index Fund",
+            "Vanguard Total International Stock",
+        ),
     ),
 
     # ── Schwab — PARENT REGISTRANT required ───────────────────────────────────
@@ -254,10 +340,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
             "Candidate. SCHD (Schwab U.S. Dividend Equity ETF) is a series of"
             " SCHWAB STRATEGIC TRUST (CIK 0001477379). Wrong share-class CIK"
             " 0001510588 produced no_nport_filing. Post-deploy: verify NPORT-P"
-            " exists under 0001477379."
+            " exists under 0001477379 and series name matches expected."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
+        expected_series_names=(
+            "Schwab U.S. Dividend Equity ETF",
+            "Schwab US Dividend Equity ETF",
+        ),
     ),
 }
 

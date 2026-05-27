@@ -1,6 +1,15 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9I — Visible Intel Useful Action Cards v1; PR #437 merged).
+Last updated: 2026-05-27 (Stage 9I cleanup — fix ETF/stock drawer semantic issues; PR #438 merged).
+
+**Stage 9I cleanup (merged PR #438):** Five production correctness fixes to ETF/stock intelligence drawers.
+1. **ETF evidence language**: `buildSupportingEvidenceSentences`/`buildIncompleteEvidenceSentences` now accept optional `assetClassDisplay` param; ETF/commodity/crypto drawers show "Fund profile data" instead of "Company fundamentals." `IntelV3Drawer` passes `intelCtx?.asset_class_display`.
+2. **ETF_TIER_PROFILE_READY overclaim**: Driver text in `_compose_etf()` no longer claims "profile and cost data available" when no provider outputs are present; now says "role is identified from ETF classification; cost, holdings overlap... require provider data."
+3. **HOLD+BUY contradiction**: `_build_why_this_action()` now accepts `existing_action`; when HOLD, BUY-conflict phrases (e.g. "adding builds the intended portfolio sleeve") are filtered and a HOLD-compatible candidate note is appended. `_BUY_CONFLICT_PHRASES` constant controls the phrase list.
+4. **Asset type normalization**: `_classify_asset_class()` expanded to recognize real runtime `card_meta.category` values — sector names ("Technology", "Communication Services"), bucket labels ("Core"), and ETF substring patterns ("Broad Market ETF"). Ticker-map override in `compose_asset_intelligence()`: any ticker in `_KNOWN_ETF_MAP` routes to ETF lens regardless of category string. "Other" category without ticker-map evidence remains UNKNOWN (conservative).
+5. **Duplicate risk items**: `IntelV3Drawer` deduplicates `card.flags` entries whose text matches any `payload.blockers` entry (normalized whitespace/case); distinct risks are preserved.
+- 143 backend tests in `test_stage9i_intel_context_adapter.py` (126 original + 17 new in `TestAssetTypeNormalization`). 97 Stage 9G/9H tests unchanged.
+- Hard constraints preserved: safe_for_decision never True, existing action never overridden.
 
 **Stage 9I (merged PR #437):** Wires the Stage 9G/9H asset intelligence composer into the Intel card data flow.
 - `intel_context_adapter_v1.py` (new): pure adapter; calls `compose_asset_intelligence()` per card; returns a safe serializable dict (role_lens, why_this_action, add_more_trigger, trim_sell_trigger, evidence_caveat, lens_applied). Explanatory only — existing visible action never overridden.
@@ -54,9 +63,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (merged PR #437).
+- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (PRs #437 + #438 merged).
 - Current PR: none open.
-- Next: validate in production that ETF/GLD/stock cards render role_lens + why_this_action + triggers correctly. Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
+- Next: validate in production that ETF/GLD/stock drawers render correctly (role_lens, why_this_action, triggers, asset-class-appropriate evidence language, no HOLD+BUY contradiction). Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

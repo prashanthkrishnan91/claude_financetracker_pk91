@@ -1,13 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9I — Visible Intel Useful Action Cards v1; PR open).
+Last updated: 2026-05-27 (Stage 9I — Visible Intel Useful Action Cards v1; PR #437 merged).
 
-**Stage 9I (current PR):** Wires the Stage 9G/9H asset intelligence composer into the Intel card data flow.
+**Stage 9I (merged PR #437):** Wires the Stage 9G/9H asset intelligence composer into the Intel card data flow.
 - `intel_context_adapter_v1.py` (new): pure adapter; calls `compose_asset_intelligence()` per card; returns a safe serializable dict (role_lens, why_this_action, add_more_trigger, trim_sell_trigger, evidence_caveat, lens_applied). Explanatory only — existing visible action never overridden.
-- `snapshot_builder.py` (modified): calls `build_intel_context()` in `_build_held_card()`; embeds result as `asset_intelligence_context` in `detail_drawer_payload`.
+- `snapshot_builder.py` (modified): calls `build_intel_context()` in `_build_held_card()`; extracts `etf_provider_outputs` and `etf_upstream_signals` from card_meta when present (Stage 9F NPORT keys — not yet populated; context degrades to role-only today); embeds result as `asset_intelligence_context` in `detail_drawer_payload`.
 - Frontend: `IntelV3Card` shows role-lens compact line (ETF/commodity only); uses composer `why_this_action` when `why_text` is empty. `IntelV3Drawer` renders `AssetIntelSection` (Role/Lens, Why this action, Add more if, Trim/Sell if, evidence caveat). `api.ts` adds `asset_intelligence_context` optional field to `detail_drawer_payload`.
-- 101 new backend tests in `test_stage9i_intel_context_adapter.py`. No SQL, no providers, no LLM.
+- 105 backend tests in `test_stage9i_intel_context_adapter.py` (101 original + 4 provider-wiring honesty tests). No SQL, no providers, no LLM.
 - Hard constraints preserved: safe_for_decision never True, existing action never overridden, no raw metrics in UI.
+- **Provider wiring TODO:** populate `etf_provider_outputs`/`etf_upstream_signals` in `card_metas` inside `intel_v3_service.py` once Stage 9F NPORT lane (`intel_v3_nport_evidence_enabled=True`) is active and portfolio overlap/cost signals are computed. No adapter changes needed — snapshot_builder already extracts these keys.
 
 **Stage 9G/9H (merged PR #435):** ETF Intelligence Classifier + Unified Asset Decision Composer.
 - `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe. Accepts real Stage 9F field names: NPORT `report_period_date`, FMP `as_of_date_or_date_field`.
@@ -53,9 +54,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (current PR, open).
-- Current PR: Stage 9I — wiring composer into Intel card UI.
-- Next after merge: validate in production that ETF/GLD/stock cards render role_lens + why_this_action + triggers correctly. Then consider activating ETF role-based BUY suggestions for portfolio fit signals when target-weight data is reliable.
+- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (merged PR #437).
+- Current PR: none open.
+- Next: validate in production that ETF/GLD/stock cards render role_lens + why_this_action + triggers correctly. Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

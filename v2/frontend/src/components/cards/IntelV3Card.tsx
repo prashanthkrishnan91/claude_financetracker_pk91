@@ -27,8 +27,13 @@ interface IntelV3CardProps {
 
 export function IntelV3Card({ card, onSelect }: IntelV3CardProps) {
   const t = ACTION_TOKEN_STYLES[card.action] ?? ACTION_TOKEN_STYLES.HOLD;
-  const whyText = card.why_text || card.action_text;
+  const intelCtx = card.detail_drawer_payload?.asset_intelligence_context;
+  // Prefer composer why_this_action over generic action_text fallback.
+  const whyText = card.why_text || intelCtx?.why_this_action || card.action_text;
   const isThinData = card.evidence_band === "THIN";
+  // Show role/lens chip for non-stock assets where the role adds meaning.
+  const showRoleLens = intelCtx?.role_lens &&
+    intelCtx.lens_applied !== "stock_fundamental_lens";
 
   return (
     <button
@@ -74,9 +79,19 @@ export function IntelV3Card({ card, onSelect }: IntelV3CardProps) {
       </div>
 
       {/* Row 2 — Plain-English why_text */}
-      <p className="text-xs text-text-secondary leading-relaxed mb-3 line-clamp-2 min-h-[2.5rem]">
+      <p className="text-xs text-text-secondary leading-relaxed mb-2 line-clamp-2 min-h-[2.5rem]">
         {whyText ?? ""}
       </p>
+
+      {/* Row 2b — Role / Lens chip (ETF, commodity, crypto only) */}
+      {showRoleLens && (
+        <p
+          className="text-[10px] text-text-muted leading-snug mb-2 line-clamp-1"
+          aria-label={`Asset role: ${intelCtx!.role_lens}`}
+        >
+          {intelCtx!.role_lens}
+        </p>
+      )}
 
       {/* Row 3 — Evidence / risk / portfolio fit chips */}
       <div className="flex items-center gap-1.5 flex-wrap">

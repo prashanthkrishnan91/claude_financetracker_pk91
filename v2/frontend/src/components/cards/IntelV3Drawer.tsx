@@ -198,6 +198,92 @@ function CatalystEvidenceModule({ ex }: { ex: import("@/lib/api").IntelV3Evidenc
   );
 }
 
+// ── Stage 9I: Asset intelligence context section ─────────────────────────────
+
+type AssetIntelCtx = NonNullable<
+  import("@/lib/api").IntelV3HeldCard["detail_drawer_payload"]["asset_intelligence_context"]
+>;
+
+function AssetIntelSection({ intelCtx, action }: { intelCtx: AssetIntelCtx; action: string }) {
+  const hasRoleLens = !!intelCtx.role_lens;
+  const hasWhy = !!intelCtx.why_this_action;
+  const hasAddMore = !!intelCtx.add_more_trigger;
+  const hasTrimSell = !!intelCtx.trim_sell_trigger;
+  const hasCaveat = !!intelCtx.evidence_caveat;
+
+  if (!hasRoleLens && !hasWhy && !hasAddMore && !hasTrimSell) return null;
+
+  return (
+    <div className="space-y-3" data-testid="asset-intel-section">
+      {/* Role / Lens */}
+      {hasRoleLens && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted mb-1">
+            Role / Lens
+          </p>
+          <p
+            className="text-[11px] text-text-secondary leading-relaxed"
+            data-testid="asset-intel-role-lens"
+          >
+            {intelCtx.role_lens}
+          </p>
+        </div>
+      )}
+
+      {/* Why this action */}
+      {hasWhy && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted mb-1">
+            Why this action
+          </p>
+          <p
+            className="text-[11px] text-text-secondary leading-relaxed"
+            data-testid="asset-intel-why-action"
+          >
+            {intelCtx.why_this_action}
+          </p>
+        </div>
+      )}
+
+      {/* Add more / Trim-Sell triggers */}
+      {(hasAddMore || hasTrimSell) && (
+        <div className="space-y-1.5">
+          {hasAddMore && (
+            <p
+              className="text-[11px] text-text-secondary leading-relaxed"
+              data-testid="asset-intel-add-more"
+            >
+              <span className="font-medium text-action-buy">Add more if:</span>{" "}
+              {intelCtx.add_more_trigger}
+            </p>
+          )}
+          {hasTrimSell && (
+            <p
+              className="text-[11px] text-text-secondary leading-relaxed"
+              data-testid="asset-intel-trim-sell"
+            >
+              <span className="font-medium text-action-trim">Trim / Sell if:</span>{" "}
+              {intelCtx.trim_sell_trigger}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Evidence caveat */}
+      {hasCaveat && (
+        <div
+          className="rounded-lg border border-border bg-surface/40 px-3 py-2"
+          data-testid="asset-intel-caveat"
+        >
+          <p className="text-[11px] text-text-muted leading-relaxed italic">
+            {intelCtx.evidence_caveat}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
   const titleId = "intel-v3-drawer-title";
@@ -220,6 +306,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   const payload = card.detail_drawer_payload;
   const t = ACTION_TOKEN_STYLES[card.action] ?? ACTION_TOKEN_STYLES.HOLD;
   const ex = payload.evidence_explanation ?? null;
+  const intelCtx = payload.asset_intelligence_context ?? null;
 
   // De-duplicate: each text is shown at most once across all sections.
   const seenTexts = new Set<string>();
@@ -373,6 +460,14 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
               <DataMissingPill label="Analysis not yet available" />
             )}
           </Section>
+
+          {/* Section 1b: Asset intelligence context (Stage 9I) */}
+          {intelCtx && (
+            <>
+              <Rule />
+              <AssetIntelSection intelCtx={intelCtx} action={card.action} />
+            </>
+          )}
 
           <Rule />
 

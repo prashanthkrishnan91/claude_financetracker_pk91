@@ -2,6 +2,60 @@
 
 **Decision artifact — diagnostic proof endpoint only. No canonical adapter built.**
 
+## Stage 9F.3c — Live proof findings and provider decision (final)
+
+### Observed live results
+
+| Ticker | holdings_count | weights | as-of date | freshness_status | coverage_quality |
+|---|---|---|---|---|---|
+| XLE | 24 | ✓ | absent | date_missing | usable_supplemental |
+| VOO | 519 | ✓ | absent | date_missing | usable_supplemental |
+| SCHD | 103 | ✓ | absent | date_missing | usable_supplemental |
+| VXUS | 37 | ✓ | absent | date_missing | partial_or_suspicious |
+
+Note: the first diagnostic run (Stage 9F.3a) returned `Information` / 0 holdings for VOO,
+VTI, VGT, VHT, VIS, VXUS, VYM, and SCHD. The root cause was not confirmed — likely quota
+exhaustion or provider-side timing, not proven premium entitlement. On the second run (after
+9F.3b was deployed and quota reset), VOO, SCHD, and VXUS succeeded with holdings and weights,
+confirming the AV free/API key can return ETF_PROFILE data for these tickers.
+
+### Provider decision record
+
+**Alpha Vantage ETF_PROFILE is accepted ONLY as non-canonical supplemental ETF
+exposure evidence.** It is NOT accepted for canonical S-grade ETF holdings truth.
+
+**Canonical rejection criteria (all apply):**
+
+1. **No as-of/date field** — every observed response is missing the as-of date.
+   `fetched_at` is not a valid provider date. Canonical use requires a verifiable
+   as-of date from the provider; none was present.
+
+2. **Partial/incomplete coverage for broad ETFs** — VXUS (Vanguard Total
+   International Stock ETF) holds thousands of positions but returned only 37.
+   This is top-holdings-like partial coverage, not full canonical holdings.
+
+3. **fund_name null** — several responses returned no fund name, indicating
+   incomplete schema coverage.
+
+**Acceptance as supplemental exposure evidence (non-canonical):**
+
+- Alpha Vantage can provide holdings + weights for focused ETFs (XLE: 24, SCHD: 103)
+  and large-cap domestic ETFs (VOO: 519) as supplemental exposure diagnostic evidence.
+- This evidence is useful for non-canonical portfolio ETF exposure analysis, NOT for
+  driving visible Buy/Hold/Trim/Sell decisions or synthesis.
+- Classification: `usable_supplemental` (focused ETF with plausible count) or
+  `partial_or_suspicious` (broad international fund with suspiciously low count).
+
+**Next provider decision:**
+
+- Use Alpha Vantage only for supplemental exposure diagnostics (non-canonical).
+- If canonical S-grade ETF holdings are required (full holdings list + verified
+  as-of date for all ETF types), evaluate a paid/full ETF holdings provider
+  separately. Candidates from Stage 9F.2c: Intrinio, FMP paid tier, ETF Global /
+  Massive Financial. Do not build a canonical AV adapter.
+
+---
+
 ## First run result (Stage 9F.3a — post-deploy run)
 
 Run sent 9 tickers. Result: `candidate_partial`.

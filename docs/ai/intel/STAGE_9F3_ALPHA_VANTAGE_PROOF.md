@@ -13,8 +13,11 @@
 | SCHD | 103 | ✓ | absent | date_missing | usable_supplemental |
 | VXUS | 37 | ✓ | absent | date_missing | partial_or_suspicious |
 
-VOO, VTI, VGT, VHT, VIS, VYM, SCHD required a premium/paid AV plan to unblock
-(free tier returned `entitlement_or_premium_required` for Vanguard tickers on first run).
+Note: the first diagnostic run (Stage 9F.3a) returned `Information` / 0 holdings for VOO,
+VTI, VGT, VHT, VIS, VXUS, VYM, and SCHD. The root cause was not confirmed — likely quota
+exhaustion or provider-side timing, not proven premium entitlement. On the second run (after
+9F.3b was deployed and quota reset), VOO, SCHD, and VXUS succeeded with holdings and weights,
+confirming the AV free/API key can return ETF_PROFILE data for these tickers.
 
 ### Provider decision record
 

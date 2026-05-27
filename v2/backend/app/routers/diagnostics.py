@@ -4116,3 +4116,75 @@ async def alpha_vantage_etf_profile_check(
         getattr(user, "email", "unknown"),
     )
     return result
+
+
+class FmpEtfHoldingsCheckRequest(BaseModel):
+    """Stage 9F.4 — operator request body for FMP ETF holdings diagnostic."""
+    tickers: list[str]
+
+
+@router.post("/fmp-etf-holdings-check")
+async def fmp_etf_holdings_check(
+    payload: FmpEtfHoldingsCheckRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9F.4 — operator-only FMP ETF holdings free-key entitlement + shape diagnostic.
+
+    Tests whether the FMP free API key can return ETF holdings with per-holding
+    weights and provider as-of/date metadata, before any canonical adapter is built.
+
+    Diagnostic-only: no artifact writes, no decision mutations, no SQL, no LLM
+    calls. canonical_ready=False and safe_for_decision=False always. The API key
+    is never logged or returned in any field.
+
+    Fails closed if FMP_API_KEY is not configured.
+
+    Proof sequence (one ticker at a time):
+      1. {"tickers": ["VOO"]}
+      2. {"tickers": ["SCHD"]}
+      3. {"tickers": ["VXUS"]}
+      4. {"tickers": ["XLE"]}
+
+    Verdict interpretation:
+      candidate_pass    — All 4 proof tickers return plausible holdings + weights + date.
+      candidate_partial — Some holdings/weights exist but date missing or coverage weak.
+      candidate_fail    — Paywalled/unauthorized/no usable holdings returned.
+
+    Required env vars:
+      FMP_API_KEY=<your free key>
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+    """
+    from ..services.intelligence.research_workers.fmp_etf_holdings_runner_v1 import (
+        run_fmp_etf_holdings_check,
+    )
+
+    settings = get_settings()
+
+    if not settings.fmp_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="missing_api_key: FMP_API_KEY is not configured",
+        )
+
+    if not payload.tickers:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="tickers must not be empty — provide at least one ticker symbol",
+        )
+
+    # Normalize, deduplicate, cap at 10 (free key quota guard).
+    normalized = list(dict.fromkeys(t.upper().strip() for t in payload.tickers if t.strip()))
+    tickers = normalized[:10]
+
+    result = run_fmp_etf_holdings_check(
+        api_key=settings.fmp_api_key,
+        tickers=tickers,
+    )
+
+    logger.info(
+        "fmp_etf_holdings_check_endpoint tickers=%d verdict=%s user=%s",
+        len(tickers),
+        result.get("provider_candidate_verdict", "unknown"),
+        getattr(user, "email", "unknown"),
+    )
+    return result

@@ -37,6 +37,15 @@ from .asset_intelligence_composer_v1 import (
 
 ADAPTER_VERSION = "intel_context_adapter.v1"
 
+# ── Action-context reconciliation ────────────────────────────────────────────
+# Phrases in driver text that suggest BUY/add intent — must not appear in
+# why_this_action when existing_action is HOLD.
+_BUY_CONFLICT_PHRASES: tuple[str, ...] = (
+    "adding builds the intended portfolio sleeve",
+    "adding builds the inflation/risk hedge sleeve",
+    "fundamental analysis supports adding",
+)
+
 # ── Per-lens plain-English trigger lines ──────────────────────────────────────
 
 _ADD_MORE_TRIGGERS: dict[str, str] = {
@@ -143,7 +152,7 @@ def build_intel_context(
         return None
 
     role_lens = _build_role_lens(t, result)
-    why_this_action = _build_why_this_action(result)
+    why_this_action = _build_why_this_action(result, existing_action)
     add_more_trigger = _ADD_MORE_TRIGGERS.get(lens, "") if lens != LENS_UNKNOWN else ""
     trim_sell_trigger = _TRIM_SELL_TRIGGERS.get(lens, "") if lens != LENS_UNKNOWN else ""
     evidence_caveat = _build_evidence_caveat(result, evidence_quality_raw)
@@ -185,11 +194,17 @@ def _build_role_lens(ticker: str, result: AssetIntelligenceResult) -> str:
     return f"{ticker}: asset intelligence lens could not be applied."
 
 
-def _build_why_this_action(result: AssetIntelligenceResult) -> str:
+def _build_why_this_action(
+    result: AssetIntelligenceResult,
+    existing_action: str = "",
+) -> str:
     """Build the why-this-action text from the composer's decision drivers.
 
     For ETF/commodity lenses the first driver is the role description (shown
     separately as role_lens), so action-specific context starts at index 1.
+
+    When existing_action is HOLD, BUY-suggesting phrases are removed and
+    replaced with a HOLD-compatible candidate note to prevent action contradiction.
     """
     lens = result.lens_applied
     drivers = result.decision_drivers
@@ -207,6 +222,21 @@ def _build_why_this_action(result: AssetIntelligenceResult) -> str:
 
     # Take up to 3 drivers; join as clean sentences.
     selected = [d.strip().rstrip(".") for d in action_drivers[:3] if d and d.strip()]
+
+    # Reconcile: when existing action is HOLD, remove drivers that suggest
+    # adding/buying and append a HOLD-compatible candidate note instead.
+    if (existing_action or "").upper().strip() == "HOLD":
+        filtered = [
+            d for d in selected
+            if not any(phrase in d.lower() for phrase in _BUY_CONFLICT_PHRASES)
+        ]
+        if len(filtered) < len(selected):
+            hold_note = (
+                "Current view is HOLD, but this fund remains a candidate to add "
+                "if the portfolio sleeve stays under target and evidence improves"
+            )
+            selected = filtered + [hold_note]
+
     return ". ".join(selected) + "." if selected else ""
 
 

@@ -297,21 +297,55 @@ export function buildWhyActionExplanation(
 
 // ── Supporting / incomplete evidence sentences ────────────────────────────────
 
+/** Primary evidence lane sentence variants keyed by asset class. */
+function _primaryEvidenceSentences(assetClassDisplay?: string): {
+  ready: string;
+  partial: string;
+  blocked: string;
+  missing: string;
+} {
+  const isStock = !assetClassDisplay || assetClassDisplay === "Stock";
+  if (isStock) {
+    return {
+      ready: "Company fundamentals are available and pass quality checks.",
+      partial: "Company fundamentals are partially available.",
+      blocked: "Company fundamentals were blocked due to data quality issues.",
+      missing: "Company fundamentals are not available or insufficient.",
+    };
+  }
+  const typeLabel =
+    assetClassDisplay === "ETF" ? "Fund profile data" :
+    assetClassDisplay === "Commodity Hedge" ? "Commodity trust data" :
+    assetClassDisplay === "Crypto" ? "Crypto asset data" :
+    "Portfolio data";
+  return {
+    ready: `${typeLabel} is available and passes quality checks.`,
+    partial: `${typeLabel} is partially available.`,
+    blocked: `${typeLabel} was blocked due to data quality issues.`,
+    missing: `${typeLabel} is not available or insufficient.`,
+  };
+}
+
 /**
  * Return plain-English sentences for usable evidence lanes.
  * Used in the "Evidence supporting this" drawer section.
+ *
+ * Pass assetClassDisplay ("ETF", "Commodity Hedge", "Crypto", "Stock") to
+ * use asset-appropriate primary evidence lane language. Defaults to stock.
  */
-export function buildSupportingEvidenceSentences(ex: IntelV3EvidenceExplanation): string[] {
+export function buildSupportingEvidenceSentences(
+  ex: IntelV3EvidenceExplanation,
+  assetClassDisplay?: string,
+): string[] {
   const sentences: string[] = [];
   const fund = readinessToDisplay(ex.primary_evidence_status);
   const tech = readinessToDisplay(ex.technical_signals_status);
   const sent = readinessToDisplay(ex.sentiment_status);
+  const ev = _primaryEvidenceSentences(assetClassDisplay);
 
   if (fund.isUsable) {
     sentences.push(
-      ex.primary_evidence_status === "READY"
-        ? "Company fundamentals are available and pass quality checks."
-        : "Company fundamentals are partially available."
+      ex.primary_evidence_status === "READY" ? ev.ready : ev.partial
     );
   }
   if (tech.isUsable) {
@@ -334,19 +368,22 @@ export function buildSupportingEvidenceSentences(ex: IntelV3EvidenceExplanation)
 /**
  * Return plain-English sentences for incomplete or missing evidence lanes.
  * Used in the "What is still incomplete" drawer section.
+ *
+ * Pass assetClassDisplay ("ETF", "Commodity Hedge", "Crypto", "Stock") to
+ * use asset-appropriate primary evidence lane language. Defaults to stock.
  */
-export function buildIncompleteEvidenceSentences(ex: IntelV3EvidenceExplanation): string[] {
+export function buildIncompleteEvidenceSentences(
+  ex: IntelV3EvidenceExplanation,
+  assetClassDisplay?: string,
+): string[] {
   const sentences: string[] = [];
   const fund = readinessToDisplay(ex.primary_evidence_status);
   const tech = readinessToDisplay(ex.technical_signals_status);
   const sent = readinessToDisplay(ex.sentiment_status);
+  const ev = _primaryEvidenceSentences(assetClassDisplay);
 
   if (!fund.isUsable) {
-    sentences.push(
-      fund.isBlocked
-        ? "Company fundamentals were blocked due to data quality issues."
-        : "Company fundamentals are not available or insufficient."
-    );
+    sentences.push(fund.isBlocked ? ev.blocked : ev.missing);
   }
   if (!tech.isUsable) {
     if (tech.isBlocked) {

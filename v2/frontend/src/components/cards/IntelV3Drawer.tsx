@@ -352,8 +352,9 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   );
 
   // Evidence sections (Stage 7 active path)
-  const supportingSentences = ex ? buildSupportingEvidenceSentences(ex) : [];
-  const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex) : [];
+  const assetClass = intelCtx?.asset_class_display ?? undefined;
+  const supportingSentences = ex ? buildSupportingEvidenceSentences(ex, assetClass) : [];
+  const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex, assetClass) : [];
   const capLabel = ex ? convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason) : "";
   const safety = ex ? buildSafetyDisplay(ex) : null;
 

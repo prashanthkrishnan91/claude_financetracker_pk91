@@ -359,8 +359,13 @@ def _probe_ticker(
 def _compute_verdict(per_ticker: list[dict]) -> tuple[str, str]:
     """Compute candidate_pass / candidate_partial / candidate_fail verdict.
 
-    candidate_pass: VOO, VXUS, SCHD, XLE all return plausible holdings + weights + date.
-    candidate_partial: Some usable data but date missing, coverage weak, or not all 4 succeed.
+    candidate_pass: ALL FOUR proof tickers (VOO, SCHD, VXUS, XLE) must be probed
+    and each must have plausible_full coverage + weights_available + freshness_status=verified.
+    A subset that fully passes is candidate_partial (missing proof tickers noted in reason).
+
+    candidate_partial: Some usable data but not all 4 proof tickers probed and passing,
+    or date missing, or coverage weak.
+
     candidate_fail: Paywalled / unauthorized / no usable holdings across tickers.
     """
     _PROOF_TICKERS = {"VOO", "VXUS", "SCHD", "XLE"}
@@ -372,9 +377,7 @@ def _compute_verdict(per_ticker: list[dict]) -> tuple[str, str]:
     with_holdings = {e["ticker"] for e in per_ticker if e.get("holdings_count", 0) > 0}
 
     proof_probed = _PROOF_TICKERS & probed
-
-    # candidate_pass: all 4 proof tickers must be plausible_full + weights + date.
-    proof_pass_full = proof_probed & plausible_full & with_weights & with_date
+    missing_proof_tickers = _PROOF_TICKERS - probed
 
     # Dominant failure check.
     failed_statuses = [
@@ -390,24 +393,32 @@ def _compute_verdict(per_ticker: list[dict]) -> tuple[str, str]:
             f"No usable holdings returned. Dominant statuses: {', '.join(sorted(dominant))}.",
         )
 
-    # candidate_pass gate.
-    if proof_probed and proof_pass_full >= proof_probed:
-        return (
-            "candidate_pass",
-            f"All proof tickers ({', '.join(sorted(proof_pass_full))}) returned "
-            "plausible holdings + weights + as-of date. FMP free key passes entitlement gate.",
-        )
+    # candidate_pass gate: ALL 4 proof tickers must be probed and each must pass fully.
+    if proof_probed == _PROOF_TICKERS:
+        proof_pass_full = _PROOF_TICKERS & plausible_full & with_weights & with_date
+        if proof_pass_full == _PROOF_TICKERS:
+            return (
+                "candidate_pass",
+                f"All proof tickers ({', '.join(sorted(proof_pass_full))}) returned "
+                "plausible holdings + weights + as-of date. FMP free key passes entitlement gate.",
+            )
 
     # candidate_partial — some data but not full pass.
     reasons: list[str] = []
-    missing_plausible = proof_probed - plausible_full
-    if missing_plausible:
-        for t in sorted(missing_plausible):
-            entry = next((e for e in per_ticker if e["ticker"] == t), None)
-            if entry:
-                cq = entry.get("coverage_quality", "unknown")
-                cnt = entry.get("holdings_count", 0)
-                reasons.append(f"{t}: coverage_quality={cq} holdings_count={cnt}")
+
+    if missing_proof_tickers:
+        reasons.append(
+            f"incomplete proof set — missing tickers not yet probed: "
+            f"{', '.join(sorted(missing_proof_tickers))}"
+        )
+
+    failing_probed = proof_probed - (plausible_full & with_weights & with_date)
+    for t in sorted(failing_probed):
+        entry = next((e for e in per_ticker if e["ticker"] == t), None)
+        if entry:
+            cq = entry.get("coverage_quality", "unknown")
+            cnt = entry.get("holdings_count", 0)
+            reasons.append(f"{t}: coverage_quality={cq} holdings_count={cnt}")
     date_missing = (with_holdings & with_weights) - with_date
     if date_missing:
         reasons.append(f"as-of date missing for: {', '.join(sorted(date_missing))}")
@@ -415,11 +426,11 @@ def _compute_verdict(per_ticker: list[dict]) -> tuple[str, str]:
     if weight_missing:
         reasons.append(f"weights missing for: {', '.join(sorted(weight_missing))}")
 
-    if with_holdings:
+    if with_holdings or missing_proof_tickers:
+        reason_str = "; ".join(reasons) if reasons else "not all proof tickers probed and passing"
         return (
             "candidate_partial",
-            "Some holdings returned but full pass criteria not met: " + "; ".join(reasons) if reasons
-            else "Some holdings returned but pass criteria not met.",
+            "Some holdings returned but full pass criteria not met: " + reason_str,
         )
 
     return (

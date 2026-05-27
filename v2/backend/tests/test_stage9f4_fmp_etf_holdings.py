@@ -424,6 +424,49 @@ def test_candidate_fail_all_paywalled():
     assert result["provider_candidate_verdict"] == "candidate_fail"
 
 
+# ── 9F4-26b. One-ticker VOO success → candidate_partial (incomplete proof set) ─
+
+def test_one_ticker_success_returns_candidate_partial():
+    """Single-ticker call that passes per-ticker should NOT be candidate_pass."""
+    result = _run_check(
+        ["VOO"],
+        {"VOO": _mock_resp(200, _VOO_HOLDINGS_WITH_DATE)},
+    )
+    assert result["provider_candidate_verdict"] == "candidate_partial"
+    reason = result["provider_candidate_reason"].lower()
+    # Reason must mention the missing proof tickers.
+    assert "schd" in reason or "vxus" in reason or "xle" in reason or "missing" in reason
+
+
+def test_two_ticker_success_returns_candidate_partial():
+    """Two passing proof tickers must remain candidate_partial."""
+    result = _run_check(
+        ["VOO", "SCHD"],
+        {
+            "VOO": _mock_resp(200, _VOO_HOLDINGS_WITH_DATE),
+            "SCHD": _mock_resp(200, _SCHD_HOLDINGS_WITH_DATE),
+        },
+    )
+    assert result["provider_candidate_verdict"] == "candidate_partial"
+    reason = result["provider_candidate_reason"].lower()
+    assert "vxus" in reason or "xle" in reason or "missing" in reason
+
+
+def test_three_ticker_success_returns_candidate_partial():
+    """Three passing proof tickers must remain candidate_partial."""
+    result = _run_check(
+        ["VOO", "SCHD", "XLE"],
+        {
+            "VOO": _mock_resp(200, _VOO_HOLDINGS_WITH_DATE),
+            "SCHD": _mock_resp(200, _SCHD_HOLDINGS_WITH_DATE),
+            "XLE": _mock_resp(200, _XLE_HOLDINGS_WITH_DATE),
+        },
+    )
+    assert result["provider_candidate_verdict"] == "candidate_partial"
+    reason = result["provider_candidate_reason"].lower()
+    assert "vxus" in reason or "missing" in reason
+
+
 # ── 9F4-30. provider_id constant ─────────────────────────────────────────────
 
 def test_provider_id_constant():

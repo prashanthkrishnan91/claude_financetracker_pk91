@@ -49,6 +49,7 @@ from .etf_intelligence_classifier_v1 import (
     ETF_TYPE_CRYPTO_ETF,
     ETF_TYPE_UNKNOWN_FUND,
     EtfIntelligenceClassification,
+    _KNOWN_ETF_MAP,
     classify_etf_intelligence,
 )
 
@@ -206,6 +207,13 @@ def compose_asset_intelligence(
     provider_outs = provider_outputs or {}
 
     asset_class = _classify_asset_class(asset_type)
+
+    # Ticker-map override: known ETFs/commodity trusts must route to ETF lens.
+    # Ticker evidence is authoritative over generic category strings like "Other",
+    # "Core", or even sector names — a holding categorized as "Technology" might
+    # actually be an ETF (e.g. VGT, XLK). Known tickers always win.
+    if t in _KNOWN_ETF_MAP and asset_class != ASSET_CLASS_ETF:
+        asset_class = ASSET_CLASS_ETF
 
     if asset_class in (ASSET_CLASS_STOCK,):
         return _compose_stock(t, asset_class, pf, eq, signals)
@@ -663,12 +671,36 @@ def _compose_crypto(
 # ── Asset class helper ────────────────────────────────────────────────────────
 
 
+_STOCK_CATEGORY_LABELS: frozenset[str] = frozenset({
+    # Explicit type strings
+    "stock", "equity", "common_stock",
+    "stocks", "equities", "individual_stock", "individual stocks",
+    "security", "holding", "holdings", "ipo",
+    # Generic portfolio bucket labels (from simulation_engine._CATEGORY_BUCKET)
+    "core",
+    # Common sector/industry strings that appear in card_meta at runtime
+    "technology", "communication services", "consumer", "healthcare",
+    "financials", "industrials", "materials", "energy", "utilities",
+    "real estate", "semiconductors", "industrials/autos", "software",
+    "retail", "banking", "media", "biotech",
+})
+
+
 def _classify_asset_class(asset_type: str) -> str:
-    """Map raw asset_type string to ASSET_CLASS_* constant."""
+    """Map raw asset_type string to ASSET_CLASS_* constant.
+
+    Handles real runtime card_meta category values including sector names,
+    portfolio bucket labels, and common ETF/fund strings. Returns UNKNOWN
+    for ambiguous values (e.g. "Other") — the caller applies ticker-map
+    override as a secondary gate for known ETFs.
+    """
     normalized = (asset_type or "").lower().strip()
-    if normalized in ("etf", "fund"):
+    # ETF: exact match or substring "etf"
+    if normalized in ("etf", "fund", "bond", "bonds", "bond etf", "fixed income"):
         return ASSET_CLASS_ETF
-    if normalized in ("stock", "equity", "common_stock"):
+    if "etf" in normalized:
+        return ASSET_CLASS_ETF
+    if normalized in _STOCK_CATEGORY_LABELS:
         return ASSET_CLASS_STOCK
     if normalized in ("crypto", "cryptocurrency", "digital_asset"):
         return ASSET_CLASS_CRYPTO

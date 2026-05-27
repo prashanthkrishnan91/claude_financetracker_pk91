@@ -30,6 +30,8 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Completed
 
+- **Stage 9F.3a — Alpha Vantage ETF_PROFILE diagnostic proof endpoint** (merged PR #429, 2026-05-27). Diagnostic-only. `POST /api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check` probes 9 uncovered ETF tickers (XLE, VOO, VTI, VGT, VHT, VIS, VXUS, VYM, SCHD) via AV `ETF_PROFILE`. Returns per-ticker holdings/weights/date shape + aggregate `candidate_pass`/`partial`/`fail` verdict. `canonical_ready=False`, `safe_for_decision=False`, `artifact_writes=0` always. Injectable `http_get_fn` for CI; no live AV calls in tests. 38 fixture-based tests. No SQL, no UI, no canonical adapter.
+
 - **Stage 5E0 — Research Worker Contract Reconciliation** (PR open 2026-05-18). Bridge PR. Routes `run_earnings_reviewer_dark` through `ResearchArtifactServiceV1` so all three Stage 5B–5D assessments are injected into every worker artifact. No new workers, no Truth Adapter, no SQL. 23 new tests. All 158 Phase 3 regression tests pass.
 
 - **Stage 5D — Evidence Completeness Scoring v1** (merged PR #371, 2026-05-18). Pure deterministic backend module. Evaluates 8 requirements (present/missing/not_applicable) and assigns COMPLETE/PARTIAL/THIN/NOT_EVALUABLE band. No numeric 0–100 scores. Consumes Stage 5B credibility and Stage 5C contradiction assessments. `evidence_completeness_assessment` injected into every new artifact payload as Step 6 in `write_artifact()`. Hard rules: editorial-only/UNKNOWN-only → THIN, contradictions → PARTIAL, non-comparable → THIN. 49 tests. No SQL.
@@ -105,7 +107,7 @@ Update via `.claude/skills/build-queue-update/SKILL.md` after meaningful roadmap
 
 ## Validation Needed
 
-- _none recorded_
+- **Stage 9F.3a post-deploy diagnostic run** — Run `POST /api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check` once after Railway deploy. Interpret `candidate_pass` / `candidate_partial` / `candidate_fail`. Result determines whether to build `alpha_vantage_etf_holdings_adapter_v1` (pass/partial) or evaluate alternative providers (fail). Do not run more than once per day on the free AV tier.
 
 ## Design Pause Candidates
 

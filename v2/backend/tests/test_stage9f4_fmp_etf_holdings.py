@@ -10,6 +10,9 @@ Coverage:
   9F4-05. VOO-like response but no weights → weights_available=False, limitation noted.
   9F4-06. VXUS-like low holdings (30) → partial_or_suspicious coverage quality.
   9F4-07. HTTP 403 response → fetch_status=paywalled.
+  9F4-07b. HTTP 402 response → fetch_status=paywalled (Payment Required = plan-gated).
+  9F4-07c. HTTP 402 with body message → provider_message_snippet set, API key not leaked.
+  9F4-07d. HTTP 402 → candidate_fail reason mentions paywalled, not generic error.
   9F4-08. HTTP 401 response → fetch_status=unauthorized.
   9F4-09. HTTP 429 response → fetch_status=rate_limited.
   9F4-10. Provider error message with paywall keyword → classified as paywalled.
@@ -223,6 +226,34 @@ def test_http_403_classified_as_paywalled():
     pt = result["per_ticker"][0]
     assert pt["fetch_status"] == "paywalled"
     assert pt["http_status"] == 403
+
+
+# ── 9F4-07b/c/d. HTTP 402 → paywalled ───────────────────────────────────────
+
+def test_http_402_classified_as_paywalled():
+    result = _run_check(["VOO"], {"VOO": _mock_resp(402)})
+    pt = result["per_ticker"][0]
+    assert pt["fetch_status"] == "paywalled"
+    assert pt["http_status"] == 402
+
+
+def test_http_402_with_body_message_sets_snippet_and_no_key_leak():
+    resp = _mock_resp(402, body={"message": f"Payment Required. Upgrade your plan. key={_FAKE_API_KEY}"})
+    result = _run_check(["VOO"], {"VOO": resp})
+    pt = result["per_ticker"][0]
+    assert pt["fetch_status"] == "paywalled"
+    assert pt["provider_message_snippet"] is not None
+    assert _FAKE_API_KEY not in (pt["provider_message_snippet"] or "")
+    assert not _contains_key(result, _FAKE_API_KEY)
+
+
+def test_http_402_candidate_fail_reason_mentions_paywalled():
+    result = _run_check(
+        ["VOO", "SCHD", "XLE", "VXUS"],
+        {t: _mock_resp(402) for t in ["VOO", "SCHD", "XLE", "VXUS"]},
+    )
+    assert result["provider_candidate_verdict"] == "candidate_fail"
+    assert "paywalled" in result["provider_candidate_reason"].lower()
 
 
 # ── 9F4-08. HTTP 401 → unauthorized ──────────────────────────────────────────

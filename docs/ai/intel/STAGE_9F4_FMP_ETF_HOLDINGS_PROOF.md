@@ -2,6 +2,40 @@
 
 **Decision artifact — diagnostic proof endpoint only. No canonical adapter built.**
 
+## Stage 9F.4b — Live proof result (2026-05-27)
+
+### VOO live result
+
+| Field | Value |
+|---|---|
+| ticker | VOO |
+| fetch_status | **paywalled** (was `error` before Stage 9F.4b HTTP 402 fix) |
+| http_status | 402 (Payment Required) |
+| holdings_count | 0 |
+| weights_available | false |
+| freshness_status | unknown |
+| coverage_quality | no_holdings |
+| provider_candidate_verdict | **candidate_fail** |
+| provider_candidate_reason | No usable holdings returned. Dominant statuses: paywalled. |
+
+### Proof verdict: candidate_fail (FMP free key is paywalled for ETF holdings)
+
+FMP `/stable/etf/holdings` returns HTTP 402 (Payment Required) for the free API key.
+The endpoint is not available on the FMP free plan. No remaining proof tickers (SCHD,
+VXUS, XLE) should be run — they will produce the same 402 response.
+
+**Do not run the full proof sequence** unless entitlement has changed (e.g. upgraded
+to a paid FMP plan). A single VOO call is sufficient to confirm the plan gate.
+
+### Next provider decision
+
+- FMP free tier is **not viable** for ETF holdings — paywalled at the `/stable/etf/holdings` endpoint.
+- FMP paid tier may work, but cost must be justified before evaluating.
+- Next candidates: Intrinio, ETF Global / Massive Financial, or EODHD (see Stage 9F.2c findings).
+- Do not build a canonical FMP adapter under the current free key.
+
+---
+
 ## Purpose
 
 Stage 9F.4 tests whether the FMP (Financial Modeling Prep) free API key can return
@@ -14,7 +48,7 @@ The result determines whether FMP is a viable candidate for a future canonical E
 holdings adapter. This is a **proof gate only** — no canonical adapter is built here.
 
 Alpha Vantage (Stage 9F.3c) was ruled out as supplemental-only due to missing as-of
-dates and incomplete VXUS coverage. FMP is the next candidate.
+dates and incomplete VXUS coverage. FMP was the next candidate.
 
 ---
 

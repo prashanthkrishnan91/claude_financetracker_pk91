@@ -168,8 +168,8 @@ def _probe_ticker(
 
         if http_status == 401:
             fetch_status = "unauthorized"
-        elif http_status == 403:
-            # FMP uses 403 for plan-gated endpoints (paywall).
+        elif http_status in (402, 403):
+            # FMP uses 402 (Payment Required) and 403 for plan-gated endpoints.
             fetch_status = "paywalled"
             try:
                 body = resp.json()

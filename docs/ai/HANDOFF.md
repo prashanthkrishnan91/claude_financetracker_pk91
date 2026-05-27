@@ -1,13 +1,13 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9G/9H — ETF Intelligence Lens + Unified Asset Decision Composer; open PR).
+Last updated: 2026-05-27 (Stage 9G/9H — ETF Intelligence Lens + Unified Asset Decision Composer; merged PR #435).
 
 **Stage 9F summary (all merged):** SEC NPORT safe but insufficient; issuer-official CSV URLs blocked; AV supplemental-only (no as-of date); FMP free tier paywalled (HTTP 402). No canonical ETF holdings provider. Provider proof loop complete — do not retry FMP or build a canonical AV/FMP adapter.
 
-**Stage 9G/9H (current PR, open):** ETF Intelligence Classifier + Unified Asset Decision Composer.
-- `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe.
+**Stage 9G/9H (merged PR #435):** ETF Intelligence Classifier + Unified Asset Decision Composer.
+- `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe. Accepts real Stage 9F field names: NPORT `report_period_date`, FMP `as_of_date_or_date_field`.
 - `asset_intelligence_composer_v1.py`: unified lens router; routes stock→stock_fundamental_lens, ETF→etf_role_lens, GLD→commodity_hedge_lens, crypto→crypto_speculative_lens. HOLD always has explicit reason code. Weak data produces blocked_reason+None action, not silent HOLD.
-- 83 new fixture tests. No SQL, no providers, no LLM, no UI changes.
+- 97 fixture tests (83 original + 14 real-shape Stage 9F compatibility). No SQL, no providers, no LLM, no UI changes.
 - See `docs/ai/intel/STAGE_9G_9H_ASSET_INTELLIGENCE_COMPOSER.md` for full spec.
 
 **Live proof results (Stage 9F.3c):**
@@ -46,9 +46,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
-- Current PR: Stage 9G/9H — ETF Intelligence Classifier + Unified Asset Decision Composer (open).
-- Next after merge: wire composer output into a diagnostic endpoint (read-only, default-off flag). Do not pursue new ETF holdings providers until composer is validated in production logs.
+- Roadmap stage: **Stage 9G/9H** merged — ETF Intelligence Lens + Unified Asset Decision Composer complete.
+- Current PR: none open.
+- Next: wire composer output into a diagnostic endpoint (read-only, default-off flag). Do not pursue new ETF holdings providers until composer is validated in production logs.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

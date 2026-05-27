@@ -1,14 +1,21 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9G/9H — ETF Intelligence Lens + Unified Asset Decision Composer; merged PR #435).
+Last updated: 2026-05-27 (Stage 9I — Visible Intel Useful Action Cards v1; PR open).
 
-**Stage 9F summary (all merged):** SEC NPORT safe but insufficient; issuer-official CSV URLs blocked; AV supplemental-only (no as-of date); FMP free tier paywalled (HTTP 402). No canonical ETF holdings provider. Provider proof loop complete — do not retry FMP or build a canonical AV/FMP adapter.
+**Stage 9I (current PR):** Wires the Stage 9G/9H asset intelligence composer into the Intel card data flow.
+- `intel_context_adapter_v1.py` (new): pure adapter; calls `compose_asset_intelligence()` per card; returns a safe serializable dict (role_lens, why_this_action, add_more_trigger, trim_sell_trigger, evidence_caveat, lens_applied). Explanatory only — existing visible action never overridden.
+- `snapshot_builder.py` (modified): calls `build_intel_context()` in `_build_held_card()`; embeds result as `asset_intelligence_context` in `detail_drawer_payload`.
+- Frontend: `IntelV3Card` shows role-lens compact line (ETF/commodity only); uses composer `why_this_action` when `why_text` is empty. `IntelV3Drawer` renders `AssetIntelSection` (Role/Lens, Why this action, Add more if, Trim/Sell if, evidence caveat). `api.ts` adds `asset_intelligence_context` optional field to `detail_drawer_payload`.
+- 101 new backend tests in `test_stage9i_intel_context_adapter.py`. No SQL, no providers, no LLM.
+- Hard constraints preserved: safe_for_decision never True, existing action never overridden, no raw metrics in UI.
 
 **Stage 9G/9H (merged PR #435):** ETF Intelligence Classifier + Unified Asset Decision Composer.
 - `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe. Accepts real Stage 9F field names: NPORT `report_period_date`, FMP `as_of_date_or_date_field`.
 - `asset_intelligence_composer_v1.py`: unified lens router; routes stock→stock_fundamental_lens, ETF→etf_role_lens, GLD→commodity_hedge_lens, crypto→crypto_speculative_lens. HOLD always has explicit reason code. Weak data produces blocked_reason+None action, not silent HOLD.
 - 97 fixture tests (83 original + 14 real-shape Stage 9F compatibility). No SQL, no providers, no LLM, no UI changes.
 - See `docs/ai/intel/STAGE_9G_9H_ASSET_INTELLIGENCE_COMPOSER.md` for full spec.
+
+**Stage 9F summary (merged):** SEC NPORT safe but insufficient; issuer-official CSV URLs blocked; AV supplemental-only (no as-of date); FMP free tier paywalled (HTTP 402). No canonical ETF holdings provider. Provider proof loop complete — do not retry FMP or build a canonical AV/FMP adapter.
 
 **Live proof results (Stage 9F.3c):**
 
@@ -46,9 +53,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9G/9H** merged — ETF Intelligence Lens + Unified Asset Decision Composer complete.
-- Current PR: none open.
-- Next: wire composer output into a diagnostic endpoint (read-only, default-off flag). Do not pursue new ETF holdings providers until composer is validated in production logs.
+- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (current PR, open).
+- Current PR: Stage 9I — wiring composer into Intel card UI.
+- Next after merge: validate in production that ETF/GLD/stock cards render role_lens + why_this_action + triggers correctly. Then consider activating ETF role-based BUY suggestions for portfolio fit signals when target-weight data is reliable.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

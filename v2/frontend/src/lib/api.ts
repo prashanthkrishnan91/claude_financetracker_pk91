@@ -1215,6 +1215,17 @@ export interface IntelV3HeldCard {
     committee: { status: "deferred" | "ready" | "source_validated" | "pending"; reason?: string };
     /** Stage 7C — evidence explanation. Always present: real from Stage 6 governance, or synthetic from decision band. */
     evidence_explanation?: IntelV3EvidenceExplanation | null;
+    /** Stage 9I — asset intelligence context from composer. Explanatory only; never overrides visible action. */
+    asset_intelligence_context?: {
+      role_lens: string;
+      why_this_action: string;
+      add_more_trigger: string;
+      trim_sell_trigger: string;
+      evidence_caveat?: string | null;
+      lens_applied: string;
+      asset_class_display: string;
+      adapter_version: string;
+    } | null;
   };
 }
 

@@ -1,41 +1,40 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9F.3b — Alpha Vantage diagnostic result clarity patch).
+Last updated: 2026-05-27 (Stage 9F.3c — Alpha Vantage proof complete; supplemental-only provider decision recorded).
 
 **Stage 9F.2b (merged PR #425):** SEC NPORT safe but insufficient; ETF holdings provider registry v1 built.
 **Stage 9F.2c (merged):** All issuer-official CSV/download URLs blocked (403/404). `issuer_official_selected_count=0`. GLD: commodity path.
 **Stage 9F.3a (merged PR #429):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic endpoint built.
-**Stage 9F.3b (current PR):** Diagnostic result clarity patch — `provider_message_snippet` per ticker, sub-classification of Information responses, single-ticker retest docs.
+**Stage 9F.3b (merged PR #430):** Diagnostic result clarity — `provider_message_snippet` per ticker (200 chars, API key redacted), `_classify_information_message()` sub-classifies Information/Error Message, 19 fixture tests.
+**Stage 9F.3c (current PR):** Live proof findings recorded; AV formally classified as supplemental-only (not canonical). `alpha_vantage_supplemental_classifier_v1.py` added; 25 new fixture tests; STAGE_9F3_ALPHA_VANTAGE_PROOF.md updated with final decision.
 
-**First run result (post-PR #429 deploy):** `candidate_partial`. XLE returned 24 holdings + weights but no as-of date. VOO, VTI, VGT, VHT, VIS, VXUS, VYM, SCHD all returned `Information` response with 0 holdings. The actual Information message text was not captured (snippet field was absent). Cannot distinguish quota exhaustion vs entitlement vs coverage gap without the message.
+**Live proof results (Stage 9F.3c):**
 
-**Stage 9F.3b fixes:**
-- `provider_message_snippet` field added to per-ticker result (capped 200 chars, API key redacted).
-- `Information` / `Error Message` sub-classified: `rate_limited` (daily/per-minute limit keywords) | `entitlement_or_premium_required` (premium/subscription keywords) | `provider_note` (fallback).
-- 16 new tests in `test_stage9f3b_alpha_vantage_diagnostic_clarity.py`. 9F3a-10 test updated to use a generic Information message. All 54 tests pass.
+| Ticker | holdings_count | weights | as-of date | coverage_quality |
+|---|---|---|---|---|
+| XLE | 24 | ✓ | absent | usable_supplemental |
+| VOO | 519 | ✓ | absent | usable_supplemental |
+| SCHD | 103 | ✓ | absent | usable_supplemental |
+| VXUS | 37 | ✓ | absent | partial_or_suspicious |
 
-**Files modified (Stage 9F.3b):**
-- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_etf_profile_runner_v1.py`: `_RATE_LIMIT_KEYWORDS`, `_ENTITLEMENT_KEYWORDS`, `_classify_information_message()`, snippet cap 200, snippet redaction, `provider_message_snippet` in entry dict.
-- `v2/backend/tests/test_stage9f3a_alpha_vantage_etf_profile.py`: 9F3a-10 message updated to generic.
-- `v2/backend/tests/test_stage9f3b_alpha_vantage_diagnostic_clarity.py`: 16 new tests.
-- `docs/ai/intel/STAGE_9F3_ALPHA_VANTAGE_PROOF.md`: First run result + single-ticker retest instructions.
+VOO, VTI, VGT, VHT, VIS, VYM required a premium/paid AV plan (free tier returned `entitlement_or_premium_required` on second run after 9F.3b was deployed).
 
-**Config flags (unchanged from 9F.3a):**
+**Provider decision (final):**
+- Alpha Vantage ETF_PROFILE is **not canonical** — every response is missing as-of date; VXUS returned only 37 holdings for a fund with thousands of positions; fund_name was null in several responses.
+- Accepted **only as supplemental exposure evidence** (non-canonical). Do NOT wire into visible decisions, synthesis, Deploy, or Watchtower.
+- Next: if canonical S-grade ETF holdings are required, evaluate a paid/full provider separately (Intrinio, FMP paid tier, ETF Global/Massive Financial). Do not build a canonical AV adapter.
+
+**New files (Stage 9F.3c):**
+- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_supplemental_classifier_v1.py`: `classify_av_etf_output()` — pure no-IO classifier; always returns `canonical_ready=False`, `safe_for_decision=False`.
+- `v2/backend/tests/test_stage9f3c_av_supplemental_classifier.py`: 25 fixture tests. All 82 tests pass.
+
+**Config flags (unchanged):**
 - `intel_v3_alpha_vantage_etf_profile_diagnostics_enabled` (default False)
 - `alpha_vantage_api_key` (Optional[str]) — never logged or returned
 
-**Endpoint:** `POST /api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check` (cert-gated).
-
-**Next operator run — single ticker first** (after quota resets at midnight UTC):
-```bash
-curl -X POST https://<railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \
-  -H "Content-Type: application/json" \
-  -H "X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>" \
-  -d '{"tickers": ["VOO"]}'
-```
-Inspect `per_ticker[0].fetch_status` + `per_ticker[0].provider_message_snippet`. Do NOT run the full 9-ticker default until the Information message reason is known.
-
 **Invariants preserved:** `canonical_ready=False`, `safe_for_decision=False`, `artifact_writes=0`, `decision_policy_changed=False`, `synthesis_ready_changed=False`, `visible_snapshot_unchanged=True`. API key never in any returned field.
+
+**Next step:** Product decision — evaluate a paid/full ETF holdings provider (Intrinio, FMP paid, ETF Global/Massive) or accept supplemental-only exposure diagnostics and move to the next roadmap stage.
 
 ## Purpose
 
@@ -44,9 +43,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
-- Current PR: Stage 9F.3b — Alpha Vantage diagnostic result clarity patch (this PR).
-- First run result (post-PR #429): `candidate_partial`. XLE 24 holdings + no date; all Vanguard + SCHD → Information / 0 holdings. Message text not captured — reason unknown (quota vs entitlement vs coverage gap).
-- Next step: deploy 9F.3b, then run single-ticker `{"tickers": ["VOO"]}` after quota reset. Inspect `fetch_status` + `provider_message_snippet` to determine root cause before running full 9-ticker set again.
+- Current state: Stage 9F.3c merged. Alpha Vantage proof complete. AV is supplemental-only, not canonical. Final verdict: `candidate_partial` (date missing on all tickers; VXUS partial coverage).
+- Next step: product decision — evaluate paid/full ETF holdings provider for canonical S-grade coverage (Intrinio, FMP paid, ETF Global/Massive) or defer canonical ETF holdings and proceed to next roadmap stage.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

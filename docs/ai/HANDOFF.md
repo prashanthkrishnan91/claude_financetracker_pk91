@@ -1,14 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9F.4 — FMP ETF holdings free-key entitlement proof gate built; awaiting live proof run).
+Last updated: 2026-05-27 (Stage 9G/9H — ETF Intelligence Lens + Unified Asset Decision Composer; open PR).
 
-**Stage 9F.2b (merged PR #425):** SEC NPORT safe but insufficient; ETF holdings provider registry v1 built.
-**Stage 9F.2c (merged):** All issuer-official CSV/download URLs blocked (403/404). `issuer_official_selected_count=0`. GLD: commodity path.
-**Stage 9F.3a (merged PR #429):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic endpoint built.
-**Stage 9F.3b (merged PR #430):** Diagnostic result clarity — `provider_message_snippet` per ticker (200 chars, API key redacted), `_classify_information_message()` sub-classifies Information/Error Message, 19 fixture tests.
-**Stage 9F.3c (merged PR #431):** Live proof findings recorded; AV formally classified as supplemental-only (not canonical). `alpha_vantage_supplemental_classifier_v1.py` added; 25 new fixture tests; STAGE_9F3_ALPHA_VANTAGE_PROOF.md updated with final decision.
-**Stage 9F.4 (merged PR #432):** FMP ETF holdings free-key proof gate built and live proof run completed. `POST /api/v1/diagnostics/finance-intel/fmp-etf-holdings-check`. VOO live result: HTTP 402 (Payment Required) → `fetch_status=paywalled`, `candidate_fail`. FMP free tier is paywalled for `/stable/etf/holdings`. Do not run remaining proof tickers (SCHD/VXUS/XLE) — same 402 expected.
-**Stage 9F.4b (current PR, open):** HTTP 402 classified as `paywalled` (was `error`). 3 new fixture tests. Docs updated with live proof findings and next-provider guidance.
+**Stage 9F summary (all merged):** SEC NPORT safe but insufficient; issuer-official CSV URLs blocked; AV supplemental-only (no as-of date); FMP free tier paywalled (HTTP 402). No canonical ETF holdings provider. Provider proof loop complete — do not retry FMP or build a canonical AV/FMP adapter.
+
+**Stage 9G/9H (current PR, open):** ETF Intelligence Classifier + Unified Asset Decision Composer.
+- `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe.
+- `asset_intelligence_composer_v1.py`: unified lens router; routes stock→stock_fundamental_lens, ETF→etf_role_lens, GLD→commodity_hedge_lens, crypto→crypto_speculative_lens. HOLD always has explicit reason code. Weak data produces blocked_reason+None action, not silent HOLD.
+- 83 new fixture tests. No SQL, no providers, no LLM, no UI changes.
+- See `docs/ai/intel/STAGE_9G_9H_ASSET_INTELLIGENCE_COMPOSER.md` for full spec.
 
 **Live proof results (Stage 9F.3c):**
 
@@ -47,8 +47,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
-- Current PR: Stage 9F.4b — HTTP 402 fix + live proof findings (open). FMP free key is paywalled (HTTP 402). `candidate_fail`.
-- Next after merge: evaluate next ETF holdings provider candidate (Intrinio / ETF Global / EODHD). Do not retry FMP free key or run remaining proof tickers. Do not build a canonical FMP adapter.
+- Current PR: Stage 9G/9H — ETF Intelligence Classifier + Unified Asset Decision Composer (open).
+- Next after merge: wire composer output into a diagnostic endpoint (read-only, default-off flag). Do not pursue new ETF holdings providers until composer is validated in production logs.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

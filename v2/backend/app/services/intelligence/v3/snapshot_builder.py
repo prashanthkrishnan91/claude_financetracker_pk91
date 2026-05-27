@@ -216,12 +216,30 @@ def _build_held_card(
 
     # Stage 9I: asset intelligence context — explanatory only.
     # Existing visible action is preserved; composer output is context only.
+    #
+    # Extract Stage 9F provider outputs and portfolio upstream signals when present.
+    # These are not yet populated (Stage 9F NPORT lane is off; portfolio overlap/cost
+    # signals are not computed) — extracting them here means the wiring is ready for
+    # when intel_v3_service.py begins writing these keys into card_meta.
+    #
+    # TODO(Stage 9F wiring): populate `etf_provider_outputs` and `etf_upstream_signals`
+    #   in card_metas inside intel_v3_service.py once:
+    #     (a) intel_v3_nport_evidence_enabled=True and NPORT holdings are available, and
+    #     (b) portfolio-level overlap/cost/redundancy signals are computed per ticker.
+    #   Key shape:
+    #     etf_provider_outputs: {nport_output, av_output, fmp_output, canonical_etf_row}
+    #     etf_upstream_signals: {is_redundant_etf, role_mismatch, structurally_inferior,
+    #                            cost_elevated, concentration_risk}
+    _provider_outputs = card_meta.get("etf_provider_outputs") or None
+    _upstream_signals = card_meta.get("etf_upstream_signals") or None
     asset_intel_ctx = build_intel_context(
         ticker=card_meta.get("ticker", ""),
         asset_type=card_meta.get("category", "stock"),
         portfolio_fit_raw=decision.portfolio_fit.value,
         evidence_quality_raw=decision.evidence_quality.value,
         existing_action=action,
+        provider_outputs=_provider_outputs,
+        upstream_signals=_upstream_signals,
     )
 
     return {

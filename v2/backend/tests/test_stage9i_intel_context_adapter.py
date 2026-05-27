@@ -655,3 +655,118 @@ class TestSnapshotBuilderIntegration:
         card = snap["current_holdings"][0]
         ctx = card["detail_drawer_payload"]["asset_intelligence_context"]
         assert ctx["lens_applied"] == LENS_COMMODITY_HEDGE
+
+
+# ── 9I-21/22/23/24: Provider-wiring honesty ──────────────────────────────────
+
+
+class TestSnapshotBuilderProviderWiring:
+    """Snapshot builder passes etf_provider_outputs/etf_upstream_signals from
+    card_meta when present, and degrades honestly to role-only when absent.
+
+    Stage 9F NPORT lane is currently off — these fields are not yet populated
+    in card_meta. Tests here prove forward-compatible extraction and honest
+    degradation under today's no-provider-data baseline.
+    """
+
+    def _make_decision(self, action: str = "HOLD", evidence_quality: str = "OK"):
+        from app.services.intelligence.v3.decision_contracts import (
+            ActionV3, AxisBand, ConvictionV3, DecisionOutputV3,
+            FitBand, RiskBand, PriceBand,
+        )
+        return DecisionOutputV3(
+            ticker="TEST",
+            action=ActionV3[action],
+            conviction=ConvictionV3.MEDIUM,
+            evidence_quality=AxisBand[evidence_quality],
+            portfolio_fit=FitBand.UNKNOWN,
+            risk_band=RiskBand.LOW,
+            price_context=PriceBand.SUPPRESSED,
+            attractiveness=AxisBand.OK,
+            rationale_plain_english="Holding at current level.",
+            why_now="",
+            why_not_now="",
+            blockers=[],
+            suppression_reasons={},
+            source_signal_summary={},
+            schema_version="v3.1",
+        )
+
+    # 9I-21: provider_outputs flow through when present in card_meta
+    def test_nport_provider_outputs_flow_through_to_etf_context(self):
+        """When card_meta includes etf_provider_outputs with a valid nport result,
+        the context reflects holdings-tier evidence language."""
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        meta = {
+            "ticker": "VOO",
+            "name": "VOO",
+            "category": "etf",
+            "etf_provider_outputs": {
+                "nport_output": {
+                    "fetch_status": "ok",
+                    "holdings_count": 10,
+                    "weights_available": True,
+                    "report_period_date": "2024-12-31",
+                    "coverage_quality": "plausible",
+                },
+            },
+        }
+        snap = build_snapshot(run_id="test-run", decisions=[self._make_decision()], card_metas=[meta])
+        card = snap["current_holdings"][0]
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        assert ctx["lens_applied"] == LENS_ETF_ROLE
+        # holdings-tier evidence is surfaced in why_this_action
+        assert "holdings" in ctx["why_this_action"].lower() or "overlap" in ctx["why_this_action"].lower()
+        assert "safe_for_decision" not in ctx
+        assert "synthesis_ready" not in ctx
+
+    # 9I-22: no provider_outputs → role-only context, no fake holdings/overlap claim
+    def test_missing_provider_outputs_degrades_to_role_only(self):
+        """When card_meta has no etf_provider_outputs, context must degrade to
+        role-only and must not claim holdings or overlap safety."""
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        meta = {"ticker": "VOO", "name": "VOO", "category": "etf"}
+        snap = build_snapshot(run_id="test-run", decisions=[self._make_decision()], card_metas=[meta])
+        card = snap["current_holdings"][0]
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        assert ctx["lens_applied"] == LENS_ETF_ROLE
+        serialised = str(ctx).lower()
+        assert "holdings_ready" not in serialised
+        assert "overlap_safe" not in serialised
+        assert "safe_for_decision" not in ctx
+        assert "synthesis_ready" not in ctx
+
+    # 9I-23: upstream_signals redundancy flag surfaces in context
+    def test_upstream_signals_redundancy_surfaces_in_etf_context(self):
+        """When etf_upstream_signals carries is_redundant_etf=True, the duplicate-
+        exposure driver appears in why_this_action or trim_sell_trigger."""
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        meta = {
+            "ticker": "VOO",
+            "name": "VOO",
+            "category": "etf",
+            "etf_upstream_signals": {"is_redundant_etf": True},
+        }
+        snap = build_snapshot(run_id="test-run", decisions=[self._make_decision()], card_metas=[meta])
+        card = snap["current_holdings"][0]
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        combined = (ctx["why_this_action"] + ctx["trim_sell_trigger"]).lower()
+        assert "duplicate" in combined or "redundant" in combined or "another holding" in combined
+
+    # 9I-24: unknown ETF with no provider data → no fake holdings claim
+    def test_unknown_etf_no_provider_outputs_no_fake_confidence(self):
+        """An unrecognised ETF ticker with no card_meta provider outputs must not
+        claim holdings analysis capability, overlap safety, or safe_for_decision."""
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        meta = {"ticker": "UNKNETF", "name": "Unknown ETF", "category": "etf"}
+        snap = build_snapshot(run_id="test-run", decisions=[self._make_decision()], card_metas=[meta])
+        card = snap["current_holdings"][0]
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        if ctx is not None:
+            serialised = str(ctx).lower()
+            assert "holdings_ready" not in serialised
+            assert "overlap_safe" not in serialised
+            assert "safe_for_decision" not in ctx

@@ -158,6 +158,16 @@ class Settings(BaseSettings):
     # Required for any FRED macro lane call. If unset, the macro lane skips honestly.
     fred_api_key: Optional[str] = None
 
+    # ── Stage 9F.3a — Alpha Vantage ETF_PROFILE diagnostic (off by default) ────
+    # When True, enables POST /diagnostics/finance-intel/alpha-vantage-etf-profile-check.
+    # Cert-gated. Diagnostic-only: no artifact writes, no decision mutations.
+    # canonical_ready=False always. ALPHA_VANTAGE_API_KEY required — fails closed if unset.
+    # Do not run more than once per day on free tier to avoid burning quota.
+    intel_v3_alpha_vantage_etf_profile_diagnostics_enabled: bool = False
+    # Alpha Vantage API key — required for ETF_PROFILE diagnostic.
+    # Never logged or returned in any API response.
+    alpha_vantage_api_key: Optional[str] = None
+
     # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
     # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
     # to produce provider-backed, source-linked, freshness-classified artifacts.

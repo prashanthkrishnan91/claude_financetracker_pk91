@@ -296,8 +296,22 @@ def _derive_evidence_tier(
     return ETF_TIER_METADATA_ONLY
 
 
+def _extract_date_field(d: dict[str, Any], *keys: str) -> Optional[str]:
+    """Return the first non-empty string found for any of the given keys."""
+    for k in keys:
+        v = d.get(k)
+        if v and isinstance(v, str):
+            return v
+    return None
+
+
 def _nport_is_holdings_ready(nport: dict[str, Any]) -> bool:
-    """NPORT result meets holdings_ready threshold."""
+    """NPORT result meets holdings_ready threshold.
+
+    Accepts the real Stage 9F etf_nport_adapter_v1.py output shape which
+    uses ``report_period_date`` (not ``as_of_date``).  Tolerates either key
+    so callers passing a generic dict with ``as_of_date`` also work.
+    """
     if not nport:
         return False
     fetch_status = (nport.get("fetch_status") or "").lower()
@@ -305,7 +319,8 @@ def _nport_is_holdings_ready(nport: dict[str, Any]) -> bool:
         return False
     holdings_count = nport.get("holdings_count", 0) or 0
     weights = bool(nport.get("weights_available", False))
-    as_of = nport.get("as_of_date")
+    # Real NPORT payload uses report_period_date; accept as_of_date as fallback.
+    as_of = _extract_date_field(nport, "report_period_date", "as_of_date")
     if holdings_count < 5 or not weights or not as_of:
         return False
     # Partial/suspicious coverage is never holdings_ready.
@@ -316,7 +331,13 @@ def _nport_is_holdings_ready(nport: dict[str, Any]) -> bool:
 
 
 def _fmp_is_holdings_ready(fmp: dict[str, Any]) -> bool:
-    """FMP result meets holdings_ready threshold (non-paywalled scenario)."""
+    """FMP result meets holdings_ready threshold (non-paywalled scenario).
+
+    Accepts the real Stage 9F fmp_etf_holdings_runner_v1.py output shape
+    which uses ``as_of_date_or_date_field`` (not ``as_of_date``).  Also
+    accepts ``report_period_date`` and ``as_of_date`` as fallbacks so fixture
+    tests and future callers remain compatible.
+    """
     if not fmp:
         return False
     fetch_status = (fmp.get("fetch_status") or "").lower()
@@ -324,7 +345,10 @@ def _fmp_is_holdings_ready(fmp: dict[str, Any]) -> bool:
         return False
     holdings_count = fmp.get("holdings_count", 0) or 0
     weights = bool(fmp.get("weights_available", False))
-    as_of = fmp.get("as_of_date")
+    # Real FMP payload uses as_of_date_or_date_field; accept alternatives.
+    as_of = _extract_date_field(
+        fmp, "as_of_date_or_date_field", "as_of_date", "report_period_date"
+    )
     if holdings_count < 5 or not weights or not as_of:
         return False
     coverage = (fmp.get("coverage_quality") or "").lower()

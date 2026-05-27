@@ -949,3 +949,216 @@ class TestRoleDescription:
         desc = result.role_description
         assert len(desc) > 20, f"Role description too short for {ticker}"
         assert desc.strip() != "", f"Role description empty for {ticker}"
+
+
+# ── Stage 9F real-shape provider compatibility tests ─────────────────────────
+# These tests use actual field names from Stage 9F provider outputs.
+
+def _fmp_real_shape_success(holdings_count: int = 200, has_date: bool = True) -> dict:
+    """FMP output using the real as_of_date_or_date_field key from fmp_etf_holdings_runner_v1."""
+    return {
+        "fetch_status": "success",
+        "http_status": 200,
+        "holdings_count": holdings_count,
+        "weights_available": True,
+        "as_of_date_or_date_field": "2026-03-31" if has_date else None,
+        "coverage_quality": "plausible_full",
+        "freshness_status": "FRESH",
+        "limitations": [],
+    }
+
+
+def _fmp_real_shape_paywalled() -> dict:
+    """FMP paywalled output (HTTP 402) from fmp_etf_holdings_runner_v1."""
+    return {
+        "fetch_status": "paywalled",
+        "http_status": 402,
+        "holdings_count": 0,
+        "weights_available": False,
+        "as_of_date_or_date_field": None,
+        "coverage_quality": "no_holdings",
+        "limitations": ["paywalled"],
+    }
+
+
+def _nport_real_shape_success(holdings_count: int = 500, has_date: bool = True) -> dict:
+    """NPORT output using the real report_period_date key from etf_nport_adapter_v1."""
+    return {
+        "fetch_status": "success",
+        "holdings_count": holdings_count,
+        "weights_available": True,
+        "weights_derived": True,
+        "report_period_date": "2026-03-31" if has_date else None,
+        "filing_date": "2026-05-01",
+        "coverage_quality": "plausible_full",
+        "total_reported_value_present": True,
+    }
+
+
+def _nport_real_shape_partial(holdings_count: int = 37) -> dict:
+    """NPORT with partial/suspicious coverage — never holdings_ready."""
+    return {
+        "fetch_status": "success",
+        "holdings_count": holdings_count,
+        "weights_available": True,
+        "report_period_date": "2026-03-31",
+        "coverage_quality": "partial_or_suspicious",
+    }
+
+
+class TestRealStage9FFieldNames:
+    """Verify classifier accepts actual Stage 9F provider output field shapes."""
+
+    def test_fmp_real_shape_holdings_ready(self):
+        """FMP success with as_of_date_or_date_field → holdings_ready."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_success()},
+        )
+        assert result.evidence_tier == ETF_TIER_HOLDINGS_READY
+
+    def test_fmp_real_shape_holdings_ready_overlap_safe(self):
+        """FMP holdings_ready via real field name → overlap analysis becomes safe."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_success()},
+        )
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is True
+        assert result.safety_flags[FLAG_SAFE_FOR_CONCENTRATION_ANALYSIS] is True
+
+    def test_fmp_real_shape_no_date_not_holdings_ready(self):
+        """FMP success but as_of_date_or_date_field=None → profile_ready at most."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_success(has_date=False)},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is False
+
+    def test_fmp_real_shape_paywalled_not_holdings_ready(self):
+        """FMP paywalled (HTTP 402) with real field shape → not holdings_ready."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_paywalled()},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is False
+
+    def test_fmp_real_shape_paywalled_governance_invariant(self):
+        """FMP paywalled real shape → safe_for_decision always False."""
+        result = classify_etf_intelligence(
+            ticker="SPY",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_paywalled()},
+        )
+        assert result.safe_for_decision is False
+        assert result.synthesis_ready is False
+
+    def test_nport_real_shape_holdings_ready(self):
+        """NPORT success with report_period_date → holdings_ready."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"nport_output": _nport_real_shape_success()},
+        )
+        assert result.evidence_tier == ETF_TIER_HOLDINGS_READY
+
+    def test_nport_real_shape_holdings_ready_overlap_safe(self):
+        """NPORT holdings_ready via real field name → overlap analysis becomes safe."""
+        result = classify_etf_intelligence(
+            ticker="SPY",
+            asset_type="etf",
+            provider_outputs={"nport_output": _nport_real_shape_success()},
+        )
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is True
+        assert result.safety_flags[FLAG_SAFE_FOR_CONCENTRATION_ANALYSIS] is True
+
+    def test_nport_real_shape_no_date_not_holdings_ready(self):
+        """NPORT success but report_period_date=None → not holdings_ready."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"nport_output": _nport_real_shape_success(has_date=False)},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is False
+
+    def test_nport_real_shape_partial_not_holdings_ready(self):
+        """NPORT with partial_or_suspicious coverage → not holdings_ready, not overlap-safe."""
+        result = classify_etf_intelligence(
+            ticker="VXUS",
+            asset_type="etf",
+            provider_outputs={"nport_output": _nport_real_shape_partial()},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+        assert result.safety_flags[FLAG_SAFE_FOR_OVERLAP_ANALYSIS] is False
+
+    def test_nport_real_shape_partial_governance_invariant(self):
+        """NPORT partial coverage → safe_for_decision always False."""
+        result = classify_etf_intelligence(
+            ticker="VXUS",
+            asset_type="etf",
+            provider_outputs={"nport_output": _nport_real_shape_partial()},
+        )
+        assert result.safe_for_decision is False
+        assert result.synthesis_ready is False
+
+    def test_av_missing_date_profile_ready_at_most(self):
+        """AV output without date verified → profile_ready at most via real shape."""
+        av_real = {
+            "holdings_available": True,
+            "holdings_count": 100,
+            "as_of_date_verified": False,      # AV never has verified date
+            "coverage_quality": "partial_or_suspicious",
+            "canonical_ready": False,
+        }
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"av_output": av_real},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+
+    def test_fmp_real_shape_insufficient_holdings_not_ready(self):
+        """FMP with only 3 holdings even with date → not holdings_ready (< 5 threshold)."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={"fmp_output": _fmp_real_shape_success(holdings_count=3)},
+        )
+        assert result.evidence_tier != ETF_TIER_HOLDINGS_READY
+
+    def test_nport_preferred_over_fmp(self):
+        """When both NPORT (success+date) and FMP (paywalled) present, NPORT wins."""
+        result = classify_etf_intelligence(
+            ticker="VOO",
+            asset_type="etf",
+            provider_outputs={
+                "nport_output": _nport_real_shape_success(),
+                "fmp_output": _fmp_real_shape_paywalled(),
+            },
+        )
+        assert result.evidence_tier == ETF_TIER_HOLDINGS_READY
+
+    def test_governance_invariants_real_shapes(self):
+        """safe_for_decision and synthesis_ready always False regardless of real-shape data."""
+        for fmp_out in [_fmp_real_shape_success(), _fmp_real_shape_paywalled()]:
+            r = classify_etf_intelligence(
+                ticker="VOO",
+                asset_type="etf",
+                provider_outputs={"fmp_output": fmp_out},
+            )
+            assert r.safe_for_decision is False
+            assert r.synthesis_ready is False
+        for nport_out in [_nport_real_shape_success(), _nport_real_shape_partial()]:
+            r = classify_etf_intelligence(
+                ticker="SPY",
+                asset_type="etf",
+                provider_outputs={"nport_output": nport_out},
+            )
+            assert r.safe_for_decision is False
+            assert r.synthesis_ready is False

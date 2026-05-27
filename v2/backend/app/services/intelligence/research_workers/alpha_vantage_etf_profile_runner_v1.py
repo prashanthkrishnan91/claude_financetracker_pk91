@@ -27,6 +27,20 @@ logger = logging.getLogger(__name__)
 
 PROVIDER_ID = "alpha_vantage_etf_profile_v1"
 
+# Keywords used to classify Alpha Vantage Information / Error Message responses.
+# Rate-limit keywords require explicit quota/frequency wording — "standard api" alone
+# is intentionally excluded because "standard API users" is an entitlement phrase.
+_RATE_LIMIT_KEYWORDS: frozenset = frozenset([
+    "request frequency", "daily limit", "rate limit", "requests per day",
+    "requests per minute", "api call frequency",
+    "usage limit", "calls per day", "calls per minute",
+])
+# Entitlement keywords — checked after rate-limit so they win on mixed messages
+# (e.g. "not available for standard API users, upgrade to premium subscription").
+_ENTITLEMENT_KEYWORDS: frozenset = frozenset([
+    "premium", "subscription", "entitlement",
+])
+
 # Missing ETF set — default tickers to probe.
 _DEFAULT_TICKERS: list[str] = [
     "XLE", "VOO", "VTI", "VGT", "VHT", "VIS", "VXUS", "VYM", "SCHD",
@@ -65,6 +79,16 @@ def _classify_provider_message(data: dict) -> Optional[str]:
         if key in data:
             return key
     return None
+
+
+def _classify_information_message(text: str) -> str:
+    """Map an AV Information/Error Message text to a diagnostic fetch_status sub-class."""
+    lower = text.lower()
+    if any(k in lower for k in _RATE_LIMIT_KEYWORDS):
+        return "rate_limited"
+    if any(k in lower for k in _ENTITLEMENT_KEYWORDS):
+        return "entitlement_or_premium_required"
+    return "provider_note"
 
 
 def _probe_ticker(
@@ -107,13 +131,17 @@ def _probe_ticker(
         msg_key = _classify_provider_message(raw)
         if msg_key is not None:
             provider_message_type = msg_key
-            snippet = str(raw[msg_key])[:120]
-            provider_message_snippet = snippet  # stored only for diagnostic, not the key
-            # Note = rate limit hint; Information = entitlement issue; Error Message = bad symbol
+            raw_text = str(raw[msg_key])
+            # Redact API key before storing snippet.
+            if api_key:
+                raw_text = raw_text.replace(api_key, "[REDACTED]")
+            provider_message_snippet = raw_text[:200]
+            # Note is always a rate-limit signal from AV.
+            # Information and Error Message are classified by message content.
             if msg_key == "Note":
                 fetch_status = "rate_limited"
-            elif msg_key in ("Information", "Error Message"):
-                fetch_status = "provider_note"
+            else:
+                fetch_status = _classify_information_message(raw_text)
             raw = None
 
     if raw is not None and not isinstance(raw, dict):
@@ -253,6 +281,7 @@ def _probe_ticker(
         "fetch_status": fetch_status,
         "http_status": http_status,
         "provider_message_type": provider_message_type,
+        "provider_message_snippet": provider_message_snippet,
         "response_top_level_keys": response_top_level_keys,
         "fund_identity_fields_found": fund_identity_fields_found,
         "fund_name": fund_name,

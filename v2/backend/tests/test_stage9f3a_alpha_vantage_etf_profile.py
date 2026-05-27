@@ -203,8 +203,8 @@ class TestProviderMessages:
         assert result["provider_message_type"] == "Note"
 
     def test_information_response_is_provider_note(self):
-        # 9F3a-10
-        result = self._probe({"Information": "You have reached the 25 requests per day limit."})
+        # 9F3a-10: generic Information message (no rate-limit or entitlement keywords) → provider_note
+        result = self._probe({"Information": "This function is unavailable for the requested ticker."})
         assert result["fetch_status"] == "provider_note"
         assert result["provider_message_type"] == "Information"
 

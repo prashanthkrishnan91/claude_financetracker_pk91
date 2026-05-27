@@ -1,40 +1,41 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-26 (Stage 9F.3a — Alpha Vantage ETF_PROFILE entitlement + shape diagnostic, open PR).
+Last updated: 2026-05-27 (Stage 9F.3b — Alpha Vantage diagnostic result clarity patch).
 
-**What changed (Stage 9F.2b — merged PR #425):** SEC NPORT is safe but insufficient for portfolio ETF coverage. ETF holdings provider registry v1 — central registry with issuer-official sources + SEC NPORT. Diagnostic-only. No canonical flip.
+**Stage 9F.2b (merged PR #425):** SEC NPORT safe but insufficient; ETF holdings provider registry v1 built.
+**Stage 9F.2c (merged):** All issuer-official CSV/download URLs blocked (403/404). `issuer_official_selected_count=0`. GLD: commodity path.
+**Stage 9F.3a (merged PR #429):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic endpoint built.
+**Stage 9F.3b (current PR):** Diagnostic result clarity patch — `provider_message_snippet` per ticker, sub-classification of Information responses, single-ticker retest docs.
 
-**What changed (Stage 9F.2c — merged):** Source-discovery stop/decision artifact. All known free issuer-official CSV/download URLs blocked (HTTP 403/404). See `docs/ai/intel/STAGE_9F2C_SOURCE_DISCOVERY_FINDINGS.md`.
+**First run result (post-PR #429 deploy):** `candidate_partial`. XLE returned 24 holdings + weights but no as-of date. VOO, VTI, VGT, VHT, VIS, VXUS, VYM, SCHD all returned `Information` response with 0 holdings. The actual Information message text was not captured (snippet field was absent). Cannot distinguish quota exhaustion vs entitlement vs coverage gap without the message.
 
-**What changed (Stage 9F.3a — current PR):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic. No canonical adapter built. No SQL. No UI. No LLM. No artifact writes.
+**Stage 9F.3b fixes:**
+- `provider_message_snippet` field added to per-ticker result (capped 200 chars, API key redacted).
+- `Information` / `Error Message` sub-classified: `rate_limited` (daily/per-minute limit keywords) | `entitlement_or_premium_required` (premium/subscription keywords) | `provider_note` (fallback).
+- 16 new tests in `test_stage9f3b_alpha_vantage_diagnostic_clarity.py`. 9F3a-10 test updated to use a generic Information message. All 54 tests pass.
 
-**Files added (Stage 9F.3a):**
-- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_etf_profile_runner_v1.py`: Diagnostic runner — probes Alpha Vantage ETF_PROFILE per ticker, normalizes shape, computes candidate_pass/partial/fail verdict. Injectable http_get_fn for tests.
-- `v2/backend/tests/test_stage9f3a_alpha_vantage_etf_profile.py`: 38 fixture-based tests. No live HTTP.
-- `docs/ai/intel/STAGE_9F3_ALPHA_VANTAGE_PROOF.md`: What the endpoint tests, missing ticker set, pass/fail criteria, quota warning, curl instructions.
+**Files modified (Stage 9F.3b):**
+- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_etf_profile_runner_v1.py`: `_RATE_LIMIT_KEYWORDS`, `_ENTITLEMENT_KEYWORDS`, `_classify_information_message()`, snippet cap 200, snippet redaction, `provider_message_snippet` in entry dict.
+- `v2/backend/tests/test_stage9f3a_alpha_vantage_etf_profile.py`: 9F3a-10 message updated to generic.
+- `v2/backend/tests/test_stage9f3b_alpha_vantage_diagnostic_clarity.py`: 16 new tests.
+- `docs/ai/intel/STAGE_9F3_ALPHA_VANTAGE_PROOF.md`: First run result + single-ticker retest instructions.
 
-**Config flags (Stage 9F.3a):**
-- `intel_v3_alpha_vantage_etf_profile_diagnostics_enabled` (default False) — enables the endpoint.
-- `alpha_vantage_api_key` (Optional[str]) — ALPHA_VANTAGE_API_KEY; never logged or returned.
+**Config flags (unchanged from 9F.3a):**
+- `intel_v3_alpha_vantage_etf_profile_diagnostics_enabled` (default False)
+- `alpha_vantage_api_key` (Optional[str]) — never logged or returned
 
 **Endpoint:** `POST /api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check` (cert-gated).
 
-**Post-deploy run (curl):**
+**Next operator run — single ticker first** (after quota resets at midnight UTC):
 ```bash
 curl -X POST https://<railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \
   -H "Content-Type: application/json" \
   -H "X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>" \
-  -d '{}'
+  -d '{"tickers": ["VOO"]}'
 ```
+Inspect `per_ticker[0].fetch_status` + `per_ticker[0].provider_message_snippet`. Do NOT run the full 9-ticker default until the Information message reason is known.
 
-**Env vars required to run:**
-- `INTEL_V3_ALPHA_VANTAGE_ETF_PROFILE_DIAGNOSTICS_ENABLED=true`
-- `FINANCE_RUNTIME_CERT_ENABLED=true` + `FINANCE_RUNTIME_CERT_SECRET=<secret>`
-- `ALPHA_VANTAGE_API_KEY=<key>` — fails closed (HTTP 403) if absent.
-
-**Invariants preserved:** `canonical_ready=False` and `safe_for_decision=False` always. `artifact_writes=0`. `decision_policy_changed=False`. `synthesis_ready_changed=False`. `visible_snapshot_unchanged=True`. API key never appears in any returned field. Do not run more than once per day on free AV tier (25 req/day limit).
-
-**Stage 9F.2c findings (unchanged):** `issuer_official_selected_count = 0`. GLD: commodity path. Next step: run the 9F.3a endpoint once deployed; interpret verdict to decide whether to build `alpha_vantage_etf_holdings_adapter_v1`.
+**Invariants preserved:** `canonical_ready=False`, `safe_for_decision=False`, `artifact_writes=0`, `decision_policy_changed=False`, `synthesis_ready_changed=False`, `visible_snapshot_unchanged=True`. API key never in any returned field.
 
 ## Purpose
 
@@ -43,9 +44,9 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
-- Current PR: Stage 9F.3a Alpha Vantage ETF_PROFILE diagnostic-only proof endpoint (PR #429, branch `claude/amazing-edison-4b8zq`).
-- Current ETF coverage: SPY/QQQ via SEC NPORT (identity_verified, holdings > 0); GLD commodity/no-equity; XLE/Vanguard (VOO/VTI/VGT/VHT/VIS/VXUS/VYM)/SCHD uncovered — all free issuer-official URLs blocked (Stage 9F.2c).
-- Next step after merge/deploy: run the Alpha Vantage diagnostic endpoint once (see curl above); interpret `candidate_pass` / `candidate_partial` / `candidate_fail` before building any canonical adapter.
+- Current PR: Stage 9F.3b — Alpha Vantage diagnostic result clarity patch (this PR).
+- First run result (post-PR #429): `candidate_partial`. XLE 24 holdings + no date; all Vanguard + SCHD → Information / 0 holdings. Message text not captured — reason unknown (quota vs entitlement vs coverage gap).
+- Next step: deploy 9F.3b, then run single-ticker `{"tickers": ["VOO"]}` after quota reset. Inspect `fetch_status` + `provider_message_snippet` to determine root cause before running full 9-ticker set again.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

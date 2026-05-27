@@ -1,6 +1,55 @@
-# Stage 9F.3a — Alpha Vantage ETF_PROFILE Proof Gate
+# Stage 9F.3 — Alpha Vantage ETF_PROFILE Proof Gate
 
 **Decision artifact — diagnostic proof endpoint only. No canonical adapter built.**
+
+## First run result (Stage 9F.3a — post-deploy run)
+
+Run sent 9 tickers. Result: `candidate_partial`.
+
+| Ticker | Outcome |
+|---|---|
+| XLE | `success` — 24 holdings + weights. No as-of date field → `freshness_status=date_missing`. |
+| VOO, VTI, VGT, VHT, VIS, VXUS, VYM | `provider_note` / `Information` response — 0 holdings. |
+| SCHD | `provider_note` / `Information` response — 0 holdings. |
+
+The `Information` responses returned 0 holdings, but the **actual provider message text was not
+captured in the first run** (snippet field was absent). Without the message, we cannot determine
+whether the cause was:
+- **Quota/rate limit** — 25 req/day free tier exhausted (9 tickers × 1 run = 9 req; 25/day limit
+  may have been hit if the key was used earlier in the day).
+- **Entitlement** — `ETF_PROFILE` may require a premium Alpha Vantage plan for Vanguard symbols.
+- **Coverage gap** — The function may simply not support those tickers.
+
+**Stage 9F.3b fixes this**: the diagnostic now returns a `provider_message_snippet` per ticker
+(capped 200 chars, API key redacted) and sub-classifies `Information` responses as:
+- `rate_limited` — if the text mentions daily/per-minute limits or standard API frequency.
+- `entitlement_or_premium_required` — if the text mentions premium, subscription, or entitlement.
+- `provider_note` — only when neither can be determined.
+
+## Next operator run instructions (after Stage 9F.3b is deployed)
+
+**Run a single ticker first** after quota resets (midnight UTC for the free tier):
+
+```bash
+curl -X POST https://<your-railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \
+  -H "Content-Type: application/json" \
+  -H "X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>" \
+  -d '{"tickers": ["VOO"]}'
+```
+
+Inspect `per_ticker[0].fetch_status` and `per_ticker[0].provider_message_snippet`:
+- `rate_limited` + snippet mentions daily/per-minute limit → wait for quota reset, retry.
+- `entitlement_or_premium_required` → AV free tier does not support ETF_PROFILE for Vanguard; evaluate paid plan or alternative provider.
+- `provider_note` (no matching keywords) → read snippet for new clues; may need manual AV support contact.
+- `success` with 0 holdings → truly no data for this ticker.
+
+**Do not re-run the full 9-ticker default** until the per-ticker reason is confirmed — each run
+consumes 9 of the 25 daily free requests.
+
+After identifying the root cause for VOO, test SCHD separately:
+```bash
+  -d '{"tickers": ["SCHD"]}'
+```
 
 ## What this endpoint tests
 
@@ -77,6 +126,17 @@ are on a higher quota plan.** Repeated runs risk hitting the daily limit and get
 `rate_limited` / `provider_note` responses that obscure the actual entitlement result.
 
 ## Post-deploy run instructions
+
+**Recommended: single-ticker first** (1 request, preserves quota):
+
+```bash
+curl -X POST https://<your-railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \
+  -H "Content-Type: application/json" \
+  -H "X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>" \
+  -d '{"tickers": ["VOO"]}'
+```
+
+Full missing set (9 requests — use only once reason for Information responses is confirmed):
 
 ```bash
 curl -X POST https://<your-railway-host>/api/v1/diagnostics/finance-intel/alpha-vantage-etf-profile-check \

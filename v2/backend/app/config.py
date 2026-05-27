@@ -168,6 +168,13 @@ class Settings(BaseSettings):
     # Never logged or returned in any API response.
     alpha_vantage_api_key: Optional[str] = None
 
+    # ── Stage 9F.4 — FMP ETF holdings free-key entitlement proof (no flag) ────
+    # POST /diagnostics/finance-intel/fmp-etf-holdings-check is cert-gated.
+    # Diagnostic-only: no artifact writes, no decision mutations.
+    # canonical_ready=False always. FMP_API_KEY required — fails closed if unset.
+    # No feature flag: key presence is the sole activation guard.
+    fmp_api_key: Optional[str] = None
+
     # ── Intel v3 Phase 6A — SEC EDGAR evidence population (off by default) ────
     # When True, the Earnings Reviewer worker fetches SEC EDGAR filing metadata
     # to produce provider-backed, source-linked, freshness-classified artifacts.

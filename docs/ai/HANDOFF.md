@@ -7,7 +7,8 @@ Last updated: 2026-05-27 (Stage 9F.4 — FMP ETF holdings free-key entitlement p
 **Stage 9F.3a (merged PR #429):** Alpha Vantage ETF_PROFILE entitlement + shape diagnostic endpoint built.
 **Stage 9F.3b (merged PR #430):** Diagnostic result clarity — `provider_message_snippet` per ticker (200 chars, API key redacted), `_classify_information_message()` sub-classifies Information/Error Message, 19 fixture tests.
 **Stage 9F.3c (merged PR #431):** Live proof findings recorded; AV formally classified as supplemental-only (not canonical). `alpha_vantage_supplemental_classifier_v1.py` added; 25 new fixture tests; STAGE_9F3_ALPHA_VANTAGE_PROOF.md updated with final decision.
-**Stage 9F.4 (current PR, open):** FMP ETF holdings free-key proof gate built. `POST /api/v1/diagnostics/finance-intel/fmp-etf-holdings-check`. Requires `FMP_API_KEY` (already in main Railway service). No feature flag — key presence is the activation guard. 29 fixture tests. Awaiting live proof run.
+**Stage 9F.4 (merged PR #432):** FMP ETF holdings free-key proof gate built and live proof run completed. `POST /api/v1/diagnostics/finance-intel/fmp-etf-holdings-check`. VOO live result: HTTP 402 (Payment Required) → `fetch_status=paywalled`, `candidate_fail`. FMP free tier is paywalled for `/stable/etf/holdings`. Do not run remaining proof tickers (SCHD/VXUS/XLE) — same 402 expected.
+**Stage 9F.4b (current PR, open):** HTTP 402 classified as `paywalled` (was `error`). 3 new fixture tests. Docs updated with live proof findings and next-provider guidance.
 
 **Live proof results (Stage 9F.3c):**
 
@@ -46,8 +47,8 @@ This file is **current operational state**, not a historical log. It is meant to
 ## Current product stage
 
 - Roadmap stage: **Stage 9F** — ETF holdings data foundation / provider proof gate.
-- Current PR: Stage 9F.4 — FMP ETF holdings free-key proof gate (open). AV verdict: `candidate_partial` (Stage 9F.3c final). AV supplemental-only; not canonical.
-- Next: after merge, run the one-ticker-at-a-time proof sequence (VOO → SCHD → VXUS → XLE). See `docs/ai/intel/STAGE_9F4_FMP_ETF_HOLDINGS_PROOF.md` for exact curl commands. Do not build a canonical FMP adapter until `candidate_pass` is confirmed from the live run.
+- Current PR: Stage 9F.4b — HTTP 402 fix + live proof findings (open). FMP free key is paywalled (HTTP 402). `candidate_fail`.
+- Next after merge: evaluate next ETF holdings provider candidate (Intrinio / ETF Global / EODHD). Do not retry FMP free key or run remaining proof tickers. Do not build a canonical FMP adapter.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

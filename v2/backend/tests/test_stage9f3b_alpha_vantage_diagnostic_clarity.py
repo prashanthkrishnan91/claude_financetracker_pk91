@@ -82,6 +82,13 @@ class TestInformationMessageClassification:
         result = _probe({"Information": "A subscription is required to access ETF_PROFILE data."})
         assert result["fetch_status"] == "entitlement_or_premium_required"
 
+    def test_information_mixed_standard_api_plus_premium_is_entitlement(self):
+        # 9F3b-17: "standard API users" alone is not a rate-limit signal;
+        # entitlement keyword ("premium subscription") must win.
+        result = _probe({"Information": "This endpoint is not available for standard API users. Please upgrade to a premium subscription."})
+        assert result["fetch_status"] == "entitlement_or_premium_required"
+        assert result["provider_message_type"] == "Information"
+
     def test_information_generic_is_provider_note(self):
         # 9F3b-03
         result = _probe({"Information": "This function is unavailable for the requested ticker."})
@@ -184,6 +191,20 @@ class TestClassifyInformationMessage:
         assert self._classify("This is a premium endpoint.") == "entitlement_or_premium_required"
         assert self._classify("Please upgrade your subscription.") == "entitlement_or_premium_required"
         assert self._classify("Entitlement check failed for this endpoint.") == "entitlement_or_premium_required"
+
+    def test_mixed_standard_api_plus_entitlement_returns_entitlement(self):
+        # 9F3b-18: "standard API users" is not a rate-limit keyword;
+        # entitlement keyword wins when both appear in the same message.
+        result = self._classify(
+            "This endpoint is not available for standard API users. "
+            "Please upgrade to a premium subscription."
+        )
+        assert result == "entitlement_or_premium_required"
+
+    def test_standard_api_alone_is_provider_note(self):
+        # 9F3b-19: "standard API" without quota/frequency wording → provider_note,
+        # not rate_limited — avoids misclassifying entitlement messages.
+        assert self._classify("Not available for standard API users.") == "provider_note"
 
     def test_generic_is_provider_note(self):
         # 9F3b-16

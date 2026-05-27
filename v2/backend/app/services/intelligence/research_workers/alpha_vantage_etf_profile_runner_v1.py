@@ -28,11 +28,15 @@ logger = logging.getLogger(__name__)
 PROVIDER_ID = "alpha_vantage_etf_profile_v1"
 
 # Keywords used to classify Alpha Vantage Information / Error Message responses.
+# Rate-limit keywords require explicit quota/frequency wording — "standard api" alone
+# is intentionally excluded because "standard API users" is an entitlement phrase.
 _RATE_LIMIT_KEYWORDS: frozenset = frozenset([
     "request frequency", "daily limit", "rate limit", "requests per day",
-    "requests per minute", "standard api", "api call frequency",
+    "requests per minute", "api call frequency",
     "usage limit", "calls per day", "calls per minute",
 ])
+# Entitlement keywords — checked after rate-limit so they win on mixed messages
+# (e.g. "not available for standard API users, upgrade to premium subscription").
 _ENTITLEMENT_KEYWORDS: frozenset = frozenset([
     "premium", "subscription", "entitlement",
 ])

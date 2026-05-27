@@ -329,10 +329,13 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
     ? null
     : buildWhyActionExplanation(card.action, ex);
 
-  // Section 5: risk
+  // Section 5: risk — deduplicate flags that duplicate blocker text
   const riskText = onceOnly(card.risk_text);
+  const _normalizeRisk = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+  const _blockerSet = new Set((payload.blockers ?? []).map(_normalizeRisk));
+  const dedupedFlags = (card.flags ?? []).filter(f => !_blockerSet.has(_normalizeRisk(f)));
   const hasBlockers = payload.blockers && payload.blockers.length > 0;
-  const hasFlags = card.flags && card.flags.length > 0;
+  const hasFlags = dedupedFlags.length > 0;
 
   // Section 6: what would change
   const whatWouldChange = onceOnly(card.what_would_change_view);
@@ -352,8 +355,9 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
   );
 
   // Evidence sections (Stage 7 active path)
-  const supportingSentences = ex ? buildSupportingEvidenceSentences(ex) : [];
-  const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex) : [];
+  const assetClass = intelCtx?.asset_class_display ?? undefined;
+  const supportingSentences = ex ? buildSupportingEvidenceSentences(ex, assetClass) : [];
+  const incompleteSentences = ex ? buildIncompleteEvidenceSentences(ex, assetClass) : [];
   const capLabel = ex ? convictionCapLabel(ex.conviction_cap_applied, ex.conviction_cap_reason) : "";
   const safety = ex ? buildSafetyDisplay(ex) : null;
 
@@ -546,7 +550,7 @@ export function IntelV3Drawer({ card, onClose }: IntelV3DrawerProps) {
             )}
             {hasFlags && (
               <ul className="mt-2 space-y-1">
-                {card.flags.map((flag, i) => (
+                {dedupedFlags.map((flag, i) => (
                   <li key={i} className="text-xs text-text-muted flex items-start gap-1.5">
                     <span className="shrink-0 mt-0.5 text-action-trim" aria-hidden="true">!</span>
                     <span>{flag}</span>

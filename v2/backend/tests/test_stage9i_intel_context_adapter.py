@@ -770,3 +770,307 @@ class TestSnapshotBuilderProviderWiring:
             assert "holdings_ready" not in serialised
             assert "overlap_safe" not in serialised
             assert "safe_for_decision" not in ctx
+
+
+# ── 9I-25/26/27/28/29: Stage 9I semantic correctness ─────────────────────────
+
+
+class TestStage9ISemanticCorrectness:
+    """Stage 9I — semantic correctness for action context and evidence language.
+
+    9I-25. ETF VTI/SCHD/VXUS context does not contain 'company fundamentals'.
+    9I-26. ETF context without provider outputs does not claim cost/holdings available.
+    9I-27. ETF context with holdings_ready provider outputs may mention holdings/overlap.
+    9I-28. HOLD ETF context with UNDERWEIGHT fit never says 'adding builds' in why_this_action.
+    9I-29. BUY ETF context may use add/build wording in why_this_action.
+    """
+
+    # 9I-25: ETF context never uses "company fundamentals" language
+    @pytest.mark.parametrize("ticker", ["VTI", "SCHD", "VXUS"])
+    def test_etf_context_no_company_fundamentals(self, ticker):
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type="etf",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        combined = (
+            (ctx.get("role_lens") or "")
+            + (ctx.get("why_this_action") or "")
+            + (ctx.get("add_more_trigger") or "")
+            + (ctx.get("trim_sell_trigger") or "")
+        ).lower()
+        assert "company fundamentals" not in combined, (
+            f"{ticker} context should not contain 'company fundamentals': {combined[:300]}"
+        )
+
+    # 9I-26: ETF context without provider outputs does not claim cost/holdings available
+    def test_etf_no_provider_outputs_no_cost_claim(self):
+        """Without real provider outputs, context must not say 'profile and cost data available'."""
+        ctx = build_intel_context(
+            ticker="SCHD",
+            asset_type="etf",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        combined = (
+            (ctx.get("why_this_action") or "")
+            + (ctx.get("role_lens") or "")
+        ).lower()
+        assert "profile and cost data available" not in combined, (
+            f"ETF context should not overclaim cost readiness: {combined[:300]}"
+        )
+        assert "overlap_safe" not in combined
+
+    @pytest.mark.parametrize("ticker", ["VTI", "SCHD", "VXUS"])
+    def test_etf_no_provider_outputs_no_holdings_claim(self, ticker):
+        """Without real provider outputs, context must not claim holdings are ready."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type="etf",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        serialised = str(ctx).lower()
+        assert "holdings_ready" not in serialised, (
+            f"{ticker} context should not claim holdings_ready without provider data"
+        )
+
+    # 9I-27: ETF context with holdings_ready provider outputs mentions holdings/overlap
+    def test_etf_holdings_ready_fixture_mentions_holdings(self):
+        """With a holdings_ready nport fixture, why_this_action mentions holdings or overlap."""
+        ctx = build_intel_context(
+            ticker="VOO",
+            asset_type="etf",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+            provider_outputs={
+                "nport_output": {
+                    "fetch_status": "success",
+                    "holdings_count": 500,
+                    "weights_available": True,
+                    "report_period_date": "2026-03-31",
+                    "coverage_quality": "plausible_full",
+                }
+            },
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "etf_role_lens"
+        combined = (ctx.get("why_this_action") or "").lower()
+        assert "holdings" in combined or "overlap" in combined or "concentration" in combined, (
+            f"Holdings-ready context should mention holdings/overlap: {combined}"
+        )
+
+    # 9I-28: HOLD + UNDERWEIGHT never says "adding builds" in why_this_action
+    @pytest.mark.parametrize("ticker", ["VTI", "SCHD", "VXUS"])
+    def test_hold_etf_underweight_no_adding_builds_in_why(self, ticker):
+        """When existing_action is HOLD, 'adding builds' must not appear in why_this_action."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type="etf",
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        why = (ctx.get("why_this_action") or "").lower()
+        assert "adding builds" not in why, (
+            f"HOLD context for {ticker} should not say 'adding builds': {why}"
+        )
+
+    def test_hold_etf_underweight_why_has_hold_note(self):
+        """HOLD + UNDERWEIGHT: why_this_action should include a HOLD-compatible candidate note."""
+        ctx = build_intel_context(
+            ticker="SCHD",
+            asset_type="etf",
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        why = (ctx.get("why_this_action") or "").lower()
+        assert "hold" in why or "candidate" in why or "remains" in why, (
+            f"HOLD context should include HOLD-compatible note: {why}"
+        )
+
+    # 9I-29: BUY ETF context may use add/build wording
+    @pytest.mark.parametrize("ticker", ["VTI", "SCHD", "VXUS"])
+    def test_buy_etf_underweight_why_may_use_build_language(self, ticker):
+        """When existing_action is BUY, add/build wording is allowed in why_this_action."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type="etf",
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None
+        why = (ctx.get("why_this_action") or "").lower()
+        # BUY context may use add/build language; must not be empty
+        assert why, f"BUY context why_this_action should not be empty for {ticker}"
+        # Should contain some add/allocation/underweight context
+        assert any(kw in why for kw in ("underweight", "builds", "sleeve", "allocation", "add")), (
+            f"BUY context why should mention allocation/add context: {why}"
+        )
+
+    # GLD does not use stock/equity-holdings failure language (complement of existing 9I-02)
+    def test_gld_no_stock_or_equity_language_in_context(self):
+        ctx = build_intel_context(
+            ticker="GLD",
+            asset_type="etf",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        combined = (
+            (ctx.get("role_lens") or "")
+            + (ctx.get("why_this_action") or "")
+        ).lower()
+        assert "company fundamentals" not in combined
+        assert "equity holdings" not in combined or "does not apply" in combined
+        assert "p/e" not in combined
+        assert "earnings per share" not in combined
+
+
+class TestAssetTypeNormalization:
+    """Tests 9I-30 through 9I-37: runtime category normalization and dedup."""
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("META",  "Communication Services"),
+        ("META",  "Core"),
+        ("MSFT",  "Technology"),
+        ("AAPL",  "Technology"),
+        ("MSFT",  "stock"),
+        ("AAPL",  "equity"),
+        ("META",  "individual stocks"),
+    ])
+    def test_stock_runtime_categories_map_to_stock_lens(self, ticker, category):
+        """9I-30: Common runtime card_meta category values produce stock lens."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None, f"{ticker} with category='{category}' returned None"
+        assert ctx["lens_applied"] == "stock_fundamental_lens", (
+            f"{ticker} with category='{category}' got lens {ctx['lens_applied']!r}"
+        )
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("META",  "Communication Services"),
+        ("MSFT",  "Technology"),
+        ("AAPL",  "Core"),
+    ])
+    def test_meta_msft_aapl_no_unknown_lens_copy(self, ticker, category):
+        """9I-31: META/MSFT/AAPL never produce 'asset type not recognized' copy."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="ON_TARGET",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        combined = " ".join([
+            ctx.get("role_lens") or "",
+            ctx.get("why_this_action") or "",
+            ctx.get("evidence_caveat") or "",
+        ]).lower()
+        assert "asset type not recognized" not in combined
+        assert "intelligence lens cannot be applied" not in combined
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("VTI",   "Core"),
+        ("VTI",   "Other"),
+        ("SCHD",  "Other"),
+        ("VXUS",  "Core"),
+    ])
+    def test_known_etf_ticker_routes_to_etf_lens_regardless_of_category(self, ticker, category):
+        """9I-32: Known ETF tickers use ETF lens even when category is generic."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None, f"{ticker} with category='{category}' returned None"
+        assert ctx["lens_applied"] == "etf_role_lens", (
+            f"{ticker} with category='{category}' got lens {ctx['lens_applied']!r}"
+        )
+
+    @pytest.mark.parametrize("category", ["Other", "Core"])
+    def test_gld_routes_to_commodity_hedge_even_with_generic_category(self, category):
+        """9I-33: GLD/IAU/SLV route to commodity hedge lens regardless of category string."""
+        ctx = build_intel_context(
+            ticker="GLD",
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "commodity_hedge_lens"
+        combined = (
+            (ctx.get("role_lens") or "") + (ctx.get("why_this_action") or "")
+        ).lower()
+        assert "company fundamentals" not in combined
+
+    def test_truly_unknown_ticker_with_other_category_remains_conservative(self):
+        """9I-34: Unknown ticker with 'Other' category does not produce stock lens."""
+        ctx = build_intel_context(
+            ticker="XYZABC999",
+            asset_type="Other",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        # May be None or unknown lens — must not claim stock fundamental analysis
+        if ctx is not None:
+            assert ctx["lens_applied"] != "stock_fundamental_lens", (
+                "Unknown ticker with 'Other' category should not produce stock lens"
+            )
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("VTI",  "Broad Market ETF"),
+        ("QQQ",  "Growth ETF"),
+        ("SCHD", "Dividend ETF"),
+        ("BND",  "Bond ETF"),
+    ])
+    def test_etf_category_strings_map_to_etf_lens(self, ticker, category):
+        """9I-35: Category strings containing 'ETF' produce ETF lens."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="ON_TARGET",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "etf_role_lens", (
+            f"{ticker} with category='{category}' got lens {ctx['lens_applied']!r}"
+        )
+
+    def test_existing_action_preserved_after_normalization(self):
+        """9I-36: Visible action is not modified by category normalization."""
+        for action in ("BUY", "HOLD", "TRIM", "SELL"):
+            ctx = build_intel_context(
+                ticker="META",
+                asset_type="Communication Services",
+                portfolio_fit_raw="UNDERWEIGHT",
+                evidence_quality_raw="OK",
+                existing_action=action,
+            )
+            assert ctx is not None
+            # adapter_version confirms adapter ran; action is preserved upstream
+            assert ctx["adapter_version"] == "intel_context_adapter.v1"

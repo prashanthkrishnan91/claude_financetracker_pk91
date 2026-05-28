@@ -207,11 +207,12 @@ type AssetIntelCtx = NonNullable<
 function AssetIntelSection({ intelCtx, action }: { intelCtx: AssetIntelCtx; action: string }) {
   const hasRoleLens = !!intelCtx.role_lens;
   const hasWhy = !!intelCtx.why_this_action;
+  const hasPortfolioWeight = !!intelCtx.portfolio_weight_context;
   const hasAddMore = !!intelCtx.add_more_trigger;
   const hasTrimSell = !!intelCtx.trim_sell_trigger;
   const hasCaveat = !!intelCtx.evidence_caveat;
 
-  if (!hasRoleLens && !hasWhy && !hasAddMore && !hasTrimSell) return null;
+  if (!hasRoleLens && !hasWhy && !hasPortfolioWeight && !hasAddMore && !hasTrimSell) return null;
 
   return (
     <div className="space-y-3" data-testid="asset-intel-section">
@@ -241,6 +242,21 @@ function AssetIntelSection({ intelCtx, action }: { intelCtx: AssetIntelCtx; acti
             data-testid="asset-intel-why-action"
           >
             {intelCtx.why_this_action}
+          </p>
+        </div>
+      )}
+
+      {/* Portfolio weight — Stage 9J: actual current weight, fit-aware copy from backend */}
+      {hasPortfolioWeight && (
+        <div>
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted mb-1">
+            Portfolio weight
+          </p>
+          <p
+            className="text-[11px] text-text-secondary leading-relaxed"
+            data-testid="asset-intel-portfolio-weight"
+          >
+            {intelCtx.portfolio_weight_context}
           </p>
         </div>
       )}

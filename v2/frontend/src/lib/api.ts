@@ -1222,6 +1222,8 @@ export interface IntelV3HeldCard {
       add_more_trigger: string;
       trim_sell_trigger: string;
       evidence_caveat?: string | null;
+      /** Stage 9J — current portfolio weight note, fit-aware plain English. Present only when backend has pct data. */
+      portfolio_weight_context?: string;
       lens_applied: string;
       asset_class_display: string;
       adapter_version: string;

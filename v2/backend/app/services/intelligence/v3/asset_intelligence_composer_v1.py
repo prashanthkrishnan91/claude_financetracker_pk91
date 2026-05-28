@@ -215,6 +215,21 @@ def compose_asset_intelligence(
     if t in _KNOWN_ETF_MAP and asset_class != ASSET_CLASS_ETF:
         asset_class = ASSET_CLASS_ETF
 
+    # Stock fallback: non-ETF ticker with a specific sector/industry category
+    # that is not a known non-equity instrument type defaults to stock lens.
+    # Handles sub-sector labels not yet in _STOCK_CATEGORY_LABELS (e.g. "Cloud",
+    # "Data Cloud", "SaaS") without exhaustive enumeration. Ambiguous labels
+    # ("Other", "Unknown", "") and instrument types ("derivative", "futures")
+    # stay UNKNOWN to remain conservative for truly unrecognized tickers.
+    if asset_class == ASSET_CLASS_UNKNOWN and t not in _KNOWN_ETF_MAP:
+        _cat_norm = (asset_type or "").lower().strip()
+        if (
+            _cat_norm
+            and _cat_norm not in _AMBIGUOUS_CATEGORY_LABELS
+            and _cat_norm not in _NON_STOCK_INSTRUMENT_TYPES
+        ):
+            asset_class = ASSET_CLASS_STOCK
+
     if asset_class in (ASSET_CLASS_STOCK,):
         return _compose_stock(t, asset_class, pf, eq, signals)
 
@@ -406,7 +421,7 @@ def _compose_etf(
     elif evidence_tier == ETF_TIER_PROFILE_READY:
         drivers.append(
             f"{ticker}: role is identified from ETF classification; "
-            "cost, holdings overlap, and concentration analysis require provider data."
+            "cost, holdings overlap, and concentration analysis requires provider data."
         )
     elif evidence_tier == ETF_TIER_HOLDINGS_READY:
         drivers.append(
@@ -683,6 +698,26 @@ _STOCK_CATEGORY_LABELS: frozenset[str] = frozenset({
     "financials", "industrials", "materials", "energy", "utilities",
     "real estate", "semiconductors", "industrials/autos", "software",
     "retail", "banking", "media", "biotech",
+    # Cloud/software sub-sectors observed in portfolio metadata (e.g. SNOW, CRM)
+    "cloud", "data cloud", "saas", "enterprise software",
+    "application software", "software infrastructure",
+    # Consumer sub-sectors
+    "consumer discretionary", "consumer staples",
+})
+
+# Category values that are genuinely ambiguous — do not imply stock or ETF.
+# Used by the stock-fallback gate to stay conservative.
+_AMBIGUOUS_CATEGORY_LABELS: frozenset[str] = frozenset({
+    "", "other", "unknown", "n/a", "none",
+})
+
+# Known non-equity instrument types — must not be reclassified as stock
+# even when the ticker is unrecognized and the category is specific.
+_NON_STOCK_INSTRUMENT_TYPES: frozenset[str] = frozenset({
+    "derivative", "derivatives", "option", "options",
+    "warrant", "warrants", "futures", "future",
+    "forex", "currency", "commodity", "commodities",
+    "preferred", "preferred stock", "notes",
 })
 
 

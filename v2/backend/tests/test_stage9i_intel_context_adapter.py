@@ -1074,3 +1074,135 @@ class TestAssetTypeNormalization:
             assert ctx is not None
             # adapter_version confirms adapter ran; action is preserved upstream
             assert ctx["adapter_version"] == "intel_context_adapter.v1"
+
+
+class TestStage9I1NormalizationFix:
+    """Stage 9I.1: SNOW cloud/SaaS categories, grammar fix, stock fallback."""
+
+    @pytest.mark.parametrize("category", [
+        "Cloud", "Data Cloud", "SaaS", "Enterprise Software",
+        "Software", "Technology",
+    ])
+    def test_snow_cloud_categories_map_to_stock_lens(self, category):
+        """9I1-01: SNOW with cloud/SaaS/software categories → stock_fundamental_lens."""
+        ctx = build_intel_context(
+            ticker="SNOW",
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None, f"SNOW with category='{category}' returned None"
+        assert ctx["lens_applied"] == "stock_fundamental_lens", (
+            f"SNOW with category='{category}' got lens {ctx['lens_applied']!r}"
+        )
+
+    @pytest.mark.parametrize("category", [
+        "Cloud", "Data Cloud", "SaaS", "Enterprise Software", "Software",
+    ])
+    def test_snow_never_produces_unknown_lens_copy(self, category):
+        """9I1-02: SNOW must not show 'asset type not recognized' for any stock-like category."""
+        ctx = build_intel_context(
+            ticker="SNOW",
+            asset_type=category,
+            portfolio_fit_raw="ON_TARGET",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        combined = " ".join([
+            ctx.get("role_lens") or "",
+            ctx.get("why_this_action") or "",
+        ]).lower()
+        assert "asset type not recognized" not in combined
+        assert "intelligence lens cannot be applied" not in combined
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("META",  "Communication Services"),
+        ("MSFT",  "Technology"),
+        ("AAPL",  "Core"),
+    ])
+    def test_meta_msft_aapl_still_stock_regression(self, ticker, category):
+        """9I1-03: PR #438 regression — META/MSFT/AAPL still map to stock lens."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="ON_TARGET",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "stock_fundamental_lens"
+
+    @pytest.mark.parametrize("ticker,category", [
+        ("VTI",  "Core"),
+        ("SCHD", "Other"),
+        ("VXUS", "Core"),
+    ])
+    def test_known_etf_still_routes_to_etf_lens_regression(self, ticker, category):
+        """9I1-04: PR #438 regression — known ETFs still override generic category."""
+        ctx = build_intel_context(
+            ticker=ticker,
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "etf_role_lens"
+
+    @pytest.mark.parametrize("category", ["Other", "Core"])
+    def test_gld_still_routes_to_commodity_hedge_regression(self, category):
+        """9I1-05: PR #438 regression — GLD still commodity hedge regardless of category."""
+        ctx = build_intel_context(
+            ticker="GLD",
+            asset_type=category,
+            portfolio_fit_raw="UNDERWEIGHT",
+            evidence_quality_raw="OK",
+            existing_action="BUY",
+        )
+        assert ctx is not None
+        assert ctx["lens_applied"] == "commodity_hedge_lens"
+
+    def test_unknown_ticker_other_category_remains_conservative(self):
+        """9I1-06: Unknown ticker + 'Other' category must not produce stock lens."""
+        ctx = build_intel_context(
+            ticker="XYZABC999",
+            asset_type="Other",
+            portfolio_fit_raw="UNKNOWN",
+            evidence_quality_raw="OK",
+            existing_action="HOLD",
+        )
+        if ctx is not None:
+            assert ctx["lens_applied"] != "stock_fundamental_lens"
+
+    def test_etf_profile_ready_grammar_correct(self):
+        """9I1-07: ETF PROFILE_READY driver must use 'requires' not 'require'."""
+        from app.services.intelligence.v3.asset_intelligence_composer_v1 import (
+            compose_asset_intelligence,
+        )
+        result = compose_asset_intelligence(
+            ticker="SCHD",
+            asset_type="etf",
+            portfolio_fit="ON_TARGET",
+            evidence_quality="OK",
+        )
+        full_text = " ".join(result.decision_drivers).lower()
+        assert "concentration analysis requires provider data" in full_text, (
+            f"Expected 'requires' in: {full_text!r}"
+        )
+
+    def test_etf_profile_ready_no_typo_concentrotion(self):
+        """9I1-08: ETF driver text must not contain 'concentrotion' typo."""
+        from app.services.intelligence.v3.asset_intelligence_composer_v1 import (
+            compose_asset_intelligence,
+        )
+        result = compose_asset_intelligence(
+            ticker="VTI",
+            asset_type="etf",
+            portfolio_fit="UNDERWEIGHT",
+            evidence_quality="OK",
+        )
+        full_text = " ".join(result.decision_drivers)
+        assert "concentrotion" not in full_text
+        assert "analysis require " not in full_text  # trailing space catches bare "require"

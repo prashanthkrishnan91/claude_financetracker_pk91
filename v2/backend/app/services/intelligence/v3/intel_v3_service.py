@@ -312,6 +312,12 @@ class IntelV3Service:
                 and getattr(settings, "intel_v3_evidence_aware_policy_enabled", False)
             )
 
+            # Stage 9K: populate etf_provider_outputs from existing NPORT artifacts.
+            # Only queries DB when the flag is on; degrades honestly to {} otherwise.
+            _etf_nport_map: dict[str, dict] = {}
+            if getattr(settings, "intel_v3_etf_nport_evidence_enabled", False):
+                _etf_nport_map = await self._get_etf_nport_provider_outputs(_all_tickers)
+
             # Step 3: build decisions for each card.
             decisions = []
             card_metas = []
@@ -482,13 +488,10 @@ class IntelV3Service:
                 decision = decide(inp)
                 decisions.append(decision)
 
-                # Stage 9J: include portfolio_current_pct so downstream adapters can produce
-                # richer portfolio-fit context (underweight/on-target/overweight with actual %).
-                # etf_provider_outputs and etf_upstream_signals are not populated here yet.
-                # TODO(Stage 9K): populate etf_provider_outputs when intel_v3_etf_nport_evidence_enabled
-                #   is True and NPORT artifacts are available for this ticker.
-                # TODO(Stage 9K): populate etf_upstream_signals when portfolio overlap/redundancy
-                #   signals are computed per ticker (is_redundant_etf, role_mismatch, etc.).
+                # Stage 9J: include portfolio_current_pct for richer portfolio-fit context.
+                # Stage 9K: populate etf_provider_outputs from NPORT artifacts when available.
+                # etf_upstream_signals (overlap/redundancy) remain deferred — not yet computed.
+                _etf_provider_outputs = _etf_nport_map.get(ticker.upper()) or None
                 card_metas.append({
                     "ticker":             ticker,
                     "name":               card.name or ticker,
@@ -497,6 +500,7 @@ class IntelV3Service:
                     "governance_result":  _gov_result_dict,
                     "research_axis_readiness": _research_axis_readiness,
                     "portfolio_current_pct": current_pct,
+                    "etf_provider_outputs": _etf_provider_outputs,
                 })
 
             # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -1259,6 +1263,11 @@ class IntelV3Service:
             and getattr(settings, "intel_v3_evidence_aware_policy_enabled", False)
         )
 
+        # Stage 9K: populate etf_provider_outputs from existing NPORT artifacts.
+        _etf_nport_map_pw: dict[str, dict] = {}
+        if getattr(settings, "intel_v3_etf_nport_evidence_enabled", False):
+            _etf_nport_map_pw = await self._get_etf_nport_provider_outputs(_all_tickers_pw)
+
         # Step 3: build decisions (identical to run_v3 card loop).
         decisions = []
         card_metas = []
@@ -1420,8 +1429,8 @@ class IntelV3Service:
             decision = decide(inp)
             decisions.append(decision)
             # Stage 9J: include portfolio_current_pct for richer portfolio-fit context.
-            # TODO(Stage 9K): populate etf_provider_outputs / etf_upstream_signals once
-            #   NPORT lane is active and portfolio overlap signals are computed.
+            # Stage 9K: populate etf_provider_outputs from NPORT artifacts when available.
+            _etf_provider_outputs_pw = _etf_nport_map_pw.get(ticker.upper()) or None
             card_metas.append({
                 "ticker":             ticker,
                 "name":               card.name or ticker,
@@ -1430,6 +1439,7 @@ class IntelV3Service:
                 "governance_result":  _gov_result_dict,
                 "research_axis_readiness": _research_axis_readiness,
                 "portfolio_current_pct": current_pct,
+                "etf_provider_outputs": _etf_provider_outputs_pw,
             })
 
         # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -2241,6 +2251,94 @@ class IntelV3Service:
         except Exception as exc:
             logger.warning(
                 "sec_catalyst_artifact_data_query_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return {}
+
+    async def _get_etf_nport_provider_outputs(
+        self,
+        tickers: list[str],
+    ) -> "dict[str, dict]":
+        """Fetch existing NPORT artifact payloads for ETF tickers (Stage 9K).
+
+        Queries research_artifacts for active etf_fund_note/etf_sec_nport_holdings_evidence_v1
+        artifacts.  For each ticker where the payload satisfies the full holdings-ready
+        safety gate (fetch_status=success, holdings_count≥5, weights_available,
+        report_period_date present, and coverage_quality not "partial" or "suspicious"),
+        returns:
+
+          {ticker_upper: {"nport_output": {fetch_status, holdings_count,
+                                           weights_available, report_period_date,
+                                           coverage_quality}}}
+
+        Tickers without a qualifying artifact are omitted from the result —
+        callers receive None from .get() and the snapshot_builder degrades
+        honestly to "not yet wired" text.
+
+        Contracts:
+          - Fail-soft: returns {} on any error.
+          - Never raises.
+          - Read-only SELECT; no writes.
+          - Does NOT call _nport_is_holdings_ready() directly — the same gate
+            criteria are applied (including coverage_quality) so the classifier in
+            etf_intelligence_classifier_v1 applies its own gate consistently when
+            compose_asset_intelligence() is called later.
+          - safe_for_decision and synthesis_ready are never set here.
+        """
+        try:
+            if not tickers:
+                return {}
+
+            from app.services.intelligence.research_workers.etf_nport_adapter_v1 import (
+                _SKILL_PACK as _NPORT_SKILL_PACK,
+            )
+
+            def _query() -> list[dict]:
+                resp = (
+                    self.client
+                    .from_("research_artifacts")
+                    .select("ticker,payload")
+                    .eq("user_id", str(self.user_id))
+                    .eq("skill_pack", _NPORT_SKILL_PACK)
+                    .eq("is_active", True)
+                    .in_("ticker", [t.upper() for t in tickers])
+                    .execute()
+                )
+                return resp.data or []
+
+            artifact_rows = await asyncio.to_thread(_query)
+            if not artifact_rows:
+                return {}
+
+            result: dict[str, dict] = {}
+            for row in artifact_rows:
+                t = (row.get("ticker") or "").upper()
+                payload = row.get("payload") or {}
+                if not t or not isinstance(payload, dict):
+                    continue
+                nport_out = {
+                    "fetch_status": payload.get("fetch_status", ""),
+                    "holdings_count": payload.get("holdings_count", 0) or 0,
+                    "weights_available": bool(payload.get("weights_available", False)),
+                    "report_period_date": payload.get("report_period_date"),
+                    "coverage_quality": payload.get("coverage_quality") or "",
+                }
+                # Full holdings-ready gate — mirrors _nport_is_holdings_ready() criteria
+                # (including coverage_quality) so partial/suspicious artifacts are blocked
+                # before reaching the classifier, preserving honest degradation.
+                fetch_ok = (nport_out["fetch_status"] or "").lower() == "success"
+                count_ok = nport_out["holdings_count"] >= 5
+                weights_ok = nport_out["weights_available"]
+                date_ok = bool(nport_out["report_period_date"])
+                cq = (nport_out["coverage_quality"] or "").lower()
+                coverage_ok = "partial" not in cq and "suspicious" not in cq
+                if fetch_ok and count_ok and weights_ok and date_ok and coverage_ok:
+                    result[t] = {"nport_output": nport_out}
+
+            return result
+        except Exception as exc:
+            logger.warning(
+                "etf_nport_provider_outputs_query_failed user_id=%s error=%s",
                 self.user_id, exc,
             )
             return {}

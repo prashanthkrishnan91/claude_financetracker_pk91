@@ -245,12 +245,14 @@ def _build_held_card(
     #                            cost_elevated, concentration_risk}
     _provider_outputs = card_meta.get("etf_provider_outputs") or None
     _upstream_signals = card_meta.get("etf_upstream_signals") or None
+    _portfolio_current_pct = card_meta.get("portfolio_current_pct")
     asset_intel_ctx = build_intel_context(
         ticker=card_meta.get("ticker", ""),
         asset_type=_resolve_intel_asset_type(card_meta.get("category", "stock")),
         portfolio_fit_raw=decision.portfolio_fit.value,
         evidence_quality_raw=decision.evidence_quality.value,
         existing_action=action,
+        portfolio_current_pct=_portfolio_current_pct,
         provider_outputs=_provider_outputs,
         upstream_signals=_upstream_signals,
     )

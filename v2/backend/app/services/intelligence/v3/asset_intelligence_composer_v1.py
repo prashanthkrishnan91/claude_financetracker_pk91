@@ -428,8 +428,8 @@ def _compose_etf(
         )
     elif evidence_tier == ETF_TIER_PROFILE_READY:
         drivers.append(
-            f"{ticker}: role is identified from ETF classification; "
-            "cost, holdings overlap, and concentration analysis requires provider data."
+            f"{ticker}: ETF role is identified; "
+            "holdings, overlap, and cost evidence are not yet wired."
         )
     elif evidence_tier == ETF_TIER_HOLDINGS_READY:
         drivers.append(

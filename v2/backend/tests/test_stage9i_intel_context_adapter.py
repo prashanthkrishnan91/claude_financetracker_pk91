@@ -1177,7 +1177,7 @@ class TestStage9I1NormalizationFix:
             assert ctx["lens_applied"] != "stock_fundamental_lens"
 
     def test_etf_profile_ready_grammar_correct(self):
-        """9I1-07: ETF PROFILE_READY driver must use 'requires' not 'require'."""
+        """9I1-07: ETF PROFILE_READY driver must say evidence is not yet wired (honest)."""
         from app.services.intelligence.v3.asset_intelligence_composer_v1 import (
             compose_asset_intelligence,
         )
@@ -1188,8 +1188,8 @@ class TestStage9I1NormalizationFix:
             evidence_quality="OK",
         )
         full_text = " ".join(result.decision_drivers).lower()
-        assert "concentration analysis requires provider data" in full_text, (
-            f"Expected 'requires' in: {full_text!r}"
+        assert "not yet wired" in full_text, (
+            f"Expected 'not yet wired' in: {full_text!r}"
         )
 
     def test_etf_profile_ready_no_typo_concentrotion(self):

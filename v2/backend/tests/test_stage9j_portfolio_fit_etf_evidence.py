@@ -2,6 +2,8 @@
 
 Verifies that Intel context adapters:
   - Distinguish underweight/on-target/overweight/no-target-data for stocks and ETFs.
+  - Wire portfolio_current_pct into portfolio_weight_context so the drawer can show
+    the actual current weight alongside the FitBand description.
   - Pass ETF provider outputs (NPORT/AV/FMP fixtures) through to context without
     fabricating readiness when data is absent.
   - Pass ETF upstream signals (is_redundant_etf etc.) through when present and
@@ -18,7 +20,8 @@ Coverage:
   9J-05. Underweight ETF (VTI) with OK evidence → context mentions sleeve/allocation add language.
   9J-06. On-target ETF (SCHD) → HOLD context with target weight language.
   9J-07. Overweight ETF → trim context, no add language.
-  9J-08. ETF with no provider outputs → no holdings/cost/overlap readiness claimed.
+  9J-08. ETF with no provider outputs → no holdings/cost/overlap readiness claimed;
+         PROFILE_READY tier says "not yet wired" explicitly.
   9J-09. ETF with NPORT holdings-ready fixture → holdings context surfaces in why_this_action.
   9J-10. ETF with AV missing-date fixture → profile_ready at most, not holdings_ready.
   9J-11. ETF with FMP 402/paywalled fixture → no holdings readiness claimed.
@@ -26,7 +29,8 @@ Coverage:
   9J-13. Upstream signals absent → context degrades honestly (no fake overlap claims).
   9J-14. VTI/SCHD/VXUS/GLD regression — lens routing unchanged.
   9J-15. Existing visible action is always preserved.
-  9J-16. portfolio_current_pct in card_meta does not break snapshot builder.
+  9J-16. portfolio_current_pct in card_meta flows into portfolio_weight_context with
+         the actual weight, fit-aware plain-English note, and UNKNOWN says no target.
 """
 from __future__ import annotations
 
@@ -53,6 +57,7 @@ def _stock_ctx(
     eq: str = "OK",
     action: str = "HOLD",
     upstream_signals: dict | None = None,
+    portfolio_current_pct: float | None = None,
 ) -> dict | None:
     return build_intel_context(
         ticker=ticker,
@@ -61,6 +66,7 @@ def _stock_ctx(
         evidence_quality_raw=eq,
         existing_action=action,
         upstream_signals=upstream_signals,
+        portfolio_current_pct=portfolio_current_pct,
     )
 
 
@@ -71,6 +77,7 @@ def _etf_ctx(
     action: str = "HOLD",
     provider_outputs: dict | None = None,
     upstream_signals: dict | None = None,
+    portfolio_current_pct: float | None = None,
 ) -> dict | None:
     return build_intel_context(
         ticker=ticker,
@@ -80,6 +87,7 @@ def _etf_ctx(
         existing_action=action,
         provider_outputs=provider_outputs,
         upstream_signals=upstream_signals,
+        portfolio_current_pct=portfolio_current_pct,
     )
 
 
@@ -335,6 +343,17 @@ class TestETFNoProviderOutputs:
         assert ctx is not None
         combined = (ctx.get("why_this_action", "") + ctx.get("role_lens", "")).lower()
         assert "cost analysis" not in combined or "requires" in combined
+
+    def test_profile_ready_tier_says_not_yet_wired(self):
+        """ETF with PROFILE_READY tier (known ETF, no provider data) must say evidence not yet wired,
+        not claim holdings/cost/overlap analysis is available."""
+        ctx = _etf_ctx("VTI", fit=FIT_UNKNOWN, eq="OK")
+        assert ctx is not None
+        combined = (ctx.get("why_this_action", "") + ctx.get("role_lens", "")).lower()
+        # Must say something about evidence not being wired — not imply it's available
+        assert "not yet wired" in combined or "requires provider" in combined, (
+            f"PROFILE_READY ETF without providers should say 'not yet wired' but got: {combined!r}"
+        )
 
 
 # ── 9J-09: ETF with NPORT holdings-ready fixture ─────────────────────────────
@@ -637,14 +656,83 @@ class TestVisibleActionPreserved:
         assert card["action"] == "HOLD"
 
 
-# ── 9J-16: portfolio_current_pct in card_meta ────────────────────────────────
+# ── 9J-16: portfolio_current_pct wired into portfolio_weight_context ──────────
 
 
-class TestPortfolioCurrentPctInCardMeta:
-    """9J-16: portfolio_current_pct in card_meta does not break snapshot builder
-    and is preserved without affecting visible action."""
+class TestPortfolioCurrentPctInContext:
+    """9J-16: portfolio_current_pct flows through the pipeline into
+    portfolio_weight_context in asset_intelligence_context.
 
-    def test_portfolio_current_pct_in_card_meta_does_not_break_snapshot(self):
+    - Actual weight % appears in the context.
+    - UNDERWEIGHT: says "room to grow toward target".
+    - ON_TARGET: says "at target allocation".
+    - OVERWEIGHT: says "above target".
+    - UNKNOWN: says "no target allocation is set", does NOT say "room to add".
+    - None/absent: portfolio_weight_context key is absent (no fabrication).
+    """
+
+    def test_underweight_with_current_pct_shows_weight_in_context(self):
+        """UNDERWEIGHT + current_pct=3.2 → portfolio_weight_context contains '3.2%'."""
+        ctx = _stock_ctx("MSFT", fit=FIT_UNDERWEIGHT, eq="OK", action="BUY",
+                         portfolio_current_pct=3.2)
+        assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None, "portfolio_weight_context must be present when pct is provided"
+        assert "3.2%" in weight_ctx, f"Expected '3.2%' in weight context but got: {weight_ctx!r}"
+        assert "room to grow" in weight_ctx.lower() or "underweight" in weight_ctx.lower(), (
+            f"UNDERWEIGHT weight context should mention room to grow: {weight_ctx!r}"
+        )
+
+    def test_on_target_with_current_pct_shows_at_target(self):
+        """ON_TARGET + current_pct=5.0 → portfolio_weight_context says 'at target'."""
+        ctx = _stock_ctx("META", fit=FIT_ON_TARGET, eq="OK", action="HOLD",
+                         portfolio_current_pct=5.0)
+        assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None
+        assert "5.0%" in weight_ctx
+        assert "target" in weight_ctx.lower(), (
+            f"ON_TARGET weight context should mention target: {weight_ctx!r}"
+        )
+
+    def test_overweight_with_current_pct_says_above_target(self):
+        """OVERWEIGHT + current_pct=8.5 → portfolio_weight_context says 'above target'."""
+        ctx = _stock_ctx("AAPL", fit=FIT_OVERWEIGHT, eq="OK", action="TRIM",
+                         portfolio_current_pct=8.5)
+        assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None
+        assert "8.5%" in weight_ctx
+        assert "above target" in weight_ctx.lower(), (
+            f"OVERWEIGHT weight context should say 'above target': {weight_ctx!r}"
+        )
+
+    def test_unknown_fit_with_current_pct_says_no_target_allocation(self):
+        """UNKNOWN fit + current_pct=2.1 → says 'no target allocation is set', NOT 'room to add'."""
+        ctx = _stock_ctx("NVDA", fit=FIT_UNKNOWN, eq="OK", action="HOLD",
+                         portfolio_current_pct=2.1)
+        assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None
+        assert "2.1%" in weight_ctx
+        assert "no target allocation" in weight_ctx.lower(), (
+            f"UNKNOWN fit should say 'no target allocation': {weight_ctx!r}"
+        )
+        assert "room to" not in weight_ctx.lower(), (
+            f"UNKNOWN fit must not imply room to add: {weight_ctx!r}"
+        )
+
+    def test_no_current_pct_portfolio_weight_context_absent(self):
+        """When portfolio_current_pct is not provided, portfolio_weight_context must be absent."""
+        ctx = _stock_ctx("AAPL", fit=FIT_UNDERWEIGHT, eq="OK", action="BUY",
+                         portfolio_current_pct=None)
+        assert ctx is not None
+        assert "portfolio_weight_context" not in ctx, (
+            "portfolio_weight_context must not appear when no pct is available"
+        )
+
+    def test_portfolio_current_pct_through_snapshot_builder(self):
+        """portfolio_current_pct in card_meta flows into portfolio_weight_context via snapshot."""
         card = _snap_card(
             "AAPL", "stock", action="BUY", fit="UNDERWEIGHT", eq="OK",
             extra_meta={"portfolio_current_pct": 3.2},
@@ -652,6 +740,9 @@ class TestPortfolioCurrentPctInCardMeta:
         assert card["action"] == "BUY"
         ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
         assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None, "portfolio_weight_context must be present when pct in card_meta"
+        assert "3.2%" in weight_ctx
 
     def test_portfolio_current_pct_none_in_card_meta_does_not_break_snapshot(self):
         card = _snap_card(
@@ -661,3 +752,13 @@ class TestPortfolioCurrentPctInCardMeta:
         assert card["action"] == "HOLD"
         ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
         assert ctx is not None
+        assert "portfolio_weight_context" not in ctx
+
+    def test_etf_with_current_pct_shows_weight(self):
+        """ETF portfolio_current_pct also flows into portfolio_weight_context."""
+        ctx = _etf_ctx("VTI", fit=FIT_UNDERWEIGHT, eq="OK", action="BUY",
+                       portfolio_current_pct=4.5)
+        assert ctx is not None
+        weight_ctx = ctx.get("portfolio_weight_context")
+        assert weight_ctx is not None
+        assert "4.5%" in weight_ctx

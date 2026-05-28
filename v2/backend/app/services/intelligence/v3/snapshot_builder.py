@@ -33,6 +33,19 @@ _SCHEMA_VERSION = "v3.1"
 # Evidence bands that indicate source-linked analyst evidence was present and scored.
 _SOURCE_VALIDATED_BANDS: frozenset = frozenset({AxisBand.OK, AxisBand.STRONG})
 
+# Position categories that are too generic to drive lens selection — resolve to "stock"
+# for held positions. Known ETF/commodity tickers still win via ticker-map override inside
+# compose_asset_intelligence(), so passing "stock" for GLD/VTI is safe.
+_AMBIGUOUS_POSITION_CATEGORIES: frozenset[str] = frozenset({
+    "", "other", "unknown", "n/a", "none",
+})
+
+
+def _resolve_intel_asset_type(category: str) -> str:
+    if (category or "").lower().strip() in _AMBIGUOUS_POSITION_CATEGORIES:
+        return "stock"
+    return category
+
 # Evidence quality axis → visible evidence band.
 # Maps the structural AxisBand (from decide()) to the display label.
 # SUPPRESSED collapses to THIN so the UI never shows an internal axis label.
@@ -234,7 +247,7 @@ def _build_held_card(
     _upstream_signals = card_meta.get("etf_upstream_signals") or None
     asset_intel_ctx = build_intel_context(
         ticker=card_meta.get("ticker", ""),
-        asset_type=card_meta.get("category", "stock"),
+        asset_type=_resolve_intel_asset_type(card_meta.get("category", "stock")),
         portfolio_fit_raw=decision.portfolio_fit.value,
         evidence_quality_raw=decision.evidence_quality.value,
         existing_action=action,

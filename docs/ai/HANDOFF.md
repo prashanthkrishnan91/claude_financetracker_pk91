@@ -1,6 +1,13 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-28 (Stage 9I.1 — SNOW normalization + ETF grammar fix; PR #439 merged).
+Last updated: 2026-05-28 (Stage 9I.2 — SNOW runtime "Other" category fix; PR pending).
+
+**Stage 9I.2 (PR pending):** Root-cause fix for SNOW still showing "asset type not recognized" after PR #439.
+- **Root cause traced**: `positions` DB table stores `category = "Other"` for SNOW. Python `or` short-circuit means `"Other" or "stock"` = `"Other"` (truthy string, fallback never fires). "Other" flows through `card_meta["category"]` into `build_intel_context(asset_type="Other")`. `_classify_asset_class("other")` → UNKNOWN; "other" is in `_AMBIGUOUS_CATEGORY_LABELS` so stock fallback is also blocked → UNKNOWN lens → "asset type not recognized."
+- **Fix**: Added `_resolve_intel_asset_type()` helper and `_AMBIGUOUS_POSITION_CATEGORIES` frozenset in `snapshot_builder.py`. Converts ambiguous category values ("Other", "Unknown", "", "n/a", "none") to "stock" before the `build_intel_context()` call in `_build_held_card()`. Known ETF/commodity tickers (GLD/VTI/SCHD/VXUS) still route correctly via ticker-map override inside `compose_asset_intelligence()` — passing "stock" for those is safe because the ticker-map override wins.
+- **Why this is durable**: Fix is at the snapshot_builder call site (the source/adapter boundary), not by adding more category label strings. Direct calls to `build_intel_context()` outside the snapshot builder still treat "Other" as UNKNOWN for truly unknown tickers (no double-routing).
+- 11 new tests in `TestStage9I2RuntimeOtherCategory`. 176 Stage 9I + 97 Stage 9G/9H pass.
+- No SQL, no providers, no LLM, no UI, no policy changes.
 
 **Stage 9I.1 (merged PR #439):** Two targeted correctness fixes after screenshot validation of PR #438.
 1. **SNOW "asset type not recognized"**: Added `cloud`, `data cloud`, `saas`, `enterprise software`, `application software`, `software infrastructure`, `consumer discretionary`, `consumer staples` to `_STOCK_CATEGORY_LABELS`. Added conservative stock fallback in `compose_asset_intelligence()`: non-ETF ticker with a non-empty, non-ambiguous, non-instrument category defaults to `ASSET_CLASS_STOCK`. Added `_NON_STOCK_INSTRUMENT_TYPES` exclusion set (`derivative`, `futures`, `option`, etc.) to preserve conservative behavior for those values.

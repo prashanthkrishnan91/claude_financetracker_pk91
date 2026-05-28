@@ -1206,3 +1206,112 @@ class TestStage9I1NormalizationFix:
         full_text = " ".join(result.decision_drivers)
         assert "concentrotion" not in full_text
         assert "analysis require " not in full_text  # trailing space catches bare "require"
+
+
+# ── 9I2-01..08: Stage 9I.2 — runtime "Other" category fix via snapshot builder ─
+
+
+class TestStage9I2RuntimeOtherCategory:
+    """Stage 9I.2: SNOW (and similar stocks) with runtime category='Other' from the
+    positions DB must route to stock_fundamental_lens via _resolve_intel_asset_type()
+    in snapshot_builder.  Known ETF/commodity tickers still win via ticker-map override.
+    """
+
+    def _make_decision(self, ticker: str = "TEST", action: str = "BUY") -> "DecisionOutputV3":  # type: ignore[name-defined]
+        from app.services.intelligence.v3.decision_contracts import (
+            ActionV3, AxisBand, ConvictionV3, DecisionOutputV3,
+            FitBand, RiskBand, PriceBand,
+        )
+        return DecisionOutputV3(
+            ticker=ticker,
+            action=ActionV3[action],
+            conviction=ConvictionV3.HIGH,
+            evidence_quality=AxisBand.OK,
+            portfolio_fit=FitBand.UNDERWEIGHT,
+            risk_band=RiskBand.LOW,
+            price_context=PriceBand.SUPPRESSED,
+            attractiveness=AxisBand.OK,
+            rationale_plain_english="Strong buy signal.",
+            why_now="",
+            why_not_now="",
+            blockers=[],
+            suppression_reasons={},
+            source_signal_summary={},
+            schema_version="v3.1",
+        )
+
+    def _snap_card(self, ticker: str, category: str, action: str = "BUY") -> dict:
+        from app.services.intelligence.v3.snapshot_builder import build_snapshot
+        decision = self._make_decision(ticker=ticker, action=action)
+        meta = {"ticker": ticker, "name": ticker, "category": category}
+        snap = build_snapshot(run_id="test-9i2", decisions=[decision], card_metas=[meta])
+        return snap["current_holdings"][0]
+
+    # 9I2-01: SNOW + "Other" (runtime DB value) → stock_fundamental_lens
+    def test_snow_other_category_routes_to_stock_lens(self):
+        """SNOW with positions.category='Other' must route to stock_fundamental_lens."""
+        card = self._snap_card("SNOW", "Other")
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None, "SNOW card must have asset_intelligence_context"
+        assert ctx["lens_applied"] == "stock_fundamental_lens", (
+            f"SNOW with category='Other' got lens {ctx['lens_applied']!r}"
+        )
+
+    # 9I2-02: SNOW + "Other" never shows "asset type not recognized"
+    def test_snow_other_category_no_unknown_lens_copy(self):
+        card = self._snap_card("SNOW", "Other")
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        combined = " ".join([
+            ctx.get("role_lens") or "",
+            ctx.get("why_this_action") or "",
+            ctx.get("evidence_caveat") or "",
+        ]).lower()
+        assert "asset type not recognized" not in combined
+        assert "intelligence lens cannot be applied" not in combined
+
+    # 9I2-03: SNOW + "Unknown" also routes to stock lens
+    def test_snow_unknown_category_routes_to_stock_lens(self):
+        card = self._snap_card("SNOW", "Unknown")
+        ctx = card["detail_drawer_payload"]["asset_intelligence_context"]
+        assert ctx is not None
+        assert ctx["lens_applied"] == "stock_fundamental_lens"
+
+    # 9I2-04: Known ETF + "Other" still uses ETF lens (ticker-map override wins)
+    @pytest.mark.parametrize("ticker", ["VTI", "SCHD", "VXUS"])
+    def test_known_etf_with_other_category_routes_to_etf_lens(self, ticker):
+        card = self._snap_card(ticker, "Other", action="HOLD")
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None, f"{ticker} with category='Other' returned no context"
+        assert ctx["lens_applied"] == "etf_role_lens", (
+            f"{ticker} with category='Other' got lens {ctx['lens_applied']!r}"
+        )
+
+    # 9I2-05: GLD + "Other" still uses commodity hedge lens
+    def test_gld_with_other_category_routes_to_commodity_hedge(self):
+        card = self._snap_card("GLD", "Other", action="HOLD")
+        ctx = card["detail_drawer_payload"]["asset_intelligence_context"]
+        assert ctx is not None
+        assert ctx["lens_applied"] == "commodity_hedge_lens"
+
+    # 9I2-06: BTC + "crypto" still routes to crypto lens
+    def test_btc_crypto_category_routes_to_crypto_lens(self):
+        card = self._snap_card("BTC", "crypto", action="HOLD")
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        assert ctx["lens_applied"] == "crypto_speculative_lens"
+
+    # 9I2-07: AAPL/MSFT with explicit stock category still route correctly (regression)
+    @pytest.mark.parametrize("ticker,category", [
+        ("AAPL", "stock"), ("MSFT", "Technology"),
+    ])
+    def test_stock_explicit_category_still_routes_to_stock_lens(self, ticker, category):
+        card = self._snap_card(ticker, category, action="HOLD")
+        ctx = card["detail_drawer_payload"]["asset_intelligence_context"]
+        assert ctx is not None
+        assert ctx["lens_applied"] == "stock_fundamental_lens"
+
+    # 9I2-08: Visible action preserved after _resolve_intel_asset_type path
+    def test_visible_action_preserved_for_snow(self):
+        card = self._snap_card("SNOW", "Other", action="BUY")
+        assert card["action"] == "BUY", "BUY action must be preserved for SNOW"

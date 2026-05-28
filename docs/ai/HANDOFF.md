@@ -1,6 +1,11 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-27 (Stage 9I cleanup — fix ETF/stock drawer semantic issues; PR #438 merged).
+Last updated: 2026-05-28 (Stage 9I.1 — SNOW normalization + ETF grammar fix; PR #439 merged).
+
+**Stage 9I.1 (merged PR #439):** Two targeted correctness fixes after screenshot validation of PR #438.
+1. **SNOW "asset type not recognized"**: Added `cloud`, `data cloud`, `saas`, `enterprise software`, `application software`, `software infrastructure`, `consumer discretionary`, `consumer staples` to `_STOCK_CATEGORY_LABELS`. Added conservative stock fallback in `compose_asset_intelligence()`: non-ETF ticker with a non-empty, non-ambiguous, non-instrument category defaults to `ASSET_CLASS_STOCK`. Added `_NON_STOCK_INSTRUMENT_TYPES` exclusion set (`derivative`, `futures`, `option`, etc.) to preserve conservative behavior for those values.
+2. **ETF profile-ready grammar**: `"analysis require provider data"` → `"analysis requires provider data"` in `ETF_TIER_PROFILE_READY` driver.
+- 22 new tests in `TestStage9I1NormalizationFix`. 165 Stage 9I + 97 Stage 9G/9H pass.
 
 **Stage 9I cleanup (merged PR #438):** Five production correctness fixes to ETF/stock intelligence drawers.
 1. **ETF evidence language**: `buildSupportingEvidenceSentences`/`buildIncompleteEvidenceSentences` now accept optional `assetClassDisplay` param; ETF/commodity/crypto drawers show "Fund profile data" instead of "Company fundamentals." `IntelV3Drawer` passes `intelCtx?.asset_class_display`.
@@ -63,9 +68,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (PRs #437 + #438 merged).
+- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (PRs #437, #438, #439 merged).
 - Current PR: none open.
-- Next: validate in production that ETF/GLD/stock drawers render correctly (role_lens, why_this_action, triggers, asset-class-appropriate evidence language, no HOLD+BUY contradiction). Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
+- Next: validate in production that all stock/ETF/GLD cards render correctly (SNOW cloud categories, ETF grammar, HOLD+BUY, evidence language). Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

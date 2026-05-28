@@ -482,6 +482,13 @@ class IntelV3Service:
                 decision = decide(inp)
                 decisions.append(decision)
 
+                # Stage 9J: include portfolio_current_pct so downstream adapters can produce
+                # richer portfolio-fit context (underweight/on-target/overweight with actual %).
+                # etf_provider_outputs and etf_upstream_signals are not populated here yet.
+                # TODO(Stage 9K): populate etf_provider_outputs when intel_v3_etf_nport_evidence_enabled
+                #   is True and NPORT artifacts are available for this ticker.
+                # TODO(Stage 9K): populate etf_upstream_signals when portfolio overlap/redundancy
+                #   signals are computed per ticker (is_redundant_etf, role_mismatch, etc.).
                 card_metas.append({
                     "ticker":             ticker,
                     "name":               card.name or ticker,
@@ -489,6 +496,7 @@ class IntelV3Service:
                     "thesis_state":       "intact",
                     "governance_result":  _gov_result_dict,
                     "research_axis_readiness": _research_axis_readiness,
+                    "portfolio_current_pct": current_pct,
                 })
 
             # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).
@@ -1411,6 +1419,9 @@ class IntelV3Service:
 
             decision = decide(inp)
             decisions.append(decision)
+            # Stage 9J: include portfolio_current_pct for richer portfolio-fit context.
+            # TODO(Stage 9K): populate etf_provider_outputs / etf_upstream_signals once
+            #   NPORT lane is active and portfolio overlap signals are computed.
             card_metas.append({
                 "ticker":             ticker,
                 "name":               card.name or ticker,
@@ -1418,6 +1429,7 @@ class IntelV3Service:
                 "thesis_state":       "intact",
                 "governance_result":  _gov_result_dict,
                 "research_axis_readiness": _research_axis_readiness,
+                "portfolio_current_pct": current_pct,
             })
 
         # Step 3b: Build valuation context map when flag enabled (Build 3 PR 2B).

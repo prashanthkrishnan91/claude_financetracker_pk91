@@ -336,10 +336,18 @@ def _compose_stock(
         suggested_action = ACTION_HOLD
         hold_reason = HOLD_ON_TARGET
     else:
-        drivers.append(
-            f"{ticker}: evidence is adequate but no clear trigger to add or reduce. "
-            "Monitoring for business quality changes, catalyst events, or risk signals."
-        )
+        # portfolio_fit is UNKNOWN (no target allocation set) or an unexpected value.
+        # Distinguish clearly from on-target/underweight so context does not mislead.
+        if portfolio_fit == FIT_UNKNOWN:
+            drivers.append(
+                f"{ticker}: no target allocation is set — "
+                "monitoring for business quality changes, catalyst events, and risk signals."
+            )
+        else:
+            drivers.append(
+                f"{ticker}: evidence is adequate but no clear trigger to add or reduce. "
+                "Monitoring for business quality changes, catalyst events, or risk signals."
+            )
         suggested_action = ACTION_HOLD
         hold_reason = HOLD_STABLE_NO_TRIGGER
 

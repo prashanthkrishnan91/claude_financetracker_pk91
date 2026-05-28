@@ -1,12 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-28 (Stage 9J.1 — portfolio_weight_context rendered in Intel drawer; PR open).
+Last updated: 2026-05-28 (Stage 9K — ETF NPORT provider evidence wired into Intel card metadata; PR open).
 
-**Stage 9J.1 (current PR):** Renders `portfolio_weight_context` in the Intel drawer when backend supplies it.
-- **Frontend type**: `portfolio_weight_context?: string` added to `asset_intelligence_context` in `api.ts`. Optional, never null — absent key means no pct data available.
-- **IntelV3Drawer**: `AssetIntelSection` renders a "Portfolio weight" labeled section after "Why this action" when `intelCtx.portfolio_weight_context` is present (`data-testid="asset-intel-portfolio-weight"`). No render when absent. Null guard updated to include `hasPortfolioWeight`.
-- **Tests**: 21 pure TypeScript contract tests in `IntelV3Stage9J1Contract.test.ts` — type contract, fit-specific copy (UNDERWEIGHT/ON_TARGET/OVERWEIGHT/UNKNOWN), action independence, existing field integrity, absence contract.
-- No new backend logic, no SQL, no providers, no LLM. Existing visible action never overridden.
+**Stage 9K (current PR):** Wires existing NPORT artifact payloads into `etf_provider_outputs` in `card_meta`, enabling ETF drawers to show "full holdings data available" when real SEC/NPORT evidence is present. Honest degradation preserved when it is not.
+- **`_get_etf_nport_provider_outputs()`**: New async method in `intel_v3_service.py` — queries `research_artifacts` for active NPORT ETF fund note artifacts, applies holdings-ready gate (fetch_status=success, holdings_count≥5, weights_available, report_period_date present), returns `{ticker: {"nport_output": {...}}}` map. Fail-soft; never raises.
+- **`run_v3` and `run_prewarm_snapshot`**: NPORT map queried before card loop (flag-gated: `intel_v3_etf_nport_evidence_enabled=True`). `etf_provider_outputs` populated in `card_metas.append()` in both paths.
+- **`snapshot_builder.py`**: Already extracted `etf_provider_outputs` from `card_meta` at lines 246-247 (Stage 9J TODO now resolved). No changes to snapshot_builder needed.
+- **Safety**: `safe_for_decision` always False; `synthesis_ready` always False; visible BUY/HOLD/TRIM/SELL never overridden. Flag off or no holdings-ready artifacts → `etf_provider_outputs=None` → honest "not yet wired" text preserved.
+- **Tests**: 45 fixture tests in `test_stage9k_etf_provider_wiring.py` — NPORT payload gate, holdings-ready wiring, AV missing-date stays profile_ready, FMP 402 not holdings_ready, lens regression (GLD=commodity_hedge_lens unchanged), stock/crypto unaffected, visible action preserved, schema integrity.
+- No new providers, no SQL, no LLM, no UI changes. AV supplemental-only unchanged. FMP paywalled unchanged.
 
 **Stage 9J (merged PR #441):** Wired portfolio-fit context and ETF evidence signals into Intel context.
 - **portfolio_current_pct → portfolio_weight_context**: adapter now emits fit-aware plain-English weight note. UNDERWEIGHT: "room to grow toward target." ON_TARGET: "at target allocation." OVERWEIGHT/BREACH: "above target." UNKNOWN: "no target allocation is set." Key absent (not null) when pct is None.

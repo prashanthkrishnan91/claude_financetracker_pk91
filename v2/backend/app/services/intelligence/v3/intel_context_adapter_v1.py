@@ -104,6 +104,7 @@ def build_intel_context(
     portfolio_fit_raw: str,
     evidence_quality_raw: str,
     existing_action: str,
+    portfolio_current_pct: Optional[float] = None,
     provider_outputs: Optional[dict[str, Any]] = None,
     upstream_signals: Optional[dict[str, Any]] = None,
 ) -> Optional[dict[str, Any]]:
@@ -119,14 +120,17 @@ def build_intel_context(
         evidence_quality_raw: AxisBand value string (THIN/OK/STRONG/SUPPRESSED).
         existing_action:     Deterministic visible action (BUY/HOLD/TRIM/SELL).
                              Preserved as-is; composer output is context only.
+        portfolio_current_pct: Current portfolio weight as a percentage (e.g. 3.2 for
+                             3.2%). When available, surfaced in portfolio_weight_context.
         provider_outputs:    Optional Stage 9F provider output dict.
         upstream_signals:    Optional upstream signal hints (is_redundant_etf etc.).
 
     Returns:
         dict with role_lens, why_this_action, add_more_trigger, trim_sell_trigger,
-        evidence_caveat (when useful), lens_applied, asset_class_display,
-        adapter_version. Returns None when no useful context can be produced
-        (empty ticker, completely unknown asset with no drivers).
+        portfolio_weight_context (when pct available), evidence_caveat (when useful),
+        lens_applied, asset_class_display, adapter_version. Returns None when no
+        useful context can be produced (empty ticker, completely unknown asset with
+        no drivers).
     """
     t = (ticker or "").strip().upper()
     if not t:
@@ -156,8 +160,9 @@ def build_intel_context(
     add_more_trigger = _ADD_MORE_TRIGGERS.get(lens, "") if lens != LENS_UNKNOWN else ""
     trim_sell_trigger = _TRIM_SELL_TRIGGERS.get(lens, "") if lens != LENS_UNKNOWN else ""
     evidence_caveat = _build_evidence_caveat(result, evidence_quality_raw)
+    portfolio_weight_ctx = _build_portfolio_weight_context(portfolio_fit_raw, portfolio_current_pct)
 
-    return {
+    ctx: dict[str, Any] = {
         "role_lens":          role_lens,
         "why_this_action":    why_this_action,
         "add_more_trigger":   add_more_trigger,
@@ -167,6 +172,9 @@ def build_intel_context(
         "asset_class_display": _ASSET_CLASS_DISPLAY.get(asset_class, ""),
         "adapter_version":    ADAPTER_VERSION,
     }
+    if portfolio_weight_ctx is not None:
+        ctx["portfolio_weight_context"] = portfolio_weight_ctx
+    return ctx
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
@@ -260,3 +268,40 @@ def _build_evidence_caveat(
             "filings, and market signals become available."
         )
     return None
+
+
+def _build_portfolio_weight_context(
+    portfolio_fit_raw: str,
+    portfolio_current_pct: Optional[float],
+) -> Optional[str]:
+    """Build a plain-English portfolio weight note when current_pct is available.
+
+    Returns None when portfolio_current_pct is not provided — the key is omitted
+    from the context dict entirely so callers can rely on key presence to detect
+    whether weight data is available.
+    """
+    if portfolio_current_pct is None:
+        return None
+    pct_str = f"{portfolio_current_pct:.1f}%"
+    fit = (portfolio_fit_raw or "").upper()
+    if fit == "UNKNOWN":
+        return (
+            f"Current portfolio weight is {pct_str}; "
+            "no target allocation is set."
+        )
+    if fit == "UNDERWEIGHT":
+        return (
+            f"Current portfolio weight is {pct_str} — "
+            "position has room to grow toward target."
+        )
+    if fit in ("OVERWEIGHT", "BREACH"):
+        return (
+            f"Current portfolio weight is {pct_str} — "
+            "position is above target."
+        )
+    if fit == "ON_TARGET":
+        return (
+            f"Current portfolio weight is {pct_str} — "
+            "at target allocation."
+        )
+    return f"Current portfolio weight: {pct_str}."

@@ -1,6 +1,14 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-28 (Stage 9I.2 — SNOW runtime "Other" category fix; PR pending).
+Last updated: 2026-05-28 (Stage 9J — portfolio-fit and ETF evidence signal wiring; PR open).
+
+**Stage 9J (current PR):** Wires portfolio-fit context and ETF evidence signals into Intel context.
+- **portfolio_current_pct added to card_meta** in both intel_v3_service.py paths (run_v3 and prewarm). Makes current weight available for future richer context; FitBand continues to drive adapter copy.
+- **`_compose_stock` FIT_UNKNOWN text improved**: Now says "no target allocation is set — monitoring for business quality changes..." instead of generic "no clear trigger." Explicitly distinguishes "no target data" from "on target."
+- **ETF provider/upstream signal wiring**: snapshot_builder already extracts `etf_provider_outputs` and `etf_upstream_signals` from card_meta. When present (fixture or future NPORT lane), they flow into `classify_etf_intelligence()` → correct evidence tier text. When absent, context degrades honestly (profile_ready for known ETFs, metadata_only for unknown).
+- **TODO(Stage 9K)**: populate `etf_provider_outputs` in card_meta once `intel_v3_etf_nport_evidence_enabled=True` and NPORT artifacts are available per ticker. Populate `etf_upstream_signals` once portfolio overlap/redundancy computation exists.
+- 62 new tests in `test_stage9j_portfolio_fit_etf_evidence.py`. 393 Stage 9F/9G/9H/9I/9J tests pass.
+- No SQL, no new providers, no LLM, no UI changes. Existing visible action never overridden.
 
 **Stage 9I.2 (PR pending):** Root-cause fix for SNOW still showing "asset type not recognized" after PR #439.
 - **Root cause traced**: `positions` DB table stores `category = "Other"` for SNOW. Python `or` short-circuit means `"Other" or "stock"` = `"Other"` (truthy string, fallback never fires). "Other" flows through `card_meta["category"]` into `build_intel_context(asset_type="Other")`. `_classify_asset_class("other")` → UNKNOWN; "other" is in `_AMBIGUOUS_CATEGORY_LABELS` so stock fallback is also blocked → UNKNOWN lens → "asset type not recognized."
@@ -75,9 +83,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9I** — Visible Intel Useful Action Cards v1 (PRs #437, #438, #439 merged).
-- Current PR: none open.
-- Next: validate in production that all stock/ETF/GLD cards render correctly (SNOW cloud categories, ETF grammar, HOLD+BUY, evidence language). Then wire `etf_provider_outputs`/`etf_upstream_signals` into card_metas once Stage 9F NPORT lane is enabled.
+- Roadmap stage: **Stage 9J** — Portfolio-fit and ETF evidence signal wiring (PR open).
+- Current PR: Stage 9J open.
+- Next: after Stage 9J merges, wire `etf_provider_outputs` in card_meta when `intel_v3_etf_nport_evidence_enabled=True` and NPORT artifacts are available (Stage 9K). Separately compute portfolio overlap/redundancy signals to populate `etf_upstream_signals`.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

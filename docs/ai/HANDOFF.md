@@ -1,8 +1,15 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-28 (Stage 9K — ETF NPORT provider evidence wired into Intel card metadata; PR open).
+Last updated: 2026-05-28 (Stage 9K diagnostic — artifact-readiness endpoint added; PR open).
 
-**Stage 9K (current PR):** Wires existing NPORT artifact payloads into `etf_provider_outputs` in `card_meta`, enabling ETF drawers to show "full holdings data available" when real SEC/NPORT evidence is present. Honest degradation preserved when it is not.
+**Stage 9K diagnostic (current PR):** Adds `POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness` to explain per-ticker why VTI/SCHD/VXUS remain "not yet wired" after deploy.
+- **`etf_stage9k_diagnostic_helper.py`** (new): pure module with `classify_stage9k_gate_failure(payload)` → `(gate_passed, reason_failed)` and `build_stage9k_ticker_entry(...)`. Mirrors the gate in `_get_etf_nport_provider_outputs` exactly.
+- **Config**: `intel_v3_stage9k_artifact_readiness_diagnostic_enabled: bool = False` added to `config.py`.
+- **Endpoint**: cert-gated, read-only SELECT only, no artifact writes, no provider calls. Queries `research_artifacts` twice (with/without `is_active=True`) to surface five failure modes: flag disabled, no_artifact_row, is_active=False, payload gate fail, gate passed.
+- **Tests**: 35 fixture tests in `test_stage9k_diagnostic.py` — all 5 gate criteria individually, combined failures, all 5 failure modes in `build_stage9k_ticker_entry`. No IO, no DB, no LLM.
+- To run: set `INTEL_V3_STAGE9K_ARTIFACT_READINESS_DIAGNOSTIC_ENABLED=true` + cert headers, then `POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness` with `{"tickers": ["VTI", "SCHD", "VXUS"]}`.
+
+**Stage 9K (prior PR):** Wires existing NPORT artifact payloads into `etf_provider_outputs` in `card_meta`, enabling ETF drawers to show "full holdings data available" when real SEC/NPORT evidence is present. Honest degradation preserved when it is not.
 - **`_get_etf_nport_provider_outputs()`**: New async method in `intel_v3_service.py` — queries `research_artifacts` for active NPORT ETF fund note artifacts, applies holdings-ready gate (fetch_status=success, holdings_count≥5, weights_available, report_period_date present), returns `{ticker: {"nport_output": {...}}}` map. Fail-soft; never raises.
 - **`run_v3` and `run_prewarm_snapshot`**: NPORT map queried before card loop (flag-gated: `intel_v3_etf_nport_evidence_enabled=True`). `etf_provider_outputs` populated in `card_metas.append()` in both paths.
 - **`snapshot_builder.py`**: Already extracted `etf_provider_outputs` from `card_meta` at lines 246-247 (Stage 9J TODO now resolved). No changes to snapshot_builder needed.

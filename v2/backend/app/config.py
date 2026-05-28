@@ -144,6 +144,13 @@ class Settings(BaseSettings):
     # Requires sec_edgar_user_agent to be set.
     intel_v3_nport_diagnostic_endpoint_enabled: bool = False
 
+    # Stage 9K diagnostic — artifact-readiness DB read endpoint (default OFF).
+    # When enabled, POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness
+    # queries research_artifacts and reports per-ticker why the Stage 9K holdings-ready
+    # gate passes or fails. Read-only SELECT only. No artifact writes. No provider calls.
+    # No SQL migration required. Cert-gated.
+    intel_v3_stage9k_artifact_readiness_diagnostic_enabled: bool = False
+
     # ── Intel v3 Stage 5I — FRED official macro evidence lane (off by default) ────
     # FRED (Federal Reserve Economic Data) → portfolio-scope macro evidence artifact
     # via fred_macro_adapter_v1. FREE / OFFICIAL source. No paid providers. No LLM calls.

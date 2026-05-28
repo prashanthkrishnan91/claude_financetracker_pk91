@@ -4188,3 +4188,132 @@ async def fmp_etf_holdings_check(
         getattr(user, "email", "unknown"),
     )
     return result
+
+
+# ── Stage 9K — ETF NPORT artifact-readiness diagnostic endpoint ───────────────
+
+
+class EtfStage9kArtifactReadinessRequest(BaseModel):
+    """Stage 9K — operator request body for artifact-readiness diagnostic."""
+    tickers: list[str] = []
+
+
+@router.post("/etf-stage9k-artifact-readiness")
+async def etf_stage9k_artifact_readiness(
+    payload: EtfStage9kArtifactReadinessRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9K — operator-only diagnostic: why are ETF drawers still 'not yet wired'?
+
+    Queries research_artifacts for the requested tickers and reports per-ticker why
+    the Stage 9K holdings-ready gate passes or fails.  Does NOT call any provider,
+    does NOT write artifacts, does NOT alter decisions or snapshots.
+
+    Five failure modes surfaced:
+      1. flag disabled — intel_v3_etf_nport_evidence_enabled=False at runtime
+      2. no_artifact_row — no row found for this user_id/ticker/skill_pack
+      3. is_active=False — row exists but inactive (production query skips it)
+      4. payload_gate_fail — active row found but fetch_status/holdings_count/
+                             weights_available/report_period_date/coverage_quality fails
+      5. gate_passed — artifact is wired correctly
+
+    Required env vars:
+      INTEL_V3_STAGE9K_ARTIFACT_READINESS_DIAGNOSTIC_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+
+    Default tickers when none are supplied: VTI, SCHD, VXUS.
+    Maximum tickers per request: 20.
+
+    Returns:
+      {
+        "flag_enabled": bool,
+        "user_id": "<uuid>",
+        "tickers_requested": int,
+        "skill_pack": "<str>",
+        "safe_for_decision": false,
+        "artifact_writes": 0,
+        "diagnostics_only": true,
+        "results": [{ per-ticker fields }]
+      }
+    """
+    settings = get_settings()
+    if not settings.intel_v3_stage9k_artifact_readiness_diagnostic_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    from ..services.intelligence.v3.etf_stage9k_diagnostic_helper import (
+        _NPORT_SKILL_PACK,
+        _STAGE9K_DIAG_DEFAULT_TICKERS,
+        _STAGE9K_DIAG_MAX_TICKERS,
+        build_stage9k_ticker_entry,
+    )
+
+    tickers_raw = [t.strip().upper() for t in (payload.tickers or []) if t.strip()]
+    if not tickers_raw:
+        tickers_raw = list(_STAGE9K_DIAG_DEFAULT_TICKERS)
+    tickers_raw = list(dict.fromkeys(tickers_raw))  # deduplicate, preserve order
+    if len(tickers_raw) > _STAGE9K_DIAG_MAX_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Maximum {_STAGE9K_DIAG_MAX_TICKERS} tickers per request.",
+        )
+
+    flag_enabled: bool = bool(
+        getattr(settings, "intel_v3_etf_nport_evidence_enabled", False)
+    )
+    user_id = str(user.id)
+    db_client = get_supabase_client()
+
+    def _query_active() -> list[dict]:
+        resp = (
+            db_client
+            .from_("research_artifacts")
+            .select("ticker,skill_pack,artifact_type,is_active,payload")
+            .eq("user_id", user_id)
+            .eq("skill_pack", _NPORT_SKILL_PACK)
+            .eq("is_active", True)
+            .in_("ticker", tickers_raw)
+            .execute()
+        )
+        return resp.data or []
+
+    def _query_all() -> list[dict]:
+        resp = (
+            db_client
+            .from_("research_artifacts")
+            .select("ticker,skill_pack,artifact_type,is_active,payload")
+            .eq("user_id", user_id)
+            .eq("skill_pack", _NPORT_SKILL_PACK)
+            .in_("ticker", tickers_raw)
+            .execute()
+        )
+        return resp.data or []
+
+    active_rows, all_rows = await asyncio.gather(
+        asyncio.to_thread(_query_active),
+        asyncio.to_thread(_query_all),
+    )
+
+    results = [
+        build_stage9k_ticker_entry(t, flag_enabled, active_rows, all_rows)
+        for t in tickers_raw
+    ]
+
+    gate_passed_count = sum(1 for r in results if r["gate_passed"])
+    logger.info(
+        "stage9k_artifact_readiness_diagnostic tickers=%d gate_passed=%d flag=%s user=%s",
+        len(tickers_raw),
+        gate_passed_count,
+        flag_enabled,
+        getattr(user, "email", "unknown"),
+    )
+
+    return {
+        "flag_enabled": flag_enabled,
+        "user_id": user_id,
+        "tickers_requested": len(tickers_raw),
+        "skill_pack": _NPORT_SKILL_PACK,
+        "safe_for_decision": False,
+        "artifact_writes": 0,
+        "diagnostics_only": True,
+        "results": results,
+    }

@@ -2262,12 +2262,14 @@ class IntelV3Service:
         """Fetch existing NPORT artifact payloads for ETF tickers (Stage 9K).
 
         Queries research_artifacts for active etf_fund_note/etf_sec_nport_holdings_evidence_v1
-        artifacts.  For each ticker where the payload satisfies the holdings-ready
-        safety gate (fetch_status=success, holdings_count≥5, weights_available, and
-        report_period_date present), returns:
+        artifacts.  For each ticker where the payload satisfies the full holdings-ready
+        safety gate (fetch_status=success, holdings_count≥5, weights_available,
+        report_period_date present, and coverage_quality not "partial" or "suspicious"),
+        returns:
 
           {ticker_upper: {"nport_output": {fetch_status, holdings_count,
-                                           weights_available, report_period_date}}}
+                                           weights_available, report_period_date,
+                                           coverage_quality}}}
 
         Tickers without a qualifying artifact are omitted from the result —
         callers receive None from .get() and the snapshot_builder degrades
@@ -2277,9 +2279,10 @@ class IntelV3Service:
           - Fail-soft: returns {} on any error.
           - Never raises.
           - Read-only SELECT; no writes.
-          - Does NOT call _nport_is_holdings_ready() directly — the same subset of
-            payload fields is returned so the classifier in etf_intelligence_classifier_v1
-            can apply its own gate when compose_asset_intelligence() is called later.
+          - Does NOT call _nport_is_holdings_ready() directly — the same gate
+            criteria are applied (including coverage_quality) so the classifier in
+            etf_intelligence_classifier_v1 applies its own gate consistently when
+            compose_asset_intelligence() is called later.
           - safe_for_decision and synthesis_ready are never set here.
         """
         try:
@@ -2318,15 +2321,18 @@ class IntelV3Service:
                     "holdings_count": payload.get("holdings_count", 0) or 0,
                     "weights_available": bool(payload.get("weights_available", False)),
                     "report_period_date": payload.get("report_period_date"),
+                    "coverage_quality": payload.get("coverage_quality") or "",
                 }
-                # Only include tickers where data passes the basic holdings-ready gate.
-                # This mirrors _nport_is_holdings_ready() without importing the classifier
-                # so the classifier's own gate still applies during compose_asset_intelligence().
+                # Full holdings-ready gate — mirrors _nport_is_holdings_ready() criteria
+                # (including coverage_quality) so partial/suspicious artifacts are blocked
+                # before reaching the classifier, preserving honest degradation.
                 fetch_ok = (nport_out["fetch_status"] or "").lower() == "success"
                 count_ok = nport_out["holdings_count"] >= 5
                 weights_ok = nport_out["weights_available"]
                 date_ok = bool(nport_out["report_period_date"])
-                if fetch_ok and count_ok and weights_ok and date_ok:
+                cq = (nport_out["coverage_quality"] or "").lower()
+                coverage_ok = "partial" not in cq and "suspicious" not in cq
+                if fetch_ok and count_ok and weights_ok and date_ok and coverage_ok:
                     result[t] = {"nport_output": nport_out}
 
             return result

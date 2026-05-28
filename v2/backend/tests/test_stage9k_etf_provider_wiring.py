@@ -132,23 +132,27 @@ class TestNportPayloadGate:
     """Verify which NPORT artifact payloads pass the holdings-ready gate.
 
     These test the payload field shape that _get_etf_nport_provider_outputs()
-    would return, mirroring the gate logic in the service method.
+    would return, mirroring the gate logic in the service method (including
+    coverage_quality — partial/suspicious values must be blocked).
     """
 
     @staticmethod
     def _gate(payload: dict) -> bool:
-        """Mirror the in-service gate for testability."""
+        """Mirror the in-service gate for testability (including coverage_quality)."""
         nport_out = {
             "fetch_status": payload.get("fetch_status", ""),
             "holdings_count": payload.get("holdings_count", 0) or 0,
             "weights_available": bool(payload.get("weights_available", False)),
             "report_period_date": payload.get("report_period_date"),
+            "coverage_quality": payload.get("coverage_quality") or "",
         }
         fetch_ok = (nport_out["fetch_status"] or "").lower() == "success"
         count_ok = nport_out["holdings_count"] >= 5
         weights_ok = nport_out["weights_available"]
         date_ok = bool(nport_out["report_period_date"])
-        return fetch_ok and count_ok and weights_ok and date_ok
+        cq = (nport_out["coverage_quality"] or "").lower()
+        coverage_ok = "partial" not in cq and "suspicious" not in cq
+        return fetch_ok and count_ok and weights_ok and date_ok and coverage_ok
 
     def test_full_holdings_ready_payload_passes(self):
         payload = {
@@ -223,7 +227,7 @@ class TestNportPayloadGate:
         }
         assert self._gate(payload) is True
 
-    def test_extra_fields_ignored(self):
+    def test_usable_coverage_quality_passes(self):
         payload = {
             "fetch_status": "success",
             "holdings_count": 50,
@@ -233,6 +237,55 @@ class TestNportPayloadGate:
             "sector_status": "MISSING",
             "geography_status": "MISSING",
             "form_type": "NPORT-P",
+        }
+        assert self._gate(payload) is True
+
+    def test_absent_coverage_quality_passes(self):
+        """When coverage_quality is missing from payload, gate should pass (no suspicious/partial)."""
+        payload = {
+            "fetch_status": "success",
+            "holdings_count": 50,
+            "weights_available": True,
+            "report_period_date": "2025-12-31",
+        }
+        assert self._gate(payload) is True
+
+    def test_partial_coverage_quality_blocked(self):
+        """coverage_quality containing 'partial' must NOT become holdings_ready."""
+        for cq in ("partial", "partial_or_suspicious", "partial_coverage"):
+            payload = {
+                "fetch_status": "success",
+                "holdings_count": 103,
+                "weights_available": True,
+                "report_period_date": "2025-12-31",
+                "coverage_quality": cq,
+            }
+            assert self._gate(payload) is False, (
+                f"Expected False for coverage_quality={cq!r} — partial must be blocked"
+            )
+
+    def test_suspicious_coverage_quality_blocked(self):
+        """coverage_quality containing 'suspicious' must NOT become holdings_ready."""
+        for cq in ("suspicious", "partial_or_suspicious", "looks_suspicious"):
+            payload = {
+                "fetch_status": "success",
+                "holdings_count": 103,
+                "weights_available": True,
+                "report_period_date": "2025-12-31",
+                "coverage_quality": cq,
+            }
+            assert self._gate(payload) is False, (
+                f"Expected False for coverage_quality={cq!r} — suspicious must be blocked"
+            )
+
+    def test_usable_supplemental_coverage_quality_passes(self):
+        """coverage_quality='usable_supplemental' contains neither 'partial' nor 'suspicious' — passes."""
+        payload = {
+            "fetch_status": "success",
+            "holdings_count": 103,
+            "weights_available": True,
+            "report_period_date": "2025-12-31",
+            "coverage_quality": "usable_supplemental",
         }
         assert self._gate(payload) is True
 
@@ -368,6 +421,95 @@ class TestNoNportDataHonestDegradation:
         assert ctx is not None
         why = ctx["why_this_action"].lower()
         assert "not yet wired" in why
+
+
+# ── coverage_quality partial/suspicious blocks holdings_ready ─────────────────
+
+
+class TestCoverageQualityGate:
+    """Artifacts with partial/suspicious coverage_quality must NOT become holdings_ready.
+
+    These tests exercise the full snapshot path to confirm the safety gate works
+    end-to-end, not just in the unit-level _gate helper in TestNportPayloadGate.
+    """
+
+    _PARTIAL_COVERAGE_NPORT = {
+        "nport_output": {
+            "fetch_status": "success",
+            "holdings_count": 103,
+            "weights_available": True,
+            "report_period_date": "2025-12-31",
+            "coverage_quality": "partial_or_suspicious",
+        }
+    }
+
+    _USABLE_COVERAGE_NPORT = {
+        "nport_output": {
+            "fetch_status": "success",
+            "holdings_count": 103,
+            "weights_available": True,
+            "report_period_date": "2025-12-31",
+            "coverage_quality": "usable",
+        }
+    }
+
+    def test_partial_coverage_does_not_say_full_holdings_available(self):
+        """NPORT artifact with partial_or_suspicious coverage must NOT say 'full holdings data available'."""
+        card = _snap_card(
+            "VTI", "etf", action="HOLD", fit="UNKNOWN", eq="OK",
+            extra_meta={"etf_provider_outputs": self._PARTIAL_COVERAGE_NPORT},
+        )
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        why = ctx["why_this_action"].lower()
+        assert "full holdings data available" not in why, (
+            f"partial/suspicious coverage must not claim full holdings available; got: {why!r}"
+        )
+
+    def test_partial_coverage_keeps_honest_not_yet_wired(self):
+        """NPORT with partial/suspicious coverage should degrade to 'not yet wired' text."""
+        card = _snap_card(
+            "VTI", "etf", action="HOLD", fit="UNKNOWN", eq="OK",
+            extra_meta={"etf_provider_outputs": self._PARTIAL_COVERAGE_NPORT},
+        )
+        ctx = card["detail_drawer_payload"].get("asset_intelligence_context")
+        assert ctx is not None
+        why = ctx["why_this_action"].lower()
+        assert "not yet wired" in why, (
+            f"partial/suspicious NPORT should degrade to 'not yet wired' but got: {why!r}"
+        )
+
+    def test_partial_coverage_never_holdings_ready_tier(self):
+        """Classifier tier for partial/suspicious NPORT must never be holdings_ready."""
+        from app.services.intelligence.v3.etf_intelligence_classifier_v1 import classify_etf_intelligence
+        cls = classify_etf_intelligence(
+            ticker="VTI",
+            asset_type="etf",
+            provider_outputs=self._PARTIAL_COVERAGE_NPORT,
+        )
+        assert cls.evidence_tier != ETF_TIER_HOLDINGS_READY, (
+            f"partial/suspicious NPORT must not produce holdings_ready tier; got {cls.evidence_tier!r}"
+        )
+
+    def test_partial_coverage_safe_for_decision_always_false(self):
+        """safe_for_decision must never be True for partial/suspicious NPORT."""
+        from app.services.intelligence.v3.etf_intelligence_classifier_v1 import classify_etf_intelligence
+        cls = classify_etf_intelligence(
+            ticker="VTI",
+            asset_type="etf",
+            provider_outputs=self._PARTIAL_COVERAGE_NPORT,
+        )
+        assert cls.safety_flags.get("safe_for_decision") is False
+
+    def test_usable_coverage_quality_becomes_holdings_ready(self):
+        """When coverage_quality='usable' and all other fields pass, ETF becomes holdings_ready."""
+        from app.services.intelligence.v3.etf_intelligence_classifier_v1 import classify_etf_intelligence
+        cls = classify_etf_intelligence(
+            ticker="VTI",
+            asset_type="etf",
+            provider_outputs=self._USABLE_COVERAGE_NPORT,
+        )
+        assert cls.evidence_tier == ETF_TIER_HOLDINGS_READY
 
 
 # ── AV missing-date stays profile-ready ───────────────────────────────────────

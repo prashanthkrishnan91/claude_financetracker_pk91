@@ -243,6 +243,10 @@ class NportProviderResult:
     filings_scanned_count: int = 0           # total filings scanned across all candidates
     matching_filing_rank: Optional[int] = None  # 1-based rank in candidate where match found
     scan_limit_reached: bool = False          # True when budget exhausted before identity match
+    # Submissions structure diagnostics for no_nport_filing path (Stage 9L).
+    submissions_recent_form_count: int = 0   # forms present in filings.recent
+    submissions_has_files_pages: bool = False  # whether filings.files[] pages exist
+    submissions_files_page_tried: bool = False  # whether a files page was fetched
 
     @property
     def is_success(self) -> bool:
@@ -847,6 +851,10 @@ def fetch_etf_nport_holdings(
         # Scan state (Stage 9F.2a multi-filing scan).
         filings_scanned_count: int = 0
         _scan_limit_reached: bool = False
+        # Submissions structure diagnostics (Stage 9L — updated each candidate iteration).
+        _sub_recent_form_count: int = 0
+        _sub_has_files_pages: bool = False
+        _sub_files_page_tried: bool = False
 
         for candidate_cik in candidate_ciks:
             candidate_ciks_tried.append(candidate_cik)
@@ -889,6 +897,38 @@ def fetch_etf_nport_holdings(
             # filing (not next candidate) so a wrong-series latest filing does
             # not block finding the matching series in an earlier filing.
             recent_filings = _collect_recent_nport_filings(sub_body, config.max_filings_to_scan)
+
+            # Track submissions structure diagnostics for no-data path.
+            _sub_recent_form_count = len(
+                (sub_body.get("filings") or {}).get("recent", {}).get("form") or []
+            )
+            _sub_files_pages_list = (sub_body.get("filings") or {}).get("files") or []
+            _sub_has_files_pages = bool(_sub_files_pages_list)
+            _sub_files_page_tried = False
+
+            # ── Fallback: try first filings.files page when recent has no NPORT-P ─
+            # Bounded: at most 1 extra HTTP call per candidate CIK.
+            # Large registrants (Vanguard, Schwab) may have recent[] filled with
+            # non-NPORT forms, pushing NPORT-P filings into a files[] page.
+            if not recent_filings and _sub_files_pages_list and request_count < config.max_requests_per_ticker:
+                _fp_entry = _sub_files_pages_list[0] if isinstance(_sub_files_pages_list[0], dict) else None
+                _fp_name = _fp_entry.get("name") if _fp_entry else None
+                if _fp_name:
+                    _fp_url = f"https://data.sec.gov/submissions/{_fp_name}"
+                    try:
+                        _resp_fp = _get(_fp_url)
+                        _resp_fp.raise_for_status()
+                        request_count += 1
+                        _fp_body = _resp_fp.json() or {}
+                        # Files page body is flat — wrap for _collect_recent_nport_filings
+                        recent_filings = _collect_recent_nport_filings(
+                            {"filings": {"recent": _fp_body}},
+                            config.max_filings_to_scan,
+                        )
+                        _sub_files_page_tried = True
+                    except Exception:  # noqa: BLE001
+                        pass
+
             if not recent_filings:
                 # No NPORT filing for this CIK
                 # Check if this is a commodity trust (GLD behavior)
@@ -1453,10 +1493,14 @@ def fetch_etf_nport_holdings(
                 else (
                     f"No NPORT-P or NPORT-EX filing found for any of the "
                     f"{len(candidate_ciks_tried)} CIK candidate(s) tried: "
-                    f"{candidate_ciks_tried!r}."
+                    f"{candidate_ciks_tried!r}. "
+                    f"filings.recent had {_sub_recent_form_count} form(s); "
+                    f"filings.files pages present: {_sub_has_files_pages}; "
+                    f"files page tried: {_sub_files_page_tried}. "
+                    "Verify CIK via SEC EDGAR company search or add candidate_ciks fallbacks."
                 )
             )
-            return _fail_closed(
+            res = _fail_closed(
                 ticker_upper, status, msg, request_count,
                 cik=candidate_ciks_tried[-1] if candidate_ciks_tried else None,
                 resolver_source=_resolver_source,
@@ -1464,6 +1508,10 @@ def fetch_etf_nport_holdings(
                 candidate_ciks_tried=candidate_ciks_tried,
                 identity_status=status,
             )
+            res.submissions_recent_form_count = _sub_recent_form_count
+            res.submissions_has_files_pages = _sub_has_files_pages
+            res.submissions_files_page_tried = _sub_files_page_tried
+            return res
 
         # Budget exhausted before any candidate produced a result
         return _fail_closed(

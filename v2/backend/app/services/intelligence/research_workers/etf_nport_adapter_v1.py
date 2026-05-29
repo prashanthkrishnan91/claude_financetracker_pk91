@@ -194,6 +194,24 @@ def _build_no_data_result(provider_result: "NportProviderResult") -> _AdapterRes
     }
     if provider_result.cik:
         diag["resolved_cik"] = provider_result.cik
+        diag["submissions_url"] = (
+            f"https://data.sec.gov/submissions/CIK{provider_result.cik}.json"
+        )
+        diag["edgar_nport_search_url"] = (
+            f"https://www.sec.gov/cgi-bin/browse-edgar"
+            f"?action=getcompany&CIK={int(provider_result.cik)}&type=NPORT-P"
+            f"&dateb=&owner=include&count=40"
+        )
+    if provider_result.parent_registrant_name:
+        diag["parent_registrant_name"] = provider_result.parent_registrant_name
+    if provider_result.candidate_ciks_tried:
+        diag["candidate_ciks_tried"] = provider_result.candidate_ciks_tried
+    if provider_result.submissions_recent_form_count:
+        diag["submissions_recent_form_count"] = provider_result.submissions_recent_form_count
+    if provider_result.submissions_has_files_pages:
+        diag["submissions_has_files_pages"] = True
+    if provider_result.submissions_files_page_tried:
+        diag["submissions_files_page_tried"] = True
     if provider_result.primary_doc_attempted:
         diag["primary_doc_attempted"] = provider_result.primary_doc_attempted
     if provider_result.parse_failure_stage:

@@ -57,6 +57,7 @@ from __future__ import annotations
 
 import logging
 import re
+import urllib.parse
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -247,6 +248,12 @@ class NportProviderResult:
     submissions_recent_form_count: int = 0   # forms present in filings.recent
     submissions_has_files_pages: bool = False  # whether filings.files[] pages exist
     submissions_files_page_tried: bool = False  # whether a files page was fetched
+    # Resolver limitation diagnostic fields (Stage 9M).
+    # Set when all candidate CIKs are exhausted with no NPORT filing found.
+    resolver_limitation_reason: Optional[str] = None
+    # EFTS search URLs for manual CIK verification (constructed, not fetched).
+    efts_entity_search_url: Optional[str] = None
+    efts_series_search_url: Optional[str] = None
 
     @property
     def is_success(self) -> bool:
@@ -1500,6 +1507,49 @@ def fetch_etf_nport_holdings(
                     "Verify CIK via SEC EDGAR company search or add candidate_ciks fallbacks."
                 )
             )
+            # Stage 9M: compute resolver limitation reason and EFTS verification URLs.
+            _limitation_reason: Optional[str] = None
+            _efts_entity_url: Optional[str] = None
+            _efts_series_url: Optional[str] = None
+            if not is_commodity_trust and _entry is not None and _entry.expected_status == "candidate":
+                _files_detail = (
+                    "files page fetched: 0 NPORT-P found there either"
+                    if _sub_files_page_tried
+                    else (
+                        "no filings.files pages present"
+                        if not _sub_has_files_pages
+                        else "filings.files pages present but not fetched (budget guard)"
+                    )
+                )
+                _limitation_reason = (
+                    f"candidate_cik_no_nport_verified: "
+                    f"CIK {candidate_ciks_tried[-1]!r} ({_parent_registrant_name!r}) "
+                    f"has {_sub_recent_form_count} form(s) in filings.recent but 0 NPORT-P; "
+                    f"{_files_detail}. "
+                    f"Static map entry expected_status='candidate' — this CIK is likely "
+                    f"the wrong NPORT-P filing entity for {ticker_upper}. "
+                    f"Manual verification required: search EFTS for NPORT-P by registrant "
+                    f"name to identify the correct filing entity."
+                )
+                _efts_base = "https://efts.sec.gov/LATEST/search-index"
+                if _parent_registrant_name:
+                    _efts_entity_url = (
+                        _efts_base + "?" + urllib.parse.urlencode({
+                            "entity": _parent_registrant_name,
+                            "forms": "NPORT-P",
+                            "dateRange": "custom",
+                            "startdt": "2023-01-01",
+                        })
+                    )
+                if _entry.expected_series_names:
+                    _efts_series_url = (
+                        _efts_base + "?" + urllib.parse.urlencode({
+                            "q": f'"{_entry.expected_series_names[0]}"',
+                            "forms": "NPORT-P",
+                            "dateRange": "custom",
+                            "startdt": "2023-01-01",
+                        })
+                    )
             res = _fail_closed(
                 ticker_upper, status, msg, request_count,
                 cik=candidate_ciks_tried[-1] if candidate_ciks_tried else None,
@@ -1511,6 +1561,9 @@ def fetch_etf_nport_holdings(
             res.submissions_recent_form_count = _sub_recent_form_count
             res.submissions_has_files_pages = _sub_has_files_pages
             res.submissions_files_page_tried = _sub_files_page_tried
+            res.resolver_limitation_reason = _limitation_reason
+            res.efts_entity_search_url = _efts_entity_url
+            res.efts_series_search_url = _efts_series_url
             return res
 
         # Budget exhausted before any candidate produced a result

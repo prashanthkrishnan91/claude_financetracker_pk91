@@ -216,6 +216,13 @@ def _build_no_data_result(provider_result: "NportProviderResult") -> _AdapterRes
         diag["primary_doc_attempted"] = provider_result.primary_doc_attempted
     if provider_result.parse_failure_stage:
         diag["parse_failure_stage"] = provider_result.parse_failure_stage
+    # Stage 9M resolver limitation diagnostics.
+    if provider_result.resolver_limitation_reason:
+        diag["resolver_limitation_reason"] = provider_result.resolver_limitation_reason
+    if provider_result.efts_entity_search_url:
+        diag["efts_entity_search_url"] = provider_result.efts_entity_search_url
+    if provider_result.efts_series_search_url:
+        diag["efts_series_search_url"] = provider_result.efts_series_search_url
     if provider_result.filing_meta:
         meta = provider_result.filing_meta
         diag["accession_number"] = meta.accession_number

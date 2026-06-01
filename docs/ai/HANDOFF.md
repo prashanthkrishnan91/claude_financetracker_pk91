@@ -1,15 +1,29 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-29 (Stage 9L — SEC NPORT filing lookup root-cause fix; PR open on branch `claude/nport-etf-filing-lookup-Bt05B`).
+Last updated: 2026-05-30 (Stage 9M — SEC NPORT resolver verification for VTI/SCHD/VXUS; PR open on branch `claude/stage-9m-nport-resolver-8eqwV`).
 
-**Stage 9L (current PR):** Root-causes and partially fixes the `no_nport_filing` result for VTI, SCHD, VXUS in the SEC NPORT-P provider lane.
-- **Root cause identified (code):** `_collect_recent_nport_filings()` in `nport_provider_v1.py` only checked `filings.recent` from the SEC submissions JSON. Large registrants (Vanguard, Schwab) with many series and mixed form types may have `filings.recent` filled with non-NPORT forms, pushing NPORT-P entries into a `filings.files[]` pagination page.
-- **Fix 1 — Pagination fallback (nport_provider_v1.py):** When `filings.recent` has no NPORT-P, code now tries the first `filings.files[]` page (bounded: at most 1 extra HTTP call per candidate CIK). Files-page body is flat — wrapped in `{"filings": {"recent": <flat>}}` for `_collect_recent_nport_filings`. Budget guard: fallback skipped when `request_count >= max_requests_per_ticker`.
-- **Fix 2 — Diagnostic fields (NportProviderResult):** Three new fields surfaced in the `no_nport_filing` path: `submissions_recent_form_count`, `submissions_has_files_pages`, `submissions_files_page_tried`.
-- **Fix 3 — Enhanced thin artifact (etf_nport_adapter_v1.py):** `_build_no_data_result()` now includes `submissions_url`, `edgar_nport_search_url`, `parent_registrant_name`, `candidate_ciks_tried`, `submissions_recent_form_count` in the no-data artifact payload — enabling post-deploy diagnosis without re-running the provider.
-- **Fixture tests (test_stage9l_nport_filing_fix.py, 26 tests):** L1–L3: VTI/SCHD/VXUS succeed with identity_verified=True when NPORT-P is in filings.recent (proves the CIK + identity path is correct). L4–L8: pagination fallback succeeds when NPORT-P is in files page; budget guard works. L9–L10: adapter diagnostic payload contains SEC URLs and submission counts. L11: no live SEC calls in any test.
-- **Post-deploy note:** The candidate CIKs (0000764180 for VTI, 0001477379 for SCHD, 0001004244 for VXUS) are still marked `expected_status="candidate"`. If live `no_nport_filing` persists after deploy, the thin artifact now surfaces `submissions_url` and `edgar_nport_search_url` for manual CIK verification against SEC EDGAR.
-- **All 93 Stage 9F/9K tests pass** (67 existing + 26 new). No changes to holdings-ready gate, visible policy decisions, or SQL schema.
+**Stage 9M (current PR):** Verifies SEC NPORT resolver CIKs for VTI/SCHD/VXUS from runtime evidence and adds bounded diagnostic proving why SEC NPORT is not currently viable for these tickers.
+- **Root cause confirmed (runtime evidence from Stage 9L deploy):**
+  - VTI (CIK 0000764180): 1000 forms in filings.recent, 0 NPORT-P; files page fetched, also 0 NPORT-P. CIK is the WRONG filing entity.
+  - SCHD (CIK 0001477379): 20 forms in filings.recent, 0 NPORT-P; no files pages. CIK is the WRONG filing entity.
+  - VXUS (CIK 0001004244): 127 forms in filings.recent, 0 NPORT-P; no files pages. CIK is the WRONG filing entity.
+  - EFTS discovery returned `[]` for all three — the same wrong CIK was deduped (already in static seeds) or EFTS returned 0 NPORT-P hits for those registrant names.
+- **Resolution (path B — bounded diagnostic):**
+  - New `resolver_limitation_reason` field on `NportProviderResult` — set on the `no_nport_filing` path when `expected_status="candidate"`, proving why the CIK is wrong with form count, files page detail, and a structured reason code.
+  - New `efts_entity_search_url` and `efts_series_search_url` fields — constructed (not fetched) EFTS search URLs for manual verification of the correct NPORT-P filer.
+  - Adapter `_build_no_data_result()` exposes these fields in the thin artifact payload.
+  - Diagnostic runner `_build_ticker_entry()` exposes `resolver_limitation_reason`, `efts_entity_search_url`, `efts_series_search_url`, `submissions_recent_form_count`, `submissions_has_files_pages`, `submissions_files_page_tried`, and `discovery_deduped_reason`.
+  - Static map provenance for VTI/SCHD/VXUS updated with "runtime evidence confirms CIK is WRONG" and recommended next path (issuer-official or Alpha Vantage supplemental).
+  - Stage 9L pagination fallback preserved, no regressions.
+- **Tests (test_stage9m_nport_resolver_verification.py, 52 tests):** M1–M2: candidate CIK + no_nport path sets resolver_limitation_reason with specific context. M3–M4: confirmed/success paths have no limitation reason. M5–M6: EFTS URLs constructed correctly. M7–M9: adapter payload includes all diagnostic fields. M10: diagnostic runner exposes new fields. M11–M12: discovery_deduped_reason covers EFTS-no-hits and all-candidates-already-tried. M13: no fake identity promotion. M15–M17: VTI/SCHD/VXUS shaped tests mirror runtime evidence. M18: Stage 9L regression guard. M19: no live SEC calls.
+- **All 262 Stage 9F/9K/9L/9M tests pass.** No SQL, no UI, no decision policy changes.
+- **Next action:** The correct NPORT-P filing entity for VTI/SCHD/VXUS must be found manually using the EFTS search URLs surfaced in the diagnostic output. After deploy, run `POST /api/v1/diagnostics/finance-intel/etf-nport-live-check` with `{"tickers": ["VTI", "SCHD", "VXUS"]}` to confirm `resolver_limitation_reason` is populated for all three and `efts_entity_search_url`/`efts_series_search_url` are returned per ticker. Use those URLs to find correct filers in SEC EDGAR. Recommended alternative: issuer-official CSV (vanguard.com/iShares) or Alpha Vantage supplemental (non-canonical). Do not add SEC NPORT as a canonical source until correct CIKs are confirmed.
+
+**Stage 9L (prior PR, merged or open on branch `claude/nport-etf-filing-lookup-Bt05B`):** Root-causes and partially fixes the `no_nport_filing` result for VTI, SCHD, VXUS.
+- **Fix 1 — Pagination fallback (nport_provider_v1.py):** When `filings.recent` has no NPORT-P, code now tries the first `filings.files[]` page (bounded: at most 1 extra HTTP call per candidate CIK).
+- **Fix 2 — Diagnostic fields (NportProviderResult):** Three new fields: `submissions_recent_form_count`, `submissions_has_files_pages`, `submissions_files_page_tried`.
+- **Fix 3 — Enhanced thin artifact (etf_nport_adapter_v1.py):** `_build_no_data_result()` includes `submissions_url`, `edgar_nport_search_url`, `parent_registrant_name`, `candidate_ciks_tried`, `submissions_recent_form_count`.
+- **26 tests (test_stage9l_nport_filing_fix.py).** No SQL, no UI, no policy changes.
 
 **Stage 9K diagnostic (prior PR):** Adds `POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness` to explain per-ticker why VTI/SCHD/VXUS remain "not yet wired" after deploy.
 - **`etf_stage9k_diagnostic_helper.py`** (new): pure module with `classify_stage9k_gate_failure(payload)` → `(gate_passed, reason_failed)` and `build_stage9k_ticker_entry(...)`. Mirrors the gate in `_get_etf_nport_provider_outputs` exactly.

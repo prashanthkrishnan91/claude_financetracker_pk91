@@ -222,10 +222,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         parent_name="VANGUARD INDEX FUNDS",
         parent_cik="0000764180",
         provenance=(
-            "Candidate. VTI is ETF share class of Vanguard Total Stock Market Index"
-            " Fund, a series of VANGUARD INDEX FUNDS (CIK 0000764180). Wrong"
-            " share-class CIK 0000732834 produced no_nport_filing. Post-deploy:"
-            " verify NPORT-P exists under 0000764180 and series name matches expected."
+            "Candidate — runtime evidence confirms CIK is WRONG (Stage 9M). VTI is"
+            " ETF share class of Vanguard Total Stock Market Index Fund. CIK 0000764180"
+            " (VANGUARD INDEX FUNDS) has 1000 forms in filings.recent but 0 NPORT-P;"
+            " first filings.files page also had 0 NPORT-P after Stage 9L fallback."
+            " EFTS discovery returned no new candidates (all deduped to same CIK)."
+            " This CIK is the wrong NPORT-P filing entity. Correct entity not yet"
+            " identified. Manual EFTS NPORT-P search required to find correct filer."
+            " Recommended next path: issuer-official data or Alpha Vantage supplemental."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
@@ -315,12 +319,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         parent_name="VANGUARD INTERNATIONAL EQUITY INDEX FUNDS",
         parent_cik="0001004244",
         provenance=(
-            "Candidate — requires post-deploy verification. VXUS is ETF share class"
-            " of Vanguard Total International Stock Index Fund. Best-available parent"
-            " CIK 0001004244 (VANGUARD INTERNATIONAL EQUITY INDEX FUNDS); previously"
-            " missing_cik (not in seed map). Validate: check submissions for NPORT-P"
-            " under this CIK. If no_nport_filing, run SEC EDGAR company search for"
-            " the correct parent registrant."
+            "Candidate — runtime evidence confirms CIK is WRONG (Stage 9M). VXUS is"
+            " ETF share class of Vanguard Total International Stock Index Fund. CIK"
+            " 0001004244 (VANGUARD INTERNATIONAL EQUITY INDEX FUNDS) has 127 forms in"
+            " filings.recent but 0 NPORT-P; no filings.files pages present. EFTS"
+            " discovery returned no new candidates (all deduped to same CIK). This CIK"
+            " is the wrong NPORT-P filing entity. Correct entity not yet identified."
+            " Manual EFTS NPORT-P search required to find correct filer."
+            " Recommended next path: issuer-official data or Alpha Vantage supplemental."
         ),
         is_parent_registrant=True,
         expected_status="candidate",
@@ -337,10 +343,14 @@ _ETF_PARENT_REGISTRANT_MAP: dict[str, ETFParentRegistrantEntry] = {
         parent_name="SCHWAB STRATEGIC TRUST",
         parent_cik="0001477379",
         provenance=(
-            "Candidate. SCHD (Schwab U.S. Dividend Equity ETF) is a series of"
-            " SCHWAB STRATEGIC TRUST (CIK 0001477379). Wrong share-class CIK"
-            " 0001510588 produced no_nport_filing. Post-deploy: verify NPORT-P"
-            " exists under 0001477379 and series name matches expected."
+            "Candidate — runtime evidence confirms CIK is WRONG (Stage 9M). SCHD"
+            " (Schwab U.S. Dividend Equity ETF) is a series of SCHWAB STRATEGIC TRUST."
+            " CIK 0001477379 has only 20 forms in filings.recent and 0 NPORT-P; no"
+            " filings.files pages present. EFTS discovery returned no new candidates"
+            " (all deduped to same CIK). This CIK is the wrong NPORT-P filing entity."
+            " Correct Schwab Strategic Trust NPORT-P filer not yet identified."
+            " Manual EFTS NPORT-P search required to find correct filer."
+            " Recommended next path: issuer-official data or Alpha Vantage supplemental."
         ),
         is_parent_registrant=True,
         expected_status="candidate",

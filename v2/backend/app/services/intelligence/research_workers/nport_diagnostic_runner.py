@@ -101,11 +101,20 @@ def _build_ticker_entry(
         "filings_scanned_count": getattr(result, "filings_scanned_count", 0),
         "matching_filing_rank": getattr(result, "matching_filing_rank", None),
         "scan_limit_reached": getattr(result, "scan_limit_reached", False),
+        # Submissions structure diagnostics (Stage 9L)
+        "submissions_recent_form_count": getattr(result, "submissions_recent_form_count", 0),
+        "submissions_has_files_pages": getattr(result, "submissions_has_files_pages", False),
+        "submissions_files_page_tried": getattr(result, "submissions_files_page_tried", False),
+        # Resolver limitation fields (Stage 9M)
+        "resolver_limitation_reason": getattr(result, "resolver_limitation_reason", None),
+        "efts_entity_search_url": getattr(result, "efts_entity_search_url", None),
+        "efts_series_search_url": getattr(result, "efts_series_search_url", None),
         # Resolver discovery fields (Stage 9F.2a resolver discovery)
         "resolver_discovery_used": False,
         "resolver_discovery_candidates": [],
         "resolver_discovery_sources_tried": [],
         "resolver_discovery_error": None,
+        "discovery_deduped_reason": None,
     }
 
     if discovery_result is not None:
@@ -125,6 +134,26 @@ def _build_ticker_entry(
             discovery_result.discovery_sources_tried
         )
         entry["resolver_discovery_error"] = discovery_result.discovery_error
+        # Stage 9M: explain why discovery returned no actionable new candidates.
+        if not discovery_result.discovered_candidates:
+            entry["discovery_deduped_reason"] = (
+                "efts_returned_no_hits_for_entity_or_series_name"
+            )
+        else:
+            already_tried = set(getattr(result, "candidate_ciks_tried", []))
+            non_rejected = [
+                c for c in discovery_result.discovered_candidates
+                if c.confidence != "rejected"
+            ]
+            new_non_rejected = [c for c in non_rejected if c.candidate_cik not in already_tried]
+            if not new_non_rejected and non_rejected:
+                entry["discovery_deduped_reason"] = (
+                    "all_non_rejected_candidates_already_tried_as_static_seeds"
+                )
+            elif not non_rejected:
+                entry["discovery_deduped_reason"] = (
+                    "all_discovered_candidates_rejected_by_confidence_filter"
+                )
 
     return entry
 

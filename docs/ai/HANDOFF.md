@@ -1,8 +1,19 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-05-30 (Stage 9M — SEC NPORT resolver verification for VTI/SCHD/VXUS; PR open on branch `claude/stage-9m-nport-resolver-8eqwV`).
+Last updated: 2026-06-01 (Stage 9N — ETF provider decision matrix; PR on branch `claude/wonderful-cannon-O0t3w`).
 
-**Stage 9M (current PR):** Verifies SEC NPORT resolver CIKs for VTI/SCHD/VXUS from runtime evidence and adds bounded diagnostic proving why SEC NPORT is not currently viable for these tickers.
+**Stage 9N (current PR):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
+- **New module**: `etf_provider_decision_matrix_v1.py` (pure, no IO, no SQL, no UI) — classifies 8 provider paths as `canonical_ready`, `supplemental_only`, `manual_research_required`, `rejected_paywalled`, or `not_applicable`. Encodes runtime evidence from Stages 9F/9K/9L/9M.
+- **Patch loop stops**: sec_nport_vti_schd_vxus → `manual_research_required` (wrong CIKs confirmed). alpha_vantage_etf_profile → `supplemental_only` (date always absent). fmp_etf_holdings → `rejected_paywalled` (402 on free key). These three must not be retried automatically.
+- **Canonical ready**: sec_nport_spy_qqq ONLY — standalone trusts with proven identity, holdings, weights, date, and free entitlement.
+- **Next recommended paths**: Vanguard ETFs → issuer_official_vanguard (URL needs post-deploy confirmation). Schwab SCHD → issuer_official_schwab (URL not publicly stable). Sector XLE → issuer_official_ssga_spdr (URL needs confirmation). GLD → not_applicable (commodity trust). SPY/QQQ → sec_nport_spy_qqq (already canonical).
+- **`check_canonical_gate()`**: Pure function enforcing 6 S-grade criteria (identity + holdings + weights + date + authority + entitlement). Mirrors Stage 9K holdings-ready gate exactly. Not loosened.
+- **`build_provider_decision_matrix()`**: Returns complete JSON-serializable diagnostic dict including patch_loop_stop_reasons per problem provider.
+- **Tests (test_stage9n_etf_provider_decision_matrix.py, 71 tests):** N1–N4 SEC NPORT VTI/SCHD/VXUS manual_research_required + wrong CIK evidence. N5–N7 SPY/QQQ canonical_ready. N8–N10 AV supplemental_only + date absent. N11–N13 FMP rejected_paywalled + 402. N14–N16 issuer-official manual_research_required. N17 GLD not_applicable. N18–N20 gate criteria. N21 serializable output. N22 only SPY/QQQ canonical. N23 safe_for_decision=False everywhere. N24 Stage 9K gate unchanged. N25 patch-loop stop reasons. N26–N29 ETF class next paths. N30–N31 unknown lookups. N32–N33 version/criteria. N34–N37 gate independence. N38 AV classifier regression. N39 valid classifications.
+- **All 263 Stage 9F/9K/9L/9M/9N tests pass.** No SQL, no UI, no decision policy changes.
+- **Next action (manual):** Confirm issuer-official URLs for Vanguard (VTI/VXUS/VOO) and SSGA (XLE). Fetch one CSV, confirm fund name in metadata + weights column + as-of date row. If confirmed, promote provider to canonical_ready. Do NOT patch the decision matrix again until a live CSV fetch proves all 6 criteria.
+
+**Stage 9M (prior PR, merged on branch `claude/stage-9m-nport-resolver-8eqwV`):** Verifies SEC NPORT resolver CIKs for VTI/SCHD/VXUS from runtime evidence and adds bounded diagnostic proving why SEC NPORT is not currently viable for these tickers.
 - **Root cause confirmed (runtime evidence from Stage 9L deploy):**
   - VTI (CIK 0000764180): 1000 forms in filings.recent, 0 NPORT-P; files page fetched, also 0 NPORT-P. CIK is the WRONG filing entity.
   - SCHD (CIK 0001477379): 20 forms in filings.recent, 0 NPORT-P; no files pages. CIK is the WRONG filing entity.

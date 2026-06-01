@@ -28,6 +28,19 @@ Classification values:
   rejected_insufficient        — data shape cannot meet canonical gate.
   not_applicable               — not a holdings provider for this ticker class
                                  (e.g. GLD commodity trust has no equity basket).
+
+Two-field semantics (canonical_ready vs safe_for_decision):
+  canonical_ready=True  means the provider PATH meets all S-grade data criteria
+                        (identity + holdings + weights + date + authority + entitlement).
+                        It is a property of the provider path, not of a live artifact.
+  safe_for_decision     is ALWAYS False for every record in this module. This module is
+                        diagnostic/helper-only. It does not activate decision policy,
+                        write artifacts, or wire into visible Buy/Hold/Trim/Sell logic.
+                        An actual holdings artifact must pass the Stage 9K holdings-ready
+                        gate before safe_for_decision can become True at the artifact level.
+  Example: sec_nport_spy_qqq has canonical_ready=True (the SEC NPORT path for SPY/QQQ
+           meets all S-grade criteria) but safe_for_decision=False (no live artifact has
+           been evaluated here; this module only classifies provider paths).
 """
 from __future__ import annotations
 

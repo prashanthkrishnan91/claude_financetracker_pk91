@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-02 (Stage 9O — issuer-official ETF CSV live-proof diagnostic; branch `claude/stage-9o-etf-csv-diagnostic-rwkiw`).
+Last updated: 2026-06-02 (Stage 9O — issuer-official ETF CSV live-proof diagnostic; PR #448, branch `claude/stage-9o-etf-csv-diagnostic-rwkiw`).
 
 **Stage 9O (current PR):** Issuer-official ETF CSV live-proof diagnostic — bounded live fetch against Vanguard holdings CSV for VTI/VXUS/VOO.
 - **New module**: `etf_csv_diagnostic_runner_v1.py` (pure, injectable, no DB, no SQL, no UI) — orchestrates `fetch_issuer_official_holdings()` per ticker, applies `check_canonical_gate()`, returns structured diagnostic dict per ticker.

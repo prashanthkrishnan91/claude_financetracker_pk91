@@ -1,8 +1,15 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-01 (Stage 9N — ETF provider decision matrix; PR on branch `claude/wonderful-cannon-O0t3w`).
+Last updated: 2026-06-02 (Stage 9O — issuer-official ETF CSV live-proof diagnostic; branch `claude/stage-9o-etf-csv-diagnostic-rwkiw`).
 
-**Stage 9N (current PR):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
+**Stage 9O (current PR):** Issuer-official ETF CSV live-proof diagnostic — bounded live fetch against Vanguard holdings CSV for VTI/VXUS/VOO.
+- **New module**: `etf_csv_diagnostic_runner_v1.py` (pure, injectable, no DB, no SQL, no UI) — orchestrates `fetch_issuer_official_holdings()` per ticker, applies `check_canonical_gate()`, returns structured diagnostic dict per ticker.
+- **New endpoint**: `POST /api/v1/diagnostics/finance-intel/etf-issuer-csv-live-check` — cert-gated, flag-gated (`intel_v3_issuer_csv_diagnostic_enabled`). Default tickers: VTI, VXUS, VOO. Default provider: `vanguard_official_v1`. Max 10 tickers. Returns per-ticker: fetch_status, identity_verified, identity_basis, as_of_date, freshness_status, holdings_count, weights_available, sample_holding_names (≤5), source_url, gate_passed, gate_failures.
+- **Hard constraints preserved**: canonical_ready=False, safe_for_decision=False, promotion_recommended=False always. No artifact writes. Never raises.
+- **Tests**: `test_stage9o_etf_csv_diagnostic.py` — 39 fixture-based tests O1–O39. No live HTTP, no DB, no LLM. All 290 Stage 9F/9K/9L/9M/9N/9O tests pass.
+- **Next action (post-deploy)**: Set `INTEL_V3_ISSUER_CSV_DIAGNOSTIC_ENABLED=true` + cert headers. Run `POST /etf-issuer-csv-live-check` with `{"tickers": ["VTI", "VXUS", "VOO"]}`. If `canonical_gate_passed=True` for all three and `as_of_date` present, issue a separate PR to promote `issuer_official_vanguard` to `canonical_ready` in the decision matrix and wire it into artifact writes. Do NOT promote in this PR.
+
+**Stage 9N (merged PR #447):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
 - **New module**: `etf_provider_decision_matrix_v1.py` (pure, no IO, no SQL, no UI) — classifies 8 provider paths as `canonical_ready`, `supplemental_only`, `manual_research_required`, `rejected_paywalled`, or `not_applicable`. Encodes runtime evidence from Stages 9F/9K/9L/9M.
 - **Patch loop stops**: sec_nport_vti_schd_vxus → `manual_research_required` (wrong CIKs confirmed). alpha_vantage_etf_profile → `supplemental_only` (date always absent). fmp_etf_holdings → `rejected_paywalled` (402 on free key). These three must not be retried automatically.
 - **Canonical ready**: sec_nport_spy_qqq ONLY — standalone trusts with proven identity, holdings, weights, date, and free entitlement.

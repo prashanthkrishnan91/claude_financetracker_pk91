@@ -354,6 +354,14 @@ class Settings(BaseSettings):
     # SEC NPORT calls also require SEC_EDGAR_USER_AGENT to be set.
     intel_v3_etf_provider_registry_diagnostics_enabled: bool = False
 
+    # Stage 9O diagnostic — issuer-official ETF CSV live-check endpoint (default OFF).
+    # When enabled, POST /api/v1/diagnostics/finance-intel/etf-issuer-csv-live-check
+    # runs a bounded live fetch against the issuer-official holdings CSV URL for
+    # the requested tickers (default: VTI, VXUS, VOO via Vanguard).
+    # Cert-gated. No artifact writes, no decision mutations, no SQL.
+    # safe_for_decision=False always. canonical_ready=False always.
+    intel_v3_issuer_csv_diagnostic_enabled: bool = False
+
     # ── Intel v3 Phase 14D — PriceBand Shadow Policy v1 (off by default) ──────
     # When True, enables the protected POST /diagnostics/finance-intel/
     # priceband-shadow-v1 endpoint which classifies certified Phase 14C inputs

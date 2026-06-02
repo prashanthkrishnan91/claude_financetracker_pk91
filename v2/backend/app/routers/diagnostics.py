@@ -4317,3 +4317,75 @@ async def etf_stage9k_artifact_readiness(
         "diagnostics_only": True,
         "results": results,
     }
+
+
+# ── Stage 9O — Issuer-official ETF CSV live-check diagnostic endpoint ─────────
+
+_ISSUER_CSV_DIAG_DEFAULT_TICKERS: list[str] = ["VTI", "VXUS", "VOO"]
+_ISSUER_CSV_DIAG_MAX_TICKERS: int = 10
+_ISSUER_CSV_DIAG_DEFAULT_PROVIDER = "vanguard_official_v1"
+
+
+class EtfIssuerCsvLiveCheckRequest(BaseModel):
+    """Stage 9O — operator request body for issuer-official ETF CSV diagnostic."""
+    tickers: list[str] = []
+    provider_id: str = _ISSUER_CSV_DIAG_DEFAULT_PROVIDER
+
+
+@router.post("/etf-issuer-csv-live-check")
+async def etf_issuer_csv_live_check(
+    payload: EtfIssuerCsvLiveCheckRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9O — operator-only diagnostic for issuer-official ETF holdings CSVs.
+
+    Runs a bounded live fetch against the issuer-official holdings CSV URL for
+    the requested tickers (default: VTI, VXUS, VOO via Vanguard).
+
+    Proves per-ticker whether the CSV provides:
+      identity (fund name in metadata), holdings count, weights, as-of date,
+      stable URL access. Reports S-grade canonical gate result (diagnostic-only).
+
+    Does NOT write artifacts, does NOT alter decisions or snapshots, and does
+    NOT promote any provider to canonical_ready.
+
+    Required env vars:
+      INTEL_V3_ISSUER_CSV_DIAGNOSTIC_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+
+    Returns compact per-ticker JSON. Never returns raw CSV body or full holdings.
+    safe_for_decision=False always. canonical_ready=False always.
+    """
+    settings = get_settings()
+    if not getattr(settings, "intel_v3_issuer_csv_diagnostic_enabled", False):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    from ..services.intelligence.research_workers.etf_csv_diagnostic_runner_v1 import (
+        run_issuer_csv_live_check,
+    )
+
+    tickers = [t.strip().upper() for t in (payload.tickers or []) if t.strip()]
+    if not tickers:
+        tickers = list(_ISSUER_CSV_DIAG_DEFAULT_TICKERS)
+    tickers = list(dict.fromkeys(tickers))  # deduplicate, preserve order
+    if len(tickers) > _ISSUER_CSV_DIAG_MAX_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Maximum {_MAX_TICKERS} tickers per request.",
+        )
+
+    provider_id = (payload.provider_id or _ISSUER_CSV_DIAG_DEFAULT_PROVIDER).strip()
+
+    result = await asyncio.to_thread(
+        run_issuer_csv_live_check,
+        tickers,
+        provider_id,
+    )
+    logger.info(
+        "issuer_csv_diagnostic_complete tickers=%d gate_passed=%d provider=%s user=%s",
+        result["tickers_requested"],
+        result["canonical_gate_passed_count"],
+        provider_id,
+        getattr(user, "email", "unknown"),
+    )
+    return result

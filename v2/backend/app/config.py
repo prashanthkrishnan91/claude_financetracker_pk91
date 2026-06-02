@@ -354,6 +354,14 @@ class Settings(BaseSettings):
     # SEC NPORT calls also require SEC_EDGAR_USER_AGENT to be set.
     intel_v3_etf_provider_registry_diagnostics_enabled: bool = False
 
+    # ── Stage 9O — Vanguard issuer-official holdings diagnostic (off by default) ─
+    # When True, enables POST /diagnostics/finance-intel/vanguard-holdings-diagnostic.
+    # Cert-gated. Proof stage only: no canonical adapter, no artifact writes, no
+    # synthesis, no decision integration. canonical_ready=False always.
+    # Evaluates VTI, VOO, VXUS for issuer-official canonical readiness.
+    # No paid providers, no LLM, no SQL, no UI changes.
+    intel_v3_vanguard_holdings_diagnostic_enabled: bool = False
+
     # ── Intel v3 Phase 14D — PriceBand Shadow Policy v1 (off by default) ──────
     # When True, enables the protected POST /diagnostics/finance-intel/
     # priceband-shadow-v1 endpoint which classifies certified Phase 14C inputs

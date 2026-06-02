@@ -585,3 +585,54 @@ def test_o25_unrecognised_csv_layout_rejected():
     entry = result["per_ticker"][0]
     assert entry["classification"] == REJECTED
     assert entry["canonical_ready"] is False
+
+
+# ── Tests O26–O28: fund_name_detected evidence contract ──────────────────────
+
+@pytest.mark.parametrize("ticker", ["VTI", "VOO", "VXUS"])
+def test_o26_fund_name_detected_exact_on_success(ticker):
+    """O26: fund_name_detected equals the raw fixture fund name exactly on success path."""
+    (_, CANONICAL_CANDIDATE, _, _, _, run) = _diag_module()
+
+    http_fn = _make_http_fn({ticker: _success_csv(ticker)})
+    result = run([ticker], http_get_fn=http_fn)
+
+    entry = result["per_ticker"][0]
+    assert entry["classification"] == CANONICAL_CANDIDATE
+    assert entry["fund_name_detected"] == _FUND_NAMES[ticker], (
+        f"Expected {_FUND_NAMES[ticker]!r}, got {entry['fund_name_detected']!r}"
+    )
+    assert entry["safe_for_decision"] is False
+    assert entry["canonical_ready"] is False
+
+
+def test_o27_fund_name_detected_raw_mismatch_on_identity_failure():
+    """O27: fund_name_detected is the raw mismatched CSV name on identity_not_proven path."""
+    (_, _, _, MANUAL_RESEARCH_REQUIRED, _, run) = _diag_module()
+
+    http_fn = _make_http_fn({"VXUS": _identity_mismatch_csv("VXUS")})
+    result = run(["VXUS"], http_get_fn=http_fn)
+
+    entry = result["per_ticker"][0]
+    assert entry["classification"] == MANUAL_RESEARCH_REQUIRED
+    assert entry["fund_name_detected"] == "XYZ Global Asset Group Ltd", (
+        f"Expected raw mismatch name, got {entry['fund_name_detected']!r}"
+    )
+    assert entry["identity_basis"] != entry["fund_name_detected"], (
+        "identity_basis should be an explanation string, not the raw fund name"
+    )
+    assert entry["safe_for_decision"] is False
+    assert entry["canonical_ready"] is False
+
+
+def test_o28_fund_name_detected_none_on_access_failure():
+    """O28: fund_name_detected is None when HTTP access fails — nothing was parsed."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result = run(["VTI"], http_get_fn=_error_http_fn)
+
+    entry = result["per_ticker"][0]
+    assert entry["classification"] == REJECTED
+    assert entry["fund_name_detected"] is None
+    assert entry["safe_for_decision"] is False
+    assert entry["canonical_ready"] is False

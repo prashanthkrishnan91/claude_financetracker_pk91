@@ -239,7 +239,7 @@ def run_vanguard_holdings_diagnostic(
             "url_used": url,
             "access_pattern": _ACCESS_PATTERN,
             "response_type": _RESPONSE_TYPE,
-            "fund_name_detected": result.identity_basis,
+            "fund_name_detected": result.detected_fund_name,
             "identity_verified": result.identity_verified,
             "identity_basis": result.identity_basis,
             "holdings_count": result.holdings_count,

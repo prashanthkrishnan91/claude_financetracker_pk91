@@ -192,6 +192,7 @@ def _fail(
     error_message: str,
     source_url: Optional[str] = None,
     limitations: Optional[list[str]] = None,
+    detected_fund_name: Optional[str] = None,
 ) -> ETFHoldingsResult:
     return ETFHoldingsResult(
         ticker=ticker,
@@ -210,6 +211,7 @@ def _fail(
         fetch_status=fetch_status,
         error_message=_truncate(error_message),
         limitations=limitations or [],
+        detected_fund_name=detected_fund_name,
         canonical_ready=False,
         safe_for_decision=False,
     )
@@ -591,6 +593,7 @@ def fetch_issuer_official_holdings(
                 identity_basis or "identity check failed",
                 source_url=url,
                 limitations=["Holdings withheld — identity not proven from file metadata."],
+                detected_fund_name=fund_name,
             )
 
         # Fail closed: as-of date required — without it we cannot verify data freshness.
@@ -601,6 +604,7 @@ def fetch_issuer_official_holdings(
                 "as-of date not found in CSV metadata — cannot verify data freshness.",
                 source_url=url,
                 limitations=["Holdings withheld — as-of date not present in file metadata."],
+                detected_fund_name=fund_name,
             )
 
         # Fail closed: percent weights required — market-value derivation not accepted.
@@ -612,6 +616,7 @@ def fetch_issuer_official_holdings(
                 "No verified percentage weight column in CSV — holdings cannot be accepted.",
                 source_url=url,
                 limitations=["Holdings withheld — weight column absent or unparseable."],
+                detected_fund_name=fund_name,
             )
         weight_basis = "percent"
 
@@ -635,6 +640,7 @@ def fetch_issuer_official_holdings(
             fetch_status="success",
             error_message=None,
             limitations=[],
+            detected_fund_name=fund_name,
             canonical_ready=False,
             safe_for_decision=False,
         )

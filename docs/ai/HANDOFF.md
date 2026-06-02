@@ -1,8 +1,16 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-01 (Stage 9N — ETF provider decision matrix; PR on branch `claude/wonderful-cannon-O0t3w`).
+Last updated: 2026-06-02 (Stage 9O — Vanguard issuer-official holdings proof diagnostic; branch `claude/vanguard-holdings-diagnostic-dwIXN`).
 
-**Stage 9N (current PR):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
+**Stage 9O (current PR):** Vanguard issuer-official holdings proof diagnostic — backend-only bounded worker evaluating whether Vanguard's CSV holdings exports can become a canonical source for VTI, VOO, VXUS.
+- **New module**: `vanguard_holdings_diagnostic_v1.py` — pure, injectable, no SQL. Calls `etf_issuer_official_adapter_v1` per ticker; classifies evidence as `canonical_candidate`, `supplemental_only`, `manual_research_required`, or `rejected`. S-grade hard rules: missing as_of_date → supplemental_only; missing weights → supplemental_only; identity_not_proven → manual_research_required; access_failure → rejected.
+- **New endpoint**: `POST /diagnostics/finance-intel/vanguard-holdings-diagnostic` — cert-gated. Default tickers VTI/VOO/VXUS, max 10. Returns per-ticker evidence (fund_name_detected, identity_verified, holdings_count, as_of_date, weights, URL, parse_status, classification, disqualifiers, rationale). canonical_ready=False and safe_for_decision=False always.
+- **New config flag**: `intel_v3_vanguard_holdings_diagnostic_enabled: bool = False`.
+- **Tests**: `test_stage9o_vanguard_holdings_diagnostic.py`, 39 tests — success path per ticker (O1–O3), missing date → supplemental_only (O4), missing weights → supplemental_only (O5), identity mismatch → manual_research_required (O6), access failure → rejected (O7), safe_for_decision/canonical_ready always False (O8–O9), mixed outcomes independent (O10–O21), diagnostics_only/policy_unchanged (O22–O23), empty/broken CSV → rejected (O24–O25). **39/39 pass. 71/71 Stage 9N pass.**
+- **No canonical adapter, no artifact writes, no synthesis, no decision integration. No SQL, no UI, no policy changes.**
+- **Next (manual validation):** Enable `INTEL_V3_VANGUARD_HOLDINGS_DIAGNOSTIC_ENABLED=true` in Railway, run `POST /diagnostics/finance-intel/vanguard-holdings-diagnostic`. If VTI/VOO/VXUS return `canonical_candidate`, update Stage 9N `issuer_official_vanguard` from `manual_research_required` to `canonical_ready`.
+
+**Stage 9N (prior PR, merged):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
 - **New module**: `etf_provider_decision_matrix_v1.py` (pure, no IO, no SQL, no UI) — classifies 8 provider paths as `canonical_ready`, `supplemental_only`, `manual_research_required`, `rejected_paywalled`, or `not_applicable`. Encodes runtime evidence from Stages 9F/9K/9L/9M.
 - **Patch loop stops**: sec_nport_vti_schd_vxus → `manual_research_required` (wrong CIKs confirmed). alpha_vantage_etf_profile → `supplemental_only` (date always absent). fmp_etf_holdings → `rejected_paywalled` (402 on free key). These three must not be retried automatically.
 - **Canonical ready**: sec_nport_spy_qqq ONLY — standalone trusts with proven identity, holdings, weights, date, and free entitlement.

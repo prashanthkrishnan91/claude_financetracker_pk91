@@ -75,6 +75,7 @@ class ETFHoldingsResult:
     fetch_status: str
     error_message: Optional[str] = None
     limitations: list[str] = field(default_factory=list)
+    detected_fund_name: Optional[str] = None  # raw fund name from CSV metadata; None if not parsed
     # Governance invariants — never mutated by any provider in this PR
     canonical_ready: bool = False
     safe_for_decision: bool = False

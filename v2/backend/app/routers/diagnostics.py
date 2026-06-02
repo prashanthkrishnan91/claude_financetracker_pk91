@@ -4317,3 +4317,100 @@ async def etf_stage9k_artifact_readiness(
         "diagnostics_only": True,
         "results": results,
     }
+
+
+# ── Stage 9O — Vanguard issuer-official holdings diagnostic endpoint ──────────
+
+
+class VanguardHoldingsDiagnosticRequest(BaseModel):
+    """Stage 9O — operator request body for Vanguard holdings proof diagnostic."""
+    tickers: list[str] = []
+
+
+@router.post("/vanguard-holdings-diagnostic")
+async def vanguard_holdings_diagnostic(
+    payload: VanguardHoldingsDiagnosticRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 9O — proof diagnostic: can Vanguard issuer-official holdings be canonical?
+
+    Evaluates whether Vanguard issuer-official holdings exports can become a
+    future canonical ETF holdings source for VTI, VOO, and VXUS.
+
+    For each ticker, attempts a live CSV fetch from the Vanguard investor portal,
+    records exact evidence (fund identity, holdings count, weights, as-of date,
+    URL used, parse status), and classifies provider readiness:
+
+      canonical_candidate      — all S-grade criteria verified in this run.
+      supplemental_only        — useful data but missing a canonical criterion.
+      manual_research_required — source reachable but identity/URL unresolved.
+      rejected                 — access failure or unusable data shape.
+
+    Hard S-grade rules:
+      missing as_of_date  → supplemental_only (automatic disqualifier).
+      missing weights     → supplemental_only (automatic disqualifier).
+      identity_not_proven → manual_research_required.
+      access_failure      → rejected.
+
+    Proof stage only:
+      - No canonical adapter built.
+      - No artifact writes.
+      - No synthesis.
+      - No decision integration.
+      - canonical_ready=False and safe_for_decision=False always.
+      - No policy changes, no visible product changes, no database changes.
+
+    Required env vars:
+      INTEL_V3_VANGUARD_HOLDINGS_DIAGNOSTIC_ENABLED=true
+      FINANCE_RUNTIME_CERT_ENABLED=true + X-Finance-Runtime-Cert-Secret header
+
+    Default tickers when none supplied: VTI, VOO, VXUS.
+    Maximum tickers per request: 10.
+
+    Returns:
+      {
+        "diagnostic_version": "stage9o_v1",
+        "provider": "issuer_official_vanguard",
+        "tickers_requested": int,
+        "per_ticker": [{ per-ticker evidence and classification }],
+        "summary": { counts by classification },
+        "safe_for_decision": false,
+        "canonical_ready": false,
+        "artifact_writes": 0,
+        "diagnostics_only": true,
+        "policy_unchanged": true
+      }
+    """
+    settings = get_settings()
+    if not settings.intel_v3_vanguard_holdings_diagnostic_enabled:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    from ..services.intelligence.research_workers.vanguard_holdings_diagnostic_v1 import (
+        _DEFAULT_TICKERS,
+        _MAX_TICKERS,
+        run_vanguard_holdings_diagnostic,
+    )
+
+    tickers_raw = [t.strip().upper() for t in (payload.tickers or []) if t.strip()]
+    if not tickers_raw:
+        tickers_raw = list(_DEFAULT_TICKERS)
+    tickers_raw = list(dict.fromkeys(tickers_raw))  # deduplicate, preserve order
+    if len(tickers_raw) > _MAX_TICKERS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Maximum {_MAX_TICKERS} tickers per request.",
+        )
+
+    result = await asyncio.to_thread(
+        run_vanguard_holdings_diagnostic,
+        tickers_raw,
+    )
+
+    logger.info(
+        "vanguard_holdings_diagnostic_endpoint tickers=%d canonical_candidate=%d user=%s",
+        len(tickers_raw),
+        result.get("summary", {}).get("canonical_candidate_count", 0),
+        getattr(user, "email", "unknown"),
+    )
+
+    return result

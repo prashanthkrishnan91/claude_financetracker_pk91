@@ -22,6 +22,11 @@ def is_snapshot_stage8e_complete(payload: Optional[dict]) -> bool:
       2. Every held card whose sec_catalyst_evidence has sec_catalyst_found=True
          also carries event_summary (the primary Stage 8E enrichment field).
 
+    Accepts either:
+    - A full snapshot payload (with current_holdings array), OR
+    - A slim dict from _fetch_latest_intel_snapshot with a pre-computed
+      ``stage8e_contract_complete`` boolean (flat column, Migration 024).
+
     Returns False (triggers deterministic republish) for:
     - Missing or wrong contract marker
     - Any card with sec_catalyst_found=True but missing event_summary
@@ -29,6 +34,10 @@ def is_snapshot_stage8e_complete(payload: Optional[dict]) -> bool:
     """
     if not payload:
         return False
+    # Fast path: pre-computed boolean from flat DB column (Migration 024) or
+    # slim republisher dict with stage8e_contract_complete key.
+    if "stage8e_contract_complete" in payload:
+        return bool(payload["stage8e_contract_complete"])
     if (
         payload.get("stage8e_catalyst_explanation_contract_version")
         != STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION

@@ -322,6 +322,7 @@ async def _fetch_latest_recommendations(
         .select("ticker,created_at")
         .eq("user_id", str(user_id))
         .order("created_at", desc=True)
+        .limit(500)
         .execute()
     )
     latest: dict[str, Optional[datetime]] = {}
@@ -342,6 +343,7 @@ async def _fetch_latest_agent_insights(
         .select("ticker,created_at")
         .eq("user_id", str(user_id))
         .order("created_at", desc=True)
+        .limit(500)
         .execute()
     )
     latest: dict[str, Optional[datetime]] = {}
@@ -356,10 +358,10 @@ async def _fetch_latest_intel_snapshot(
     user_id: UUID,
     client: Any,
 ) -> dict[str, Any]:
-    """Latest intel_v3_snapshots row metadata."""
+    """Latest intel_v3_snapshots row metadata (flat columns only, not payload)."""
     result = await asyncio.to_thread(
         lambda: client.table("intel_v3_snapshots")
-        .select("created_at,payload")
+        .select("created_at,snapshot_source")
         .eq("user_id", str(user_id))
         .eq("is_active", True)
         .order("created_at", desc=True)
@@ -370,10 +372,9 @@ async def _fetch_latest_intel_snapshot(
     if not rows:
         return {"created_at": None, "snapshot_source": "none"}
     row = rows[0] or {}
-    payload = row.get("payload") or {}
     return {
         "created_at": _parse_iso(row.get("created_at")),
-        "snapshot_source": payload.get("snapshot_source", "unknown"),
+        "snapshot_source": row.get("snapshot_source") or "unknown",
     }
 
 
@@ -385,17 +386,15 @@ async def _fetch_latest_usable_research_artifacts(
 ) -> dict[str, datetime]:
     """Return ticker → latest usable artifact generated_at for active artifacts.
 
-    Filters to is_usable=True from payload.truth_usability_assessment in Python
-    (the field is inside the JSONB payload, not a top-level column). Only returns
-    the most-recent usable artifact per ticker (Stage 5A guarantees at most one
-    active row per identity, but we take the latest defensively).
+    Uses is_active=True as a proxy for usable (Stage 5A guarantees at most one
+    active row per identity). Avoids reading payload JSONB to eliminate egress.
 
     Returns empty dict on any failure — callers treat absence as MISSING.
     """
     try:
         result = await asyncio.to_thread(
             lambda: client.table("research_artifacts")
-            .select("ticker,generated_at,payload")
+            .select("ticker,generated_at")
             .eq("user_id", str(user_id))
             .eq("artifact_type", artifact_type)
             .eq("is_active", True)
@@ -406,12 +405,6 @@ async def _fetch_latest_usable_research_artifacts(
         for row in (result.data or []):
             t = (row.get("ticker") or "").strip().upper()
             if not t or t in latest:
-                continue
-            payload = row.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            usability = payload.get("truth_usability_assessment")
-            if not isinstance(usability, dict) or not usability.get("is_usable"):
                 continue
             gen_at = _parse_iso(row.get("generated_at"))
             if gen_at is not None:

@@ -23,24 +23,30 @@ ALTER TABLE intel_v3_snapshots
   ADD COLUMN IF NOT EXISTS stage7_contract_complete  BOOLEAN DEFAULT FALSE,
   ADD COLUMN IF NOT EXISTS stage8e_contract_complete BOOLEAN DEFAULT FALSE;
 
--- Backfill existing rows from payload JSONB.
+-- Backfill scalar metadata columns from payload JSONB.
 -- Runs once; NULL guard means repeated application is safe.
+--
+-- stage7_contract_complete and stage8e_contract_complete are intentionally
+-- left at their column DEFAULT (FALSE) for historical rows.
+-- Reason: the Python contract checks structural completeness of holdings cards
+-- (evidence_explanation present + non-null for stage7; event_summary present
+-- for each sec_catalyst_found=true card for stage8e).  Replicating that logic
+-- accurately in SQL against arbitrary historical payloads is fragile.  Instead,
+-- we let the Watchtower trigger one deterministic republish per user after deploy
+-- (no LLM, no new evidence); the new snapshot is written with the correct
+-- Python-computed booleans, and subsequent cycles see TRUE and skip republish.
 UPDATE intel_v3_snapshots
 SET
-  snapshot_source = payload->>'snapshot_source',
+  snapshot_source      = payload->>'snapshot_source',
   payload_generated_at = CASE
     WHEN payload->>'generated_at' IS NOT NULL
      AND payload->>'generated_at' ~ '^\d{4}-\d{2}-\d{2}'
     THEN (payload->>'generated_at')::TIMESTAMPTZ
     ELSE NULL
   END,
-  evidence_mapping_version = payload->>'evidence_mapping_version',
-  stage7_contract_complete = (
-    payload->>'stage7_explanation_contract_version' = 'stage7_explanation_v2'
-  ),
-  stage8e_contract_complete = (
-    payload->>'stage8e_catalyst_explanation_contract_version' = 'stage8e_catalyst_explanation_v1'
-  )
+  evidence_mapping_version = payload->>'evidence_mapping_version'
+  -- stage7_contract_complete and stage8e_contract_complete remain FALSE (column default)
+  -- and are corrected on the first Watchtower republish after deploy.
 WHERE snapshot_source IS NULL;
 
 -- Partial index: fast single-row lookup for the active snapshot per user.

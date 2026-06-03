@@ -1,8 +1,8 @@
 """Stage 10 — Supabase PostgREST egress fix regression tests.
 
 Proves:
-  1. Unchanged source_hash → _persist_snapshot skips deactivate+insert (idempotency).
-  2. Changed source_hash → _persist_snapshot writes flat metadata columns.
+  1. Unchanged source_hash → IntelV3Service._persist_snapshot skips insert (idempotency).
+  2. Changed source_hash → IntelV3Service._persist_snapshot writes flat metadata columns.
   3. evidence_collector _fetch_latest_intel_snapshot reads flat columns (no payload).
   4. evidence_collector _fetch_latest_usable_research_artifacts reads no payload.
   5. evidence_collector recommendations/agent_insights queries include LIMIT.
@@ -11,6 +11,7 @@ Proves:
   8. stage8e contract fast path for pre-computed boolean.
   9. stage7 contract fast path for pre-computed boolean.
  10. republisher returns PUBLISH_CERTIFIED_CURRENT when stage8e_contract_complete=True.
+ 11. stage8e contract returns False when sec_catalyst_found=True but event_summary missing.
 """
 from __future__ import annotations
 
@@ -52,71 +53,28 @@ def _make_client(*, select_data: list | None = None) -> MagicMock:
 
 
 def _hash_payload(payload: dict) -> str:
-    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    """Match intel_v3_service._hash_payload exactly (truncated to 16 chars)."""
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, default=str).encode()
+    ).hexdigest()[:16]
 
 
-# ── 1. Idempotency: unchanged source_hash skips write ─────────────────────────
-# IntelV3Service has heavy app dependencies (supabase, pydantic_settings) not
-# available in the unit-test environment.  We verify the idempotency contract
-# by reimplementing the same async logic inline and confirming its behaviour,
-# rather than importing the class.
+# ── 1 & 2. IntelV3Service._persist_snapshot — idempotency + flat columns ──────
+# Tests call the actual production method on a real IntelV3Service instance
+# (created via __new__ to bypass __init__); only the Supabase client is mocked.
 
-async def _call_persist_logic(user_id, client, run_id: str, payload: dict):
-    """Inline re-implementation of _persist_snapshot for isolated unit testing.
-
-    Mirrors the exact logic in intel_v3_service._persist_snapshot so we can
-    verify idempotency and flat-column writes without the full app import chain.
-    """
-    source_hash = _hash_payload(payload)
-
-    existing = await asyncio.to_thread(
-        lambda: client.table("intel_v3_snapshots")
-        .select("source_hash")
-        .eq("user_id", str(user_id))
-        .eq("is_active", True)
-        .order("created_at", desc=True)
-        .limit(1)
-        .execute()
-    )
-    existing_rows = existing.data or []
-    if existing_rows and existing_rows[0].get("source_hash") == source_hash:
-        return "skipped"
-
-    stage7_complete = is_snapshot_stage7_complete(payload)
-    stage8e_complete = is_snapshot_stage8e_complete(payload)
-
-    await asyncio.to_thread(
-        lambda: client.table("intel_v3_snapshots")
-        .update({"is_active": False})
-        .eq("user_id", str(user_id))
-        .eq("is_active", True)
-        .select("id")
-        .execute()
-    )
-    await asyncio.to_thread(
-        lambda: client.table("intel_v3_snapshots")
-        .insert({
-            "user_id":                   str(user_id),
-            "run_id":                    run_id,
-            "schema_version":            payload.get("schema_version", "v3.1"),
-            "payload":                   payload,
-            "source_hash":               source_hash,
-            "is_active":                 True,
-            "snapshot_source":           payload.get("snapshot_source"),
-            "payload_generated_at":      payload.get("generated_at"),
-            "evidence_mapping_version":  payload.get("evidence_mapping_version"),
-            "stage7_contract_complete":  stage7_complete,
-            "stage8e_contract_complete": stage8e_complete,
-        })
-        .select("id,created_at")
-        .execute()
-    )
-    return "written"
+def _make_svc(user_id, client):
+    """Return an IntelV3Service instance with user_id and client injected."""
+    from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+    svc = IntelV3Service.__new__(IntelV3Service)
+    svc.user_id = user_id
+    svc.client = client
+    return svc
 
 
 @pytest.mark.asyncio
 async def test_persist_snapshot_skipped_when_hash_unchanged():
-    """_persist_snapshot logic must not call insert when source_hash is unchanged."""
+    """IntelV3Service._persist_snapshot must not call insert when source_hash is unchanged."""
     user_id = uuid.uuid4()
     payload = {
         "snapshot_source": "worker_certified",
@@ -138,15 +96,15 @@ async def test_persist_snapshot_skipped_when_hash_unchanged():
     client = MagicMock()
     client.table.return_value = chain
 
-    outcome = await _call_persist_logic(user_id, client, "run-1", payload)
+    svc = _make_svc(user_id, client)
+    await svc._persist_snapshot(run_id="run-1", payload=payload)
 
-    assert outcome == "skipped"
     chain.insert.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_persist_snapshot_writes_flat_columns_on_change():
-    """_persist_snapshot logic must include flat metadata columns when hash changed."""
+    """IntelV3Service._persist_snapshot must include flat metadata columns when hash changed."""
     user_id = uuid.uuid4()
     payload = {
         "snapshot_source": "worker_certified",
@@ -191,9 +149,9 @@ async def test_persist_snapshot_writes_flat_columns_on_change():
     client = MagicMock()
     client.table.side_effect = _table_side_effect
 
-    outcome = await _call_persist_logic(user_id, client, "run-2", payload)
+    svc = _make_svc(user_id, client)
+    await svc._persist_snapshot(run_id="run-2", payload=payload)
 
-    assert outcome == "written"
     insert_chain.insert.assert_called_once()
     inserted_dict = insert_chain.insert.call_args[0][0]
     assert inserted_dict.get("snapshot_source") == "worker_certified"
@@ -392,6 +350,68 @@ def test_stage8e_fast_path_false():
 def test_stage8e_fast_path_overrides_missing_marker():
     """Fast path wins even when the version marker is absent."""
     assert is_snapshot_stage8e_complete({"stage8e_contract_complete": True, "other_key": "x"}) is True
+
+
+# ── 8b. Stage 8E structural check: incomplete payload must not be certified ────
+
+def test_stage8e_incomplete_sec_catalyst_not_certified():
+    """is_snapshot_stage8e_complete must return False when sec_catalyst_found=True
+    but event_summary is absent — version marker alone is not sufficient."""
+    payload = {
+        "stage8e_catalyst_explanation_contract_version": "stage8e_catalyst_explanation_v1",
+        "current_holdings": [
+            {
+                "detail_drawer_payload": {
+                    "evidence_explanation": {
+                        "sec_catalyst_evidence": {
+                            "sec_catalyst_found": True,
+                            # event_summary intentionally missing
+                        }
+                    }
+                }
+            }
+        ],
+    }
+    assert is_snapshot_stage8e_complete(payload) is False
+
+
+def test_stage8e_complete_when_event_summary_present():
+    """is_snapshot_stage8e_complete must return True when event_summary is present."""
+    payload = {
+        "stage8e_catalyst_explanation_contract_version": "stage8e_catalyst_explanation_v1",
+        "current_holdings": [
+            {
+                "detail_drawer_payload": {
+                    "evidence_explanation": {
+                        "sec_catalyst_evidence": {
+                            "sec_catalyst_found": True,
+                            "event_summary": "Quarterly earnings beat expectations.",
+                        }
+                    }
+                }
+            }
+        ],
+    }
+    assert is_snapshot_stage8e_complete(payload) is True
+
+
+def test_stage8e_complete_no_catalyst_cards():
+    """is_snapshot_stage8e_complete is True when no cards have sec_catalyst_found=True."""
+    payload = {
+        "stage8e_catalyst_explanation_contract_version": "stage8e_catalyst_explanation_v1",
+        "current_holdings": [
+            {
+                "detail_drawer_payload": {
+                    "evidence_explanation": {
+                        "sec_catalyst_evidence": {
+                            "sec_catalyst_found": False,
+                        }
+                    }
+                }
+            }
+        ],
+    }
+    assert is_snapshot_stage8e_complete(payload) is True
 
 
 # ── 9. Stage 7 contract fast path ────────────────────────────────────────────

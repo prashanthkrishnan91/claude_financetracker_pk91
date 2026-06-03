@@ -2427,28 +2427,65 @@ class IntelV3Service:
         run_id: str,
         payload: dict[str, Any],
     ) -> None:
-        """Persist snapshot to intel_v3_snapshots, deactivating old ones."""
+        """Persist snapshot to intel_v3_snapshots, deactivating old ones.
+
+        Idempotent: skips the deactivate+insert cycle when the new payload's
+        source_hash matches the currently-active row. This prevents the 60-second
+        Watchtower loop from writing identical snapshots on every cycle.
+        """
         try:
-            # Deactivate previous snapshots.
+            source_hash = _hash_payload(payload)
+
+            # Idempotency check: read only source_hash of current active row.
+            existing = await asyncio.to_thread(
+                lambda: self.client.table("intel_v3_snapshots")
+                .select("source_hash")
+                .eq("user_id", str(self.user_id))
+                .eq("is_active", True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            existing_rows = existing.data or []
+            if existing_rows and existing_rows[0].get("source_hash") == source_hash:
+                logger.info(
+                    "intel_v3.persist_snapshot_skipped_identical user_id=%s run_id=%s source_hash=%s",
+                    self.user_id, run_id, source_hash,
+                )
+                return
+
+            # Compute flat column values from full payload (avoids payload reads on hot path).
+            from .stage7_snapshot_contract_v1 import is_snapshot_stage7_complete as _s7_complete
+            from .stage8e_catalyst_explanation_contract_v1 import (
+                is_snapshot_stage8e_complete as _s8e_complete,
+            )
+
+            # Deactivate previous snapshots — return only id to avoid egress.
             await asyncio.to_thread(
                 lambda: self.client.table("intel_v3_snapshots")
                 .update({"is_active": False})
                 .eq("user_id", str(self.user_id))
                 .eq("is_active", True)
+                .select("id")
                 .execute()
             )
-            # Insert new snapshot.
-            source_hash = _hash_payload(payload)
+            # Insert new snapshot with flat metadata columns populated.
             await asyncio.to_thread(
                 lambda: self.client.table("intel_v3_snapshots")
                 .insert({
-                    "user_id":        str(self.user_id),
-                    "run_id":         run_id,
-                    "schema_version": payload.get("schema_version", "v3.1"),
-                    "payload":        payload,
-                    "source_hash":    source_hash,
-                    "is_active":      True,
+                    "user_id":                   str(self.user_id),
+                    "run_id":                    run_id,
+                    "schema_version":            payload.get("schema_version", "v3.1"),
+                    "payload":                   payload,
+                    "source_hash":               source_hash,
+                    "is_active":                 True,
+                    "snapshot_source":           payload.get("snapshot_source"),
+                    "payload_generated_at":      payload.get("generated_at"),
+                    "evidence_mapping_version":  payload.get("evidence_mapping_version"),
+                    "stage7_contract_complete":  _s7_complete(payload),
+                    "stage8e_contract_complete": _s8e_complete(payload),
                 })
+                .select("id,created_at")
                 .execute()
             )
         except Exception as exc:

@@ -1,6 +1,9 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-02 (Stage 9O — Vanguard issuer-official holdings proof diagnostic; branch `claude/vanguard-holdings-diagnostic-dwIXN`).
+Last updated: 2026-06-03 (Stage 10 — Supabase PostgREST egress fix; branch `claude/intelligent-tesla-6sQio`).
+
+**Stage 10 (current PR):** Supabase PostgREST egress emergency fix. Root cause: `watchtower_intel_republisher_v1._fetch_latest_intel_snapshot()` returned a slim dict missing `stage8e_catalyst_explanation_contract_version`, so `is_snapshot_stage8e_complete()` always returned False → republisher always called `run_prewarm_snapshot()` every 60s → full read+write cycle on every Watchtower iteration. Migration 024 adds 5 flat metadata columns to `intel_v3_snapshots` (snapshot_source, payload_generated_at, evidence_mapping_version, stage7_contract_complete, stage8e_contract_complete). Republisher + evidence collector + technical artifacts now read only flat columns (no payload JSONB). `_persist_snapshot` skips deactivate+insert when source_hash is unchanged (idempotency). Minimal RETURNING on UPDATE/INSERT. Recommendations and agent_insights queries now have LIMIT 500. Contract fast paths added for stage7 and stage8e flat boolean keys. 14/14 regression tests pass. Supabase SQL: Migration 024 required before deploy. No visible behavior change.
+
 
 **Stage 9O (current PR):** Vanguard issuer-official holdings proof diagnostic — backend-only bounded worker evaluating whether Vanguard's CSV holdings exports can become a canonical source for VTI, VOO, VXUS.
 - **New module**: `vanguard_holdings_diagnostic_v1.py` — pure, injectable, no SQL. Calls `etf_issuer_official_adapter_v1` per ticker; classifies evidence as `canonical_candidate`, `supplemental_only`, `manual_research_required`, or `rejected`. S-grade hard rules: missing as_of_date → supplemental_only; missing weights → supplemental_only; identity_not_proven → manual_research_required; access_failure → rejected.

@@ -622,11 +622,21 @@ async def compare_and_republish_after_evidence_lanes(
 # ── Private helpers ───────────────────────────────────────────────────────────
 
 async def _fetch_latest_intel_snapshot(user_id: UUID, client: Any) -> Optional[dict]:
-    """Read the latest active Intel v3 snapshot (indexed fast read)."""
+    """Read the latest active Intel v3 snapshot metadata (flat columns only, not payload).
+
+    Reads flat metadata columns added by Migration 024 to avoid fetching the full
+    snapshot payload JSONB (which can be 50-200KB) on every Watchtower cycle.
+    The returned dict uses the ``stage7_contract_complete`` and
+    ``stage8e_contract_complete`` keys recognised by the contract fast-paths in
+    is_snapshot_stage7_complete() and is_snapshot_stage8e_complete().
+    """
     try:
         row = await asyncio.to_thread(
             lambda: client.table("intel_v3_snapshots")
-            .select("payload")
+            .select(
+                "source_hash,snapshot_source,payload_generated_at,"
+                "evidence_mapping_version,stage7_contract_complete,stage8e_contract_complete"
+            )
             .eq("user_id", str(user_id))
             .eq("is_active", True)
             .order("created_at", desc=True)
@@ -636,23 +646,16 @@ async def _fetch_latest_intel_snapshot(user_id: UUID, client: Any) -> Optional[d
         rows = row.data or []
         if not rows:
             return None
-        payload = rows[0].get("payload") or {}
-        # Pre-compute explanation payload presence: all cards with detail_drawer_payload
-        # must have the evidence_explanation key (key check, not value truth).
-        holdings = payload.get("current_holdings") or []
-        stage7_explanation_payload_present = True
-        for card in holdings:
-            ddp = card.get("detail_drawer_payload")
-            if isinstance(ddp, dict) and "evidence_explanation" not in ddp:
-                stage7_explanation_payload_present = False
-                break
+        r = rows[0] or {}
         return {
-            "snapshot_id": payload.get("snapshot_id"),
-            "generated_at": payload.get("generated_at"),
-            "snapshot_source": payload.get("snapshot_source"),
-            "evidence_mapping_version": payload.get("evidence_mapping_version"),
-            "stage7_explanation_contract_version": payload.get("stage7_explanation_contract_version"),
-            "stage7_explanation_payload_present": stage7_explanation_payload_present,
+            "snapshot_id": None,  # not stored as flat column; used for logging only
+            "generated_at": _to_iso(r.get("payload_generated_at")),
+            "snapshot_source": r.get("snapshot_source"),
+            "evidence_mapping_version": r.get("evidence_mapping_version"),
+            # Pre-computed contract booleans — consumed by is_snapshot_stage7_complete()
+            # and is_snapshot_stage8e_complete() via their fast-path branches.
+            "stage7_contract_complete": bool(r.get("stage7_contract_complete")),
+            "stage8e_contract_complete": bool(r.get("stage8e_contract_complete")),
         }
     except Exception as exc:
         logger.warning(
@@ -706,14 +709,14 @@ async def _fetch_latest_usable_technical_artifacts(
 ) -> dict[str, datetime]:
     """Query research_artifacts for the latest usable technical_signal per ticker.
 
-    Mirrors the logic in watchtower_evidence_collector_v1._fetch_latest_usable_research_artifacts
-    but lives here so compare_and_republish_after_evidence_lanes() has no cross-module
-    dependency on the collector. Returns ticker → latest usable artifact generated_at.
+    Uses is_active=True as a proxy for usable (Stage 5A guarantees at most one
+    active row per identity). Avoids reading payload JSONB to eliminate egress.
+    Returns ticker → latest usable artifact generated_at.
     """
     try:
         result = await asyncio.to_thread(
             lambda: client.table("research_artifacts")
-            .select("ticker,generated_at,payload")
+            .select("ticker,generated_at")
             .eq("user_id", str(user_id))
             .eq("artifact_type", "technical_signal")
             .eq("is_active", True)
@@ -724,12 +727,6 @@ async def _fetch_latest_usable_technical_artifacts(
         for row in (result.data or []):
             t = (row.get("ticker") or "").strip().upper()
             if not t or t in latest:
-                continue
-            payload = row.get("payload")
-            if not isinstance(payload, dict):
-                continue
-            usability = payload.get("truth_usability_assessment")
-            if not isinstance(usability, dict) or not usability.get("is_usable"):
                 continue
             gen_at = _parse_iso(row.get("generated_at"))
             if gen_at is not None:

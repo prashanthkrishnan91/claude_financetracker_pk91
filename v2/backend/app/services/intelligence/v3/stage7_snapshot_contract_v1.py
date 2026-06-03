@@ -42,10 +42,14 @@ def is_snapshot_stage7_complete(payload: Optional[dict]) -> bool:
     """
     if not payload:
         return False
+    # Fast path: pre-computed boolean from flat DB column (Migration 024) or
+    # slim republisher dict with stage7_contract_complete key.
+    if "stage7_contract_complete" in payload:
+        return bool(payload["stage7_contract_complete"])
     if not is_snapshot_stage7_current(payload):
         return False
 
-    # Slim republisher dict carries a pre-computed boolean — use it directly.
+    # Pre-Migration-024 slim republisher dict carries a pre-computed boolean — use it directly.
     if "stage7_explanation_payload_present" in payload:
         return bool(payload["stage7_explanation_payload_present"])
 

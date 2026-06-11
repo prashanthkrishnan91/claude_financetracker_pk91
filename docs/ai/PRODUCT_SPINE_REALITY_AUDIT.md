@@ -6,24 +6,26 @@
 
 This document is grounded in a direct read of `v2/backend` code plus `docs/ai/HANDOFF.md`, `docs/product/{NORTH_STAR,ROADMAP,BUILD_QUEUE}.md`. File:line references are illustrative anchors, not exhaustive.
 
+**Evidence standard:** This audit is based on static code/docs inspection. It identifies implemented paths and gaps; it does not certify runtime behavior unless runtime evidence is explicitly cited.
+
 ---
 
 ## Executive verdict
 
-**Usable today (production-wired):**
+**Implemented / code-wired today (not runtime-certified by this PR):**
 
-- **Books of record (F1)** — positions/transactions/deposits/DRIP/Plaid/CSV are real and wired. Positions table is the holdings source of truth; cost basis is weighted-average (AVCO); Plaid is authoritative on sync with a 24h cache; CSV import dedups (SHA-256) and reconciles. This is the most under-celebrated, genuinely-working layer.
+- **Books of record (F1)** — positions/transactions/deposits/DRIP/Plaid/CSV are real and wired. Positions table is the holdings source of truth; cost basis is weighted-average (AVCO); Plaid is authoritative on sync with a 24h cache; CSV import dedups (SHA-256) and reconciles. This is the most under-celebrated, genuinely-implemented layer (per static inspection).
 - **Data backbone (F2)** — multi-source concurrent price engine (yfinance + Finnhub + Alpaca + Polygon + CoinGecko) with per-source timeout, 5-minute cache, and circuit breaker. Evidence providers (sec_edgar OFFICIAL, fred OFFICIAL, yfinance unofficial) are wired read-only.
 - **Honest Intel (Stage 1)** — by far the most mature area. Deterministic `decision_policy_v1` owns visible Buy/Hold/Trim/Sell. Suppression, freshness SLAs, source credibility bands, and evidence-aware governance all exist. `safe_for_decision` is held False by design in the shadow adapter.
 - **Labeled advisory analyst (Stage 4)** — single-LLM orchestrator produces conviction + narrative; action is deterministic post-hoc; conviction is capped by data quality; banned-indicator-language validator is enforced. The LLM is genuinely explanatory-only.
-- **Deploy exact-dollar math (Stage 2, partial)** — allocation/adaptive/deployment engines plus `deploy_dollar_math_v1` produce exact-dollar buy/trim/sell with rounding + cash-residual handling and a cash guardrail. Validated in production for $900/$1,500 flows (BUILD_QUEUE Stage 2 exit).
+- **Deploy exact-dollar math (Stage 2, partial)** — allocation/adaptive/deployment engines plus `deploy_dollar_math_v1` produce exact-dollar buy/trim/sell with rounding + cash-residual handling and a cash guardrail. Documented as Stage 2 exit / previously validated per repo docs ($900/$1,500 flows, BUILD_QUEUE); not revalidated in this PR.
 
 **Not usable today (gap / scaffold / absent):**
 
 - **Tax & wash-sale safety** — *not implemented*. `tax_guardrail_status` / `wash_sale_guardrail_status` are literal `"not_evaluated_yet"` placeholders; every actionable Deploy item terminates in `ACTIONABLE_PENDING_TAX`, never `ACTIONABLE`. There is no tax-lot accounting; `lt_eligible`/`lt_date` exist on positions as fields with no enforcing logic.
 - **VTI-only benchmark truth (Stage 3)** — *absent as a user-facing capability*. `benchmark.py` fetches SPY price-action as a **decision signal input only**. There is no deposit-history-vs-hypothetical-VTI-DCA comparison anywhere.
 - **Behavioral discipline (Stage 5)** — concentration caps + data-quality caps + cash constraint exist, but there is **no overtrading / panic / cooldown discipline in the main decision or deploy path** (cooldowns live only in the alert-suppression layer).
-- **Watchtower delivery (Stage 6)** — candidate generation + outbox are production; real email send is parked behind Resend domain verification; push/in_app channels are scaffold.
+- **Watchtower delivery (Stage 6)** — candidate generation + outbox are code-wired / implemented; real email send is parked behind Resend domain verification; push/in_app channels are scaffold.
 - **Teaching layer (Stage 7)** — not built; exists only as "Coming-Later" chrome and Stage 6E–6H build-queue items.
 - **Premium polish (Stage 8)** — design foundation shipped (Stage 4A/4B/4C); polish is correctly gated behind a stable decision/action loop.
 
@@ -38,7 +40,7 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 ### F1 — Books of Record  ✅  Risk ⬛
 
 - **Existing assets:** `models/{position,transaction,deposit,drip,portfolio}.py`; `services/portfolio_service.py` (get_summary, snapshots, rebalance, backfill), `portfolio_engine.py` (pure AVCO cost-basis math), `plaid_service.py` (sync, 24h cache, audit log, sold-position removal), `import_service.py` (CSV SHA-256 dedup + post-import reconciliation), `deposit_service.py`, `drip_service.py`, `routers/sync.py`.
-- **Current readiness:** Production. Positions table = holdings source of truth. Plaid authoritative for shares + cost_basis on sync; manual + crypto-PDF positions preserved. Cost basis is weighted-average (one bucket per ticker).
+- **Current readiness:** Code-wired / implemented. Positions table = holdings source of truth. Plaid authoritative for shares + cost_basis on sync; manual + crypto-PDF positions preserved. Cost basis is weighted-average (one bucket per ticker).
 - **Missing gaps:** No lot-level cost basis (blocks real tax-lot/wash-sale later). No cross-source reconciliation *audit surface* — Plaid simply wins on conflict; there is no visible drift report between Plaid holdings and the transaction-derived ledger. DRIP dividend dates come from yfinance with no fallback (best-effort).
 - **Entry gate:** none (foundational).
 - **Exit gate:** Per-position source provenance + cost-basis integrity are inspectable; Plaid-vs-transaction drift is detectable. → enables `facts_ready`.
@@ -47,16 +49,16 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 ### F2 — Data Backbone  ✅  Risk ⬛
 
 - **Existing assets:** `services/price_engine.py` (concurrent stock sources yfinance/Finnhub/Alpaca/Polygon; crypto CoinGecko/yfinance; 8s timeout, 5-min cache, 3-fail/300s circuit breaker), `price_service.py`, `services/market_data/`, evidence registries `intelligence/research_workers/evidence_provider_registry_v1.py` (sec_edgar/yfinance/fred) and `intelligence/v3/provider_registry_v1.py`.
-- **Current readiness:** Production. Price refresh races multiple sources; first valid wins; stale-cache fallback only when all sources circuit-broken.
+- **Current readiness:** Code-wired / implemented. Price refresh races multiple sources; first valid wins; stale-cache fallback only when all sources circuit-broken.
 - **Missing gaps:** DRIP dividend-date path is yfinance-only. No single-provider hard dependency on the price hot path.
 - **Entry gate:** none.
-- **Exit gate:** Daily price refresh remains reliable under any single-source outage. Already met by the concurrent design.
+- **Exit gate:** Concurrent design is intended to tolerate a single-source outage; not runtime-revalidated in this PR.
 - **Recommended next action:** **None urgent.** Specifically, *yfinance is not a sole critical-path dependency* — see "yfinance criticality" below. Do not migrate to Finnhub.
 
 ### Stage 1 — Honest Intel  ✅  Risk 🟧 (highest-value, already built)
 
 - **Existing assets:** `intelligence/v3/decision_policy_v1.py` (deterministic action authority, no composite score), `decision_contracts.py` (sanitized plain-English output, forbidden raw-metric keys), `intel_v3_evidence_aware_governance_v1.py` (Stage 6), `research_evidence_decision_input_adapter_v1.py` (Stage 5K shadow readiness, `safe_for_decision=False` immutable), `watchtower_freshness_ledger_v1.py` (per-type SLAs), `watchtower_deploy_gate_v1.py`, `source_credibility_registry_v1.py`.
-- **Current readiness:** Production and mature. Source/freshness/suppression/blockers are surfaced in plain English; LLM cannot own visible action.
+- **Current readiness:** Code-wired / implemented and mature. Source/freshness/suppression/blockers are surfaced in plain English; LLM cannot own visible action.
 - **Missing gaps:** None blocking. `safe_for_decision` intentionally False; evidence-aware governance is flag-gated.
 - **Entry gate:** Intel v3 backend policy in place — met.
 - **Exit gate:** Intel v3 Certification Gate (decisions certified, no LLM final authority, honest gaps) — substantially met per HANDOFF.
@@ -64,8 +66,8 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 
 ### Stage 2 — Deploy + Tax Safety  🟡  Risk 🟥 (tax safety is the gap)
 
-- **Existing assets:** `allocation_engine.py`, `adaptive_deployment.py`, `deployment_engine.py`, `deploy/deploy_dollar_math_v1.py`, `deploy/deploy_sizing_source_adapter_v1.py` (reads `portfolio_snapshots` + `target_allocations` + Settings), `deploy/deploy_cash_guardrail_v1.py`, `deploy/deploy_finalization_v1.py`, `deploy/deploy_contracts.py`, `routers/deploy_v3.py`. Exact-dollar + rounding + cash-residual validated in production (Stage 2 exit, $900/$1,500).
-- **Current readiness:** Exact-dollar sizing is real and production-validated. Allocation is user-driven via `target_allocations` (theme map is only an example/enrichment layer, not the source of truth).
+- **Existing assets:** `allocation_engine.py`, `adaptive_deployment.py`, `deployment_engine.py`, `deploy/deploy_dollar_math_v1.py`, `deploy/deploy_sizing_source_adapter_v1.py` (reads `portfolio_snapshots` + `target_allocations` + Settings), `deploy/deploy_cash_guardrail_v1.py`, `deploy/deploy_finalization_v1.py`, `deploy/deploy_contracts.py`, `routers/deploy_v3.py`. Exact-dollar + rounding + cash-residual documented as Stage 2 exit / previously validated per repo docs ($900/$1,500); not revalidated in this PR.
+- **Current readiness:** Exact-dollar sizing is code-wired / implemented (documented Stage 2 exit per repo docs; not revalidated here). Allocation is user-driven via `target_allocations` (theme map is only an example/enrichment layer, not the source of truth).
 - **Missing gaps:** **Tax & wash-sale evaluation is absent.** Items terminate in `ACTIONABLE_PENDING_TAX`; `tax_guardrail_status`/`wash_sale_guardrail_status` = `"not_evaluated_yet"`. No tax-lot model; `lt_eligible`/`lt_date` unenforced. This is the single biggest "before action" safety gap.
 - **Entry gate:** Stage 1 certified Intel decisions (met).
 - **Exit gate:** Deploy Readiness Gate *plus* an honest tax/wash-sale verdict before any item is labeled fully actionable.
@@ -83,7 +85,7 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 ### Stage 4 — Labeled Advisory Analyst  ✅  Risk 🟧
 
 - **Existing assets:** `services/agents/orchestrator.py` (5-phase, ≤1 LLM call/run), `agents/llm.py` (Sonnet→Haiku failover), `intelligence/per_ticker_analyst.py` (banned-language validator, INSUFFICIENT_DATA fallback), `intelligence/portfolio_synthesis.py` (deterministic fallback), `agents/portfolio_manager.py` (concentration caps), migrations 010/011 (`analyst_verdict`, `portfolio_synthesis` JSONB).
-- **Current readiness:** Production. Conviction capped by data quality; action derived deterministically; LLM output is explanatory-only and persisted as labeled advisory.
+- **Current readiness:** Code-wired / implemented. Conviction capped by data quality; action derived deterministically; LLM output is explanatory-only and persisted as labeled advisory.
 - **Missing gaps:** None blocking. The advisory attach-point already exists (`analyst_verdict` / `portfolio_synthesis`).
 - **Entry gate:** Intel deterministic authority (met).
 - **Exit gate:** LLM never owns visible action; advisory clearly labeled — met.
@@ -100,8 +102,8 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 
 ### Stage 6 — Watchtower / Rare Alerts  🟡  Risk 🟧
 
-- **Existing assets:** `alert/watchtower_alert_candidate_hook_v1.py`, `alert/alert_trigger_policy_v1.py` (pure deterministic), `alert/alert_candidate_service.py`, `alert/alert_delivery_outbox_service.py`, `alert/alert_email_delivery_worker_v1.py` (Resend), routers + models, Watchtower production loop (Railway PROCESS_TYPE).
-- **Current readiness:** Candidate generation + outbox = production. Real email send parked behind Resend domain verification (dry-run passing). Push/in_app = scaffold.
+- **Existing assets:** `alert/watchtower_alert_candidate_hook_v1.py`, `alert/alert_trigger_policy_v1.py` (pure deterministic), `alert/alert_candidate_service.py`, `alert/alert_delivery_outbox_service.py`, `alert/alert_email_delivery_worker_v1.py` (Resend), routers + models, Watchtower loop wired as a Railway PROCESS_TYPE (per repo docs).
+- **Current readiness:** Candidate generation + outbox = code-wired / implemented. Real email send parked behind Resend domain verification (dry-run passing per repo docs). Push/in_app = scaffold.
 - **Missing gaps:** Real-send activation (Stage 5M in BUILD_QUEUE) — operational, not a code gap.
 - **Entry gate:** Stage 2/Deploy loop stable.
 - **Exit gate:** Alert Readiness Gate.
@@ -147,7 +149,7 @@ Legend — Risk: ⬛ low / 🟧 medium / 🟥 high. Readiness: ✅ wired / 🟡 
 
 ## Deploy — production-ready for exact-dollar biweekly plans?
 
-**Exact-dollar math: yes (production-validated). Action safety: no.** Sizing, rounding, cash-residual distribution, and the cash guardrail are real and were validated for $900/$1,500 flows. But every item ends in `ACTIONABLE_PENDING_TAX` because tax/wash-sale are `"not_evaluated_yet"`. Deploy can *plan* exact dollars today; it cannot honestly say an item is *safe to act on* until tax safety exists.
+**Exact-dollar math: code-wired / implemented (documented Stage 2 exit per repo docs; not revalidated in this PR). Action safety: no.** Sizing, rounding, cash-residual distribution, and the cash guardrail are implemented and are documented as previously validated for $900/$1,500 flows. But every item ends in `ACTIONABLE_PENDING_TAX` because tax/wash-sale are `"not_evaluated_yet"`. Deploy can *plan* exact dollars today; it cannot honestly say an item is *safe to act on* until tax safety exists.
 
 ## Tax / wash-sale / lot capabilities
 

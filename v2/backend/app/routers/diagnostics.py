@@ -4427,6 +4427,8 @@ async def vanguard_holdings_diagnostic(
         getattr(user, "email", "unknown"),
     )
 
+    return result
+
 
 # ── Stage 10B — Books-of-record integrity & reconciliation diagnostic ────────
 

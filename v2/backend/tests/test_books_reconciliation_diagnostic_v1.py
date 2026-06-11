@@ -439,3 +439,41 @@ class TestRouterWiring:
         assert len(returns) == 1, (
             f"Expected exactly 1 return in books_reconciliation_diagnostic, found {len(returns)}"
         )
+
+    def test_vanguard_function_has_return(self):
+        """Vanguard endpoint must have at least one return (not implicit None)."""
+        import ast, pathlib
+        router_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+        source = router_path.read_text()
+        tree = ast.parse(source)
+        returns = []
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.AsyncFunctionDef)
+                and node.name == "vanguard_holdings_diagnostic"
+            ):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Return) and child.value is not None:
+                        returns.append(child)
+        assert len(returns) >= 1, (
+            "vanguard_holdings_diagnostic_endpoint has no explicit return — "
+            "it would return None instead of the diagnostic result"
+        )
+
+    def test_stage10b_route_appears_after_vanguard_function(self):
+        """Stage 10B @router.post must appear in source after the vanguard function body.
+
+        Catches the case where new route code is accidentally inserted inside or
+        before the final return of an existing function.
+        """
+        import pathlib
+        router_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+        source = router_path.read_text()
+        vanguard_marker = "vanguard_holdings_diagnostic_endpoint"
+        stage10b_marker = '"/books-reconciliation-diagnostic"'
+        assert vanguard_marker in source, "vanguard function not found in router"
+        assert stage10b_marker in source, "Stage 10B route not found in router"
+        assert source.index(vanguard_marker) < source.index(stage10b_marker), (
+            "Stage 10B route appears before vanguard function in source — "
+            "check that the new route was not inserted inside an existing function"
+        )

@@ -658,6 +658,14 @@ def test_o29_schd_rejected_before_network_call():
     assert entry["canonical_ready"] is False
     assert entry["safe_for_decision"] is False
     assert result["summary"]["rejected_count"] == 1
+    # url_used must be None — no Vanguard URL is constructed for unsupported issuers
+    assert entry["url_used"] is None, (
+        f"url_used must be None for unsupported issuer SCHD, got {entry['url_used']!r}"
+    )
+    url_str = entry["url_used"] or ""
+    assert "vanguard" not in url_str.lower()
+    assert "investor.vanguard.com" not in url_str.lower()
+    assert "QuantDataFundHoldings" not in url_str
 
 
 def test_o30_schd_output_is_deterministic():
@@ -749,7 +757,7 @@ def test_o35_unsupported_issuer_policy_invariants():
 
 
 def test_o36_arbitrary_non_vanguard_ticker_rejected_before_network():
-    """O36: Arbitrary non-Vanguard ticker (SPY) is rejected before network call."""
+    """O36: Arbitrary non-Vanguard ticker (SPY) is rejected before network call, url_used=None."""
     (_, _, _, _, REJECTED, run) = _diag_module()
 
     result = run(["SPY"], http_get_fn=_network_call_detector)
@@ -759,3 +767,10 @@ def test_o36_arbitrary_non_vanguard_ticker_rejected_before_network():
     assert entry["failure_reason"] == "unsupported_issuer_for_provider"
     assert entry["canonical_ready"] is False
     assert entry["safe_for_decision"] is False
+    # No Vanguard URL produced for unsupported issuers
+    assert entry["url_used"] is None, (
+        f"url_used must be None for unsupported issuer SPY, got {entry['url_used']!r}"
+    )
+    url_str = entry["url_used"] or ""
+    assert "vanguard" not in url_str.lower()
+    assert "QuantDataFundHoldings" not in url_str

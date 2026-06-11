@@ -196,9 +196,10 @@ def run_vanguard_holdings_diagnostic(
 
     for ticker in tickers:
         ticker_upper = ticker.upper().strip()
-        url = _VANGUARD_URL_TEMPLATE.format(ticker=ticker_upper)
 
         # ── Issuer eligibility guard — reject before any network call ──────────
+        # URL is not constructed for unsupported issuers — no Vanguard URL is
+        # produced for tickers that are not Vanguard-issued.
         if ticker_upper not in _VANGUARD_ELIGIBLE_TICKERS:
             logger.info(
                 "vanguard_diagnostic_unsupported_issuer ticker=%s provider=%s",
@@ -206,7 +207,7 @@ def run_vanguard_holdings_diagnostic(
             )
             per_ticker.append({
                 "ticker": ticker_upper,
-                "url_used": url,
+                "url_used": None,
                 "access_pattern": _ACCESS_PATTERN,
                 "response_type": _RESPONSE_TYPE,
                 "fund_name_detected": None,
@@ -230,6 +231,9 @@ def run_vanguard_holdings_diagnostic(
             })
             rejected_count += 1
             continue
+
+        # URL is only constructed for Vanguard-eligible tickers.
+        url = _VANGUARD_URL_TEMPLATE.format(ticker=ticker_upper)
 
         try:
             result = fetch_issuer_official_holdings(

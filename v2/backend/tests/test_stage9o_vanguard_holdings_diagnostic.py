@@ -636,3 +636,141 @@ def test_o28_fund_name_detected_none_on_access_failure():
     assert entry["fund_name_detected"] is None
     assert entry["safe_for_decision"] is False
     assert entry["canonical_ready"] is False
+
+
+# ── Tests O29–O36: issuer eligibility guard ───────────────────────────────────
+
+def _network_call_detector(url: str) -> None:
+    """Raises if called — proves no network call was made for rejected issuers."""
+    raise AssertionError(f"Network call must not be made for unsupported issuers: {url}")
+
+
+def test_o29_schd_rejected_before_network_call():
+    """O29: SCHD (Schwab ETF) is rejected before any network call — unsupported_issuer_for_provider."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result = run(["SCHD"], http_get_fn=_network_call_detector)
+
+    entry = result["per_ticker"][0]
+    assert entry["classification"] == REJECTED
+    assert entry["failure_reason"] == "unsupported_issuer_for_provider"
+    assert "unsupported_issuer_for_provider" in entry["disqualifiers"]
+    assert entry["canonical_ready"] is False
+    assert entry["safe_for_decision"] is False
+    assert result["summary"]["rejected_count"] == 1
+    # url_used must be None — no Vanguard URL is constructed for unsupported issuers
+    assert entry["url_used"] is None, (
+        f"url_used must be None for unsupported issuer SCHD, got {entry['url_used']!r}"
+    )
+    url_str = entry["url_used"] or ""
+    assert "vanguard" not in url_str.lower()
+    assert "investor.vanguard.com" not in url_str.lower()
+    assert "QuantDataFundHoldings" not in url_str
+
+
+def test_o30_schd_output_is_deterministic():
+    """O30: SCHD eligibility rejection is deterministic — same output on repeated calls."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result1 = run(["SCHD"], http_get_fn=_network_call_detector)
+    result2 = run(["SCHD"], http_get_fn=_network_call_detector)
+
+    e1 = result1["per_ticker"][0]
+    e2 = result2["per_ticker"][0]
+    assert e1["classification"] == e2["classification"] == REJECTED
+    assert e1["failure_reason"] == e2["failure_reason"] == "unsupported_issuer_for_provider"
+    assert e1["canonical_ready"] is False
+    assert e2["canonical_ready"] is False
+    assert e1["safe_for_decision"] is False
+    assert e2["safe_for_decision"] is False
+
+
+def test_o31_unsupported_issuer_required_fields_all_present():
+    """O31: All required evidence fields are present on unsupported-issuer rejection path."""
+    (_, _, _, _, _, run) = _diag_module()
+
+    result = run(["SCHD"], http_get_fn=_network_call_detector)
+    entry = result["per_ticker"][0]
+
+    missing = _REQUIRED_EVIDENCE_FIELDS - set(entry.keys())
+    assert not missing, f"Missing evidence fields on unsupported-issuer path: {missing}"
+
+
+def test_o32_unsupported_issuer_zero_holdings():
+    """O32: Unsupported issuer returns holdings_count=0 and holdings_weights_available=False."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result = run(["SCHD"], http_get_fn=_network_call_detector)
+    entry = result["per_ticker"][0]
+
+    assert entry["holdings_count"] == 0
+    assert entry["holdings_weights_available"] is False
+    assert entry["as_of_date"] is None
+    assert entry["identity_verified"] is False
+
+
+def test_o33_unsupported_issuer_summary_count_correct():
+    """O33: Unsupported issuer increments rejected_count in summary; other counts zero."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result = run(["SCHD"], http_get_fn=_network_call_detector)
+
+    assert result["summary"]["rejected_count"] == 1
+    assert result["summary"]["canonical_candidate_count"] == 0
+    assert result["summary"]["supplemental_only_count"] == 0
+    assert result["summary"]["manual_research_required_count"] == 0
+
+
+def test_o34_unsupported_issuer_mixed_with_valid_ticker():
+    """O34: SCHD rejected before network; VTI proceeds normally in the same run."""
+    (_, CANONICAL_CANDIDATE, _, _, REJECTED, run) = _diag_module()
+
+    http_fn = _make_http_fn({"VTI": _success_csv("VTI")})
+
+    def guarded_http_fn(url: str) -> _MockResponse:
+        if "SCHD" in url:
+            raise AssertionError(f"SCHD must not reach the network: {url}")
+        return http_fn(url)
+
+    result = run(["VTI", "SCHD"], http_get_fn=guarded_http_fn)
+
+    by_ticker = {e["ticker"]: e for e in result["per_ticker"]}
+    assert by_ticker["VTI"]["classification"] == CANONICAL_CANDIDATE
+    assert by_ticker["SCHD"]["classification"] == REJECTED
+    assert by_ticker["SCHD"]["failure_reason"] == "unsupported_issuer_for_provider"
+    assert result["summary"]["canonical_candidate_count"] == 1
+    assert result["summary"]["rejected_count"] == 1
+
+
+def test_o35_unsupported_issuer_policy_invariants():
+    """O35: diagnostics_only, policy_unchanged, visible_snapshot_unchanged on unsupported-issuer path."""
+    (_, _, _, _, _, run) = _diag_module()
+
+    result = run(["SCHD"], http_get_fn=_network_call_detector)
+
+    assert result["diagnostics_only"] is True
+    assert result["artifact_writes"] == 0
+    assert result["policy_unchanged"] is True
+    assert result["visible_snapshot_unchanged"] is True
+    assert result["canonical_ready"] is False
+    assert result["safe_for_decision"] is False
+
+
+def test_o36_arbitrary_non_vanguard_ticker_rejected_before_network():
+    """O36: Arbitrary non-Vanguard ticker (SPY) is rejected before network call, url_used=None."""
+    (_, _, _, _, REJECTED, run) = _diag_module()
+
+    result = run(["SPY"], http_get_fn=_network_call_detector)
+
+    entry = result["per_ticker"][0]
+    assert entry["classification"] == REJECTED
+    assert entry["failure_reason"] == "unsupported_issuer_for_provider"
+    assert entry["canonical_ready"] is False
+    assert entry["safe_for_decision"] is False
+    # No Vanguard URL produced for unsupported issuers
+    assert entry["url_used"] is None, (
+        f"url_used must be None for unsupported issuer SPY, got {entry['url_used']!r}"
+    )
+    url_str = entry["url_used"] or ""
+    assert "vanguard" not in url_str.lower()
+    assert "QuantDataFundHoldings" not in url_str

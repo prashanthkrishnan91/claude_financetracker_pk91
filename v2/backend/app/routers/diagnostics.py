@@ -13,7 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..database import get_supabase_client
@@ -191,7 +191,7 @@ class BooksReconciliationDiagnosticRequest(BaseModel):
                            are included in per_ticker output but excluded from
                            facts_ready counting.
     """
-    tickers: list[str] = []
+    tickers: list[str] = Field(default_factory=list)
     include_not_evaluable: bool = True
 
 
@@ -4472,7 +4472,5 @@ async def books_reconciliation_diagnostic(
         result.get("positions_degraded_count", 0),
         result.get("positions_blocked_count", 0),
     )
-
-    return result
 
     return result

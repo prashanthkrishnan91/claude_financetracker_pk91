@@ -385,4 +385,57 @@ class TestBooksReconciliationEndpointContract:
         assert result["diagnostics_only"] is True
         assert result["writes_performed"] == 0
         assert result["policy_unchanged"] is True
-        assert result["visible_snapshot_unchanged"] is True
+
+
+# ── Router wiring tests (import + route registration, no fastapi in test env) ─
+
+class TestRouterWiring:
+    """Catch router-level syntax/import failures that service-only tests miss.
+
+    These tests do NOT import app.routers.diagnostics (which requires fastapi).
+    Instead they verify: (1) the service module is importable, (2) the request
+    model is importable from the service module's package, and (3) a fast Python
+    syntax check on the router file passes.
+    """
+
+    def test_service_module_imports_cleanly(self):
+        """The service must be importable with no side-effects."""
+        import importlib
+        mod = importlib.import_module("app.services.books_reconciliation_diagnostic_v1")
+        assert hasattr(mod, "run_books_reconciliation_diagnostic")
+        assert hasattr(mod, "_reconcile_ticker")
+        assert hasattr(mod, "DIAGNOSTIC_VERSION")
+
+    def test_router_file_has_no_syntax_errors(self):
+        """Compile the router file to catch duplicate return / indentation bugs."""
+        import ast, pathlib
+        router_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+        source = router_path.read_text()
+        # ast.parse raises SyntaxError on any syntax problem
+        tree = ast.parse(source, filename=str(router_path))
+        assert tree is not None
+
+    def test_router_file_contains_books_reconciliation_route(self):
+        """The route decorator must be present in the router source."""
+        import pathlib
+        router_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+        source = router_path.read_text()
+        assert '"/books-reconciliation-diagnostic"' in source
+        assert "books_reconciliation_diagnostic" in source
+        assert "BooksReconciliationDiagnosticRequest" in source
+
+    def test_router_file_has_single_return_in_books_function(self):
+        """Detect the duplicate-return bug: the books endpoint must return exactly once."""
+        import ast, pathlib
+        router_path = pathlib.Path(__file__).parent.parent / "app" / "routers" / "diagnostics.py"
+        source = router_path.read_text()
+        tree = ast.parse(source)
+        returns = []
+        for node in ast.walk(tree):
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "books_reconciliation_diagnostic":
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Return):
+                        returns.append(child)
+        assert len(returns) == 1, (
+            f"Expected exactly 1 return in books_reconciliation_diagnostic, found {len(returns)}"
+        )

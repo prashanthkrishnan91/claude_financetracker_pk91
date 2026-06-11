@@ -196,12 +196,31 @@ class TestFmpMatrix:
         assert rec["safe_for_decision"] is False
 
 
-# ── N14–N16: Issuer-official is manual_research_required ─────────────────────
+# ── N14–N16: Issuer-official matrix records ───────────────────────────────────
+# N14: issuer_official_vanguard is now rejected_insufficient (Stage 9O live run: 404).
+# N15–N16: schwab and ssga remain manual_research_required (no live run attempted).
 
 class TestIssuerOfficialMatrix:
-    def test_n14_vanguard_is_manual_research_required(self):
+    def test_n14_vanguard_is_rejected_insufficient_after_stage9o(self):
+        """N14: Stage 9O live run returned 404 for VTI/VXUS — vanguard is rejected_insufficient."""
         rec = _classify_provider("issuer_official_vanguard")
-        assert rec["classification"] == "manual_research_required"
+        assert rec["classification"] == "rejected_insufficient"
+
+    def test_n14b_vanguard_stage9o_runtime_evidence_present(self):
+        """N14b: runtime_evidence references Stage 9O and 404 result."""
+        rec = _classify_provider("issuer_official_vanguard")
+        assert "9O" in rec["runtime_evidence"] or "stage9o" in rec["runtime_evidence"].lower()
+        assert "404" in rec["runtime_evidence"]
+
+    def test_n14c_vanguard_rejection_includes_404_reason(self):
+        """N14c: rejection_reasons include the live 404 outcome."""
+        rec = _classify_provider("issuer_official_vanguard")
+        assert any("404" in r for r in rec["rejection_reasons"])
+
+    def test_n14d_vanguard_rejection_includes_do_not_build_stage9p(self):
+        """N14d: rejection_reasons state do not build Stage 9P adapter."""
+        rec = _classify_provider("issuer_official_vanguard")
+        assert any("stage9p" in r.lower() or "9p" in r.lower() for r in rec["rejection_reasons"])
 
     def test_n15_schwab_is_manual_research_required(self):
         rec = _classify_provider("issuer_official_schwab")
@@ -215,9 +234,12 @@ class TestIssuerOfficialMatrix:
         rec = _classify_provider("issuer_official_vanguard")
         assert rec["canonical_ready"] is False
 
-    def test_n16c_vanguard_rejection_includes_url_or_stable(self):
+    def test_n16c_vanguard_rejection_includes_url_or_404(self):
         rec = _classify_provider("issuer_official_vanguard")
-        assert any("url" in r.lower() or "stable" in r.lower() for r in rec["rejection_reasons"])
+        assert any(
+            "url" in r.lower() or "404" in r or "stable" in r.lower()
+            for r in rec["rejection_reasons"]
+        )
 
     def test_n16d_vanguard_has_issuer_official_source_authority(self):
         rec = _classify_provider("issuer_official_vanguard")
@@ -234,6 +256,10 @@ class TestIssuerOfficialMatrix:
         )
         assert gate_passed is True
         assert failures == []
+
+    def test_n16f_vanguard_safe_for_decision_false(self):
+        rec = _classify_provider("issuer_official_vanguard")
+        assert rec["safe_for_decision"] is False
 
 
 # ── N17: GLD commodity trust is not_applicable ────────────────────────────────
@@ -357,6 +383,13 @@ class TestBuildMatrix:
         assert "sec_nport_vti_schd_vxus" in stop
         assert "alpha_vantage_etf_profile" in stop
         assert "fmp_etf_holdings" in stop
+        assert "issuer_official_vanguard" in stop
+
+    def test_n21f_vanguard_stop_reason_mentions_404_and_pivot(self):
+        m = _build_matrix()
+        stop = m["patch_loop_stop_reasons"]["issuer_official_vanguard"]
+        assert "404" in stop
+        assert "stage9p" in stop.lower() or "9P" in stop
 
     def test_n21f_s_grade_criteria_in_matrix(self):
         m = _build_matrix()
@@ -440,17 +473,30 @@ class TestEtfClassNextPaths:
         m = _build_matrix()
         assert required_classes.issubset(m["etf_class_next_paths"].keys())
 
-    def test_n27_vanguard_recommends_issuer_official(self):
+    def test_n27_vanguard_has_no_proven_path_after_stage9o(self):
+        """N27: After Stage 9O 404 result, vanguard_etfs recommended_path is not the rejected provider."""
         rec = _get_next_path("vanguard_etfs")
-        assert rec["recommended_path"] == "issuer_official_vanguard"
+        # recommended_path updated to reflect Stage 9O outcome — no proven path
+        assert rec["recommended_path"] != "issuer_official_vanguard"
+        assert "blocker" in rec
+        assert "404" in rec["blocker"] or "not_proven" in rec["blocker"]
+
+    def test_n27b_vanguard_manual_action_mentions_do_not_build_stage9p(self):
+        """N27b: vanguard_etfs manual_action_required warns against Stage 9P adapter."""
+        rec = _get_next_path("vanguard_etfs")
+        action = rec.get("manual_action_required", "")
+        assert "9P" in action or "stage9p" in action.lower() or "9p" in action.lower()
 
     def test_n28_schwab_recommends_issuer_official_schwab(self):
         rec = _get_next_path("schwab_etfs")
         assert rec["recommended_path"] == "issuer_official_schwab"
 
-    def test_n29_international_recommends_issuer_official_vanguard(self):
+    def test_n29_international_etfs_has_blocker(self):
+        """N29: international_etfs (VXUS) has a blocker — issuer official URL returned 404."""
         rec = _get_next_path("international_etfs")
-        assert rec["recommended_path"] == "issuer_official_vanguard"
+        assert "blocker" in rec
+        # VXUS is Vanguard — its path is also blocked by Stage 9O 404 result
+        assert rec["blocker"] != "none_already_canonical"
 
     def test_n29b_standalone_trust_recommends_sec_nport(self):
         rec = _get_next_path("standalone_trust_etfs")

@@ -51,6 +51,15 @@ PROVIDER_LABEL = "issuer_official_vanguard"
 _DEFAULT_TICKERS: tuple[str, ...] = ("VTI", "VOO", "VXUS")
 _MAX_TICKERS: int = 10
 
+# Tickers known to be issued by Vanguard — the only tickers this provider may attempt.
+# Any ticker not in this set is rejected before the network call with
+# failure_reason="unsupported_issuer_for_provider".
+_VANGUARD_ELIGIBLE_TICKERS: frozenset[str] = frozenset({
+    "VTI", "VOO", "VXUS", "VGT", "VHT", "VIS", "VYM",
+    "VOOG", "VOOV", "VV", "VB", "VO", "VBR", "VBK",
+    "MGK", "MGV", "VUG", "VTV",
+})
+
 # Access metadata constants.
 _ACCESS_PATTERN = "direct_csv_download"
 _RESPONSE_TYPE = "csv"
@@ -188,6 +197,39 @@ def run_vanguard_holdings_diagnostic(
     for ticker in tickers:
         ticker_upper = ticker.upper().strip()
         url = _VANGUARD_URL_TEMPLATE.format(ticker=ticker_upper)
+
+        # ── Issuer eligibility guard — reject before any network call ──────────
+        if ticker_upper not in _VANGUARD_ELIGIBLE_TICKERS:
+            logger.info(
+                "vanguard_diagnostic_unsupported_issuer ticker=%s provider=%s",
+                ticker_upper, PROVIDER_ID,
+            )
+            per_ticker.append({
+                "ticker": ticker_upper,
+                "url_used": url,
+                "access_pattern": _ACCESS_PATTERN,
+                "response_type": _RESPONSE_TYPE,
+                "fund_name_detected": None,
+                "identity_verified": False,
+                "identity_basis": None,
+                "holdings_count": 0,
+                "holdings_weights_available": False,
+                "as_of_date": None,
+                "parse_status": "unsupported_issuer_for_provider",
+                "fetch_status": "unsupported_issuer_for_provider",
+                "failure_reason": "unsupported_issuer_for_provider",
+                "classification": REJECTED,
+                "disqualifiers": ["unsupported_issuer_for_provider"],
+                "classification_rationale": (
+                    f"Ticker {ticker_upper} is not a known Vanguard ETF — "
+                    "this provider may only attempt Vanguard-issued tickers. "
+                    "No network call was made."
+                ),
+                "canonical_ready": False,
+                "safe_for_decision": False,
+            })
+            rejected_count += 1
+            continue
 
         try:
             result = fetch_issuer_official_holdings(

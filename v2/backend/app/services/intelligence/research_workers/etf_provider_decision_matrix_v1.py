@@ -232,31 +232,40 @@ _PROVIDER_MATRIX: dict[str, dict] = {
 
     "issuer_official_vanguard": _provider_record(
         provider_id="issuer_official_vanguard",
-        classification=MANUAL_RESEARCH_REQUIRED,
-        identity_verified=None,
-        holdings_count_known=None,
-        weights_available=None,
-        as_of_or_report_date_present=None,
+        classification=REJECTED_INSUFFICIENT,
+        identity_verified=False,
+        holdings_count_known=False,
+        weights_available=False,
+        as_of_or_report_date_present=False,
         source_authority="issuer_official",
         entitlement_status="free_no_key_required",
-        stability_risk="medium_url_schema_may_change",
-        canonical_readiness="blocked_url_not_confirmed_stable",
+        stability_risk="high_url_returns_404",
+        canonical_readiness="blocked_url_returns_404",
         rejection_reasons=[
-            "url_pattern_needs_post_deploy_validation",
-            "csv_schema_subject_to_layout_changes",
-            "identity_check_requires_fund_name_in_csv_metadata",
+            "live_url_returned_404_for_vti",
+            "live_url_returned_404_for_vxus",
+            "schd_not_a_vanguard_etf_routing_error",
+            "canonical_candidate_count_zero_in_live_run",
+            "do_not_build_stage9p_vanguard_adapter_from_this_evidence",
         ],
         runtime_evidence=(
-            "Stage 9F.2b registry: vanguard_official_v1 registered but not confirmed. "
-            "URL template: investor.vanguard.com/content/dam/fas-portspec-images/"
-            "downloads/etf-shares/{TICKER}_QuantDataFundHoldings.csv. "
-            "No live confirmation run at Stage 9N."
+            "Stage 9O runtime diagnostic (diagnostic_version=stage9o_v1): "
+            "VTI URL returned HTTP 404: investor.vanguard.com/.../VTI_QuantDataFundHoldings.csv. "
+            "VXUS URL returned HTTP 404: investor.vanguard.com/.../VXUS_QuantDataFundHoldings.csv. "
+            "SCHD routed to Vanguard URL in error — SCHD is a Schwab ETF, not Vanguard; "
+            "issuer eligibility guard added to prevent re-occurrence. "
+            "canonical_candidate_count=0, rejected_count=3, canonical_ready=False, "
+            "safe_for_decision=False. Provider not promoted."
         ),
         notes=(
-            "Issuer-official is the recommended canonical path for Vanguard ETFs (VTI/VXUS etc.) "
-            "once the URL is confirmed stable, CSV is accessible, identity is verified via "
-            "fund name in metadata, weights are present, and as-of date is present. "
-            "Cannot be canonical_ready until a successful live confirmation proves all five criteria."
+            "Vanguard direct CSV URL pattern is NOT proven. "
+            "Do not build Stage 9P canonical Vanguard adapter from this evidence. "
+            "Do not continue SEC NPORT patching for VTI/SCHD/VXUS unless manual SEC research "
+            "identifies correct filing entities. "
+            "ETF holdings should be treated as enrichment/exposure evidence unless an "
+            "issuer-official path proves identity, holdings count, weights, and as-of date. "
+            "If Vanguard CSV access is needed in a future stage, manually verify the correct "
+            "download URL from investor.vanguard.com before implementing any adapter."
         ),
     ),
 
@@ -347,17 +356,22 @@ _PROVIDER_MATRIX: dict[str, dict] = {
 _ETF_CLASS_NEXT_PATH: dict[str, dict] = {
     "vanguard_etfs": {
         "examples": ["VTI", "VXUS", "VOO", "VGT", "VHT", "VIS", "VYM"],
-        "recommended_path": "issuer_official_vanguard",
+        "recommended_path": "manual_research_required_no_proven_path",
         "rationale": (
-            "SEC NPORT CIKs are confirmed wrong for VTI/SCHD/VXUS (Stage 9M runtime). "
-            "Vanguard publishes official holdings CSVs. Confirm URL stability and "
-            "identity/weights/date before promoting to canonical_ready."
+            "SEC NPORT CIKs confirmed wrong (Stage 9M). "
+            "Vanguard issuer-official CSV returned 404 for VTI and VXUS in Stage 9O live run. "
+            "No proven canonical path exists. "
+            "ETF holdings are enrichment/exposure evidence only — not a gate for app usability. "
+            "Pivot: books of record, data backbone, exact-dollar deploy, and advisory Intel "
+            "are higher priority than ETF holdings certification."
         ),
-        "blocker": "issuer_official_url_not_yet_confirmed_stable",
+        "blocker": "vanguard_csv_url_returns_404_not_proven",
         "manual_action_required": (
-            "Fetch investor.vanguard.com CSV for one Vanguard ticker (e.g. VTI), "
-            "confirm fund name in metadata, weights column, and as-of date row. "
-            "If confirmed, promote issuer_official_vanguard to canonical_ready."
+            "If Vanguard holdings are needed in a future stage: manually verify the correct "
+            "CSV download URL directly from investor.vanguard.com. Do not assume the "
+            "QuantDataFundHoldings.csv URL pattern is stable. Confirm URL, identity, "
+            "weights, and as-of date before any adapter implementation. "
+            "Do not build a Stage 9P Vanguard adapter from Stage 9O evidence."
         ),
     },
     "schwab_etfs": {
@@ -400,16 +414,18 @@ _ETF_CLASS_NEXT_PATH: dict[str, dict] = {
     },
     "international_etfs": {
         "examples": ["VXUS"],
-        "recommended_path": "issuer_official_vanguard",
+        "recommended_path": "manual_research_required_no_proven_path",
         "rationale": (
             "VXUS is a Vanguard international fund. SEC NPORT CIK wrong (Stage 9M). "
-            "AV returned only 37 holdings for a fund with thousands of positions — partial, "
-            "not canonical. Issuer-official Vanguard CSV is the recommended canonical path."
+            "AV returned only 37 holdings (partial, not canonical). "
+            "Vanguard issuer-official CSV returned HTTP 404 in Stage 9O live run. "
+            "No proven canonical path exists for VXUS holdings at this time."
         ),
-        "blocker": "issuer_official_url_not_yet_confirmed_stable",
+        "blocker": "vanguard_csv_url_returns_404_not_proven",
         "manual_action_required": (
-            "Fetch Vanguard holdings CSV for VXUS, confirm fund name, weights, as-of date. "
-            "Verify that full holdings depth is present (not just top holdings)."
+            "If VXUS holdings are needed in a future stage: manually verify the correct "
+            "CSV download URL from investor.vanguard.com. Confirm URL, identity, "
+            "weights, and as-of date. Do not build a Stage 9P adapter from Stage 9O evidence."
         ),
     },
     "standalone_trust_etfs": {
@@ -510,6 +526,13 @@ def build_provider_decision_matrix() -> dict:
             "fmp_etf_holdings": (
                 "HTTP 402 on free key in Stage 9F.4. "
                 "Do not retry FMP with free key."
+            ),
+            "issuer_official_vanguard": (
+                "HTTP 404 for VTI and VXUS in Stage 9O live run. "
+                "URL pattern investor.vanguard.com/.../QuantDataFundHoldings.csv is not proven. "
+                "Do not build Stage 9P Vanguard adapter. "
+                "ETF holdings are not a global gate for app usability — "
+                "pivot to books, data backbone, deploy, benchmark, advisory, tax/guardrails."
             ),
         },
     }

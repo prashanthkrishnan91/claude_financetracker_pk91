@@ -13,7 +13,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..database import get_supabase_client
@@ -179,6 +179,20 @@ class FyEpsRawTraceRequest(BaseModel):
     """
     tickers: list[str]
     include_raw_counts_only: bool = True
+
+
+class BooksReconciliationDiagnosticRequest(BaseModel):
+    """Stage 10B — books-of-record integrity diagnostic request.
+
+    tickers:              Optional list of tickers to restrict the diagnostic.
+                          Defaults to all positions for the authenticated user.
+    include_not_evaluable: When True (default), crypto/manual-only positions
+                           whose transaction reconciliation is not applicable
+                           are included in per_ticker output but excluded from
+                           facts_ready counting.
+    """
+    tickers: list[str] = Field(default_factory=list)
+    include_not_evaluable: bool = True
 
 
 def _ensure_cert_enabled(secret_header: str | None) -> None:
@@ -4411,6 +4425,54 @@ async def vanguard_holdings_diagnostic(
         len(tickers_raw),
         result.get("summary", {}).get("canonical_candidate_count", 0),
         getattr(user, "email", "unknown"),
+    )
+
+    return result
+
+
+# ── Stage 10B — Books-of-record integrity & reconciliation diagnostic ────────
+
+@router.post("/books-reconciliation-diagnostic")
+async def books_reconciliation_diagnostic(
+    payload: BooksReconciliationDiagnosticRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 10B — read-only books-of-record integrity diagnostic.
+
+    Compares persisted positions against transaction-derived quantities using
+    the AVCO portfolio engine. Identifies facts_ready, degraded, or blocked
+    holdings and explains what missing data prevents facts_ready.
+
+    Invariants:
+    - diagnostics_only = true
+    - writes_performed = 0
+    - No live Plaid calls
+    - No market-data provider calls
+    - No position/transaction/snapshot mutations
+    - No Buy/Hold/Trim/Sell policy changes
+    """
+    from ..services.books_reconciliation_diagnostic_v1 import run_books_reconciliation_diagnostic
+
+    db_client = get_supabase_client()
+
+    tickers = [t.strip().upper() for t in payload.tickers if t.strip()] or None
+
+    result = await run_books_reconciliation_diagnostic(
+        db_client=db_client,
+        user_id=str(user.id),
+        tickers=tickers,
+        include_not_evaluable=payload.include_not_evaluable,
+    )
+
+    logger.info(
+        "books_reconciliation_diagnostic user=%s tickers_requested=%d "
+        "positions_checked=%d facts_ready=%d degraded=%d blocked=%d",
+        getattr(user, "email", "unknown"),
+        len(tickers or []),
+        result.get("positions_checked", 0),
+        result.get("positions_facts_ready_count", 0),
+        result.get("positions_degraded_count", 0),
+        result.get("positions_blocked_count", 0),
     )
 
     return result

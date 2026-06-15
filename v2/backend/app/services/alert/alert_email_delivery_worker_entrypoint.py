@@ -103,45 +103,49 @@ def _is_delivery_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
-def _resolve_interval_seconds() -> float:
-    raw = (os.getenv(_INTERVAL_ENV) or "").strip()
-    if not raw:
-        configured = DEFAULT_INTERVAL_SECONDS
-    else:
-        try:
-            val = float(raw)
-        except (TypeError, ValueError):
-            logger.warning(
-                "alert_email_delivery_worker invalid %s=%r — using default %ss",
-                _INTERVAL_ENV, raw, DEFAULT_INTERVAL_SECONDS,
-            )
-            configured = DEFAULT_INTERVAL_SECONDS
-        else:
-            if val <= 0:
-                logger.warning(
-                    "alert_email_delivery_worker non-positive %s=%r — using default %ss",
-                    _INTERVAL_ENV, raw, DEFAULT_INTERVAL_SECONDS,
-                )
-                configured = DEFAULT_INTERVAL_SECONDS
-            else:
-                configured = val
+def _apply_cost_guard_clamp(interval: float) -> float:
+    """Clamp interval to MIN_INTERVAL_SECONDS unless aggressive polling is allowed.
 
+    Applied to the final resolved interval regardless of whether the value came
+    from the env var or a --interval-seconds CLI argument.
+    """
     allow_aggressive = (os.getenv(_ALLOW_AGGRESSIVE_ENV) or "").strip().lower() in (
         "1", "true", "yes", "on"
     )
-    if not allow_aggressive and configured < MIN_INTERVAL_SECONDS:
+    if not allow_aggressive and interval < MIN_INTERVAL_SECONDS:
         logger.warning(
             "COST_GUARD alert_email_delivery_worker interval_clamped "
             "requested=%ss min=%ss effective=%ss "
             "set %s=true to allow shorter intervals",
-            configured, MIN_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, _ALLOW_AGGRESSIVE_ENV,
+            interval, MIN_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, _ALLOW_AGGRESSIVE_ENV,
         )
-        configured = MIN_INTERVAL_SECONDS
+        interval = MIN_INTERVAL_SECONDS
     logger.info(
         "COST_GUARD alert_email_delivery_worker effective_interval_seconds=%s",
-        configured,
+        interval,
     )
-    return configured
+    return interval
+
+
+def _resolve_interval_seconds() -> float:
+    raw = (os.getenv(_INTERVAL_ENV) or "").strip()
+    if not raw:
+        return DEFAULT_INTERVAL_SECONDS
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        logger.warning(
+            "alert_email_delivery_worker invalid %s=%r — using default %ss",
+            _INTERVAL_ENV, raw, DEFAULT_INTERVAL_SECONDS,
+        )
+        return DEFAULT_INTERVAL_SECONDS
+    if val <= 0:
+        logger.warning(
+            "alert_email_delivery_worker non-positive %s=%r — using default %ss",
+            _INTERVAL_ENV, raw, DEFAULT_INTERVAL_SECONDS,
+        )
+        return DEFAULT_INTERVAL_SECONDS
+    return val
 
 
 def _run_one_pass() -> dict:
@@ -230,6 +234,7 @@ def main(argv: "list[str] | None" = None) -> int:
         if args.interval_seconds is not None
         else _resolve_interval_seconds()
     )
+    interval_seconds = _apply_cost_guard_clamp(interval_seconds)
     return _run(loop=args.loop, interval_seconds=interval_seconds)
 
 

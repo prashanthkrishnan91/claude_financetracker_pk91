@@ -1,6 +1,20 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-11 (Stage 10B — books-of-record integrity & reconciliation diagnostic; read-only; 25/25 tests pass).
+Last updated: 2026-06-15 (Cost Guard Emergency PR — worker kill switches, interval clamping, snapshot write guard, retention SQL, tests, docs).
+
+**ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
+
+**Cost Guard PR (current):** Emergency cost-control response to Supabase storage overrun (~497.9 MB in intel_v3_snapshots) and Railway RAM cost (~$18 mid-cycle from always-on workers). No UI, no provider, no investment logic, no SQL migration changes.
+- **Master kill switch:** `INTEL_BACKGROUND_WORKERS_ENABLED=false` (new config field) — all three worker entrypoints check this first and exit 0 if off.
+- **Per-worker flags** (already existed, defaults verified): `INTEL_V3_WATCHTOWER_ENABLED=false`, `INTEL_V3_RESEARCH_WORKERS_ENABLED=false`, `ALERT_EMAIL_DELIVERY_ENABLED=false`.
+- **Interval clamping:** Watchtower min 6h, Analyst/research min 12h, Email delivery min 24h. Override: `COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true`.
+- **Snapshot write guard:** `INTEL_V3_SNAPSHOT_WRITES_ENABLED=false` (new) — `_persist_snapshot()` logs COST_GUARD and returns without writing. Read paths unaffected.
+- **Retention SQL:** `v2/database/cost_guard_retention_cleanup.sql` — bounded DELETE (7-day retention) for all generated tables. No TRUNCATE CASCADE. Does not touch core user data.
+- **Diagnostic script:** `scripts/cost_guard_health.py` — reports all flag states, effective intervals, and approximate row counts.
+- **Tests:** `v2/backend/tests/test_cost_guard.py` — 17 tests covering all kill switches, interval clamping, snapshot write guard, and SQL safety.
+- **Railway start commands unchanged** — fix is entirely in application code and env flags.
+- **Files changed:** `app/config.py`, `watchtower_worker_entrypoint.py`, `analyst_refresh_worker_entrypoint.py`, `alert_email_delivery_worker_entrypoint.py`, `intel_v3_service.py` (`_persist_snapshot`).
+- **Validation:** After deploy, confirm `COST_GUARD ... Exiting cleanly.` in Railway logs for each worker. Confirm RAM drops near zero. Confirm `MAX(created_at)` in intel_v3_snapshots stops advancing.
 
 **Stage 10B books reconciliation diagnostic (current PR):** Read-only backend diagnostic answering whether books of record are trustworthy enough for downstream VTI benchmark and tax-safety work. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
 - **New service:** `v2/backend/app/services/books_reconciliation_diagnostic_v1.py` — pure AVCO reconciliation against persisted positions + transactions. Thresholds: qty_abs=0.001 shares, qty_pct=1%, cost_basis_pct=2%, blocked_threshold=10%.

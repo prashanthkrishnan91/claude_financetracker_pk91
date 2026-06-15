@@ -15,9 +15,33 @@
 
 ## Current active phase
 
-- **Roadmap stage:** Stage 2.2 — Deploy policy + target-allocation readiness bridge complete (backend-only; next: Stage 2.3 exact-dollar math).
-- **Active build queue item:** Policy/allocation bridge DONE. Next: exact-dollar math using the fully-certified DeploySizingInputBundle seam (exact_dollar_ready=True).
+- **Roadmap stage:** COST GUARD EMERGENCY — background worker RAM + snapshot storage incident (2026-06-15). Workers disabled. PR in review.
+- **Next after cost guard merges:** Stage 10C VTI-only DCA benchmark (read-only, deterministic). Then Stage 2.3 exact-dollar math.
 - **North-star reminder:** Intel → Deploy → Watchtower; deterministic backend Intel v3 policy owns visible Buy/Hold/Trim/Sell authority.
+
+### 2026-06-15: Cost Guard Emergency PR
+
+**Incident:** Supabase storage exceeded 0.5 GB free tier (intel_v3_snapshots ~497.9 MB, market_snapshots ~18.1 MB). Railway cost ~$18 mid-cycle from always-on worker RAM. Emergency SQL cleanup reduced DB to ~0.04 GB.
+
+**Root cause:** Watchtower + analyst + email workers ran with 60s polling with no cost gate. Snapshot writes were unbounded. No master kill switch existed.
+
+**Changes in this PR (no UI, no provider, no investment logic):**
+- `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill switch in all worker entrypoints.
+- `INTEL_V3_SNAPSHOT_WRITES_ENABLED=false` write guard in `_persist_snapshot`.
+- Interval clamping: Watchtower ≥6h, Analyst ≥12h, Email ≥24h (bypass: `COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true`).
+- `v2/database/cost_guard_retention_cleanup.sql` — bounded 7-day DELETE for generated tables.
+- `scripts/cost_guard_health.py` — diagnostic flag/interval/count report.
+- 17 tests in `test_cost_guard.py`.
+- `docs/deploy/RAILWAY_COST_GUARD.md`.
+
+**Current Railway env (emergency, already set):**
+```
+INTEL_BACKGROUND_WORKERS_ENABLED=false
+INTEL_V3_WATCHTOWER_ENABLED=false
+INTEL_V3_RESEARCH_WORKERS_ENABLED=false
+ALERT_EMAIL_DELIVERY_ENABLED=false
+INTEL_V3_SNAPSHOT_WRITES_ENABLED=false
+```
 - **Source of truth:** `docs/product/ROADMAP.md`, `docs/product/BUILD_QUEUE.md`, `docs/product/NORTH_STAR.md`, `docs/ai/HANDOFF.md`.
 
 ## Latest merged PRs

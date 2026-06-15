@@ -460,6 +460,24 @@ class Settings(BaseSettings):
     alert_email_to: Optional[str] = None    # v1: single recipient
     alert_email_dry_run: bool = True        # must set =false for real sends
 
+    # ── COST GUARD — emergency cost-control switches (all off by default) ─────────
+    # Master kill switch for all background workers. When False, every worker
+    # entrypoint exits 0 immediately without initializing clients or polling.
+    # Set INTEL_BACKGROUND_WORKERS_ENABLED=true to allow individual worker flags
+    # to take effect. Individual flags are still checked after the master.
+    intel_background_workers_enabled: bool = False
+
+    # Snapshot write guard. When False, _persist_snapshot() in intel_v3_service
+    # logs and returns without writing to intel_v3_snapshots. Read paths are
+    # unaffected. Manual/explicit Intel v3 runs still compute and return results
+    # but do not grow the snapshots table until this is re-enabled.
+    intel_v3_snapshot_writes_enabled: bool = False
+
+    # When True, polling interval clamping is bypassed. Leave False in production
+    # to ensure workers cannot poll faster than their safe minimums even if an
+    # env var is set to a short interval.
+    cost_guard_allow_aggressive_polling: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

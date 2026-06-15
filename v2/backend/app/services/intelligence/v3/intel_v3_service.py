@@ -2432,7 +2432,19 @@ class IntelV3Service:
         Idempotent: skips the deactivate+insert cycle when the new payload's
         source_hash matches the currently-active row. This prevents the 60-second
         Watchtower loop from writing identical snapshots on every cycle.
+
+        Skips all writes when INTEL_V3_SNAPSHOT_WRITES_ENABLED is not truthy
+        (cost guard default). Read paths are never affected.
         """
+        _settings = get_settings()
+        if not _settings.intel_v3_snapshot_writes_enabled:
+            logger.info(
+                "COST_GUARD intel_v3.persist_snapshot_skipped_writes_disabled "
+                "user_id=%s run_id=%s set INTEL_V3_SNAPSHOT_WRITES_ENABLED=true to persist",
+                self.user_id, run_id,
+            )
+            return
+
         try:
             source_hash = _hash_payload(payload)
 

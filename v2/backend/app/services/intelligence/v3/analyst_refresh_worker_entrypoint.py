@@ -50,7 +50,23 @@ logger = logging.getLogger("intel_v3.analyst_refresh_worker_entrypoint")
 # validation legible: a Run Intel v3 enqueue is consumed within ~a minute
 # rather than after the previous 15-minute default.
 _INTERVAL_ENV = "INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS"
+_MASTER_ENABLED_ENV = "INTEL_BACKGROUND_WORKERS_ENABLED"
+_WORKER_ENABLED_ENV = "INTEL_V3_RESEARCH_WORKERS_ENABLED"
+_ALLOW_AGGRESSIVE_ENV = "COST_GUARD_ALLOW_AGGRESSIVE_POLLING"
 DEFAULT_INTERVAL_SECONDS = 60.0
+# Cost guard: minimum safe polling interval for this LLM-calling worker.
+# Clamped unless COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true.
+MIN_INTERVAL_SECONDS = 43200.0  # 12 hours
+
+
+def _is_master_enabled() -> bool:
+    raw = (os.getenv(_MASTER_ENABLED_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def _is_worker_enabled() -> bool:
+    raw = (os.getenv(_WORKER_ENABLED_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 # Drain loop guardrails — when jobs remain after a batch the worker may
 # continue draining immediately without sleeping for the full poll interval.
@@ -58,6 +74,30 @@ DEFAULT_INTERVAL_SECONDS = 60.0
 # gaps between immediately-due batches.
 MAX_DRAIN_BATCHES_PER_CYCLE = 8   # 8 × 10 tickers = 80 max per cycle (>34 portfolio)
 MAX_DRAIN_RUNTIME_SECONDS_PER_CYCLE = 300.0  # 5-minute wall-clock cap per drain cycle
+
+
+def _apply_cost_guard_clamp(interval: float) -> float:
+    """Clamp interval to MIN_INTERVAL_SECONDS unless aggressive polling is allowed.
+
+    Applied to the final resolved interval regardless of whether the value came
+    from the env var or a --interval-seconds CLI argument.
+    """
+    allow_aggressive = (os.getenv(_ALLOW_AGGRESSIVE_ENV) or "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not allow_aggressive and interval < MIN_INTERVAL_SECONDS:
+        logger.warning(
+            "COST_GUARD intel_v3.analyst_refresh_worker_entrypoint interval_clamped "
+            "requested=%ss min=%ss effective=%ss "
+            "set %s=true to allow shorter intervals",
+            interval, MIN_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, _ALLOW_AGGRESSIVE_ENV,
+        )
+        interval = MIN_INTERVAL_SECONDS
+    logger.info(
+        "COST_GUARD intel_v3.analyst_refresh_worker_entrypoint effective_interval_seconds=%s",
+        interval,
+    )
+    return interval
 
 
 def _resolve_interval_seconds() -> float:
@@ -245,11 +285,29 @@ def main(argv: "list[str] | None" = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+
+    if not _is_master_enabled():
+        logger.info(
+            "COST_GUARD intel_v3.analyst_refresh_worker_entrypoint master_disabled — "
+            "set %s=true to allow background workers. Exiting cleanly.",
+            _MASTER_ENABLED_ENV,
+        )
+        return 0
+
+    if not _is_worker_enabled():
+        logger.info(
+            "COST_GUARD intel_v3.analyst_refresh_worker_entrypoint worker_disabled — "
+            "set %s=true to enable this worker. Exiting cleanly.",
+            _WORKER_ENABLED_ENV,
+        )
+        return 0
+
     interval_seconds = (
         args.interval_seconds
         if args.interval_seconds is not None
         else _resolve_interval_seconds()
     )
+    interval_seconds = _apply_cost_guard_clamp(interval_seconds)
     return asyncio.run(_run(loop=args.loop, interval_seconds=interval_seconds))
 
 

@@ -39,7 +39,18 @@ logger = logging.getLogger("intel_v3.watchtower_worker_entrypoint")
 
 _INTERVAL_ENV = "INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS"
 _ENABLED_ENV = "INTEL_V3_WATCHTOWER_ENABLED"
+_MASTER_ENABLED_ENV = "INTEL_BACKGROUND_WORKERS_ENABLED"
+_ALLOW_AGGRESSIVE_ENV = "COST_GUARD_ALLOW_AGGRESSIVE_POLLING"
 DEFAULT_INTERVAL_SECONDS = 60.0
+# Cost guard: minimum safe polling interval. Clamped unless
+# COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true.
+MIN_INTERVAL_SECONDS = 21600.0  # 6 hours
+
+
+def _is_master_enabled() -> bool:
+    """Returns True ONLY when INTEL_BACKGROUND_WORKERS_ENABLED is truthy."""
+    raw = (os.getenv(_MASTER_ENABLED_ENV) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
 
 
 def _is_watchtower_enabled() -> bool:
@@ -51,6 +62,30 @@ def _is_watchtower_enabled() -> bool:
     """
     raw = (os.getenv(_ENABLED_ENV) or "").strip().lower()
     return raw in ("1", "true", "yes", "on")
+
+
+def _apply_cost_guard_clamp(interval: float) -> float:
+    """Clamp interval to MIN_INTERVAL_SECONDS unless aggressive polling is allowed.
+
+    Applied to the final resolved interval regardless of whether the value came
+    from the env var or a --interval-seconds CLI argument.
+    """
+    allow_aggressive = (os.getenv(_ALLOW_AGGRESSIVE_ENV) or "").strip().lower() in (
+        "1", "true", "yes", "on"
+    )
+    if not allow_aggressive and interval < MIN_INTERVAL_SECONDS:
+        logger.warning(
+            "COST_GUARD intel_v3.watchtower_worker_entrypoint interval_clamped "
+            "requested=%ss min=%ss effective=%ss "
+            "set %s=true to allow shorter intervals",
+            interval, MIN_INTERVAL_SECONDS, MIN_INTERVAL_SECONDS, _ALLOW_AGGRESSIVE_ENV,
+        )
+        interval = MIN_INTERVAL_SECONDS
+    logger.info(
+        "COST_GUARD intel_v3.watchtower_worker_entrypoint effective_interval_seconds=%s",
+        interval,
+    )
+    return interval
 
 
 def _resolve_interval_seconds() -> float:
@@ -225,9 +260,17 @@ def main(argv: "list[str] | None" = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    if not _is_master_enabled():
+        logger.info(
+            "COST_GUARD intel_v3.watchtower_worker_entrypoint master_disabled — "
+            "set %s=true to allow background workers. Exiting cleanly.",
+            _MASTER_ENABLED_ENV,
+        )
+        return 0
+
     if not _is_watchtower_enabled():
         logger.info(
-            "intel_v3.watchtower_worker_entrypoint not enabled — "
+            "COST_GUARD intel_v3.watchtower_worker_entrypoint not enabled — "
             "set %s=true to start the loop (currently absent or not a truthy value). "
             "Exiting cleanly.",
             _ENABLED_ENV,
@@ -239,6 +282,7 @@ def main(argv: "list[str] | None" = None) -> int:
         if args.interval_seconds is not None
         else _resolve_interval_seconds()
     )
+    interval_seconds = _apply_cost_guard_clamp(interval_seconds)
     return asyncio.run(_run(loop=args.loop, interval_seconds=interval_seconds))
 
 

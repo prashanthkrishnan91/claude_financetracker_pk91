@@ -4476,3 +4476,85 @@ async def books_reconciliation_diagnostic(
     )
 
     return result
+
+
+# ── Stage 10C — VTI DCA benchmark diagnostic ─────────────────────────────────
+
+class VtiDcaBenchmarkDiagnosticRequest(BaseModel):
+    """Stage 10C — VTI DCA benchmark diagnostic request.
+
+    start_date:                Optional ISO date (YYYY-MM-DD) to filter contributions.
+    end_date:                  Optional ISO date (YYYY-MM-DD) to filter contributions.
+    include_position_breakdown: When True (default), include per-contribution price
+                               mapping records in the response.
+    """
+    start_date: str | None = None
+    end_date: str | None = None
+    include_position_breakdown: bool = True
+
+
+@router.post("/vti-dca-benchmark-diagnostic")
+async def vti_dca_benchmark_diagnostic(
+    payload: VtiDcaBenchmarkDiagnosticRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 10C — read-only VTI DCA benchmark diagnostic.
+
+    Compares the actual portfolio against a hypothetical VTI DCA strategy:
+    "If the user had put the same deposits into VTI on the same dates, what
+    would the benchmark value and return look like?"
+
+    Runs the books reconciliation diagnostic inline to obtain the books gate,
+    then runs the VTI benchmark computation.
+
+    Invariants:
+    - diagnostics_only = true
+    - writes_performed = 0
+    - No live Plaid calls
+    - No market-data provider calls
+    - No position/transaction/snapshot mutations
+    - No Buy/Hold/Trim/Sell policy changes
+    - No synthesis changes
+    """
+    from ..services.books_reconciliation_diagnostic_v1 import run_books_reconciliation_diagnostic
+    from ..services.vti_dca_benchmark_diagnostic_v1 import run_vti_dca_benchmark_diagnostic
+
+    db_client = get_supabase_client()
+
+    # Run books reconciliation for gate status — read-only, no writes.
+    # Conservative: if this raises, books_gate_result is None → degraded benchmark.
+    books_gate_result = None
+    try:
+        books_gate_result = await run_books_reconciliation_diagnostic(
+            db_client=db_client,
+            user_id=str(user.id),
+        )
+    except Exception:
+        logger.warning(
+            "vti_dca_benchmark_diagnostic books_gate_unavailable user=%s — proceeding degraded",
+            getattr(user, "email", "unknown"),
+        )
+
+    result = await run_vti_dca_benchmark_diagnostic(
+        db_client=db_client,
+        user_id=str(user.id),
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        include_position_breakdown=payload.include_position_breakdown,
+        books_gate_result=books_gate_result,
+    )
+
+    logger.info(
+        "vti_dca_benchmark_diagnostic user=%s benchmark_status=%s "
+        "deposits_detected=%d benchmark_contributions=%d "
+        "books_gate=%s vti_dca_value=%s actual_portfolio_value=%s",
+        getattr(user, "email", "unknown"),
+        result.get("benchmark_status"),
+        result.get("deposits_detected_count", 0),
+        result.get("benchmark_contribution_count", 0),
+        books_gate_result.get("benchmark_books_gate") if books_gate_result else "unavailable",
+        result.get("vti_dca_current_value"),
+        result.get("actual_portfolio_value"),
+    )
+
+    return result

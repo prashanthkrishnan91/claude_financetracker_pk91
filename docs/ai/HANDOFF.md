@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-15 (Cost Guard Emergency PR — worker kill switches, interval clamping, snapshot write guard, retention SQL, tests, docs).
+Last updated: 2026-06-16 (Stage 10C VTI DCA benchmark diagnostic — read-only, no UI, no SQL, no provider calls).
 
 **ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
 
@@ -16,7 +16,23 @@ Last updated: 2026-06-15 (Cost Guard Emergency PR — worker kill switches, inte
 - **Files changed:** `app/config.py`, `watchtower_worker_entrypoint.py`, `analyst_refresh_worker_entrypoint.py`, `alert_email_delivery_worker_entrypoint.py`, `intel_v3_service.py` (`_persist_snapshot`).
 - **Validation:** After deploy, confirm `COST_GUARD ... Exiting cleanly.` in Railway logs for each worker. Confirm RAM drops near zero. Confirm `MAX(created_at)` in intel_v3_snapshots stops advancing.
 
-**Stage 10B.1 blocked-ticker forensics (current PR):** Read-only extension to Stage 10B diagnostic explaining why 4 tickers (MSFT, NFLX, NVDA, XLE) blocked in the Stage 10B runtime result. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
+**Stage 10C VTI DCA benchmark diagnostic (current PR):** Read-only backend diagnostic service for VTI-only DCA benchmark computation. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
+- **New service:** `v2/backend/app/services/vti_dca_benchmark_diagnostic_v1.py` — `run_vti_dca_benchmark_diagnostic()`. Pure async, no I/O except the DB client passed in. Books gate result is accepted as a parameter (not re-computed inline by default, but the endpoint runs books reconciliation first and passes the result).
+- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-dca-benchmark-diagnostic`. Cert-gated (same `X-Finance-Runtime-Cert-Secret` header). Runs books reconciliation inline (read-only) to get `benchmark_books_gate`, then runs VTI benchmark.
+- **Sample request body:** `{"start_date": null, "end_date": null, "include_position_breakdown": true}`
+- **Required runtime-cert header:** `X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>`
+- **Data sources:** `deposit_plans` (executed=true, primary); `transactions` (Buy type, fallback); `price_history` (VTI close prices); `portfolio_snapshots` (total_equity for actual portfolio value).
+- **Historical VTI prices:** Read from `price_history` table (`ticker='VTI'`). If exact deposit date is missing, maps to next available trading day (up to 7 calendar days ahead), then previous (up to 7 days back). Mapping reason is explicit in every contribution record. If no VTI price history exists in the table, `benchmark_status=blocked`.
+- **Contribution detection:** Primary = `deposit_plans` executed=True. Fallback = buy transactions aggregated by date. If neither, `benchmark_status=blocked`. Buy-transaction fallback marks `benchmark_status=degraded`.
+- **Books gate integration:** If books gate = `pass` → can reach `benchmark_status=computed`. If `pass_with_exclusions` → degraded with flagged tickers listed. If `blocked` → benchmark blocked. If unavailable (exception or None) → degraded with warning `books_gate_runtime_not_available`.
+- **benchmark_status semantics:** `computed` = books gate pass + all prices present + portfolio value present. `degraded` = computation possible but with caveats. `blocked` = hard blocker prevents any meaningful computation. `not_evaluable` not used by this diagnostic.
+- **Invariants:** `diagnostics_only=true`, `writes_performed=0`, `policy_unchanged=true`, `visible_snapshot_unchanged=true`. No Buy/Hold/Trim/Sell changes.
+- **Tests:** `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py` — 38/38 pass. All DB calls mocked. No live I/O, no providers, no Plaid.
+- **Fields to inspect after deploy:** `benchmark_status`, `deposits_detected_count`, `benchmark_contribution_count`, `vti_dca_units`, `vti_dca_cost_basis`, `vti_dca_current_value`, `vti_dca_return_pct`, `actual_portfolio_value`, `relative_vs_vti_abs`, `benchmark_blockers`, `benchmark_warnings`, `missing_price_points`.
+- **What unlocks UI work (Stage 10C UI):** If `benchmark_status=computed` or `benchmark_status=degraded` with acceptable caveats (no hard blockers), Stage 10D UI readout can proceed. If `missing_price_points` is non-empty, a price backfill PR is needed first. If deposits not found, a data-entry or deposit-import step is needed first.
+- **Next-PR sequence:** Stage 10C UI (read-only readout of this endpoint) → Stage 10D Deploy tax-lot/wash-sale source design+contract → Stage 10E readiness-flag read model.
+
+**Stage 10B.1 blocked-ticker forensics (prior PR):** Read-only extension to Stage 10B diagnostic explaining why 4 tickers (MSFT, NFLX, NVDA, XLE) blocked in the Stage 10B runtime result. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
 - **Extended service:** `v2/backend/app/services/books_reconciliation_diagnostic_v1.py` — added `_compute_ticker_forensics()`, `_enrich_ticker_with_forensics()`, `_compute_benchmark_books_gate()`. Endpoint path unchanged.
 - **Per-ticker forensic fields (blocked/degraded only):** `transaction_type_counts`, `transaction_quantity_by_type`, `transaction_cost_basis_by_type`, `ignored_transaction_type_counts`, `ignored_transaction_quantity_by_type`, `ignored_transaction_cost_basis_by_type`, `first_transaction_date`, `last_transaction_date`, `possible_unmodeled_adjustment_detected`, `possible_unmodeled_adjustment_reason`, `cost_basis_matches_but_quantity_drift_detected`, `cost_basis_match_threshold_used`. `ticker_forensics=null` for facts_ready/not_evaluable tickers.
 - **New top-level fields:** `benchmark_books_gate` (`pass`|`pass_with_exclusions`|`blocked`|`unknown`), `benchmark_books_gate_reason`, `next_recommended_stage` (`stage10c_vti_benchmark`|`stage10b_books_repair`|`stage10b_manual_review`|`stage10b_forensics_needed`). Gate does NOT change `facts_ready` semantics.

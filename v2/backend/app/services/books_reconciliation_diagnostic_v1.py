@@ -23,6 +23,10 @@ QUANTITY_PCT_TOLERANCE_PCT: float = 1.0
 COST_BASIS_PCT_TOLERANCE_PCT: float = 2.0
 # Quantity drift above this % is blocked rather than degraded.
 QUANTITY_BLOCKED_THRESHOLD_PCT: float = 10.0
+# Cost-basis match threshold used in forensics (same as reconciliation tolerance).
+COST_BASIS_MATCH_THRESHOLD_PCT: float = COST_BASIS_PCT_TOLERANCE_PCT
+# Cost-basis drift above this % is treated as material disagreement in the gate.
+COST_BASIS_MATERIAL_DISAGREEMENT_PCT: float = 5.0
 
 _NEAR_ZERO = 1e-9
 
@@ -40,6 +44,246 @@ def _asset_type_from_category(category: str) -> str:
     if c == "etf":
         return "etf"
     return "stock"
+
+
+def _compute_ticker_forensics(
+    all_tx_rows: list[dict[str, Any]],
+    qty_drift_pct: float | None,
+    cb_drift_pct: float | None,
+) -> dict[str, Any]:
+    """Read-only forensic analysis of all transaction rows for a blocked/degraded ticker.
+
+    Surfaces raw transaction-type distribution and conservative adjustment hints
+    without fabricating semantics. Never writes. Never calls external providers.
+    """
+    tx_type_counts: dict[str, int] = {}
+    tx_qty_by_type: dict[str, float] = {}
+    tx_cb_by_type: dict[str, float] = {}
+    dates: list[str] = []
+
+    for row in all_tx_rows:
+        tx_type = (
+            str(row.get("tx_type") or row.get("type") or "").strip() or "unknown"
+        )
+        try:
+            qty = abs(float(row.get("quantity") or 0))
+        except (TypeError, ValueError):
+            qty = 0.0
+        try:
+            price = abs(float(row.get("price") or 0))
+        except (TypeError, ValueError):
+            price = 0.0
+
+        tx_type_counts[tx_type] = tx_type_counts.get(tx_type, 0) + 1
+        tx_qty_by_type[tx_type] = round(
+            tx_qty_by_type.get(tx_type, 0.0) + qty, 8
+        )
+        tx_cb_by_type[tx_type] = round(
+            tx_cb_by_type.get(tx_type, 0.0) + qty * price, 6
+        )
+
+        tx_date = str(row.get("tx_date") or row.get("date") or "").strip()
+        if tx_date:
+            dates.append(tx_date)
+
+    first_transaction_date = min(dates) if dates else None
+    last_transaction_date = max(dates) if dates else None
+
+    buy_sell_types = {"Buy", "Sell"}
+    ignored_tx_type_counts: dict[str, int] = {
+        t: c for t, c in tx_type_counts.items() if t not in buy_sell_types
+    }
+    ignored_tx_qty_by_type: dict[str, float] = {
+        t: tx_qty_by_type[t] for t in ignored_tx_type_counts
+    }
+    ignored_tx_cb_by_type: dict[str, float] = {
+        t: tx_cb_by_type[t] for t in ignored_tx_type_counts
+    }
+
+    # Detect: large qty drift with matching cost basis — strong signal of unmodeled shares
+    cost_basis_matches_but_quantity_drift_detected = bool(
+        cb_drift_pct is not None
+        and cb_drift_pct <= COST_BASIS_MATCH_THRESHOLD_PCT
+        and qty_drift_pct is not None
+        and qty_drift_pct > QUANTITY_BLOCKED_THRESHOLD_PCT
+    )
+
+    possible_unmodeled_adjustment_detected = False
+    possible_unmodeled_adjustment_reason: str | None = None
+
+    if cost_basis_matches_but_quantity_drift_detected:
+        possible_unmodeled_adjustment_detected = True
+        if ignored_tx_type_counts:
+            types_str = ", ".join(sorted(ignored_tx_type_counts.keys()))
+            possible_unmodeled_adjustment_reason = (
+                f"quantity_drift_pct={qty_drift_pct:.2f}% "
+                f"cost_basis_drift_pct={cb_drift_pct:.4f}% — "
+                "large quantity gap with matching cost basis; "
+                f"unmodeled_transaction_type_present types=[{types_str}]; "
+                "shares may have arrived via transfer, reinvestment, split, or "
+                "broker lot import not recorded as a Buy transaction"
+            )
+        else:
+            possible_unmodeled_adjustment_reason = (
+                f"quantity_drift_pct={qty_drift_pct:.2f}% "
+                f"cost_basis_drift_pct={cb_drift_pct:.4f}% — "
+                "large quantity gap with matching cost basis; "
+                "no non-Buy/Sell transaction types found to explain gap; "
+                "possible external transfer or broker lot import with no recorded transaction"
+            )
+    elif ignored_tx_type_counts:
+        types_str = ", ".join(sorted(ignored_tx_type_counts.keys()))
+        possible_unmodeled_adjustment_reason = (
+            f"unmodeled_transaction_type_present types=[{types_str}]; "
+            "raw transaction fields do not clearly indicate corporate actions — "
+            "flagging as unmodeled without assuming semantics"
+        )
+
+    return {
+        "transaction_type_counts": tx_type_counts,
+        "transaction_quantity_by_type": tx_qty_by_type,
+        "transaction_cost_basis_by_type": tx_cb_by_type,
+        "ignored_transaction_type_counts": ignored_tx_type_counts,
+        "ignored_transaction_quantity_by_type": ignored_tx_qty_by_type,
+        "ignored_transaction_cost_basis_by_type": ignored_tx_cb_by_type,
+        "first_transaction_date": first_transaction_date,
+        "last_transaction_date": last_transaction_date,
+        "possible_unmodeled_adjustment_detected": possible_unmodeled_adjustment_detected,
+        "possible_unmodeled_adjustment_reason": possible_unmodeled_adjustment_reason,
+        "cost_basis_matches_but_quantity_drift_detected": cost_basis_matches_but_quantity_drift_detected,
+        "cost_basis_match_threshold_used": COST_BASIS_MATCH_THRESHOLD_PCT,
+    }
+
+
+def _enrich_ticker_with_forensics(
+    ticker_result: dict[str, Any],
+    all_tx_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach forensic fields to a blocked/degraded per-ticker result. No-op for others."""
+    status = ticker_result.get("reconciliation_status")
+    if status not in ("blocked", "degraded"):
+        ticker_result["ticker_forensics"] = None
+        return ticker_result
+
+    ticker_result["ticker_forensics"] = _compute_ticker_forensics(
+        all_tx_rows=all_tx_rows,
+        qty_drift_pct=ticker_result.get("quantity_drift_pct"),
+        cb_drift_pct=ticker_result.get("cost_basis_drift_pct"),
+    )
+    return ticker_result
+
+
+def _compute_benchmark_books_gate(
+    per_ticker: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Conservative gate: can the books support a VTI DCA benchmark run?
+
+    Returns benchmark_books_gate, a reason string, and next_recommended_stage.
+    Does not alter any position data or reconciliation status.
+    """
+    non_crypto = [
+        r for r in per_ticker
+        if not r.get("crypto_or_pdf_position_detected")
+    ]
+
+    if not non_crypto:
+        return {
+            "benchmark_books_gate": "unknown",
+            "benchmark_books_gate_reason": "no_non_crypto_positions_evaluated",
+            "next_recommended_stage": "stage10b_forensics_needed",
+        }
+
+    # Hard blockers: missing/invalid position fields
+    hard_blocker_keys = {
+        "position_not_found",
+        "position_quantity_missing",
+        "position_quantity_negative",
+        "position_quantity_zero",
+        "avg_cost_missing",
+        "avg_cost_negative",
+    }
+    has_hard_blocked = any(
+        r["reconciliation_status"] == "blocked"
+        and any(
+            any(hk in b for hk in hard_blocker_keys)
+            for b in r.get("blockers", [])
+        )
+        for r in non_crypto
+    )
+
+    # Material cost-basis disagreement: cb drift > threshold AND NOT the
+    # cost-basis-match+qty-drift pattern (which is explainable differently)
+    has_cb_material_disagreement = any(
+        r["reconciliation_status"] == "blocked"
+        and r.get("cost_basis_drift_pct") is not None
+        and r["cost_basis_drift_pct"] > COST_BASIS_MATERIAL_DISAGREEMENT_PCT
+        and not (r.get("ticker_forensics") or {}).get(
+            "cost_basis_matches_but_quantity_drift_detected", False
+        )
+        for r in non_crypto
+    )
+
+    if has_hard_blocked or has_cb_material_disagreement:
+        reason = (
+            "hard_blocked_positions_missing_or_invalid_data"
+            if has_hard_blocked
+            else "cost_basis_material_disagreement_exceeds_threshold"
+        )
+        return {
+            "benchmark_books_gate": "blocked",
+            "benchmark_books_gate_reason": reason,
+            "next_recommended_stage": "stage10b_books_repair",
+        }
+
+    all_safe = all(
+        r["reconciliation_status"] in ("facts_ready", "not_evaluable")
+        for r in non_crypto
+    )
+    if all_safe:
+        return {
+            "benchmark_books_gate": "pass",
+            "benchmark_books_gate_reason": "all_non_crypto_positions_facts_ready_or_not_evaluable",
+            "next_recommended_stage": "stage10c_vti_benchmark",
+        }
+
+    blocked_degraded = [
+        r for r in non_crypto
+        if r["reconciliation_status"] in ("blocked", "degraded")
+    ]
+
+    # pass_with_exclusions: all blocked/degraded tickers must be explainable by
+    # unmodeled transactions AND must have sane current position/cost-basis data.
+    def _is_explainable(r: dict[str, Any]) -> bool:
+        forensics = r.get("ticker_forensics") or {}
+        position_sane = (
+            r.get("current_quantity") is not None
+            and (r.get("current_quantity") or 0.0) > _NEAR_ZERO
+            and r.get("position_cost_basis") is not None
+            and (r.get("position_cost_basis") or 0.0) > _NEAR_ZERO
+        )
+        explainable = forensics.get(
+            "cost_basis_matches_but_quantity_drift_detected", False
+        ) or forensics.get("possible_unmodeled_adjustment_detected", False)
+        return position_sane and explainable
+
+    if blocked_degraded and all(_is_explainable(r) for r in blocked_degraded):
+        return {
+            "benchmark_books_gate": "pass_with_exclusions",
+            "benchmark_books_gate_reason": (
+                "blocked_degraded_tickers_appear_explainable_by_unmodeled_transactions; "
+                "current_position_and_cost_basis_data_present; "
+                "manual_review_recommended_before_proceeding"
+            ),
+            "next_recommended_stage": "stage10b_manual_review",
+        }
+
+    return {
+        "benchmark_books_gate": "unknown",
+        "benchmark_books_gate_reason": (
+            "blocked_degraded_tickers_not_clearly_explainable_by_forensic_evidence"
+        ),
+        "next_recommended_stage": "stage10b_forensics_needed",
+    }
 
 
 def _reconcile_ticker(
@@ -405,7 +649,7 @@ async def run_books_reconciliation_diagnostic(
         if row.get("ticker")
     }
 
-    # ── Load Buy/Sell transactions ordered by date ───────────────────────────
+    # ── Load Buy/Sell transactions ordered by date (AVCO reconciliation) ───────
     tx_query = (
         db_client.table("transactions")
         .select("ticker, tx_type, quantity, price, tx_date")
@@ -423,6 +667,23 @@ async def run_books_reconciliation_diagnostic(
         if t:
             tx_by_ticker.setdefault(t, []).append(row)
 
+    # ── Load ALL transaction types for forensic analysis (read-only) ─────────
+    all_tx_query = (
+        db_client.table("transactions")
+        .select("ticker, tx_type, quantity, price, tx_date, amount, fees")
+        .eq("user_id", str(user_id))
+        .order("tx_date", desc=False)
+    )
+    if tickers:
+        all_tx_query = all_tx_query.in_("ticker", [t.upper() for t in tickers])
+    all_tx_rows_raw: list[dict[str, Any]] = (all_tx_query.execute().data or [])
+
+    all_tx_by_ticker: dict[str, list[dict[str, Any]]] = {}
+    for row in all_tx_rows_raw:
+        t = str(row.get("ticker") or "").upper()
+        if t:
+            all_tx_by_ticker.setdefault(t, []).append(row)
+
     # ── Determine evaluation scope ───────────────────────────────────────────
     eval_tickers: list[str] = sorted(pos_map.keys())
     if tickers:
@@ -433,12 +694,15 @@ async def run_books_reconciliation_diagnostic(
                 eval_tickers.append(t)
         eval_tickers = sorted(set(eval_tickers))
 
-    # ── Reconcile ────────────────────────────────────────────────────────────
+    # ── Reconcile + forensic enrichment ─────────────────────────────────────
     per_ticker: list[dict[str, Any]] = [
-        _reconcile_ticker(
-            ticker=t,
-            pos_row=pos_map.get(t),
-            tx_rows=tx_by_ticker.get(t, []),
+        _enrich_ticker_with_forensics(
+            _reconcile_ticker(
+                ticker=t,
+                pos_row=pos_map.get(t),
+                tx_rows=tx_by_ticker.get(t, []),
+            ),
+            all_tx_rows=all_tx_by_ticker.get(t, []),
         )
         for t in eval_tickers
     ]
@@ -461,6 +725,8 @@ async def run_books_reconciliation_diagnostic(
         and counts["degraded"] == 0
     )
 
+    gate = _compute_benchmark_books_gate(per_ticker)
+
     completed_at = datetime.now(timezone.utc)
 
     return {
@@ -475,6 +741,9 @@ async def run_books_reconciliation_diagnostic(
         "positions_blocked_count": counts["blocked"],
         "positions_not_evaluable_count": counts["not_evaluable"],
         "facts_ready": global_facts_ready,
+        "benchmark_books_gate": gate["benchmark_books_gate"],
+        "benchmark_books_gate_reason": gate["benchmark_books_gate_reason"],
+        "next_recommended_stage": gate["next_recommended_stage"],
         "diagnostics_only": True,
         "writes_performed": 0,
         "policy_unchanged": True,

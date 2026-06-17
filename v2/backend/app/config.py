@@ -331,6 +331,13 @@ class Settings(BaseSettings):
     # Must NOT be enabled in normal app operation. Explicit, auditable only.
     intel_v3_sec_fy_eps_backfill_enabled: bool = False
 
+    # ── Stage 10C.1 — VTI price history repair (off by default) ─────────────────
+    # When True, enables POST /diagnostics/finance-intel/vti-price-history-repair.
+    # Cert-gated. Manual/on-demand only. Writes VTI rows to price_history via
+    # yfinance (idempotent upsert). dry_run=True by default. No workers.
+    # No synthesis changes. No Buy/Hold/Trim/Sell changes.
+    vti_price_history_repair_enabled: bool = False
+
     # ── Intel v3 Phase 14C.4 — FY EPS Raw Trace Diagnostics (off by default) ──
     # When True, enables the protected per-ticker FY EPS raw trace endpoint.
     # For each explicitly requested ticker (max 5), traces exactly where in the

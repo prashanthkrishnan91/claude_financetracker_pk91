@@ -243,6 +243,17 @@ class HistoryService:
         except Exception as e:
             logger.error("Cache write %s: %s", ticker, e)
 
+    async def fetch_prices_from_provider(
+        self, ticker: str, period: str = "5Y"
+    ) -> list[HistoryPoint]:
+        """Fetch historical prices directly from yfinance, bypassing the cache.
+
+        Used by repair/backfill services that need direct provider access without
+        triggering the normal cache read-or-fetch flow. Returns empty list on any
+        provider failure — never raises.
+        """
+        return await self._fetch_yfinance(ticker, period)
+
     @staticmethod
     def _cache_is_fresh(points: list[HistoryPoint]) -> bool:
         """Cache is fresh if the latest point is from today or yesterday."""

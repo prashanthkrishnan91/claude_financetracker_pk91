@@ -6,6 +6,10 @@ Idempotent: ON CONFLICT(ticker, price_date) DO UPDATE.
 Writes ONLY VTI rows — ticker is hardcoded; no other ticker can be written.
 dry_run=True by default — no DB writes without explicit dry_run=False.
 Never fabricates prices: missing or zero-close points are dropped.
+
+Supported backfill_period values:
+  "1Y", "3Y", "5Y" — approximate calendar range via yfinance
+  "max"            — full available history; use when oldest contribution date exceeds 5Y
 """
 from __future__ import annotations
 
@@ -19,9 +23,12 @@ logger = logging.getLogger(__name__)
 REPAIR_VERSION = "vti_price_history_repair_v1"
 VTI_TICKER = "VTI"
 _DEFAULT_BACKFILL_PERIOD = "5Y"
-_PRICE_SEARCH_DAYS = 7  # ±days used by _find_vti_price in benchmark
+_PRICE_SEARCH_DAYS = 7   # ±days used by _find_vti_price in benchmark
 _SAMPLE_MISSING_CAP = 10
+_SAMPLE_CONTRIBUTION_CAP = 5
 _NEAR_ZERO = 1e-9
+# Approximate calendar days for each period (for coverage warning only)
+_PERIOD_APPROX_DAYS = {"1Y": 365, "3Y": 1095, "5Y": 1826, "max": 99999}
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -40,9 +47,18 @@ def _count_vti_rows(db_client) -> int:
         return -1
 
 
-def _load_contribution_dates(db_client, user_id: str) -> tuple[list[str], str, str]:
-    """Return (sorted unique contribution date strings, source_mode, source_reason)."""
-    # Primary: deposit_plans executed=True
+def _load_contribution_forensics(db_client, user_id: str) -> dict:
+    """Load contribution dates from both sources and return full forensics.
+
+    Always queries both deposit_plans and buy_transactions so the caller has
+    complete visibility into why a source was or was not selected.
+
+    Returns a dict with:
+      selected_dates, selected_mode, selected_reason,
+      executed_deposit_plans_count, buy_transactions_fallback_count
+    """
+    dp_dates: list[str] = []
+    dp_error: str | None = None
     try:
         dp_result = (
             db_client.table("deposit_plans")
@@ -51,17 +67,17 @@ def _load_contribution_dates(db_client, user_id: str) -> tuple[list[str], str, s
             .eq("executed", True)
             .execute()
         )
-        dates = sorted({
+        dp_dates = sorted({
             row["execution_date"]
             for row in (dp_result.data or [])
             if row.get("execution_date")
         })
-        if dates:
-            return dates, "deposit_plans_primary", "deposit_plans_executed_true_found"
     except Exception as e:
-        logger.warning("vti_repair deposit_plans read error: %s", e)
+        dp_error = f"{type(e).__name__}: {e}"
+        logger.warning("vti_repair deposit_plans read error: %s", dp_error)
 
-    # Fallback: all Buy transactions aggregated by date
+    tx_dates: list[str] = []
+    tx_error: str | None = None
     try:
         tx_result = (
             db_client.table("transactions")
@@ -70,17 +86,41 @@ def _load_contribution_dates(db_client, user_id: str) -> tuple[list[str], str, s
             .eq("tx_type", "Buy")
             .execute()
         )
-        dates = sorted({
+        tx_dates = sorted({
             row["tx_date"]
             for row in (tx_result.data or [])
             if row.get("tx_date")
         })
-        if dates:
-            return dates, "buy_transactions_fallback", "deposit_plans_empty_used_buy_transactions"
-        return [], "buy_transactions_fallback", "no_buy_transactions_found"
     except Exception as e:
-        logger.warning("vti_repair transactions read error: %s", e)
-        return [], "buy_transactions_fallback", f"transactions_read_error_{type(e).__name__}"
+        tx_error = f"{type(e).__name__}: {e}"
+        logger.warning("vti_repair transactions read error: %s", tx_error)
+
+    # Selection logic: deposit_plans primary if non-empty, else buy_transactions fallback
+    if dp_dates:
+        selected_dates = dp_dates
+        selected_mode = "deposit_plans_primary"
+        selected_reason = "deposit_plans_executed_true_found"
+    elif tx_dates:
+        selected_dates = tx_dates
+        selected_mode = "buy_transactions_fallback"
+        selected_reason = "deposit_plans_empty_used_buy_transactions"
+    else:
+        selected_dates = []
+        selected_mode = "buy_transactions_fallback"
+        if dp_error:
+            selected_reason = f"deposit_plans_read_error_{dp_error[:60]}"
+        elif tx_error:
+            selected_reason = f"transactions_read_error_{tx_error[:60]}"
+        else:
+            selected_reason = "no_contribution_dates_found"
+
+    return {
+        "selected_dates": selected_dates,
+        "selected_mode": selected_mode,
+        "selected_reason": selected_reason,
+        "executed_deposit_plans_count": len(dp_dates),
+        "buy_transactions_fallback_count": len(tx_dates),
+    }
 
 
 def _coverage_check(
@@ -113,6 +153,30 @@ def _coverage_check(
     return covered, len(missing_dates), missing_dates[:_SAMPLE_MISSING_CAP]
 
 
+def _period_coverage_warning(
+    required_price_start_date: str | None,
+    backfill_period: str,
+) -> str | None:
+    """Return a warning string if earliest contribution date may predate the period window."""
+    if not required_price_start_date:
+        return None
+    approx_days = _PERIOD_APPROX_DAYS.get(backfill_period)
+    if approx_days is None or approx_days >= 99999:
+        return None  # "max" covers everything
+    try:
+        earliest = date.fromisoformat(required_price_start_date)
+    except ValueError:
+        return None
+    period_start = date.today() - timedelta(days=approx_days)
+    if earliest < period_start:
+        return (
+            f"earliest_contribution_date_{required_price_start_date}_predates_"
+            f"{backfill_period}_window_{period_start.isoformat()}_"
+            f"consider_backfill_period_max"
+        )
+    return None
+
+
 # ── main entry point ──────────────────────────────────────────────────────────
 
 async def run_vti_price_history_repair(
@@ -127,10 +191,12 @@ async def run_vti_price_history_repair(
 
     Returns a forensics dict describing what was found, what would be written
     (dry_run=True), or what was written (dry_run=False).
+
+    backfill_period: "1Y", "3Y", "5Y", or "max" (full history).
+    Use "max" when earliest contribution date predates 5Y window.
     """
-    contribution_dates, source_mode, source_reason = _load_contribution_dates(
-        db_client, user_id
-    )
+    forensics = _load_contribution_forensics(db_client, user_id)
+    contribution_dates = forensics["selected_dates"]
 
     # Filter contribution dates to requested range
     if start_date or end_date:
@@ -139,6 +205,10 @@ async def run_vti_price_history_repair(
             if (start_date is None or d >= start_date)
             and (end_date is None or d <= end_date)
         ]
+
+    required_price_start_date = contribution_dates[0] if contribution_dates else None
+    required_price_end_date = contribution_dates[-1] if contribution_dates else None
+    period_warning = _period_coverage_warning(required_price_start_date, backfill_period)
 
     vti_rows_before = _count_vti_rows(db_client)
 
@@ -195,25 +265,27 @@ async def run_vti_price_history_repair(
 
     vti_rows_after = _count_vti_rows(db_client) if not dry_run else vti_rows_before
 
-    # Build price index for coverage check
     price_index = {p.date for p in valid_points}
-
-    covered, missing_count, sample_missing = _coverage_check(
-        contribution_dates, price_index
-    )
+    covered, missing_count, sample_missing = _coverage_check(contribution_dates, price_index)
 
     return {
         "repair_version": REPAIR_VERSION,
         "dry_run": dry_run,
-        "backfill_period": backfill_period,
+        "backfill_period_requested": backfill_period,
         "date_range_filter": {
             "start_date": start_date,
             "end_date": end_date,
         },
         "contribution_source": {
-            "mode": source_mode,
-            "reason": source_reason,
+            "selected_mode": forensics["selected_mode"],
+            "selected_reason": forensics["selected_reason"],
+            "executed_deposit_plans_count": forensics["executed_deposit_plans_count"],
+            "buy_transactions_fallback_count": forensics["buy_transactions_fallback_count"],
             "contribution_dates_count": len(contribution_dates),
+            "required_price_start_date": required_price_start_date,
+            "required_price_end_date": required_price_end_date,
+            "sample_contribution_dates": contribution_dates[:_SAMPLE_CONTRIBUTION_CAP],
+            "period_coverage_warning": period_warning,
         },
         "provider_fetch": {
             "fetched_points_total": len(fetched_points),
@@ -228,7 +300,11 @@ async def run_vti_price_history_repair(
         "price_history_row_counts": {
             "vti_rows_before": vti_rows_before,
             "vti_rows_after": vti_rows_after,
-            "net_change": (vti_rows_after - vti_rows_before) if vti_rows_before >= 0 and vti_rows_after >= 0 else None,
+            "net_change": (
+                (vti_rows_after - vti_rows_before)
+                if vti_rows_before >= 0 and vti_rows_after >= 0
+                else None
+            ),
         },
         "coverage": {
             "contribution_dates_checked": len(contribution_dates),

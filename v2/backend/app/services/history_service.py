@@ -29,6 +29,7 @@ _PERIOD_MAP = {
     "6M": "6mo",
     "1Y": "1y",
     "5Y": "5y",
+    "max": "max",  # full available history — use for repair/backfill when oldest contribution dates may exceed 5Y
 }
 
 # Period → approximate number of data points expected

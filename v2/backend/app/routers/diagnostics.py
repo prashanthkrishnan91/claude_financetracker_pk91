@@ -4558,3 +4558,68 @@ async def vti_dca_benchmark_diagnostic(
     )
 
     return result
+
+
+# ── Stage 10C.1 — VTI price history repair ────────────────────────────────────
+
+class VtiPriceHistoryRepairRequest(BaseModel):
+    """Request body for the VTI price history repair endpoint."""
+    dry_run: bool = True
+    backfill_period: str = "5Y"
+    start_date: str | None = None
+    end_date: str | None = None
+
+
+@router.post("/vti-price-history-repair")
+async def vti_price_history_repair(
+    payload: VtiPriceHistoryRepairRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+):
+    """Stage 10C.1 — cert-gated VTI price history repair.
+
+    Fetches VTI OHLCV from yfinance and optionally upserts rows into
+    price_history (idempotent ON CONFLICT upsert). dry_run=True by default.
+
+    Invariants:
+    - Writes ONLY VTI rows — ticker hardcoded in service layer
+    - Idempotent upsert (ON CONFLICT ticker,price_date DO UPDATE)
+    - Never fabricates prices (zero-close points dropped before write)
+    - No worker, no scheduled job, no synthesis changes
+    - No Buy/Hold/Trim/Sell policy changes
+    - Cert-gated (X-Finance-Runtime-Cert-Secret required)
+    - Feature-flag-gated (VTI_PRICE_HISTORY_REPAIR_ENABLED=true)
+    """
+    settings = get_settings()
+    if not settings.vti_price_history_repair_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail="vti_price_history_repair_disabled — set VTI_PRICE_HISTORY_REPAIR_ENABLED=true",
+        )
+
+    from ..services.vti_price_history_repair_v1 import run_vti_price_history_repair
+
+    db_client = get_supabase_client()
+
+    result = await run_vti_price_history_repair(
+        db_client=db_client,
+        user_id=str(user.id),
+        dry_run=payload.dry_run,
+        backfill_period=payload.backfill_period,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+    )
+
+    logger.info(
+        "vti_price_history_repair user=%s dry_run=%s fetched=%d written=%d "
+        "vti_before=%d vti_after=%d coverage=%d/%d",
+        getattr(user, "email", "unknown"),
+        payload.dry_run,
+        result.get("provider_fetch", {}).get("fetched_points_total", 0),
+        result.get("write_result", {}).get("rows_written", 0),
+        result.get("price_history_row_counts", {}).get("vti_rows_before", -1),
+        result.get("price_history_row_counts", {}).get("vti_rows_after", -1),
+        result.get("coverage", {}).get("covered_within_search_window", 0),
+        result.get("coverage", {}).get("contribution_dates_checked", 0),
+    )
+
+    return result

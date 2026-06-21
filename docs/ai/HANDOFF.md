@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-16 (Stage 10C VTI DCA benchmark diagnostic — read-only, no UI, no SQL, no provider calls).
+Last updated: 2026-06-17 (Stage 10C.1 VTI price history repair — backend-only data foundation repair, cert+flag-gated endpoint, no UI, no SQL migration, no synthesis changes).
 
 **ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
 
@@ -16,7 +16,17 @@ Last updated: 2026-06-16 (Stage 10C VTI DCA benchmark diagnostic — read-only, 
 - **Files changed:** `app/config.py`, `watchtower_worker_entrypoint.py`, `analyst_refresh_worker_entrypoint.py`, `alert_email_delivery_worker_entrypoint.py`, `intel_v3_service.py` (`_persist_snapshot`).
 - **Validation:** After deploy, confirm `COST_GUARD ... Exiting cleanly.` in Railway logs for each worker. Confirm RAM drops near zero. Confirm `MAX(created_at)` in intel_v3_snapshots stops advancing.
 
-**Stage 10C VTI DCA benchmark diagnostic (current PR):** Read-only backend diagnostic service for VTI-only DCA benchmark computation. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
+**Stage 10C.1 VTI price history repair (current PR #457):** Cert-gated, feature-flag-gated on-demand endpoint to backfill VTI price history. Prerequisite for Stage 10C benchmark to unblock. No UI, no SQL migration, no synthesis, no Buy/Hold/Trim/Sell changes. Intel workers remain disabled.
+- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-price-history-repair` (cert + `VTI_PRICE_HISTORY_REPAIR_ENABLED=true` required, else 403)
+- **New service:** `v2/backend/app/services/vti_price_history_repair_v1.py` — writes ONLY VTI rows (ticker hardcoded), idempotent upsert, zero-close filter (no fabrication), dry_run=True default
+- **New public method:** `HistoryService.fetch_prices_from_provider(ticker, period)` — bypasses cache read/write, used by repair service
+- **New config flag:** `vti_price_history_repair_enabled: bool = False`
+- **Repair forensics returned:** contribution source mode (deposit_plans primary vs buy_transactions fallback), provider fetch counts, rows written, VTI row counts before/after, coverage check with sample missing dates
+- **Tests:** 13 fixture tests covering cert-gating, idempotency, no non-VTI writes, no fabrication, source mode, Stage 10C blocked/unblocked states
+- **To run repair:** Set `VTI_PRICE_HISTORY_REPAIR_ENABLED=true` → dry-run to verify fetch → `dry_run=false` to write → re-run Stage 10C benchmark
+- **Current blocker status:** `price_history` has 0 VTI rows → Stage 10C returns `benchmark_status=blocked`. After repair with `dry_run=false`, benchmark should reach `computed` or `degraded`.
+
+**Stage 10C VTI DCA benchmark diagnostic (prior PR #456):** Read-only backend diagnostic service for VTI-only DCA benchmark computation. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
 - **New service:** `v2/backend/app/services/vti_dca_benchmark_diagnostic_v1.py` — `run_vti_dca_benchmark_diagnostic()`. Pure async, no I/O except the DB client passed in. Books gate result is accepted as a parameter (not re-computed inline by default, but the endpoint runs books reconciliation first and passes the result).
 - **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-dca-benchmark-diagnostic`. Cert-gated (same `X-Finance-Runtime-Cert-Secret` header). Runs books reconciliation inline (read-only) to get `benchmark_books_gate`, then runs VTI benchmark.
 - **Sample request body:** `{"start_date": null, "end_date": null, "include_position_breakdown": true}`

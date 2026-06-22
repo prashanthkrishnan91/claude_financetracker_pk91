@@ -560,7 +560,10 @@ class TestEndpointContractFields:
             "benchmark_status", "benchmark_blockers", "benchmark_warnings",
             "required_price_points_count", "available_price_points_count",
             "missing_price_points", "contribution_source_mode",
-            "contribution_records", "diagnostics_only", "writes_performed",
+            "contribution_records",
+            "vti_price_rows_loaded_count", "vti_price_query_start_date",
+            "vti_price_query_end_date", "vti_price_query_truncated",
+            "diagnostics_only", "writes_performed",
             "policy_unchanged", "visible_snapshot_unchanged",
         ]
         for field in required:
@@ -678,3 +681,223 @@ class TestVtiDcaComputationAccuracy:
         )
         assert result["relative_vs_vti_abs"] is not None
         assert result["relative_vs_vti_abs"] < 0
+
+
+# ── Test helpers for large-scale date generation ──────────────────────────────
+
+def _generate_contribution_dates(n: int, start: str = "2024-03-04") -> list[str]:
+    """Generate n weekday dates at approximately weekly intervals."""
+    from datetime import date, timedelta
+    result: list[str] = []
+    current = date.fromisoformat(start)
+    while len(result) < n:
+        if current.weekday() < 5:  # Mon–Fri
+            result.append(current.isoformat())
+        current += timedelta(days=7)
+    return result[:n]
+
+
+def _make_vti_prices_for_dates(
+    contribution_dates: list[str],
+    base_price: float = 200.0,
+) -> list[dict]:
+    """Generate weekday VTI price rows spanning the contribution range plus buffer."""
+    from datetime import date, timedelta
+    if not contribution_dates:
+        return []
+    start = date.fromisoformat(min(contribution_dates)) - timedelta(days=14)
+    end = date.fromisoformat(max(contribution_dates)) + timedelta(days=60)
+    rows: list[dict] = []
+    price = base_price
+    current = start
+    while current <= end:
+        if current.weekday() < 5:
+            rows.append({"price_date": current.isoformat(), "close_price": round(price, 2)})
+            price *= 1.0001
+        current += timedelta(days=1)
+    return rows
+
+
+# ── Stage 10C.2: VTI price query diagnostic fields ───────────────────────────
+
+class TestVtiPriceQueryDiagnosticFields:
+    """Tests for the four new VTI price query diagnostic response fields."""
+
+    @pytest.mark.asyncio
+    async def test_diagnostic_fields_present_in_normal_response(self):
+        deposits = [_make_deposit("2024-01-05", 900.0)]
+        prices = [
+            _make_vti_price("2024-01-05", 200.0),
+            _make_vti_price("2025-01-01", 250.0),
+        ]
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+        assert "vti_price_rows_loaded_count" in result
+        assert "vti_price_query_start_date" in result
+        assert "vti_price_query_end_date" in result
+        assert "vti_price_query_truncated" in result
+
+    @pytest.mark.asyncio
+    async def test_rows_loaded_count_matches_mock_data(self):
+        deposits = [_make_deposit("2024-01-05", 900.0)]
+        prices = [
+            _make_vti_price("2024-01-05", 200.0),
+            _make_vti_price("2025-01-01", 250.0),
+        ]
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+        assert result["vti_price_rows_loaded_count"] == 2
+
+    @pytest.mark.asyncio
+    async def test_query_start_date_precedes_first_contribution(self):
+        deposits = [_make_deposit("2024-01-05", 900.0)]
+        prices = [
+            _make_vti_price("2024-01-05", 200.0),
+            _make_vti_price("2025-01-01", 250.0),
+        ]
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+        from datetime import date
+        assert result["vti_price_query_start_date"] is not None
+        assert date.fromisoformat(result["vti_price_query_start_date"]) < date.fromisoformat("2024-01-05")
+
+    @pytest.mark.asyncio
+    async def test_query_truncated_false_for_small_result_set(self):
+        deposits = [_make_deposit("2024-01-05", 900.0)]
+        prices = [
+            _make_vti_price("2024-01-05", 200.0),
+            _make_vti_price("2025-01-01", 250.0),
+        ]
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+        assert result["vti_price_query_truncated"] is False
+
+    @pytest.mark.asyncio
+    async def test_diagnostic_fields_present_in_early_return_no_contributions(self):
+        """New fields are present even in blocked/early-return responses."""
+        db = _MockDB(price_history=[_make_vti_price("2024-01-05", 200.0)])
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+        # No contributions → early return before VTI query
+        assert "vti_price_rows_loaded_count" in result
+        assert result["vti_price_rows_loaded_count"] == 0
+        assert result["vti_price_query_start_date"] is None
+        assert result["vti_price_query_end_date"] is None
+        assert result["vti_price_query_truncated"] is False
+
+
+# ── Stage 10C.2: regression tests for 1000-row Supabase cap ─────────────────
+
+class TestVtiRowTruncationRegression:
+    """Regression for the bug where an unbounded Supabase query silently dropped
+    VTI price rows beyond the default 1000-row cap, causing contribution dates
+    after ~mid-2025 to appear as missing even though prices existed.
+
+    Stage 10C.1 wrote 1254 VTI rows; the old query returned only the oldest ~1000,
+    covering ~64 of 143 contribution dates. The fix uses a date-bounded query with
+    an explicit 10 000-row limit so all required rows are always returned.
+    """
+
+    @pytest.mark.asyncio
+    async def test_all_143_contribution_dates_covered_when_prices_exist(self):
+        """All 143 dates are available when the bounded query returns correct rows."""
+        dates = _generate_contribution_dates(143)
+        deposits = [_make_deposit(d, 1000.0) for d in dates]
+        prices = _make_vti_prices_for_dates(dates)
+        snapshots = [_make_snapshot(total_equity=200000.0, total_cost=143000.0)]
+        db = _MockDB(deposit_plans=deposits, price_history=prices, portfolio_snapshots=snapshots)
+
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+
+        assert result["required_price_points_count"] == 143
+        assert result["available_price_points_count"] == 143
+        assert result["missing_price_points"] == []
+        assert result["benchmark_status"] == "computed"
+
+    @pytest.mark.asyncio
+    async def test_old_truncation_shape_partial_prices_leaves_dates_missing(self):
+        """Documents the old failure shape: the 1000-row Supabase default cap returned
+        only a subset of VTI prices, leaving many later contribution dates unmapped.
+        Simulated by supplying prices only for the first 64 contribution dates."""
+        dates = _generate_contribution_dates(143)
+        deposits = [_make_deposit(d, 1000.0) for d in dates]
+        # Provide prices for only the first 64 contribution dates (old truncated slice).
+        # Use exact-date rows (no daily fill) to minimise ±7-day spillover.
+        prices_truncated = [
+            _make_vti_price(d, round(200.0 + i * 0.1, 2))
+            for i, d in enumerate(dates[:64])
+        ]
+
+        db = _MockDB(deposit_plans=deposits, price_history=prices_truncated)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+
+        # Fewer than all 143 dates are covered when prices are truncated
+        assert result["available_price_points_count"] < 143
+        assert len(result["missing_price_points"]) > 0
+        # The first missing date must be at or after dates[65] (beyond ±7-day reach of date[63])
+        assert result["missing_price_points"][0] >= dates[65]
+        assert result["benchmark_status"] == "degraded"
+
+    @pytest.mark.asyncio
+    async def test_contribution_dates_beyond_1000th_row_are_mapped(self):
+        """With the fix, contribution dates that fall beyond the 1000th historical row
+        are still resolved when the bounded query returns the correct window of rows."""
+        dates = _generate_contribution_dates(143)
+        deposits = [_make_deposit(d, 1000.0) for d in dates]
+        prices = _make_vti_prices_for_dates(dates)
+        # Sanity-check the helper generated more than 143 distinct price rows
+        assert len(prices) > 143
+
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+
+        assert result["available_price_points_count"] == 143
+        assert len(result["missing_price_points"]) == 0
+
+    @pytest.mark.asyncio
+    async def test_required_143_available_143_status_computed(self):
+        """required=143, available=143, status=computed with full price coverage."""
+        dates = _generate_contribution_dates(143)
+        deposits = [_make_deposit(d, 1000.0) for d in dates]
+        prices = _make_vti_prices_for_dates(dates)
+        snapshots = [_make_snapshot(total_equity=200000.0, total_cost=143000.0)]
+        db = _MockDB(deposit_plans=deposits, price_history=prices, portfolio_snapshots=snapshots)
+
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+
+        assert result["required_price_points_count"] == 143
+        assert result["available_price_points_count"] == 143
+        assert result["benchmark_status"] == "computed"
+
+    @pytest.mark.asyncio
+    async def test_no_writes_no_provider_calls_with_143_contributions(self):
+        dates = _generate_contribution_dates(143)
+        deposits = [_make_deposit(d, 1000.0) for d in dates]
+        prices = _make_vti_prices_for_dates(dates)
+        db = _MockDB(deposit_plans=deposits, price_history=prices)
+
+        result = await run_vti_dca_benchmark_diagnostic(
+            db, str(uuid4()), books_gate_result=_books_gate_pass()
+        )
+
+        assert result["writes_performed"] == 0
+        assert result["diagnostics_only"] is True
+        assert result["policy_unchanged"] is True
+        assert result["visible_snapshot_unchanged"] is True

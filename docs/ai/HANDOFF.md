@@ -1,6 +1,18 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-22 (Stage 10C.2 — fix VTI DCA benchmark Supabase 1000-row truncation bug; bounded date-window query; 4 new diagnostic fields; 48/48 tests pass).
+Last updated: 2026-06-22 (Stage 11A — Financial Truth Baseline diagnostic; 38/38 tests pass; no UI, no SQL migration, no provider calls, no writes).
+
+**Stage 11A — Financial Truth Baseline Diagnostic (current PR):** Backend/tests/docs only. No UI, no SQL migration, no provider calls, no LLM calls, no writes.
+- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/financial-truth-baseline` — cert-gated (X-Finance-Runtime-Cert-Secret required).
+- **New service:** `v2/backend/app/services/financial_truth_baseline_v1.py` — pure async, read-only. Inspects portfolio_snapshots, positions, price_history, transactions, recommendations, agent_runs, intel_snapshots (graceful if absent).
+- **7 output sections:** snapshot_truth, position_derived_truth, transaction_derived_truth, price_truth, intelligence_layer, reconciliation, verdict.
+- **Verdict fields:** `truth_status` (certified / degraded / blocked), `canonical_portfolio_value_source`, `canonical_cost_basis_source`, `unsafe_sources_to_ignore`, `next_required_fix`, `recommendations_trusted` (always False until certified).
+- **Reconciliation:** Compares portfolio_snapshots.total_equity vs position-derived market value (positions × price_history.close_price). Status: pass (≤1%), degraded (≤5%), blocked (>5%), unavailable (either source missing).
+- **Key invariants:** read-only (no writes), no provider calls, no LLM calls, no Buy/Hold/Trim/Sell changes. intel_snapshots query failure handled gracefully.
+- **Tests:** 38/38 pass (`test_financial_truth_baseline_v1.py`). Covers certified/degraded/blocked, stale snapshot, duplicate positions, missing prices, recommendations unsafe, no writes, no provider calls, empty DB, graceful DB failure.
+- **Advisor/recommendation UI remains blocked** until truth_status is certified or explicitly accepted as degraded.
+- **Schema limitation:** `intel_snapshots` table not in SQL migrations; query handled gracefully with `intel_snapshot_table_exists: false`. Position market value requires current prices in `price_history` — if stale/missing, reconciliation returns `unavailable`.
+- **Files changed:** `v2/backend/app/services/financial_truth_baseline_v1.py`, `v2/backend/app/routers/diagnostics.py`, `v2/backend/tests/test_financial_truth_baseline_v1.py`, `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
 
 **ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
 

@@ -4623,3 +4623,61 @@ async def vti_price_history_repair(
     )
 
     return result
+
+
+# ── Stage 11A — Financial Truth Baseline diagnostic endpoint ──────────────────
+
+
+class FinancialTruthBaselineRequest(BaseModel):
+    """Stage 11A — financial truth baseline diagnostic request.
+
+    No configurable fields: the diagnostic always inspects all tables for the
+    authenticated user. Included for future extensibility and OpenAPI schema
+    completeness.
+    """
+
+
+@router.post("/financial-truth-baseline")
+async def financial_truth_baseline(
+    payload: FinancialTruthBaselineRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 11A — operator-only financial truth baseline diagnostic.
+
+    Reads existing Supabase tables (portfolio_snapshots, positions,
+    transactions, price_history, agent_runs, recommendations) and returns a
+    structured audit of the app's financial data integrity, including whether
+    portfolio value, cost basis, and recommendation inputs can be trusted.
+
+    Invariants:
+    - Read-only — no writes to any table
+    - No live provider calls (no yfinance, no Plaid, no SEC, no Alpha Vantage)
+    - No LLM calls
+    - No Buy/Hold/Trim/Sell policy changes
+    - No snapshot or position mutations
+    - Cert-gated (X-Finance-Runtime-Cert-Secret required)
+
+    Returns truth_status: certified / degraded / blocked and identifies the
+    canonical portfolio value source and canonical cost basis source.
+    Advisor/recommendation UI remains blocked until truth_status is certified
+    or explicitly accepted as degraded.
+    """
+    from ..services.financial_truth_baseline_v1 import run_financial_truth_baseline
+
+    db_client = get_supabase_client()
+    result = await run_financial_truth_baseline(
+        db_client=db_client,
+        user_id=str(user.id),
+    )
+
+    logger.info(
+        "financial_truth_baseline user=%s truth_status=%s recon_status=%s "
+        "snap_value=%s pos_mv=%s",
+        getattr(user, "email", "unknown"),
+        result.get("verdict", {}).get("truth_status"),
+        result.get("reconciliation", {}).get("reconciliation_status"),
+        result.get("snapshot_truth", {}).get("latest_portfolio_value"),
+        result.get("position_derived_truth", {}).get("market_value_sum"),
+    )
+
+    return result

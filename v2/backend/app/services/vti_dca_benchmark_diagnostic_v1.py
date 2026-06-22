@@ -25,6 +25,9 @@ VTI_TICKER = "VTI"
 _NEAR_ZERO = 1e-9
 # Maximum calendar days to search forward/backward for a VTI price on non-trading days.
 _PRICE_SEARCH_DAYS = 7
+# Explicit row limit for the bounded VTI price query — well above any realistic date window.
+# Prevents Supabase's default 1000-row cap from silently truncating newer price rows.
+_VTI_PRICE_FETCH_LIMIT = 10_000
 
 
 def _find_vti_price(
@@ -124,6 +127,10 @@ async def run_vti_dca_benchmark_diagnostic(
     def _early_return(
         deposits_detected: int = 0,
         contribution_source: str | None = None,
+        vti_rows_loaded: int = 0,
+        vti_qstart: str | None = None,
+        vti_qend: str | None = None,
+        vti_truncated: bool = False,
     ) -> dict[str, Any]:
         return {
             "diagnostic_version": DIAGNOSTIC_VERSION,
@@ -153,6 +160,10 @@ async def run_vti_dca_benchmark_diagnostic(
             "missing_price_points": [],
             "contribution_source_mode": contribution_source,
             "contribution_records": [],
+            "vti_price_rows_loaded_count": vti_rows_loaded,
+            "vti_price_query_start_date": vti_qstart,
+            "vti_price_query_end_date": vti_qend,
+            "vti_price_query_truncated": vti_truncated,
             "diagnostics_only": True,
             "writes_performed": 0,
             "policy_unchanged": True,
@@ -243,14 +254,44 @@ async def run_vti_dca_benchmark_diagnostic(
         )
 
     # ── 3. Load VTI historical prices ─────────────────────────────────────────
-    vti_price_rows: list[dict[str, Any]] = (
+    # Derive a bounded date window from contribution dates. Without this,
+    # Supabase's default 1000-row cap silently drops newer price rows and
+    # produces false "missing price" results for recent contribution dates.
+    _contrib_date_strs = [d for d, _ in contribution_amounts]
+    vti_query_start_date: str | None = None
+    vti_query_end_date: str | None = None
+    try:
+        _min_contrib = _date.fromisoformat(min(_contrib_date_strs))
+        _max_contrib = _date.fromisoformat(max(_contrib_date_strs))
+        _window_start = _min_contrib - timedelta(days=_PRICE_SEARCH_DAYS)
+        # Extend end to today so the most-recent VTI price is captured for current value.
+        _window_end = max(
+            _max_contrib + timedelta(days=_PRICE_SEARCH_DAYS),
+            datetime.now(timezone.utc).date(),
+        )
+        vti_query_start_date = _window_start.isoformat()
+        vti_query_end_date = _window_end.isoformat()
+    except (ValueError, TypeError):
+        pass  # fall through; proceed without date bounds as a safe fallback
+
+    _price_query = (
         db_client.table("price_history")
         .select("price_date, close_price")
         .eq("ticker", VTI_TICKER)
+    )
+    if vti_query_start_date:
+        _price_query = _price_query.gte("price_date", vti_query_start_date)
+    if vti_query_end_date:
+        _price_query = _price_query.lte("price_date", vti_query_end_date)
+    vti_price_rows: list[dict[str, Any]] = (
+        _price_query
         .order("price_date", desc=False)
+        .limit(_VTI_PRICE_FETCH_LIMIT)
         .execute()
         .data or []
     )
+    vti_price_rows_loaded = len(vti_price_rows)
+    vti_price_query_truncated = vti_price_rows_loaded >= _VTI_PRICE_FETCH_LIMIT
 
     vti_price_map: dict[str, float] = {}
     for row in vti_price_rows:
@@ -273,6 +314,10 @@ async def run_vti_dca_benchmark_diagnostic(
         return _early_return(
             deposits_detected=deposits_detected_count,
             contribution_source=contribution_source_mode,
+            vti_rows_loaded=vti_price_rows_loaded,
+            vti_qstart=vti_query_start_date,
+            vti_qend=vti_query_end_date,
+            vti_truncated=vti_price_query_truncated,
         )
 
     if vti_current_price is None:
@@ -280,6 +325,10 @@ async def run_vti_dca_benchmark_diagnostic(
         return _early_return(
             deposits_detected=deposits_detected_count,
             contribution_source=contribution_source_mode,
+            vti_rows_loaded=vti_price_rows_loaded,
+            vti_qstart=vti_query_start_date,
+            vti_qend=vti_query_end_date,
+            vti_truncated=vti_price_query_truncated,
         )
 
     # ── 4. Map contributions to VTI prices ────────────────────────────────────
@@ -329,6 +378,10 @@ async def run_vti_dca_benchmark_diagnostic(
         return _early_return(
             deposits_detected=deposits_detected_count,
             contribution_source=contribution_source_mode,
+            vti_rows_loaded=vti_price_rows_loaded,
+            vti_qstart=vti_query_start_date,
+            vti_qend=vti_query_end_date,
+            vti_truncated=vti_price_query_truncated,
         )
 
     benchmark_contribution_count = available_price_points_count
@@ -435,6 +488,10 @@ async def run_vti_dca_benchmark_diagnostic(
         "missing_price_points": missing_price_points,
         "contribution_source_mode": contribution_source_mode,
         "contribution_records": contribution_records if include_position_breakdown else [],
+        "vti_price_rows_loaded_count": vti_price_rows_loaded,
+        "vti_price_query_start_date": vti_query_start_date,
+        "vti_price_query_end_date": vti_query_end_date,
+        "vti_price_query_truncated": vti_price_query_truncated,
         "diagnostics_only": True,
         "writes_performed": 0,
         "policy_unchanged": True,

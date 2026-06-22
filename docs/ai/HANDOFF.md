@@ -1,6 +1,6 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-17 (Stage 10C.1 VTI price history repair — backend-only data foundation repair, cert+flag-gated endpoint, no UI, no SQL migration, no synthesis changes).
+Last updated: 2026-06-22 (Stage 10C.2 — fix VTI DCA benchmark Supabase 1000-row truncation bug; bounded date-window query; 4 new diagnostic fields; 48/48 tests pass).
 
 **ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
 
@@ -16,7 +16,16 @@ Last updated: 2026-06-17 (Stage 10C.1 VTI price history repair — backend-only 
 - **Files changed:** `app/config.py`, `watchtower_worker_entrypoint.py`, `analyst_refresh_worker_entrypoint.py`, `alert_email_delivery_worker_entrypoint.py`, `intel_v3_service.py` (`_persist_snapshot`).
 - **Validation:** After deploy, confirm `COST_GUARD ... Exiting cleanly.` in Railway logs for each worker. Confirm RAM drops near zero. Confirm `MAX(created_at)` in intel_v3_snapshots stops advancing.
 
-**Stage 10C.1 VTI price history repair (current PR #457):** Cert-gated, feature-flag-gated on-demand endpoint to backfill VTI price history. Prerequisite for Stage 10C benchmark to unblock. No UI, no SQL migration, no synthesis, no Buy/Hold/Trim/Sell changes. Intel workers remain disabled.
+**Stage 10C.2 VTI benchmark row-truncation fix (current):** Backend-only patch. No UI, no SQL migration, no provider calls, no writes, no synthesis changes.
+- **Root cause:** `price_history` query in `vti_dca_benchmark_diagnostic_v1.py` had no date filter and no explicit `.limit()`, hitting Supabase's default 1000-row cap. After Stage 10C.1 wrote 1254 VTI rows, the oldest ~1000 rows were returned; contribution dates from ~2025-06-25 onward appeared as missing even though prices existed.
+- **Fix:** Replace unbounded query with a date-bounded query derived from contribution dates. Window = `min(contrib_dates) - 7 days` to `max(max(contrib_dates) + 7 days, today)`. Explicit `.limit(10_000)` prevents silent truncation. Two conditional `.gte()/.lte()` clauses filter to only the needed window.
+- **New constant:** `_VTI_PRICE_FETCH_LIMIT = 10_000` (well above any realistic contribution window).
+- **4 new diagnostic fields in response:** `vti_price_rows_loaded_count`, `vti_price_query_start_date`, `vti_price_query_end_date`, `vti_price_query_truncated`. Present in all responses including early-returns.
+- **Tests:** 48/48 pass (10 new: 5 in `TestVtiPriceQueryDiagnosticFields`, 5 in `TestVtiRowTruncationRegression`). Includes regression test with 143 contribution dates and truncated price shape. No live I/O.
+- **Files changed:** `v2/backend/app/services/vti_dca_benchmark_diagnostic_v1.py`, `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py`, `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
+- **Expected outcome after deploy:** Re-running Stage 10C benchmark with 1254 VTI rows in price_history should show `available_price_points_count=143`, `missing_price_points=[]`, `benchmark_status=computed` (if books gate=pass and portfolio snapshot exists).
+
+**Stage 10C.1 VTI price history repair (prior PR #457):** Cert-gated, feature-flag-gated on-demand endpoint to backfill VTI price history. Prerequisite for Stage 10C benchmark to unblock. No UI, no SQL migration, no synthesis, no Buy/Hold/Trim/Sell changes. Intel workers remain disabled.
 - **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-price-history-repair` (cert + `VTI_PRICE_HISTORY_REPAIR_ENABLED=true` required, else 403)
 - **New service:** `v2/backend/app/services/vti_price_history_repair_v1.py` — writes ONLY VTI rows (ticker hardcoded), idempotent upsert, zero-close filter (no fabrication), dry_run=True default
 - **New public method:** `HistoryService.fetch_prices_from_provider(ticker, period)` — bypasses cache read/write, used by repair service
@@ -37,7 +46,7 @@ Last updated: 2026-06-17 (Stage 10C.1 VTI price history repair — backend-only 
 - **Books gate integration:** If books gate = `pass` → can reach `benchmark_status=computed`. If `pass_with_exclusions` → degraded with flagged tickers listed. If `blocked` → benchmark blocked. If unavailable (exception or None) → degraded with warning `books_gate_runtime_not_available`.
 - **benchmark_status semantics:** `computed` = books gate pass + all prices present + portfolio value present. `degraded` = computation possible but with caveats. `blocked` = hard blocker prevents any meaningful computation. `not_evaluable` not used by this diagnostic.
 - **Invariants:** `diagnostics_only=true`, `writes_performed=0`, `policy_unchanged=true`, `visible_snapshot_unchanged=true`. No Buy/Hold/Trim/Sell changes.
-- **Tests:** `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py` — 38/38 pass. All DB calls mocked. No live I/O, no providers, no Plaid.
+- **Tests:** `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py` — 48/48 pass (was 38; 10 new tests added in Stage 10C.2). All DB calls mocked. No live I/O, no providers, no Plaid.
 - **Fields to inspect after deploy:** `benchmark_status`, `deposits_detected_count`, `benchmark_contribution_count`, `vti_dca_units`, `vti_dca_cost_basis`, `vti_dca_current_value`, `vti_dca_return_pct`, `actual_portfolio_value`, `relative_vs_vti_abs`, `benchmark_blockers`, `benchmark_warnings`, `missing_price_points`.
 - **What unlocks UI work (Stage 10C UI):** If `benchmark_status=computed` or `benchmark_status=degraded` with acceptable caveats (no hard blockers), Stage 10D UI readout can proceed. If `missing_price_points` is non-empty, a price backfill PR is needed first. If deposits not found, a data-entry or deposit-import step is needed first.
 - **Next-PR sequence:** Stage 10C UI (read-only readout of this endpoint) → Stage 10D Deploy tax-lot/wash-sale source design+contract → Stage 10E readiness-flag read model.

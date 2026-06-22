@@ -5,7 +5,7 @@ All tests use fully mocked DB clients — no live Supabase, provider, or LLM cal
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -13,10 +13,13 @@ import pytest
 
 from app.services.financial_truth_baseline_v1 import (
     DIAGNOSTIC_VERSION,
+    PRICE_STALE_BUSINESS_DAYS,
     RECONCILIATION_CERTIFIED_PCT,
     RECONCILIATION_DEGRADED_PCT,
     SNAPSHOT_STALE_HOURS,
+    _business_days_since,
     _intel_truth,
+    _is_price_stale,
     _position_truth,
     _price_truth,
     _reconciliation,
@@ -307,12 +310,13 @@ class TestPriceTruth:
         assert "MISSING" in result["missing_price_tickers"]
 
     def test_stale_price_ticker_detected(self):
+        # Monday 2026-06-22, price from Monday 2026-06-15 → 5 business days old (> PRICE_STALE_BUSINESS_DAYS=3)
         tickers = ["AAPL"]
-        prices = [_price("AAPL", days_old=5)]
-        result = _price_truth(prices, tickers)
+        prices = [{"ticker": "AAPL", "price_date": "2026-06-15", "close_price": 160.0}]
+        result = _price_truth(prices, tickers, _today=date(2026, 6, 22))
         assert len(result["stale_price_tickers"]) == 1
         assert result["stale_price_tickers"][0]["ticker"] == "AAPL"
-        assert result["stale_price_tickers"][0]["days_old"] == 5
+        assert result["stale_price_tickers"][0]["business_days_old"] == 5
 
 
 # ── Unit tests: _reconciliation ───────────────────────────────────────────────
@@ -535,3 +539,118 @@ class TestFinancialTruthBaseline:
         result = await run_financial_truth_baseline(_BrokenDB(), USER_ID)
         assert result["snapshot_truth"]["status"] == "unavailable"
         assert "query_failed" in result["snapshot_truth"]["reason"]
+
+
+# ── Unit tests: business-day staleness helpers ────────────────────────────────
+
+class TestBusinessDayStaleness:
+    def test_friday_price_not_stale_on_monday(self):
+        # Friday 2026-06-19 → Monday 2026-06-22: only Mon counts → 1 business day, not stale
+        friday_price = date(2026, 6, 19)
+        monday = date(2026, 6, 22)
+        assert _business_days_since(friday_price, monday) == 1
+        assert not _is_price_stale(friday_price, monday)
+
+    def test_price_is_stale_after_many_business_days(self):
+        # 2026-06-10 (Wed) → 2026-06-22 (Mon): Thu 11, Fri 12, Mon 15, Tue 16, Wed 17, Thu 18, Fri 19, Mon 22 = 8 bdays
+        assert _business_days_since(date(2026, 6, 10), date(2026, 6, 22)) == 8
+        assert _is_price_stale(date(2026, 6, 10), date(2026, 6, 22))
+
+    def test_same_day_not_stale(self):
+        today = date(2026, 6, 22)
+        assert _business_days_since(today, today) == 0
+        assert not _is_price_stale(today, today)
+
+    def test_weekend_days_not_counted(self):
+        # Sat 2026-06-20 → Mon 2026-06-22: only Mon counts = 1
+        assert _business_days_since(date(2026, 6, 20), date(2026, 6, 22)) == 1
+
+    def test_price_truth_friday_not_stale_on_monday(self):
+        tickers = ["SPY"]
+        prices = [{"ticker": "SPY", "price_date": "2026-06-19", "close_price": 500.0}]
+        result = _price_truth(prices, tickers, _today=date(2026, 6, 22))
+        assert result["stale_price_tickers"] == []
+        assert result["tickers_with_recent_price"] == 1
+
+
+# ── Unit tests: zero-share position filtering ─────────────────────────────────
+
+class TestZeroSharePositionFiltering:
+    def test_zero_share_rows_excluded_from_open_positions(self):
+        rows = [
+            _pos("AAPL", shares=10.0),   # open
+            _pos("SOLD", shares=0.0),     # closed — zero shares
+        ]
+        result = _position_truth(rows, [])
+        assert result["open_position_count"] == 1
+        assert "AAPL" in result["open_tickers"]
+        assert "SOLD" not in result["open_tickers"]
+
+    def test_zero_share_duplicate_does_not_create_duplicate_warning(self):
+        # AAPL held once with shares, once with 0 (sold/closed entry)
+        rows = [_pos("AAPL", shares=10.0), _pos("AAPL", shares=0.0)]
+        result = _position_truth(rows, [])
+        assert result["open_position_count"] == 1
+        assert result["duplicate_active_tickers"] == []
+
+    def test_sell_category_excluded(self):
+        rows = [_pos("AAPL", shares=10.0), _pos("TSLA", shares=5.0, category="SELL")]
+        result = _position_truth(rows, [])
+        assert result["open_position_count"] == 1
+        assert "TSLA" not in result["open_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_zero_share_position_excluded_from_open_tickers(self):
+        snap = [_snap(hours_old=1.0)]
+        pos = [_pos("AAPL", shares=10.0), _pos("CLOSED", shares=0.0)]
+        prices = [{"ticker": "AAPL", "price_date": "2026-06-22", "close_price": 200.0}]
+
+        db = _MockDB(snap_rows=snap, pos_rows=pos, price_rows=prices, tx_rows=[_tx()], rec_rows=[_rec()], agent_rows=[_agent()])
+        result = await run_financial_truth_baseline(db, USER_ID)
+
+        assert "CLOSED" not in result["price_truth"]["missing_price_tickers"]
+        assert "CLOSED" not in result["position_derived_truth"]["open_tickers"]
+
+
+# ── Unit tests: price_rows_loaded_count / truncation guard ────────────────────
+
+class TestPriceTruncationGuard:
+    def test_price_rows_loaded_count_in_output(self):
+        tickers = ["AAPL"]
+        prices = [{"ticker": "AAPL", "price_date": "2026-06-22", "close_price": 160.0}]
+        result = _price_truth(prices, tickers, price_rows_loaded_count=1)
+        assert result["price_rows_loaded"] == 1
+        assert result["price_query_truncated"] is False
+
+    def test_price_truncation_regression_gt_1000_rows(self):
+        # Simulate 1001 rows — under our 10K limit, so not flagged as truncated.
+        # The key invariant: even with many rows, latest price per ticker is still found
+        # (desc ordering means row 0 is the newest).
+        from app.services.financial_truth_baseline_v1 import _PRICE_HISTORY_FETCH_LIMIT
+        tickers = ["VTI"]
+        rows = [{"ticker": "VTI", "price_date": "2026-06-22", "close_price": 300.0}]
+        rows += [{"ticker": "VTI", "price_date": f"2020-01-{i:02d}", "close_price": 100.0} for i in range(1, 1001)]
+        result = _price_truth(rows, tickers, _today=date(2026, 6, 22), price_rows_loaded_count=len(rows))
+        # Latest price should be found regardless of how many older rows follow
+        assert result["tickers_with_recent_price"] == 1
+        assert result["stale_price_tickers"] == []
+        assert result["price_rows_loaded"] == 1001
+        # 1001 < 10_000 limit → not truncated
+        assert result["price_query_truncated"] is False
+
+    def test_price_truncation_flag_when_at_limit(self):
+        # When loaded rows == limit, flag as truncated (newer rows might have been cut off)
+        from app.services.financial_truth_baseline_v1 import _PRICE_HISTORY_FETCH_LIMIT
+        tickers = ["VTI"]
+        rows = [{"ticker": "VTI", "price_date": "2026-06-22", "close_price": 300.0}]
+        result = _price_truth(rows, tickers, _today=date(2026, 6, 22), price_rows_loaded_count=_PRICE_HISTORY_FETCH_LIMIT)
+        assert result["price_query_truncated"] is True
+        assert any("truncated" in w for w in result["warnings"])
+
+    def test_no_truncation_warning_when_under_limit(self):
+        from app.services.financial_truth_baseline_v1 import _PRICE_HISTORY_FETCH_LIMIT
+        tickers = ["AAPL"]
+        prices = [{"ticker": "AAPL", "price_date": "2026-06-22", "close_price": 160.0}]
+        result = _price_truth(prices, tickers, price_rows_loaded_count=500)
+        assert result["price_query_truncated"] is False
+        assert not any("truncated" in w for w in result["warnings"])

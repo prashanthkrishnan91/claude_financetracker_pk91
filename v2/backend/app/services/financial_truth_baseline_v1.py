@@ -8,15 +8,18 @@ portfolio value, cost basis, and recommendation inputs can be trusted.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 DIAGNOSTIC_VERSION = "financial_truth_baseline_v1"
 
 # Staleness thresholds
 SNAPSHOT_STALE_HOURS: int = 24
-PRICE_STALE_DAYS: int = 2
+PRICE_STALE_BUSINESS_DAYS: int = 3   # equity markets closed weekends; count Mon-Fri only
 INTEL_STALE_HOURS: int = 48
+
+# Price history fetch limit — prevents silent Supabase 1000-row truncation (Stage 10C.2 VTI bug)
+_PRICE_HISTORY_FETCH_LIMIT: int = 10_000
 
 # Reconciliation tolerance bands
 RECONCILIATION_CERTIFIED_PCT: float = 1.0   # within 1%  → certified
@@ -38,6 +41,23 @@ _DEPOSIT_TYPES = {"ACH", "RTP"}
 
 def _now_utc() -> datetime:
     return datetime.now(tz=timezone.utc)
+
+
+def _business_days_since(price_date: date, today: date) -> int:
+    """Count Mon-Fri days strictly between price_date and today (inclusive)."""
+    if today <= price_date:
+        return 0
+    count = 0
+    d = price_date + timedelta(days=1)
+    while d <= today:
+        if d.weekday() < 5:  # Mon=0 … Fri=4
+            count += 1
+        d += timedelta(days=1)
+    return count
+
+
+def _is_price_stale(price_date: date, today: date) -> bool:
+    return _business_days_since(price_date, today) > PRICE_STALE_BUSINESS_DAYS
 
 
 def _parse_dt(val: Any) -> datetime | None:
@@ -158,7 +178,12 @@ def _position_truth(pos_rows: list[dict], price_rows: list[dict]) -> dict[str, A
             "warnings": [],
         }
 
-    open_positions = [r for r in pos_rows if (r.get("category") or "").upper() != "SELL"]
+    open_positions = [
+        r for r in pos_rows
+        if r.get("ticker")
+        and (r.get("category") or "").upper() != "SELL"
+        and (_safe_float(r.get("shares")) or 0.0) > 0
+    ]
 
     # Duplicate ticker check
     ticker_counts: Counter = Counter(r.get("ticker") for r in open_positions)
@@ -292,7 +317,12 @@ def _transaction_truth(tx_rows: list[dict]) -> dict[str, Any]:
 
 # ── Section 4: Price truth ────────────────────────────────────────────────────
 
-def _price_truth(price_rows: list[dict], open_tickers: list[str]) -> dict[str, Any]:
+def _price_truth(
+    price_rows: list[dict],
+    open_tickers: list[str],
+    _today: date | None = None,
+    price_rows_loaded_count: int | None = None,
+) -> dict[str, Any]:
     if not open_tickers:
         return {
             "status": "unavailable",
@@ -302,6 +332,8 @@ def _price_truth(price_rows: list[dict], open_tickers: list[str]) -> dict[str, A
             "stale_price_tickers": [],
             "missing_price_tickers": [],
             "latest_price_dates": {},
+            "price_rows_loaded": price_rows_loaded_count,
+            "price_query_truncated": None,
         }
 
     # Latest price per ticker
@@ -311,7 +343,7 @@ def _price_truth(price_rows: list[dict], open_tickers: list[str]) -> dict[str, A
         if t and t not in latest_by_ticker:
             latest_by_ticker[t] = r
 
-    today = _now_utc().date()
+    today = _today if _today is not None else _now_utc().date()
     stale: list[dict] = []
     missing: list[str] = []
     latest_dates: dict[str, str | None] = {}
@@ -327,19 +359,26 @@ def _price_truth(price_rows: list[dict], open_tickers: list[str]) -> dict[str, A
         latest_dates[ticker] = str(price_date) if price_date else None
 
         if price_date is None:
-            stale.append({"ticker": ticker, "latest_price_date": None, "days_old": None})
-        else:
-            days_old = (today - price_date).days
-            if days_old > PRICE_STALE_DAYS:
-                stale.append({"ticker": ticker, "latest_price_date": str(price_date), "days_old": days_old})
+            stale.append({"ticker": ticker, "latest_price_date": None, "business_days_old": None})
+        elif _is_price_stale(price_date, today):
+            bdays = _business_days_since(price_date, today)
+            stale.append({"ticker": ticker, "latest_price_date": str(price_date), "business_days_old": bdays})
 
     recent_count = len(open_tickers) - len(missing) - len(stale)
+
+    truncated = (
+        price_rows_loaded_count >= _PRICE_HISTORY_FETCH_LIMIT
+        if price_rows_loaded_count is not None
+        else None
+    )
 
     warnings: list[str] = []
     if missing:
         warnings.append(f"missing_price_data for {len(missing)} ticker(s)")
     if stale:
-        warnings.append(f"stale_price_data for {len(stale)} ticker(s) (>{PRICE_STALE_DAYS} days old)")
+        warnings.append(f"stale_price_data for {len(stale)} ticker(s) (>{PRICE_STALE_BUSINESS_DAYS} business days old)")
+    if truncated:
+        warnings.append(f"price_query_truncated: loaded {price_rows_loaded_count} rows (limit {_PRICE_HISTORY_FETCH_LIMIT})")
 
     return {
         "status": "ok",
@@ -348,6 +387,8 @@ def _price_truth(price_rows: list[dict], open_tickers: list[str]) -> dict[str, A
         "stale_price_tickers": stale[:_MAX_LIST_CAP],
         "missing_price_tickers": missing[:_MAX_LIST_CAP],
         "latest_price_dates": {t: latest_dates.get(t) for t in list(latest_dates)[:_MAX_LIST_CAP]},
+        "price_rows_loaded": price_rows_loaded_count,
+        "price_query_truncated": truncated,
         "warnings": warnings,
     }
 
@@ -619,7 +660,9 @@ async def run_financial_truth_baseline(
 
     open_tickers: list[str] = [
         r.get("ticker") for r in pos_rows
-        if (r.get("category") or "").upper() != "SELL" and r.get("ticker")
+        if r.get("ticker")
+        and (r.get("category") or "").upper() != "SELL"
+        and (_safe_float(r.get("shares")) or 0.0) > 0
     ]
 
     # ── 3. Price history ──────────────────────────────────────────────────────
@@ -630,6 +673,7 @@ async def run_financial_truth_baseline(
                 .select("ticker,price_date,close_price")
                 .in_("ticker", open_tickers)
                 .order("price_date", desc=True)
+                .limit(_PRICE_HISTORY_FETCH_LIMIT)
                 .execute()
             )
             price_rows: list[dict] = ph_res.data or []
@@ -639,7 +683,7 @@ async def run_financial_truth_baseline(
         price_rows = []
 
     pos_section = _position_truth(pos_rows, price_rows)
-    price_section = _price_truth(price_rows, open_tickers)
+    price_section = _price_truth(price_rows, open_tickers, price_rows_loaded_count=len(price_rows))
 
     # ── 4. Transactions ───────────────────────────────────────────────────────
     try:

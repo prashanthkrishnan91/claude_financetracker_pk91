@@ -74,6 +74,12 @@ class Settings(BaseSettings):
     finance_runtime_cert_user_id: Optional[str] = None
     finance_runtime_cert_user_email: Optional[str] = None
 
+    # ── Stage 11B — Current price truth repair (off by default) ──────────────
+    # When True, POST /api/v1/diagnostics/finance-intel/current-price-truth-repair
+    # is available (cert-gated). dry_run=true by default — no writes unless
+    # dry_run=false is explicitly set. Writes only to price_history.
+    current_price_truth_repair_enabled: bool = False
+
     # ── Intel v3 Research Workers (Phase 3) — dark-run, off by default ────────
     # Kill switch: if False, no research worker of any kind runs.
     intel_v3_research_workers_enabled: bool = False

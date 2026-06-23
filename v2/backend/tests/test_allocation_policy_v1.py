@@ -32,6 +32,7 @@ from app.services.allocation_policy_v1 import (
     _check_reconciliation,
     _compute_group_weights,
     _compute_portfolio,
+    _floor5,
     _generate_policy,
     _load_open_positions,
     _parse_intel_v3_overlay,
@@ -475,6 +476,51 @@ class TestAllocateCash:
             min_trade_amount=25.0, max_positions=5,
         )
         assert alloc_cash + unalloc == pytest.approx(cash, abs=0.01)
+
+    def test_cash_2737_50_does_not_overspend(self):
+        """Regression: cash_to_deploy=2737.50 must not produce allocated_cash=2740."""
+        candidates = [self._candidate("SPY", GROUP_BROAD_ETF, gap_pct=50.0)]
+        allocated, alloc_cash, unalloc, count, _ = _allocate_cash(
+            candidates, total_mv=5000.0, cash_to_deploy=2737.50,
+            min_trade_amount=25.0, max_positions=5,
+        )
+        assert alloc_cash <= 2737.50, f"allocated_cash={alloc_cash} exceeds cash_to_deploy=2737.50"
+        assert unalloc >= 0.0, f"unallocated_cash={unalloc} is negative"
+        if allocated:
+            assert allocated[0]["dollar_amount"] <= 2737.50
+
+    def test_unallocated_cash_never_negative(self):
+        """unallocated_cash must be >= 0 for any cash_to_deploy value."""
+        candidates = [self._candidate("VOO", GROUP_BROAD_ETF, gap_pct=100.0)]
+        for cash in [2737.50, 100.50, 503.75, 1002.00, 25.0, 27.50]:
+            _, alloc_cash, unalloc, _, _ = _allocate_cash(
+                candidates, total_mv=5000.0, cash_to_deploy=cash,
+                min_trade_amount=25.0, max_positions=5,
+            )
+            assert unalloc >= 0.0, f"unallocated_cash={unalloc} negative for cash={cash}"
+            assert alloc_cash <= cash + 0.01, f"allocated={alloc_cash} > cash={cash}"
+
+    def test_floor5_never_rounds_up(self):
+        """_floor5 must always return a value <= input and a multiple of 5."""
+        for amount in [2737.50, 100.50, 503.75, 27.3, 1.0, 0.0, 5.0, 25.0, 30.0]:
+            result = _floor5(amount)
+            assert result <= amount + 1e-9, f"_floor5({amount})={result} > {amount}"
+            assert int(result) % 5 == 0, f"_floor5({amount})={result} is not a multiple of 5"
+
+    def test_allocated_equals_sum_of_candidates(self):
+        """allocated_cash must equal sum of candidate dollar_amounts within $0.02."""
+        candidates = [
+            self._candidate("VOO", GROUP_BROAD_ETF, gap_pct=20.0),
+            self._candidate("QQQ", GROUP_BROAD_ETF, gap_pct=15.0),
+        ]
+        allocated, alloc_cash, unalloc, count, _ = _allocate_cash(
+            candidates, total_mv=10000.0, cash_to_deploy=1000.0,
+            min_trade_amount=25.0, max_positions=5,
+        )
+        sum_amounts = sum(c["dollar_amount"] for c in allocated)
+        assert abs(sum_amounts - alloc_cash) <= 0.02, (
+            f"sum(candidates)={sum_amounts} != allocated_cash={alloc_cash}"
+        )
 
 
 # ── run_next_buy_policy_diagnostic (integration via mocked DB) ─────────────────
@@ -929,3 +975,55 @@ class TestNumericPlanTrusted:
         assert result["verdict"]["policy_status"] == "blocked"
         assert result["verdict"]["numeric_plan_trusted"] is False
         assert result["verdict"]["recommendations_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_cash_2737_50_numeric_plan_trusted_and_no_overspend(self):
+        """Regression: cash_to_deploy=2737.50 with valid truth => no overspend, numeric_plan_trusted True."""
+        positions = [_pos("VOO", shares=20)]
+        prices = {"VOO": [_price("VOO", close=450.0, days_old=0)]}
+        mv = 20 * 450.0  # 9000
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=1, min_trade_amount=25.0,
+        )
+        cp = result["cash_plan"]
+        assert cp["allocated_cash"] <= 2737.50, (
+            f"allocated_cash={cp['allocated_cash']} exceeds cash_to_deploy=2737.50"
+        )
+        assert cp["unallocated_cash"] >= 0.0, (
+            f"unallocated_cash={cp['unallocated_cash']} is negative"
+        )
+        assert cp["allocated_cash"] + cp["unallocated_cash"] == pytest.approx(2737.50, abs=0.02)
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_numeric_plan_trusted_false_if_cash_invariant_violated(self):
+        """numeric_plan_trusted must be False if allocated_cash > cash_to_deploy (invariant guard)."""
+        # Patch _allocate_cash to simulate a broken allocator returning overspend
+        import unittest.mock as mock
+        from app.services import allocation_policy_v1 as svc
+
+        positions = [_pos("VOO", shares=20)]
+        prices = {"VOO": [_price("VOO", close=450.0, days_old=0)]}
+        mv = 20 * 450.0
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv)
+
+        with mock.patch.object(svc, "_allocate_cash") as mock_alloc:
+            # Simulate the overspend bug: allocated > cash_to_deploy, unallocated < 0
+            mock_alloc.return_value = (
+                [{"ticker": "VOO", "dollar_amount": 2740.0}],
+                2740.0,   # allocated_cash
+                -2.50,    # unallocated_cash (invalid)
+                1,
+                None,
+            )
+            result = await run_next_buy_policy_diagnostic(
+                db_client=db, user_id=str(uuid4()),
+                cash_to_deploy=2737.50, max_positions=1, min_trade_amount=25.0,
+            )
+
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert result["cash_plan"]["unallocated_cash"] >= 0.0  # clamped by invariant guard
+        assert "cash_bound_violated" in str(result["generated_policy"].get("warnings", []))

@@ -169,6 +169,11 @@ def _round5(amount: float) -> float:
     return round(round(amount / 5.0) * 5.0, 2)
 
 
+def _floor5(amount: float) -> float:
+    """Floor to nearest $5 — never rounds up, guarantees result <= amount."""
+    return round(int(amount / 5.0) * 5.0, 2)
+
+
 # ── Step 1: Load and validate open positions ─────────────────────────────────
 
 def _load_open_positions(pos_rows: list[dict]) -> list[dict]:
@@ -594,14 +599,14 @@ def _allocate_cash(
         if alloc < min_trade_amount:
             continue
 
-        # Round to nearest $5
-        alloc_rounded = _round5(alloc)
+        # Floor to nearest $5 — never allocate more than remaining cash
+        alloc_rounded = _floor5(alloc)
         if alloc_rounded < min_trade_amount:
             alloc_rounded = min_trade_amount
         if alloc_rounded > remaining:
-            alloc_rounded = _round5(remaining)
-        if alloc_rounded < min_trade_amount:
-            continue
+            alloc_rounded = _floor5(remaining)
+            if alloc_rounded < min_trade_amount:
+                continue
 
         c = dict(c)
         c["dollar_amount"] = alloc_rounded
@@ -819,6 +824,15 @@ async def run_next_buy_policy_diagnostic(
         next_buy_candidates, allocated_cash, unallocated_cash, allocation_count, no_buy_reason = (
             _allocate_cash(raw_candidates, total_mv, cash_to_deploy, min_trade_amount, max_positions)
         )
+
+        # Defensive cash-bound invariant — must never trigger with correct allocator
+        if allocated_cash > cash_to_deploy or unallocated_cash < 0:
+            warnings.append(
+                f"cash_bound_violated: allocated={allocated_cash:.2f} > cash_to_deploy={cash_to_deploy:.2f}"
+            )
+            policy_status = "degraded"
+            unallocated_cash = max(0.0, round(cash_to_deploy - allocated_cash, 2))
+            allocated_cash = min(allocated_cash, cash_to_deploy)
     else:
         no_buy_reason = "policy_blocked: " + "; ".join(policy_blockers)
 
@@ -895,6 +909,12 @@ async def run_next_buy_policy_diagnostic(
                 and not missing_price_tickers
                 and not stale_price_tickers
                 and not policy_blockers
+                and allocated_cash <= cash_to_deploy
+                and unallocated_cash >= 0
+                and all(c.get("dollar_amount", 0) >= 0 for c in next_buy_candidates)
+                and abs(
+                    sum(c.get("dollar_amount", 0) for c in next_buy_candidates) - allocated_cash
+                ) <= 0.02
             ),
             "next_required_fix": _next_fix(
                 policy_status, policy_blockers, has_missing_prices,

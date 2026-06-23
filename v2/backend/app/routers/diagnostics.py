@@ -4681,3 +4681,71 @@ async def financial_truth_baseline(
     )
 
     return result
+
+
+# ── Stage 11B — Current price truth repair endpoint ───────────────────────────
+
+
+class CurrentPriceTruthRepairRequest(BaseModel):
+    """Stage 11B — current price truth repair request.
+
+    dry_run defaults to True. Set dry_run=false to write price_history rows
+    for missing/stale open-position tickers. All other fields are fixed by
+    the repair logic.
+    """
+    dry_run: bool = True
+
+
+@router.post("/current-price-truth-repair")
+async def current_price_truth_repair(
+    payload: CurrentPriceTruthRepairRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 11B — operator-only current price truth repair.
+
+    Identifies open-position tickers with missing or stale price_history rows
+    and optionally fetches + writes current prices via free providers:
+      - yfinance (Yahoo Finance v8 chart API) for equities and ETFs
+      - CoinGecko (free, no key) for supported crypto tickers
+
+    Uses per-ticker price_history queries to avoid Supabase 1000-row default-
+    cap truncation (the Stage 10C.2 VTI truncation root cause pattern).
+
+    Invariants:
+    - Cert-gated (X-Finance-Runtime-Cert-Secret required)
+    - Feature-flag gated (CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true required)
+    - dry_run=true by default — no writes without explicit dry_run=false
+    - Writes only to price_history — no other table is modified
+    - No LLM calls
+    - No Buy/Hold/Trim/Sell policy changes
+    - No snapshot or position mutations
+    - Safe to run repeatedly (idempotent upsert on ticker+price_date)
+    """
+    settings = get_settings()
+    if not settings.current_price_truth_repair_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
+
+    from ..services.current_price_truth_repair_v1 import run_current_price_truth_repair
+
+    db_client = get_supabase_client()
+    result = await run_current_price_truth_repair(
+        db_client=db_client,
+        user_id=str(user.id),
+        dry_run=payload.dry_run,
+    )
+
+    logger.info(
+        "current_price_truth_repair user=%s dry_run=%s open=%s missing=%s "
+        "stale=%s fetched=%s written=%s unsupported=%s errors=%s",
+        getattr(user, "email", "unknown"),
+        result.get("dry_run"),
+        result.get("open_tickers_count"),
+        result.get("missing_before_count"),
+        result.get("stale_before_count"),
+        result.get("successful_fetch_count"),
+        result.get("rows_written"),
+        result.get("unsupported_count"),
+        result.get("provider_error_count"),
+    )
+
+    return result

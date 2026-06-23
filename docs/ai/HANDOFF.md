@@ -1,8 +1,21 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-22 (Stage 11A — Financial Truth Baseline diagnostic; 38/38 tests pass; no UI, no SQL migration, no provider calls, no writes).
+Last updated: 2026-06-23 (Stage 11B — Current Price Truth Repair; 41/41 tests pass; no UI, no SQL migration, no LLM calls).
 
-**Stage 11A — Financial Truth Baseline Diagnostic (current PR):** Backend/tests/docs only. No UI, no SQL migration, no provider calls, no LLM calls, no writes.
+**Stage 11B — Current Price Truth Repair (current PR):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls. Repairs price_history for open-position tickers that are missing or stale so Stage 11A market_value_sum becomes non-null.
+- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/current-price-truth-repair` — cert-gated + feature-flag gated (`CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true` required, else 403).
+- **New service:** `v2/backend/app/services/current_price_truth_repair_v1.py` — async. Loads open positions (same semantics as Stage 11A: ticker present, shares > 0, category != SELL). Per-ticker price_history queries avoid Supabase 1000-row default-cap truncation.
+- **Providers:** yfinance (Yahoo Finance v8 chart API, 5-day window) for equities/ETFs; CoinGecko free API (no key) for supported crypto tickers. Crypto tickers not in `_CRYPTO_IDS` return `unsupported` (non-fatal). No paid providers.
+- **dry_run=true default:** No writes without explicit `dry_run=false`. Writes only to price_history (upsert on ticker+price_date). No snapshot, position, recommendation, or agent table writes.
+- **New config flag:** `current_price_truth_repair_enabled: bool = False`
+- **Per-ticker response fields:** `current_price_status` (recent/stale/missing/unsupported/provider_error), `latest_price_date`, `latest_price_value`, `business_days_old`, `provider_used`, `write_status` (skipped_dry_run/written/unchanged/failed/unsupported/skipped_fetch_failed).
+- **Summary fields:** `open_tickers_count`, `missing_before_count`, `stale_before_count`, `attempted_fetch_count`, `successful_fetch_count`, `unsupported_count`, `provider_error_count`, `rows_written`, `safe_to_rerun=True`, `next_step=rerun_financial_truth_baseline`.
+- **Truncation protection:** Per-ticker queries (limit=10) replace the bulk query pattern. `price_query_truncated` is False unless a per-ticker query hits the limit (anomalous). `_SUPABASE_DEFAULT_ROW_CAP=1000` constant documented for reference.
+- **Tests:** 41/41 pass (35 service + 6 router). Covers cert-gating, feature-flag gating, dry_run default, open-position exclusions, missing/stale detection, unsupported crypto, known crypto→CoinGecko routing, provider errors, no-writes invariant, no-recommendation-writes invariant, >1000-row truncation protection.
+- **Files changed:** `v2/backend/app/services/current_price_truth_repair_v1.py` (new), `v2/backend/app/routers/diagnostics.py` (endpoint added), `v2/backend/app/config.py` (flag added), `v2/backend/tests/test_current_price_truth_repair_v1.py` (new), `v2/backend/tests/test_current_price_truth_repair_router.py` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
+- **To run repair:** Set `CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true` + cert headers → `dry_run=true` to inspect → `dry_run=false` to write → re-run Stage 11A financial-truth-baseline to verify `market_value_sum` becomes non-null.
+
+**Stage 11A — Financial Truth Baseline Diagnostic (prior PR):** Backend/tests/docs only. No UI, no SQL migration, no provider calls, no LLM calls, no writes.
 - **New endpoint:** `POST /api/v1/diagnostics/finance-intel/financial-truth-baseline` — cert-gated (X-Finance-Runtime-Cert-Secret required).
 - **New service:** `v2/backend/app/services/financial_truth_baseline_v1.py` — pure async, read-only. Inspects portfolio_snapshots, positions, price_history, transactions, recommendations, agent_runs, intel_snapshots (graceful if absent).
 - **7 output sections:** snapshot_truth, position_derived_truth, transaction_derived_truth, price_truth, intelligence_layer, reconciliation, verdict.

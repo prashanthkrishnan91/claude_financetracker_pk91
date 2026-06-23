@@ -4749,3 +4749,66 @@ async def current_price_truth_repair(
     )
 
     return result
+
+
+# ── Stage 12B — Next-buy policy diagnostic endpoint ───────────────────────────
+
+
+class NextBuyPolicyDiagnosticRequest(BaseModel):
+    """Stage 12B — conservative next-buy policy diagnostic request.
+
+    cash_to_deploy: required, must be > 0.
+    max_positions:  maximum number of buy candidates to return (default 5).
+    min_trade_amount: minimum dollar amount per candidate (default 25).
+    """
+    cash_to_deploy: float = Field(..., gt=0, description="Cash available to deploy (must be > 0)")
+    max_positions: int = Field(default=5, ge=1, le=20)
+    min_trade_amount: float = Field(default=25.0, ge=1.0)
+
+
+@router.post("/next-buy-policy-diagnostic")
+async def next_buy_policy_diagnostic(
+    payload: NextBuyPolicyDiagnosticRequest,
+    user: AuthenticatedUser = Depends(_get_runtime_cert_user),
+) -> dict:
+    """Stage 12B — deterministic conservative next-buy policy diagnostic.
+
+    Generates target allocation weights from a conservative policy and returns
+    a ranked list of buy candidates for the supplied cash amount.
+
+    Invariants:
+    - Read-only — no writes to any table
+    - No live provider calls
+    - No LLM calls
+    - No recommendation rows created
+    - No Buy/Hold/Trim/Sell policy changes
+    - Cert-gated (X-Finance-Runtime-Cert-Secret required)
+
+    Policy: ETF floor 40%, individual stock cap 20%, speculative cap 5%,
+    crypto total cap 5%, alternatives total cap 5%.
+    Intel v3 conviction overlay is optional — endpoint degrades gracefully
+    without it, returning policy_only confidence candidates.
+    """
+    from ..services.allocation_policy_v1 import run_next_buy_policy_diagnostic
+
+    db_client = get_supabase_client()
+    result = await run_next_buy_policy_diagnostic(
+        db_client=db_client,
+        user_id=str(user.id),
+        cash_to_deploy=payload.cash_to_deploy,
+        max_positions=payload.max_positions,
+        min_trade_amount=payload.min_trade_amount,
+    )
+
+    logger.info(
+        "next_buy_policy_diagnostic user=%s cash=%.2f policy_status=%s "
+        "candidates=%d allocated=%.2f intel_overlay=%s",
+        getattr(user, "email", "unknown"),
+        payload.cash_to_deploy,
+        result.get("verdict", {}).get("policy_status"),
+        len(result.get("next_buy_candidates", [])),
+        result.get("cash_plan", {}).get("allocated_cash", 0.0),
+        result.get("generated_policy", {}).get("intel_v3_overlay_used"),
+    )
+
+    return result

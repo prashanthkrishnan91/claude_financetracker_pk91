@@ -1,6 +1,17 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-23 (Stage 11B — Current Price Truth Repair; 41/41 tests pass; no UI, no SQL migration, no LLM calls).
+Last updated: 2026-06-23 (Stage 12A — Allocation & Rebalancing Reality Audit; docs/audit only; no code, no SQL, no UI, no LLM calls).
+
+**Stage 12A — Allocation & Rebalancing Reality Audit (current PR):** Docs/audit only. No code, no SQL migration, no UI, no provider calls, no LLM calls, no writes.
+- **Audit doc:** `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md`
+- **Components found:** allocation_engine, legacy allocation router, recommendation_engine (deterministic + LLM paths), intel_v3_service (read path + worker), per_ticker_analyst, deploy_v3 router, deploy_sizing_source_adapter_v1, deploy_target_allocation_bridge, deployment_engine_v2, adaptive_deployment, deposit_service (schedule infra + hardcoded weights).
+- **Safe to reuse now:** `intel_v3_service` read path, `deploy_sizing_source_adapter_v1`, `deploy_target_allocation_bridge`.
+- **Safe after truth gate:** allocation_engine, legacy allocation router, recommendation_engine deterministic methods, per_ticker_analyst, deploy_v3 router, deployment_engine_v2, adaptive_deployment.
+- **Patch required:** deposit_service hardcoded weight formula (`_BREAKDOWN`); `portfolio_advisor()` LLM advisory label enforcement.
+- **Critical gap:** No target weight generator exists. `deploy_target_allocation_bridge.py` explicitly defers this. Stage 12B must build `allocation_policy_v1.py`.
+- **Stage 12B spec:** Conservative profile policy → generate target weights (no user input) → `GET /deploy/v3/next-buy?cash_to_deploy=X` endpoint → deterministic BUY ranking by conviction × gap → zero LLM, zero providers.
+- **No existing tests assert old unsafe behavior** requiring removal in this audit PR.
+- **Files changed:** `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
 
 **Stage 11B — Current Price Truth Repair (current PR):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls. Repairs price_history for open-position tickers that are missing or stale so Stage 11A market_value_sum becomes non-null.
 - **New endpoint:** `POST /api/v1/diagnostics/finance-intel/current-price-truth-repair` — cert-gated + feature-flag gated (`CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true` required, else 403).
@@ -231,9 +242,9 @@ This file is **current operational state**, not a historical log. It is meant to
 
 ## Current product stage
 
-- Roadmap stage: **Stage 9J.1** — Portfolio weight context rendered in Intel drawer (PR open).
-- Current PR: Stage 9J.1 open.
-- Next: after Stage 9J.1 merges, wire `etf_provider_outputs` in card_meta when `intel_v3_etf_nport_evidence_enabled=True` and NPORT artifacts are available (Stage 9K). Separately compute portfolio overlap/redundancy signals to populate `etf_upstream_signals`.
+- Roadmap stage: **Stage 12A** — Allocation & Rebalancing Reality Audit (PR open). Prior stage: Stage 11B certified financial truth (`truth_status=certified`, `reconciliation=pass`, `snapshot_portfolio_value=53796.87`, `position_derived_market_value=53759.82`, 33/33 tickers priced).
+- Current PR: Stage 12A audit doc only (no code changes, no SQL, no UI, no LLM calls).
+- Next: **Stage 12B** — Conservative profile allocation policy + "what should I buy next with $X?" endpoint. See `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md` §6 for full spec. Key constraint: no user-defined manual target weights; policy is generated from conservative profile + Intel v3 certified snapshot.
 - North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
 
 

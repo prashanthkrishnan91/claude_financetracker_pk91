@@ -888,7 +888,14 @@ async def run_next_buy_policy_diagnostic(
         "verdict": {
             "policy_status": policy_status,
             "recommendations_trusted": False,
-            "numeric_plan_trusted": policy_status in ("ready", "degraded") and not policy_blockers,
+            "numeric_plan_trusted": (
+                policy_status == "ready"
+                and recon_status == "pass"
+                and price_coverage_status == "ok"
+                and not missing_price_tickers
+                and not stale_price_tickers
+                and not policy_blockers
+            ),
             "next_required_fix": _next_fix(
                 policy_status, policy_blockers, has_missing_prices,
                 has_stale_prices, recon_status,
@@ -913,5 +920,5 @@ def _next_fix(
     if has_stale_prices:
         return "Run Stage 11B current-price-truth-repair to refresh stale price_history rows"
     if recon_status == "degraded":
-        return "Reconciliation degraded — refresh portfolio snapshot or investigate price drift"
+        return "Reconciliation degraded — run Stage 11B current-price-truth-repair and refresh portfolio snapshot"
     return "No immediate fix required — policy is ready"

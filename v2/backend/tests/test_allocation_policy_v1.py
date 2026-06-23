@@ -847,3 +847,85 @@ class TestRunNextBuyPolicyDiagnostic:
         assert "AAPL" in td["stale_price_tickers"]
         # Degraded, not blocked
         assert result["verdict"]["policy_status"] == "degraded"
+
+
+# ── numeric_plan_trusted contract tests ───────────────────────────────────────
+
+class TestNumericPlanTrusted:
+    """Stage 12B contract: numeric_plan_trusted is True only when all truth conditions pass."""
+
+    @pytest.mark.asyncio
+    async def test_ready_pass_complete_prices_trusted(self):
+        """policy_status=ready + reconciliation pass + complete price coverage => numeric_plan_trusted True."""
+        positions = [_pos("VOO", shares=20)]
+        prices = {"VOO": [_price("VOO", close=450.0, days_old=0)]}
+        mv = 20 * 450.0  # 9000
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        assert result["verdict"]["policy_status"] == "ready"
+        assert result["truth_dependency"]["reconciliation_status"] == "pass"
+        assert result["truth_dependency"]["price_coverage_status"] == "ok"
+        assert result["verdict"]["numeric_plan_trusted"] is True
+
+    @pytest.mark.asyncio
+    async def test_missing_price_coverage_makes_numeric_plan_untrusted(self):
+        """Missing price for a held ticker => policy_status degraded => numeric_plan_trusted False."""
+        positions = [_pos("VOO"), _pos("ZZZZ")]
+        prices = {"VOO": [_price("VOO", close=450.0)], "ZZZZ": []}  # ZZZZ has no price
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=4500.0)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        assert result["verdict"]["policy_status"] == "degraded"
+        assert "ZZZZ" in result["truth_dependency"]["missing_price_tickers"]
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert result["verdict"]["recommendations_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_stale_price_coverage_makes_numeric_plan_untrusted(self):
+        """Stale price for a held ticker => policy_status degraded => numeric_plan_trusted False."""
+        positions = [_pos("AAPL")]
+        prices = {"AAPL": [_price("AAPL", close=200.0, days_old=14)]}  # 14 days = stale
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=2000.0)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        assert result["verdict"]["policy_status"] == "degraded"
+        assert "AAPL" in result["truth_dependency"]["stale_price_tickers"]
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert result["verdict"]["recommendations_trusted"] is False
+        assert "Stage 11B" in result["verdict"]["next_required_fix"]
+
+    @pytest.mark.asyncio
+    async def test_degraded_reconciliation_makes_numeric_plan_untrusted(self):
+        """Snapshot value 4% off from position_mv => recon degraded => numeric_plan_trusted False."""
+        positions = [_pos("AAPL", shares=10)]
+        prices = {"AAPL": [_price("AAPL", close=200.0)]}  # position_mv = 2000
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=2080.0)  # ~4% off
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        assert result["truth_dependency"]["reconciliation_status"] == "degraded"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert result["verdict"]["recommendations_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_blocked_reconciliation_makes_numeric_plan_untrusted(self):
+        """Snapshot >5% off => reconciliation blocked => policy blocked => numeric_plan_trusted False."""
+        positions = [_pos("AAPL", shares=10)]
+        prices = {"AAPL": [_price("AAPL", close=200.0)]}  # position_mv = 2000
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=3000.0)  # 50% off
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0,
+        )
+        assert result["truth_dependency"]["reconciliation_status"] == "blocked"
+        assert result["verdict"]["policy_status"] == "blocked"
+        assert result["verdict"]["numeric_plan_trusted"] is False
+        assert result["verdict"]["recommendations_trusted"] is False

@@ -1,4 +1,4 @@
-"""Stage 12B — Conservative Allocation Policy v1.
+"""Stage 12C — Conservative Allocation Policy v1.
 
 Read-only. No writes. No provider calls. No LLM calls.
 Generates conservative target weights from Stage 11-certified portfolio truth
@@ -8,6 +8,10 @@ Policy: ETF floor 40%, individual stock cap 20%, speculative cap 5%,
 crypto total cap 5%, alternatives total cap 5%, same-theme cap 40%.
 Intel v3 conviction overlay is optional — endpoint degrades gracefully
 without it using neutral defaults.
+
+Stage 12C adds a deterministic core ETF preference policy for broad_index_etf
+candidates: VTI > VOO > SPY > QQQ. Preference order governs over raw gap size
+so SPY's larger gap cannot displace an eligible underweight VTI.
 """
 
 from __future__ import annotations
@@ -20,6 +24,17 @@ logger = logging.getLogger(__name__)
 
 DIAGNOSTIC_VERSION = "allocation_policy_v1"
 POLICY_VERSION = "conservative_profile_policy_v1"
+
+# ── Stage 12C: Core ETF preference order for broad_index_etf group ────────────
+# Preference governs within the group when group is underweight.
+# VTI = broad total-US core; VOO/SPY = S&P 500 core; QQQ = growth/tech-tilted.
+BROAD_INDEX_CORE_PREFERENCE_ORDER: list[str] = ["VTI", "VOO", "SPY", "QQQ"]
+
+# Numeric rank: VTI=4, VOO=3, SPY=2, QQQ=1. Unknown tickers get 0.
+_CORE_ETF_PREFERENCE_RANK: dict[str, int] = {
+    ticker: len(BROAD_INDEX_CORE_PREFERENCE_ORDER) - i
+    for i, ticker in enumerate(BROAD_INDEX_CORE_PREFERENCE_ORDER)
+}
 
 # ── Staleness / reconciliation thresholds (same as Stage 11A) ────────────────
 SNAPSHOT_STALE_HOURS: int = 24
@@ -509,9 +524,19 @@ def _rank_buy_candidates(
     """Build ranked list of buy candidates.
 
     Primary: ETF/diversification priority when ETF floor is not met.
-    Secondary: positive dollar gap.
+    Secondary (broad_index_etf): core ETF preference order (VTI>VOO>SPY>QQQ).
     Tertiary: Intel v3 conviction if available.
+    Quaternary: positive gap size.
+
+    For broad_index_etf, preference order governs within the group — a larger
+    SPY gap does not displace an eligible underweight VTI.
     """
+    # Pre-compute eligible broad_index_etf candidate tickers for reason code context.
+    eligible_broad_tickers: set[str] = {
+        t for t, tg in ticker_gaps.items()
+        if tg["eligible_for_buy"] and tg["gap_pct"] > 0 and tg["group"] == GROUP_BROAD_ETF
+    }
+
     candidates = []
     for ticker, tg in ticker_gaps.items():
         if not tg["eligible_for_buy"]:
@@ -531,6 +556,43 @@ def _rank_buy_candidates(
         conviction_rank = _CONVICTION_RANK.get(conviction, 0)
         confidence = "policy_plus_intel" if intel_overlay_used and conviction != "neutral" else "policy_only"
 
+        # ── Stage 12C: core ETF preference for broad_index_etf ───────────────
+        core_preference_rank = 0
+        selection_policy = "policy_v1"
+        preference_rank: int | None = None
+        preference_reason: str | None = None
+        skipped_higher_preference_tickers: list[str] = []
+        extra_reason_codes: list[str] = []
+
+        if group == GROUP_BROAD_ETF:
+            pref_rank = _CORE_ETF_PREFERENCE_RANK.get(ticker, 0)
+            core_preference_rank = pref_rank
+            selection_policy = "core_etf_preference_v1"
+            preference_rank = pref_rank if pref_rank > 0 else None
+
+            if pref_rank > 0:
+                preference_reason = "preferred_core_broad_market_etf"
+                extra_reason_codes.append("core_etf_preference")
+
+                # Tickers with higher preference that are held but NOT eligible candidates
+                for higher_ticker, higher_rank in _CORE_ETF_PREFERENCE_RANK.items():
+                    if higher_rank <= pref_rank:
+                        continue
+                    if higher_ticker not in ticker_gaps:
+                        continue  # not held in this portfolio
+                    htg = ticker_gaps[higher_ticker]
+                    if not htg["eligible_for_buy"] or htg["gap_pct"] <= 0:
+                        skipped_higher_preference_tickers.append(higher_ticker)
+
+                # Specific code when VTI is selected and SPY is also an eligible candidate
+                if ticker == "VTI" and "SPY" in eligible_broad_tickers:
+                    extra_reason_codes.append("preferred_vti_over_spy")
+        # ─────────────────────────────────────────────────────────────────────
+
+        reason_codes = (
+            _build_reason_codes(group, group_gaps, etf_floor_met) + extra_reason_codes
+        )
+
         candidates.append({
             "ticker": ticker,
             "group": group,
@@ -541,8 +603,12 @@ def _rank_buy_candidates(
             "classification": group,
             "conviction": conviction,
             "confidence": confidence,
-            "reason_codes": _build_reason_codes(group, group_gaps, etf_floor_met),
-            "_sort_key": (group_priority, conviction_rank, gap_pct),
+            "reason_codes": reason_codes,
+            "selection_policy": selection_policy,
+            "preference_rank": preference_rank,
+            "preference_reason": preference_reason,
+            "skipped_higher_preference_tickers": skipped_higher_preference_tickers,
+            "_sort_key": (group_priority, conviction_rank, core_preference_rank, gap_pct),
             "is_unknown_ticker": tg.get("is_unknown_ticker", False),
         })
 

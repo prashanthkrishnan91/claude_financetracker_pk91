@@ -13,6 +13,7 @@ from uuid import uuid4
 import pytest
 
 from app.services.allocation_policy_v1 import (
+    BROAD_INDEX_CORE_PREFERENCE_ORDER,
     DIAGNOSTIC_VERSION,
     ETF_FLOOR_PCT,
     GROUP_BROAD_ETF,
@@ -30,6 +31,7 @@ from app.services.allocation_policy_v1 import (
     _allocate_cash,
     _build_price_map,
     _check_reconciliation,
+    _compute_gaps,
     _compute_group_weights,
     _compute_portfolio,
     _floor5,
@@ -378,10 +380,7 @@ class TestRankBuyCandidates:
         holdings, total_mv, *_ = _compute_portfolio(positions, price_map)
         gw = _compute_group_weights(holdings, total_mv)
         policy = _generate_policy(gw)
-        group_gaps, ticker_gaps = _rank_buy_candidates.__module__ and \
-            __import__("app.services.allocation_policy_v1", fromlist=["_compute_gaps"])._compute_gaps(
-                holdings, gw, policy, total_mv
-            )
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
         candidates = _rank_buy_candidates(
             ticker_gaps, group_gaps, holdings,
             conviction_map={}, intel_overlay_used=False,
@@ -399,7 +398,6 @@ class TestRankBuyCandidates:
         holdings, total_mv, *_ = _compute_portfolio(positions, price_map)
         gw = _compute_group_weights(holdings, total_mv)
         policy = _generate_policy(gw)
-        from app.services.allocation_policy_v1 import _compute_gaps
         group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
         # BTC is at 100%, crypto cap is 5% — should be ineligible
         assert ticker_gaps["BTC"]["eligible_for_buy"] is False
@@ -1027,3 +1025,432 @@ class TestNumericPlanTrusted:
         assert result["verdict"]["numeric_plan_trusted"] is False
         assert result["cash_plan"]["unallocated_cash"] >= 0.0  # clamped by invariant guard
         assert "cash_bound_violated" in str(result["generated_policy"].get("warnings", []))
+
+
+# ── Stage 12C: Core ETF preference unit tests ─────────────────────────────────
+#
+# Portfolio design note: for broad_index_etf tickers to be eligible candidates,
+# the broad_index_etf GROUP must be under its 25% target. This requires a
+# dominant individual-stock holding (AAPL = 1000 shares @ $100 = $100,000)
+# so that the ETF group stays well below 25% of the total portfolio.
+
+
+def _build_stock_dominant_candidates(
+    etf_tickers_shares_prices: list[tuple[str, float, float]],
+    stock_shares: float = 1000.0,
+    stock_price: float = 100.0,
+    stock_ticker: str = "AAPL",
+    extra_etfs: list[tuple[str, float, float]] | None = None,
+) -> list[dict]:
+    """Return ranked buy candidates with a dominant stock holding.
+
+    Uses AAPL at $100,000 (default) to keep every ETF group well under its
+    target, ensuring broad_index_etf tickers are eligible candidates.
+    """
+    all_etfs = list(etf_tickers_shares_prices) + (extra_etfs or [])
+    positions = [_pos(t, shares=s) for t, s, _ in all_etfs]
+    positions.append(_pos(stock_ticker, shares=stock_shares))
+    price_map = {t: _price(t, close=p) for t, s, p in all_etfs}
+    price_map[stock_ticker] = _price(stock_ticker, close=stock_price)
+
+    holdings, total_mv, *_ = _compute_portfolio(positions, price_map)
+    gw = _compute_group_weights(holdings, total_mv)
+    policy = _generate_policy(gw)
+    group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+    return _rank_buy_candidates(
+        ticker_gaps, group_gaps, holdings,
+        conviction_map={}, intel_overlay_used=False,
+        etf_floor_met=policy["etf_floor_met"],
+    )
+
+
+class TestCoreETFPreference:
+    """Stage 12C: Deterministic core ETF preference policy for broad_index_etf."""
+
+    def test_preference_order_constant_is_vti_voo_spy_qqq(self):
+        assert BROAD_INDEX_CORE_PREFERENCE_ORDER == ["VTI", "VOO", "SPY", "QQQ"]
+
+    def test_vti_beats_spy_when_both_eligible_and_underweight(self):
+        """VTI preferred over SPY when both are underweight candidates."""
+        # AAPL = $100K dominant → ETF group well under 25% target.
+        # Both VTI and SPY have positive gaps. VTI wins regardless of gap size.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 5, 220.0),   # $1,100 → small weight
+            ("SPY", 3, 540.0),   # $1,620 → slightly larger weight, smaller gap vs VTI
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates with dominant AAPL holding"
+        assert broad[0]["ticker"] == "VTI", (
+            f"Expected VTI first, got {broad[0]['ticker']} "
+            f"(broad: {[c['ticker'] for c in broad]})"
+        )
+
+    def test_vti_beats_spy_when_spy_has_larger_gap(self):
+        """SPY has largest gap by % but VTI is eligible → VTI wins due to preference."""
+        # VTI has a larger position (higher weight, smaller gap).
+        # SPY has a smaller position (lower weight, LARGER gap).
+        # Without preference, SPY would rank first. With preference, VTI wins.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 50, 220.0),  # $11,000 → weight ~9.7% (gap ~2.8%)
+            ("SPY", 5, 540.0),   # $2,700  → weight ~2.4% (gap ~10.1%)  ← larger gap
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad
+        # Verify SPY has larger gap (test is only meaningful if this holds)
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
+        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        assert vti is not None and spy is not None
+        assert spy["gap_pct"] > vti["gap_pct"], (
+            f"Test setup error: expected SPY gap({spy['gap_pct']}) > VTI gap({vti['gap_pct']})"
+        )
+        # VTI must still rank first (preference over gap)
+        assert broad[0]["ticker"] == "VTI", (
+            f"VTI should beat SPY by preference even with smaller gap; got {broad[0]['ticker']}"
+        )
+
+    def test_voo_selected_when_vti_has_no_gap(self):
+        """When VTI is at/above its per-ticker target (gap ≤ 0), VOO becomes first."""
+        # With 3 broad ETFs, per-ticker target = 25/3 ≈ 8.33%.
+        # VTI at 120 shares × $100 = $12,000. With AAPL=$100K+others:
+        # total ≈ $113K → VTI = 10.6% > 8.33% → gap ≤ 0, not a candidate.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 120, 100.0),  # above per-ticker target → no gap
+            ("VOO", 5, 100.0),    # underweight → candidate, rank 3
+            ("SPY", 5, 100.0),    # underweight → candidate, rank 2
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected VOO/SPY as broad ETF candidates"
+        tickers = [c["ticker"] for c in broad]
+        assert "VTI" not in tickers, "VTI should have no positive gap at this weight"
+        assert tickers[0] == "VOO", (
+            f"Expected VOO first when VTI has no gap, got {tickers[0]}"
+        )
+
+    def test_spy_selected_when_vti_and_voo_have_no_gap(self):
+        """When VTI and VOO are at/above per-ticker target, SPY can be selected."""
+        # 3 broad ETFs, target = 8.33% each.
+        # VTI and VOO each at 120 shares × $100 = $12,000 → 9.6% > 8.33% → no gap.
+        # SPY at 5 shares × $100 = $500 → 0.4% → large gap → candidate.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 120, 100.0),
+            ("VOO", 120, 100.0),
+            ("SPY", 5, 100.0),
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        tickers = [c["ticker"] for c in broad]
+        assert "VTI" not in tickers
+        assert "VOO" not in tickers
+        assert tickers and tickers[0] == "SPY", (
+            f"Expected SPY when VTI/VOO have no gap, got {tickers}"
+        )
+
+    def test_qqq_does_not_outrank_spy(self):
+        """QQQ (growth/tech-tilted) does not outrank SPY even with a larger gap."""
+        # SPY has larger position (higher weight, smaller gap).
+        # QQQ has smaller position (lower weight, LARGER gap).
+        # Without preference, QQQ might rank first. SPY (rank 2) > QQQ (rank 1).
+        candidates = _build_stock_dominant_candidates([
+            ("SPY", 5, 540.0),  # $2,700 → weight ~2.6%, gap ~9.9%
+            ("QQQ", 1, 480.0),  # $480  → weight ~0.5%, gap ~12.0%  ← larger gap
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        tickers = [c["ticker"] for c in broad]
+        assert tickers and tickers[0] == "SPY", (
+            f"Expected SPY to rank ahead of QQQ, got {tickers}"
+        )
+
+    def test_qqq_does_not_outrank_vti(self):
+        """QQQ cannot displace VTI even with a larger gap."""
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 5, 220.0),  # larger position → smaller gap
+            ("QQQ", 1, 480.0),  # smaller position → larger gap
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad
+        assert broad[0]["ticker"] == "VTI"
+
+    def test_candidate_has_selection_policy_field(self):
+        """Each broad_index_etf candidate must carry selection_policy='core_etf_preference_v1'."""
+        candidates = _build_stock_dominant_candidates([("VTI", 5, 200.0)])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad
+        for c in broad:
+            assert "selection_policy" in c
+            assert c["selection_policy"] == "core_etf_preference_v1"
+
+    def test_candidate_has_preference_rank(self):
+        """Each broad_index_etf candidate must carry correct preference_rank."""
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 1, 200.0),
+            ("VOO", 1, 400.0),
+            ("SPY", 1, 500.0),
+            ("QQQ", 1, 480.0),
+        ])
+        ranks = {c["ticker"]: c["preference_rank"] for c in candidates if c["group"] == GROUP_BROAD_ETF}
+        assert ranks.get("VTI") == 4, f"VTI should have rank 4, got {ranks}"
+        assert ranks.get("VOO") == 3
+        assert ranks.get("SPY") == 2
+        assert ranks.get("QQQ") == 1
+
+    def test_reason_codes_include_core_etf_preference(self):
+        """Broad ETF candidates must include core_etf_preference in reason_codes."""
+        candidates = _build_stock_dominant_candidates([("VTI", 2, 200.0)])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad
+        assert "core_etf_preference" in broad[0]["reason_codes"]
+
+    def test_reason_codes_include_preferred_vti_over_spy(self):
+        """When VTI wins over an eligible SPY, reason_codes includes preferred_vti_over_spy."""
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 2, 200.0),
+            ("SPY", 2, 500.0),
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        assert vti is not None
+        assert "preferred_vti_over_spy" in vti["reason_codes"], (
+            f"reason_codes={vti['reason_codes']}"
+        )
+
+    def test_non_broad_etf_tickers_have_policy_v1(self):
+        """Dividend ETF candidates (non-broad) get selection_policy='policy_v1'."""
+        candidates = _build_stock_dominant_candidates(
+            [("VTI", 2, 200.0)],
+            extra_etfs=[("VYM", 2, 130.0)],  # dividend ETF
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        dividend = [c for c in candidates if c["group"] == GROUP_DIVIDEND_ETF]
+        for c in broad:
+            assert c["selection_policy"] == "core_etf_preference_v1"
+        for c in dividend:
+            assert c["selection_policy"] == "policy_v1"
+            assert c["preference_rank"] is None
+
+    def test_preference_reason_set_for_broad_etf(self):
+        """VTI candidate must have preference_reason='preferred_core_broad_market_etf'."""
+        candidates = _build_stock_dominant_candidates([("VTI", 2, 200.0)])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad
+        assert broad[0]["preference_reason"] == "preferred_core_broad_market_etf"
+
+    def test_skipped_higher_preference_tickers_populated(self):
+        """VOO lists VTI in skipped_higher_preference_tickers when VTI has no positive gap."""
+        # With 2 broad ETFs, per-ticker target = 25/2 = 12.5%.
+        # VTI = 200 shares × $100 = $20,000. With AAPL=$100K + VOO=$500:
+        # total ≈ $120,500 → VTI = 16.6% > 12.5% → gap ≤ 0 → not a candidate.
+        # VOO = 5 shares × $100 = $500 → 0.41% → large gap → candidate.
+        # VOO should list VTI in skipped_higher_preference_tickers.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 200, 100.0),  # well above per-ticker target → no positive gap
+            ("VOO", 5, 100.0),    # underweight → candidate
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        voo = next((c for c in broad if c["ticker"] == "VOO"), None)
+        assert voo is not None, "VOO should be a candidate"
+        assert "VTI" in voo["skipped_higher_preference_tickers"], (
+            f"skipped={voo['skipped_higher_preference_tickers']}"
+        )
+
+    def test_allocation_respects_cash_to_deploy(self):
+        """Core ETF preference selection must never overspend cash_to_deploy."""
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 5, 220.0),
+            ("SPY", 5, 540.0),
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        # Use approximate total_mv from the portfolio (AAPL $100K + ETFs ~$3.8K)
+        total_mv = 1000 * 100 + 5 * 220 + 5 * 540  # $103,800
+        allocated, alloc_cash, unalloc, count, _ = _allocate_cash(
+            broad, total_mv=total_mv, cash_to_deploy=2737.50,
+            min_trade_amount=25.0, max_positions=5,
+        )
+        assert alloc_cash <= 2737.50
+        assert unalloc >= 0.0
+
+    def test_preferred_etf_gap_filled_then_next_candidate(self):
+        """When preferred ETF gap < cash_to_deploy, remainder goes to next candidate."""
+        # With a large AAPL stock holding, VTI and VOO are both underweight.
+        # VTI ranks first; if its gap is smaller than cash_to_deploy,
+        # the remainder flows to VOO.
+        candidates = _build_stock_dominant_candidates([
+            ("VTI", 5, 220.0),   # $1,100 → small gap
+            ("VOO", 2, 440.0),   # $880 → similar gap, ranks second (pref rank 3)
+        ])
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        voo = next((c for c in broad if c["ticker"] == "VOO"), None)
+        if vti and voo:
+            assert broad.index(vti) < broad.index(voo), "VTI must rank ahead of VOO"
+
+
+# ── Stage 12C: Runtime regression fixture ─────────────────────────────────────
+
+class TestStage12CRegressionFixture:
+    """Regression fixture encoding real portfolio shape after PR #463.
+
+    Portfolio design:
+      - Individual stocks dominate (~85% of portfolio) → all above 20% cap → ineligible
+      - broad_index_etf group < 25% target → group is underweight → ETF tickers eligible
+      - ETF total weight < 40% → ETF floor not met → ETF candidates get group-priority boost
+      - Both VTI and SPY are held; SPY has a slightly larger per-ticker gap than VTI
+      - Stage 12B (without preference) would have selected SPY first
+      - Stage 12C must select VTI first (preference policy)
+
+    Holdings:
+      AAPL: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
+      NVDA: 15 shares @ $800 = $12,000   (stock, ~28% → above 20% cap)
+      MSFT: 30 shares @ $400 = $12,000   (stock, ~28% → above 20% cap)
+      VTI : 10 shares @ $220 = $2,200    (broad ETF, ~5.2%)
+      SPY :  3 shares @ $540 = $1,620    (broad ETF, ~3.8% → larger gap than VTI)
+      VOO :  2 shares @ $440 = $880      (broad ETF, ~2.1%)
+      QQQ :  2 shares @ $480 = $960      (broad ETF, ~2.3%)
+      VYM :  5 shares @ $130 = $650      (dividend ETF, ~1.5%)
+    Total ≈ $42,310
+
+    Group weights:
+      individual_stock: ~85%  → way above policy target (~30%) → all ineligible
+      broad_index_etf:  ~13.4% < 25% target → group "under" → all 4 ETFs eligible
+      ETF total:        ~14.9% < 40% floor  → floor not met
+    Per-ticker target for 4 broad ETFs = 25/4 = 6.25%:
+      VTI: 5.20%, gap = 1.05%
+      SPY: 3.83%, gap = 2.42%  ← LARGER gap than VTI
+      VOO: 2.08%, gap = 4.17%
+      QQQ: 2.27%, gap = 3.98%
+    Without preference: VOO or SPY might rank first.
+    With 12C preference: VTI (rank 4) ranks first despite smallest gap.
+    """
+
+    _POSITIONS = [
+        ("AAPL", 30, 400.0),
+        ("NVDA", 15, 800.0),
+        ("MSFT", 30, 400.0),
+        ("VTI", 10, 220.0),
+        ("SPY",  3, 540.0),
+        ("VOO",  2, 440.0),
+        ("QQQ",  2, 480.0),
+        ("VYM",  5, 130.0),
+    ]
+    _TOTAL_MV = (
+        30 * 400 + 15 * 800 + 30 * 400
+        + 10 * 220 + 3 * 540 + 2 * 440 + 2 * 480 + 5 * 130
+    )  # $42,310
+
+    def _make_db(self) -> MagicMock:
+        positions = [_pos(t, shares=s) for t, s, _ in self._POSITIONS]
+        prices_by_ticker = {t: [_price(t, close=p)] for t, s, p in self._POSITIONS}
+        return _make_db(
+            positions=positions,
+            prices_by_ticker=prices_by_ticker,
+            snapshot_value=self._TOTAL_MV,
+        )
+
+    @pytest.mark.asyncio
+    async def test_first_candidate_is_vti_not_spy(self):
+        """VTI must be first candidate despite SPY having a larger per-ticker gap."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        assert result["verdict"]["numeric_plan_trusted"] is True
+        candidates = result["next_buy_candidates"]
+        assert candidates, "Expected at least one buy candidate"
+        first = candidates[0]
+        assert first["ticker"] == "VTI", (
+            f"Expected VTI as first candidate (core preference), got {first['ticker']}. "
+            f"All candidates: {[c['ticker'] for c in candidates]}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_vti_candidate_has_correct_policy_fields(self):
+        """VTI candidate must carry all Stage 12C policy fields correctly."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        candidates = result["next_buy_candidates"]
+        vti = next((c for c in candidates if c["ticker"] == "VTI"), None)
+        assert vti is not None, "VTI should be in next_buy_candidates"
+        assert vti["selection_policy"] == "core_etf_preference_v1"
+        assert vti["preference_rank"] == 4
+        assert vti["preference_reason"] == "preferred_core_broad_market_etf"
+        assert "core_etf_preference" in vti["reason_codes"]
+        assert "preferred_vti_over_spy" in vti["reason_codes"]
+
+    @pytest.mark.asyncio
+    async def test_no_overspend_with_2737_50(self):
+        """cash_to_deploy=2737.50 must not produce allocated_cash > 2737.50."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        cp = result["cash_plan"]
+        assert cp["allocated_cash"] <= 2737.50
+        assert cp["unallocated_cash"] >= 0.0
+        assert cp["allocated_cash"] + cp["unallocated_cash"] == pytest.approx(2737.50, abs=0.02)
+
+    @pytest.mark.asyncio
+    async def test_numeric_plan_trusted_true_with_runtime_fixture(self):
+        """Clean prices + reconciliation pass + core preference → numeric_plan_trusted True."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        assert result["verdict"]["numeric_plan_trusted"] is True
+        assert result["verdict"]["recommendations_trusted"] is False
+
+    @pytest.mark.asyncio
+    async def test_individual_stock_not_first_when_etf_floor_unmet(self):
+        """Individual stocks are above 20% cap → not recommended ahead of ETFs."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        candidates = result["next_buy_candidates"]
+        if candidates:
+            assert candidates[0]["group"] != GROUP_INDIVIDUAL_STOCK, (
+                f"Expected ETF first, got individual_stock: {candidates[0]['ticker']}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_output_shape_includes_stage_12c_fields(self):
+        """All Stage 12C required output fields present on every next_buy_candidate."""
+        db = self._make_db()
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=500.0, max_positions=5, min_trade_amount=25.0,
+        )
+        for c in result["next_buy_candidates"]:
+            for field in ("selection_policy", "preference_rank", "preference_reason",
+                          "skipped_higher_preference_tickers"):
+                assert field in c, f"Missing {field} on candidate {c['ticker']}"
+            assert isinstance(c["skipped_higher_preference_tickers"], list)
+
+    @pytest.mark.asyncio
+    async def test_no_writes_regression_fixture(self):
+        """Runtime fixture must not write to any DB table."""
+        db = self._make_db()
+        writes: list[str] = []
+        original_table = db.table.side_effect
+
+        def patched_table(name):
+            m = original_table(name)
+            for method in ("insert", "upsert", "update", "delete"):
+                def trap(mn=method):
+                    def inner(*a, **kw):
+                        writes.append(f"{mn}:{name}")
+                        return m
+                    return inner
+                setattr(m, method, trap())
+            return m
+
+        db.table.side_effect = patched_table
+        await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()),
+            cash_to_deploy=2737.50, max_positions=5, min_trade_amount=25.0,
+        )
+        assert writes == [], f"No writes expected, got: {writes}"

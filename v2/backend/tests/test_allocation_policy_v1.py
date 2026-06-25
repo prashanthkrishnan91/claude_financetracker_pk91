@@ -1251,6 +1251,147 @@ class TestCoreETFPreference:
             f"skipped={voo['skipped_higher_preference_tickers']}"
         )
 
+    def test_vti_neutral_beats_spy_high_conviction(self):
+        """VTI with neutral conviction must beat SPY with HIGH conviction.
+
+        Core ETF preference (VTI=4 > SPY=2) takes precedence over
+        Intel v3 conviction overlay within broad_index_etf group.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [_pos("VTI", shares=5), _pos("SPY", shares=5), _pos("AAPL", shares=1000)],
+            {
+                "VTI": _price("VTI", close=220.0),
+                "SPY": _price("SPY", close=540.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"SPY": "HIGH"},  # SPY has HIGH conviction
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates"
+        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
+        assert vti is not None and spy is not None
+        assert spy["conviction"] == "HIGH"
+        assert vti["conviction"] == "neutral"
+        assert broad[0]["ticker"] == "VTI", (
+            f"VTI (pref=4, neutral) must beat SPY (pref=2, HIGH); got {broad[0]['ticker']}"
+        )
+
+    def test_voo_neutral_beats_spy_high_conviction(self):
+        """VOO with neutral conviction must beat SPY with HIGH conviction (VTI not held).
+
+        When VTI is not in the portfolio, VOO (pref=3) still outranks SPY (pref=2)
+        even when SPY has HIGH conviction.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [_pos("VOO", shares=5), _pos("SPY", shares=5), _pos("AAPL", shares=1000)],
+            {
+                "VOO": _price("VOO", close=440.0),
+                "SPY": _price("SPY", close=540.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"SPY": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates"
+        voo = next((c for c in broad if c["ticker"] == "VOO"), None)
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
+        assert voo is not None and spy is not None
+        assert spy["conviction"] == "HIGH"
+        assert broad[0]["ticker"] == "VOO", (
+            f"VOO (pref=3, neutral) must beat SPY (pref=2, HIGH); got {broad[0]['ticker']}"
+        )
+
+    def test_qqq_high_conviction_does_not_outrank_vti(self):
+        """QQQ with HIGH conviction must not outrank eligible VTI/VOO/SPY.
+
+        Conviction overlay must never override core ETF preference order.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [
+                _pos("QQQ", shares=5),
+                _pos("VTI", shares=5),
+                _pos("AAPL", shares=1000),
+            ],
+            {
+                "QQQ": _price("QQQ", close=480.0),
+                "VTI": _price("VTI", close=220.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"QQQ": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates"
+        vti = next((c for c in broad if c["ticker"] == "VTI"), None)
+        qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
+        assert vti is not None and qqq is not None
+        assert qqq["conviction"] == "HIGH"
+        assert broad[0]["ticker"] == "VTI", (
+            f"VTI (pref=4) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
+        )
+
+    def test_conviction_breaks_tie_within_same_preference_rank(self):
+        """Conviction overlay is the tiebreaker when preference ranks are equal.
+
+        Two different non-broad ETF tickers (same group, both pref=0) should
+        be ranked by conviction when gap_pct is also equal.
+        VYM (HIGH) must beat SCHD (neutral) within dividend_etf group.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [
+                _pos("VYM", shares=5),
+                _pos("SCHD", shares=5),
+                _pos("AAPL", shares=1000),
+            ],
+            {
+                "VYM": _price("VYM", close=130.0),
+                "SCHD": _price("SCHD", close=130.0),  # same price → same gap
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"VYM": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        div = [c for c in candidates if c["group"] == GROUP_DIVIDEND_ETF]
+        if len(div) >= 2:
+            # VYM HIGH conviction should rank before SCHD neutral
+            vym = next((c for c in div if c["ticker"] == "VYM"), None)
+            schd = next((c for c in div if c["ticker"] == "SCHD"), None)
+            if vym and schd:
+                assert div.index(vym) < div.index(schd), (
+                    "VYM (HIGH conviction) should rank before SCHD (neutral) within same group"
+                )
+
     def test_allocation_respects_cash_to_deploy(self):
         """Core ETF preference selection must never overspend cash_to_deploy."""
         candidates = _build_stock_dominant_candidates([

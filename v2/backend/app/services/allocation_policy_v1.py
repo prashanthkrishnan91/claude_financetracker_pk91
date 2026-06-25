@@ -608,7 +608,7 @@ def _rank_buy_candidates(
             "preference_rank": preference_rank,
             "preference_reason": preference_reason,
             "skipped_higher_preference_tickers": skipped_higher_preference_tickers,
-            "_sort_key": (group_priority, conviction_rank, core_preference_rank, gap_pct),
+            "_sort_key": (group_priority, core_preference_rank, conviction_rank, gap_pct),
             "is_unknown_ticker": tg.get("is_unknown_ticker", False),
         })
 

@@ -1,8 +1,16 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-06-23 (Stage 12B — Conservative Policy Target Generator + Next Buy Diagnostic; backend/tests/docs only; no UI, no SQL, no LLM, no provider calls).
+Last updated: 2026-07-07 (Stage 12B.2 — ETF ranking fix: core_preference_rank outranks conviction_rank for broad_index_etf; backend/tests/docs only; no UI, no SQL, no LLM, no provider calls, no writes).
 
-**Stage 12B — Conservative Policy Target Generator + Next Buy Diagnostic (current PR):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls, no provider calls, no writes.
+**Stage 12B.2 — ETF Ranking Fix (current PR #465):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls, no provider calls, no writes.
+- **Bug fixed:** `_rank_buy_candidates` used a 3-tuple sort key `(group_priority, conviction_rank, gap_pct)`. Intel v3 HIGH conviction could outrank core ETF policy preference, causing SPY HIGH to beat eligible VTI neutral.
+- **Correct sort key:** `(group_priority, core_preference_rank, conviction_rank, gap_pct)` — all descending. Core preference outranks conviction for `broad_index_etf` candidates.
+- **`_CORE_ETF_PREFERENCE`:** `{"VTI": 4, "VOO": 3, "SPY": 2, "QQQ": 1}`. Non-broad-ETF tickers use `core_preference_rank = 0` (unchanged effective ordering).
+- **Tests added:** `TestBroadEtfCorePreference` (6 tests): VTI neutral beats SPY HIGH with larger gap; VOO neutral beats SPY HIGH when VTI ineligible; QQQ HIGH does not outrank VTI/VOO/SPY; full VTI>VOO>SPY>QQQ order.
+- **Test run:** 50/75 pass. 25 pre-existing async failures (pytest-asyncio missing) unrelated to this change.
+- **Files changed:** `v2/backend/app/services/allocation_policy_v1.py`, `v2/backend/tests/test_allocation_policy_v1.py`, `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
+
+**Stage 12B — Conservative Policy Target Generator + Next Buy Diagnostic (PR #462/#463):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls, no provider calls, no writes.
 - **New service:** `v2/backend/app/services/allocation_policy_v1.py` — deterministic, read-only. Loads open positions + per-ticker price_history + latest portfolio_snapshot + optional Intel v3 snapshot. Computes current weights, generates conservative target weights (ETF floor 40%, individual stock cap 20%, speculative cap 5%, crypto total cap 5%, alternatives total cap 5%, same-theme cap 40%), computes group + ticker gaps, ranks buy candidates, allocates cash (min_trade_amount, max_positions, $5 rounding).
 - **New endpoint:** `POST /api/v1/diagnostics/finance-intel/next-buy-policy-diagnostic` — cert-gated. Accepts `cash_to_deploy` (required, >0), `max_positions` (default 5), `min_trade_amount` (default 25). Read-only. No writes, no LLM, no providers.
 - **Intel v3 overlay:** Optional. If unavailable/stale/no BUY cards, endpoint degrades gracefully — returns `policy_only` confidence candidates with `intel_v3_overlay_warning`. Endpoint never blocks on Intel v3 absence.

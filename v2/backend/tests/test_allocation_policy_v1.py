@@ -406,6 +406,108 @@ class TestRankBuyCandidates:
         assert "cap" in (ticker_gaps["BTC"]["ineligibility_reason"] or "")
 
 
+# ── broad_index_etf core preference ranking ───────────────────────────────────
+
+class TestBroadEtfCorePreference:
+    """Verify that for broad_index_etf candidates, core preference outranks conviction.
+
+    Sort key is (group_priority, core_preference_rank, conviction_rank, gap_pct).
+    VTI(4) > VOO(3) > SPY(2) > QQQ(1) regardless of conviction.
+    """
+
+    def _ticker_gap(self, ticker: str, gap_pct: float, eligible: bool = True) -> dict:
+        from app.services.allocation_policy_v1 import classify_ticker
+        group, is_unknown = classify_ticker(ticker)
+        return {
+            "ticker": ticker,
+            "group": group,
+            "current_weight_pct": 5.0,
+            "target_weight_pct": 5.0 + gap_pct,
+            "per_ticker_cap_pct": 40.0,
+            "gap_pct": gap_pct,
+            "eligible_for_buy": eligible,
+            "ineligibility_reason": None if eligible else "test_ineligible",
+            "is_unknown_ticker": is_unknown,
+        }
+
+    def _rank(self, ticker_gaps: dict, conviction_map: dict | None = None) -> list[str]:
+        from app.services.allocation_policy_v1 import _rank_buy_candidates
+        candidates = _rank_buy_candidates(
+            ticker_gaps=ticker_gaps,
+            group_gaps={},
+            holdings={},
+            conviction_map=conviction_map or {},
+            intel_overlay_used=bool(conviction_map),
+            etf_floor_met=True,
+        )
+        return [c["ticker"] for c in candidates]
+
+    def test_vti_neutral_beats_spy_high_larger_gap(self):
+        """VTI neutral ranks before SPY HIGH even when SPY has a larger gap."""
+        ticker_gaps = {
+            "VTI": self._ticker_gap("VTI", gap_pct=5.0),
+            "SPY": self._ticker_gap("SPY", gap_pct=10.0),
+        }
+        conviction_map = {"SPY": "HIGH", "VTI": "neutral"}
+        ranked = self._rank(ticker_gaps, conviction_map)
+        assert ranked[0] == "VTI", f"Expected VTI first, got {ranked}"
+        assert ranked[1] == "SPY"
+
+    def test_voo_neutral_beats_spy_high_when_vti_ineligible(self):
+        """VOO neutral ranks before SPY HIGH when VTI is ineligible."""
+        ticker_gaps = {
+            "VTI": self._ticker_gap("VTI", gap_pct=8.0, eligible=False),
+            "VOO": self._ticker_gap("VOO", gap_pct=5.0),
+            "SPY": self._ticker_gap("SPY", gap_pct=10.0),
+        }
+        conviction_map = {"SPY": "HIGH", "VOO": "neutral"}
+        ranked = self._rank(ticker_gaps, conviction_map)
+        assert "VTI" not in ranked  # ineligible
+        assert ranked[0] == "VOO", f"Expected VOO first, got {ranked}"
+        assert ranked[1] == "SPY"
+
+    def test_qqq_high_does_not_outrank_vti_eligible(self):
+        """QQQ HIGH conviction does not outrank eligible VTI."""
+        ticker_gaps = {
+            "VTI": self._ticker_gap("VTI", gap_pct=5.0),
+            "QQQ": self._ticker_gap("QQQ", gap_pct=15.0),
+        }
+        conviction_map = {"QQQ": "HIGH", "VTI": "neutral"}
+        ranked = self._rank(ticker_gaps, conviction_map)
+        assert ranked[0] == "VTI", f"Expected VTI first, got {ranked}"
+
+    def test_qqq_high_does_not_outrank_voo_eligible(self):
+        """QQQ HIGH conviction does not outrank eligible VOO."""
+        ticker_gaps = {
+            "VOO": self._ticker_gap("VOO", gap_pct=5.0),
+            "QQQ": self._ticker_gap("QQQ", gap_pct=15.0),
+        }
+        conviction_map = {"QQQ": "HIGH", "VOO": "neutral"}
+        ranked = self._rank(ticker_gaps, conviction_map)
+        assert ranked[0] == "VOO", f"Expected VOO first, got {ranked}"
+
+    def test_qqq_high_does_not_outrank_spy_eligible(self):
+        """QQQ HIGH conviction does not outrank eligible SPY."""
+        ticker_gaps = {
+            "SPY": self._ticker_gap("SPY", gap_pct=5.0),
+            "QQQ": self._ticker_gap("QQQ", gap_pct=15.0),
+        }
+        conviction_map = {"QQQ": "HIGH", "SPY": "neutral"}
+        ranked = self._rank(ticker_gaps, conviction_map)
+        assert ranked[0] == "SPY", f"Expected SPY first, got {ranked}"
+
+    def test_full_preference_order_vti_voo_spy_qqq(self):
+        """Full ordering: VTI > VOO > SPY > QQQ regardless of equal conviction."""
+        ticker_gaps = {
+            "QQQ": self._ticker_gap("QQQ", gap_pct=20.0),
+            "SPY": self._ticker_gap("SPY", gap_pct=15.0),
+            "VOO": self._ticker_gap("VOO", gap_pct=10.0),
+            "VTI": self._ticker_gap("VTI", gap_pct=5.0),
+        }
+        ranked = self._rank(ticker_gaps)
+        assert ranked == ["VTI", "VOO", "SPY", "QQQ"], f"Wrong order: {ranked}"
+
+
 # ── _allocate_cash ────────────────────────────────────────────────────────────
 
 class TestAllocateCash:

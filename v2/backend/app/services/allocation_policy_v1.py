@@ -486,6 +486,8 @@ def _parse_intel_v3_overlay(
 # ── Step 8: Rank buy candidates ──────────────────────────────────────────────
 
 _CONVICTION_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "neutral": 0}
+# Within broad_index_etf, core preference outranks conviction: VTI > VOO > SPY > QQQ
+_CORE_ETF_PREFERENCE: dict[str, int] = {"VTI": 4, "VOO": 3, "SPY": 2, "QQQ": 1}
 _GROUP_PRIORITY = {
     GROUP_BROAD_ETF: 10,
     GROUP_DIVIDEND_ETF: 9,
@@ -531,6 +533,11 @@ def _rank_buy_candidates(
         conviction_rank = _CONVICTION_RANK.get(conviction, 0)
         confidence = "policy_plus_intel" if intel_overlay_used and conviction != "neutral" else "policy_only"
 
+        # For broad_index_etf: core preference outranks conviction so that
+        # VTI/VOO/SPY/QQQ ordering is policy-first, not intel-first.
+        core_preference_rank = _CORE_ETF_PREFERENCE.get(ticker, 0) if group == GROUP_BROAD_ETF else 0
+        sort_key = (group_priority, core_preference_rank, conviction_rank, gap_pct)
+
         candidates.append({
             "ticker": ticker,
             "group": group,
@@ -542,7 +549,7 @@ def _rank_buy_candidates(
             "conviction": conviction,
             "confidence": confidence,
             "reason_codes": _build_reason_codes(group, group_gaps, etf_floor_met),
-            "_sort_key": (group_priority, conviction_rank, gap_pct),
+            "_sort_key": sort_key,
             "is_unknown_ticker": tg.get("is_unknown_ticker", False),
         })
 

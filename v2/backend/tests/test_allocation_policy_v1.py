@@ -1354,6 +1354,119 @@ class TestCoreETFPreference:
             f"VTI (pref=4) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
         )
 
+    def test_qqq_high_conviction_does_not_outrank_voo(self):
+        """QQQ with HIGH conviction must not outrank eligible VOO (pref=3 > QQQ pref=1).
+
+        Core ETF preference (VOO=3 > QQQ=1) takes precedence over
+        Intel v3 conviction overlay within broad_index_etf group.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [
+                _pos("QQQ", shares=5),
+                _pos("VOO", shares=5),
+                _pos("AAPL", shares=1000),
+            ],
+            {
+                "QQQ": _price("QQQ", close=480.0),
+                "VOO": _price("VOO", close=440.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"QQQ": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates"
+        voo = next((c for c in broad if c["ticker"] == "VOO"), None)
+        qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
+        assert voo is not None and qqq is not None
+        assert qqq["conviction"] == "HIGH"
+        assert broad[0]["ticker"] == "VOO", (
+            f"VOO (pref=3) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
+        )
+
+    def test_qqq_high_conviction_does_not_outrank_spy(self):
+        """QQQ with HIGH conviction must not outrank eligible SPY (pref=2 > QQQ pref=1).
+
+        Core ETF preference (SPY=2 > QQQ=1) takes precedence over
+        Intel v3 conviction overlay within broad_index_etf group.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [
+                _pos("QQQ", shares=5),
+                _pos("SPY", shares=5),
+                _pos("AAPL", shares=1000),
+            ],
+            {
+                "QQQ": _price("QQQ", close=480.0),
+                "SPY": _price("SPY", close=540.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"QQQ": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        assert broad, "Expected broad ETF candidates"
+        spy = next((c for c in broad if c["ticker"] == "SPY"), None)
+        qqq = next((c for c in broad if c["ticker"] == "QQQ"), None)
+        assert spy is not None and qqq is not None
+        assert qqq["conviction"] == "HIGH"
+        assert broad[0]["ticker"] == "SPY", (
+            f"SPY (pref=2) must beat QQQ (pref=1, HIGH); got {broad[0]['ticker']}"
+        )
+
+    def test_full_preference_order_vti_voo_spy_qqq(self):
+        """All four broad ETFs rank VTI > VOO > SPY > QQQ when QQQ and SPY have HIGH conviction.
+
+        Uses conviction=HIGH on SPY and QQQ to prove that core_preference_rank
+        sits before conviction_rank in the sort key. With the wrong tuple order
+        (conviction_rank first), QQQ/SPY HIGH conviction would push them above
+        VTI/VOO — this test catches that regression.
+        """
+        holdings, total_mv, *_ = _compute_portfolio(
+            [
+                _pos("VTI", shares=5),
+                _pos("VOO", shares=5),
+                _pos("SPY", shares=5),
+                _pos("QQQ", shares=5),
+                _pos("AAPL", shares=1000),
+            ],
+            {
+                "VTI": _price("VTI", close=220.0),
+                "VOO": _price("VOO", close=440.0),
+                "SPY": _price("SPY", close=540.0),
+                "QQQ": _price("QQQ", close=480.0),
+                "AAPL": _price("AAPL", close=100.0),
+            },
+        )
+        gw = _compute_group_weights(holdings, total_mv)
+        policy = _generate_policy(gw)
+        group_gaps, ticker_gaps = _compute_gaps(holdings, gw, policy, total_mv)
+        candidates = _rank_buy_candidates(
+            ticker_gaps, group_gaps, holdings,
+            conviction_map={"SPY": "HIGH", "QQQ": "HIGH"},
+            intel_overlay_used=True,
+            etf_floor_met=policy["etf_floor_met"],
+        )
+        broad = [c for c in candidates if c["group"] == GROUP_BROAD_ETF]
+        tickers = [c["ticker"] for c in broad]
+        assert tickers == ["VTI", "VOO", "SPY", "QQQ"], (
+            f"Expected VTI>VOO>SPY>QQQ order (preference over conviction); got {tickers}"
+        )
+
     def test_conviction_breaks_tie_within_same_preference_rank(self):
         """Conviction overlay is the tiebreaker when preference ranks are equal.
 

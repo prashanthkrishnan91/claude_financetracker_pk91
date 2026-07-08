@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routers import action_feedback, ai, alert_candidates, alert_delivery_outbox, allocation, analytics, auth, decision_logs, decisions, deposits, deploy_v3, diagnostics, drip, intel_v3, portfolio, positions, prices, recommendations, sync
+from .routers import action_feedback, ai, alert_candidates, alert_delivery_outbox, allocation, analytics, auth, decision_logs, decisions, deposits, deploy_v3, diagnostics, drip, intel_v3, paycheck_plan_preview, portfolio, positions, prices, recommendations, sync
 
 
 def _configure_yfinance_cache() -> None:
@@ -102,6 +102,7 @@ def create_app() -> FastAPI:
     app.include_router(analytics.router, prefix="/api/v1")
     app.include_router(allocation.router, prefix="/api/v1")
     app.include_router(diagnostics.router, prefix="/api/v1")
+    app.include_router(paycheck_plan_preview.router, prefix="/api/v1")
     app.include_router(intel_v3.router, prefix="/api/v1")
     app.include_router(deploy_v3.router, prefix="/api/v1")
     app.include_router(action_feedback.router, prefix="/api/v1")

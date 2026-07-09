@@ -12,6 +12,10 @@ import { NextResponse } from "next/server";
  * no changes to the response shape — no allocation math is recomputed here.
  */
 
+// Pinned to the Node.js runtime (not edge) since this route reads a
+// server-only secret env var and forwards it upstream.
+export const runtime = "nodejs";
+
 export async function POST(req: Request) {
   const authHeader = req.headers.get("Authorization") ?? "";
   const apiBase = process.env.NEXT_PUBLIC_API_URL || "";

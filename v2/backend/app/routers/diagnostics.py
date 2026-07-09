@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..database import get_supabase_client
-from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..middleware.auth import AuthenticatedUser, get_current_user_from_request
 from ..models.recommendation import AgentInsight, AgentRunStatus
 from ..services.agents.job_runner import run_agent_pipeline
 from ..services.intelligence.research_workers.artifact_observability import summarize_recent_research_artifacts
@@ -214,7 +214,7 @@ async def _get_runtime_cert_user(
 
     auth_header = request.headers.get("authorization")
     if auth_header:
-        return await get_current_user(request)
+        return await get_current_user_from_request(request)
 
     if not settings.finance_runtime_cert_user_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Runtime certification user is not configured")

@@ -100,3 +100,25 @@ async def get_current_user(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Invalid token: {str(e)}"
         )
+
+
+async def get_current_user_from_request(request: Request) -> AuthenticatedUser:
+    """
+    Resolve the authenticated user from a raw Request outside of FastAPI's
+    own dependency-injection call path.
+
+    get_current_user's `auth` and `settings` parameters are declared with
+    Depends(...) defaults that only resolve when FastAPI itself calls the
+    function as part of a route's dependency graph. Calling
+    get_current_user(request) directly (e.g. from another dependency that
+    already holds a validated Request) leaves those parameters as
+    unresolved Depends objects and crashes with
+    `AttributeError: 'Depends' object has no attribute 'credentials'`.
+
+    This helper explicitly resolves the bearer credentials via the same
+    HTTPBearer scheme and the settings singleton, then delegates to
+    get_current_user's existing JWT validation logic unchanged.
+    """
+    auth = await _bearer_scheme(request)
+    settings = get_settings()
+    return await get_current_user(request, auth=auth, settings=settings)

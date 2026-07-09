@@ -90,6 +90,11 @@ npm run dev
 
 Open `http://localhost:3000`.
 
+**`FINANCE_RUNTIME_CERT_SECRET`** (server-only, frontend runtime env — set in Vercel project settings, not in a `NEXT_PUBLIC_` var):
+- Must match the backend's `finance_runtime_cert_secret` value exactly.
+- Used only by `v2/frontend/src/app/api/advisor/paycheck-plan/preview/route.ts` to attach the `X-Finance-Runtime-Cert-Secret` header when proxying to the cert-gated `POST /api/v1/advisor/paycheck-plan/preview` backend endpoint.
+- Never prefix with `NEXT_PUBLIC_` — doing so would ship it to the browser bundle. It is read only inside this one server-side Route Handler and is never referenced by client (`"use client"`) code.
+
 ### Database
 
 Apply SQL files in order from [`v2/database/`](v2/database/) (001 → 017) and any newer files in [`v2/backend/migrations/`](v2/backend/migrations/) using the Supabase SQL editor.

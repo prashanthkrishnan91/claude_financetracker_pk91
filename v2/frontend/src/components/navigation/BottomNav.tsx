@@ -31,6 +31,7 @@ const MOBILE_NAV_ITEMS = [
 const SIDE_ONLY_NAV_ITEMS = [
   { href: "/dashboard/journal", label: "Journal", icon: BookIcon },
   { href: "/dashboard/radar", label: "Radar", icon: RadarIcon },
+  { href: "/dashboard/paycheck-plan", label: "Paycheck", icon: WalletIcon },
 ];
 
 export function BottomNav() {

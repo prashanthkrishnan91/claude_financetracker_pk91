@@ -36,6 +36,7 @@ _REASON_CODE_TEXT: dict[str, str] = {
     "preferred_vti_over_spy": "Chosen ahead of SPY under the core ETF preference order",
     "etf_floor_not_met": "Overall ETF allocation floor is not yet met",
     "positive_gap": "Below its target allocation weight",
+    "evidence_fresh_and_constructive": "Passed evidence freshness, confidence, and concentration checks",
 }
 
 
@@ -77,6 +78,7 @@ def _build_caveats(
     preview_status: str,
     missing_price_tickers: list[str],
     stale_price_tickers: list[str],
+    stock_candidates_status: str | None = None,
 ) -> list[str]:
     caveats = [_ADVICE_CAVEAT]
     if not trusted:
@@ -91,6 +93,16 @@ def _build_caveats(
         caveats.append("Some holdings are missing recent price data.")
     if stale_price_tickers:
         caveats.append("Some holdings have stale price data.")
+    if stock_candidates_status == "blocked_insufficient_evidence":
+        caveats.append(
+            "Individual stocks were not included in this plan — evidence data did not pass "
+            "freshness or confidence checks. This plan covers ETF allocation only."
+        )
+    elif stock_candidates_status == "blocked_by_policy_caps":
+        caveats.append(
+            "Individual stocks were not included in this plan — held positions are already "
+            "at or above their concentration cap."
+        )
     return caveats
 
 
@@ -137,6 +149,7 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
             preview_status,
             truth_dependency.get("missing_price_tickers", []),
             truth_dependency.get("stale_price_tickers", []),
+            diagnostic.get("stock_candidates", {}).get("status"),
         ),
         "next_required_fix": next_required_fix,
         "recommendations_trusted": False,

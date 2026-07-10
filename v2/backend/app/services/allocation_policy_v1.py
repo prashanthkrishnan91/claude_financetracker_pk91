@@ -12,6 +12,14 @@ without it using neutral defaults.
 Stage 12C adds a deterministic core ETF preference policy for broad_index_etf
 candidates: VTI > VOO > SPY > QQQ. Preference order governs over raw gap size
 so SPY's larger gap cannot displace an eligible underweight VTI.
+
+Stage 13A extends this same policy (no new model, no new endpoint) with
+evidence-aware gating for individual-stock candidates. A stock only becomes
+an eligible buy candidate when Intel v3 evidence for that ticker is present,
+fresh, carries a constructive (BUY) signal with sufficient evidence
+confidence, and has no blocking evidence gaps — on top of the existing
+concentration/cap checks. Missing or ambiguous evidence blocks the ticker
+rather than defaulting to a fake pass; the ETF plan still runs on its own.
 """
 
 from __future__ import annotations
@@ -378,6 +386,7 @@ def _compute_gaps(
     group_weights: dict[str, dict],
     policy: dict[str, Any],
     total_mv: float,
+    stock_evidence_map: dict[str, dict] | None = None,
 ) -> tuple[dict[str, dict], dict[str, dict]]:
     """Compute target vs current gaps at group and ticker level."""
     group_targets = policy["group_targets"]
@@ -443,6 +452,17 @@ def _compute_gaps(
             if alt_current >= ALTERNATIVES_TOTAL_CAP_PCT:
                 ineligibility_reason = "alternatives_group_at_or_above_cap"
 
+        # Stage 13A: individual stocks additionally require the Intel v3
+        # evidence gate — additive to the cap/group checks above, never
+        # loosens them.
+        evidence_gate_codes: list[str] = []
+        if ineligibility_reason is None and group == GROUP_INDIVIDUAL_STOCK:
+            gate_passed, evidence_gate_codes = _evaluate_stock_candidate_gate(
+                ticker, stock_evidence_map or {}
+            )
+            if not gate_passed:
+                ineligibility_reason = "evidence_gate_failed:" + ",".join(evidence_gate_codes)
+
         eligible = ineligibility_reason is None
 
         # Target weight for this ticker (group target / tickers in group)
@@ -461,6 +481,7 @@ def _compute_gaps(
             "eligible_for_buy": eligible,
             "ineligibility_reason": ineligibility_reason,
             "is_unknown_ticker": h["is_unknown"],
+            "evidence_gate_codes": evidence_gate_codes,
         }
 
     return group_gaps, ticker_gaps
@@ -498,6 +519,113 @@ def _parse_intel_v3_overlay(
     return conviction_map, True, None
 
 
+# ── Step 7b: Individual-stock evidence gate (Stage 13A) ──────────────────────
+#
+# Individual stocks may only become buy candidates when Intel v3 evidence for
+# that ticker is fresh, constructive, and confident. This is additive to the
+# existing concentration/cap checks in `_compute_gaps` — it never loosens
+# them. Kept separate from `_parse_intel_v3_overlay` so ETF/crypto/
+# speculative ranking (which already reuses that overlay) is untouched.
+#
+# Production evidence-band vocabulary: Intel v3 cards serialize the internal
+# AxisBand.OK axis as the string "PARTIAL", not "OK" — see
+# `_EVIDENCE_QUALITY_TO_BAND` in `snapshot_builder.py` (STRONG->"STRONG",
+# OK->"PARTIAL", THIN/SUPPRESSED->"THIN") and the existing `_STRONG_PARTIAL`
+# positive-band set in `intel_v3_service.py`. The positive stock evidence
+# bands here are therefore STRONG and PARTIAL. "OK" is accepted only as a
+# legacy alias (normalized to PARTIAL) in case an older snapshot shape is
+# ever encountered — it is not the production card shape.
+
+_STOCK_POSITIVE_EVIDENCE_BANDS: frozenset[str] = frozenset({"STRONG", "PARTIAL"})
+STOCK_EVIDENCE_STALE_HOURS: int = SNAPSHOT_STALE_HOURS
+
+
+def _normalize_evidence_band(raw: Any) -> str:
+    """Normalize a card's evidence_band to the production vocabulary.
+
+    Production cards serialize AxisBand.OK as "PARTIAL" (see
+    `_EVIDENCE_QUALITY_TO_BAND` in snapshot_builder.py). "OK" is accepted
+    here only as a legacy alias for "PARTIAL" — it is not what production
+    snapshots actually write.
+    """
+    band = (raw or "").upper()
+    if band == "OK":
+        return "PARTIAL"
+    return band
+
+
+def _parse_intel_v3_stock_evidence(intel_snapshot: dict | None) -> dict[str, dict[str, Any]]:
+    """Extract per-ticker evidence detail used to gate individual-stock candidates.
+
+    Returns {ticker: {action, conviction, evidence_band, asset_type, flags,
+    hours_since_update}}. A ticker absent from a real snapshot's cards (or a
+    missing snapshot entirely) is treated by the gate below as insufficient
+    evidence — this function never fabricates a positive default.
+
+    Freshness uses the card's own `updated_at` when present; if a card omits
+    it, this falls back to the snapshot row's `created_at` (the snapshot as a
+    whole is timestamped even when an individual card is not). If neither
+    timestamp exists, `hours_since_update` stays None and the gate below
+    fails closed on `evidence_freshness_unknown` — this fallback never
+    loosens the freshness requirement, only widens where the timestamp may
+    come from.
+    """
+    if intel_snapshot is None:
+        return {}
+    payload = intel_snapshot.get("payload") or intel_snapshot
+    cards = payload.get("cards") or []
+    snapshot_created_at = _parse_dt(intel_snapshot.get("created_at"))
+    evidence: dict[str, dict[str, Any]] = {}
+    for card in cards:
+        ticker = card.get("ticker") or card.get("symbol")
+        if not ticker:
+            continue
+        updated_at = _parse_dt(card.get("updated_at")) or snapshot_created_at
+        evidence[ticker] = {
+            "action": (card.get("action") or "").upper(),
+            "conviction": (card.get("conviction") or card.get("conviction_level") or "").upper(),
+            "evidence_band": _normalize_evidence_band(card.get("evidence_band")),
+            "asset_type": (card.get("asset_type") or "").lower(),
+            "flags": list(card.get("flags") or []),
+            "hours_since_update": _hours_since(updated_at),
+        }
+    return evidence
+
+
+def _evaluate_stock_candidate_gate(
+    ticker: str,
+    stock_evidence_map: dict[str, dict[str, Any]],
+) -> tuple[bool, list[str]]:
+    """Gate an individual-stock candidate on Intel v3 evidence.
+
+    Returns (passes, blocked_reason_codes). Every check fails closed: missing
+    or ambiguous evidence blocks the candidate instead of defaulting to a
+    fake pass.
+    """
+    ev = stock_evidence_map.get(ticker)
+    if ev is None:
+        return False, ["evidence_missing_for_ticker"]
+
+    codes: list[str] = []
+
+    if ev["action"] != "BUY":
+        codes.append("evidence_signal_not_constructive")
+
+    if ev["evidence_band"] not in _STOCK_POSITIVE_EVIDENCE_BANDS:
+        codes.append("evidence_confidence_insufficient")
+
+    hours = ev.get("hours_since_update")
+    if hours is None:
+        codes.append("evidence_freshness_unknown")
+    elif hours > STOCK_EVIDENCE_STALE_HOURS:
+        codes.append("evidence_stale")
+
+    if ev.get("flags"):
+        codes.append("evidence_has_blocking_gaps")
+
+    return (len(codes) == 0), codes
+
+
 # ── Step 8: Rank buy candidates ──────────────────────────────────────────────
 
 _CONVICTION_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1, "neutral": 0}
@@ -520,6 +648,7 @@ def _rank_buy_candidates(
     conviction_map: dict[str, str],
     intel_overlay_used: bool,
     etf_floor_met: bool,
+    stock_evidence_map: dict[str, dict] | None = None,
 ) -> list[dict]:
     """Build ranked list of buy candidates.
 
@@ -589,6 +718,25 @@ def _rank_buy_candidates(
                     extra_reason_codes.append("preferred_vti_over_spy")
         # ─────────────────────────────────────────────────────────────────────
 
+        # ── Stage 13A: evidence-aware transparency fields for individual stocks ──
+        asset_type = "equity" if group == GROUP_INDIVIDUAL_STOCK else group
+        candidate_source = "policy_v1"
+        confidence_label = "policy_baseline"
+        evidence_rank = 0
+
+        if group == GROUP_INDIVIDUAL_STOCK:
+            ev = (stock_evidence_map or {}).get(ticker) or {}
+            evidence_band = ev.get("evidence_band", "")
+            candidate_source = "evidence_aware_stock_ranking_v1"
+            if evidence_band == "STRONG":
+                confidence_label = "high_confidence_evidence"
+                evidence_rank = 2
+            elif evidence_band == "PARTIAL":
+                confidence_label = "moderate_confidence_evidence"
+                evidence_rank = 1
+            extra_reason_codes.append("evidence_fresh_and_constructive")
+        # ─────────────────────────────────────────────────────────────────────
+
         reason_codes = (
             _build_reason_codes(group, group_gaps, etf_floor_met) + extra_reason_codes
         )
@@ -608,7 +756,10 @@ def _rank_buy_candidates(
             "preference_rank": preference_rank,
             "preference_reason": preference_reason,
             "skipped_higher_preference_tickers": skipped_higher_preference_tickers,
-            "_sort_key": (group_priority, core_preference_rank, conviction_rank, gap_pct),
+            "asset_type": asset_type,
+            "candidate_source": candidate_source,
+            "confidence_label": confidence_label,
+            "_sort_key": (group_priority, core_preference_rank, conviction_rank, evidence_rank, gap_pct),
             "is_unknown_ticker": tg.get("is_unknown_ticker", False),
         })
 
@@ -868,6 +1019,10 @@ async def run_next_buy_policy_diagnostic(
     if intel_warning:
         warnings.append(intel_warning)
 
+    # Stage 13A: separate, richer evidence extraction used only to gate
+    # individual-stock candidates. Reuses the same intel_snapshot fetch above.
+    stock_evidence_map = _parse_intel_v3_stock_evidence(intel_snapshot)
+
     # ── 8-10. Policy + gaps + candidates (only if can_run_policy) ─────────────
     group_weights = _compute_group_weights(holdings, total_mv) if can_run_policy else {}
     policy = _generate_policy(group_weights) if can_run_policy else {"policy_version": POLICY_VERSION}
@@ -880,12 +1035,15 @@ async def run_next_buy_policy_diagnostic(
     no_buy_reason: str | None = None
 
     if can_run_policy:
-        group_gaps, ticker_gaps = _compute_gaps(holdings, group_weights, policy, total_mv)
+        group_gaps, ticker_gaps = _compute_gaps(
+            holdings, group_weights, policy, total_mv, stock_evidence_map,
+        )
         etf_floor_met = policy.get("etf_floor_met", False)
 
         raw_candidates = _rank_buy_candidates(
             ticker_gaps, group_gaps, holdings,
             conviction_map, intel_overlay_used, etf_floor_met,
+            stock_evidence_map,
         )
         next_buy_candidates, allocated_cash, unallocated_cash, allocation_count, no_buy_reason = (
             _allocate_cash(raw_candidates, total_mv, cash_to_deploy, min_trade_amount, max_positions)
@@ -916,6 +1074,26 @@ async def run_next_buy_policy_diagnostic(
             "shares": h["shares"],
         })
     per_ticker_summary.sort(key=lambda x: (x["market_value"] or 0.0), reverse=True)
+
+    # ── Stage 13A: individual-stock candidate gating summary ─────────────────
+    stock_tickers_held = [
+        t for t, tg in ticker_gaps.items() if tg.get("group") == GROUP_INDIVIDUAL_STOCK
+    ]
+    stock_tickers_selected = [
+        c["ticker"] for c in next_buy_candidates if c.get("asset_type") == "equity"
+    ]
+    stock_tickers_blocked = [
+        t for t in stock_tickers_held
+        if t not in stock_tickers_selected and ticker_gaps[t].get("evidence_gate_codes")
+    ]
+    if stock_tickers_selected:
+        stock_candidates_status = "enabled"
+    elif stock_tickers_blocked:
+        stock_candidates_status = "blocked_insufficient_evidence"
+    elif stock_tickers_held:
+        stock_candidates_status = "blocked_by_policy_caps"
+    else:
+        stock_candidates_status = "no_stock_positions_held"
 
     # ── Assemble response ─────────────────────────────────────────────────────
     return {
@@ -958,6 +1136,12 @@ async def run_next_buy_policy_diagnostic(
             "by_ticker": ticker_gaps,
         },
         "next_buy_candidates": next_buy_candidates,
+        "stock_candidates": {
+            "status": stock_candidates_status,
+            "held_tickers": stock_tickers_held,
+            "selected_tickers": stock_tickers_selected,
+            "blocked_by_evidence_tickers": stock_tickers_blocked,
+        },
         "cash_plan": {
             "cash_to_deploy": cash_to_deploy,
             "allocated_cash": allocated_cash,

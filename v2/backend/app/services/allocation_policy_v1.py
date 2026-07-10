@@ -452,6 +452,15 @@ def _compute_gaps(
             if alt_current >= ALTERNATIVES_TOTAL_CAP_PCT:
                 ineligibility_reason = "alternatives_group_at_or_above_cap"
 
+        # Individual-stock sleeve guardrail: block new-dollar candidates for
+        # the whole individual_stock group once it is already at or above its
+        # policy target (checked before the per-ticker evidence gate below,
+        # so a policy block is never misreported as an evidence block).
+        elif group == GROUP_INDIVIDUAL_STOCK:
+            stock_group_status = group_gaps.get(GROUP_INDIVIDUAL_STOCK, {}).get("status", "within")
+            if stock_group_status == "over":
+                ineligibility_reason = "individual_stock_group_above_target"
+
         # Stage 13A: individual stocks additionally require the Intel v3
         # evidence gate — additive to the cap/group checks above, never
         # loosens them.
@@ -489,6 +498,44 @@ def _compute_gaps(
 
 # ── Step 7: Optional Intel v3 conviction overlay ─────────────────────────────
 
+def _extract_intel_v3_cards(intel_snapshot: dict | None) -> list[dict]:
+    """Extract the canonical list of Intel v3 holding cards from a snapshot.
+
+    Production snapshots (see `snapshot_builder.build_snapshot`) serialize
+    held cards under `current_holdings` — that is the canonical production
+    card list. `cards` is accepted only as a documented legacy/test
+    compatibility fallback for older snapshot shapes; it is never combined
+    with `current_holdings` so cards are never duplicated. Returns an empty
+    list only when neither key holds a non-empty list.
+
+    Handles both the wrapped database-row shape (`{"payload": {...}, ...}`,
+    as returned by a direct `intel_v3_snapshots` table query) and the
+    unwrapped payload shape (as returned by
+    `IntelV3Service.get_latest_snapshot()`).
+    """
+    if not intel_snapshot:
+        return []
+    payload = intel_snapshot.get("payload") or intel_snapshot
+    current_holdings = payload.get("current_holdings")
+    if current_holdings:
+        return current_holdings
+    cards = payload.get("cards")
+    if cards:
+        return cards
+    return []
+
+
+def _intel_v3_snapshot_fallback_timestamp(intel_snapshot: dict, payload: dict) -> datetime | None:
+    """Snapshot-level freshness fallback used when a card has no `updated_at`.
+
+    Order: `payload.generated_at` (production snapshot generation time), then
+    `intel_snapshot.created_at` (the wrapped database row's write time, for
+    wrapped/legacy rows). Returns None if neither exists — callers must fail
+    closed on that.
+    """
+    return _parse_dt(payload.get("generated_at")) or _parse_dt(intel_snapshot.get("created_at"))
+
+
 def _parse_intel_v3_overlay(
     intel_snapshot: dict | None,
 ) -> tuple[dict[str, str], bool, str | None]:
@@ -500,8 +547,7 @@ def _parse_intel_v3_overlay(
     if intel_snapshot is None:
         return {}, False, "intel_v3_snapshot_unavailable: using neutral conviction defaults"
 
-    payload = intel_snapshot.get("payload") or intel_snapshot
-    cards = payload.get("cards") or []
+    cards = _extract_intel_v3_cards(intel_snapshot)
     if not cards:
         return {}, False, "intel_v3_snapshot_has_no_cards: using neutral conviction defaults"
 
@@ -562,25 +608,25 @@ def _parse_intel_v3_stock_evidence(intel_snapshot: dict | None) -> dict[str, dic
     missing snapshot entirely) is treated by the gate below as insufficient
     evidence — this function never fabricates a positive default.
 
-    Freshness uses the card's own `updated_at` when present; if a card omits
-    it, this falls back to the snapshot row's `created_at` (the snapshot as a
-    whole is timestamped even when an individual card is not). If neither
-    timestamp exists, `hours_since_update` stays None and the gate below
-    fails closed on `evidence_freshness_unknown` — this fallback never
-    loosens the freshness requirement, only widens where the timestamp may
-    come from.
+    Freshness uses the card's own `updated_at` when present. If a card omits
+    it, this falls back to `payload.generated_at` (the production snapshot's
+    own generation time), and then to the wrapped row's `created_at` for
+    wrapped/legacy rows. If none of these exist, `hours_since_update` stays
+    None and the gate below fails closed on `evidence_freshness_unknown` —
+    this fallback never loosens the freshness requirement, only widens where
+    the timestamp may come from.
     """
     if intel_snapshot is None:
         return {}
     payload = intel_snapshot.get("payload") or intel_snapshot
-    cards = payload.get("cards") or []
-    snapshot_created_at = _parse_dt(intel_snapshot.get("created_at"))
+    cards = _extract_intel_v3_cards(intel_snapshot)
+    snapshot_fallback_at = _intel_v3_snapshot_fallback_timestamp(intel_snapshot, payload)
     evidence: dict[str, dict[str, Any]] = {}
     for card in cards:
         ticker = card.get("ticker") or card.get("symbol")
         if not ticker:
             continue
-        updated_at = _parse_dt(card.get("updated_at")) or snapshot_created_at
+        updated_at = _parse_dt(card.get("updated_at")) or snapshot_fallback_at
         evidence[ticker] = {
             "action": (card.get("action") or "").upper(),
             "conviction": (card.get("conviction") or card.get("conviction_level") or "").upper(),
@@ -1082,14 +1128,30 @@ async def run_next_buy_policy_diagnostic(
     stock_tickers_selected = [
         c["ticker"] for c in next_buy_candidates if c.get("asset_type") == "equity"
     ]
-    stock_tickers_blocked = [
-        t for t in stock_tickers_held
-        if t not in stock_tickers_selected and ticker_gaps[t].get("evidence_gate_codes")
-    ]
+    # Stage 13B: distinguish evidence-blocked tickers (evidence gate failed)
+    # from policy/allocation-blocked tickers (the individual_stock sleeve is
+    # already at or above its policy target/cap — this can block a ticker
+    # even when its own Intel v3 evidence would otherwise pass, so it must
+    # never be reported as evidence-missing).
+    stock_tickers_blocked: list[str] = []
+    blocked_by_policy_tickers: list[str] = []
+    policy_block_reason_codes: dict[str, str] = {}
+    for t in stock_tickers_held:
+        if t in stock_tickers_selected:
+            continue
+        tg = ticker_gaps[t]
+        if tg.get("ineligibility_reason") == "individual_stock_group_above_target":
+            blocked_by_policy_tickers.append(t)
+            policy_block_reason_codes[t] = "individual_stock_group_above_target"
+        elif tg.get("evidence_gate_codes"):
+            stock_tickers_blocked.append(t)
+
     if stock_tickers_selected:
         stock_candidates_status = "enabled"
-    elif stock_tickers_blocked:
+    elif stock_tickers_blocked and not blocked_by_policy_tickers:
         stock_candidates_status = "blocked_insufficient_evidence"
+    elif blocked_by_policy_tickers:
+        stock_candidates_status = "blocked_by_policy_caps"
     elif stock_tickers_held:
         stock_candidates_status = "blocked_by_policy_caps"
     else:
@@ -1141,6 +1203,8 @@ async def run_next_buy_policy_diagnostic(
             "held_tickers": stock_tickers_held,
             "selected_tickers": stock_tickers_selected,
             "blocked_by_evidence_tickers": stock_tickers_blocked,
+            "blocked_by_policy_tickers": blocked_by_policy_tickers,
+            "policy_block_reason_codes": policy_block_reason_codes,
         },
         "cash_plan": {
             "cash_to_deploy": cash_to_deploy,

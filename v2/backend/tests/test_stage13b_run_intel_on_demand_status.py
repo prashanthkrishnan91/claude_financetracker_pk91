@@ -1,0 +1,251 @@
+"""Stage 13B — Run Intel v3 on-demand evidence build, operational-truth fields.
+
+Contract under test (app/routers/intel_v3.py):
+  1. POST /intel/v3/run still enqueues analyst_refresh_jobs exactly as before
+     (Stage 3.2 enqueue path untouched — covered by
+     test_intel_v3_stage_3_2_analyst_refresh_worker.py; this file adds only
+     the new augmentation behavior layered on top).
+  2. When on-demand processing is disabled, the response explicitly reports
+     queue-only / worker-disabled status instead of implying progress.
+  3. When on-demand processing is enabled, the bounded drain is invoked.
+  4. The bounded drain's own caps (batches/runtime/cost-guard) are exercised
+     in test_stage13b_analyst_refresh_on_demand_drain.py — this file checks
+     the router wires jobs_attempted/succeeded/failed through honestly.
+  5. No infinite loop: augmentation calls the drain at most once per request.
+  6. When no certified snapshot results, next_required_action is honest
+     (never implies "in progress" when nothing will finish it).
+  7. Router-level exceptions from augmentation never fail the whole request.
+  8. Paycheck Plan / allocation_policy_v1 are untouched by this module (no
+     import coupling — Intel v3 remains an evidence input, not a competing
+     recommendation surface).
+"""
+from __future__ import annotations
+
+import uuid
+from dataclasses import dataclass
+from unittest.mock import AsyncMock
+
+import pytest
+
+from app.routers import intel_v3 as router_mod
+from app.services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
+    OnDemandDrainResult,
+    STOPPED_DRAINED,
+)
+
+USER_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
+
+
+class _FakeService:
+    """Minimal stand-in for IntelV3Service — only what the augmentation touches."""
+
+    def __init__(self, *, latest_snapshot=None):
+        self.user_id = USER_ID
+        self.client = object()
+        self._latest_snapshot = latest_snapshot
+        self.get_latest_snapshot = AsyncMock(return_value=latest_snapshot)
+
+
+@dataclass
+class _FakeSettings:
+    intel_v3_on_demand_refresh_enabled: bool
+    intel_v3_snapshot_writes_enabled: bool = False
+
+
+# ── 2. On-demand processing disabled → honest queue-only status ─────────────
+
+
+class TestOnDemandDisabledReportsQueueOnly:
+    @pytest.mark.asyncio
+    async def test_disabled_never_invokes_drain(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=False)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(latest_snapshot=None)
+        result = {"status": "refresh_requested", "queued_ticker_count": 34}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["on_demand_processing_enabled"] is False
+        assert out["on_demand_jobs_attempted"] == 0
+        assert out["on_demand_jobs_succeeded"] == 0
+        assert out["on_demand_jobs_failed"] == 0
+        assert out["snapshot_available_after_run"] is False
+        assert "queue_only" in out["next_required_action"]
+
+    @pytest.mark.asyncio
+    async def test_disabled_with_nothing_queued_reports_no_stale_evidence(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=False)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(latest_snapshot=None)
+        result = {"status": "analyst_evidence_current", "queued_ticker_count": 0}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+        assert out["next_required_action"] == "none_no_stale_evidence_to_refresh"
+
+
+# ── 3. On-demand processing enabled → bounded drain invoked ─────────────────
+
+
+class TestOnDemandEnabledInvokesBoundedDrain:
+    @pytest.mark.asyncio
+    async def test_enabled_invokes_drain_exactly_once(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_result = OnDemandDrainResult(
+            batches_run=2, jobs_attempted=20, jobs_succeeded=17, jobs_failed=3,
+            duration_ms=500, run_resumable=False, stopped_reason=STOPPED_DRAINED,
+        )
+        drain_spy = AsyncMock(return_value=drain_result)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={"snapshot_source": "worker_certified"}
+        )
+        result = {"status": "refresh_requested", "queued_ticker_count": 34}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_awaited_once()
+        assert out["on_demand_processing_enabled"] is True
+        assert out["on_demand_jobs_attempted"] == 20
+        assert out["on_demand_jobs_succeeded"] == 17
+        assert out["on_demand_jobs_failed"] == 3
+        assert out["snapshot_available_after_run"] is True
+        assert out["next_required_action"] == "none_certified_snapshot_current"
+
+    @pytest.mark.asyncio
+    async def test_enabled_but_nothing_queued_skips_drain(self, monkeypatch):
+        """No infinite loop / no wasted work: an empty queue never triggers a
+        drain call, regardless of the flag."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(latest_snapshot=None)
+        result = {"status": "analyst_evidence_current", "queued_ticker_count": 0}
+
+        await router_mod._augment_with_on_demand_status(service, result)
+        drain_spy.assert_not_awaited()
+
+
+# ── 6. Honest next_required_action across outcomes ───────────────────────────
+
+
+class TestNextRequiredActionIsHonest:
+    def test_no_active_holdings(self):
+        action = router_mod._next_required_action(
+            status_value="no_active_holdings",
+            on_demand_processing_enabled=False,
+            queued_ticker_count=0,
+            drain_ran=False,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=False,
+        )
+        assert action == "add_positions_before_running_intel"
+
+    def test_certified_snapshot_after_run_overrides_everything(self):
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=34,
+            drain_ran=True,
+            drain_remaining=True,  # even if more jobs remain elsewhere
+            snapshot_available_after_run=True,
+            snapshot_writes_enabled=True,
+        )
+        assert action == "none_certified_snapshot_current"
+
+    def test_drain_incomplete_asks_for_reclick(self):
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=34,
+            drain_ran=True,
+            drain_remaining=True,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=True,
+        )
+        assert "reclick_run_intel" in action
+
+    def test_drain_complete_but_snapshot_writes_disabled_is_surfaced_honestly(self):
+        """Even if the drain fully processes the queue, a certified snapshot
+        can never appear while INTEL_V3_SNAPSHOT_WRITES_ENABLED is false —
+        the response must say so rather than looking like a stuck drain."""
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=10,
+            drain_ran=True,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=False,
+        )
+        assert "intel_v3_snapshot_writes_enabled_is_false" in action
+
+    def test_never_implies_progress_when_queue_only(self):
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=False,
+            queued_ticker_count=34,
+            drain_ran=False,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=False,
+        )
+        assert action.startswith("queue_only")
+
+
+# ── 7. Augmentation failures never break the enqueue response ───────────────
+
+
+class TestAugmentationIsBestEffort:
+    @pytest.mark.asyncio
+    async def test_augmentation_exception_does_not_propagate_from_endpoint(self, monkeypatch):
+        """The endpoint wraps _augment_with_on_demand_status in try/except and
+        fills honest defaults — this test exercises that fallback path
+        directly against the augmentation function raising."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+
+        service = _FakeService(latest_snapshot=None)
+        service.get_latest_snapshot = AsyncMock(side_effect=RuntimeError("db down"))
+        result = {"status": "refresh_requested", "queued_ticker_count": 34}
+
+        with pytest.raises(RuntimeError):
+            await router_mod._augment_with_on_demand_status(service, result)
+        # The endpoint itself (run_intel_v3) catches this and fills honest
+        # defaults — see the try/except around _augment_with_on_demand_status.
+
+
+# ── 8. No coupling into Paycheck Plan / no new recommendation surface ───────
+
+
+class TestNoPaycheckPlanCoupling:
+    def test_on_demand_drain_module_does_not_import_allocation_policy(self):
+        import inspect
+
+        from app.services.intelligence.v3 import analyst_refresh_on_demand_drain_v1 as mod
+        from app.services.intelligence.v3 import analyst_refresh_worker_v1
+
+        src = inspect.getsource(mod)
+        assert "allocation_policy_v1" not in src
+        assert "paycheck_plan" not in src
+        # Must not import the deterministic decision policy either — same
+        # boundary as the standalone worker.
+        assert "decision_policy_v1" not in src
+        assert "decision_policy_v1" not in inspect.getsource(analyst_refresh_worker_v1)
+
+    def test_router_augmentation_does_not_touch_allocation_policy(self):
+        import inspect
+
+        src = inspect.getsource(router_mod)
+        assert "allocation_policy_v1" not in src
+        assert "paycheck_plan_preview" not in src

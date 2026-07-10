@@ -26,7 +26,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { cn } from "@/lib/utils";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
-import { buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
+import { buildBannerState, buildStatusPillState, onDemandDrainNote } from "@/lib/intel-v3-banner";
 import { buildPortfolioEvidenceSummary } from "@/lib/intel-v3-explanation";
 import { IntelV3Card } from "./IntelV3Card";
 import { IntelV3Drawer } from "./IntelV3Drawer";
@@ -79,6 +79,7 @@ function CommitteeStatusBand({
   const [diagOpen, setDiagOpen] = useState(false);
   const pillState = buildStatusPillState(snapshot, isRefreshing, lastRunResult);
   const bannerState = buildBannerState(snapshot, isRefreshing, lastRunResult);
+  const drainNote = onDemandDrainNote(lastRunResult);
 
   const pillClass: Record<string, string> = {
     green: "bg-action-buy/10 text-action-buy border-action-buy/30",
@@ -113,6 +114,9 @@ function CommitteeStatusBand({
           {isRefreshing && <Spinner className="h-3 w-3 text-text-muted" />}
         </div>
         <p className="text-[11px] text-text-secondary">{pillState.line}</p>
+        {drainNote && (
+          <p className="text-[11px] text-text-muted opacity-80">{drainNote}</p>
+        )}
         <div className="flex items-center gap-3">
           <button
             onClick={() => setDiagOpen((v) => !v)}

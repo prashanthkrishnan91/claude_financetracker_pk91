@@ -491,6 +491,17 @@ class Settings(BaseSettings):
     # env var is set to a short interval.
     cost_guard_allow_aggressive_polling: bool = False
 
+    # ── Stage 13B — bounded on-demand Intel v3 evidence drain ─────────────────
+    # When True, POST /intel/v3/run drains a bounded number of the
+    # analyst_refresh_jobs it just enqueued in-request (reusing
+    # AnalystRefreshWorker.run_once(), capped batches/runtime — see
+    # analyst_refresh_on_demand_drain_v1.py) so a manual Run Intel click can
+    # produce a certified snapshot without requiring the separate always-on
+    # analyst_refresh_worker_v1 Railway service. When False (default), Run
+    # Intel stays queue-only and the response says so honestly instead of
+    # implying a snapshot is being built.
+    intel_v3_on_demand_refresh_enabled: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

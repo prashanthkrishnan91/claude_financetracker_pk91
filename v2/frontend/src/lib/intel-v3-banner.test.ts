@@ -4,7 +4,7 @@
  * Covers deriveIntelV3UIStatus and buildBannerState (all-or-nothing certified
  * intelligence run contract), plus legacy analystRefreshRequestNote tests.
  */
-import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState, buildStatusPillState } from "@/lib/intel-v3-banner";
+import { analystRefreshRequestNote, deriveIntelV3UIStatus, buildBannerState, buildStatusPillState, onDemandDrainNote } from "@/lib/intel-v3-banner";
 import type { IntelV3Snapshot, IntelV3SnapshotDiagnostics } from "@/lib/api";
 
 function makeDiag(
@@ -521,5 +521,77 @@ describe("mapping version guard — banner state machine contract", () => {
       existing_certified_snapshot: true,
     };
     expect(buildStatusPillState(snap, false, runResult).pill).not.toBe("Updating");
+  });
+});
+
+describe("Stage 13B — onDemandDrainNote", () => {
+  it("returns null when there is no run result", () => {
+    expect(onDemandDrainNote(null)).toBeNull();
+    expect(onDemandDrainNote(undefined)).toBeNull();
+  });
+
+  it("returns null once a certified snapshot is available after the run", () => {
+    const runResult = {
+      status: "refresh_requested" as const,
+      queued_ticker_count: 5,
+      on_demand_processing_enabled: true,
+      snapshot_available_after_run: true,
+    };
+    expect(onDemandDrainNote(runResult)).toBeNull();
+  });
+
+  it("returns null when nothing was queued (no stale evidence)", () => {
+    const runResult = {
+      status: "analyst_evidence_current" as const,
+      queued_ticker_count: 0,
+      on_demand_processing_enabled: false,
+      snapshot_available_after_run: false,
+    };
+    expect(onDemandDrainNote(runResult)).toBeNull();
+  });
+
+  it("explains queue-only state when on-demand processing is disabled", () => {
+    const runResult = {
+      status: "refresh_requested" as const,
+      queued_ticker_count: 34,
+      on_demand_processing_enabled: false,
+      snapshot_available_after_run: false,
+    };
+    const note = onDemandDrainNote(runResult);
+    expect(note).toContain("queued only");
+    expect(note).toContain("on-demand processing is");
+  });
+
+  it("reports drain progress when on-demand processing ran but snapshot is not yet available", () => {
+    const runResult = {
+      status: "refresh_requested" as const,
+      queued_ticker_count: 34,
+      on_demand_processing_enabled: true,
+      on_demand_jobs_attempted: 10,
+      on_demand_jobs_succeeded: 8,
+      on_demand_jobs_failed: 2,
+      snapshot_available_after_run: false,
+      next_required_action:
+        "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
+    };
+    const note = onDemandDrainNote(runResult);
+    expect(note).toContain("8/10");
+    expect(note).toContain("Click Run Intel again");
+  });
+
+  it("does not prompt re-click when the drain has nothing left to resume", () => {
+    const runResult = {
+      status: "refresh_requested" as const,
+      queued_ticker_count: 3,
+      on_demand_processing_enabled: true,
+      on_demand_jobs_attempted: 3,
+      on_demand_jobs_succeeded: 0,
+      on_demand_jobs_failed: 3,
+      snapshot_available_after_run: false,
+      next_required_action: "reclick_run_intel_to_retry",
+    };
+    const note = onDemandDrainNote(runResult);
+    expect(note).toContain("0/3");
+    expect(note).not.toContain("Click Run Intel again");
   });
 });

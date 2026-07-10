@@ -1392,6 +1392,15 @@ export interface IntelV3RunResult {
   existing_certified_snapshot_id?: string | null;
   existing_certified_snapshot?: boolean;
   message?: string;
+  // Stage 13B — bounded on-demand evidence drain operational-truth fields.
+  // Present on every /intel/v3/run response so the UI never implies a
+  // snapshot is being built when the queue is only queued, not draining.
+  on_demand_processing_enabled?: boolean;
+  on_demand_jobs_attempted?: number;
+  on_demand_jobs_succeeded?: number;
+  on_demand_jobs_failed?: number;
+  snapshot_available_after_run?: boolean;
+  next_required_action?: string;
   // Legacy fields — kept for back-compat if old backend serves them
   snapshot_id?: string;
   run_id?: string;

@@ -526,9 +526,32 @@ def _parse_intel_v3_overlay(
 # existing concentration/cap checks in `_compute_gaps` — it never loosens
 # them. Kept separate from `_parse_intel_v3_overlay` so ETF/crypto/
 # speculative ranking (which already reuses that overlay) is untouched.
+#
+# Production evidence-band vocabulary: Intel v3 cards serialize the internal
+# AxisBand.OK axis as the string "PARTIAL", not "OK" — see
+# `_EVIDENCE_QUALITY_TO_BAND` in `snapshot_builder.py` (STRONG->"STRONG",
+# OK->"PARTIAL", THIN/SUPPRESSED->"THIN") and the existing `_STRONG_PARTIAL`
+# positive-band set in `intel_v3_service.py`. The positive stock evidence
+# bands here are therefore STRONG and PARTIAL. "OK" is accepted only as a
+# legacy alias (normalized to PARTIAL) in case an older snapshot shape is
+# ever encountered — it is not the production card shape.
 
-_STOCK_POSITIVE_EVIDENCE_BANDS: frozenset[str] = frozenset({"OK", "STRONG"})
+_STOCK_POSITIVE_EVIDENCE_BANDS: frozenset[str] = frozenset({"STRONG", "PARTIAL"})
 STOCK_EVIDENCE_STALE_HOURS: int = SNAPSHOT_STALE_HOURS
+
+
+def _normalize_evidence_band(raw: Any) -> str:
+    """Normalize a card's evidence_band to the production vocabulary.
+
+    Production cards serialize AxisBand.OK as "PARTIAL" (see
+    `_EVIDENCE_QUALITY_TO_BAND` in snapshot_builder.py). "OK" is accepted
+    here only as a legacy alias for "PARTIAL" — it is not what production
+    snapshots actually write.
+    """
+    band = (raw or "").upper()
+    if band == "OK":
+        return "PARTIAL"
+    return band
 
 
 def _parse_intel_v3_stock_evidence(intel_snapshot: dict | None) -> dict[str, dict[str, Any]]:
@@ -538,21 +561,30 @@ def _parse_intel_v3_stock_evidence(intel_snapshot: dict | None) -> dict[str, dic
     hours_since_update}}. A ticker absent from a real snapshot's cards (or a
     missing snapshot entirely) is treated by the gate below as insufficient
     evidence — this function never fabricates a positive default.
+
+    Freshness uses the card's own `updated_at` when present; if a card omits
+    it, this falls back to the snapshot row's `created_at` (the snapshot as a
+    whole is timestamped even when an individual card is not). If neither
+    timestamp exists, `hours_since_update` stays None and the gate below
+    fails closed on `evidence_freshness_unknown` — this fallback never
+    loosens the freshness requirement, only widens where the timestamp may
+    come from.
     """
     if intel_snapshot is None:
         return {}
     payload = intel_snapshot.get("payload") or intel_snapshot
     cards = payload.get("cards") or []
+    snapshot_created_at = _parse_dt(intel_snapshot.get("created_at"))
     evidence: dict[str, dict[str, Any]] = {}
     for card in cards:
         ticker = card.get("ticker") or card.get("symbol")
         if not ticker:
             continue
-        updated_at = _parse_dt(card.get("updated_at"))
+        updated_at = _parse_dt(card.get("updated_at")) or snapshot_created_at
         evidence[ticker] = {
             "action": (card.get("action") or "").upper(),
             "conviction": (card.get("conviction") or card.get("conviction_level") or "").upper(),
-            "evidence_band": (card.get("evidence_band") or "").upper(),
+            "evidence_band": _normalize_evidence_band(card.get("evidence_band")),
             "asset_type": (card.get("asset_type") or "").lower(),
             "flags": list(card.get("flags") or []),
             "hours_since_update": _hours_since(updated_at),
@@ -699,7 +731,7 @@ def _rank_buy_candidates(
             if evidence_band == "STRONG":
                 confidence_label = "high_confidence_evidence"
                 evidence_rank = 2
-            elif evidence_band == "OK":
+            elif evidence_band == "PARTIAL":
                 confidence_label = "moderate_confidence_evidence"
                 evidence_rank = 1
             extra_reason_codes.append("evidence_fresh_and_constructive")

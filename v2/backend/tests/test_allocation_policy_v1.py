@@ -1714,9 +1714,11 @@ class TestStage12CRegressionFixture:
 #
 # Individual stocks may only become buy candidates when Intel v3 evidence for
 # that ticker is present, fresh, carries a constructive (BUY) signal with
-# sufficient evidence confidence (evidence_band OK/STRONG), and has no
-# blocking flags — on top of the existing concentration/cap checks. This is
-# additive to the Stage 12B/12C policy: ETF baseline behavior is unchanged.
+# sufficient evidence confidence (evidence_band STRONG/PARTIAL — production
+# cards serialize AxisBand.OK as "PARTIAL", not "OK"; see
+# _EVIDENCE_QUALITY_TO_BAND in snapshot_builder.py), and has no blocking
+# flags — on top of the existing concentration/cap checks. This is additive
+# to the Stage 12B/12C policy: ETF baseline behavior is unchanged.
 
 def _hours_ago_iso(hours: float) -> str:
     return (datetime.now(tz=timezone.utc) - timedelta(hours=hours)).isoformat()
@@ -1726,20 +1728,23 @@ def _intel_card(
     ticker: str,
     action: str = "BUY",
     conviction: str = "HIGH",
-    evidence_band: str = "STRONG",
+    evidence_band: str = "PARTIAL",
     hours_old: float | None = 1.0,
     flags: list[str] | None = None,
     asset_type: str = "stock",
+    include_updated_at: bool = True,
 ) -> dict:
-    return {
+    card = {
         "ticker": ticker,
         "action": action,
         "conviction": conviction,
         "evidence_band": evidence_band,
         "asset_type": asset_type,
         "flags": flags or [],
-        "updated_at": _hours_ago_iso(hours_old) if hours_old is not None else None,
     }
+    if include_updated_at:
+        card["updated_at"] = _hours_ago_iso(hours_old) if hours_old is not None else None
+    return card
 
 
 def _intel_snapshot(cards: list[dict]) -> list[dict]:
@@ -1786,18 +1791,54 @@ class TestStage13AEvidenceAwareStockCandidates:
 
     @pytest.mark.asyncio
     async def test_fresh_positive_evidence_stock_outranks_capped_sector_etf(self):
-        """Requirement 2: a fresh, positive-evidence, underweight stock with no
+        """Requirement 2: a fresh, PARTIAL-evidence, underweight stock with no
         concentration violation becomes an eligible, allocated candidate — and
         beats a same-or-lower-priority ETF slot that is already at its cap and
         therefore not a candidate at all.
+
+        PARTIAL is the main passing production evidence band (Intel v3 cards
+        serialize AxisBand.OK as "PARTIAL" — see _EVIDENCE_QUALITY_TO_BAND in
+        snapshot_builder.py). This is the fixture that must pass in practice;
+        `test_strong_evidence_band_stock_also_passes_gate` below covers STRONG.
         """
         # XLE (sector ETF) held at/above its per-ticker cap (no per-ticker ETF
         # cap, but the group is capped at 5%) so it stays ineligible; MSFT is a
-        # small, underweight individual stock with strong fresh evidence.
+        # small, underweight individual stock with fresh PARTIAL evidence.
         positions = [
             _pos("VOO", shares=200),   # dominant broad ETF holding → ETF floor met
             _pos("XLE", shares=50),    # sector ETF already at/above its 5% group target
             _pos("MSFT", shares=2),    # small, underweight individual stock
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "XLE": [_price("XLE", close=90.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 200 * 400 + 50 * 90 + 2 * 100
+        intel_rows = _intel_snapshot([_intel_card("MSFT", evidence_band="PARTIAL")])
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        candidate_tickers = [c["ticker"] for c in result["next_buy_candidates"]]
+        assert "MSFT" in candidate_tickers, f"Expected MSFT as evidence-backed candidate, got {candidate_tickers}"
+        assert "XLE" not in candidate_tickers, "XLE should be excluded — sector ETF group already at cap"
+
+        msft = next(c for c in result["next_buy_candidates"] if c["ticker"] == "MSFT")
+        assert msft["asset_type"] == "equity"
+        assert msft["candidate_source"] == "evidence_aware_stock_ranking_v1"
+        assert msft["confidence_label"] == "moderate_confidence_evidence"
+        assert msft["dollar_amount"] > 0
+        assert result["stock_candidates"]["status"] == "enabled"
+
+    @pytest.mark.asyncio
+    async def test_strong_evidence_band_stock_also_passes_gate(self):
+        """STRONG remains a passing evidence band alongside PARTIAL."""
+        positions = [
+            _pos("VOO", shares=200),
+            _pos("XLE", shares=50),
+            _pos("MSFT", shares=2),
         ]
         prices = {
             "VOO": [_price("VOO", close=400.0)],
@@ -1812,15 +1853,87 @@ class TestStage13AEvidenceAwareStockCandidates:
             db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
         )
         candidate_tickers = [c["ticker"] for c in result["next_buy_candidates"]]
-        assert "MSFT" in candidate_tickers, f"Expected MSFT as evidence-backed candidate, got {candidate_tickers}"
-        assert "XLE" not in candidate_tickers, "XLE should be excluded — sector ETF group already at cap"
-
+        assert "MSFT" in candidate_tickers
         msft = next(c for c in result["next_buy_candidates"] if c["ticker"] == "MSFT")
-        assert msft["asset_type"] == "equity"
-        assert msft["candidate_source"] == "evidence_aware_stock_ranking_v1"
         assert msft["confidence_label"] == "high_confidence_evidence"
-        assert msft["dollar_amount"] > 0
-        assert result["stock_candidates"]["status"] == "enabled"
+
+    @pytest.mark.asyncio
+    async def test_legacy_ok_evidence_band_normalized_to_partial(self):
+        """Requirement: "OK" is accepted only as a legacy alias, normalized to
+        PARTIAL — it is never the production card shape (that's "PARTIAL").
+        """
+        from app.services.allocation_policy_v1 import _normalize_evidence_band
+
+        assert _normalize_evidence_band("OK") == "PARTIAL"
+        assert _normalize_evidence_band("ok") == "PARTIAL"
+        assert _normalize_evidence_band("STRONG") == "STRONG"
+        assert _normalize_evidence_band("THIN") == "THIN"
+        assert _normalize_evidence_band(None) == ""
+
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 200 * 400 + 2 * 100
+        # A legacy card written with the old "OK" label must still pass the
+        # gate via normalization, but production candidates always report
+        # the normalized "PARTIAL" band downstream.
+        intel_rows = _intel_snapshot([_intel_card("MSFT", evidence_band="OK")])
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        candidate_tickers = [c["ticker"] for c in result["next_buy_candidates"]]
+        assert "MSFT" in candidate_tickers
+        msft = next(c for c in result["next_buy_candidates"] if c["ticker"] == "MSFT")
+        assert msft["confidence_label"] == "moderate_confidence_evidence"
+
+    @pytest.mark.asyncio
+    async def test_missing_card_updated_at_falls_back_to_snapshot_created_at(self):
+        """Requirement: freshness falls back to the snapshot row's created_at
+        when a card omits its own updated_at, without loosening the gate.
+        """
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 200 * 400 + 2 * 100
+
+        # Card has no updated_at at all; snapshot row created_at is fresh (1h ago).
+        card = _intel_card("MSFT", evidence_band="PARTIAL", include_updated_at=False)
+        intel_rows = [{
+            "payload": {"cards": [card]},
+            "created_at": _hours_ago_iso(1.0),
+            "is_active": True,
+        }]
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        candidate_tickers = [c["ticker"] for c in result["next_buy_candidates"]]
+        assert "MSFT" in candidate_tickers, (
+            "Fresh snapshot created_at should be used as a freshness fallback "
+            "when the card itself has no updated_at"
+        )
+
+        # Now the snapshot row itself is stale (48h ago) — must still fail closed.
+        stale_intel_rows = [{
+            "payload": {"cards": [card]},
+            "created_at": _hours_ago_iso(48.0),
+            "is_active": True,
+        }]
+        stale_db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=stale_intel_rows)
+        stale_result = await run_next_buy_policy_diagnostic(
+            db_client=stale_db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        stale_candidate_tickers = [c["ticker"] for c in stale_result["next_buy_candidates"]]
+        assert "MSFT" not in stale_candidate_tickers, (
+            "Stale snapshot created_at fallback must still block the candidate"
+        )
 
     @pytest.mark.asyncio
     async def test_stale_evidence_stock_blocked_no_dollars(self):

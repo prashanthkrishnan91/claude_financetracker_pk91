@@ -427,52 +427,80 @@ def _compute_gaps(
         else:
             per_ticker_cap = INDIVIDUAL_STOCK_CAP_PCT
 
-        # Eligible for buy?
-        ineligibility_reason: str | None = None
+        # Policy/cap eligibility — computed independently of Intel v3 evidence.
+        # This is deliberately a separate variable from the final
+        # `ineligibility_reason`/`eligible_for_buy` below: for individual
+        # stocks, a policy blocker here must never short-circuit evaluation
+        # of the evidence gate (Stage 13C fix — see evidence_gate_passed).
+        policy_ineligibility_reason: str | None = None
         if h["market_value"] is None:
-            ineligibility_reason = "no_price_available"
+            policy_ineligibility_reason = "no_price_available"
         elif current_pct >= per_ticker_cap:
-            ineligibility_reason = f"at_or_above_{group}_cap_{per_ticker_cap}pct"
+            policy_ineligibility_reason = f"at_or_above_{group}_cap_{per_ticker_cap}pct"
 
         # For ETFs: also check if group target is met
         elif group in _ETF_GROUPS:
             group_gap_status = group_gaps.get(group, {}).get("status", "within")
             if group_gap_status == "over":
-                ineligibility_reason = f"etf_group_{group}_already_above_target"
+                policy_ineligibility_reason = f"etf_group_{group}_already_above_target"
 
         # For crypto: check group total
         elif group == GROUP_CRYPTO:
             crypto_current = group_weights.get(GROUP_CRYPTO, {}).get("weight_pct", 0.0)
             if crypto_current >= CRYPTO_TOTAL_CAP_PCT:
-                ineligibility_reason = "crypto_group_at_or_above_cap"
+                policy_ineligibility_reason = "crypto_group_at_or_above_cap"
 
         # For alternatives: check group total
         elif group == GROUP_ALTERNATIVES:
             alt_current = group_weights.get(GROUP_ALTERNATIVES, {}).get("weight_pct", 0.0)
             if alt_current >= ALTERNATIVES_TOTAL_CAP_PCT:
-                ineligibility_reason = "alternatives_group_at_or_above_cap"
+                policy_ineligibility_reason = "alternatives_group_at_or_above_cap"
 
         # Individual-stock sleeve guardrail: block new-dollar candidates for
-        # the whole individual_stock group once it is already at or above its
-        # policy target (checked before the per-ticker evidence gate below,
-        # so a policy block is never misreported as an evidence block).
+        # the whole individual_stock group once its current weight is at or
+        # above its policy target. Compared directly against the group's
+        # current weight/target (not `group_gaps[...]["status"] == "over"`,
+        # whose >0.5pct-band "over"/"within" split would incorrectly pass a
+        # sleeve sitting exactly at its target).
         elif group == GROUP_INDIVIDUAL_STOCK:
-            stock_group_status = group_gaps.get(GROUP_INDIVIDUAL_STOCK, {}).get("status", "within")
-            if stock_group_status == "over":
-                ineligibility_reason = "individual_stock_group_above_target"
+            stock_group_current_pct = group_weights.get(GROUP_INDIVIDUAL_STOCK, {}).get("weight_pct", 0.0)
+            stock_group_target_pct = group_targets.get(GROUP_INDIVIDUAL_STOCK, 0.0)
+            if _safe_float(stock_group_current_pct) is not None and stock_group_current_pct >= stock_group_target_pct:
+                policy_ineligibility_reason = "individual_stock_group_above_target"
 
-        # Stage 13A: individual stocks additionally require the Intel v3
-        # evidence gate — additive to the cap/group checks above, never
-        # loosens them.
+        # Stage 13A/13C: individual stocks are additionally gated on Intel v3
+        # evidence — but this gate is now ALWAYS evaluated for every
+        # individual-stock ticker, independent of any policy blocker above.
+        # This lets the diagnostic distinguish an evidence-eligible BUY that
+        # was blocked purely by allocation policy from a ticker that
+        # independently fails its own evidence checks (HOLD/THIN/stale/
+        # missing), instead of collapsing every overweight-sleeve ticker into
+        # a single undifferentiated policy-blocked bucket.
         evidence_gate_codes: list[str] = []
-        if ineligibility_reason is None and group == GROUP_INDIVIDUAL_STOCK:
-            gate_passed, evidence_gate_codes = _evaluate_stock_candidate_gate(
+        evidence_gate_passed: bool = True
+        if group == GROUP_INDIVIDUAL_STOCK:
+            evidence_gate_passed, evidence_gate_codes = _evaluate_stock_candidate_gate(
                 ticker, stock_evidence_map or {}
             )
-            if not gate_passed:
-                ineligibility_reason = "evidence_gate_failed:" + ",".join(evidence_gate_codes)
 
-        eligible = ineligibility_reason is None
+        # Final eligibility requires both gates: no policy blocker AND a
+        # passed evidence gate. Passing evidence never overrides a policy
+        # blocker, and a passed policy check never overrides failed evidence.
+        if group == GROUP_INDIVIDUAL_STOCK:
+            eligible = policy_ineligibility_reason is None and evidence_gate_passed
+            if policy_ineligibility_reason is not None:
+                # Frontend-compatible field: expose the primary policy reason
+                # when policy-blocked, even if evidence also failed — the
+                # independent evidence_gate_passed/evidence_gate_codes fields
+                # below still carry the full picture.
+                ineligibility_reason = policy_ineligibility_reason
+            elif not evidence_gate_passed:
+                ineligibility_reason = "evidence_gate_failed:" + ",".join(evidence_gate_codes)
+            else:
+                ineligibility_reason = None
+        else:
+            ineligibility_reason = policy_ineligibility_reason
+            eligible = ineligibility_reason is None
 
         # Target weight for this ticker (group target / tickers in group)
         tickers_in_group = [t for t, hh in holdings.items() if hh["group"] == group]
@@ -489,6 +517,8 @@ def _compute_gaps(
             "gap_pct": round(ticker_target_pct - current_pct, 4),
             "eligible_for_buy": eligible,
             "ineligibility_reason": ineligibility_reason,
+            "policy_ineligibility_reason": policy_ineligibility_reason,
+            "evidence_gate_passed": evidence_gate_passed,
             "is_unknown_ticker": h["is_unknown"],
             "evidence_gate_codes": evidence_gate_codes,
         }
@@ -1128,27 +1158,38 @@ async def run_next_buy_policy_diagnostic(
     stock_tickers_selected = [
         c["ticker"] for c in next_buy_candidates if c.get("asset_type") == "equity"
     ]
-    # Stage 13B: distinguish evidence-blocked tickers (evidence gate failed)
-    # from policy/allocation-blocked tickers (the individual_stock sleeve is
-    # already at or above its policy target/cap — this can block a ticker
-    # even when its own Intel v3 evidence would otherwise pass, so it must
-    # never be reported as evidence-missing).
+    # Stage 13C: policy eligibility and evidence eligibility are independent
+    # gates for individual stocks (see _compute_gaps) — a ticker can fail
+    # either, both, or neither. These four buckets report each combination
+    # so the diagnostic never collapses an evidence-eligible-but-policy-
+    # blocked BUY into the same bucket as a ticker that independently fails
+    # its own evidence checks.
     stock_tickers_blocked: list[str] = []
     blocked_by_policy_tickers: list[str] = []
+    evidence_eligible_but_policy_blocked_tickers: list[str] = []
     policy_block_reason_codes: dict[str, str] = {}
     for t in stock_tickers_held:
         if t in stock_tickers_selected:
             continue
         tg = ticker_gaps[t]
-        if tg.get("ineligibility_reason") == "individual_stock_group_above_target":
+        has_policy_blocker = tg.get("policy_ineligibility_reason") is not None
+        evidence_passed = bool(tg.get("evidence_gate_passed"))
+
+        if has_policy_blocker:
             blocked_by_policy_tickers.append(t)
-            policy_block_reason_codes[t] = "individual_stock_group_above_target"
-        elif tg.get("evidence_gate_codes"):
+            policy_block_reason_codes[t] = tg["policy_ineligibility_reason"]
+            if evidence_passed:
+                evidence_eligible_but_policy_blocked_tickers.append(t)
+        if not evidence_passed:
             stock_tickers_blocked.append(t)
 
     if stock_tickers_selected:
         stock_candidates_status = "enabled"
-    elif stock_tickers_blocked and not blocked_by_policy_tickers:
+    elif evidence_eligible_but_policy_blocked_tickers:
+        # At least one stock cleared evidence but every such stock was
+        # policy-blocked — report the policy reason, not evidence-missing.
+        stock_candidates_status = "blocked_by_policy_caps"
+    elif stock_tickers_blocked:
         stock_candidates_status = "blocked_insufficient_evidence"
     elif blocked_by_policy_tickers:
         stock_candidates_status = "blocked_by_policy_caps"
@@ -1204,6 +1245,7 @@ async def run_next_buy_policy_diagnostic(
             "selected_tickers": stock_tickers_selected,
             "blocked_by_evidence_tickers": stock_tickers_blocked,
             "blocked_by_policy_tickers": blocked_by_policy_tickers,
+            "evidence_eligible_but_policy_blocked_tickers": evidence_eligible_but_policy_blocked_tickers,
             "policy_block_reason_codes": policy_block_reason_codes,
         },
         "cash_plan": {

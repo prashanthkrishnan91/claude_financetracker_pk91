@@ -1777,11 +1777,16 @@ class TestStage13AEvidenceAwareStockCandidates:
         )
         candidates = result["next_buy_candidates"]
         assert candidates and candidates[0]["ticker"] == "VTI"
-        # AAPL/NVDA/MSFT are already above the 20% cap in this fixture, so they
-        # are blocked by the pre-existing policy cap before the evidence gate
-        # ever runs — confirms Stage 13A doesn't loosen the existing guardrail.
-        assert result["stock_candidates"]["status"] == "blocked_by_policy_caps"
+        # AAPL/NVDA/MSFT are already above the 20% cap in this fixture (a
+        # policy blocker), AND the evidence gate is now always evaluated
+        # (Stage 13C) — with no Intel v3 snapshot at all, evidence also fails
+        # for every stock, so no stock ever clears evidence here. Status is
+        # therefore "blocked_insufficient_evidence" (no stock passed
+        # evidence), not "blocked_by_policy_caps" (which is reserved for when
+        # at least one stock passed evidence but was policy-blocked).
+        assert result["stock_candidates"]["status"] == "blocked_insufficient_evidence"
         assert "AAPL" not in [c["ticker"] for c in candidates]
+        assert result["stock_candidates"]["evidence_eligible_but_policy_blocked_tickers"] == []
 
         cp = result["cash_plan"]
         assert cp["allocated_cash"] <= cp["cash_to_deploy"]
@@ -2439,8 +2444,13 @@ class TestStockSleevePolicyGuardrail:
 
         msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
         assert msft_gap["eligible_for_buy"] is False
+        # ineligibility_reason still exposes the primary policy reason...
         assert msft_gap["ineligibility_reason"] == "individual_stock_group_above_target"
-        # Evidence gate never ran for MSFT — must not be misreported as evidence-missing.
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        # ...but the evidence gate is now ALWAYS evaluated (Stage 13C) and
+        # independently reported — MSFT's BUY+STRONG evidence passes even
+        # though policy still blocks new dollars.
+        assert msft_gap["evidence_gate_passed"] is True
         assert msft_gap["evidence_gate_codes"] == []
 
         assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
@@ -2448,6 +2458,7 @@ class TestStockSleevePolicyGuardrail:
         stock_candidates = result["stock_candidates"]
         assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
         assert "MSFT" not in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
         assert stock_candidates["policy_block_reason_codes"]["MSFT"] == "individual_stock_group_above_target"
         assert stock_candidates["status"] == "blocked_by_policy_caps"
 
@@ -2456,6 +2467,133 @@ class TestStockSleevePolicyGuardrail:
         cp = result["cash_plan"]
         assert cp["allocated_cash"] <= cp["cash_to_deploy"]
         assert cp["unallocated_cash"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_overweight_sleeve_hold_strong_blocked_by_both_gates(self):
+        """Requirement B: a HOLD stock in an overweight sleeve independently
+        fails its own evidence check (action != BUY) on top of the policy
+        blocker — both gates report it, and it must NOT appear in
+        evidence_eligible_but_policy_blocked_tickers (evidence didn't pass).
+        """
+        positions = [
+            _pos("VOO", shares=100),     # 40,000
+            _pos("VXUS", shares=76.9),   # 7,690
+            _pos("AAPL", shares=473.1),  # 47,310
+            _pos("MSFT", shares=50),     # 5,000
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "VXUS": [_price("VXUS", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 40000 + 7690 + 47310 + 5000  # 100,000 → individual_stock ~52.31%
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="HOLD", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        assert msft_gap["evidence_gate_passed"] is False
+        assert "evidence_signal_not_constructive" in msft_gap["evidence_gate_codes"]
+        # Frontend-compatible field still surfaces the policy reason.
+        assert msft_gap["ineligibility_reason"] == "individual_stock_group_above_target"
+
+        stock_candidates = result["stock_candidates"]
+        assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
+        assert "MSFT" in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" not in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_overweight_sleeve_buy_thin_evidence_confidence_insufficient(self):
+        """Requirement C: a BUY stock in an overweight sleeve with THIN
+        evidence is still policy-blocked, and evidence_confidence_insufficient
+        is still reported (evidence gate runs regardless of the policy block).
+        """
+        positions = [
+            _pos("VOO", shares=100),
+            _pos("VXUS", shares=76.9),
+            _pos("AAPL", shares=473.1),
+            _pos("MSFT", shares=50),
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "VXUS": [_price("VXUS", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 40000 + 7690 + 47310 + 5000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="THIN")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        assert msft_gap["evidence_gate_passed"] is False
+        assert "evidence_confidence_insufficient" in msft_gap["evidence_gate_codes"]
+
+        stock_candidates = result["stock_candidates"]
+        assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
+        assert "MSFT" in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" not in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_sleeve_exactly_at_target_boundary_blocks_new_dollars(self):
+        """Requirement D: individual_stock group weight exactly at its 40%
+        target (not merely "over" by the >0.5pct group-status band) still
+        blocks new dollars, even with fresh BUY+STRONG evidence.
+
+        Uses four individual-stock tickers at 10% each (well under the 20%
+        per-ticker cap) so the group hits exactly 40% without any single
+        ticker separately tripping the per-ticker cap check first — this
+        isolates the assertion to the new group-level boundary guardrail.
+        """
+        positions = [
+            _pos("VOO", shares=600),    # 60,000 → 60%
+            _pos("MSFT", shares=100),   # 10,000 → 10%
+            _pos("AAPL", shares=100),   # 10,000 → 10%
+            _pos("NVDA", shares=100),   # 10,000 → 10%
+            _pos("GOOG", shares=100),   # 10,000 → 10%  (group total: exactly 40%)
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "NVDA": [_price("NVDA", close=100.0)],
+            "GOOG": [_price("GOOG", close=100.0)],
+        }
+        mv = 60000 + 40000  # 100,000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        stock_group = result["target_vs_current"]["by_group"][GROUP_INDIVIDUAL_STOCK]
+        assert stock_group["current_weight_pct"] == pytest.approx(40.0, abs=0.001)
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["eligible_for_buy"] is False
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        # Evidence itself passes — this is a boundary policy block, not evidence-missing.
+        assert msft_gap["evidence_gate_passed"] is True
+        assert msft_gap["evidence_gate_codes"] == []
+
+        assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
+        assert "MSFT" in result["stock_candidates"]["evidence_eligible_but_policy_blocked_tickers"]
 
     @pytest.mark.asyncio
     async def test_stock_receives_dollars_when_group_below_target_and_etf_floor_met(self):

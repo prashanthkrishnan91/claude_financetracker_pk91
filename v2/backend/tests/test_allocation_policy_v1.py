@@ -1777,11 +1777,16 @@ class TestStage13AEvidenceAwareStockCandidates:
         )
         candidates = result["next_buy_candidates"]
         assert candidates and candidates[0]["ticker"] == "VTI"
-        # AAPL/NVDA/MSFT are already above the 20% cap in this fixture, so they
-        # are blocked by the pre-existing policy cap before the evidence gate
-        # ever runs — confirms Stage 13A doesn't loosen the existing guardrail.
-        assert result["stock_candidates"]["status"] == "blocked_by_policy_caps"
+        # AAPL/NVDA/MSFT are already above the 20% cap in this fixture (a
+        # policy blocker), AND the evidence gate is now always evaluated
+        # (Stage 13C) — with no Intel v3 snapshot at all, evidence also fails
+        # for every stock, so no stock ever clears evidence here. Status is
+        # therefore "blocked_insufficient_evidence" (no stock passed
+        # evidence), not "blocked_by_policy_caps" (which is reserved for when
+        # at least one stock passed evidence but was policy-blocked).
+        assert result["stock_candidates"]["status"] == "blocked_insufficient_evidence"
         assert "AAPL" not in [c["ticker"] for c in candidates]
+        assert result["stock_candidates"]["evidence_eligible_but_policy_blocked_tickers"] == []
 
         cp = result["cash_plan"]
         assert cp["allocated_cash"] <= cp["cash_to_deploy"]
@@ -2147,3 +2152,487 @@ class TestStage13AEvidenceAwareStockCandidates:
         c1 = [(c["ticker"], c["dollar_amount"]) for c in r1["next_buy_candidates"]]
         c2 = [(c["ticker"], c["dollar_amount"]) for c in r2["next_buy_candidates"]]
         assert c1 == c2
+
+
+# ── Stage 13B: production Intel v3 snapshot contract regression ───────────────
+#
+# Production snapshots (snapshot_builder.build_snapshot) store held cards
+# under `current_holdings` and never write a `cards` key. These fixtures
+# mirror that exact returned contract (schema_version/snapshot_id/run_id/
+# generated_at/current_holdings/best_buys/trim_sell_desk, and each card's
+# ticker/action/conviction/evidence_band/flags/updated_at fields) so the
+# allocation policy's Intel v3 adapter is exercised against the real
+# production shape, not just the legacy `cards` test shape used above.
+
+def _production_card(
+    ticker: str,
+    action: str = "BUY",
+    conviction: str = "HIGH",
+    evidence_band: str = "PARTIAL",
+    hours_old: float | None = 1.0,
+    flags: list[str] | None = None,
+    asset_type: str = "stock",
+    include_updated_at: bool = True,
+) -> dict:
+    """Mirrors the exact per-card shape returned by
+    `snapshot_builder.build_snapshot`'s `_build_held_card`.
+    """
+    card = {
+        "ticker": ticker,
+        "name": ticker,
+        "asset_type": asset_type,
+        "action": action,
+        "conviction": conviction,
+        "evidence_band": evidence_band,
+        "portfolio_fit": "On target",
+        "risk_level": "LOW",
+        "thesis_state": "intact",
+        "why_text": "Some evidence is available; gaps noted where present.",
+        "risk_text": "",
+        "action_text": "Add to this position if Deploy has room.",
+        "what_would_change_view": "",
+        "fit_text": "On target",
+        "evidence_text": "Some evidence is available; gaps noted where present.",
+        "flags": flags or [],
+        "source_snapshot_id": "snap-prod-1",
+        "source_run_id": "run-prod-1",
+        "detail_drawer_payload": {},
+    }
+    if include_updated_at:
+        card["updated_at"] = _hours_ago_iso(hours_old) if hours_old is not None else None
+    return card
+
+
+def _production_snapshot_row(
+    cards: list[dict],
+    generated_at_hours_ago: float | None = 0.1,
+    row_created_at_hours_ago: float | None = None,
+    also_include_legacy_cards_key: bool = False,
+) -> list[dict]:
+    """Mirrors the exact wrapped database-row contract for a direct
+    `intel_v3_snapshots` table query — `snapshot_builder.build_snapshot`'s
+    payload (cards under `current_holdings`, no `cards` key) wrapped the same
+    way `run_next_buy_policy_diagnostic` fetches it (`payload, created_at`).
+    """
+    payload = {
+        "schema_version": "v3.1",
+        "snapshot_id": "snap-prod-1",
+        "run_id": "run-prod-1",
+        "is_stale": False,
+        "current_holdings": cards,
+        "best_buys": [c for c in cards if c["action"] == "BUY"],
+        "trim_sell_desk": [c for c in cards if c["action"] in {"TRIM", "SELL"}],
+    }
+    if generated_at_hours_ago is not None:
+        payload["generated_at"] = _hours_ago_iso(generated_at_hours_ago)
+    if also_include_legacy_cards_key:
+        payload["cards"] = cards
+    row = {"payload": payload, "is_active": True}
+    if row_created_at_hours_ago is not None:
+        row["created_at"] = _hours_ago_iso(row_created_at_hours_ago)
+    return [row]
+
+
+class TestProductionIntelV3SnapshotContract:
+    """Stage 13B: Paycheck Advisor must consume the real production Intel v3
+    snapshot contract — held cards live under `current_holdings`, not
+    `cards`. `cards` remains accepted only as legacy/test compatibility.
+    """
+
+    @pytest.mark.asyncio
+    async def test_current_holdings_consumed_overlay_used_no_missing_cards_warning(self):
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert result["generated_policy"]["intel_v3_overlay_used"] is True
+        warning = result["generated_policy"]["intel_v3_overlay_warning"]
+        assert warning is None or "has_no_cards" not in warning
+        assert "intel_v3_snapshot_has_no_cards" not in str(result["generated_policy"].get("warnings", []))
+
+    @pytest.mark.asyncio
+    async def test_buy_strong_passes_evidence_from_current_holdings(self):
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        intel_rows = _production_snapshot_row([_production_card("MSFT", evidence_band="STRONG")])
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" in [c["ticker"] for c in result["next_buy_candidates"]]
+
+    @pytest.mark.asyncio
+    async def test_buy_partial_passes_evidence_from_current_holdings(self):
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        intel_rows = _production_snapshot_row([_production_card("MSFT", evidence_band="PARTIAL")])
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" in [c["ticker"] for c in result["next_buy_candidates"]]
+
+    @pytest.mark.asyncio
+    async def test_hold_does_not_pass_from_current_holdings(self):
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="HOLD", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert "evidence_signal_not_constructive" in msft_gap["evidence_gate_codes"]
+
+    @pytest.mark.asyncio
+    async def test_thin_does_not_pass_from_current_holdings(self):
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="THIN")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert "evidence_confidence_insufficient" in msft_gap["evidence_gate_codes"]
+
+    @pytest.mark.asyncio
+    async def test_generated_at_freshness_fallback_works(self):
+        """Card omits updated_at → falls back to payload.generated_at."""
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+
+        card = _production_card("MSFT", evidence_band="STRONG", include_updated_at=False)
+        fresh_rows = _production_snapshot_row([card], generated_at_hours_ago=1.0)
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=fresh_rows)
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" in [c["ticker"] for c in result["next_buy_candidates"]], (
+            "payload.generated_at should be used as a freshness fallback"
+        )
+
+        stale_rows = _production_snapshot_row([card], generated_at_hours_ago=48.0)
+        stale_db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=stale_rows)
+        stale_result = await run_next_buy_policy_diagnostic(
+            db_client=stale_db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" not in [c["ticker"] for c in stale_result["next_buy_candidates"]], (
+            "Stale payload.generated_at fallback must still fail closed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_generated_at_takes_priority_over_row_created_at(self):
+        """When both payload.generated_at and row.created_at exist, generated_at wins."""
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+
+        card = _production_card("MSFT", evidence_band="STRONG", include_updated_at=False)
+        # payload.generated_at fresh, row.created_at stale — generated_at must win.
+        rows = _production_snapshot_row(
+            [card], generated_at_hours_ago=1.0, row_created_at_hours_ago=48.0,
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=rows)
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" in [c["ticker"] for c in result["next_buy_candidates"]]
+
+    @pytest.mark.asyncio
+    async def test_cards_still_accepted_as_legacy_compatibility_only(self):
+        """`cards` remains a documented legacy/test fallback when
+        `current_holdings` is absent — but it is not the production shape.
+        """
+        positions = [_pos("VOO", shares=200), _pos("MSFT", shares=2)]
+        prices = {"VOO": [_price("VOO", close=400.0)], "MSFT": [_price("MSFT", close=100.0)]}
+        mv = 200 * 400 + 2 * 100
+        legacy_rows = [{
+            "payload": {"cards": [_intel_card("MSFT", evidence_band="STRONG")]},
+            "created_at": _hours_ago_iso(1.0),
+            "is_active": True,
+        }]
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=legacy_rows)
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=500.0, max_positions=5,
+        )
+        assert "MSFT" in [c["ticker"] for c in result["next_buy_candidates"]]
+
+    def test_current_holdings_and_cards_both_present_no_duplication(self):
+        """When both keys exist, current_holdings is canonical — never combined
+        with `cards`, so cards are never duplicated.
+        """
+        from app.services.allocation_policy_v1 import _extract_intel_v3_cards
+
+        card = _production_card("MSFT", evidence_band="STRONG")
+        rows = _production_snapshot_row([card], also_include_legacy_cards_key=True)
+        extracted = _extract_intel_v3_cards(rows[0])
+        assert len(extracted) == 1
+        assert extracted[0]["ticker"] == "MSFT"
+
+    def test_neither_key_present_returns_empty_list(self):
+        from app.services.allocation_policy_v1 import _extract_intel_v3_cards
+
+        assert _extract_intel_v3_cards({"payload": {"generated_at": "2026-01-01T00:00:00Z"}}) == []
+        assert _extract_intel_v3_cards(None) == []
+        assert _extract_intel_v3_cards({}) == []
+
+
+# ── Stage 13B: individual-stock sleeve policy guardrail ────────────────────────
+#
+# Evidence eligibility and allocation-policy eligibility are separate gates.
+# A stock can pass its Intel v3 evidence check and still be blocked from new
+# dollars because the individual_stock sleeve as a whole is already at or
+# above its policy target — this must be reported as policy-blocked, never
+# as evidence-missing.
+
+class TestStockSleevePolicyGuardrail:
+    @pytest.mark.asyncio
+    async def test_stock_policy_blocked_when_individual_stock_group_above_target(self):
+        """Certified production-shape snapshot, stock BUY+STRONG evidence
+        present, individual_stock group already above its 40% target
+        (~52.31%, mirroring the live portfolio) → stock is reported
+        policy-blocked, not evidence-missing. ETF plan remains valid.
+        """
+        positions = [
+            _pos("VOO", shares=100),     # 40,000 → broad ETF
+            _pos("VXUS", shares=76.9),   # 7,690  → international ETF
+            _pos("AAPL", shares=473.1),  # 47,310 → dominant individual stock
+            _pos("MSFT", shares=50),     # 5,000  → small, fresh-evidence individual stock
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "VXUS": [_price("VXUS", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 40000 + 7690 + 47310 + 5000  # 100,000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        stock_group = result["target_vs_current"]["by_group"][GROUP_INDIVIDUAL_STOCK]
+        assert stock_group["current_weight_pct"] == pytest.approx(52.31, abs=0.01)
+        assert stock_group["status"] == "over"
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["eligible_for_buy"] is False
+        # ineligibility_reason still exposes the primary policy reason...
+        assert msft_gap["ineligibility_reason"] == "individual_stock_group_above_target"
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        # ...but the evidence gate is now ALWAYS evaluated (Stage 13C) and
+        # independently reported — MSFT's BUY+STRONG evidence passes even
+        # though policy still blocks new dollars.
+        assert msft_gap["evidence_gate_passed"] is True
+        assert msft_gap["evidence_gate_codes"] == []
+
+        assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
+
+        stock_candidates = result["stock_candidates"]
+        assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
+        assert "MSFT" not in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
+        assert stock_candidates["policy_block_reason_codes"]["MSFT"] == "individual_stock_group_above_target"
+        assert stock_candidates["status"] == "blocked_by_policy_caps"
+
+        # ETF plan remains valid — cash invariants hold even though the stock
+        # sleeve is entirely blocked.
+        cp = result["cash_plan"]
+        assert cp["allocated_cash"] <= cp["cash_to_deploy"]
+        assert cp["unallocated_cash"] >= 0
+
+    @pytest.mark.asyncio
+    async def test_overweight_sleeve_hold_strong_blocked_by_both_gates(self):
+        """Requirement B: a HOLD stock in an overweight sleeve independently
+        fails its own evidence check (action != BUY) on top of the policy
+        blocker — both gates report it, and it must NOT appear in
+        evidence_eligible_but_policy_blocked_tickers (evidence didn't pass).
+        """
+        positions = [
+            _pos("VOO", shares=100),     # 40,000
+            _pos("VXUS", shares=76.9),   # 7,690
+            _pos("AAPL", shares=473.1),  # 47,310
+            _pos("MSFT", shares=50),     # 5,000
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "VXUS": [_price("VXUS", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 40000 + 7690 + 47310 + 5000  # 100,000 → individual_stock ~52.31%
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="HOLD", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        assert msft_gap["evidence_gate_passed"] is False
+        assert "evidence_signal_not_constructive" in msft_gap["evidence_gate_codes"]
+        # Frontend-compatible field still surfaces the policy reason.
+        assert msft_gap["ineligibility_reason"] == "individual_stock_group_above_target"
+
+        stock_candidates = result["stock_candidates"]
+        assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
+        assert "MSFT" in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" not in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_overweight_sleeve_buy_thin_evidence_confidence_insufficient(self):
+        """Requirement C: a BUY stock in an overweight sleeve with THIN
+        evidence is still policy-blocked, and evidence_confidence_insufficient
+        is still reported (evidence gate runs regardless of the policy block).
+        """
+        positions = [
+            _pos("VOO", shares=100),
+            _pos("VXUS", shares=76.9),
+            _pos("AAPL", shares=473.1),
+            _pos("MSFT", shares=50),
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=400.0)],
+            "VXUS": [_price("VXUS", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 40000 + 7690 + 47310 + 5000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="THIN")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        assert msft_gap["evidence_gate_passed"] is False
+        assert "evidence_confidence_insufficient" in msft_gap["evidence_gate_codes"]
+
+        stock_candidates = result["stock_candidates"]
+        assert "MSFT" in stock_candidates["blocked_by_policy_tickers"]
+        assert "MSFT" in stock_candidates["blocked_by_evidence_tickers"]
+        assert "MSFT" not in stock_candidates["evidence_eligible_but_policy_blocked_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_sleeve_exactly_at_target_boundary_blocks_new_dollars(self):
+        """Requirement D: individual_stock group weight exactly at its 40%
+        target (not merely "over" by the >0.5pct group-status band) still
+        blocks new dollars, even with fresh BUY+STRONG evidence.
+
+        Uses four individual-stock tickers at 10% each (well under the 20%
+        per-ticker cap) so the group hits exactly 40% without any single
+        ticker separately tripping the per-ticker cap check first — this
+        isolates the assertion to the new group-level boundary guardrail.
+        """
+        positions = [
+            _pos("VOO", shares=600),    # 60,000 → 60%
+            _pos("MSFT", shares=100),   # 10,000 → 10%
+            _pos("AAPL", shares=100),   # 10,000 → 10%
+            _pos("NVDA", shares=100),   # 10,000 → 10%
+            _pos("GOOG", shares=100),   # 10,000 → 10%  (group total: exactly 40%)
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+            "AAPL": [_price("AAPL", close=100.0)],
+            "NVDA": [_price("NVDA", close=100.0)],
+            "GOOG": [_price("GOOG", close=100.0)],
+        }
+        mv = 60000 + 40000  # 100,000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="STRONG")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        stock_group = result["target_vs_current"]["by_group"][GROUP_INDIVIDUAL_STOCK]
+        assert stock_group["current_weight_pct"] == pytest.approx(40.0, abs=0.001)
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["eligible_for_buy"] is False
+        assert msft_gap["policy_ineligibility_reason"] == "individual_stock_group_above_target"
+        # Evidence itself passes — this is a boundary policy block, not evidence-missing.
+        assert msft_gap["evidence_gate_passed"] is True
+        assert msft_gap["evidence_gate_codes"] == []
+
+        assert "MSFT" not in [c["ticker"] for c in result["next_buy_candidates"]]
+        assert "MSFT" in result["stock_candidates"]["evidence_eligible_but_policy_blocked_tickers"]
+
+    @pytest.mark.asyncio
+    async def test_stock_receives_dollars_when_group_below_target_and_etf_floor_met(self):
+        """ETF floor met, individual_stock group below its 40% target, and an
+        eligible underweight stock with fresh BUY+STRONG/PARTIAL evidence can
+        still receive dollars.
+        """
+        positions = [
+            _pos("VOO", shares=450),   # 45,000 → ETF floor comfortably met
+            _pos("MSFT", shares=100),  # 10,000 → underweight individual stock
+        ]
+        prices = {
+            "VOO": [_price("VOO", close=100.0)],
+            "MSFT": [_price("MSFT", close=100.0)],
+        }
+        mv = 45000 + 10000  # 55,000
+        intel_rows = _production_snapshot_row(
+            [_production_card("MSFT", action="BUY", evidence_band="PARTIAL")]
+        )
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=mv, intel_rows=intel_rows)
+
+        result = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id=str(uuid4()), cash_to_deploy=1000.0, max_positions=5,
+        )
+
+        assert result["generated_policy"]["etf_floor_met"] is True
+        stock_group = result["target_vs_current"]["by_group"][GROUP_INDIVIDUAL_STOCK]
+        assert stock_group["status"] == "under"
+
+        msft_gap = result["target_vs_current"]["by_ticker"]["MSFT"]
+        assert msft_gap["eligible_for_buy"] is True
+
+        msft_candidate = next(
+            (c for c in result["next_buy_candidates"] if c["ticker"] == "MSFT"), None,
+        )
+        assert msft_candidate is not None
+        assert msft_candidate["dollar_amount"] > 0
+        assert result["stock_candidates"]["status"] == "enabled"
+
+        cp = result["cash_plan"]
+        assert cp["allocated_cash"] <= cp["cash_to_deploy"]
+        assert cp["unallocated_cash"] >= 0

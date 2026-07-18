@@ -96,6 +96,11 @@ export const RUN_REQUEST_FAILED_SENTENCE =
 export const RUN_IDLE_SENTENCE =
   "Run Intel to generate a certified snapshot for your holdings.";
 
+/** Idle sentence when a certified snapshot already exists — never asks the
+ *  user to "generate" a snapshot that is already current. */
+export const RUN_IDLE_CERTIFIED_SENTENCE =
+  "Certified snapshot is current. Run Intel again to refresh evidence when needed.";
+
 export const RUN_IN_PROGRESS_SENTENCE =
   "Intel run in progress — refreshing analyst evidence for your holdings.";
 
@@ -504,7 +509,7 @@ export function deriveAdvisorReadiness(
   runInput: AdvisorRunInput,
   now: Date = new Date(),
 ): AdvisorReadinessModel {
-  const run = deriveRunModel(runInput);
+  let run = deriveRunModel(runInput);
   const snapshot = query.snapshot ?? null;
 
   let snapshotState: AdvisorSnapshotState;
@@ -528,6 +533,17 @@ export function deriveAdvisorReadiness(
 
   // Ready requires an actually-certified, non-stale snapshot. Nothing else.
   const ready = snapshotState === "certified";
+
+  // Snapshot-aware idle sentence: with a certified snapshot present, never
+  // tell the user to "generate" one — only offer a refresh. (Other idle
+  // sentences, e.g. add-positions, are left untouched.)
+  if (
+    run.state === "idle" &&
+    snapshotState === "certified" &&
+    run.nextActionSentence === RUN_IDLE_SENTENCE
+  ) {
+    run = { ...run, nextActionSentence: RUN_IDLE_CERTIFIED_SENTENCE };
+  }
 
   const isRefreshing = run.state === "running";
   // Shared status derivation (the pill can only say Ready for certified snapshots).

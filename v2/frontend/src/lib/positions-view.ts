@@ -197,9 +197,9 @@ export interface FreshnessInfo {
   /** ISO timestamp of the newest portfolio snapshot, or null when none exist. */
   latestSnapshotAt: string | null;
   hasSnapshots: boolean;
-  /** Tickers whose live price is missing right now. */
-  staleTickers: string[];
-  hasStalePrices: boolean;
+  /** Tickers with no trusted live price right now — missing, not merely stale. */
+  missingPriceTickers: string[];
+  hasMissingPrices: boolean;
 }
 
 export function deriveFreshness(
@@ -213,14 +213,14 @@ export function deriveFreshness(
       latest = s.snapshot_at;
     }
   }
-  const staleTickers = (positions ?? [])
+  const missingPriceTickers = (positions ?? [])
     .filter(p => positionMarketValue(p) === null)
     .map(p => p.ticker);
   return {
     latestSnapshotAt: latest,
     hasSnapshots: (snapshots?.length ?? 0) > 0,
-    staleTickers,
-    hasStalePrices: staleTickers.length > 0,
+    missingPriceTickers,
+    hasMissingPrices: missingPriceTickers.length > 0,
   };
 }
 

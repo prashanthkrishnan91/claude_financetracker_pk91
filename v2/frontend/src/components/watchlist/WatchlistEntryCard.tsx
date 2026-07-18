@@ -6,7 +6,7 @@
  * buy actions, no advisor links.
  */
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn, formatCurrency } from "@/lib/utils";
 import { relativeAgeLabel } from "@/lib/positions-view";
 import {
@@ -42,6 +42,19 @@ export function WatchlistEntryCard({ item }: { item: WatchlistItem }) {
   const deleteMutation = useDeleteWatchlistItem();
 
   const status = criteriaStatus(item);
+
+  // Focus management: moving the action under the pointer/keyboard user is a
+  // swap, so move focus with it (confirm button on delete, first field on edit).
+  const confirmDeleteRef = useRef<HTMLButtonElement>(null);
+  const firstEditFieldRef = useRef<HTMLSelectElement>(null);
+
+  useEffect(() => {
+    if (confirmingDelete) confirmDeleteRef.current?.focus();
+  }, [confirmingDelete]);
+
+  useEffect(() => {
+    if (editing) firstEditFieldRef.current?.focus();
+  }, [editing]);
 
   const startEdit = () => {
     setCriteriaType(item.criteria_type);
@@ -114,6 +127,7 @@ export function WatchlistEntryCard({ item }: { item: WatchlistItem }) {
             {confirmingDelete ? (
               <span className="inline-flex items-center gap-1">
                 <button
+                  ref={confirmDeleteRef}
                   type="button"
                   onClick={() => deleteMutation.mutate(item.id)}
                   disabled={deleteMutation.isPending}
@@ -182,6 +196,7 @@ export function WatchlistEntryCard({ item }: { item: WatchlistItem }) {
                 Criterion
               </label>
               <select
+                ref={firstEditFieldRef}
                 id={`wl-edit-criteria-${item.id}`}
                 value={criteriaType}
                 onChange={e => setCriteriaType(e.target.value as WatchlistCriteriaType)}

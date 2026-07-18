@@ -245,9 +245,9 @@ export default function PositionsPage() {
                   ) : (
                     <p className="text-xs text-text-muted italic">No portfolio snapshots yet.</p>
                   )}
-                  {freshness.hasStalePrices ? (
+                  {freshness.hasMissingPrices ? (
                     <p className="text-xs text-caution mt-1">
-                      Stale prices: {freshness.staleTickers.join(", ")}
+                      Missing prices: {freshness.missingPriceTickers.join(", ")}
                     </p>
                   ) : (
                     <p className="text-xs text-text-muted mt-1">Live prices loaded for all holdings.</p>
@@ -472,12 +472,23 @@ function DetailItem({ label, value }: { label: string; value: string }) {
 
 const RECONCILIATION_LABELS: Record<string, string> = {
   reconciled: "Reconciled with your position",
-  quantity_mismatch: "Share count does not reconcile",
-  basis_mismatch: "Cost basis does not reconcile",
-  blocked_unsupported_events: "Blocked by unsupported transaction events",
-  blocked_share_ledger_oversold: "Blocked — transaction ledger oversold",
-  no_transaction_history: "No transaction history",
+  quantity_mismatch: "Share counts don't match your imported transactions.",
+  basis_mismatch: "Cost basis doesn't match your imported transactions.",
+  blocked_unsupported_events: "Some imported events can't be modeled yet.",
+  blocked_share_ledger_oversold: "Imported sells exceed imported buys.",
+  no_transaction_history: "No imported transaction history for this holding.",
 };
+
+const RECONCILIATION_FALLBACK_LABEL = "Could not be reconciled.";
+
+/** "2024-03-05" → "Mar 5, 2024" (en-US medium). Falls back to the raw string. */
+function formatDateMedium(iso: string): string {
+  // Date-only strings parse as UTC midnight; pin to local midnight so the
+  // rendered day never shifts across timezones.
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(iso) ? `${iso}T00:00:00` : iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString("en-US", { dateStyle: "medium" });
+}
 
 function TaxLotsSection({ ticker }: { ticker: string }) {
   const [open, setOpen] = useState(false);
@@ -531,8 +542,16 @@ function TaxLotsSection({ ticker }: { ticker: string }) {
                 <p className="text-xs text-text-secondary">
                   Reconciliation:{" "}
                   {RECONCILIATION_LABELS[holding.reconciliation.status] ??
-                    holding.reconciliation.status.replace(/_/g, " ")}
+                    RECONCILIATION_FALLBACK_LABEL}
                 </p>
+                <details className="text-[10px] text-text-muted">
+                  <summary className={cn("cursor-pointer w-fit hover:text-text-primary transition-colors motion-reduce:transition-none rounded", FOCUS_RING)}>
+                    Technical detail
+                  </summary>
+                  <p className="mt-1 font-mono break-words">
+                    {holding.reconciliation.status}
+                  </p>
+                </details>
 
                 {holding.authoritative && holding.lots ? (
                   holding.lots.length === 0 ? (
@@ -554,7 +573,8 @@ function TaxLotsSection({ ticker }: { ticker: string }) {
                 )}
 
                 <p className="text-[11px] text-text-muted leading-relaxed">
-                  {data.disclaimer} {data.jurisdiction_note}
+                  These lots are estimates from your imported transactions — not
+                  tax advice. {data.disclaimer} {data.jurisdiction_note}
                 </p>
               </>
             )}
@@ -570,7 +590,7 @@ function TaxLotCard({ lot }: { lot: TaxLotRow }) {
   return (
     <li className="data-card-elevated p-3">
       <dl className="grid grid-cols-2 sm:grid-cols-3 gap-x-4 gap-y-2">
-        <DetailItem label="Acquired" value={lot.acquired_date} />
+        <DetailItem label="Acquired" value={formatDateMedium(lot.acquired_date)} />
         <DetailItem label="Remaining shares" value={formatNumber(lot.remaining_shares, 4)} />
         <DetailItem label="Cost basis" value={formatCurrency(lot.cost_basis)} />
         <DetailItem
@@ -590,7 +610,7 @@ function TaxLotCard({ lot }: { lot: TaxLotRow }) {
           value={
             isLongTerm
               ? "Long-term (estimated)"
-              : `Short-term — long-term on ${lot.estimated_long_term_start_date} (${lot.days_until_long_term}d)`
+              : `Short-term — long-term on ${formatDateMedium(lot.estimated_long_term_start_date)} (${lot.days_until_long_term}d)`
           }
         />
       </dl>

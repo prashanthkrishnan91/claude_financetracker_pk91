@@ -9,6 +9,8 @@ import {
   CERTIFIED_CURRENT_SENTENCE,
   NO_STALE_EVIDENCE_SENTENCE,
   QUEUE_ONLY_SENTENCE,
+  RUN_IDLE_CERTIFIED_SENTENCE,
+  RUN_IDLE_SENTENCE,
   RUN_REQUEST_FAILED_SENTENCE,
   SNAPSHOT_WRITES_DISABLED_SENTENCE,
   continueSentence,
@@ -460,6 +462,45 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     expect(model.statusPillLabel).not.toBe("Ready");
     expect(model.run.state).toBe("complete");
     expect(model.run.shouldRefetchSnapshot).toBe(true);
+  });
+
+  it("idle + certified snapshot: sentence says refresh, not generate", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, NOW);
+    expect(model.run.state).toBe("idle");
+    expect(model.run.nextActionSentence).toBe(RUN_IDLE_CERTIFIED_SENTENCE);
+    expect(model.run.nextActionSentence).not.toContain("generate a certified snapshot");
+  });
+
+  it("idle without a certified snapshot keeps the generate sentence", () => {
+    const model = deriveAdvisorReadiness(
+      {
+        snapshot: null,
+        isLoading: false,
+        isError: true,
+        errorMessage: "API error: 404",
+      },
+      NO_RUN,
+      NOW,
+    );
+    expect(model.run.state).toBe("idle");
+    expect(model.run.nextActionSentence).toBe(RUN_IDLE_SENTENCE);
+  });
+
+  it("idle + certified never overrides the add-positions sentence", () => {
+    const model = deriveAdvisorReadiness(
+      queryWith(makeSnapshot()),
+      {
+        isRunPending: false,
+        isRunError: false,
+        lastRunResult: makeRunResult({
+          status: "no_active_holdings",
+          next_required_action: "add_positions_before_running_intel",
+        }),
+      },
+      NOW,
+    );
+    expect(model.run.state).toBe("idle");
+    expect(model.run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
   });
 
   it("loading state", () => {

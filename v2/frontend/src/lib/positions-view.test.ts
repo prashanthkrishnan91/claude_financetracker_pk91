@@ -260,13 +260,13 @@ describe("deriveFreshness", () => {
     expect(deriveFreshness(undefined, undefined).latestSnapshotAt).toBeNull();
   });
 
-  it("flags stale-price tickers", () => {
+  it("flags missing-price tickers (no trusted live price)", () => {
     const info = deriveFreshness(snapshots, [
       makePosition({ ticker: "AAPL", market_value: 100 }),
       makePosition({ ticker: "MYST", market_value: undefined, current_price: undefined }),
     ]);
-    expect(info.hasStalePrices).toBe(true);
-    expect(info.staleTickers).toEqual(["MYST"]);
+    expect(info.hasMissingPrices).toBe(true);
+    expect(info.missingPriceTickers).toEqual(["MYST"]);
   });
 });
 

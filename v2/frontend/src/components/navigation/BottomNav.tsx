@@ -51,6 +51,7 @@ export function BottomNav() {
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "relative flex flex-col items-center gap-0.5 px-2 py-2 rounded-md transition-colors duration-160",
                 active
@@ -109,6 +110,7 @@ export function SideNav() {
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex items-center gap-3 py-2 text-sm transition-colors duration-160",
                 // Engraved active rule: 2pt left border + very subtle accent bg
@@ -136,6 +138,7 @@ export function SideNav() {
             <Link
               key={item.href}
               href={item.href}
+              aria-current={active ? "page" : undefined}
               className={cn(
                 "flex items-center gap-2 px-1 py-1.5 text-[11px] uppercase tracking-label transition-colors duration-160",
                 active

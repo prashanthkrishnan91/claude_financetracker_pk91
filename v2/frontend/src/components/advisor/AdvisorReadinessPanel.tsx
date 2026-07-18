@@ -21,6 +21,9 @@ import { TrustStatusRow } from "@/components/cards/TrustPrimitives";
 import type { AdvisorReadinessModel } from "@/lib/advisor-readiness";
 import type { IntelV3RunResult } from "@/lib/api";
 
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
+
 const PILL_TONE_CLASS: Record<string, string> = {
   Ready: "bg-action-buy/10 text-action-buy border-action-buy/30",
   Updating: "bg-action-trim/10 text-action-trim border-action-trim/30",
@@ -86,7 +89,7 @@ export function AdvisorReadinessPanel({
           type="button"
           onClick={onRun}
           disabled={run.buttonBusy}
-          className="btn-primary shrink-0 flex items-center gap-1.5"
+          className={cn("btn-primary min-h-[40px] shrink-0 flex items-center gap-1.5", FOCUS_RING)}
         >
           {run.buttonBusy && <Spinner className="h-3 w-3" />}
           {run.buttonLabel}
@@ -150,7 +153,11 @@ export function AdvisorReadinessPanel({
           <p className="text-[11px] text-text-muted">{run.boundedStopReason}</p>
         )}
         {run.state === "failed" && (
-          <button type="button" onClick={onRun} className="btn-secondary">
+          <button
+            type="button"
+            onClick={onRun}
+            className={cn("btn-secondary min-h-[40px]", FOCUS_RING)}
+          >
             Retry Intel run
           </button>
         )}

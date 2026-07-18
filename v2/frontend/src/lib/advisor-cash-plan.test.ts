@@ -257,6 +257,16 @@ describe("translateNextRequiredFix", () => {
     expect(t?.technical).toBe(fix);
   });
 
+  it("unknown fixes get a plain blocker with the raw fix as technical detail only", () => {
+    const fix = "Rebuild stage_14 evidence_ledger artifacts before planning";
+    const t = translateNextRequiredFix(fix);
+    expect(t?.plain).toBe(
+      "Underlying data needs a repair before this plan can be trusted.",
+    );
+    expect(t?.plain).not.toContain("_");
+    expect(t?.technical).toBe(fix);
+  });
+
   it("returns null for empty", () => {
     expect(translateNextRequiredFix(null)).toBeNull();
     expect(translateNextRequiredFix("  ")).toBeNull();
@@ -417,9 +427,11 @@ describe("deriveCashPlanState — 10 states", () => {
     expect(cashPlanErrorMessage(401)).toContain("Sign in again");
   });
 
-  it("503 maps to a cert-not-configured message", () => {
+  it("503 maps to a plain not-set-up message with no config internals", () => {
     expect(deriveCashPlanState({ hadError: true, errorStatus: 503 })).toBe("backend-error");
-    expect(cashPlanErrorMessage(503)).toContain("not configured");
+    expect(cashPlanErrorMessage(503)).toBe("Cash planning isn't set up on the server yet.");
+    expect(cashPlanErrorMessage(503)).not.toContain("secret");
+    expect(cashPlanErrorMessage(503)).not.toContain("certification");
   });
 
   it("every state has copy and no raw codes or execution language in headlines", () => {

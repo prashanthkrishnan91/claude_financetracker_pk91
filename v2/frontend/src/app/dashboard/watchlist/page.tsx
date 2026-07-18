@@ -182,7 +182,7 @@ function AddWatchlistForm() {
               className={cn(FIELD_CLASS, "font-mono uppercase")}
             />
             {errors.ticker && (
-              <p id="wl-ticker-err" className="text-xs text-negative mt-1">
+              <p id="wl-ticker-err" role="alert" className="text-xs text-negative mt-1">
                 {errors.ticker}
               </p>
             )}
@@ -221,7 +221,7 @@ function AddWatchlistForm() {
               className={FIELD_CLASS}
             />
             {errors.threshold && (
-              <p id="wl-threshold-err" className="text-xs text-negative mt-1">
+              <p id="wl-threshold-err" role="alert" className="text-xs text-negative mt-1">
                 {errors.threshold}
               </p>
             )}
@@ -243,7 +243,7 @@ function AddWatchlistForm() {
               className={FIELD_CLASS}
             />
             {errors.notes && (
-              <p id="wl-notes-err" className="text-xs text-negative mt-1">
+              <p id="wl-notes-err" role="alert" className="text-xs text-negative mt-1">
                 {errors.notes}
               </p>
             )}

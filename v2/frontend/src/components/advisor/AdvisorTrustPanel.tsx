@@ -12,6 +12,7 @@
  */
 
 import { useState } from "react";
+import { cn } from "@/lib/utils";
 import {
   DataUnavailableCallout,
   TrustStatusRow,
@@ -23,6 +24,9 @@ import {
   type AdvisorCashPlanResponse,
   type CashPlanRepairAction,
 } from "@/lib/advisor-cash-plan";
+
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
 
 function deriveRepairAction(
   model: AdvisorReadinessModel,
@@ -93,7 +97,10 @@ export function AdvisorTrustPanel({
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
           aria-controls="advisor-trust-content"
-          className="w-full flex items-center justify-between px-4 py-3 text-left transition-colors motion-reduce:transition-none hover:bg-surface-elevated/40"
+          className={cn(
+            "w-full flex items-center justify-between px-4 py-3 min-h-[40px] text-left transition-colors motion-reduce:transition-none hover:bg-surface-elevated/40",
+            FOCUS_RING,
+          )}
         >
           <span className="section-header">Trust &amp; data health</span>
           <span className="text-[10px] text-text-muted" aria-hidden="true">
@@ -102,8 +109,11 @@ export function AdvisorTrustPanel({
         </button>
       </h2>
 
-      {open && (
-        <div id="advisor-trust-content" className="border-t border-border/50 px-4 py-3 space-y-4">
+      <div
+        id="advisor-trust-content"
+        hidden={!open}
+        className="border-t border-border/50 px-4 py-3 space-y-4"
+      >
           {healthy ? (
             <p className="text-xs text-text-secondary">
               Nothing is degraded right now. The snapshot is certified
@@ -180,8 +190,7 @@ export function AdvisorTrustPanel({
               <DataUnavailableCallout label="No specific repair action reported yet." />
             )}
           </div>
-        </div>
-      )}
+      </div>
     </section>
   );
 }

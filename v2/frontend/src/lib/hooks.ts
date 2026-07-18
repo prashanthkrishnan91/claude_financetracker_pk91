@@ -37,14 +37,6 @@ export function useBackfillSnapshots() {
   });
 }
 
-export function useRebalance(cashToDeploy?: number) {
-  return useQuery({
-    queryKey: ["portfolio", "rebalance", cashToDeploy],
-    queryFn: () => api.portfolio.getRebalance(cashToDeploy),
-    enabled: false, // Manual trigger only
-  });
-}
-
 export function useTargets() {
   return useQuery({
     queryKey: ["portfolio", "targets"],
@@ -242,6 +234,4 @@ export function useIntelV3RunStatus(runId: string | null, enabled = true) {
     staleTime: 0,
   });
 }
-
-// ── Deploy v3 plan ────────────────────────────────────────────
 

@@ -65,10 +65,6 @@ export const api = {
         method: "PUT",
         body: JSON.stringify(targets),
       }),
-    getRebalance: (cashToDeploy?: number) =>
-      fetchApi<RebalanceResult[]>(
-        `/api/v1/portfolio/rebalance${cashToDeploy ? `?cash_to_deploy=${cashToDeploy}` : ""}`
-      ),
     getCash: () => fetchApi<CashBalance>("/api/v1/portfolio/cash"),
     setCash: (amount: number | null) =>
       fetchApi<CashBalance>("/api/v1/portfolio/cash", {
@@ -697,24 +693,6 @@ export interface DeployV3PlanRollup {
   schema_version: string;
 }
 
-/** Per-item scaffold from the Deploy plan (read-only display). */
-export interface DeployV3PlanItem {
-  ticker: string;
-  intel_action: string;
-  actionability_status: string;
-  action_source: string;
-  intel_snapshot_id: string;
-  intel_run_id: string;
-  plan_status: string;
-  recommended_dollar_amount: number | null;
-  final_actionability_status: string;
-  pending_guardrails_reason: string;
-  suppression_reason: string | null;
-  /** Plain-English reason a BUY made the new-cash sleeve top-N; "none" otherwise. */
-  selection_reason?: string;
-  schema_version: string;
-}
-
 /** Guardrail integrity summary for a Deploy plan run. */
 export interface DeployV3GuardrailSummary {
   total_items: number;
@@ -731,57 +709,3 @@ export interface DeployV3GuardrailSummary {
   schema_version: string;
 }
 
-/** Full response from GET /api/v1/deploy/v3/plan. */
-export interface DeployV3PlanResponse {
-  plan_status: string;
-  snapshot_id: string;
-  run_id: string;
-  schema_version: string;
-  items: DeployV3PlanItem[];
-  guardrail_summary: DeployV3GuardrailSummary | null;
-  rollup: DeployV3PlanRollup | null;
-  source: {
-    intel_source: string;
-    sizing_bundle_provided: boolean;
-    note: string;
-    exact_dollar_ready?: boolean;
-    sizing_values_ready?: boolean;
-    target_allocation_ready?: boolean;
-    policy_ready?: boolean;
-    suppression_reasons?: string[];
-    cash_source?: string | null;
-    portfolio_source?: string | null;
-    /** true when the plan was sized for user-entered new-cash planning capital. */
-    amount_aware?: boolean;
-    /** The user-entered cash_to_deploy amount when amount_aware is true. Not broker-verified. */
-    cash_to_deploy?: number | null;
-    /** "new_cash" when amount-aware mode active; "current_gap" otherwise. */
-    sizing_mode?: "new_cash" | "current_gap" | string;
-    /** Residual planning capital not allocated by new-cash sleeve sizing. Null outside new_cash mode. */
-    residual_cash?: number | null;
-    /** Plain-English reason for residual_cash > 0 (threshold suppression, few candidates, rounding). */
-    residual_reason?: string | null;
-  };
-}
-
-// ── Alert Center types (mirrors backend Pydantic models) ─────────────────────
-
-export interface AlertCandidate {
-  id: string;
-  user_id: string;
-  ticker: string;
-  source_area: string;
-  candidate_type: string;
-  action_type: string | null;
-  severity: string;
-  reason_code: string;
-  plain_english_reason: string;
-  policy_version: string;
-  status: string;
-  dedupe_key: string;
-  source_snapshot_id: string | null;
-  source_run_id: string | null;
-  expires_at: string | null;
-  cooldown_until: string | null;
-  created_at: string;
-}

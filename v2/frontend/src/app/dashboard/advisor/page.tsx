@@ -42,9 +42,20 @@ function CashPlanDeepLink({
     if (section !== "cash-plan") return;
     const el = targetRef.current;
     if (!el) return;
-    // No smooth scrolling — reduced-motion safe by default.
-    el.scrollIntoView({ block: "start" });
+    // No smooth scrolling — reduced-motion safe by default (auto behavior).
+    const scrollToSection = () => el.scrollIntoView({ block: "start" });
+    scrollToSection();
     el.focus({ preventScroll: true });
+    // Sections above expand as their data loads, shifting layout and defeating
+    // the initial scroll — re-run non-smooth scroll passes after layout settles.
+    const raf = requestAnimationFrame(scrollToSection);
+    const t1 = setTimeout(scrollToSection, 250);
+    const t2 = setTimeout(scrollToSection, 900);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, [section, targetRef]);
 
   return null;

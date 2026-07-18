@@ -269,8 +269,12 @@ export function translateNextRequiredFix(
   if (lower.includes("no immediate fix required")) {
     return { plain: "No immediate fix required.", technical: fix };
   }
-  // Backend fixes are already sentences; pass through unknown ones honestly.
-  return { plain: fix, technical: fix };
+  // Unknown fixes are operator-facing sentences — keep them behind technical
+  // detail and show a plain-English blocker instead.
+  return {
+    plain: "Underlying data needs a repair before this plan can be trusted.",
+    technical: fix,
+  };
 }
 
 export interface CashPlanTrust {
@@ -443,7 +447,7 @@ export function cashPlanErrorMessage(errorStatus: number | null | undefined): st
     return "Your session has expired. Sign in again to plan your cash.";
   }
   if (errorStatus === 503) {
-    return "Cash planning is not configured on the server — the runtime certification secret is missing.";
+    return "Cash planning isn't set up on the server yet.";
   }
   return "The cash plan service did not respond. Try again.";
 }

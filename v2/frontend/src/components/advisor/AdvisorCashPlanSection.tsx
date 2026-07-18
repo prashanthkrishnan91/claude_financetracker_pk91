@@ -16,7 +16,7 @@
  * selects BUY-evidence stocks and policy ETFs; this surface adds nothing).
  */
 
-import { useState } from "react";
+import { useId, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { cn, formatCurrency } from "@/lib/utils";
 import { Spinner } from "@/components/ui/Spinner";
@@ -41,6 +41,29 @@ const TONE_TEXT_CLASS: Record<string, string> = {
   caution: "text-action-trim",
   negative: "text-action-sell",
   neutral: "text-text-secondary",
+};
+
+const FOCUS_RING =
+  "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
+
+// Raw backend enums → plain-English chip copy (never rendered raw).
+const EVIDENCE_BAND_LABELS: Record<string, string> = {
+  STRONG: "Strong evidence",
+  PARTIAL: "Partial evidence",
+  THIN: "Thin evidence",
+};
+
+const ACTION_LABELS: Record<string, string> = {
+  BUY: "Buy",
+  HOLD: "Hold",
+  TRIM: "Trim",
+  SELL: "Sell",
+};
+
+const ASSET_TYPE_LABELS: Record<string, string> = {
+  equity: "Stock",
+  etf: "ETF",
+  crypto: "Crypto",
 };
 
 class CashPlanHttpError extends Error {
@@ -83,6 +106,7 @@ export function AdvisorCashPlanSection({
   const [maxPositionsInput, setMaxPositionsInput] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
+  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [response, setResponse] = useState<AdvisorCashPlanResponse | null>(null);
   const [errorStatus, setErrorStatus] = useState<number | null>(null);
@@ -145,8 +169,14 @@ export function AdvisorCashPlanSection({
         </p>
       </div>
 
-      {/* Input form */}
-      <div className="space-y-3">
+      {/* Input form — Enter in any field submits the plan request */}
+      <form
+        onSubmit={(e) => {
+          e.preventDefault();
+          void handlePlan();
+        }}
+        className="space-y-3"
+      >
         <div className="flex items-end gap-2 flex-wrap">
           <div className="flex flex-col gap-1">
             <label htmlFor="advisor-cash-input" className="metric-label">
@@ -165,10 +195,9 @@ export function AdvisorCashPlanSection({
             />
           </div>
           <button
-            type="button"
-            onClick={handlePlan}
+            type="submit"
             disabled={isLoading}
-            className="btn-primary flex items-center gap-1.5"
+            className={cn("btn-primary min-h-[40px] flex items-center gap-1.5", FOCUS_RING)}
           >
             {isLoading && <Spinner className="h-3 w-3" />}
             {isLoading ? "Planning…" : "Plan my cash"}
@@ -180,13 +209,16 @@ export function AdvisorCashPlanSection({
           onClick={() => setAdvancedOpen((v) => !v)}
           aria-expanded={advancedOpen}
           aria-controls="advisor-cash-plan-advanced"
-          className="btn-ghost"
+          className={cn("btn-ghost min-h-[40px]", FOCUS_RING)}
         >
           {advancedOpen ? "Hide advanced constraints" : "Advanced constraints"}
         </button>
 
-        {advancedOpen && (
-          <div id="advisor-cash-plan-advanced" className="flex items-end gap-3 flex-wrap">
+        <div
+          id="advisor-cash-plan-advanced"
+          hidden={!advancedOpen}
+          className="flex items-end gap-3 flex-wrap"
+        >
             <div className="flex flex-col gap-1">
               <label htmlFor="advisor-min-trade-input" className="metric-label">
                 Min trade ($, ≥ 1)
@@ -220,18 +252,17 @@ export function AdvisorCashPlanSection({
                 className="w-32 rounded-md border border-border bg-surface px-2.5 py-1.5 text-sm font-mono tabular-nums text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
               />
             </div>
-          </div>
-        )}
+        </div>
 
         {validationError && (
           <p className="text-xs text-action-sell" role="alert">
             {validationError}
           </p>
         )}
-      </div>
+      </form>
 
-      {/* Results — polite live region so plan updates are announced */}
-      <div aria-live="polite" className="space-y-4">
+      {/* Results — the live region is scoped to the status headline only */}
+      <div className="space-y-4">
         {isLoading && (
           <div className="flex items-center gap-2 text-text-muted text-sm py-4">
             <Spinner className="h-4 w-4" />
@@ -241,12 +272,19 @@ export function AdvisorCashPlanSection({
 
         {showResult && isErrorState && stateCopy && (
           <div className="rounded-md border border-action-sell/30 bg-action-sell/5 p-3 space-y-2">
-            <p className={cn("text-sm font-semibold", TONE_TEXT_CLASS[stateCopy.tone])}>
+            <p
+              aria-live="polite"
+              className={cn("text-sm font-semibold", TONE_TEXT_CLASS[stateCopy.tone])}
+            >
               {stateCopy.headline}
             </p>
             <p className="text-xs text-text-muted">{cashPlanErrorMessage(errorStatus)}</p>
             {planState === "backend-error" && (
-              <button type="button" onClick={handlePlan} className="btn-secondary">
+              <button
+                type="button"
+                onClick={handlePlan}
+                className={cn("btn-secondary min-h-[40px]", FOCUS_RING)}
+              >
                 Try again
               </button>
             )}
@@ -257,7 +295,10 @@ export function AdvisorCashPlanSection({
           <div className="space-y-4">
             {/* Status + trust */}
             <div className="space-y-1.5">
-              <p className={cn("text-sm font-semibold", TONE_TEXT_CLASS[stateCopy.tone])}>
+              <p
+                aria-live="polite"
+                className={cn("text-sm font-semibold", TONE_TEXT_CLASS[stateCopy.tone])}
+              >
                 {stateCopy.headline}
               </p>
               <div className="flex items-center gap-2 flex-wrap">
@@ -279,6 +320,29 @@ export function AdvisorCashPlanSection({
               </div>
               {trust.blocker && (
                 <p className="text-xs text-text-muted">Blocker: {trust.blocker}</p>
+              )}
+              {trust.blockerTechnicalDetail && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setBlockerDetailOpen((v) => !v)}
+                    aria-expanded={blockerDetailOpen}
+                    aria-controls="advisor-cash-plan-blocker-detail"
+                    className={cn(
+                      "text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none min-h-[40px] rounded",
+                      FOCUS_RING,
+                    )}
+                  >
+                    {blockerDetailOpen ? "Hide technical detail" : "Technical detail"}
+                  </button>
+                  <p
+                    id="advisor-cash-plan-blocker-detail"
+                    hidden={!blockerDetailOpen}
+                    className="text-[10px] text-text-muted font-mono break-words"
+                  >
+                    {trust.blockerTechnicalDetail}
+                  </p>
+                </>
               )}
             </div>
 
@@ -315,16 +379,26 @@ export function AdvisorCashPlanSection({
               </div>
             )}
 
-            {/* Totals */}
+            {/* Totals — only shown as a plan when the plan is ready AND trusted;
+                a degraded/blocked response must not present allocation_summary
+                numbers as if they were a trusted plan. */}
             <div className="space-y-1 border-t border-border/50 pt-2">
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">Allocated cash</span>
-                <span className="data-value-sm">{formatCurrency(totals.allocated)}</span>
-              </div>
-              <div className="flex items-center justify-between text-xs">
-                <span className="text-text-muted">Unallocated cash</span>
-                <span className="data-value-sm">{formatCurrency(totals.unallocated)}</span>
-              </div>
+              {response.status === "ready" && trust.trusted ? (
+                <>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-muted">Allocated cash</span>
+                    <span className="data-value-sm">{formatCurrency(totals.allocated)}</span>
+                  </div>
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-text-muted">Unallocated cash</span>
+                    <span className="data-value-sm">{formatCurrency(totals.unallocated)}</span>
+                  </div>
+                </>
+              ) : (
+                <p className="text-xs text-text-muted italic">
+                  No trusted allocation totals — the plan is degraded or blocked.
+                </p>
+              )}
             </div>
 
             {/* Not-selected buckets */}
@@ -364,11 +438,12 @@ function SelectedAllocationRow({ entry }: { entry: CashPlanSelectedEntry }) {
         <div className="flex items-center gap-2 flex-wrap">
           <span className="ticker-symbol text-sm">{entry.ticker}</span>
           <span className="text-[10px] px-1.5 py-0.5 rounded border border-border bg-surface-elevated text-text-muted uppercase tracking-wide">
-            {isStock ? "Stock" : entry.asset_type === "etf" ? "ETF" : entry.asset_type}
+            {ASSET_TYPE_LABELS[entry.asset_type] ?? "Other"}
           </span>
           {isStock && entry.evidence && (
             <span className="action-badge-buy">
-              {entry.evidence.action} · {entry.evidence.evidence_band}
+              {ACTION_LABELS[entry.evidence.action] ?? entry.evidence.action} ·{" "}
+              {EVIDENCE_BAND_LABELS[entry.evidence.evidence_band] ?? "Evidence unknown"}
             </span>
           )}
         </div>
@@ -403,7 +478,10 @@ function BucketGroup({ group }: { group: CashPlanBucketGroup }) {
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
         aria-controls={contentId}
-        className="w-full flex items-center justify-between px-3 py-2 text-left text-xs text-text-secondary hover:text-text-primary transition-colors motion-reduce:transition-none"
+        className={cn(
+          "w-full flex items-center justify-between px-3 py-2 min-h-[40px] text-left text-xs text-text-secondary hover:text-text-primary transition-colors motion-reduce:transition-none",
+          FOCUS_RING,
+        )}
       >
         <span className="font-semibold">{group.title}</span>
         <span className="text-text-muted font-mono tabular-nums">
@@ -413,13 +491,15 @@ function BucketGroup({ group }: { group: CashPlanBucketGroup }) {
           </span>
         </span>
       </button>
-      {open && (
-        <div id={contentId} className="border-t border-border/50 divide-y divide-border/40">
-          {group.entries.map((entry, idx) => (
-            <BucketEntryRow key={`${entry.ticker}-${idx}`} entry={entry} />
-          ))}
-        </div>
-      )}
+      <div
+        id={contentId}
+        hidden={!open}
+        className="border-t border-border/50 divide-y divide-border/40"
+      >
+        {group.entries.map((entry, idx) => (
+          <BucketEntryRow key={`${entry.ticker}-${idx}`} entry={entry} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -430,6 +510,7 @@ function BucketEntryRow({
   entry: CashPlanBucketGroup["entries"][number];
 }) {
   const [detailOpen, setDetailOpen] = useState(false);
+  const detailId = useId();
   return (
     <div className="px-3 py-2 space-y-1">
       <p className="text-[11px] text-text-secondary leading-snug">{entry.text}</p>
@@ -439,15 +520,21 @@ function BucketEntryRow({
             type="button"
             onClick={() => setDetailOpen((v) => !v)}
             aria-expanded={detailOpen}
-            className="text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none"
+            aria-controls={detailId}
+            className={cn(
+              "text-[10px] text-text-muted hover:text-text-primary transition-colors motion-reduce:transition-none min-h-[40px] rounded",
+              FOCUS_RING,
+            )}
           >
             {detailOpen ? "Hide technical detail" : "Technical detail"}
           </button>
-          {detailOpen && (
-            <p className="text-[10px] text-text-muted font-mono break-words">
-              {entry.technicalDetail}
-            </p>
-          )}
+          <p
+            id={detailId}
+            hidden={!detailOpen}
+            className="text-[10px] text-text-muted font-mono break-words"
+          >
+            {entry.technicalDetail}
+          </p>
         </>
       )}
     </div>

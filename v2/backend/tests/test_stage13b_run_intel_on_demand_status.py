@@ -95,6 +95,9 @@ class TestOnDemandDisabledReportsQueueOnly:
 class TestOnDemandEnabledInvokesBoundedDrain:
     @pytest.mark.asyncio
     async def test_enabled_invokes_drain_exactly_once(self, monkeypatch):
+        """True completion: drain has no remaining work, latest snapshot is
+        worker_certified AND certified_current — snapshot_available_after_run
+        must be true and next action reports current."""
         settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
         monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
         drain_result = OnDemandDrainResult(
@@ -105,7 +108,10 @@ class TestOnDemandEnabledInvokesBoundedDrain:
         monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
 
         service = _FakeService(
-            latest_snapshot={"snapshot_source": "worker_certified"}
+            latest_snapshot={
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
         )
         result = {"status": "refresh_requested", "queued_ticker_count": 34}
 
@@ -134,6 +140,104 @@ class TestOnDemandEnabledInvokesBoundedDrain:
         await router_mod._augment_with_on_demand_status(service, result)
         drain_spy.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_production_regression_stale_worker_certified_with_partial_drain(
+        self, monkeypatch
+    ):
+        """Production regression (July 18, 2026): an existing worker_certified
+        snapshot with evidence_freshness_state=republish_pending must not mask
+        a partial, resumable bounded drain (20/32 succeeded, 12 remaining).
+        The response must report snapshot_available_after_run=false and ask
+        for another click — never "none_certified_snapshot_current"."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_result = OnDemandDrainResult(
+            batches_run=2, jobs_attempted=20, jobs_succeeded=20, jobs_failed=0,
+            duration_ms=500, run_resumable=True, stopped_reason="runtime_cap_reached",
+        )
+        drain_spy = AsyncMock(return_value=drain_result)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "52c593c8-b5c2-447e-bbd5-194c3f634c96",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "republish_pending",
+            }
+        )
+        result = {"status": "refresh_requested", "queued_ticker_count": 32}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_awaited_once()
+        assert out["on_demand_jobs_attempted"] == 20
+        assert out["on_demand_jobs_succeeded"] == 20
+        assert out["on_demand_jobs_failed"] == 0
+        assert out["snapshot_available_after_run"] is False
+        assert (
+            out["next_required_action"]
+            == "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
+        )
+
+    @pytest.mark.asyncio
+    async def test_historical_certified_current_snapshot_cannot_mask_drain_remaining(
+        self, monkeypatch
+    ):
+        """Even an otherwise current historical snapshot (worker_certified +
+        certified_current) does not classify the request as complete while
+        the bounded drain still has remaining resumable work."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_result = OnDemandDrainResult(
+            batches_run=1, jobs_attempted=20, jobs_succeeded=20, jobs_failed=0,
+            duration_ms=500, run_resumable=True, stopped_reason="runtime_cap_reached",
+        )
+        drain_spy = AsyncMock(return_value=drain_result)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {"status": "refresh_requested", "queued_ticker_count": 32}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert (
+            out["next_required_action"]
+            == "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
+        )
+
+    @pytest.mark.asyncio
+    async def test_already_current_certified_snapshot_no_stale_evidence_is_a_noop(
+        self, monkeypatch
+    ):
+        """Already-current no-op: zero stale jobs and an already-current
+        certified snapshot retain the existing completed behavior — the
+        drain never runs (nothing queued) and completion is still reported
+        from the existing certified_current snapshot."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {"status": "analyst_evidence_current", "queued_ticker_count": 0}
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is True
+        assert out["next_required_action"] == "none_certified_snapshot_current"
+
 
 # ── 6. Honest next_required_action across outcomes ───────────────────────────
 
@@ -151,17 +255,32 @@ class TestNextRequiredActionIsHonest:
         )
         assert action == "add_positions_before_running_intel"
 
-    def test_certified_snapshot_after_run_overrides_everything(self):
+    def test_certified_snapshot_when_no_drain_work_remains(self):
         action = router_mod._next_required_action(
             status_value="refresh_requested",
             on_demand_processing_enabled=True,
             queued_ticker_count=34,
             drain_ran=True,
-            drain_remaining=True,  # even if more jobs remain elsewhere
+            drain_remaining=False,
             snapshot_available_after_run=True,
             snapshot_writes_enabled=True,
         )
         assert action == "none_certified_snapshot_current"
+
+    def test_drain_remaining_takes_priority_over_historical_snapshot(self):
+        """Remaining bounded-drain work must take priority over the mere
+        existence of a snapshot — a stale/historical worker_certified
+        snapshot must never mask jobs still queued from this run."""
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=34,
+            drain_ran=True,
+            drain_remaining=True,
+            snapshot_available_after_run=True,  # would only ever be true here
+            snapshot_writes_enabled=True,       # via a stale caller — must still lose
+        )
+        assert action == "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
 
     def test_drain_incomplete_asks_for_reclick(self):
         action = router_mod._next_required_action(

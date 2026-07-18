@@ -2,7 +2,8 @@
 
 Last updated: 2026-07-18 (Lean Advisor Consolidation — Positions / Advisor / Watchlist; replaces
 the stage-by-stage log with a compact state summary. Full evidence for the consolidation lives in
-`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body.)
+`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body. Same-day follow-up: Run
+Intel completion-classification fix after PR #473 — see bullet below.)
 
 ## Product architecture (read this first)
 
@@ -73,7 +74,11 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   enqueues and, when `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains up to 3 batches × 10
   jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
   clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
-  worker services remain optional and OFF.
+  worker services remain optional and OFF. `snapshot_available_after_run` (in `routers/intel_v3.py
+  ::_augment_with_on_demand_status`) requires all three: `snapshot_source == "worker_certified"`,
+  `evidence_freshness_state == "certified_current"`, and no remaining bounded-drain work —
+  an old worker_certified snapshot with stale/republish_pending freshness or a resumable partial
+  drain must never report completion (post-#473 production regression fix).
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.

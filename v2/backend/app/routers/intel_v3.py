@@ -19,6 +19,9 @@ from ..services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
     run_on_demand_drain,
 )
 from ..services.intelligence.v3.intel_v3_service import IntelV3Service, is_intel_v3_enabled
+from ..services.intelligence.v3.watchtower_intel_republisher_v1 import (
+    PUBLISH_CERTIFIED_CURRENT,
+)
 
 router = APIRouter(prefix="/intel/v3", tags=["intel_v3"])
 logger = logging.getLogger(__name__)
@@ -42,6 +45,13 @@ def _next_required_action(
     """
     if status_value == "no_active_holdings":
         return "add_positions_before_running_intel"
+    # Remaining bounded-drain work always takes priority over any historical
+    # snapshot — an old worker_certified snapshot must never mask jobs still
+    # queued from this run. See production regression: snapshot_id
+    # 52c593c8-b5c2-447e-bbd5-194c3f634c96 stayed republish_pending while a
+    # partial drain (20/32) still had 12 jobs remaining.
+    if drain_ran and drain_remaining:
+        return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
     if snapshot_available_after_run:
         return "none_certified_snapshot_current"
     if queued_ticker_count == 0:
@@ -51,8 +61,6 @@ def _next_required_action(
             "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_"
             "analyst_refresh_worker_entrypoint_separately"
         )
-    if drain_ran and drain_remaining:
-        return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
     if drain_ran and not snapshot_writes_enabled:
         return "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false"
     return "reclick_run_intel_to_retry"
@@ -88,9 +96,17 @@ async def _augment_with_on_demand_status(
         drain_remaining = drain_result.run_resumable
 
     latest_snapshot = await service.get_latest_snapshot()
+    # Completion truth requires all three: the latest snapshot is
+    # worker_certified, its evidence is certified_current (not
+    # republish_pending/stale/blocked/unknown/missing), AND the bounded
+    # drain has no remaining resumable work. An old worker_certified
+    # snapshot alone must never report completion while evidence is stale
+    # or jobs remain — see production regression above.
     snapshot_available_after_run = (
         isinstance(latest_snapshot, dict)
         and latest_snapshot.get("snapshot_source") == "worker_certified"
+        and latest_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
+        and not drain_remaining
     )
 
     result["on_demand_processing_enabled"] = on_demand_enabled

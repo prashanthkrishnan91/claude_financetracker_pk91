@@ -40,13 +40,13 @@ function makeCard(action: IntelV3HeldCard["action"] = "HOLD", intelCtx?: AssetIn
   return {
     ticker: "AAPL",
     action,
-    detail_drawer_payload: {
+    detail_drawer_payload: ({
       rationale: "Test rationale.",
       why_now: "",
       committee: { status: "deferred" },
       schema_version: "v3.1",
       asset_intelligence_context: intelCtx ?? null,
-    },
+    }) as IntelV3HeldCard["detail_drawer_payload"],
   };
 }
 

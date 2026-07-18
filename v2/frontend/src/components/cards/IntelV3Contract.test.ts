@@ -22,6 +22,8 @@ function makeCard(
   action: IntelV3Action = "HOLD",
   overrides: Partial<IntelV3HeldCard> = {},
 ): IntelV3HeldCard {
+  // Fixture predates later card-contract fields; the cast keeps this
+  // legacy contract test compiling against the widened production type.
   return {
     ticker,
     name: `${ticker} Corp`,
@@ -38,14 +40,14 @@ function makeCard(
     updated_at: "2026-01-01T00:00:00Z",
     source_snapshot_id: "snap-001",
     source_run_id: "run-001",
-    detail_drawer_payload: {
+    detail_drawer_payload: ({
       rationale: "Signals and price context support position.",
       why_now: "Acting now aligns with current market setup.",
       committee: { status: "deferred" },
       schema_version: "v3.1",
-    },
+    }) as IntelV3HeldCard["detail_drawer_payload"],
     ...overrides,
-  };
+  } as unknown as IntelV3HeldCard;
 }
 
 function makeSnapshot(cards: IntelV3HeldCard[]): IntelV3Snapshot {
@@ -65,14 +67,14 @@ function makeSnapshot(cards: IntelV3HeldCard[]): IntelV3Snapshot {
     action_counts: counts,
     best_buys: cards.filter((c) => c.action === "BUY"),
     trim_sell_desk: cards.filter((c) => c.action === "TRIM" || c.action === "SELL"),
-    portfolio_command_center: {
+    portfolio_command_center: ({
       total_holdings: cards.length,
       buy_count: counts["BUY"] || 0,
       hold_count: counts["HOLD"] || 0,
       trim_count: counts["TRIM"] || 0,
       sell_count: counts["SELL"] || 0,
-    },
-  };
+    }) as IntelV3Snapshot["portfolio_command_center"],
+  } as unknown as IntelV3Snapshot;
 }
 
 // ── Action contract ───────────────────────────────────────────────────────────
@@ -236,12 +238,12 @@ describe("Intel v3 drawer payload contract", () => {
 
   it("committee section hidden when source_validated", () => {
     const card = makeCard("AAPL", "BUY", {
-      detail_drawer_payload: {
+      detail_drawer_payload: ({
         rationale: "Signals support this.",
         why_now: "Evidence is strong.",
         committee: { status: "source_validated" },
         schema_version: "v3.1",
-      },
+      }) as IntelV3HeldCard["detail_drawer_payload"],
     });
     // source_validated means the drawer should NOT show the "Analysis pending" block.
     expect(card.detail_drawer_payload.committee.status).toBe("source_validated");
@@ -250,12 +252,12 @@ describe("Intel v3 drawer payload contract", () => {
 
   it("committee section visible with reason when pending", () => {
     const card = makeCard("MSFT", "HOLD", {
-      detail_drawer_payload: {
+      detail_drawer_payload: ({
         rationale: "Holding position.",
         why_now: "No clear trigger.",
         committee: { status: "pending", reason: "No trusted evidence — 0 trusted dimension(s)." },
         schema_version: "v3.1",
-      },
+      }) as IntelV3HeldCard["detail_drawer_payload"],
     });
     expect(card.detail_drawer_payload.committee.status).toBe("pending");
     expect(card.detail_drawer_payload.committee.reason).toBeTruthy();
@@ -578,12 +580,12 @@ describe("Stage 4C — card thin/missing evidence contract", () => {
 describe("Stage 4C — drawer live-data contract", () => {
   it("drawer payload rationale is the primary why_view source", () => {
     const card = makeCard("AAPL", "BUY", {
-      detail_drawer_payload: {
+      detail_drawer_payload: ({
         rationale: "Strong evidence supports adding to this position.",
         why_now: "Current setup is favorable.",
         committee: { status: "deferred" },
         schema_version: "v3.1",
-      },
+      }) as IntelV3HeldCard["detail_drawer_payload"],
     });
     expect(card.detail_drawer_payload.rationale).toBeTruthy();
     expect(card.detail_drawer_payload.rationale).toContain("evidence supports");
@@ -592,12 +594,12 @@ describe("Stage 4C — drawer live-data contract", () => {
   it("drawer falls back to card why_text when payload rationale is absent", () => {
     const card = makeCard("MSFT", "HOLD", {
       why_text: "Holding while evidence builds.",
-      detail_drawer_payload: {
+      detail_drawer_payload: ({
         rationale: "",
         why_now: "",
         committee: { status: "pending" },
         schema_version: "v3.1",
-      },
+      }) as IntelV3HeldCard["detail_drawer_payload"],
     });
     // Fallback contract: when rationale is empty, why_text is the source.
     expect(card.detail_drawer_payload.rationale).toBe("");
@@ -622,7 +624,7 @@ describe("Stage 4C — drawer live-data contract", () => {
 
   it("valuation_context renders when present — visible_text is plain English, no price targets", () => {
     const card = makeCard("AAPL", "BUY", {
-      detail_drawer_payload: {
+      detail_drawer_payload: ({
         rationale: "Solid evidence.",
         why_now: "Favorable setup.",
         committee: { status: "source_validated" },
@@ -632,7 +634,7 @@ describe("Stage 4C — drawer live-data contract", () => {
           limitation_text: "Based on annual EPS only.",
           source_basis: "fy_eps_earnings_yield",
         },
-      },
+      }) as IntelV3HeldCard["detail_drawer_payload"],
     });
     expect(card.detail_drawer_payload.valuation_context).not.toBeNull();
     expect(card.detail_drawer_payload.valuation_context!.visible_text).not.toMatch(/\$\d+/);

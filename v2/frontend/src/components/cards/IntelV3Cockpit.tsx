@@ -16,7 +16,6 @@
  *
  * Invariants:
  *   - Intel v3 authority and route behavior unchanged
- *   - NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED split preserved
  *   - No legacy v2 blending
  *   - Filter contract: ALL / BUY / HOLD / TRIM / SELL only
  *   - Run Intel button behavior identical to pre-Stage-4C

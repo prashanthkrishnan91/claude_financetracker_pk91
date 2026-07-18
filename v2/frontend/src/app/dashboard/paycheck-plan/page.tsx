@@ -1,10 +1,7 @@
-import { PaycheckPlanPreviewCard } from "@/components/cards/PaycheckPlanPreviewCard";
+import { redirect } from "next/navigation";
+import { LEGACY_ROUTE_REDIRECTS } from "@/lib/route-redirects";
 
-export default function PaycheckPlanPage() {
-  return (
-    <div className="max-w-xl mx-auto p-4 space-y-4">
-      <h1 className="text-lg font-semibold text-text-primary">Paycheck Plan Preview</h1>
-      <PaycheckPlanPreviewCard />
-    </div>
-  );
+/** Retired surface — permanently redirects to its canonical view. */
+export default function Page() {
+  redirect(LEGACY_ROUTE_REDIRECTS["/dashboard/paycheck-plan"]);
 }

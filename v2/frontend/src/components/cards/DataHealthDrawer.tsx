@@ -15,8 +15,6 @@ import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import {
   useIntelV3Snapshot,
-  useDeployV3Plan,
-  useAlertCandidates,
   usePortfolioSummary,
   usePlaidStatus,
 } from "@/lib/hooks";
@@ -41,8 +39,6 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
 
   const { data: intelSnapshot } = useIntelV3Snapshot();
-  const { data: deployPlan } = useDeployV3Plan();
-  const { data: alertCandidates } = useAlertCandidates(50);
   const { data: portfolioSummary } = usePortfolioSummary();
   const { data: plaidStatus } = usePlaidStatus();
 
@@ -64,8 +60,6 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
   const rows = buildDataHealthRows({
     intelSnapshotSource: intelSnapshot?.snapshot_source ?? null,
     intelFreshnessState: intelSnapshot?.evidence_freshness_state ?? null,
-    deployReadinessStatus: deployPlan?.rollup?.plan_readiness_status ?? null,
-    alertCandidateCount: alertCandidates?.length ?? null,
     pricesFresh: portfolioSummary?.prices_fresh ?? null,
     pricesStale: portfolioSummary?.prices_stale ?? null,
     plaidStatus: plaidStatus?.status ?? null,

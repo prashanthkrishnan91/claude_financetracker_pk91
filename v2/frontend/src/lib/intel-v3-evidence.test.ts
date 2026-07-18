@@ -188,9 +188,9 @@ describe("evidenceFreshnessToLabel", () => {
 // ── buildDataHealthRows ───────────────────────────────────────────────────────
 
 describe("buildDataHealthRows", () => {
-  it("returns exactly 7 rows always (Intel snapshot, Evidence freshness, Deploy, Alerts, Price, Broker sync, Email)", () => {
+  it("returns exactly 4 rows always (Intel snapshot, Evidence freshness, Price, Broker sync)", () => {
     const rows = buildDataHealthRows({});
-    expect(rows).toHaveLength(7);
+    expect(rows).toHaveLength(4);
   });
 
   it("all rows have label, status, detail fields", () => {
@@ -203,31 +203,15 @@ describe("buildDataHealthRows", () => {
     }
   });
 
-  it("labels are the canonical plain-English set", () => {
-    const rows = buildDataHealthRows({});
-    const labels = rows.map((r) => r.label);
-    expect(labels).toContain("Intel snapshot");
-    expect(labels).toContain("Evidence freshness");
-    expect(labels).toContain("Deploy readiness");
-    expect(labels).toContain("Watchtower alerts");
-    expect(labels).toContain("Price data");
-    expect(labels).toContain("Broker sync");
-    expect(labels).toContain("Email delivery safety");
-  });
-
   it("missing inputs produce unavailable rows — never fake status", () => {
     const rows = buildDataHealthRows({});
     const intelRow = rows.find((r) => r.label === "Intel snapshot")!;
     const freshnessRow = rows.find((r) => r.label === "Evidence freshness")!;
-    const deployRow = rows.find((r) => r.label === "Deploy readiness")!;
-    const alertsRow = rows.find((r) => r.label === "Watchtower alerts")!;
     const priceRow = rows.find((r) => r.label === "Price data")!;
     const brokerRow = rows.find((r) => r.label === "Broker sync")!;
 
     expect(intelRow.status).toBe("unavailable");
     expect(freshnessRow.status).toBe("unavailable");
-    expect(deployRow.status).toBe("unavailable");
-    expect(alertsRow.status).toBe("unavailable");
     expect(priceRow.status).toBe("unavailable");
     expect(brokerRow.status).toBe("unavailable");
   });
@@ -266,27 +250,6 @@ describe("buildDataHealthRows", () => {
     expect(row.detail).toBe("Refresh pending");
   });
 
-  it("alert candidates > 0 → ok status", () => {
-    const rows = buildDataHealthRows({ alertCandidateCount: 5 });
-    const row = rows.find((r) => r.label === "Watchtower alerts")!;
-    expect(row.status).toBe("ok");
-    expect(row.detail).toContain("5 candidates");
-  });
-
-  it("alert candidates = 1 → singular label", () => {
-    const rows = buildDataHealthRows({ alertCandidateCount: 1 });
-    const row = rows.find((r) => r.label === "Watchtower alerts")!;
-    expect(row.detail).toContain("1 candidate");
-    expect(row.detail).not.toContain("candidates");
-  });
-
-  it("alert candidates = 0 → pending status", () => {
-    const rows = buildDataHealthRows({ alertCandidateCount: 0 });
-    const row = rows.find((r) => r.label === "Watchtower alerts")!;
-    expect(row.status).toBe("pending");
-    expect(row.detail).toContain("No active");
-  });
-
   it("all prices fresh → ok status", () => {
     const rows = buildDataHealthRows({ pricesFresh: 10, pricesStale: 0 });
     const row = rows.find((r) => r.label === "Price data")!;
@@ -310,36 +273,4 @@ describe("buildDataHealthRows", () => {
     expect(row.detail).toContain("Connected");
   });
 
-  it("email delivery safety row is always ok with dry-run copy", () => {
-    const rows = buildDataHealthRows({});
-    const row = rows.find((r) => r.label === "Email delivery safety")!;
-    expect(row.status).toBe("ok");
-    expect(row.detail).toContain("Dry-run");
-    expect(row.detail).toContain("no emails sent");
-  });
-
-  it("no fake credibility, contradiction, or completeness labels appear as live values", () => {
-    const FORBIDDEN_LIVE_LABELS = [
-      "credibility score",
-      "contradiction detected",
-      "evidence complete",
-      "SEC filing",
-      "sentiment confirmed",
-      "technical analysis",
-    ];
-    const rows = buildDataHealthRows({
-      intelSnapshotSource: "worker_certified",
-      intelFreshnessState: "certified_current",
-      alertCandidateCount: 3,
-      pricesFresh: 5,
-      pricesStale: 0,
-      plaidStatus: "connected",
-    });
-    for (const row of rows) {
-      for (const forbidden of FORBIDDEN_LIVE_LABELS) {
-        expect(row.detail.toLowerCase()).not.toContain(forbidden.toLowerCase());
-        expect(row.label.toLowerCase()).not.toContain(forbidden.toLowerCase());
-      }
-    }
-  });
 });

@@ -3,36 +3,33 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { cn } from "@/lib/utils";
+import {
+  MOBILE_NAV_ITEMS,
+  DESKTOP_NAV_ITEMS,
+  SECONDARY_NAV_ITEMS,
+  type NavItem,
+} from "./nav-items";
 
-// All destinations rendered in the desktop SideNav.
-const NAV_ITEMS = [
-  { href: "/dashboard", label: "Today", icon: BarChartIcon },
-  { href: "/dashboard/portfolio", label: "Portfolio", icon: BriefcaseIcon },
-  { href: "/dashboard/recommendations", label: "Intel", icon: LightbulbIcon },
-  { href: "/dashboard/deposits", label: "Deploy", icon: WalletIcon },
-  { href: "/dashboard/alerts", label: "Alerts", icon: BellIcon },
-  { href: "/dashboard/drip", label: "DRIP", icon: DropletIcon },
-  { href: "/dashboard/import", label: "Import", icon: UploadIcon },
-  { href: "/settings", label: "Settings", icon: GearIcon },
-];
+// Icon lookup for the canonical nav constants (which stay pure-TS for tests).
+const NAV_ICONS: Record<string, IconComponent> = {
+  "/dashboard/positions": BriefcaseIcon,
+  "/dashboard/advisor": CompassIcon,
+  "/dashboard/watchlist": EyeIcon,
+  "/settings": GearIcon,
+};
 
-// Stage 4H: Mobile BottomNav is the focused 4-tab subset (§30.8).
-// Alerts stays reachable via Today Watchtower links and in-product links.
-// Desktop SideNav keeps all NAV_ITEMS + SIDE_ONLY_NAV_ITEMS.
-const MOBILE_NAV_ITEMS = [
-  { href: "/dashboard", label: "Today", icon: BarChartIcon },
-  { href: "/dashboard/recommendations", label: "Intel", icon: LightbulbIcon },
-  { href: "/dashboard/deposits", label: "Deploy", icon: WalletIcon },
-  { href: "/dashboard/portfolio", label: "Portfolio", icon: BriefcaseIcon },
-];
+type IconComponent = (props: {
+  className?: string;
+  strokeWidth?: number;
+}) => JSX.Element;
 
-// Desktop-only destinations: Journal, Radar, and any future surface that is
-// deferred from mobile BottomNav per §26.1 and §30.7.
-const SIDE_ONLY_NAV_ITEMS = [
-  { href: "/dashboard/journal", label: "Journal", icon: BookIcon },
-  { href: "/dashboard/radar", label: "Radar", icon: RadarIcon },
-  { href: "/dashboard/paycheck-plan", label: "Paycheck", icon: WalletIcon },
-];
+function iconFor(item: NavItem): IconComponent {
+  return NAV_ICONS[item.href] ?? BriefcaseIcon;
+}
+
+function isActive(pathname: string, href: string): boolean {
+  return pathname === href || pathname.startsWith(`${href}/`);
+}
 
 export function BottomNav() {
   const pathname = usePathname();
@@ -48,9 +45,8 @@ export function BottomNav() {
     >
       <div className="flex justify-around items-center h-16 max-w-lg mx-auto">
         {MOBILE_NAV_ITEMS.map((item) => {
-          const active =
-            pathname === item.href ||
-            (item.href !== "/dashboard" && pathname.startsWith(item.href));
+          const active = isActive(pathname, item.href);
+          const Icon = iconFor(item);
           return (
             <Link
               key={item.href}
@@ -66,7 +62,7 @@ export function BottomNav() {
               {active && (
                 <span className="absolute top-0 left-1/2 -translate-x-1/2 w-6 h-[2px] bg-accent rounded-full opacity-80" />
               )}
-              <item.icon
+              <Icon
                 className={cn("w-5 h-5", active ? "opacity-100" : "opacity-60")}
                 strokeWidth={active ? 2 : 1.5}
               />
@@ -95,7 +91,7 @@ export function SideNav() {
     <nav className="hidden lg:flex flex-col w-56 border-r border-border-subtle bg-surface p-4 gap-1 min-h-screen sticky top-0 h-screen overflow-y-auto">
 
       {/* Brand mark — editorial serif for the product name */}
-      <Link href="/dashboard" className="block mb-8 group">
+      <Link href="/dashboard/positions" className="block mb-8 group">
         <span className="block font-display text-base font-normal text-text-primary leading-none">
           Portfolio
         </span>
@@ -104,12 +100,11 @@ export function SideNav() {
         </span>
       </Link>
 
-      {/* Navigation items */}
+      {/* Primary navigation — exactly the three canonical views */}
       <div className="space-y-px">
-        {[...NAV_ITEMS, ...SIDE_ONLY_NAV_ITEMS].map((item) => {
-          const active =
-            pathname === item.href ||
-            (item.href !== "/dashboard" && pathname.startsWith(item.href));
+        {DESKTOP_NAV_ITEMS.map((item) => {
+          const active = isActive(pathname, item.href);
+          const Icon = iconFor(item);
           return (
             <Link
               key={item.href}
@@ -122,7 +117,7 @@ export function SideNav() {
                   : "text-text-secondary hover:text-text-primary hover:bg-surface-elevated/60 px-3 border-l-2 border-transparent"
               )}
             >
-              <item.icon
+              <Icon
                 className="w-4 h-4 shrink-0"
                 strokeWidth={active ? 2 : 1.5}
               />
@@ -132,13 +127,27 @@ export function SideNav() {
         })}
       </div>
 
-      {/* Footer chrome */}
+      {/* Footer chrome — secondary actions, visually separated from primary nav */}
       <div className="mt-auto pt-3 border-t border-border-subtle/40">
-        {/* Data-health dot — placeholder state (wired in Stage 4D) */}
-        <div className="flex items-center gap-2 px-1 py-1.5 text-text-muted opacity-40">
-          <span className="w-1.5 h-1.5 rounded-full bg-border-strong shrink-0" />
-          <span className="text-[10px] uppercase tracking-label">Data health</span>
-        </div>
+        {SECONDARY_NAV_ITEMS.map((item) => {
+          const active = isActive(pathname, item.href);
+          const Icon = iconFor(item);
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              className={cn(
+                "flex items-center gap-2 px-1 py-1.5 text-[11px] uppercase tracking-label transition-colors duration-160",
+                active
+                  ? "text-accent"
+                  : "text-text-muted opacity-60 hover:opacity-100 hover:text-text-secondary"
+              )}
+            >
+              <Icon className="w-3.5 h-3.5 shrink-0" strokeWidth={1.5} />
+              <span>{item.label}</span>
+            </Link>
+          );
+        })}
         {/* Version / build stamp */}
         <p className="text-[10px] font-mono text-text-muted opacity-25 tracking-widest px-1 mt-1">
           v2
@@ -149,20 +158,6 @@ export function SideNav() {
 }
 
 // ─── Icons (1.5 px stroke, geometric) ─────────────────────────────────────────
-
-function BarChartIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M18 20V10M12 20V4M6 20v-6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
 
 function BriefcaseIcon({
   className,
@@ -180,7 +175,7 @@ function BriefcaseIcon({
   );
 }
 
-function LightbulbIcon({
+function CompassIcon({
   className,
   strokeWidth = 1.5,
 }: {
@@ -189,12 +184,13 @@ function LightbulbIcon({
 }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M9 18h6M10 22h4M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="10" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M16.24 7.76l-2.12 6.36-6.36 2.12 2.12-6.36 6.36-2.12z" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
 
-function WalletIcon({
+function EyeIcon({
   className,
   strokeWidth = 1.5,
 }: {
@@ -203,37 +199,8 @@ function WalletIcon({
 }) {
   return (
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M21 12V7H5a2 2 0 0 1 0-4h14v4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M3 5v14a2 2 0 0 0 2 2h16v-5" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M18 12a2 2 0 0 0 0 4h4v-4h-4z" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function DropletIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function UploadIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="12" cy="12" r="3" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }
@@ -249,53 +216,6 @@ function GearIcon({
     <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
       <circle cx="12" cy="12" r="3" />
       <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-    </svg>
-  );
-}
-
-function BellIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M13.73 21a2 2 0 0 1-3.46 0" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function BookIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-function RadarIcon({
-  className,
-  strokeWidth = 1.5,
-}: {
-  className?: string;
-  strokeWidth?: number;
-}) {
-  return (
-    <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={strokeWidth}>
-      <path d="M12 2a10 10 0 1 0 10 10" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 6a6 6 0 0 1 6 6" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 10a2 2 0 0 1 2 2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M12 12l6-6" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

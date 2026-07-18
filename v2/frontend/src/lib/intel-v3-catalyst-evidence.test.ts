@@ -482,7 +482,7 @@ describe("Stage 8F: filing-type specificity", () => {
         })
       );
       // filing_type_label should not bleed onto the editorial card.
-      expect((result.editorial_suppressed as Record<string, unknown>)?.filing_type_label)
+      expect((result.editorial_suppressed as unknown as Record<string, unknown> | undefined)?.filing_type_label)
         .toBeUndefined();
     });
   });

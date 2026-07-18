@@ -60,6 +60,30 @@ _ANALYST_REFRESH_FLAG_ENV = "INTEL_V3_ANALYST_REFRESH_ENABLED"
 _TRUTHY = {"1", "true", "yes", "on"}
 _FALSY = {"0", "false", "no", "off"}
 
+# Plain-English messages for enqueue_run_v3()'s zero-LLM deterministic
+# recertification failure statuses. Explicit per-status mapping (rather than
+# extending the message conditional further) so every recertification
+# failure gets an accurate "failed, retry" message instead of silently
+# falling through to the generic already-current message.
+_RECERTIFICATION_FAILURE_MESSAGES = {
+    "mapping_version_recertification_failed": (
+        "Deterministic recertification failed — evidence mapping version mismatch. "
+        "Retry Run Intel to recertify."
+    ),
+    "stage7_contract_recertification_failed": (
+        "Deterministic recertification failed — Stage 7 explanation contract missing. "
+        "Retry Run Intel to recertify."
+    ),
+    "stage8e_contract_recertification_failed": (
+        "Deterministic recertification failed — Stage 8E catalyst explanation contract missing. "
+        "Retry Run Intel to recertify."
+    ),
+    "stage8f_contract_recertification_failed": (
+        "Deterministic recertification failed — Stage 8F filing-type contract missing. "
+        "Retry Run Intel to recertify."
+    ),
+}
+
 
 def is_intel_v3_enabled() -> bool:
     return os.getenv(_FLAG_ENV, "").strip().lower() in _TRUTHY
@@ -1178,13 +1202,9 @@ class IntelV3Service:
                 f"Analyst refresh enqueued for {queued_count}/{total_holding_count} holdings. "
                 "Background worker will run LLM analysis and publish a certified snapshot."
                 if queued_count > 0
-                else "Deterministic recertification failed — evidence mapping version mismatch. "
-                "Retry Run Intel to recertify."
-                if status == "mapping_version_recertification_failed"
-                else "Deterministic recertification failed — Stage 7 explanation contract missing. "
-                "Retry Run Intel to recertify."
-                if status == "stage7_contract_recertification_failed"
-                else "Analyst evidence is current — no refresh needed."
+                else _RECERTIFICATION_FAILURE_MESSAGES.get(
+                    status, "Analyst evidence is current — no refresh needed."
+                )
             ),
         }
 

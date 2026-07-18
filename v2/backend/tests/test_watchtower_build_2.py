@@ -85,16 +85,17 @@ def _make_client(
 
     snap_id = intel_snapshot_id or str(uuid.uuid4())
     gen_at = intel_snapshot_generated_at or "2026-05-15T10:00:00+00:00"
-    snap_payload: dict = {
-        "snapshot_id": snap_id,
-        "generated_at": gen_at,
+    # Migration 024: _fetch_latest_intel_snapshot reads flat metadata columns
+    # (payload_generated_at, contract booleans) instead of the payload JSONB.
+    intel_row: dict = {
+        "source_hash": f"hash-{snap_id}",
         "snapshot_source": "worker_certified",
+        "payload_generated_at": gen_at,
+        "evidence_mapping_version": intel_mapping_version,
+        "stage7_contract_complete": intel_stage7_version is not None,
+        "stage8e_contract_complete": True,
     }
-    if intel_mapping_version is not None:
-        snap_payload["evidence_mapping_version"] = intel_mapping_version
-    if intel_stage7_version is not None:
-        snap_payload["stage7_explanation_contract_version"] = intel_stage7_version
-    intel_rows = [] if no_intel_snapshot else [{"payload": snap_payload}]
+    intel_rows = [] if no_intel_snapshot else [intel_row]
 
     port_id = portfolio_snapshot_id or str(uuid.uuid4())
     port_at = portfolio_snapshot_at or "2026-05-15T11:00:00+00:00"
@@ -257,7 +258,9 @@ class TestCompareAndRepublish:
 
         result = await compare_and_republish(USER_ID, client)
 
-        assert result.latest_certified_snapshot_id == snap_id
+        # Migration 024: the flat-column fetch no longer returns a snapshot_id
+        # (it is not stored as a flat column; the field is logging-only now).
+        assert result.latest_certified_snapshot_id is None
         assert result.latest_certified_snapshot_generated_at == intel_ts
         assert port_id in (result.latest_decision_evidence_snapshot_id or "")
         assert result.latest_decision_evidence_snapshot_at == port_ts

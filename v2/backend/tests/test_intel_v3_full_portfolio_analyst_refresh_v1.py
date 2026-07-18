@@ -765,17 +765,23 @@ class TestBoundaryInvariants(unittest.TestCase):
         assert "build_snapshot" not in src
 
     def test_full_portfolio_adapter_default_backend_does_not_scope_orchestrator(self):
-        """Default backend must call AgentOrchestrator WITHOUT
-        analyst_refresh_tickers — that's the difference vs Stage 3.0b.6."""
+        """Default backend scopes AgentOrchestrator to the SELECTED BATCH only.
+
+        Current contract: unlike the fixed 6-ticker Stage 3.0b.6 call site, the
+        full-portfolio backend passes the dynamic selected batch
+        (``analyst_refresh_tickers=set(selected_tickers)``) so non-scope tickers
+        keep their existing rows untouched. It must never hard-code a fixed
+        ticker scope.
+        """
         import inspect
         from app.services.intelligence.v3 import (
             full_portfolio_analyst_refresh_adapter_v1 as mod,
         )
         src = inspect.getsource(mod.default_full_portfolio_agent_orchestrator_backend)
-        # The scoped 6-ticker call site set analyst_refresh_tickers=... — the
-        # full-portfolio call site must not.
-        assert "analyst_refresh_tickers=" not in src, (
-            "Full-portfolio backend must NOT pass analyst_refresh_tickers — "
-            "the orchestrator runs over the full portfolio."
+        # The orchestrator scope must be the dynamic selected batch, not a
+        # hard-coded 6-ticker list.
+        assert "analyst_refresh_tickers=set(selected_tickers)" in src, (
+            "Full-portfolio backend must scope the orchestrator to the "
+            "dynamic selected batch (analyst_refresh_tickers=set(selected_tickers))."
         )
         assert "force_recompute=True" in src

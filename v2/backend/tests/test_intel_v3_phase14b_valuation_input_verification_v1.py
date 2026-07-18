@@ -645,11 +645,34 @@ class TestPhase14BStaticImportSafety:
             assert "PriceBand" not in name
 
     def test_no_decide_import_in_diagnostics_endpoint(self):
+        # Current contract (Stage 6 governance diagnostics): decide() is imported
+        # lazily ONLY inside the env-gated Stage 6 governance endpoint
+        # (get_stage6_evidence_governance_diagnostics). It must never appear as a
+        # module-level import, and no other endpoint may import it — in
+        # particular not the Phase 14B verification endpoint under test here.
+        import ast as _ast
         src = self._diagnostics_source()
-        # Must not import decide directly in diagnostics.py
-        # decide() is not imported in any existing diagnostics endpoints
-        assert "import decide" not in src
-        assert "from decision_policy" not in src
+        tree = _ast.parse(src)
+        allowed_funcs = {"get_stage6_evidence_governance_diagnostics"}
+        for node in tree.body:
+            if isinstance(node, (_ast.Import, _ast.ImportFrom)):
+                for alias in getattr(node, "names", []):
+                    assert alias.name != "decide", (
+                        "diagnostics.py must not import decide() at module level"
+                    )
+        offending = []
+        for func in _ast.walk(tree):
+            if isinstance(func, (_ast.FunctionDef, _ast.AsyncFunctionDef)):
+                if func.name in allowed_funcs:
+                    continue
+                for sub in _ast.walk(func):
+                    if isinstance(sub, (_ast.Import, _ast.ImportFrom)):
+                        for alias in getattr(sub, "names", []):
+                            if alias.name == "decide":
+                                offending.append(func.name)
+        assert offending == [], (
+            f"decide() imported outside the Stage 6 governance endpoint: {offending}"
+        )
 
     def test_diagnostics_endpoint_never_sets_safe_for_decision_true(self):
         src = self._diagnostics_source()

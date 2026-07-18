@@ -971,11 +971,17 @@ class TestNoSql:
         if not os.path.isdir(db_dir):
             pytest.skip("database directory not found")
         migrations = sorted(glob.glob(os.path.join(db_dir, "0*.sql")))
-        # The latest migration should be 017 (Phase 2.1) — no new ones for Phase 6B
+        # At Phase 6B time the latest migration was 017 (Phase 2.1). Later
+        # stages legitimately added migrations (018+: analyst refresh jobs,
+        # alert candidates/outbox, Stage 5A artifact store, Migration 024 flat
+        # snapshot metadata, watchlist). The Phase 6B invariant is narrower:
+        # no migration file may belong to Phase 6B readiness observability.
+        phase6b_markers = ("phase6b", "phase_6b", "readiness_observability", "truth_readiness")
         for m in migrations:
-            basename = os.path.basename(m)
-            seq = int(basename.split("_")[0])
-            assert seq <= 17, f"Unexpected migration file found: {basename}"
+            basename = os.path.basename(m).lower()
+            assert not any(marker in basename for marker in phase6b_markers), (
+                f"Phase 6B must not introduce SQL migrations, found: {basename}"
+            )
 
 
 # ── Integration: Phase 6B summary invariants ─────────────────────────────────

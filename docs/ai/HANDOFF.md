@@ -75,10 +75,16 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
   clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
   worker services remain optional and OFF. `snapshot_available_after_run` (in `routers/intel_v3.py
-  ::_augment_with_on_demand_status`) requires all three: `snapshot_source == "worker_certified"`,
-  `evidence_freshness_state == "certified_current"`, and no remaining bounded-drain work —
-  an old worker_certified snapshot with stale/republish_pending freshness or a resumable partial
-  drain must never report completion (post-#473 production regression fix).
+  ::_augment_with_on_demand_status`) has two paths: when nothing was queued this request, an
+  already-current `worker_certified` + `certified_current` snapshot legitimately means "nothing to
+  do" (no-op preserved); when jobs WERE queued this request, completion requires proof THIS
+  request actually published — on-demand enabled, drain ran, nothing left resumable, snapshot
+  writes enabled, latest snapshot is `worker_certified` + `certified_current`, AND its
+  `snapshot_id` differs from `existing_certified_snapshot_id` (the id seen before the request, or
+  no prior certified snapshot). A stale/historical snapshot — whatever its freshness — can never
+  stand in for a request's own unresolved outcome (queue-only, write-guard, still-draining, or
+  drain-completed-without-publishing all correctly report non-completion; `_next_required_action`
+  checks in that exact priority order, so the snapshot-write guard always outranks "continue").
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.

@@ -42,27 +42,32 @@ def _next_required_action(
     Never implies a snapshot is being built when it is not — the whole point
     of Stage 13B is to stop the queue-only 202 from silently reading as
     "in progress" when nothing will ever drain it.
+
+    Priority order (each branch outranks everything below it):
+      1. no active holdings
+      2. queued jobs + on-demand processing disabled -> queue-only
+      3. drain ran + snapshot writes disabled -> write-guard (outranks
+         "continue" — reclicking can never publish while writes are off)
+      4. drain ran + remaining resumable work -> continue draining
+      5. a newly/currently certified snapshot is available -> complete
+      6. nothing was queued -> no stale evidence to refresh
+      7. otherwise -> retry
     """
     if status_value == "no_active_holdings":
         return "add_positions_before_running_intel"
-    # Remaining bounded-drain work always takes priority over any historical
-    # snapshot — an old worker_certified snapshot must never mask jobs still
-    # queued from this run. See production regression: snapshot_id
-    # 52c593c8-b5c2-447e-bbd5-194c3f634c96 stayed republish_pending while a
-    # partial drain (20/32) still had 12 jobs remaining.
-    if drain_ran and drain_remaining:
-        return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
-    if snapshot_available_after_run:
-        return "none_certified_snapshot_current"
-    if queued_ticker_count == 0:
-        return "none_no_stale_evidence_to_refresh"
-    if not on_demand_processing_enabled:
+    if queued_ticker_count > 0 and not on_demand_processing_enabled:
         return (
             "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_"
             "analyst_refresh_worker_entrypoint_separately"
         )
     if drain_ran and not snapshot_writes_enabled:
         return "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false"
+    if drain_ran and drain_remaining:
+        return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
+    if snapshot_available_after_run:
+        return "none_certified_snapshot_current"
+    if queued_ticker_count == 0:
+        return "none_no_stale_evidence_to_refresh"
     return "reclick_run_intel_to_retry"
 
 
@@ -79,7 +84,9 @@ async def _augment_with_on_demand_status(
     """
     settings = get_settings()
     on_demand_enabled = settings.intel_v3_on_demand_refresh_enabled
+    snapshot_writes_enabled = settings.intel_v3_snapshot_writes_enabled
     queued_ticker_count = int(result.get("queued_ticker_count") or 0)
+    existing_certified_snapshot_id = result.get("existing_certified_snapshot_id")
 
     drain_ran = False
     drain_remaining = False
@@ -96,18 +103,36 @@ async def _augment_with_on_demand_status(
         drain_remaining = drain_result.run_resumable
 
     latest_snapshot = await service.get_latest_snapshot()
-    # Completion truth requires all three: the latest snapshot is
-    # worker_certified, its evidence is certified_current (not
-    # republish_pending/stale/blocked/unknown/missing), AND the bounded
-    # drain has no remaining resumable work. An old worker_certified
-    # snapshot alone must never report completion while evidence is stale
-    # or jobs remain — see production regression above.
-    snapshot_available_after_run = (
+    latest_snapshot_id = (
+        latest_snapshot.get("snapshot_id") if isinstance(latest_snapshot, dict) else None
+    )
+    latest_is_certified_current = (
         isinstance(latest_snapshot, dict)
         and latest_snapshot.get("snapshot_source") == "worker_certified"
         and latest_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
-        and not drain_remaining
     )
+
+    if queued_ticker_count > 0:
+        # This request queued work, so completion requires proof THIS
+        # request actually published a new certified snapshot — not merely
+        # that an older worker_certified + certified_current snapshot still
+        # happens to be sitting there untouched. Requires the full chain
+        # (on-demand enabled, drain ran, nothing left resumable, writes
+        # enabled) AND a concrete latest snapshot id that differs from
+        # whatever certified snapshot (if any) existed before this request.
+        snapshot_available_after_run = (
+            on_demand_enabled
+            and drain_ran
+            and not drain_remaining
+            and snapshot_writes_enabled
+            and latest_is_certified_current
+            and latest_snapshot_id is not None
+            and latest_snapshot_id != existing_certified_snapshot_id
+        )
+    else:
+        # Nothing was queued this request — an already-current certified
+        # snapshot legitimately means "nothing to do." Preserve that no-op.
+        snapshot_available_after_run = latest_is_certified_current
 
     result["on_demand_processing_enabled"] = on_demand_enabled
     result["on_demand_jobs_attempted"] = jobs_attempted
@@ -121,7 +146,7 @@ async def _augment_with_on_demand_status(
         drain_ran=drain_ran,
         drain_remaining=drain_remaining,
         snapshot_available_after_run=snapshot_available_after_run,
-        snapshot_writes_enabled=settings.intel_v3_snapshot_writes_enabled,
+        snapshot_writes_enabled=snapshot_writes_enabled,
     )
     return result
 

@@ -91,9 +91,13 @@ class TestAppImport:
         assert router is not None
 
     def test_router_routes_registered(self):
-        """intel_v3 router must be registered in the app with expected paths."""
+        """intel_v3 router must be registered in the app with expected paths.
+
+        Newer FastAPI wraps included routers (app.routes entries no longer all
+        expose ``.path``), so enumerate registered paths via the OpenAPI schema.
+        """
         from app.main import app
-        paths = [r.path for r in app.routes]
+        paths = set(app.openapi()["paths"].keys())
         assert "/api/v1/intel/v3/snapshot" in paths
         assert "/api/v1/intel/v3/run" in paths
         assert "/api/v1/intel/v3/runs/{run_id}" in paths
@@ -396,7 +400,12 @@ class TestPageLoadIsolation:
         service.client = mock_client
 
         result = asyncio.run(service.get_latest_snapshot())
-        assert result == expected
+        # Build 2: get_latest_snapshot embeds evidence_freshness_state in the
+        # returned payload — the stored payload fields must still round-trip.
+        assert result is not None
+        for key, value in expected.items():
+            assert result[key] == value
+        assert "evidence_freshness_state" in result
 
 
 # ── Gate F: Run path produces valid snapshot ──────────────────────────────────

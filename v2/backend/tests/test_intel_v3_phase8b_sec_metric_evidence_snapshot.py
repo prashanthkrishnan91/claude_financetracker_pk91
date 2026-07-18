@@ -946,31 +946,6 @@ class TestStaticImportGuards:
         assert ".update(" not in src
         assert ".upsert(" not in src
 
-    def test_diagnostics_includes_phase8b_keys(self):
-        src = _read_src("app/routers/diagnostics.py")
-        required_keys = [
-            "sec_metric_evidence_snapshot_dry_run_enabled",
-            "sec_metric_evidence_snapshot_safe_for_decision",
-            "sec_metric_evidence_snapshot_visible_snapshot_unchanged",
-            "sec_metric_evidence_snapshot_tickers_evaluated_count",
-            "sec_metric_evidence_snapshot_tickers_with_any_source_linked_evidence_count",
-            "sec_metric_evidence_snapshot_tickers_ready_for_future_adapter_count",
-            "sec_metric_evidence_snapshot_tickers_blocked_from_decision_count",
-            "sec_metric_evidence_snapshot_by_ticker",
-        ]
-        for key in required_keys:
-            assert f'"{key}"' in src, f"Missing Phase 8B key in diagnostics.py: {key}"
-
-    def test_phase8a_keys_still_in_diagnostics(self):
-        src = _read_src("app/routers/diagnostics.py")
-        for key in [
-            "sec_metric_truth_adapter_dry_run_enabled",
-            "sec_metric_truth_adapter_by_ticker",
-            "sec_metric_truth_adapter_by_bucket",
-            "sec_metric_truth_adapter_missing_buckets_by_ticker",
-        ]:
-            assert f'"{key}"' in src, f"Phase 8A key missing from diagnostics.py: {key}"
-
 
 # =============================================================================
 # AC 13: Kill switch — disabled flag path returns zero/empty/false defaults

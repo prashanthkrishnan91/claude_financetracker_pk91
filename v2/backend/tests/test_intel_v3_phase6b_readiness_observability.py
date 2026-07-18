@@ -760,85 +760,6 @@ class TestNoRawDataExposed:
         assert "quote_or_excerpt" not in result_dict
 
 
-# ── AC 15/16: Endpoint 403 when flag off / cert required ────────────────────
-
-class TestEndpointGating:
-    def test_endpoint_403_when_observability_flag_off(self):
-        """Endpoint returns 403 when observability flag is off — enforced in diagnostics.py."""
-        from app.routers.diagnostics import observe_research_artifacts
-        # This is a behavioral contract confirmed by Phase 4 endpoint tests.
-        # We verify the endpoint code path here by checking the source text.
-        import inspect
-        src = inspect.getsource(observe_research_artifacts)
-        assert "intel_v3_research_artifact_observability_enabled" in src
-        assert "HTTP_403_FORBIDDEN" in src or "403" in src
-
-    def test_endpoint_uses_runtime_cert_dependency(self):
-        from app.routers.diagnostics import observe_research_artifacts
-        import inspect
-        src = inspect.getsource(observe_research_artifacts)
-        assert "_get_runtime_cert_user" in src
-
-
-# ── AC 17: Endpoint caps params ──────────────────────────────────────────────
-
-class TestEndpointCaps:
-    def test_endpoint_caps_tickers(self):
-        from app.routers.diagnostics import MAX_OBSERVE_TICKERS_PER_REQUEST
-        assert MAX_OBSERVE_TICKERS_PER_REQUEST == 10
-
-    def test_endpoint_caps_lookback_days(self):
-        from app.routers.diagnostics import MAX_OBSERVE_LOOKBACK_DAYS, MIN_OBSERVE_LOOKBACK_DAYS
-        assert MAX_OBSERVE_LOOKBACK_DAYS == 365
-        assert MIN_OBSERVE_LOOKBACK_DAYS == 1
-
-    def test_endpoint_caps_max_rows(self):
-        from app.routers.diagnostics import MAX_OBSERVE_ROWS, MIN_OBSERVE_ROWS
-        assert MAX_OBSERVE_ROWS == 1000
-        assert MIN_OBSERVE_ROWS == 1
-
-
-# ── AC 18: Endpoint returns new readiness fields ────────────────────────────
-
-class TestEndpointNewFields:
-    def test_endpoint_includes_readiness_fields_in_response(self):
-        """Verify the endpoint response dict includes all new Phase 6B keys."""
-        import inspect
-        from app.routers.diagnostics import observe_research_artifacts
-        src = inspect.getsource(observe_research_artifacts)
-        for field_name in [
-            "readiness_evaluated_count",
-            "eligible_for_truth_adapter_count",
-            "eligible_for_decision_consumption_count",
-            "safe_for_decision_db_promotion_blocked_count",
-            "fail_closed_count",
-            "by_readiness_reason_code",
-            "phase5_ready_but_decision_blocked_count",
-            "readiness_visible_snapshot_unchanged",
-        ]:
-            assert field_name in src, f"Missing field in endpoint response: {field_name}"
-
-    def test_endpoint_includes_phase7a_metric_counter_fields(self):
-        """Endpoint response includes Phase 7A metric observation aggregate counters."""
-        import os
-        diagnostics_path = os.path.join(
-            os.path.dirname(__file__), "..", "app", "routers", "diagnostics.py"
-        )
-        src = open(diagnostics_path).read()
-        for field_name in [
-            "artifacts_with_metric_observations_count",
-            "metric_observation_fact_count",
-        ]:
-            assert field_name in src, f"Missing Phase 7A metric counter in endpoint response: {field_name}"
-
-    # Removed test_endpoint_metric_fields_not_raw_payloads:
-    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
-    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
-    # which asserts directly on the runtime response shape rather than
-    # grepping diagnostics.py source (the latter conflated legitimate row
-    # reads like row.get("structured_payload") with response leakage).
-
-
 # ── AC 19: No frontend/page-load path references endpoint ────────────────────
 
 class TestNoFrontendReference:
@@ -959,23 +880,6 @@ class TestNoDecisionIntegration:
             facts=[fact_dict],
         )
         assert result.eligible_for_decision_consumption is False
-
-
-# ── AC 23: No SQL (structural check) ─────────────────────────────────────────
-
-class TestNoSql:
-    def test_no_new_migration_files_for_phase6b(self):
-        """Phase 6B must not introduce new SQL migration files."""
-        import os, glob
-        db_dir = os.path.join(os.path.dirname(__file__), "..", "..", "database")
-        if not os.path.isdir(db_dir):
-            pytest.skip("database directory not found")
-        migrations = sorted(glob.glob(os.path.join(db_dir, "0*.sql")))
-        # The latest migration should be 017 (Phase 2.1) — no new ones for Phase 6B
-        for m in migrations:
-            basename = os.path.basename(m)
-            seq = int(basename.split("_")[0])
-            assert seq <= 17, f"Unexpected migration file found: {basename}"
 
 
 # ── Integration: Phase 6B summary invariants ─────────────────────────────────

@@ -34,9 +34,6 @@ _EXTRACTOR_PATH = (
     Path(__file__).parent.parent
     / "app/services/intelligence/v3/eps_payload_extractor_v1.py"
 )
-_ROUTER_PATH = (
-    Path(__file__).parent.parent / "app/routers/diagnostics.py"
-)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -447,41 +444,6 @@ class TestSchemaVersion:
         )
         assert EPS_EXTRACTION_SCHEMA_VERSION == "eps_payload_extractor_v1"
 
-    def test_router_response_includes_schema_version(self):
-        src = _ROUTER_PATH.read_text()
-        assert "eps_extraction_schema_version" in src
-        assert "EPS_EXTRACTION_SCHEMA_VERSION" in src
-
-    def test_router_imports_extractor(self):
-        src = _ROUTER_PATH.read_text()
-        assert "eps_payload_extractor_v1" in src
-        assert "extract_fy_eps_observation_from_payload" in src
-
-
-# ── Router response includes new diagnostic fields ───────────────────────────
-
-class TestRouterDiagnosticFields:
-    def _src(self):
-        return _ROUTER_PATH.read_text()
-
-    def test_shape_checked_count_in_response(self):
-        assert "eps_payload_shape_checked_count" in self._src()
-
-    def test_shape_computable_count_in_response(self):
-        assert "eps_payload_shape_computable_count" in self._src()
-
-    def test_skipped_fiscal_period_count_in_response(self):
-        assert "skipped_eps_missing_fiscal_period_count" in self._src()
-
-    def test_skipped_fiscal_year_count_in_response(self):
-        assert "skipped_eps_missing_fiscal_year_count" in self._src()
-
-    def test_skipped_numeric_value_count_in_response(self):
-        assert "skipped_eps_missing_numeric_value_count" in self._src()
-
-    def test_skipped_not_source_linked_count_in_response(self):
-        assert "skipped_eps_not_source_linked_count" in self._src()
-
 
 # ── Hard locks unchanged ──────────────────────────────────────────────────────
 
@@ -499,10 +461,6 @@ class TestHardLocksPreserved:
     def test_extractor_has_no_visible_decision_field(self):
         from app.services.intelligence.v3.eps_payload_extractor_v1 import EpsExtractionResult
         assert "visible_decision_changed" not in EpsExtractionResult.__dataclass_fields__
-
-    def test_router_still_asserts_safe_for_decision_false(self):
-        src = _ROUTER_PATH.read_text()
-        assert "safe_for_decision" in src
 
 
 # ── Static import safety ──────────────────────────────────────────────────────

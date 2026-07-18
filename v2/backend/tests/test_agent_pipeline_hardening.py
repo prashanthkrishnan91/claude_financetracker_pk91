@@ -1,269 +1,26 @@
-"""SEV-1 regressions: single-run lock, light cache, LLM failover, normalisation.
+"""SEV-1 regressions: LLM failover, JSON extraction, fallback shape.
 
 Covers the hardening work on the agent analysis pipeline so future refactors
 can't silently regress the guarantees the Intel tab depends on:
 
-  * `queue_agent_run` reuses an in-flight run for the same user (lock)
-  * `queue_agent_run` reuses a <2 min old completed run (light cache)
-  * `queue_agent_run` creates a new run otherwise
   * `LLMClient._trim_prompt` shortens prompts for Haiku fallback
   * `LLMClient.ask_json` falls back to the secondary model on primary failure
   * `LLMClient.ask_json` returns `{}` — never None — on total failure
-  * `_force_fail_run` always writes a summary so the UI never sees blanks
+  * portfolio-manager fallback summary/thesis are never blank
+
+NOTE: The queue_agent_run lock/light-cache tests and the `_within_last`
+helper tests were removed in the lean-product refactor — they exercised
+`app.services.recommendation_engine`, which was deleted along with the
+/recommendations refresh route. The agents pipeline itself (llm.py,
+portfolio_manager.py, orchestrator.py) is kept and remains covered below.
 """
 
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
-from uuid import UUID, uuid4
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
-
-# ── helpers ──────────────────────────────────────────────────────────────────
-
-
-def _mock_supabase(agent_runs_rows=None, users_row=None):
-    """Build a MagicMock that mimics the supabase-py fluent interface used
-    by RecommendationService.queue_agent_run.
-    """
-    client = MagicMock()
-
-    def _table(name):
-        tbl = MagicMock()
-        if name == "agent_runs":
-            # Select chain → .eq(user_id).order(...).limit(1).execute()
-            exec_mock = MagicMock()
-            exec_mock.data = agent_runs_rows or []
-            (
-                tbl.select.return_value
-                .eq.return_value
-                .order.return_value
-                .limit.return_value
-                .execute.return_value
-            ) = exec_mock
-            # Insert chain → .execute() returns the inserted row
-            new_id = str(uuid4())
-            (
-                tbl.insert.return_value
-                .execute.return_value
-            ).data = [{"id": new_id}]
-            tbl._new_id = new_id
-        elif name == "users":
-            exec_mock = MagicMock()
-            exec_mock.data = users_row or {"deposit_amount": 900.0}
-            (
-                tbl.select.return_value
-                .eq.return_value
-                .single.return_value
-                .execute.return_value
-            ) = exec_mock
-        return tbl
-
-    client.table.side_effect = _table
-    return client
-
-
-# ── Single-run lock + light cache ────────────────────────────────────────────
-
-
-class TestQueueAgentRunLock:
-    """queue_agent_run must short-circuit concurrent/recent runs."""
-
-    @pytest.mark.asyncio
-    async def test_reuses_running_run(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        existing_id = str(uuid4())
-        existing_rows = [{
-            "id": existing_id,
-            "status": "running",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "finished_at": None,
-        }]
-        mock_client = _mock_supabase(agent_runs_rows=existing_rows)
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(
-            deposit_amount=500.0,
-            allow_completed_reuse=True,
-        )
-
-        assert job_id == existing_id
-        assert is_new is False
-
-    @pytest.mark.asyncio
-    async def test_reuses_queued_run(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        existing_id = str(uuid4())
-        existing_rows = [{
-            "id": existing_id,
-            "status": "queued",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "finished_at": None,
-        }]
-        mock_client = _mock_supabase(agent_runs_rows=existing_rows)
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(
-            deposit_amount=500.0,
-            allow_completed_reuse=True,
-        )
-
-        assert job_id == existing_id
-        assert is_new is False
-
-    @pytest.mark.asyncio
-    async def test_reuses_recently_completed_run(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        existing_id = str(uuid4())
-        finished_at = datetime.now(timezone.utc).isoformat()
-        existing_rows = [{
-            "id": existing_id,
-            "status": "completed",
-            "started_at": finished_at,
-            "finished_at": finished_at,
-        }]
-        mock_client = _mock_supabase(agent_runs_rows=existing_rows)
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(
-            deposit_amount=500.0,
-            allow_completed_reuse=True,
-        )
-
-        assert job_id == existing_id
-        assert is_new is False
-
-    @pytest.mark.asyncio
-    async def test_creates_new_run_when_cache_stale(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        # Last completed run is 5 minutes old — outside the 2-minute cache.
-        stale_id = str(uuid4())
-        stale_time = (
-            datetime.now(timezone.utc) - timedelta(minutes=5)
-        ).isoformat()
-        existing_rows = [{
-            "id": stale_id,
-            "status": "completed",
-            "started_at": stale_time,
-            "finished_at": stale_time,
-        }]
-        mock_client = _mock_supabase(agent_runs_rows=existing_rows)
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-        # Prevent real orchestrator construction
-        orch = MagicMock()
-        orch.create_run = MagicMock(return_value=_async_value("new-run-id"))
-        monkeypatch.setattr(
-            "app.services.agents.job_runner.build_orchestrator",
-            lambda **_: orch,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
-
-        assert job_id == "new-run-id"
-        assert is_new is True
-
-    @pytest.mark.asyncio
-    async def test_creates_new_run_after_failed(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        failed_id = str(uuid4())
-        existing_rows = [{
-            "id": failed_id,
-            "status": "failed",
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "finished_at": datetime.now(timezone.utc).isoformat(),
-        }]
-        mock_client = _mock_supabase(agent_runs_rows=existing_rows)
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-        orch = MagicMock()
-        orch.create_run = MagicMock(return_value=_async_value("retry-id"))
-        monkeypatch.setattr(
-            "app.services.agents.job_runner.build_orchestrator",
-            lambda **_: orch,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
-
-        assert job_id == "retry-id"
-        assert is_new is True
-
-    @pytest.mark.asyncio
-    async def test_creates_new_run_when_no_prior_run(self, monkeypatch):
-        from app.services.recommendation_engine import RecommendationService
-
-        mock_client = _mock_supabase(agent_runs_rows=[])
-        monkeypatch.setattr(
-            "app.services.recommendation_engine.get_supabase_client",
-            lambda: mock_client,
-        )
-        orch = MagicMock()
-        orch.create_run = MagicMock(return_value=_async_value("first-run"))
-        monkeypatch.setattr(
-            "app.services.agents.job_runner.build_orchestrator",
-            lambda **_: orch,
-        )
-
-        svc = RecommendationService(user_id=uuid4())
-        job_id, is_new = await svc.queue_agent_run(deposit_amount=500.0)
-
-        assert job_id == "first-run"
-        assert is_new is True
-
-
-# ── _within_last helper ──────────────────────────────────────────────────────
-
-
-class TestWithinLast:
-    def test_recent_timestamp(self):
-        from app.services.recommendation_engine import _within_last
-        now = datetime.now(timezone.utc).isoformat()
-        assert _within_last(now, seconds=120) is True
-
-    def test_old_timestamp(self):
-        from app.services.recommendation_engine import _within_last
-        past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
-        assert _within_last(past, seconds=120) is False
-
-    def test_naive_isoformat_coerced_to_utc(self):
-        from app.services.recommendation_engine import _within_last
-        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
-        # Naive timestamps are treated as UTC.
-        assert _within_last(now, seconds=120) is True
-
-    def test_empty_string(self):
-        from app.services.recommendation_engine import _within_last
-        assert _within_last("", seconds=120) is False
-
-    def test_malformed_timestamp(self):
-        from app.services.recommendation_engine import _within_last
-        assert _within_last("not-a-date", seconds=120) is False
 
 
 # ── LLMClient hardening ──────────────────────────────────────────────────────
@@ -573,14 +330,3 @@ class TestFallbackShape:
         out = _fallback_thesis(t)
         assert isinstance(out, str)
         assert len(out) > 0
-
-
-# ── Utility ──────────────────────────────────────────────────────────────────
-
-
-def _async_value(value):
-    """Return an awaitable that resolves to ``value`` — used to mock async
-    methods on MagicMocks."""
-    async def _coro():
-        return value
-    return _coro()

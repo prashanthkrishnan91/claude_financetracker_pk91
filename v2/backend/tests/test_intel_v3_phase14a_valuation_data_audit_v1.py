@@ -115,45 +115,13 @@ class TestPhase14AConfigFlagDefault:
 
 # ── TestPhase14AEndpointFlagGate ─────────────────────────────────────────────
 
-_DIAGNOSTICS_ROUTER_PATH = (
-    Path(__file__).parent.parent / "app/routers/diagnostics.py"
-)
-
-
 class TestPhase14AEndpointFlagGate:
-    """AC 2: Endpoint is env-gated and runtime-cert protected (static analysis)."""
+    """AC 2: config flag for the (since-removed) diagnostics endpoint.
 
-    def _router_source(self) -> str:
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
-    def test_endpoint_path_registered_in_router_source(self):
-        src = self._router_source()
-        assert "/valuation-data-audit-v1" in src
-
-    def test_flag_gate_present_in_router_source(self):
-        src = self._router_source()
-        assert "intel_v3_valuation_data_audit_v1_diagnostics_enabled" in src
-
-    def test_flag_gate_raises_http_exception_when_off(self):
-        """Router source must raise HTTPException when flag is off."""
-        src = self._router_source()
-        # The pattern for all existing diagnostic endpoints.
-        assert "HTTP_403_FORBIDDEN" in src or "status.HTTP_403_FORBIDDEN" in src
-
-    def test_runtime_cert_dependency_used_for_endpoint(self):
-        """Endpoint must use _get_runtime_cert_user dependency."""
-        src = self._router_source()
-        # Count occurrences — valuation-data-audit-v1 endpoint must reference it.
-        assert "_get_runtime_cert_user" in src
-
-    def test_endpoint_is_post_in_source(self):
-        src = self._router_source()
-        # The router decorator for this endpoint must be @router.post.
-        assert '@router.post("/valuation-data-audit-v1")' in src
-
-    def test_config_flag_referenced_in_router(self):
-        src = self._router_source()
-        assert "intel_v3_valuation_data_audit_v1_diagnostics_enabled" in src
+    The /valuation-data-audit-v1 diagnostics endpoint was removed with
+    app/routers/diagnostics.py in the lean-product refactor; router source
+    static-analysis tests were deleted. The config flag default remains.
+    """
 
     def test_flag_default_is_false_in_config(self):
         from app.config import Settings

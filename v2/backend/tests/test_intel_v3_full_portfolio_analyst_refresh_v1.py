@@ -764,18 +764,21 @@ class TestBoundaryInvariants(unittest.TestCase):
         assert '.table("intel_v3_snapshots")' not in src
         assert "build_snapshot" not in src
 
-    def test_full_portfolio_adapter_default_backend_does_not_scope_orchestrator(self):
-        """Default backend must call AgentOrchestrator WITHOUT
-        analyst_refresh_tickers — that's the difference vs Stage 3.0b.6."""
+    def test_full_portfolio_adapter_default_backend_scopes_orchestrator_to_batch(self):
+        """Default backend scopes AgentOrchestrator to the selected batch.
+
+        Stage 3.2 changed the contract: the backend passes
+        ``analyst_refresh_tickers=set(selected_tickers)`` so the LLM + persist
+        phases run only for the selected batch while non-scope tickers keep
+        their existing rows untouched (the original unscoped Stage 3.1 backend
+        re-ran and re-persisted the whole portfolio on every batch)."""
         import inspect
         from app.services.intelligence.v3 import (
             full_portfolio_analyst_refresh_adapter_v1 as mod,
         )
         src = inspect.getsource(mod.default_full_portfolio_agent_orchestrator_backend)
-        # The scoped 6-ticker call site set analyst_refresh_tickers=... — the
-        # full-portfolio call site must not.
-        assert "analyst_refresh_tickers=" not in src, (
-            "Full-portfolio backend must NOT pass analyst_refresh_tickers — "
-            "the orchestrator runs over the full portfolio."
+        assert "analyst_refresh_tickers=set(selected_tickers)" in src, (
+            "Full-portfolio backend must scope the orchestrator to the "
+            "selected batch via analyst_refresh_tickers=set(selected_tickers)."
         )
         assert "force_recompute=True" in src

@@ -51,9 +51,6 @@ import pytest
 
 # ── Path constants ─────────────────────────────────────────────────────────────
 
-_DIAGNOSTICS_ROUTER_PATH = (
-    Path(__file__).parent.parent / "app/routers/diagnostics.py"
-)
 _MODULE_PATH = (
     Path(__file__).parent.parent
     / "app/services/intelligence/v3/valuation_input_verification_v1.py"
@@ -179,46 +176,6 @@ class TestPhase14BConfigFlagDefault:
         # Both should default to False independently
         assert settings.intel_v3_valuation_data_audit_v1_diagnostics_enabled is False
         assert settings.intel_v3_valuation_input_verification_v1_diagnostics_enabled is False
-
-
-# ── TestPhase14BEndpointFlagGate ──────────────────────────────────────────────
-
-class TestPhase14BEndpointFlagGate:
-    """AC 2: Endpoint registered, runtime-cert protected, 403 when flag off."""
-
-    def _router_source(self) -> str:
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
-    def test_endpoint_path_registered(self):
-        assert "/valuation-input-verification-v1" in self._router_source()
-
-    def test_flag_gate_present_in_router_source(self):
-        assert "intel_v3_valuation_input_verification_v1_diagnostics_enabled" in self._router_source()
-
-    def test_http_403_when_flag_off(self):
-        src = self._router_source()
-        assert "HTTP_403_FORBIDDEN" in src or "status.HTTP_403_FORBIDDEN" in src
-
-    def test_runtime_cert_dependency_used(self):
-        assert "_get_runtime_cert_user" in self._router_source()
-
-    def test_endpoint_is_post(self):
-        src = self._router_source()
-        # Phase 14B endpoint uses @router.post decorator
-        lines = src.split("\n")
-        found = any(
-            "@router.post" in line and "valuation-input-verification-v1" in src[src.find(line):]
-            for line in lines
-            if "valuation-input-verification-v1" in line
-        )
-        # simpler: check the post decorator precedes the endpoint name
-        assert '@router.post("/valuation-input-verification-v1")' in src
-
-    def test_module_version_constant_imported_in_router(self):
-        assert "VALUATION_INPUT_VERIFICATION_V1_CONTRACT_VERSION" in self._router_source()
-
-    def test_module_build_function_imported_in_router(self):
-        assert "build_valuation_input_verification" in self._router_source()
 
 
 # ── TestPhase14BHardLocks ──────────────────────────────────────────────────────
@@ -580,9 +537,6 @@ class TestPhase14BStaticImportSafety:
     def _module_source(self) -> str:
         return _MODULE_PATH.read_text()
 
-    def _diagnostics_source(self) -> str:
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
     def _all_imported_names(self) -> list[str]:
         tree = self._module_ast()
         names = []
@@ -643,35 +597,6 @@ class TestPhase14BStaticImportSafety:
     def test_no_priceband_import_in_module(self):
         for name in self._all_imported_names():
             assert "PriceBand" not in name
-
-    def test_no_decide_import_in_diagnostics_endpoint(self):
-        src = self._diagnostics_source()
-        # Must not import decide directly in diagnostics.py
-        # decide() is not imported in any existing diagnostics endpoints
-        assert "import decide" not in src
-        assert "from decision_policy" not in src
-
-    def test_diagnostics_endpoint_never_sets_safe_for_decision_true(self):
-        src = self._diagnostics_source()
-        # Response dict literals in the endpoint always set safe_for_decision: False
-        # Verify no assignment like `safe_for_decision": True` appears in source
-        assert '"safe_for_decision": True' not in src
-        assert "'safe_for_decision': True" not in src
-        # Also verify no Python assignment like safe_for_decision = True appears
-        lines = src.split("\n")
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("#") or stripped.startswith('"""') or stripped.startswith("'"):
-                continue
-            if "safe_for_decision = True" in stripped:
-                pytest.fail(f"safe_for_decision = True found in non-comment line: {line!r}")
-
-    def test_no_intel_v3_snapshots_write_in_diagnostics_endpoint(self):
-        src = self._diagnostics_source()
-        # Must never write to intel_v3_snapshots
-        assert ".table(\"intel_v3_snapshots\").insert" not in src
-        assert ".table(\"intel_v3_snapshots\").upsert" not in src
-        assert ".table(\"intel_v3_snapshots\").update" not in src
 
 
 # ── TestPhase14BTTMBlocked ────────────────────────────────────────────────────

@@ -1072,19 +1072,10 @@ class TestCertificationSummaryLog:
             for r in caplog.records
         )
 
-    def test_recommendation_engine_emits_cert_summary(self, caplog):
-        """The recommendation_engine module must contain the certification log call."""
-        import ast
-        import pathlib
-
-        src = pathlib.Path(
-            "/home/user/claude_financetracker_pk91/v2/backend/app/services/recommendation_engine.py"
-        ).read_text()
-        assert "intel_response_certification_summary" in src, (
-            "recommendation_engine.py must contain 'intel_response_certification_summary' log"
-        )
-        assert "conflict_count_after_sanitize" in src
-        assert "schema_version" in src
+    # NOTE: test_recommendation_engine_emits_cert_summary was removed in the
+    # lean-product refactor — it source-scanned app/services/recommendation_engine.py,
+    # which was deleted along with the /recommendations surface. The cert-summary
+    # field/level contract remains covered by the pure tests in this class.
 
     def test_all_buy_hold_language_counts_present(self):
         summary = self._build_cert_summary()

@@ -57,15 +57,19 @@ def _make_client(
 ) -> MagicMock:
     client = MagicMock()
 
-    snap_payload: dict[str, Any] = {
-        "snapshot_id": str(uuid.uuid4()),
-        "generated_at": intel_generated_at,
+    # Stage 10: the republisher reads flat metadata columns (Migration 024),
+    # not the payload JSONB. Mirror that row shape here. Stage 7/8E contract
+    # booleans are True so only the mapping version under test drives behavior.
+    snap_row: dict[str, Any] = {
+        "source_hash": str(uuid.uuid4()),
         "snapshot_source": "worker_certified",
+        "payload_generated_at": intel_generated_at,
+        "evidence_mapping_version": intel_mapping_version,
+        "stage7_contract_complete": True,
+        "stage8e_contract_complete": True,
     }
-    if intel_mapping_version is not None:
-        snap_payload["evidence_mapping_version"] = intel_mapping_version
 
-    intel_rows = [] if no_intel_snapshot else [{"payload": snap_payload}]
+    intel_rows = [] if no_intel_snapshot else [snap_row]
     portfolio_rows = [] if no_portfolio_snapshot else [
         {"id": str(uuid.uuid4()), "snapshot_at": portfolio_snapshot_at}
     ]
@@ -316,10 +320,27 @@ class TestEnqueueRunV3MappingGuard:
         """analyst_evidence_current + current mapping → analyst_evidence_current (no prewarm)."""
         svc = self._make_service()
 
+        # A fully current snapshot also carries the Stage 7 / 8E / 8F contract
+        # markers — enqueue_run_v3 checks each in turn before reporting
+        # analyst_evidence_current (empty holdings satisfy the per-card checks).
+        from app.services.intelligence.v3.stage7_snapshot_contract_v1 import (
+            STAGE7_EXPLANATION_CONTRACT_VERSION,
+        )
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+        )
+        from app.services.intelligence.v3.stage8f_filing_type_contract_v1 import (
+            STAGE8F_FILING_TYPE_CONTRACT_VERSION,
+        )
+
         current_snapshot = {
             "snapshot_id": str(uuid.uuid4()),
             "snapshot_source": "worker_certified",
             "evidence_mapping_version": EVIDENCE_MAPPING_VERSION,
+            "stage7_explanation_contract_version": STAGE7_EXPLANATION_CONTRACT_VERSION,
+            "stage8e_catalyst_explanation_contract_version": STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+            "stage8f_filing_type_contract_version": STAGE8F_FILING_TYPE_CONTRACT_VERSION,
+            "current_holdings": [],
         }
 
         prewarm_called = []

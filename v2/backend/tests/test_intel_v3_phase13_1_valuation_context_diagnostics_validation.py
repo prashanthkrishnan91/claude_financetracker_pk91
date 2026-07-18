@@ -64,11 +64,6 @@ from app.services.intelligence.research_workers.sec_metric_evidence_readiness_ad
 
 # ── Module paths for static analysis ─────────────────────────────────────────
 
-_DIAGNOSTICS_ROUTER = (
-    pathlib.Path(__file__).parent.parent
-    / "app/routers/diagnostics.py"
-)
-
 _ADAPTER_MODULE = (
     pathlib.Path(__file__).parent.parent
     / "app/services/intelligence/v3/valuation_context_adapter_v1.py"
@@ -550,95 +545,6 @@ class TestDiagnosticBuildPathNoPriceContextContribution:
     def test_no_signal_produces_priceband_expensive(self) -> None:
         signals = self._signals_from_readiness(_MIXED_READINESS)
         assert all(sig.price_context_contribution != PriceBand.EXPENSIVE for sig in signals)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AC 10-12 — Diagnostic router static analysis
-# ═══════════════════════════════════════════════════════════════════════════════
-
-class TestDiagnosticRouterStaticAnalysis:
-    """Phase 13.1 AC 10-12: static analysis of diagnostics.py proves the
-    Phase 13 endpoint never sets safe_for_decision=True, never sets
-    readiness_only=False, and never sets visible_snapshot_unchanged=False."""
-
-    def _phase13_endpoint_source(self) -> str:
-        full = _load_source(_DIAGNOSTICS_ROUTER)
-        # Start from the async function definition to avoid Unicode in comments
-        marker = "async def get_valuation_context_adapter_v1_diagnostics"
-        idx = full.find(marker)
-        assert idx >= 0, "Phase 13 endpoint not found in diagnostics.py"
-        return full[idx:]
-
-    def test_diagnostics_router_exists(self) -> None:
-        assert _DIAGNOSTICS_ROUTER.exists()
-
-    def test_diagnostics_router_imports_valuation_signal_status(self) -> None:
-        src = _load_source(_DIAGNOSTICS_ROUTER)
-        assert "ValuationSignalStatus" in src
-
-    def test_diagnostics_router_imports_valuation_governance_gate(self) -> None:
-        src = _load_source(_DIAGNOSTICS_ROUTER)
-        assert "check_valuation_governance_gate" in src or "check_governance_gate" in src
-
-    def test_phase13_endpoint_never_sets_safe_for_decision_true(self) -> None:
-        src = self._phase13_endpoint_source()
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Assign):
-                for target in node.targets:
-                    if isinstance(target, ast.Constant) and target.value == "safe_for_decision":
-                        if isinstance(node.value, ast.Constant):
-                            assert node.value.value is not True, \
-                                "Phase 13 endpoint must not set safe_for_decision=True"
-            if isinstance(node, ast.Dict):
-                for k, v in zip(node.keys, node.values):
-                    if isinstance(k, ast.Constant) and k.value == "safe_for_decision":
-                        if isinstance(v, ast.Constant):
-                            assert v.value is not True, \
-                                "Phase 13 response must not set safe_for_decision=True"
-
-    def test_phase13_endpoint_hard_locks_safe_for_decision_false(self) -> None:
-        src = self._phase13_endpoint_source()
-        assert '"safe_for_decision": False' in src or "'safe_for_decision': False" in src or \
-               "safe_for_decision\": False" in src
-
-    def test_phase13_endpoint_hard_locks_readiness_only_true(self) -> None:
-        src = self._phase13_endpoint_source()
-        assert "readiness_only" in src
-        assert "True" in src
-
-    def test_phase13_endpoint_hard_locks_price_context_unchanged_true(self) -> None:
-        src = self._phase13_endpoint_source()
-        assert "price_context_unchanged" in src
-
-    def test_phase13_endpoint_hard_locks_visible_snapshot_unchanged_true(self) -> None:
-        src = self._phase13_endpoint_source()
-        assert "visible_snapshot_unchanged" in src
-
-    def test_phase13_endpoint_never_imports_decide(self) -> None:
-        src = _load_source(_DIAGNOSTICS_ROUTER)
-        tree = ast.parse(src)
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Import, ast.ImportFrom)):
-                for alias in getattr(node, "names", []):
-                    assert alias.name != "decide", \
-                        "diagnostics.py must not import decide()"
-
-    def test_phase13_endpoint_never_imports_price_band_directly(self) -> None:
-        src = _load_source(_DIAGNOSTICS_ROUTER)
-        assert "from .decision_contracts import" not in src or "PriceBand" not in src.split(
-            "from .decision_contracts import"
-        )[-1].split("\n")[0]
-
-    def test_phase13_endpoint_status_counts_initialized_from_all_statuses(self) -> None:
-        src = self._phase13_endpoint_source()
-        assert "ValuationSignalStatus" in src
-
-    def test_diagnostics_router_does_not_set_price_context_upgraded_true(self) -> None:
-        src = _load_source(_DIAGNOSTICS_ROUTER)
-        assert "price_context_upgraded" not in src or (
-            "True" not in src[src.find("price_context_upgraded"):src.find("price_context_upgraded") + 60]
-        )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

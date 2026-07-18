@@ -11,6 +11,6 @@ builder = "nixpacks"
 # All four backend services share this file, so a shared watchPatterns block
 # here would apply identically to all services. Per-service watch rules must
 # therefore live in the Railway dashboard, not in this file.
-startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"watchtower\" ]; then python -m app.services.intelligence.v3.watchtower_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"email_delivery\" ] || [ \"$PROCESS_TYPE\" = \"alert_email_delivery\" ]; then python -m app.services.alert.alert_email_delivery_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
+startCommand = "sh -c 'if [ \"$PROCESS_TYPE\" = \"worker\" ]; then python -m app.services.intelligence.v3.analyst_refresh_worker_entrypoint --loop; elif [ \"$PROCESS_TYPE\" = \"watchtower\" ]; then python -m app.services.intelligence.v3.watchtower_worker_entrypoint --loop; else uvicorn app.main:app --host 0.0.0.0 --port $PORT --proxy-headers --forwarded-allow-ips=\"*\"; fi'"
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3

@@ -711,20 +711,6 @@ def _read_source_file(rel_path: str) -> str:
 
 
 class TestEndpointNewFields:
-    def test_observe_endpoint_response_includes_phase7c_fields(self):
-        """AC 17: Statically verify the 4 Phase 7C keys are in the observe endpoint."""
-        src = _read_source_file("app/routers/diagnostics.py")
-        assert '"by_metric_observation_tag"' in src
-        assert '"by_metric_observation_unit"' in src
-        assert '"by_metric_observation_form"' in src
-        assert '"artifacts_with_companyfacts_metric_observations_count"' in src
-
-    # Removed test_observe_endpoint_does_not_expose_raw_values_key:
-    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
-    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
-    # which asserts directly on the runtime response shape rather than
-    # grepping diagnostics.py source.
-
     def test_artifact_observability_does_not_import_decide(self):
         """Invariant: artifact_observability must not import decide()."""
         src = _read_source_file(

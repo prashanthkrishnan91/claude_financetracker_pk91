@@ -1377,42 +1377,6 @@ class TestStage6KeywordArgIntegration:
         with pytest.raises(TypeError):
             compute_research_evidence_coverage("u1", [], MagicMock())
 
-    def test_diagnostics_endpoint_stage5j_call_uses_keyword_args(self):
-        """Stage 6 diagnostics endpoint must pass keyword args to Stage 5J.
-        Verifies the keyword-arg fix in routers/diagnostics.py."""
-        import asyncio
-        import ast
-        from pathlib import Path
-
-        src = Path(
-            "app/services/intelligence/v3/research_evidence_coverage_read_model_v1.py"
-        ).read_text()
-        diag_src = Path("app/routers/diagnostics.py").read_text()
-
-        # Find the stage6-evidence-governance function body in diagnostics.py.
-        # Confirm it contains no positional-only pattern:
-        # to_thread(compute_research_evidence_coverage, <expr>, <expr>, <expr>)
-        # which would pass positional args.
-        import re
-        # Pattern for the BAD old call: positional args to to_thread
-        bad_pattern = re.compile(
-            r"to_thread\s*\(\s*compute_research_evidence_coverage\s*,\s*\w",
-            re.MULTILINE,
-        )
-        assert not bad_pattern.search(diag_src), (
-            "diagnostics.py must not pass positional args to "
-            "compute_research_evidence_coverage via to_thread"
-        )
-
-        # Confirm the GOOD pattern exists: lambda wrapping keyword call.
-        good_pattern = re.compile(
-            r"to_thread\s*\(\s*lambda\s*:",
-            re.MULTILINE,
-        )
-        assert good_pattern.search(diag_src), (
-            "diagnostics.py Stage 6 path must use lambda wrapper for keyword-only call"
-        )
-
     def test_service_stage5j_call_uses_lambda_wrapper(self):
         """intel_v3_service.py _get_evidence_shadow_for_governance must use
         a lambda wrapper so keyword-only Stage 5J call is not passed positional args."""

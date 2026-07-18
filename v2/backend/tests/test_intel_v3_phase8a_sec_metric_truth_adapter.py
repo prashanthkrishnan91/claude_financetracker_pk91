@@ -1012,50 +1012,6 @@ class TestStaticImportGuards:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AC 15 / Static: diagnostics.py includes all 12 Phase 8A keys
-# ─────────────────────────────────────────────────────────────────────────────
-
-class TestEndpointHasPhase8AFields:
-    _REQUIRED_KEYS = [
-        "sec_metric_truth_adapter_dry_run_enabled",
-        "sec_metric_truth_adapter_dry_run_safe_for_decision",
-        "sec_metric_truth_adapter_artifacts_evaluated_count",
-        "sec_metric_truth_adapter_source_linked_metric_fact_count",
-        "sec_metric_truth_adapter_unmapped_metric_fact_count",
-        "sec_metric_truth_adapter_by_ticker",
-        "sec_metric_truth_adapter_by_bucket",
-        "sec_metric_truth_adapter_by_tag",
-        "sec_metric_truth_adapter_by_unit",
-        "sec_metric_truth_adapter_by_form",
-        "sec_metric_truth_adapter_missing_buckets_by_ticker",
-        "sec_metric_truth_adapter_visible_snapshot_unchanged",
-    ]
-
-    def test_all_phase8a_keys_in_endpoint(self):
-        src = _read_src("app/routers/diagnostics.py")
-        for key in self._REQUIRED_KEYS:
-            assert f'"{key}"' in src, f"Missing key in diagnostics.py: {key}"
-
-    def test_phase7c_fields_still_in_endpoint(self):
-        src = _read_src("app/routers/diagnostics.py")
-        for key in [
-            "by_metric_observation_tag",
-            "by_metric_observation_unit",
-            "by_metric_observation_form",
-            "artifacts_with_companyfacts_metric_observations_count",
-            "metric_observation_fact_count",
-            "artifacts_with_metric_observations_count",
-        ]:
-            assert f'"{key}"' in src, f"Phase 7C key missing from endpoint: {key}"
-
-    # Removed test_no_raw_value_keys_in_endpoint:
-    # superseded by test_intel_v3_phase4_artifact_observability_endpoint.py
-    # ::TestEndpointResponseShape::test_response_has_no_raw_payload_field,
-    # which asserts on the runtime response shape rather than grepping
-    # diagnostics.py source for forbidden keys.
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # AC 16: ArtifactObservabilitySummary has all 12 Phase 8A fields with defaults
 # ─────────────────────────────────────────────────────────────────────────────
 

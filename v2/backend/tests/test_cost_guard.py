@@ -5,17 +5,17 @@ Covers:
   CG2. Master kill switch blocks watchtower even when per-worker flag is set.
   CG3. Analyst refresh worker disabled by default — main() exits 0 without polling.
   CG4. Master kill switch blocks analyst worker even when per-worker flag is set.
-  CG5. Email delivery worker disabled by default — main() exits 0 without polling.
-  CG6. Master kill switch blocks email worker even when per-worker flag is set.
   CG7. Watchtower interval is clamped to MIN_INTERVAL_SECONDS (6h) when configured below.
   CG7b. Watchtower CLI --interval-seconds is also clamped (not just env var path).
   CG8. Clamping is bypassed when COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true.
   CG8b. Aggressive polling bypass also applies to CLI-supplied intervals.
   CG9. Analyst worker interval is clamped to 12h minimum.
   CG9b. Analyst worker CLI interval is also clamped.
-  CG10. Email worker interval is clamped to 24h minimum.
-  CG10b. Email worker CLI interval is also clamped.
   CG11. _persist_snapshot() makes no DB calls when intel_v3_snapshot_writes_enabled=False.
+
+(CG5/CG6/CG10/CG10b covered the alert email delivery worker
+``app.services.alert.alert_email_delivery_worker_entrypoint`` — that worker
+was deleted in the lean-product refactor, so those cases were removed.)
   CG12. Retention SQL file exists, has no uncommented TRUNCATE CASCADE, and uses FK-safe
         child-first deletion order.
 
@@ -156,50 +156,7 @@ class TestAnalystRefreshWorkerKillSwitch:
         assert "COST_GUARD" in caplog.text
 
 
-# ── CG5 / CG6: Email delivery worker ─────────────────────────────────────────
-
-class TestEmailDeliveryWorkerKillSwitch:
-    def test_cg5_disabled_by_default_exits_zero(self, monkeypatch):
-        """Email delivery worker exits 0 immediately when both flags are off."""
-        monkeypatch.delenv("INTEL_BACKGROUND_WORKERS_ENABLED", raising=False)
-        monkeypatch.delenv("ALERT_EMAIL_DELIVERY_ENABLED", raising=False)
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        result = ep.main([])
-        assert result == 0
-
-    def test_cg6_master_switch_blocks_even_when_worker_enabled(self, monkeypatch):
-        """Master kill switch takes priority over per-worker flag."""
-        monkeypatch.setenv("INTEL_BACKGROUND_WORKERS_ENABLED", "false")
-        monkeypatch.setenv("ALERT_EMAIL_DELIVERY_ENABLED", "true")
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        result = ep.main([])
-        assert result == 0
-
-    def test_email_per_worker_disabled_when_master_on(self, monkeypatch):
-        """When master is on but per-worker flag is off, exits 0."""
-        monkeypatch.setenv("INTEL_BACKGROUND_WORKERS_ENABLED", "true")
-        monkeypatch.setenv("ALERT_EMAIL_DELIVERY_ENABLED", "false")
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        result = ep.main([])
-        assert result == 0
-
-    def test_email_log_contains_cost_guard_on_master_disabled(
-        self, monkeypatch, caplog
-    ):
-        """COST_GUARD appears in log when master is disabled."""
-        import logging
-        monkeypatch.delenv("INTEL_BACKGROUND_WORKERS_ENABLED", raising=False)
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        with caplog.at_level(logging.INFO):
-            ep.main([])
-        assert "COST_GUARD" in caplog.text
-
-
-# ── CG7 / CG8 / CG9 / CG10: Interval clamping ───────────────────────────────
+# ── CG7 / CG8 / CG9: Interval clamping ───────────────────────────────────────
 
 class TestIntervalClamping:
     def test_cg7_watchtower_interval_clamped_to_6h(self, monkeypatch):
@@ -271,26 +228,6 @@ class TestIntervalClamping:
         result = ep._apply_cost_guard_clamp(60.0)
         assert result == ep.MIN_INTERVAL_SECONDS
         assert result == 43200.0
-
-    def test_cg10_email_interval_clamped_to_24h(self, monkeypatch):
-        """Email delivery worker env-var interval below minimum is clamped to 86400s (24h)."""
-        monkeypatch.setenv("ALERT_EMAIL_DELIVERY_WORKER_INTERVAL_SECONDS", "300")
-        monkeypatch.delenv("COST_GUARD_ALLOW_AGGRESSIVE_POLLING", raising=False)
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        raw = ep._resolve_interval_seconds()
-        result = ep._apply_cost_guard_clamp(raw)
-        assert result == ep.MIN_INTERVAL_SECONDS
-        assert result == 86400.0
-
-    def test_cg10b_email_cli_interval_also_clamped(self, monkeypatch):
-        """Email worker CLI --interval-seconds below minimum is clamped."""
-        monkeypatch.delenv("COST_GUARD_ALLOW_AGGRESSIVE_POLLING", raising=False)
-
-        from app.services.alert import alert_email_delivery_worker_entrypoint as ep
-        result = ep._apply_cost_guard_clamp(300.0)
-        assert result == ep.MIN_INTERVAL_SECONDS
-        assert result == 86400.0
 
     def test_interval_above_min_is_not_clamped(self, monkeypatch):
         """Intervals already above the minimum are passed through unchanged."""

@@ -103,12 +103,25 @@ class FakeTableQuery:
         self._on_conflict = on_conflict
         return self
 
+    def update(self, row: dict) -> "FakeTableQuery":
+        # Stage 5 clean replacement: write_artifact deactivates superseded
+        # artifacts via .update(...) before inserting. The fake has no stored
+        # rows, so the update matches nothing and returns empty data.
+        self._is_update = True
+        return self
+
     def select(self, cols: str = "*") -> "FakeTableQuery":
         self._select_cols = cols
         return self
 
     def eq(self, col: str, val: Any) -> "FakeTableQuery":
         self._filters[col] = val
+        return self
+
+    def neq(self, col: str, val: Any) -> "FakeTableQuery":
+        return self
+
+    def is_(self, col: str, val: Any) -> "FakeTableQuery":
         return self
 
     def order(self, *args, **kwargs) -> "FakeTableQuery":

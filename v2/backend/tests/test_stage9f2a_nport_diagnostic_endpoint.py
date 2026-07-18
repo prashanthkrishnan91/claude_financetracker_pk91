@@ -71,38 +71,6 @@ def _no_sleep(seconds: float) -> None:  # noqa: ARG001
     """Test sleep_fn that skips all delays."""
 
 
-# ── Test 64 — when endpoint flag is off, runner is never reached ──────────────
-# The endpoint raises HTTPException(404) before calling run_nport_live_check.
-# Verified structurally: the endpoint body guards on settings.intel_v3_nport_diagnostic_endpoint_enabled.
-
-def test_64_runner_not_invoked_when_flag_off():
-    """Confirm run_nport_live_check is never called when the flag is off.
-
-    The endpoint in diagnostics.py raises HTTPException(404) before touching
-    the runner. This test validates the guard is present in the endpoint source.
-    """
-    import inspect
-    import ast
-
-    # Read the endpoint source without importing the router (avoids supabase/jwt)
-    import pathlib
-    src = pathlib.Path(
-        __file__
-    ).parent.parent / "app" / "routers" / "diagnostics.py"
-    source = src.read_text()
-
-    # Verify the flag check and 404 are both present in the endpoint
-    assert "intel_v3_nport_diagnostic_endpoint_enabled" in source
-    assert "HTTP_404_NOT_FOUND" in source
-    # Verify the flag check appears before the runner import so the module is never
-    # loaded (and the runner never called) when the flag is off.
-    fn_start = source.index("async def etf_nport_live_check")
-    fn_source = source[fn_start:]
-    flag_pos = fn_source.index("intel_v3_nport_diagnostic_endpoint_enabled")
-    import_pos = fn_source.index("run_nport_live_check")  # first occurrence = lazy import
-    assert flag_pos < import_pos, "Flag check must appear before runner import"
-
-
 # ── Test 65 — mocked success provider → correct per-ticker JSON ───────────────
 
 def test_65_success_provider_returns_compact_json():

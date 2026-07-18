@@ -16,9 +16,6 @@ _MODULE_PATH = (
     Path(__file__).parent.parent
     / "app/services/intelligence/v3/fy_eps_earnings_yield_v1.py"
 )
-_DIAGNOSTICS_ROUTER_PATH = (
-    Path(__file__).parent.parent / "app/routers/diagnostics.py"
-)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -85,29 +82,6 @@ class TestConfigFlagDefault:
             "intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled"
             in Settings.model_fields
         )
-
-
-# ── Endpoint flag gate ─────────────────────────────────────────────────────────
-
-class TestEndpointFlagGate:
-    def _src(self):
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
-    def test_endpoint_path_registered(self):
-        assert '@router.post("/fy-eps-earnings-yield-v1")' in self._src()
-
-    def test_flag_gate_in_router(self):
-        assert "intel_v3_fy_eps_earnings_yield_v1_diagnostics_enabled" in self._src()
-
-    def test_403_when_flag_off(self):
-        assert "INTEL_V3_FY_EPS_EARNINGS_YIELD_V1_DIAGNOSTICS_ENABLED is not enabled" in self._src()
-
-    def test_runtime_cert_dep_used(self):
-        # Endpoint binding uses the runtime-cert dependency.
-        src = self._src()
-        idx = src.index('@router.post("/fy-eps-earnings-yield-v1")')
-        body = src[idx:idx + 2000]
-        assert "_get_runtime_cert_user" in body
 
 
 # ── Hard locks ─────────────────────────────────────────────────────────────────
@@ -585,46 +559,6 @@ class TestStaticImportSafety:
                 assert node.value != "intel_v3_snapshots", (
                     "pure module must not reference intel_v3_snapshots table"
                 )
-
-    def test_router_endpoint_no_provider_or_db_writes(self):
-        router_src = _DIAGNOSTICS_ROUTER_PATH.read_text()
-        tree = ast.parse(router_src)
-        target = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name == "get_fy_eps_earnings_yield_v1_diagnostics":
-                    target = node
-                    break
-        assert target is not None, "endpoint function not found in router AST"
-
-        forbidden_writes = {"insert", "upsert", "update", "delete"}
-        forbidden_provider_names = {"yfinance", "openai", "anthropic"}
-        for node in ast.walk(target):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
-                assert node.func.attr not in forbidden_writes, (
-                    f"DB write method .{node.func.attr}( in endpoint body"
-                )
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    top = alias.name.split(".")[0]
-                    assert top not in forbidden_provider_names
-            if isinstance(node, ast.ImportFrom) and node.module:
-                top = node.module.split(".")[0]
-                assert top not in forbidden_provider_names
-
-    def test_router_endpoint_no_decide_or_run_v3_calls(self):
-        router_src = _DIAGNOSTICS_ROUTER_PATH.read_text()
-        tree = ast.parse(router_src)
-        target = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name == "get_fy_eps_earnings_yield_v1_diagnostics":
-                    target = node
-                    break
-        assert target is not None
-        for node in ast.walk(target):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                assert node.func.id not in {"decide", "run_v3"}
 
 
 # ── No frontend / UI changes ──────────────────────────────────────────────

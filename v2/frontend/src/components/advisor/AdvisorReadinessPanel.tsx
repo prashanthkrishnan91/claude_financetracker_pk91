@@ -152,15 +152,6 @@ export function AdvisorReadinessPanel({
         {run.boundedStopReason && (
           <p className="text-[11px] text-text-muted">{run.boundedStopReason}</p>
         )}
-        {run.state === "failed" && (
-          <button
-            type="button"
-            onClick={onRun}
-            className={cn("btn-secondary min-h-[40px]", FOCUS_RING)}
-          >
-            Retry Intel run
-          </button>
-        )}
       </div>
     </section>
   );

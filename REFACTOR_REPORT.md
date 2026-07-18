@@ -661,3 +661,35 @@ captures (baseline + degraded) appended to RESPONSES.md as labeled local contrac
 sandbox's egress proxy blocks vercel.app (403 CONNECT), so in-environment preview HTTP
 verification was not possible; the readiness proxy consumes pre-existing production
 diagnostics, so no backend deploy is needed for preview parity.
+
+## Residual integration correction (record)
+
+Two frontend-only blockers patched (no backend/SQL/policy/scope changes):
+
+1. **Failed state rendered two Run Intel controls.** AdvisorReadinessPanel's primary button
+   already relabels to "Retry Intel run" in the failed state, but a second conditional
+   failed-state button also called `onRun`. The second button is removed; exactly one control
+   wired to `onRun` renders in every state (Run Intel / Continue Intel run / Retry Intel run),
+   with the failed-state explanation and bounded stop detail preserved. Proven by REAL DOM
+   render tests (`AdvisorReadinessPanel.render.test.tsx`, jsdom): per-state single-control
+   assertions discovered by dispatching clicks against every rendered button, plus
+   one-click-one-invocation.
+2. **IntelV3Card bypassed the canonical rationale extractor.** The card's independent untrimmed
+   `why_text || why_this_action || action_text` chain is replaced with
+   `extractHoldingRationale`; the extracted value drives both the visible rationale and the
+   aria-label, and the card fails closed at its own boundary — a null rationale renders no card
+   (the panel-level exclusion count and ticker detail are unchanged). Proven by DOM render
+   tests (`IntelV3Card.render.test.tsx`): each precedence level, whitespace-only `why_text`
+   not masking `action_text`, all-empty renders nothing, aria-label equals the visible
+   canonical rationale.
+
+Test infrastructure note: these render tests required a real DOM, so
+`jest-environment-jsdom@29` was added as a devDependency (test-only; opt-in per file via
+docblock — every existing suite still runs in the node environment) and ts-jest now compiles
+JSX for tests (`jsx: react-jsx` transform override; Next's `jsx: preserve` is unchanged for
+builds). No product dependencies added.
+
+**Validation after correction:** frontend `20 suites / 585 tests passed, 0 failed` (+10 render
+tests), `tsc --noEmit` 0 errors, `next build` green (21/21). Backend untouched
+(`8290 passed, 0 failed` stands). Greps: `AdvisorReadinessPanel.tsx` contains a single
+`onClick={onRun}`; `IntelV3Card.tsx` contains no `card.why_text ||` chain.

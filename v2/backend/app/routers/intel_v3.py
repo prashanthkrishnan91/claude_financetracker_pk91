@@ -26,6 +26,34 @@ from ..services.intelligence.v3.watchtower_intel_republisher_v1 import (
 router = APIRouter(prefix="/intel/v3", tags=["intel_v3"])
 logger = logging.getLogger(__name__)
 
+# Zero-queued statuses from IntelV3Service.enqueue_run_v3() that genuinely mean
+# the request succeeded without any analyst work — either evidence was already
+# current, or a zero-LLM deterministic recertification (prewarm) rebuilt the
+# snapshot from already-persisted evidence. Only these may let an existing
+# worker_certified + certified_current snapshot count as this request's own
+# completed outcome when nothing was queued.
+_ZERO_QUEUED_SUCCESS_STATUSES = frozenset({
+    "analyst_evidence_current",
+    "mapping_version_recertified",
+    "stage7_contract_recertified",
+    "stage8e_contract_recertified",
+    "stage8f_contract_recertified",
+})
+
+# Zero-queued statuses that mean the request itself failed — a historical
+# certified-current snapshot must never be allowed to paper over these, and
+# they must never fall through to "no stale evidence to refresh" (that value
+# implies nothing needed doing, which is false — recertification was
+# attempted and failed).
+_ZERO_QUEUED_FAILURE_STATUSES = frozenset({
+    "enqueue_failed",
+    "failed",
+    "mapping_version_recertification_failed",
+    "stage7_contract_recertification_failed",
+    "stage8e_contract_recertification_failed",
+    "stage8f_contract_recertification_failed",
+})
+
 
 def _next_required_action(
     *,
@@ -45,16 +73,20 @@ def _next_required_action(
 
     Priority order (each branch outranks everything below it):
       1. no active holdings
-      2. queued jobs + on-demand processing disabled -> queue-only
-      3. drain ran + snapshot writes disabled -> write-guard (outranks
+      2. a zero-queued request-level failure (enqueue or deterministic
+         recertification failed) -> retry, never "no stale evidence"
+      3. queued jobs + on-demand processing disabled -> queue-only
+      4. drain ran + snapshot writes disabled -> write-guard (outranks
          "continue" — reclicking can never publish while writes are off)
-      4. drain ran + remaining resumable work -> continue draining
-      5. a newly/currently certified snapshot is available -> complete
-      6. nothing was queued -> no stale evidence to refresh
-      7. otherwise -> retry
+      5. drain ran + remaining resumable work -> continue draining
+      6. a newly/currently certified snapshot is available -> complete
+      7. nothing was queued -> no stale evidence to refresh
+      8. otherwise -> retry
     """
     if status_value == "no_active_holdings":
         return "add_positions_before_running_intel"
+    if status_value in _ZERO_QUEUED_FAILURE_STATUSES:
+        return "reclick_run_intel_to_retry"
     if queued_ticker_count > 0 and not on_demand_processing_enabled:
         return (
             "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_"
@@ -87,6 +119,7 @@ async def _augment_with_on_demand_status(
     snapshot_writes_enabled = settings.intel_v3_snapshot_writes_enabled
     queued_ticker_count = int(result.get("queued_ticker_count") or 0)
     existing_certified_snapshot_id = result.get("existing_certified_snapshot_id")
+    status_value = str(result.get("status") or "")
 
     drain_ran = False
     drain_remaining = False
@@ -129,10 +162,18 @@ async def _augment_with_on_demand_status(
             and latest_snapshot_id is not None
             and latest_snapshot_id != existing_certified_snapshot_id
         )
-    else:
-        # Nothing was queued this request — an already-current certified
-        # snapshot legitimately means "nothing to do." Preserve that no-op.
+    elif status_value in _ZERO_QUEUED_SUCCESS_STATUSES:
+        # Nothing was queued this request, but the status confirms it's a
+        # genuine no-op (evidence already current) or a successful zero-LLM
+        # deterministic recertification — an already-current certified
+        # snapshot legitimately means "nothing to do."
         snapshot_available_after_run = latest_is_certified_current
+    else:
+        # Zero queued for any other reason (no_active_holdings, enqueue
+        # failure, a recertification failure, or an unrecognized status) must
+        # never borrow completeness from a historical snapshot — that
+        # snapshot did not come from this request succeeding.
+        snapshot_available_after_run = False
 
     result["on_demand_processing_enabled"] = on_demand_enabled
     result["on_demand_jobs_attempted"] = jobs_attempted
@@ -140,7 +181,7 @@ async def _augment_with_on_demand_status(
     result["on_demand_jobs_failed"] = jobs_failed
     result["snapshot_available_after_run"] = snapshot_available_after_run
     result["next_required_action"] = _next_required_action(
-        status_value=str(result.get("status") or ""),
+        status_value=status_value,
         on_demand_processing_enabled=on_demand_enabled,
         queued_ticker_count=queued_ticker_count,
         drain_ran=drain_ran,

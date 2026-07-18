@@ -311,6 +311,46 @@ describe("deriveRunModel — state machine", () => {
     expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
   });
 
+  it("no active holdings with a historical certified-current snapshot: backend now reports incomplete, so the run model stays idle, not complete", () => {
+    // Proven contradiction (pre-fix): the backend used to report
+    // snapshot_available_after_run=true from an old worker_certified +
+    // certified_current snapshot even when status=no_active_holdings. The
+    // backend fix (see test_stage13b_run_intel_on_demand_status.py
+    // ::TestZeroQueuedStatusClassification) guarantees this response shape
+    // is what a no_active_holdings request now actually produces —
+    // this test proves the frontend renders it correctly.
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        status: "no_active_holdings",
+        next_required_action: "add_positions_before_running_intel",
+        snapshot_available_after_run: false,
+      }),
+    });
+    expect(run.state).toBe("idle");
+    expect(run.state).not.toBe("complete");
+    expect(run.nextActionSentence).toBe(ADD_POSITIONS_SENTENCE);
+  });
+
+  it.each([
+    "mapping_version_recertification_failed",
+    "stage7_contract_recertification_failed",
+    "stage8e_contract_recertification_failed",
+    "stage8f_contract_recertification_failed",
+  ])("%s status → failed with retry label", (failureStatus) => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        status: failureStatus as IntelV3RunResult["status"],
+        next_required_action: "reclick_run_intel_to_retry",
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+  });
+
   it("never leaks raw next_required_action codes into visible sentences", () => {
     const rawActions = [
       "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_analyst_refresh_worker_entrypoint_separately",

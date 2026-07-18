@@ -499,6 +499,225 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
         assert out["next_required_action"] == "none_certified_snapshot_current"
 
 
+# ── 5c. Zero-queued outcomes require an explicit success-status allowlist — ──
+# a historical worker_certified + certified_current snapshot must not paper
+# over no_active_holdings, enqueue_failed, or a deterministic recertification
+# failure. Only a genuine no-op or a successful recertification may complete.
+
+
+class TestZeroQueuedStatusClassification:
+    @pytest.mark.asyncio
+    async def test_no_active_holdings_with_historical_current_snapshot_stays_incomplete(
+        self, monkeypatch
+    ):
+        """The proven contradiction: status=no_active_holdings must never
+        report snapshot_available_after_run=true just because an old
+        worker_certified + certified_current snapshot happens to exist —
+        that would render as "complete" in the frontend before the
+        "add positions" branch is ever reached."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": "no_active_holdings",
+            "queued_ticker_count": 0,
+            "total_holding_count": 0,
+            "existing_certified_snapshot_id": None,
+            "existing_certified_snapshot": False,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == "add_positions_before_running_intel"
+
+    @pytest.mark.asyncio
+    async def test_mapping_version_recertification_failed_with_historical_snapshot_is_failure(
+        self, monkeypatch
+    ):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": "mapping_version_recertification_failed",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "historical-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == "reclick_run_intel_to_retry"
+        assert out["next_required_action"] != "none_no_stale_evidence_to_refresh"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "failure_status",
+        [
+            "stage7_contract_recertification_failed",
+            "stage8e_contract_recertification_failed",
+            "stage8f_contract_recertification_failed",
+        ],
+    )
+    async def test_stage_contract_recertification_failures_follow_same_failure_rule(
+        self, monkeypatch, failure_status
+    ):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": failure_status,
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "historical-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == "reclick_run_intel_to_retry"
+
+    @pytest.mark.asyncio
+    async def test_enqueue_failed_with_historical_snapshot_stays_incomplete(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": "enqueue_failed",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "historical-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == "reclick_run_intel_to_retry"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "success_status",
+        [
+            "mapping_version_recertified",
+            "stage7_contract_recertified",
+            "stage8e_contract_recertified",
+            "stage8f_contract_recertified",
+        ],
+    )
+    async def test_successful_recertification_statuses_retain_completion(
+        self, monkeypatch, success_status
+    ):
+        """A successful zero-LLM deterministic recertification (no analyst
+        jobs queued) still counts as completion when the snapshot it
+        rebuilt is worker_certified + certified_current."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "recertified-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": success_status,
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "recertified-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is True
+        assert out["next_required_action"] == "none_certified_snapshot_current"
+
+    @pytest.mark.asyncio
+    async def test_analyst_evidence_current_no_op_remains_complete(self, monkeypatch):
+        """Regression guard: the pre-existing already-current no-op status
+        must keep working exactly as before this fix."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "current-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            }
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "current-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is True
+        assert out["next_required_action"] == "none_certified_snapshot_current"
+
+    @pytest.mark.asyncio
+    async def test_zero_queued_with_no_snapshot_keeps_existing_no_stale_evidence_behavior(
+        self, monkeypatch
+    ):
+        """Regression guard: zero queued with no snapshot at all (never had
+        one) is a distinct case from failure/no-holdings — it must keep
+        reporting the existing "no stale evidence" outcome, not "retry"."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(latest_snapshot=None)
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == "none_no_stale_evidence_to_refresh"
+
+
 # ── 6. Honest next_required_action across outcomes ───────────────────────────
 
 
@@ -514,6 +733,32 @@ class TestNextRequiredActionIsHonest:
             snapshot_writes_enabled=False,
         )
         assert action == "add_positions_before_running_intel"
+
+    @pytest.mark.parametrize(
+        "failure_status",
+        [
+            "enqueue_failed",
+            "mapping_version_recertification_failed",
+            "stage7_contract_recertification_failed",
+            "stage8e_contract_recertification_failed",
+            "stage8f_contract_recertification_failed",
+        ],
+    )
+    def test_zero_queued_failure_status_outranks_no_stale_evidence(self, failure_status):
+        """A zero-queued request-level failure must never fall through to
+        "no stale evidence to refresh" — that would imply nothing needed
+        doing, when in fact recertification was attempted and failed."""
+        action = router_mod._next_required_action(
+            status_value=failure_status,
+            on_demand_processing_enabled=True,
+            queued_ticker_count=0,
+            drain_ran=False,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=True,
+        )
+        assert action == "reclick_run_intel_to_retry"
+        assert action != "none_no_stale_evidence_to_refresh"
 
     def test_write_guard_outranks_continue_draining(self):
         """The snapshot-write guard must outrank "continue" — reclicking

@@ -1,8 +1,19 @@
 # Portfolio Intelligence Platform
 
-A personal investment intelligence and execution cockpit. Deterministic, auditable Buy/Hold/Trim/Sell decisions backed by sourced evidence, with a plain-English UI built for an amateur investor — not a quant terminal.
+A lean personal portfolio tool with exactly three views:
 
-This is the **only active product**. The earlier Streamlit prototype has been retired.
+1. **Positions** — every holding with cost basis by tax lot, unrealized gain/loss, and
+   short-term vs long-term tax status including a days-until-long-term countdown per lot.
+2. **Recommendations** — current Buy/Hold/Trim/Sell calls from the deterministic Intel v3
+   policy engine, each with a one-line rationale showing its work (profit threshold,
+   estimated tax impact at the configured bracket, allocation drift). A recommendation
+   with no rationale never renders.
+3. **Watchlist** — user-defined candidate tickers with user-defined price criteria,
+   flagged when the criteria are met. The app surfaces candidates; it never picks stocks.
+
+Deterministic, auditable decisions backed by sourced evidence, with a plain-English UI
+built for an amateur investor — not a quant terminal. See `REFACTOR_REPORT.md` for the
+refactor that produced this shape.
 
 ---
 
@@ -90,14 +101,9 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-**`FINANCE_RUNTIME_CERT_SECRET`** (server-only, frontend runtime env — set in Vercel project settings, not in a `NEXT_PUBLIC_` var):
-- Must match the backend's `finance_runtime_cert_secret` value exactly.
-- Used only by `v2/frontend/src/app/api/advisor/paycheck-plan/preview/route.ts` to attach the `X-Finance-Runtime-Cert-Secret` header when proxying to the cert-gated `POST /api/v1/advisor/paycheck-plan/preview` backend endpoint.
-- Never prefix with `NEXT_PUBLIC_` — doing so would ship it to the browser bundle. It is read only inside this one server-side Route Handler and is never referenced by client (`"use client"`) code.
-
 ### Database
 
-Apply SQL files in order from [`v2/database/`](v2/database/) (001 → 017) and any newer files in [`v2/backend/migrations/`](v2/backend/migrations/) using the Supabase SQL editor.
+Apply SQL files in order from [`v2/database/`](v2/database/) (001 → 025) and any newer files in [`v2/backend/migrations/`](v2/backend/migrations/) using the Supabase SQL editor. `025_watchlist.sql` is required for the Watchlist view.
 
 ---
 

@@ -91,7 +91,7 @@ API docs at `http://localhost:8000/docs` when `DEBUG=true`.
 
 ```bash
 cd v2/frontend
-cp .env.local.example .env.local # fill in Supabase URL + anon key + API URL
+cp .env.example .env.local       # fill in Supabase URL + anon key + API URL
 npm install
 npm run dev
 ```

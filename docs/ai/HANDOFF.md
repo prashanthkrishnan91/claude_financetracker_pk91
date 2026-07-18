@@ -108,5 +108,10 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   and cert user config (Railway) power the Advisor cash plan.
 - `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true` (Railway) recommended so Run Intel drains without
   the optional worker. `INTEL_V3_SNAPSHOT_WRITES_ENABLED=true` needed for new snapshots.
+- Backend `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true` (Railway) MUST stay set — the Advisor view's
+  Intel section reads `GET /intel/v3/snapshot`, which 404s without it. Only the frontend
+  `NEXT_PUBLIC_...` variant of this name is dead. Backend boot-required vars remain
+  `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `SUPABASE_JWT_SECRET`,
+  `ENCRYPTION_KEY`.
 - `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` is no longer read by any code — safe to
   remove from Vercel at leisure (documented cleanup, not required).

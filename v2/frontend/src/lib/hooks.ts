@@ -211,7 +211,8 @@ export function useIntelV3Snapshot(enabled = true) {
  * Stage 3.3 — Enqueue an Intel v3 analyst refresh.
  * POST /intel/v3/run returns a refresh-enqueue status, NOT a snapshot.
  * On success, invalidates the snapshot query so the UI immediately re-fetches.
- * The cockpit polls the snapshot until snapshot_source=worker_certified appears.
+ * The Advisor readiness panel invalidates the snapshot query again when a run
+ * reports snapshot_available_after_run — no polling interval exists.
  */
 export function useRunIntelV3() {
   const qc = useQueryClient();

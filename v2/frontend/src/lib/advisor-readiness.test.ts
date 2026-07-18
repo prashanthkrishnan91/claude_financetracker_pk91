@@ -4,6 +4,7 @@
  */
 
 import type { IntelV3HeldCard, IntelV3RunResult, IntelV3Snapshot } from "@/lib/api";
+import type { AdvisorTruthContract } from "@/lib/advisor-truth";
 import {
   ADD_POSITIONS_SENTENCE,
   CERTIFIED_CURRENT_SENTENCE,
@@ -18,6 +19,7 @@ import {
   deriveAdvisorReadiness,
   deriveRunJobs,
   deriveRunModel,
+  deriveTruthRows,
   evidenceFreshnessLabel,
   formatSnapshotAge,
   isSnapshotMissingError,
@@ -88,6 +90,20 @@ const NO_RUN = { isRunPending: false, isRunError: false, lastRunResult: null };
 
 function queryWith(snapshot: IntelV3Snapshot | null) {
   return { snapshot, isLoading: false, isError: false };
+}
+
+function makeTruth(overrides: Partial<AdvisorTruthContract> = {}): AdvisorTruthContract {
+  return {
+    portfolio_truth: "certified",
+    price_truth: "ok",
+    reconciliation: "pass",
+    snapshot_value: 100_000,
+    position_derived_value: 100_050,
+    snapshot_stale: false,
+    next_required_repair: null,
+    as_of: "2026-07-18T10:00:00+00:00",
+    ...overrides,
+  };
 }
 
 // ── Run state machine ─────────────────────────────────────────────────────────
@@ -354,6 +370,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
         errorMessage: "API error: 404",
       },
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.snapshotState).toBe("missing");
@@ -361,10 +378,10 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     expect(model.statusPillLabel).not.toBe("Ready");
     expect(model.generatedAt).toBeNull();
     expect(model.actionCounts).toEqual({ BUY: 0, HOLD: 0, TRIM: 0, SELL: 0 });
-    // Truth rows are honest Unknowns without a snapshot.
-    const portfolioRow = model.truthRows.find((r) => r.key === "portfolio_truth");
-    expect(portfolioRow?.status).toBe("unavailable");
-    expect(portfolioRow?.detail).toContain("Unknown");
+    // Rows are honest Unknowns without a snapshot and without the truth endpoint.
+    const certRow = model.truthRows.find((r) => r.key === "intel_certification");
+    expect(certRow?.status).toBe("unavailable");
+    expect(certRow?.detail).toContain("Unknown");
   });
 
   it("collapsed 404 detail object ('[object Object]') is treated as missing", () => {
@@ -382,6 +399,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
         errorMessage: "network down",
       },
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.snapshotState).toBe("error");
@@ -389,7 +407,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
   });
 
   it("certified current snapshot → ready with derived action counts", () => {
-    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, NOW);
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, null, NOW);
     expect(model.snapshotState).toBe("certified");
     expect(model.ready).toBe(true);
     expect(model.statusPillLabel).toBe("Ready");
@@ -399,11 +417,11 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     expect(model.totalCount).toBe(4);
     expect(model.snapshotAgeLabel).toBe("2h ago");
     expect(model.evidenceFreshnessLabel).toBe("Evidence current");
-    const portfolioRow = model.truthRows.find((r) => r.key === "portfolio_truth");
-    expect(portfolioRow?.status).toBe("ok");
-    const priceRow = model.truthRows.find((r) => r.key === "price_truth");
-    expect(priceRow?.status).toBe("ok");
-    const reconRow = model.truthRows.find((r) => r.key === "reconciliation");
+    const certRow = model.truthRows.find((r) => r.key === "intel_certification");
+    expect(certRow?.status).toBe("ok");
+    const sourceRow = model.truthRows.find((r) => r.key === "snapshot_source_health");
+    expect(sourceRow?.status).toBe("ok");
+    const reconRow = model.truthRows.find((r) => r.key === "books_reconciliation");
     expect(reconRow?.status).toBe("unavailable");
   });
 
@@ -411,6 +429,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     const model = deriveAdvisorReadiness(
       queryWith(makeSnapshot({ is_stale: true })),
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.snapshotState).toBe("stale");
@@ -422,6 +441,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     const model = deriveAdvisorReadiness(
       queryWith(makeSnapshot({ evidence_freshness_state: "republish_pending" })),
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.ready).toBe(false);
@@ -432,6 +452,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     const model = deriveAdvisorReadiness(
       queryWith(makeSnapshot({ certified_holding_count: 2, total_holding_count: 4 })),
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.snapshotState).toBe("uncertified");
@@ -456,6 +477,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
           next_required_action: "none_certified_snapshot_current",
         }),
       },
+      null,
       NOW,
     );
     expect(model.ready).toBe(false);
@@ -465,7 +487,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
   });
 
   it("idle + certified snapshot: sentence says refresh, not generate", () => {
-    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, NOW);
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, null, NOW);
     expect(model.run.state).toBe("idle");
     expect(model.run.nextActionSentence).toBe(RUN_IDLE_CERTIFIED_SENTENCE);
     expect(model.run.nextActionSentence).not.toContain("generate a certified snapshot");
@@ -480,6 +502,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
         errorMessage: "API error: 404",
       },
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.run.state).toBe("idle");
@@ -497,6 +520,7 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
           next_required_action: "add_positions_before_running_intel",
         }),
       },
+      null,
       NOW,
     );
     expect(model.run.state).toBe("idle");
@@ -507,10 +531,124 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
     const model = deriveAdvisorReadiness(
       { snapshot: null, isLoading: true, isError: false },
       NO_RUN,
+      null,
       NOW,
     );
     expect(model.snapshotState).toBe("loading");
     expect(model.ready).toBe(false);
+  });
+});
+
+// ── Truth-row vocabulary (six-dimension contract) ─────────────────────────────
+
+describe("deriveTruthRows — renamed Intel vocabulary + endpoint-fed truth rows", () => {
+  const NOW = new Date("2026-07-18T12:00:00Z");
+
+  it("exposes the six-dimension vocabulary with no legacy labels", () => {
+    const rows = deriveTruthRows(makeSnapshot(), "certified", null);
+    expect(rows.map((r) => r.key)).toEqual([
+      "intel_certification",
+      "intel_evidence_freshness",
+      "snapshot_source_health",
+      "portfolio_financial_truth",
+      "current_price_truth",
+      "books_reconciliation",
+    ]);
+    expect(rows.map((r) => r.label)).toEqual([
+      "Intel certification",
+      "Intel evidence freshness",
+      "Snapshot source health",
+      "Portfolio financial truth",
+      "Current-price truth",
+      "Books reconciliation",
+    ]);
+    // Snapshot fields must no longer feed anything labeled portfolio/price truth.
+    expect(rows.map((r) => r.label)).not.toContain("Portfolio truth");
+    expect(rows.map((r) => r.label)).not.toContain("Price truth");
+  });
+
+  it("truth rows are honest Unknowns by default (endpoint not fetched)", () => {
+    const rows = deriveTruthRows(makeSnapshot(), "certified", null);
+    for (const key of [
+      "portfolio_financial_truth",
+      "current_price_truth",
+      "books_reconciliation",
+    ] as const) {
+      const row = rows.find((r) => r.key === key);
+      expect(row?.status).toBe("unavailable");
+      expect(row?.detail).toContain("Unknown");
+    }
+  });
+
+  it("worker-certified Intel must NOT mark portfolio financial truth certified", () => {
+    // Fully certified, current Intel snapshot — but no truth endpoint result.
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, null, NOW);
+    expect(model.ready).toBe(true); // Intel-side readiness
+    const intelRow = model.truthRows.find((r) => r.key === "intel_certification");
+    expect(intelRow?.status).toBe("ok");
+    // Financial truth stays unknown — Intel certification is not financial truth.
+    const financialRow = model.truthRows.find(
+      (r) => r.key === "portfolio_financial_truth",
+    );
+    expect(financialRow?.status).toBe("unavailable");
+    expect(financialRow?.detail).toContain("Unknown");
+  });
+
+  it("endpoint-fed rows reflect the truth contract when provided", () => {
+    const model = deriveAdvisorReadiness(
+      queryWith(makeSnapshot()),
+      NO_RUN,
+      makeTruth(),
+      NOW,
+    );
+    expect(
+      model.truthRows.find((r) => r.key === "portfolio_financial_truth")?.status,
+    ).toBe("ok");
+    expect(
+      model.truthRows.find((r) => r.key === "current_price_truth")?.status,
+    ).toBe("ok");
+    expect(
+      model.truthRows.find((r) => r.key === "books_reconciliation")?.status,
+    ).toBe("ok");
+  });
+
+  it("degraded/blocked truth dimensions map to pending/blocked row statuses", () => {
+    const rows = deriveTruthRows(
+      makeSnapshot(),
+      "certified",
+      makeTruth({
+        portfolio_truth: "degraded",
+        price_truth: "missing",
+        reconciliation: "blocked",
+      }),
+    );
+    expect(rows.find((r) => r.key === "portfolio_financial_truth")?.status).toBe("pending");
+    expect(rows.find((r) => r.key === "current_price_truth")?.status).toBe("blocked");
+    expect(rows.find((r) => r.key === "books_reconciliation")?.status).toBe("blocked");
+  });
+
+  it("stale price truth maps to pending, and stale intel freshness to pending", () => {
+    const rows = deriveTruthRows(
+      makeSnapshot({ evidence_freshness_state: "republish_pending" }),
+      "stale",
+      makeTruth({ price_truth: "stale" }),
+    );
+    expect(rows.find((r) => r.key === "current_price_truth")?.status).toBe("pending");
+    expect(rows.find((r) => r.key === "intel_evidence_freshness")?.status).toBe("pending");
+  });
+
+  it("intel evidence freshness is its own row with honest unknown handling", () => {
+    const certified = deriveTruthRows(makeSnapshot(), "certified", null);
+    expect(certified.find((r) => r.key === "intel_evidence_freshness")?.status).toBe("ok");
+
+    const noFreshness = deriveTruthRows(
+      makeSnapshot({ evidence_freshness_state: undefined }),
+      "certified",
+      null,
+    );
+    expect(noFreshness.find((r) => r.key === "intel_evidence_freshness")?.status).toBe(
+      "unavailable",
+    );
   });
 });
 

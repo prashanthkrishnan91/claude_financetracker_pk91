@@ -6,14 +6,16 @@
  * Consolidation to three primary views (Positions / Advisor / Watchlist).
  * Sections:
  *   A — Readiness (trust rows, snapshot age, Run Intel state machine)
- *   B — Holding actions (existing IntelV3Cockpit, mounted unconditionally —
- *       it is the deterministic Intel v3 surface; no env flag gate here)
+ *   B — Holding actions (IntelV3HoldingsPanel — presentation-only over the
+ *       page's shared snapshot query; no run control of its own)
  *   C — Cash plan (evolved paycheck-plan preview with explanations)
  *   D — Trust drawer (collapsible operational detail, closed by default)
  *
- * No visible action comes from any legacy LLM/agent surface — only the
- * IntelV3Cockpit and the deterministic paycheck endpoint. No new polling is
- * added (the cockpit's built-in snapshot polling is the only interval).
+ * This page owns the SINGLE Intel v3 snapshot query and the SINGLE run
+ * mutation: the readiness panel renders the only control that triggers
+ * POST /intel/v3/run. No polling intervals exist on this page. Financial
+ * truth (portfolio / current-price / books reconciliation) comes only from
+ * useAdvisorTruth() — never from Intel snapshot fields.
  *
  * Deep link: /dashboard/advisor?section=cash-plan scrolls to and focuses the
  * cash-plan section on mount (useSearchParams inside <Suspense> as Next
@@ -23,11 +25,12 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { useIntelV3Snapshot, useRunIntelV3 } from "@/lib/hooks";
-import { IntelV3Cockpit } from "@/components/cards/IntelV3Cockpit";
+import { IntelV3HoldingsPanel } from "@/components/advisor/IntelV3HoldingsPanel";
 import { AdvisorReadinessPanel } from "@/components/advisor/AdvisorReadinessPanel";
 import { AdvisorCashPlanSection } from "@/components/advisor/AdvisorCashPlanSection";
 import { AdvisorTrustPanel } from "@/components/advisor/AdvisorTrustPanel";
 import { deriveAdvisorReadiness } from "@/lib/advisor-readiness";
+import { useAdvisorTruth } from "@/lib/advisor-truth";
 import type { AdvisorCashPlanResponse } from "@/lib/advisor-cash-plan";
 
 function CashPlanDeepLink({
@@ -64,8 +67,11 @@ function CashPlanDeepLink({
 export default function AdvisorPage() {
   const snapshotQuery = useIntelV3Snapshot();
   const runMutation = useRunIntelV3();
+  const truthQuery = useAdvisorTruth();
   const [lastPlan, setLastPlan] = useState<AdvisorCashPlanResponse | null>(null);
   const cashPlanRef = useRef<HTMLDivElement>(null);
+
+  const truth = truthQuery.data ?? null;
 
   const model = deriveAdvisorReadiness(
     {
@@ -80,6 +86,7 @@ export default function AdvisorPage() {
       isRunError: runMutation.isError,
       lastRunResult: runMutation.data ?? null,
     },
+    truth,
   );
 
   return (
@@ -113,7 +120,7 @@ export default function AdvisorPage() {
               />
             </div>
             <div className="order-4 lg:order-none">
-              <AdvisorTrustPanel model={model} plan={lastPlan} />
+              <AdvisorTrustPanel model={model} plan={lastPlan} truth={truth} />
             </div>
           </div>
 
@@ -126,8 +133,15 @@ export default function AdvisorPage() {
               <h2 id="advisor-holding-actions-heading" className="section-header mb-3">
                 Holding actions
               </h2>
-              {/* Deterministic Intel v3 surface — mounted unconditionally. */}
-              <IntelV3Cockpit />
+              {/* Deterministic Intel v3 surface — presentation-only over the
+                  page's shared snapshot query. No run control lives here. */}
+              <IntelV3HoldingsPanel
+                snapshot={snapshotQuery.data ?? null}
+                isLoading={snapshotQuery.isLoading}
+                noSnapshot={
+                  model.snapshotState === "missing" || model.snapshotState === "error"
+                }
+              />
             </section>
 
             <div

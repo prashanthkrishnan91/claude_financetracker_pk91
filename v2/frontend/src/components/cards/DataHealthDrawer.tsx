@@ -20,7 +20,6 @@ import {
 } from "@/lib/hooks";
 import { buildDataHealthRows } from "@/lib/intel-v3-evidence";
 import { TrustStatusRow } from "./TrustPrimitives";
-import { ComingLaterPanel } from "./IntelV3Primitives";
 
 interface DataHealthDrawerProps {
   open: boolean;
@@ -186,18 +185,6 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
                 />
               ))}
             </div>
-          </div>
-
-          <div className="border-t border-border" />
-
-          {/* Coming-Later: Source Room modules */}
-          <div className="space-y-3">
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-              Preparing for the next intelligence stage
-            </p>
-            <ComingLaterPanel title="Source credibility tier" />
-            <ComingLaterPanel title="Contradiction detection" />
-            <ComingLaterPanel title="Evidence completeness score" />
           </div>
 
         </div>

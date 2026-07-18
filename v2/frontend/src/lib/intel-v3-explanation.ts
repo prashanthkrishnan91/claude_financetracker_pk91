@@ -430,7 +430,7 @@ export interface PortfolioEvidenceSummary {
 
 /**
  * Derive a portfolio-level evidence summary from all current_holdings cards.
- * Used by IntelV3Cockpit to show the evidence health banner.
+ * Used by the Advisor holdings panel to summarize evidence health.
  */
 export function buildPortfolioEvidenceSummary(cards: IntelV3HeldCard[]): PortfolioEvidenceSummary {
   let safeCount = 0;

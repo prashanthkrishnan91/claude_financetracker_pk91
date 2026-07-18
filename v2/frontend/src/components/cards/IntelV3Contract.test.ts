@@ -98,7 +98,7 @@ describe("Intel v3 visible action contract", () => {
   });
 
   it("filter tab keys are exactly ALL / BUY / HOLD / TRIM / SELL", () => {
-    // LOCKED filter contract from IntelV3Cockpit.tsx — must never expand.
+    // LOCKED filter contract from IntelV3HoldingsPanel.tsx — must never expand.
     const FILTER_KEYS = ["ALL", "BUY", "HOLD", "TRIM", "SELL"];
     expect(FILTER_KEYS).toHaveLength(5);
     expect(FILTER_KEYS).not.toContain("WATCH");
@@ -678,7 +678,7 @@ describe("Stage 4C — drawer Coming-Later contract", () => {
 
 describe("Stage 4C — filter rail locked contract", () => {
   it("filter rail has exactly 5 entries: ALL, BUY, HOLD, TRIM, SELL", () => {
-    // Mirrors INTEL_V3_FILTERS keys in IntelV3Cockpit.tsx
+    // Mirrors INTEL_V3_FILTERS keys in IntelV3HoldingsPanel.tsx
     const FILTER_KEYS = ["ALL", "BUY", "HOLD", "TRIM", "SELL"];
     expect(FILTER_KEYS).toHaveLength(5);
   });

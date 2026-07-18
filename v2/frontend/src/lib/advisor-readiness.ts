@@ -22,6 +22,7 @@ import type {
   IntelV3RunResult,
   IntelV3Snapshot,
 } from "@/lib/api";
+import type { AdvisorTruthContract } from "@/lib/advisor-truth";
 import { buildStatusPillState } from "@/lib/intel-v3-banner";
 
 // ── Run state machine types ───────────────────────────────────────────────────
@@ -298,8 +299,21 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
 
 export type AdvisorTruthStatus = "ok" | "pending" | "blocked" | "unavailable";
 
+/**
+ * Six-dimension vocabulary. Intel-layer facts (from the Intel snapshot) are
+ * labeled as Intel facts; financial-truth facts come ONLY from the
+ * /api/advisor/readiness truth endpoint (never from snapshot fields). The
+ * sixth dimension, Cash-plan trust, lives in the cash-plan/trust surfaces
+ * (numeric_plan_trusted) — not in these rows.
+ */
 export interface AdvisorTruthRow {
-  key: "portfolio_truth" | "price_truth" | "reconciliation";
+  key:
+    | "intel_certification"
+    | "intel_evidence_freshness"
+    | "snapshot_source_health"
+    | "portfolio_financial_truth"
+    | "current_price_truth"
+    | "books_reconciliation";
   label: string;
   status: AdvisorTruthStatus;
   detail: string;
@@ -408,43 +422,47 @@ function isCertifiedSnapshot(snapshot: IntelV3Snapshot): boolean {
   );
 }
 
-function derivePriceTruthRow(snapshot: IntelV3Snapshot | null): AdvisorTruthRow {
+/**
+ * Intel-layer source-health row. This is an Intel snapshot fact — it must
+ * never be labeled price/portfolio truth (those come from the truth endpoint).
+ */
+function deriveSnapshotSourceHealthRow(snapshot: IntelV3Snapshot | null): AdvisorTruthRow {
   if (!snapshot) {
     return {
-      key: "price_truth",
-      label: "Price truth",
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
       status: "unavailable",
-      detail: "Unknown — no snapshot to report price health.",
+      detail: "Unknown — no snapshot to report source health.",
     };
   }
   const raw = snapshot.source_health?.status ?? null;
   if (raw === "ok" || raw === "healthy" || raw === "green") {
     return {
-      key: "price_truth",
-      label: "Price truth",
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
       status: "ok",
       detail: "Source health reported healthy by the latest snapshot.",
     };
   }
   if (raw === "degraded" || raw === "stale" || raw === "partial") {
     return {
-      key: "price_truth",
-      label: "Price truth",
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
       status: "pending",
       detail: `Source health reported "${raw}" by the latest snapshot.`,
     };
   }
   if (raw === "blocked" || raw === "failed" || raw === "error") {
     return {
-      key: "price_truth",
-      label: "Price truth",
+      key: "snapshot_source_health",
+      label: "Snapshot source health",
       status: "blocked",
       detail: `Source health reported "${raw}" by the latest snapshot.`,
     };
   }
   return {
-    key: "price_truth",
-    label: "Price truth",
+    key: "snapshot_source_health",
+    label: "Snapshot source health",
     status: "unavailable",
     detail: raw
       ? `Source health reported "${raw}" — not a recognized status.`
@@ -452,15 +470,139 @@ function derivePriceTruthRow(snapshot: IntelV3Snapshot | null): AdvisorTruthRow 
   };
 }
 
+/** Intel-layer evidence freshness row (from evidence_freshness_state). */
+function deriveEvidenceFreshnessRow(snapshot: IntelV3Snapshot | null): AdvisorTruthRow {
+  const state = snapshot?.evidence_freshness_state ?? null;
+  const label = evidenceFreshnessLabel(state);
+  if (!state || !label) {
+    return {
+      key: "intel_evidence_freshness",
+      label: "Intel evidence freshness",
+      status: "unavailable",
+      detail: "Unknown — the snapshot did not report evidence freshness.",
+    };
+  }
+  const status: AdvisorTruthStatus =
+    state === "certified_current" || state === "rebuilt_and_published"
+      ? "ok"
+      : state === "republish_pending"
+        ? "pending"
+        : state === "certification_blocked"
+          ? "blocked"
+          : "unavailable";
+  return {
+    key: "intel_evidence_freshness",
+    label: "Intel evidence freshness",
+    status,
+    detail: `${label}.`,
+  };
+}
+
+// ── Financial-truth rows (fed ONLY by the /api/advisor/readiness endpoint) ────
+
+const TRUTH_UNKNOWN_DETAIL =
+  "Unknown — the financial truth check has not run yet or is unavailable.";
+
+function derivePortfolioFinancialTruthRow(
+  truth: AdvisorTruthContract | null,
+): AdvisorTruthRow {
+  const base = {
+    key: "portfolio_financial_truth" as const,
+    label: "Portfolio financial truth",
+  };
+  switch (truth?.portfolio_truth) {
+    case "certified":
+      return {
+        ...base,
+        status: "ok",
+        detail: "The financial truth baseline certified portfolio value and cost basis.",
+      };
+    case "degraded":
+      return {
+        ...base,
+        status: "pending",
+        detail: "The financial truth baseline reports degraded portfolio truth — repair needed.",
+      };
+    case "blocked":
+      return {
+        ...base,
+        status: "blocked",
+        detail: "The financial truth baseline reports blocked portfolio truth — values cannot be trusted.",
+      };
+    default:
+      return { ...base, status: "unavailable", detail: TRUTH_UNKNOWN_DETAIL };
+  }
+}
+
+function deriveCurrentPriceTruthRow(truth: AdvisorTruthContract | null): AdvisorTruthRow {
+  const base = { key: "current_price_truth" as const, label: "Current-price truth" };
+  switch (truth?.price_truth) {
+    case "ok":
+      return {
+        ...base,
+        status: "ok",
+        detail: "All open holdings have recent prices per the financial truth baseline.",
+      };
+    case "stale":
+      return {
+        ...base,
+        status: "pending",
+        detail: "Some holdings have stale prices per the financial truth baseline.",
+      };
+    case "missing":
+      return {
+        ...base,
+        status: "blocked",
+        detail: "Some holdings are missing prices per the financial truth baseline.",
+      };
+    default:
+      return { ...base, status: "unavailable", detail: TRUTH_UNKNOWN_DETAIL };
+  }
+}
+
+function deriveBooksReconciliationRow(truth: AdvisorTruthContract | null): AdvisorTruthRow {
+  const base = { key: "books_reconciliation" as const, label: "Books reconciliation" };
+  const values =
+    truth && truth.snapshot_value !== null && truth.position_derived_value !== null
+      ? ` Snapshot value ${truth.snapshot_value.toFixed(2)} vs position-derived ${truth.position_derived_value.toFixed(2)}.`
+      : "";
+  switch (truth?.reconciliation) {
+    case "pass":
+      return {
+        ...base,
+        status: "ok",
+        detail: `Snapshot and position-derived values agree within tolerance.${values}`,
+      };
+    case "degraded":
+      return {
+        ...base,
+        status: "pending",
+        detail: `Snapshot and position-derived values disagree beyond the certified threshold.${values}`,
+      };
+    case "blocked":
+      return {
+        ...base,
+        status: "blocked",
+        detail: `Snapshot and position-derived values diverge beyond tolerance.${values}`,
+      };
+    default:
+      return { ...base, status: "unavailable", detail: TRUTH_UNKNOWN_DETAIL };
+  }
+}
+
 export function deriveTruthRows(
   snapshot: IntelV3Snapshot | null,
   snapshotState: AdvisorSnapshotState,
+  truth: AdvisorTruthContract | null = null,
 ): AdvisorTruthRow[] {
-  let portfolio: AdvisorTruthRow;
+  // Intel certification — an Intel-layer fact (worker certification coverage).
+  // It must NEVER be labeled portfolio truth: a worker-certified Intel
+  // snapshot says nothing about whether the books are financially true.
+  let intelCertification: AdvisorTruthRow;
   if (!snapshot) {
-    portfolio = {
-      key: "portfolio_truth",
-      label: "Portfolio truth",
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
       status: "unavailable",
       detail:
         snapshotState === "loading"
@@ -468,38 +610,38 @@ export function deriveTruthRows(
           : "Unknown — no certified snapshot exists yet.",
     };
   } else if (isCertifiedSnapshot(snapshot)) {
-    portfolio = {
-      key: "portfolio_truth",
-      label: "Portfolio truth",
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
       status: snapshot.is_stale ? "pending" : "ok",
       detail: snapshot.is_stale
         ? `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings but is marked stale.`
         : `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings.`,
     };
   } else if (snapshot.snapshot_source === "certification_failed") {
-    portfolio = {
-      key: "portfolio_truth",
-      label: "Portfolio truth",
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
       status: "blocked",
       detail: "Snapshot certification failed — holdings could not all be certified.",
     };
   } else {
-    portfolio = {
-      key: "portfolio_truth",
-      label: "Portfolio truth",
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
       status: "pending",
       detail: "A snapshot exists but it has not passed certification yet.",
     };
   }
 
-  const reconciliation: AdvisorTruthRow = {
-    key: "reconciliation",
-    label: "Reconciliation",
-    status: "unavailable",
-    detail: "Unknown — the Intel snapshot does not report reconciliation. See the cash plan's trust status.",
-  };
-
-  return [portfolio, derivePriceTruthRow(snapshot), reconciliation];
+  return [
+    intelCertification,
+    deriveEvidenceFreshnessRow(snapshot),
+    deriveSnapshotSourceHealthRow(snapshot),
+    derivePortfolioFinancialTruthRow(truth),
+    deriveCurrentPriceTruthRow(truth),
+    deriveBooksReconciliationRow(truth),
+  ];
 }
 
 // ── Main derivation ───────────────────────────────────────────────────────────
@@ -507,6 +649,7 @@ export function deriveTruthRows(
 export function deriveAdvisorReadiness(
   query: AdvisorSnapshotQueryInput,
   runInput: AdvisorRunInput,
+  truth: AdvisorTruthContract | null = null,
   now: Date = new Date(),
 ): AdvisorReadinessModel {
   let run = deriveRunModel(runInput);
@@ -573,7 +716,7 @@ export function deriveAdvisorReadiness(
       snapshot?.certification_summary?.total_holding_count ??
       null,
     actionCounts: deriveActionCounts(snapshot),
-    truthRows: deriveTruthRows(snapshot, snapshotState),
+    truthRows: deriveTruthRows(snapshot, snapshotState, truth),
     run,
   };
 }

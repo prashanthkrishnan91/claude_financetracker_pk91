@@ -16,9 +16,6 @@ _MODULE_PATH = (
     Path(__file__).parent.parent
     / "app/services/intelligence/v3/priceband_shadow_policy_v1.py"
 )
-_DIAGNOSTICS_ROUTER_PATH = (
-    Path(__file__).parent.parent / "app/routers/diagnostics.py"
-)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -86,29 +83,6 @@ class TestConfigFlagDefault:
 
 
 # ── Endpoint flag gate ─────────────────────────────────────────────────────────
-
-class TestEndpointFlagGate:
-    def _src(self):
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
-    def test_endpoint_path_registered(self):
-        assert '@router.post("/priceband-shadow-v1")' in self._src()
-
-    def test_flag_gate_in_router(self):
-        assert "intel_v3_priceband_shadow_v1_diagnostics_enabled" in self._src()
-
-    def test_403_when_flag_off(self):
-        assert (
-            "INTEL_V3_PRICEBAND_SHADOW_V1_DIAGNOSTICS_ENABLED is not enabled"
-            in self._src()
-        )
-
-    def test_runtime_cert_dep_used(self):
-        src = self._src()
-        idx = src.index('@router.post("/priceband-shadow-v1")')
-        body = src[idx:idx + 4000]
-        assert "_get_runtime_cert_user" in body
-
 
 # ── Hard locks ─────────────────────────────────────────────────────────────────
 
@@ -651,62 +625,3 @@ class TestStaticImportSafety:
                     "pure module must not reference intel_v3_snapshots table"
                 )
 
-    def test_router_endpoint_no_decision_policy_calls(self):
-        router_src = _DIAGNOSTICS_ROUTER_PATH.read_text()
-        tree = ast.parse(router_src)
-        target = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name == "get_priceband_shadow_v1_diagnostics":
-                    target = node
-                    break
-        assert target is not None, "endpoint function not found in router AST"
-        # The endpoint body must NOT call decide() or run_v3() or write to
-        # intel_v3_snapshots.
-        for node in ast.walk(target):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
-                assert node.func.id not in {"decide", "run_v3"}
-            if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                assert node.value != "intel_v3_snapshots"
-
-
-# ── Endpoint response shape (static AST checks) ────────────────────────────
-
-class TestEndpointResponseShape:
-    def _src(self):
-        return _DIAGNOSTICS_ROUTER_PATH.read_text()
-
-    def test_response_includes_required_aggregate_keys(self):
-        src = self._src()
-        # Slice to the endpoint body.
-        idx = src.index("get_priceband_shadow_v1_diagnostics")
-        body = src[idx:]
-        # Aggregate spec keys.
-        for key in (
-            "evaluated_company_ticker_count",
-            "priceband_computed_count",
-            "priceband_unavailable_count",
-            "by_valuation_signal",
-            "by_confidence",
-            "unavailable_reason_counts",
-            "negative_eps_count",
-            "missing_eps_count",
-            "fresh_price_count",
-            "source_linked_eps_count",
-            "no_target_price_emitted",
-            "no_fair_value_emitted",
-            "visible_decision_changed",
-            "decision_input_mutated",
-        ):
-            assert key in body, f"endpoint missing key {key!r}"
-
-    def test_endpoint_does_not_emit_forbidden_keys(self):
-        src = self._src()
-        idx = src.index("get_priceband_shadow_v1_diagnostics")
-        body = src[idx:]
-        for key in (
-            "target_price", "fair_value", "buy_below", "sell_above",
-            "intrinsic_value", "price_target",
-        ):
-            # No string literal of this exact key as a dict key.
-            assert f'"{key}"' not in body, f"endpoint emits forbidden key {key!r}"

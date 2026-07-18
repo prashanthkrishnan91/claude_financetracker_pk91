@@ -263,6 +263,10 @@ _INTEL_V3_SERVICE_HEAVY_SIBLINGS = [
     "app.services.intelligence.v3.sec_filing_type_adapter_v1",
 ]
 
+# Cache for the stub-built intel_v3_service module. Kept OUT of sys.modules so
+# it never leaks into other test files' imports of the real module.
+_INTEL_V3_SERVICE_MODULE_CACHE: dict[str, types.ModuleType] = {}
+
 
 def _load_intel_v3_service(monkeypatch: Any) -> types.ModuleType:
     """Load intel_v3_service with heavy/unavailable imports pre-stubbed.
@@ -278,9 +282,14 @@ def _load_intel_v3_service(monkeypatch: Any) -> types.ModuleType:
     """
     svc_key = "app.services.intelligence.v3.intel_v3_service"
 
-    # Return cached version if already loaded by this helper
+    # Reuse the real module when another test file already imported it.
     if svc_key in sys.modules and hasattr(sys.modules[svc_key], "IntelV3Service"):
         return sys.modules[svc_key]
+
+    # Return cached version if already loaded by this helper.
+    cached = _INTEL_V3_SERVICE_MODULE_CACHE.get(svc_key)
+    if cached is not None:
+        return cached
 
     stubs_needed = _INTEL_V3_SERVICE_HEAVY_SIBLINGS + [
         "app.config",                    # pydantic_settings not available in test env
@@ -297,14 +306,17 @@ def _load_intel_v3_service(monkeypatch: Any) -> types.ModuleType:
     spec = importlib.util.spec_from_file_location(svc_key, svc_path)
     mod = importlib.util.module_from_spec(spec)
     mod.__package__ = "app.services.intelligence.v3"
-    # Register before exec so circular-import self-references resolve
+    # Register before exec so circular-import self-references resolve, but
+    # ALWAYS remove the entry afterwards — leaving this stub-built module in
+    # sys.modules would poison any later test file that imports the real
+    # intel_v3_service (its siblings resolve to MagicMocks in this copy).
     sys.modules[svc_key] = mod
     try:
         spec.loader.exec_module(mod)
-    except Exception:
+    finally:
         if sys.modules.get(svc_key) is mod:
             del sys.modules[svc_key]
-        raise
+    _INTEL_V3_SERVICE_MODULE_CACHE[svc_key] = mod
     return mod
 
 

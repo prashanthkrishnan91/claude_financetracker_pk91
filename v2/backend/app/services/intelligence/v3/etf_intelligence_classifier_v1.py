@@ -21,6 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from ...policy_tickers import etf_classifier_map as _load_etf_classifier_map
+
 CLASSIFIER_VERSION = "etf_intelligence_classifier.v1"
 
 # ── ETF asset/product type constants ─────────────────────────────────────────
@@ -71,71 +73,13 @@ FLAG_SYNTHESIS_READY = "synthesis_ready"              # always False
 # Maps uppercase ticker → (etf_type, etf_role).
 # Intentionally conservative: unknown tickers fall back to unknown_fund/unknown_role.
 
-_KNOWN_ETF_MAP: dict[str, tuple[str, str]] = {
-    # US Broad Market / Core Equity
-    "VOO":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    "VTI":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    "SPY":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    "IVV":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    "ITOT":  (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    "SWTSX": (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_CORE_US_EQUITY),
-    # Growth / Large-Cap Tech tilt
-    "QQQ":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_GROWTH_TILT),
-    "QQQM":  (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_GROWTH_TILT),
-    "VGT":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_GROWTH_TILT),
-    "IVW":   (ETF_TYPE_EQUITY_ETF,        ETF_ROLE_GROWTH_TILT),
-    # Dividend / Income
-    "SCHD":  (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    "VYM":   (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    "DVY":   (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    "HDV":   (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    "DGRO":  (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    "NOBL":  (ETF_TYPE_DIVIDEND_ETF,      ETF_ROLE_DIVIDEND_INCOME),
-    # Sector ETFs
-    "XLE":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLF":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLK":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLV":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLI":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLU":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLP":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "XLY":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "VHT":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "VIS":   (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    "ARKK":  (ETF_TYPE_SECTOR_ETF,        ETF_ROLE_SECTOR_TILT),
-    # International / Ex-US
-    "VXUS":  (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "VEA":   (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "VWO":   (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "IEFA":  (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "IEMG":  (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "EFA":   (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    "EEM":   (ETF_TYPE_INTERNATIONAL_ETF, ETF_ROLE_INTERNATIONAL_DIVERSIFIER),
-    # Bond / Fixed Income
-    "BND":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "AGG":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "TLT":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "IEF":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "BNDX":  (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "BSV":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "LQD":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "HYG":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_BOND_STABILITY),
-    "SHY":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_CASH_LIKE),
-    "SHV":   (ETF_TYPE_BOND_ETF,          ETF_ROLE_CASH_LIKE),
-    # Commodity Trusts — equity holdings NOT applicable
-    "GLD":   (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    "IAU":   (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    "SLV":   (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    "PDBC":  (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    "GSG":   (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    "DJP":   (ETF_TYPE_COMMODITY_TRUST,   ETF_ROLE_COMMODITY_HEDGE),
-    # Crypto ETFs
-    "IBIT":  (ETF_TYPE_CRYPTO_ETF,        ETF_ROLE_CRYPTO_SPECULATIVE),
-    "FBTC":  (ETF_TYPE_CRYPTO_ETF,        ETF_ROLE_CRYPTO_SPECULATIVE),
-    "BITB":  (ETF_TYPE_CRYPTO_ETF,        ETF_ROLE_CRYPTO_SPECULATIVE),
-    "GBTC":  (ETF_TYPE_CRYPTO_ETF,        ETF_ROLE_CRYPTO_SPECULATIVE),
-    "BITO":  (ETF_TYPE_CRYPTO_ETF,        ETF_ROLE_CRYPTO_SPECULATIVE),
-}
+# Membership is configuration (app/policy_tickers.json), not code — the map is
+# loaded and validated (allowed type/role vocabulary) by the policy_tickers
+# loader; parity with the historic hardcoded map is asserted in
+# tests/test_policy_tickers.py. This module stays pure: the one-time config
+# read happens in the loader module.
+_KNOWN_ETF_MAP: dict[str, tuple[str, str]] = _load_etf_classifier_map()
+
 
 
 # ── Output dataclass ──────────────────────────────────────────────────────────

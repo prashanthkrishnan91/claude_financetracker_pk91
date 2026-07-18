@@ -327,3 +327,29 @@ not removed by this PR, so no env restore is needed.
 (To be completed: dependency-graph proofs, deletion log, policy-ticker migration, dataclass fix,
 tax-lot decision and reconciliation evidence, Watchlist schema, final tests, test-count
 reconciliation, build output, runtime proof, screenshots, semantic review findings, final SHA.)
+
+## Phase 1 — decision spine stabilized (record)
+
+- **Dataclass fix:** `_SupplementalData.sec_fact_records`
+  (`app/services/intelligence/v3/intel_data_foundation_forensics_v1.py`) was a required,
+  default-less field added in Stage 9D, crashing every pre-9D constructor
+  (`TypeError: missing 1 required positional argument`). Smallest behavior-preserving fix:
+  `field(default_factory=dict)` — the production producer always passes the field explicitly.
+  Verified: `test_stage9c_sec_companyfacts_readiness.py` + stage9b + stage9d = 226 passed
+  (baseline had 8 failures in stage9c).
+- **Policy tickers externalized** to `v2/backend/app/policy_tickers.json`, loaded by
+  `v2/backend/app/services/policy_tickers.py` (validated, fail-loud, cached, override via
+  `POLICY_TICKERS_FILE`). Wired consumers: `allocation_policy_v1.py` (preference order +
+  7 classification sets), `intelligence/v3/decision_policy_v1.py` (kernel crypto set),
+  `intelligence/v3/etf_intelligence_classifier_v1.py` (`_KNOWN_ETF_MAP`, 55 entries).
+  Exact parity with historic hardcoded values proven by
+  `tests/test_policy_tickers.py` (25 tests: exact-membership/order parity, consumer-constant
+  parity, classification behavior, fail-loud validation for missing file/key, empty list,
+  duplicate ticker, ambiguous cross-set membership, unknown group/type/role, malformed pair,
+  case normalization, override path) plus an independent scripted diff of the historic
+  `_KNOWN_ETF_MAP` against the config (55/55 identical). Provider symbol-translation tables
+  (crypto→Yahoo in `history_service.py`, CoinGecko IDs in `agents/data_sources.py` and
+  `current_price_truth_repair_v1.py`) stay in provider code — routing data, not policy.
+- **PR #471 behavior confirmed:** `test_allocation_policy_v1.py` +
+  `test_allocation_policy_v1_router.py` + `test_paycheck_plan_preview_router.py` +
+  kernel policy suites = 315 passed after the change.

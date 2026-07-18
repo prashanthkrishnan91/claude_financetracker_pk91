@@ -28,6 +28,8 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+from . import policy_tickers
+
 logger = logging.getLogger(__name__)
 
 DIAGNOSTIC_VERSION = "allocation_policy_v1"
@@ -36,7 +38,11 @@ POLICY_VERSION = "conservative_profile_policy_v1"
 # ── Stage 12C: Core ETF preference order for broad_index_etf group ────────────
 # Preference governs within the group when group is underweight.
 # VTI = broad total-US core; VOO/SPY = S&P 500 core; QQQ = growth/tech-tilted.
-BROAD_INDEX_CORE_PREFERENCE_ORDER: list[str] = ["VTI", "VOO", "SPY", "QQQ"]
+# Membership/order is configuration (app/policy_tickers.json), not code —
+# parity with the historic hardcoded values is asserted in test_policy_tickers.py.
+BROAD_INDEX_CORE_PREFERENCE_ORDER: list[str] = list(
+    policy_tickers.broad_index_core_preference_order()
+)
 
 # Numeric rank: VTI=4, VOO=3, SPY=2, QQQ=1. Unknown tickers get 0.
 _CORE_ETF_PREFERENCE_RANK: dict[str, int] = {
@@ -82,16 +88,15 @@ GROUP_SPECULATIVE = "speculative"
 # ETF groups (collectively form the ETF floor)
 _ETF_GROUPS = {GROUP_BROAD_ETF, GROUP_DIVIDEND_ETF, GROUP_INTERNATIONAL_ETF, GROUP_SECTOR_ETF}
 
-_BROAD_ETF_TICKERS: frozenset[str] = frozenset({"VOO", "VTI", "SPY", "QQQ"})
-_DIVIDEND_ETF_TICKERS: frozenset[str] = frozenset({"VYM", "SCHD"})
-_INTERNATIONAL_ETF_TICKERS: frozenset[str] = frozenset({"VXUS"})
-_SECTOR_ETF_TICKERS: frozenset[str] = frozenset({"VGT", "VHT", "VIS", "XLE"})
-_ALTERNATIVES_TICKERS: frozenset[str] = frozenset({"GLD"})
-_CRYPTO_TICKERS: frozenset[str] = frozenset({
-    "BTC", "XRP", "ETH", "SOL", "DOGE", "ADA", "AVAX", "MATIC", "DOT", "LTC",
-})
+# Ticker membership is configuration (app/policy_tickers.json), not code.
+_BROAD_ETF_TICKERS: frozenset[str] = policy_tickers.etf_group_tickers(GROUP_BROAD_ETF)
+_DIVIDEND_ETF_TICKERS: frozenset[str] = policy_tickers.etf_group_tickers(GROUP_DIVIDEND_ETF)
+_INTERNATIONAL_ETF_TICKERS: frozenset[str] = policy_tickers.etf_group_tickers(GROUP_INTERNATIONAL_ETF)
+_SECTOR_ETF_TICKERS: frozenset[str] = policy_tickers.etf_group_tickers(GROUP_SECTOR_ETF)
+_ALTERNATIVES_TICKERS: frozenset[str] = policy_tickers.alternatives_tickers()
+_CRYPTO_TICKERS: frozenset[str] = policy_tickers.crypto_tickers()
 # Known speculative / small-cap / new IPO tickers in this portfolio
-_SPECULATIVE_TICKERS: frozenset[str] = frozenset({"STUB", "KLAR", "BLSH", "RDDT"})
+_SPECULATIVE_TICKERS: frozenset[str] = policy_tickers.speculative_tickers()
 
 
 def classify_ticker(ticker: str) -> tuple[str, bool]:

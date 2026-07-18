@@ -97,6 +97,100 @@ async def list_positions(
     return [_enrich_position(r, prices) for r in rows]
 
 
+@router.get("/tax-lots")
+async def get_tax_lots(user: AuthenticatedUser = Depends(get_current_user)):
+    """Estimated FIFO tax lots per holding, gated by reconciliation.
+
+    A ticker's lots are shown only when its transaction-derived ledger
+    reconciles with the certified position row (shares within
+    max(0.0001, 0.1%) and cost basis within 2%). Unsupported or unknown
+    share-affecting events are surfaced, never silently ignored. Estimates
+    only — never tax advice, and no dollar tax liability is computed.
+
+    Registered before ``/{ticker}`` so the literal path wins.
+    """
+    from ..services import tax_lot_engine as tle
+
+    client = get_supabase_client()
+
+    pos_result = (
+        client.table("positions")
+        .select("*")
+        .eq("user_id", str(user.id))
+        .execute()
+    )
+    positions = pos_result.data or []
+
+    tx_result = (
+        client.table("transactions")
+        .select("ticker, tx_type, quantity, price, amount, tx_date")
+        .eq("user_id", str(user.id))
+        .limit(10_000)
+        .execute()
+    )
+    transactions = tx_result.data or []
+
+    ledgers = tle.build_ticker_ledger(transactions)
+
+    # One batched price fetch for reconciled tickers' current values.
+    prices: dict[str, float] = {}
+    tickers = sorted({p["ticker"] for p in positions if p.get("ticker")})
+    if tickers:
+        try:
+            ps = _make_price_service()
+            price_results = await ps.fetch_prices(tickers)
+            for t, pr in price_results.items():
+                if pr.is_valid:
+                    prices[t] = pr.mid_price
+        except Exception:
+            pass  # missing price → null market fields, never fabricated
+
+    holdings_out: list[dict] = []
+    for pos in sorted(positions, key=lambda p: p.get("ticker") or ""):
+        ticker = pos.get("ticker")
+        if not ticker:
+            continue
+        shares = float(pos.get("shares") or 0.0)
+        if shares <= 0:
+            continue
+        avg_cost = float(pos.get("avg_cost") or 0.0)
+        position_basis = shares * avg_cost if avg_cost > 0 else None
+
+        ledger = ledgers.get(ticker)
+        if ledger is None:
+            holdings_out.append({
+                "ticker": ticker,
+                "reconciliation": {"status": tle.STATUS_NO_TRANSACTIONS},
+                "authoritative": False,
+                "message": tle.NOT_RECONCILED_MESSAGE,
+                "lots": None,
+                "unsupported_events": [],
+            })
+            continue
+
+        recon = tle.reconcile_ledger(ledger, shares, position_basis)
+        authoritative = recon["status"] == tle.STATUS_RECONCILED
+        holdings_out.append({
+            "ticker": ticker,
+            "reconciliation": recon,
+            "authoritative": authoritative,
+            "message": None if authoritative else tle.NOT_RECONCILED_MESSAGE,
+            "lots": tle.present_lots(ledger, prices.get(ticker)) if authoritative else None,
+            "unsupported_events": ledger["unsupported_events"],
+            "event_counts": ledger["event_counts"],
+        })
+
+    return {
+        "engine_version": tle.ENGINE_VERSION,
+        "jurisdiction_note": tle.JURISDICTION_NOTE,
+        "disclaimer": (
+            "All tax-lot figures are estimates derived from imported "
+            "transactions. They are not tax advice."
+        ),
+        "holdings": holdings_out,
+    }
+
+
 @router.get("/{ticker}", response_model=PositionWithPrice)
 async def get_position(
     ticker: str,

@@ -400,7 +400,10 @@ class _SupplementalData:
     # Used to derive per-section period identities and trend directions.
     # Raw values in payloads are consumed internally by the canonical dataset
     # builder and never serialized.
-    sec_fact_records: dict  # {sec_artifact_id: list[structured_payload dict]}
+    # Defaulted: earlier-stage callers (and their fixtures) construct this
+    # dataclass without Stage 9D+ fields; absence must mean "no records", not
+    # a construction error.
+    sec_fact_records: dict = field(default_factory=dict)  # {sec_artifact_id: list[structured_payload dict]}
     # Stage 9E.1: ticker-level price signals from the latest portfolio snapshot.
     # Keyed by normalized uppercase ticker symbol. Populated from portfolio_snapshots
     # positions_data JSON. Raw market values are NOT stored here — only safe metadata

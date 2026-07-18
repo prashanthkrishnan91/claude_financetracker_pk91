@@ -2,9 +2,28 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 
 import pytest
+
+
+@pytest.fixture(autouse=True)
+def _ensure_event_loop():
+    """Guarantee an open event loop exists for tests that call asyncio.get_event_loop().
+
+    Some async tests close (or unset) the thread's event loop on teardown,
+    which used to poison later tests in the same session with
+    ``RuntimeError: There is no current event loop in thread 'MainThread'``.
+    """
+    try:
+        loop = asyncio.get_event_loop_policy().get_event_loop()
+        needs_new = loop.is_closed()
+    except RuntimeError:
+        needs_new = True
+    if needs_new:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+    yield
 
 
 @pytest.fixture(autouse=True)

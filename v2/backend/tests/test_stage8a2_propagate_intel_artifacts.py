@@ -389,7 +389,12 @@ class TestWatchtowerEvidenceCollectorTechnicalArtifacts:
                     "recommendations": _Fake(rec_rows or []),
                     "agent_insights": _Fake(insight_rows or []),
                     "intel_v3_snapshots": _Fake(intel_snap_rows or []),
-                    "research_artifacts": _Fake(technical_rows),
+                    # Production queries research_artifacts with eq(is_active=True) as
+                    # the usability proxy (Stage 5A) and no longer reads payload
+                    # usability fields; emulate that DB-side filter here.
+                    "research_artifacts": _Fake(
+                        [r for r in technical_rows if r.get("is_active", True)]
+                    ),
                 }
 
             def table(self, name):
@@ -434,9 +439,13 @@ class TestWatchtowerEvidenceCollectorTechnicalArtifacts:
         from app.services.intelligence.v3.watchtower_evidence_collector_v1 import collect_evidence_records
         from app.services.intelligence.v3.watchtower_freshness_ledger_v1 import FRESHNESS_MISSING, FRESHNESS_FRESH
 
+        # Stage 5A / Migration 024: the collector no longer inspects payload
+        # usability — it queries is_active=True as the usable proxy. A suppressed
+        # (is_usable=False) artifact is not active, so the query excludes it.
         suppressed_row = {
             "ticker": "MSFT",
             "generated_at": ARTIFACT_AT.isoformat(),
+            "is_active": False,
             "payload": {
                 "truth_usability_assessment": {"is_usable": False, "usability_label": "SUPPRESSED_INCOMPLETE"},
             },
@@ -457,14 +466,15 @@ class TestWatchtowerRepublishFreshnessTrigger:
     usable technical artifact timestamp is newer than certified snapshot."""
 
     def _make_snap_row(self, generated_at: datetime) -> dict:
+        # Migration 024: _fetch_latest_intel_snapshot reads flat metadata columns
+        # from intel_v3_snapshots, not the payload JSONB.
         return {
-            "payload": {
-                "snapshot_id": "snap-before-artifact",
-                "generated_at": generated_at.isoformat(),
-                "snapshot_source": "worker_certified",
-                "evidence_mapping_version": None,
-                "stage7_explanation_contract_version": None,
-            }
+            "source_hash": "hash-snap-before-artifact",
+            "snapshot_source": "worker_certified",
+            "payload_generated_at": generated_at.isoformat(),
+            "evidence_mapping_version": None,
+            "stage7_contract_complete": True,
+            "stage8e_contract_complete": True,
         }
 
     def _make_client_with_snap(self, snap_generated_at: datetime):

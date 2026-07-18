@@ -150,7 +150,13 @@ async def test_persist_snapshot_writes_flat_columns_on_change():
     client.table.side_effect = _table_side_effect
 
     svc = _make_svc(user_id, client)
-    await svc._persist_snapshot(run_id="run-2", payload=payload)
+    # Cost guard: snapshot writes are off by default; this test asserts the
+    # write path, so enable the flag for the duration of the call.
+    import app.services.intelligence.v3.intel_v3_service as svc_mod
+    fake_settings = MagicMock()
+    fake_settings.intel_v3_snapshot_writes_enabled = True
+    with patch.object(svc_mod, "get_settings", return_value=fake_settings):
+        await svc._persist_snapshot(run_id="run-2", payload=payload)
 
     insert_chain.insert.assert_called_once()
     inserted_dict = insert_chain.insert.call_args[0][0]

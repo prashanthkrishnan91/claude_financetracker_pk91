@@ -127,7 +127,22 @@ def _make_client(
     """Minimal Supabase client mock for watchtower republisher tests."""
     client = MagicMock()
 
-    intel_rows = [] if no_intel_snapshot else [{"payload": snap_payload or _make_snap_payload()}]
+    if no_intel_snapshot:
+        intel_rows = []
+    else:
+        # Migration 024: _fetch_latest_intel_snapshot reads flat metadata columns
+        # from intel_v3_snapshots (not the payload JSONB). The contract booleans
+        # are pre-computed at write time; mirror that here by deriving them from
+        # the test payload so stage7-incomplete payloads still trigger republish.
+        sp = snap_payload or _make_snap_payload()
+        intel_rows = [{
+            "source_hash": "hash-test",
+            "snapshot_source": sp.get("snapshot_source"),
+            "payload_generated_at": sp.get("generated_at"),
+            "evidence_mapping_version": sp.get("evidence_mapping_version"),
+            "stage7_contract_complete": is_snapshot_stage7_complete(sp),
+            "stage8e_contract_complete": True,  # Stage 8E contract not under test here
+        }]
     port_at = portfolio_snapshot_at or COMMON_TS
     portfolio_rows = [{"id": str(uuid.uuid4()), "snapshot_at": port_at}]
 

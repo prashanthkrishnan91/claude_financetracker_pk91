@@ -185,11 +185,15 @@ class TestEvidenceProviderRegistryStructure:
 
     def test_all_ten_lanes_present(self):
         # Stage 5H added LANE_SEC_COMPANY_FACTS (sec_edgar official XBRL lane).
+        # Stage 9F.2a added LANE_ETF_FUND_DATA (SEC NPORT-P ETF holdings lane).
+        from app.services.intelligence.research_workers.evidence_provider_registry_v1 import (
+            LANE_ETF_FUND_DATA,
+        )
         expected = {
             LANE_FUNDAMENTALS, LANE_TECHNICALS, LANE_NEWS_SENTIMENT,
             LANE_SEC_FILING, LANE_SEC_COMPANY_FACTS, LANE_MACRO,
             LANE_ANALYST_REVISIONS, LANE_COMPANY_STRATEGY,
-            LANE_TRANSCRIPTS, LANE_INSIDER_13F,
+            LANE_TRANSCRIPTS, LANE_INSIDER_13F, LANE_ETF_FUND_DATA,
         }
         assert ALL_LANES == expected
 

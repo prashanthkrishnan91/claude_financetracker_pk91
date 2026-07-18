@@ -96,6 +96,11 @@ def project_shadow_from_card_signals(
             (s for s in truth_summaries if s.axis_name == "evidence_quality"),
             None,
         )
+        # Cap 5 in decision_policy_v1._compute_conviction() applies this
+        # guardrail inside the visible policy kernel, so v3_out.conviction is
+        # already capped by the time we get here and the shadow guardrail
+        # correctly reports applied=False for kernel-capped cards (see
+        # test_v3_evidence_quality_guardrail.py — "policy already capped").
         post_conviction, guardrail_diag = apply_buy_conviction_guardrail(
             action=v3_out.action,
             conviction=v3_out.conviction,

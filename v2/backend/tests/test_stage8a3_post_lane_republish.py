@@ -56,9 +56,13 @@ def _make_current_snap_payload(generated_at: Optional[str] = None) -> dict:
 
 
 def _make_artifact_row(ticker: str, generated_at: datetime, is_usable: bool = True) -> dict:
+    # Stage 5A: production queries research_artifacts with eq(is_active=True) as the
+    # usability proxy and no longer reads payload usability — a not-usable artifact
+    # is represented as an inactive row (excluded by the query).
     return {
         "ticker": ticker,
         "generated_at": generated_at.isoformat(),
+        "is_active": is_usable,
         "payload": {
             "truth_usability_assessment": {
                 "usability_label": "USABLE_WITH_LIMITATIONS" if is_usable else "SUPPRESSED_INCOMPLETE",
@@ -84,11 +88,28 @@ def _make_client_with_snap_and_artifacts(
         q.limit.return_value = q
 
         if table_name == "intel_v3_snapshots":
-            q.execute.return_value = MagicMock(
-                data=[{"payload": snap_payload}] if snap_payload else []
-            )
+            if snap_payload:
+                # Migration 024: the republisher reads flat metadata columns from
+                # intel_v3_snapshots, not the payload JSONB. Contract booleans are
+                # pre-computed at write time; derive them from the test payload.
+                intel_row = {
+                    "source_hash": "hash-test-snap",
+                    "snapshot_source": snap_payload.get("snapshot_source"),
+                    "payload_generated_at": snap_payload.get("generated_at"),
+                    "evidence_mapping_version": snap_payload.get("evidence_mapping_version"),
+                    "stage7_contract_complete": (
+                        snap_payload.get("stage7_explanation_contract_version") == _STAGE7_VERSION
+                    ),
+                    "stage8e_contract_complete": True,  # Stage 8E not under test here
+                }
+                q.execute.return_value = MagicMock(data=[intel_row])
+            else:
+                q.execute.return_value = MagicMock(data=[])
         elif table_name == "research_artifacts":
-            q.execute.return_value = MagicMock(data=artifact_rows)
+            # Emulate the DB-side eq(is_active=True) usability filter (Stage 5A).
+            q.execute.return_value = MagicMock(
+                data=[r for r in artifact_rows if r.get("is_active", True)]
+            )
         else:
             q.execute.return_value = MagicMock(data=[])
 

@@ -109,6 +109,21 @@ def _make_intel_snapshot_client(*, generated_at: str) -> MagicMock:
     return client
 
 
+def _current_contract_fields() -> dict:
+    """Migration 024: _fetch_latest_intel_snapshot returns flat-column metadata,
+    including pre-computed contract fields. Skip-path tests must mark the mocked
+    snapshot contract-current, otherwise the mapping/stage7/stage8e completeness
+    gate forces a republish regardless of evidence timestamps."""
+    from app.services.intelligence.v3.evidence_mapping_version_v1 import (
+        EVIDENCE_MAPPING_VERSION,
+    )
+    return {
+        "evidence_mapping_version": EVIDENCE_MAPPING_VERSION,
+        "stage7_contract_complete": True,
+        "stage8e_contract_complete": True,
+    }
+
+
 # ── 1. Republisher called once after analyst jobs drain ───────────────────────
 
 class TestRepublisherCalledAfterAnalystDrain:
@@ -215,6 +230,7 @@ class TestSkippedNoNewEvidence:
                 "snapshot_id": "snap-recent",
                 "generated_at": INTEL_SNAPSHOT_AT_RECENT.isoformat(),
                 "snapshot_source": "worker_certified",
+                **_current_contract_fields(),
             },
         ):
             result = await republish_after_analyst_eligibility(
@@ -258,6 +274,7 @@ class TestSkippedNoNewEvidence:
                     # Intel snapshot generated 10 min ago; analyst evidence is 30 min old
                     "generated_at": INTEL_SNAPSHOT_AT_RECENT.isoformat(),
                     "snapshot_source": "worker_certified",
+                    **_current_contract_fields(),
                 },
             ),
         ):
@@ -384,6 +401,7 @@ class TestNoRepeatedPublish:
             return_value={
                 "snapshot_id": "snap-new",
                 "generated_at": NOW.isoformat(),
+                **_current_contract_fields(),
             },
         ):
             result2 = await republish_after_analyst_eligibility(
@@ -660,6 +678,7 @@ class TestRepublishAfterAnalystEligibilityEdgeCases:
             return_value={
                 "snapshot_id": "snap-old",
                 "generated_at": INTEL_SNAPSHOT_AT.isoformat(),
+                **_current_contract_fields(),
             },
         ):
             result = await republish_after_analyst_eligibility(

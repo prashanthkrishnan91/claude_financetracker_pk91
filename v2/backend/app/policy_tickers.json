@@ -1,0 +1,132 @@
+{
+  "_comment": "All ticker sets/maps referenced by policy source code live here, not in code. Each key preserves the exact membership the code shipped with; edit values here (or point POLICY_TICKERS_FILE at an override) — never re-hardcode tickers in policy modules.",
+
+  "benchmark_symbol": "SPY",
+
+  "kernel_crypto_tickers": ["BTC", "ETH", "XRP", "SOL", "BNB", "ADA", "DOGE"],
+
+  "speculative_tickers": ["BTC", "XRP", "RIVN", "KLAR", "BLSH"],
+  "intel_risk_watch_tickers": ["BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"],
+
+  "orchestrator_etf_tickers": [
+    "VOO", "VTI", "SPY", "QQQ", "VGT", "VIG", "VYM", "SCHD", "JEPI",
+    "JEPQ", "DIVO", "VXUS", "VEA", "VWO", "BND", "AGG", "TLT", "GLD",
+    "IAU", "SLV", "DBC", "USO", "IWM", "EFA", "ARKG", "ARKK"
+  ],
+  "orchestrator_crypto_tickers": [
+    "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "MATIC",
+    "BTC-USD", "ETH-USD", "XRP-USD"
+  ],
+
+  "sentiment_known_crypto_tickers": ["BTC", "XRP", "ETH", "DOGE", "SOL", "LTC"],
+  "sentiment_known_etf_tickers": [
+    "SPY", "QQQ", "IWM", "GLD", "TLT", "VTI", "VOO", "AGG",
+    "EFA", "EEM", "HYG", "LQD", "XLF", "XLE", "XLK"
+  ],
+
+  "valuation_known_crypto_tickers": ["BTC", "ETH", "XRP", "SOL", "BNB", "ADA", "DOGE"],
+
+  "evidence_adapter_known_etf_tickers": [
+    "GLD", "QQQ", "SCHD", "SPY", "VGT", "VHT", "VIS",
+    "VOO", "VTI", "VUG", "VXUS", "VYM", "XLE"
+  ],
+  "evidence_adapter_known_crypto_tickers": ["BTC", "XRP"],
+
+  "stage9k_diagnostic_default_tickers": ["VTI", "SCHD", "VXUS"],
+
+  "ticker_sector_fallback": {
+    "AAPL": "Technology",
+    "MSFT": "Technology",
+    "NVDA": "Technology",
+    "AMD": "Technology",
+    "CRM": "Technology",
+    "SNOW": "Technology",
+    "GOOGL": "Communication Services",
+    "META": "Communication Services",
+    "NFLX": "Communication Services",
+    "RDDT": "Communication Services",
+    "COST": "Consumer",
+    "WMT": "Consumer",
+    "CAVA": "Consumer",
+    "QCOM": "Semiconductors",
+    "TSM": "Semiconductors",
+    "BRK-B": "Financials",
+    "ALK": "Industrials/Autos",
+    "RIVN": "Industrials/Autos",
+    "BMWYY": "Industrials/Autos",
+    "VOO": "Broad Market ETF",
+    "VTI": "Broad Market ETF",
+    "SPY": "Broad Market ETF",
+    "QQQ": "Growth ETF",
+    "SCHD": "Dividend ETF",
+    "VYM": "Dividend ETF",
+    "BND": "Bonds",
+    "VXUS": "International ETF",
+    "VEA": "International ETF",
+    "VWO": "International ETF",
+    "GLD": "Gold/Commodity",
+    "BTC": "Crypto",
+    "XRP": "Crypto",
+    "KLAR": "Recent IPO/Speculative",
+    "BLSH": "Recent IPO/Speculative",
+    "STUB": "Recent IPO/Speculative"
+  },
+
+  "etf_classifier_map": {
+    "VOO": ["equity_etf", "core_us_equity"],
+    "VTI": ["equity_etf", "core_us_equity"],
+    "SPY": ["equity_etf", "core_us_equity"],
+    "IVV": ["equity_etf", "core_us_equity"],
+    "ITOT": ["equity_etf", "core_us_equity"],
+    "SWTSX": ["equity_etf", "core_us_equity"],
+    "QQQ": ["equity_etf", "growth_tilt"],
+    "QQQM": ["equity_etf", "growth_tilt"],
+    "VGT": ["sector_etf", "growth_tilt"],
+    "IVW": ["equity_etf", "growth_tilt"],
+    "SCHD": ["dividend_etf", "dividend_income"],
+    "VYM": ["dividend_etf", "dividend_income"],
+    "DVY": ["dividend_etf", "dividend_income"],
+    "HDV": ["dividend_etf", "dividend_income"],
+    "DGRO": ["dividend_etf", "dividend_income"],
+    "NOBL": ["dividend_etf", "dividend_income"],
+    "XLE": ["sector_etf", "sector_tilt"],
+    "XLF": ["sector_etf", "sector_tilt"],
+    "XLK": ["sector_etf", "sector_tilt"],
+    "XLV": ["sector_etf", "sector_tilt"],
+    "XLI": ["sector_etf", "sector_tilt"],
+    "XLU": ["sector_etf", "sector_tilt"],
+    "XLP": ["sector_etf", "sector_tilt"],
+    "XLY": ["sector_etf", "sector_tilt"],
+    "VHT": ["sector_etf", "sector_tilt"],
+    "VIS": ["sector_etf", "sector_tilt"],
+    "ARKK": ["sector_etf", "sector_tilt"],
+    "VXUS": ["international_etf", "international_diversifier"],
+    "VEA": ["international_etf", "international_diversifier"],
+    "VWO": ["international_etf", "international_diversifier"],
+    "IEFA": ["international_etf", "international_diversifier"],
+    "IEMG": ["international_etf", "international_diversifier"],
+    "EFA": ["international_etf", "international_diversifier"],
+    "EEM": ["international_etf", "international_diversifier"],
+    "BND": ["bond_etf", "bond_stability"],
+    "AGG": ["bond_etf", "bond_stability"],
+    "TLT": ["bond_etf", "bond_stability"],
+    "IEF": ["bond_etf", "bond_stability"],
+    "BNDX": ["bond_etf", "bond_stability"],
+    "BSV": ["bond_etf", "bond_stability"],
+    "LQD": ["bond_etf", "bond_stability"],
+    "HYG": ["bond_etf", "bond_stability"],
+    "SHY": ["bond_etf", "cash_like"],
+    "SHV": ["bond_etf", "cash_like"],
+    "GLD": ["commodity_trust", "commodity_hedge"],
+    "IAU": ["commodity_trust", "commodity_hedge"],
+    "SLV": ["commodity_trust", "commodity_hedge"],
+    "PDBC": ["commodity_trust", "commodity_hedge"],
+    "GSG": ["commodity_trust", "commodity_hedge"],
+    "DJP": ["commodity_trust", "commodity_hedge"],
+    "IBIT": ["crypto_etf", "crypto_speculative"],
+    "FBTC": ["crypto_etf", "crypto_speculative"],
+    "BITB": ["crypto_etf", "crypto_speculative"],
+    "GBTC": ["crypto_etf", "crypto_speculative"],
+    "BITO": ["crypto_etf", "crypto_speculative"]
+  }
+}

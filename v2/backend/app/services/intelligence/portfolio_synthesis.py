@@ -29,6 +29,7 @@ import logging
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+from ..policy_tickers import ticker_map as _policy_ticker_map
 from .feature_engine import FeatureSet
 from .market_snapshot import MarketSnapshot
 from .per_ticker_analyst import AnalystVerdict
@@ -40,43 +41,8 @@ ALLOWED_BIASES = {"bullish", "neutral", "defensive"}
 UNKNOWN_SECTOR_KEYS = {"unknown", "n/a", "none", ""}
 HIGH_QUALITY_THRESHOLD = 0.75
 
-TICKER_SECTOR_FALLBACK: dict[str, str] = {
-    "AAPL": "Technology",
-    "MSFT": "Technology",
-    "NVDA": "Technology",
-    "AMD": "Technology",
-    "CRM": "Technology",
-    "SNOW": "Technology",
-    "GOOGL": "Communication Services",
-    "META": "Communication Services",
-    "NFLX": "Communication Services",
-    "RDDT": "Communication Services",
-    "COST": "Consumer",
-    "WMT": "Consumer",
-    "CAVA": "Consumer",
-    "QCOM": "Semiconductors",
-    "TSM": "Semiconductors",
-    "BRK-B": "Financials",
-    "ALK": "Industrials/Autos",
-    "RIVN": "Industrials/Autos",
-    "BMWYY": "Industrials/Autos",
-    "VOO": "Broad Market ETF",
-    "VTI": "Broad Market ETF",
-    "SPY": "Broad Market ETF",
-    "QQQ": "Growth ETF",
-    "SCHD": "Dividend ETF",
-    "VYM": "Dividend ETF",
-    "BND": "Bonds",
-    "VXUS": "International ETF",
-    "VEA": "International ETF",
-    "VWO": "International ETF",
-    "GLD": "Gold/Commodity",
-    "BTC": "Crypto",
-    "XRP": "Crypto",
-    "KLAR": "Recent IPO/Speculative",
-    "BLSH": "Recent IPO/Speculative",
-    "STUB": "Recent IPO/Speculative",
-}
+# Membership lives in app/policy_tickers.json ("ticker_sector_fallback").
+TICKER_SECTOR_FALLBACK: dict[str, str] = _policy_ticker_map("ticker_sector_fallback")
 
 
 # ── Result shape ───────────────────────────────────────────────────────────

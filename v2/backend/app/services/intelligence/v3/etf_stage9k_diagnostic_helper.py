@@ -20,7 +20,12 @@ from __future__ import annotations
 from typing import Optional
 
 _NPORT_SKILL_PACK: str = "etf_sec_nport_holdings_evidence_v1"
-_STAGE9K_DIAG_DEFAULT_TICKERS: tuple[str, ...] = ("VTI", "SCHD", "VXUS")
+# Membership lives in app/policy_tickers.json ("stage9k_diagnostic_default_tickers").
+from ...policy_tickers import ticker_tuple as _policy_ticker_tuple
+
+_STAGE9K_DIAG_DEFAULT_TICKERS: tuple[str, ...] = _policy_ticker_tuple(
+    "stage9k_diagnostic_default_tickers"
+)
 _STAGE9K_DIAG_MAX_TICKERS: int = 20
 
 

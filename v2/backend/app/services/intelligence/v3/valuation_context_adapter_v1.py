@@ -98,9 +98,10 @@ _NON_COMPANY_CATEGORY_KEYWORDS: frozenset[str] = frozenset({
 })
 
 # Well-known crypto tickers — always non-company regardless of category label.
-_KNOWN_CRYPTO_TICKERS: frozenset[str] = frozenset({
-    "BTC", "ETH", "XRP", "SOL", "BNB", "ADA", "DOGE",
-})
+# Membership lives in app/policy_tickers.json ("valuation_known_crypto_tickers").
+from ...policy_tickers import ticker_set as _policy_ticker_set
+
+_KNOWN_CRYPTO_TICKERS: frozenset[str] = _policy_ticker_set("valuation_known_crypto_tickers")
 
 
 # ── Readiness status enum ─────────────────────────────────────────────────────

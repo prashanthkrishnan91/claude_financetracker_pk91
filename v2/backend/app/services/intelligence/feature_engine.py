@@ -20,7 +20,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from typing import Any, Optional
 
+from ..policy_tickers import benchmark_symbol as _policy_benchmark_symbol
 from .market_snapshot import MarketSnapshot
+
+# Default benchmark symbol lives in app/policy_tickers.json ("benchmark_symbol").
+_DEFAULT_BENCHMARK: str = _policy_benchmark_symbol()
 
 
 # ── Regime thresholds ───────────────────────────────────────────────────────
@@ -64,8 +68,8 @@ class FeatureSet:
     volatility_regime: str = "medium"      # low / medium / high
     volatility_30d: Optional[float] = None
 
-    # Relative strength vs benchmark (SPY by default)
-    benchmark_symbol: str = "SPY"
+    # Relative strength vs benchmark (configured default)
+    benchmark_symbol: str = _DEFAULT_BENCHMARK
     benchmark_return_30d: Optional[float] = None
     relative_strength_30d: Optional[float] = None
     relative_strength_label: str = "inline"  # outperforming / inline / underperforming
@@ -118,7 +122,7 @@ def build_features(
     *,
     bundle: dict[str, Any],
     benchmark: Optional[dict[str, Any]] = None,
-    benchmark_symbol: str = "SPY",
+    benchmark_symbol: str = _DEFAULT_BENCHMARK,
 ) -> dict[str, FeatureSet]:
     """Project ``snapshots`` + ``bundle`` into one :class:`FeatureSet` per ticker.
 

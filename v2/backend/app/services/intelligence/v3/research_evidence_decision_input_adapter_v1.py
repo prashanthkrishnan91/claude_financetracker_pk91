@@ -97,12 +97,12 @@ AXIS_SENTIMENT = "sentiment"
 AXIS_MACRO_CONTEXT = "macro_context"
 
 # Non-equity detection (conservative symbol fallback — matches Phase 8F list).
+from ...policy_tickers import ticker_set as _policy_ticker_set
+
 _NON_EQUITY_CATEGORIES: frozenset[str] = frozenset({"ETF", "Crypto"})
-_KNOWN_ETF_TICKERS: frozenset[str] = frozenset({
-    "GLD", "QQQ", "SCHD", "SPY", "VGT", "VHT", "VIS",
-    "VOO", "VTI", "VUG", "VXUS", "VYM", "XLE",
-})
-_KNOWN_CRYPTO_TICKERS: frozenset[str] = frozenset({"BTC", "XRP"})
+# Membership lives in app/policy_tickers.json.
+_KNOWN_ETF_TICKERS: frozenset[str] = _policy_ticker_set("evidence_adapter_known_etf_tickers")
+_KNOWN_CRYPTO_TICKERS: frozenset[str] = _policy_ticker_set("evidence_adapter_known_crypto_tickers")
 
 # Instrument category constants — used by Stage 6 governance to distinguish
 # equity/ETF (can reach OK on limited fundamentals) from crypto/unknown (THIN).

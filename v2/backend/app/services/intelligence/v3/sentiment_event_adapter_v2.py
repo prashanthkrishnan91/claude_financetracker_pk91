@@ -208,12 +208,12 @@ _URL_SAFE_SOURCE_KINDS: frozenset[str] = frozenset({
 # ── Asset ineligibility guard ─────────────────────────────────────────────────
 # Crypto and ETF tickers are too conservative for sentiment scoring.
 
+from ...policy_tickers import ticker_set as _policy_ticker_set
+
 _INELIGIBLE_CATEGORIES: frozenset[str] = frozenset({"Crypto", "ETF"})
-_KNOWN_CRYPTO_TICKERS: frozenset[str] = frozenset({"BTC", "XRP", "ETH", "DOGE", "SOL", "LTC"})
-_KNOWN_ETF_TICKERS: frozenset[str] = frozenset({
-    "SPY", "QQQ", "IWM", "GLD", "TLT", "VTI", "VOO", "AGG",
-    "EFA", "EEM", "HYG", "LQD", "XLF", "XLE", "XLK",
-})
+# Membership lives in app/policy_tickers.json.
+_KNOWN_CRYPTO_TICKERS: frozenset[str] = _policy_ticker_set("sentiment_known_crypto_tickers")
+_KNOWN_ETF_TICKERS: frozenset[str] = _policy_ticker_set("sentiment_known_etf_tickers")
 
 # ── Input contract ────────────────────────────────────────────────────────────
 

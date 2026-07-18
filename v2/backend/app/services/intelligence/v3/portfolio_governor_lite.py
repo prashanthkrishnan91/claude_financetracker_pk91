@@ -21,9 +21,10 @@ from typing import Optional
 from .decision_contracts import FitBand
 
 # Tickers/categories blocked from BUY by design.
-_SPECULATIVE_TICKERS: frozenset[str] = frozenset(
-    {"BTC", "XRP", "RIVN", "KLAR", "BLSH"}
-)
+# Membership lives in app/policy_tickers.json ("speculative_tickers").
+from ...policy_tickers import ticker_set as _policy_ticker_set
+
+_SPECULATIVE_TICKERS: frozenset[str] = _policy_ticker_set("speculative_tickers")
 _BLOCKED_CAT_KEYWORDS: frozenset[str] = frozenset({"crypto", "speculative", "ipo"})
 
 # Default concentration caps by category (pct of total portfolio).

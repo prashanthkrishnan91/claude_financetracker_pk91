@@ -222,9 +222,10 @@ def _build_bottom_line(
     return "Not enough evidence yet to form a view."
 
 
-_INTEL_RISK_WATCH_TICKERS: frozenset[str] = frozenset(
-    {"BTC", "XRP", "RIVN", "KLAR", "BLSH", "STUB"}
-)
+# Membership lives in app/policy_tickers.json ("intel_risk_watch_tickers").
+from ..policy_tickers import ticker_set as _policy_ticker_set
+
+_INTEL_RISK_WATCH_TICKERS: frozenset[str] = _policy_ticker_set("intel_risk_watch_tickers")
 
 
 def build_posture_reason(

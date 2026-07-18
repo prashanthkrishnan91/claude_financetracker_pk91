@@ -21,9 +21,14 @@ logger = logging.getLogger(__name__)
 
 _BENCHMARK_TTL_S = 300.0  # 5 minutes — matches price_action cache TTL defaults
 
+# Default benchmark symbol lives in app/policy_tickers.json ("benchmark_symbol").
+from ..policy_tickers import benchmark_symbol as _policy_benchmark_symbol
+
+_DEFAULT_BENCHMARK: str = _policy_benchmark_symbol()
+
 
 async def fetch_benchmark_price_action(
-    symbol: str = "SPY",
+    symbol: str = _DEFAULT_BENCHMARK,
     *,
     cache: Optional["MarketCache"] = None,
     coalescer: Optional["RequestCoalescer"] = None,

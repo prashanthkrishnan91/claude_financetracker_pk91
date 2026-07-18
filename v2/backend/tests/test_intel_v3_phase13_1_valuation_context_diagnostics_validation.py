@@ -616,13 +616,33 @@ class TestDiagnosticRouterStaticAnalysis:
         assert "visible_snapshot_unchanged" in src
 
     def test_phase13_endpoint_never_imports_decide(self) -> None:
+        # Current contract (Stage 6 governance diagnostics): decide() may only be
+        # imported lazily inside the env-gated Stage 6 governance endpoint
+        # (get_stage6_evidence_governance_diagnostics). It must never be imported
+        # at module level, and never inside the Phase 13 endpoint.
         src = _load_source(_DIAGNOSTICS_ROUTER)
         tree = ast.parse(src)
-        for node in ast.walk(tree):
+        allowed_funcs = {"get_stage6_evidence_governance_diagnostics"}
+        # Module-level imports must never include decide.
+        for node in tree.body:
             if isinstance(node, (ast.Import, ast.ImportFrom)):
                 for alias in getattr(node, "names", []):
                     assert alias.name != "decide", \
-                        "diagnostics.py must not import decide()"
+                        "diagnostics.py must not import decide() at module level"
+        # Any function-local decide import must be confined to the allowed
+        # Stage 6 governance endpoint.
+        offending = []
+        for func in ast.walk(tree):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if func.name in allowed_funcs:
+                    continue
+                for sub in ast.walk(func):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)):
+                        for alias in getattr(sub, "names", []):
+                            if alias.name == "decide":
+                                offending.append(func.name)
+        assert offending == [], \
+            f"decide() imported outside the Stage 6 governance endpoint: {offending}"
 
     def test_phase13_endpoint_never_imports_price_band_directly(self) -> None:
         src = _load_source(_DIAGNOSTICS_ROUTER)

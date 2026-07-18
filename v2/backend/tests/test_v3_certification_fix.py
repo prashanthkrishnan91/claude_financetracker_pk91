@@ -302,7 +302,9 @@ class TestPageLoadIsolationFromLLM:
         service.client = mock_client
 
         result = asyncio.run(service.get_latest_snapshot())
-        assert result == expected_payload
+        # Stage 13 republish work: get_latest_snapshot() annotates the payload
+        # with evidence_freshness_state before returning it.
+        assert result == {**expected_payload, "evidence_freshness_state": "certified_current"}
 
 
 # ── Section 5: Run path persists and GET returns it ──────────────────────────

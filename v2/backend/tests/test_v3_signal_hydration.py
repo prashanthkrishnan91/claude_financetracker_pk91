@@ -190,12 +190,17 @@ class TestGuardrailEvaluatedForBuyCards:
         assert diag["v3_shadow_action"] == "BUY"
 
         guardrail = diag["truth_diagnostics"]["buy_conviction_guardrail"]
-        assert guardrail["buy_high_conviction_guardrail_applied"] is True
+        # The evidence-quality guardrail was promoted into the visible policy
+        # kernel (Cap 5 in _compute_conviction), so conviction arrives here
+        # already capped at MEDIUM and the shadow guardrail reports
+        # applied=False (see test_v3_evidence_quality_guardrail.py).
+        assert guardrail["buy_high_conviction_guardrail_applied"] is False
+        assert guardrail["evidence_quality_trust_level"] == "MEDIUM"
         assert diag["v3_shadow_conviction"] == "MEDIUM"
 
         summary = summarize_guardrail_impact_observability([diag])
-        assert summary["buy_conviction_capped_count"] == 1
-        assert summary["buy_high_conviction_pre_guardrail_count"] == 1
+        assert summary["buy_conviction_capped_count"] == 0
+        assert summary["guardrail_evaluated_count"] == 1
 
 
 # ── Test 3: HOLD cards — truth diagnostics populated, guardrail not triggered ─

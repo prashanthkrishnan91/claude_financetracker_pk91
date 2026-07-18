@@ -10,6 +10,7 @@
  */
 
 import { cn } from "@/lib/utils";
+import { extractHoldingRationale } from "@/lib/visibleIntelActions";
 import type { IntelV3HeldCard } from "@/lib/api";
 import {
   ActionGlyph,
@@ -28,8 +29,14 @@ interface IntelV3CardProps {
 export function IntelV3Card({ card, onSelect }: IntelV3CardProps) {
   const t = ACTION_TOKEN_STYLES[card.action] ?? ACTION_TOKEN_STYLES.HOLD;
   const intelCtx = card.detail_drawer_payload?.asset_intelligence_context;
-  // Prefer composer why_this_action over generic action_text fallback.
-  const whyText = card.why_text || intelCtx?.why_this_action || card.action_text;
+  // Canonical rationale (visibleIntelActions.extractHoldingRationale):
+  // why_text -> asset_intelligence_context.why_this_action -> action_text,
+  // trimmed. The panel already partitions unexplained cards out, but the
+  // card fails closed at its own boundary too — no rationale, no card.
+  const whyText = extractHoldingRationale(card);
+  if (whyText === null) {
+    return null;
+  }
   const isThinData = card.evidence_band === "THIN";
   // Show role/lens chip for non-stock assets where the role adds meaning.
   const showRoleLens = intelCtx?.role_lens &&
@@ -46,7 +53,7 @@ export function IntelV3Card({ card, onSelect }: IntelV3CardProps) {
         // Respect reduced-motion
         "motion-reduce:transition-none"
       )}
-      aria-label={`${card.ticker} — ${card.action}. ${(whyText ?? "").slice(0, 80)}`}
+      aria-label={`${card.ticker} — ${card.action}. ${whyText.slice(0, 80)}`}
     >
       {/* Row 1 — Action badge left, ticker right */}
       <div className="flex items-start justify-between gap-2 mb-2.5">
@@ -80,7 +87,7 @@ export function IntelV3Card({ card, onSelect }: IntelV3CardProps) {
 
       {/* Row 2 — Plain-English why_text */}
       <p className="text-xs text-text-secondary leading-relaxed mb-2 line-clamp-2 min-h-[2.5rem]">
-        {whyText ?? ""}
+        {whyText}
       </p>
 
       {/* Row 2b — Role / Lens chip (ETF, commodity, crypto only) */}

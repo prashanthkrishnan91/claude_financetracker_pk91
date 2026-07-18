@@ -6,4 +6,3 @@ from .portfolio import *
 from .transaction import *
 from .recommendation import *
 from .price import *
-from .deposit import *

@@ -27,6 +27,8 @@ from __future__ import annotations
 import re
 from typing import Optional
 
+from ...policy_tickers import kernel_crypto_tickers as _load_kernel_crypto_tickers
+
 from .buy_conviction_guardrail import apply_buy_conviction_guardrail_by_band
 from .decision_contracts import (
     ActionV3,
@@ -38,6 +40,11 @@ from .decision_contracts import (
     PriceBand,
     RiskBand,
 )
+
+# Crypto tickers recognized by the kernel's plain-English reason builder.
+# Membership is configuration (app/policy_tickers.json), not code; the config
+# load happens in the loader module, keeping this kernel free of its own IO.
+_KERNEL_CRYPTO_TICKERS: frozenset[str] = _load_kernel_crypto_tickers()
 
 # Raw metric key names that must never appear in visible rationale text.
 _FORBIDDEN_KEYS: frozenset[str] = frozenset({
@@ -184,9 +191,7 @@ def _build_rationale(
 
     hint = (asset_type_hint or "stock").lower()
     is_etf = "etf" in hint
-    is_crypto = "crypto" in hint or ticker.upper() in {
-        "BTC", "ETH", "XRP", "SOL", "BNB", "ADA", "DOGE"
-    }
+    is_crypto = "crypto" in hint or ticker.upper() in _KERNEL_CRYPTO_TICKERS
 
     # Best available driver text (cleaned, safe for display).
     driver = _clean_evidence_text(primary_driver)

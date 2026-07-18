@@ -521,10 +521,20 @@ class TestEnqueueObservability:
         async def _fake_to_thread(fn, *args, **kwargs):
             return _FakeEnqueueResult()
 
+        # Force the fast freshness gate to fail so enqueue_run_v3 takes the
+        # safe-degradation path (all tickers treated as stale and enqueued) —
+        # the gate cannot produce a meaningful result against these mocks.
+        async def _gate_unavailable(*args, **kwargs):
+            raise RuntimeError("freshness gate unavailable in unit test")
+
         with _patch.object(svc, "get_latest_snapshot", _fake_get_latest):
             with _patch.object(svc, "_get_active_tickers", _fake_get_tickers):
                 with _patch("asyncio.to_thread", side_effect=_fake_to_thread):
-                    result = await svc.enqueue_run_v3()
+                    with _patch(
+                        "app.services.intelligence.v3.intel_v3_fast_freshness_gate_v1.run_fast_freshness_gate",
+                        side_effect=_gate_unavailable,
+                    ):
+                        result = await svc.enqueue_run_v3()
 
         assert result["certified_snapshot_available_on_click"] is True
         assert "run_click_response_ms" in result
@@ -691,6 +701,11 @@ class TestNoLLMWaitOnClick:
 
         from unittest.mock import patch as _patch
 
+        # Force the fast freshness gate to fail so the safe-degradation path
+        # (enqueue all tickers) runs — the gate is meaningless against mocks.
+        async def _gate_unavailable(*args, **kwargs):
+            raise RuntimeError("freshness gate unavailable in unit test")
+
         with _patch.object(svc, "get_latest_snapshot", _fake_get_latest):
             with _patch.object(svc, "_get_active_tickers", _fake_get_tickers):
                 with _patch("asyncio.to_thread", side_effect=_fake_to_thread):
@@ -698,6 +713,9 @@ class TestNoLLMWaitOnClick:
                     with _patch(
                         "app.services.intelligence.v3.intel_v3_service.decide",
                         side_effect=lambda *a, **kw: llm_called.append(1) or [],
+                    ), _patch(
+                        "app.services.intelligence.v3.intel_v3_fast_freshness_gate_v1.run_fast_freshness_gate",
+                        side_effect=_gate_unavailable,
                     ):
                         result = await svc.enqueue_run_v3()
 

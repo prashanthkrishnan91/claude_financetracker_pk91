@@ -15,14 +15,11 @@ import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 import {
   useIntelV3Snapshot,
-  useDeployV3Plan,
-  useAlertCandidates,
   usePortfolioSummary,
   usePlaidStatus,
 } from "@/lib/hooks";
 import { buildDataHealthRows } from "@/lib/intel-v3-evidence";
 import { TrustStatusRow } from "./TrustPrimitives";
-import { ComingLaterPanel } from "./IntelV3Primitives";
 
 interface DataHealthDrawerProps {
   open: boolean;
@@ -37,12 +34,14 @@ function CloseIcon() {
   );
 }
 
+const FOCUSABLE_SELECTOR =
+  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
 export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
   const closeRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLElement>(null);
 
   const { data: intelSnapshot } = useIntelV3Snapshot();
-  const { data: deployPlan } = useDeployV3Plan();
-  const { data: alertCandidates } = useAlertCandidates(50);
   const { data: portfolioSummary } = usePortfolioSummary();
   const { data: plaidStatus } = usePlaidStatus();
 
@@ -59,13 +58,46 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
     if (open) closeRef.current?.focus();
   }, [open]);
 
+  // Simple focus trap while the dialog is open: Tab cycles within the panel.
+  // On close, focus returns to the element that opened the drawer.
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusables = Array.from(
+        panel.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)
+      );
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      const inside = active instanceof HTMLElement && panel.contains(active);
+      if (e.shiftKey) {
+        if (!inside || active === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (!inside || active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handler);
+    return () => {
+      document.removeEventListener("keydown", handler);
+      previouslyFocused?.focus();
+    };
+  }, [open]);
+
   if (!open) return null;
 
   const rows = buildDataHealthRows({
     intelSnapshotSource: intelSnapshot?.snapshot_source ?? null,
     intelFreshnessState: intelSnapshot?.evidence_freshness_state ?? null,
-    deployReadinessStatus: deployPlan?.rollup?.plan_readiness_status ?? null,
-    alertCandidateCount: alertCandidates?.length ?? null,
     pricesFresh: portfolioSummary?.prices_fresh ?? null,
     pricesStale: portfolioSummary?.prices_stale ?? null,
     plaidStatus: plaidStatus?.status ?? null,
@@ -83,6 +115,7 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
 
       {/* Drawer panel — mobile: bottom sheet; desktop: right-side drawer */}
       <aside
+        ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="data-health-title"
@@ -152,18 +185,6 @@ export function DataHealthDrawer({ open, onClose }: DataHealthDrawerProps) {
                 />
               ))}
             </div>
-          </div>
-
-          <div className="border-t border-border" />
-
-          {/* Coming-Later: Source Room modules */}
-          <div className="space-y-3">
-            <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-              Preparing for the next intelligence stage
-            </p>
-            <ComingLaterPanel title="Source credibility tier" />
-            <ComingLaterPanel title="Contradiction detection" />
-            <ComingLaterPanel title="Evidence completeness score" />
           </div>
 
         </div>

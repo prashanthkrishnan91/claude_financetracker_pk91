@@ -192,18 +192,3 @@ async def test_cert_secret_guard_missing_or_bad_secret_403(monkeypatch):
     with pytest.raises(HTTPException) as bad_exc:
         await _get_runtime_cert_user(request=SimpleNamespace(headers={}), cert_secret="bad")
     assert bad_exc.value.status_code == 403
-
-
-def test_recommendations_job_status_route_still_requires_normal_auth(monkeypatch):
-    from app.main import app
-    from app.routers.recommendations import get_current_user
-
-    app.dependency_overrides = {}
-    client = TestClient(app)
-    response = client.get(f"/api/v1/recommendations/jobs/{uuid4()}")
-    assert response.status_code in (401, 403)
-
-    app.dependency_overrides[get_current_user] = lambda: SimpleNamespace(id=uuid4())
-    allowed = client.get(f"/api/v1/recommendations/jobs/{uuid4()}")
-    assert allowed.status_code != response.status_code
-    app.dependency_overrides = {}

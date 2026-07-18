@@ -84,25 +84,10 @@ export interface DataHealthRow {
 export interface DataHealthInput {
   intelSnapshotSource?: string | null;
   intelFreshnessState?: string | null;
-  deployReadinessStatus?: string | null;
-  alertCandidateCount?: number | null;
   pricesFresh?: number | null;
   pricesStale?: number | null;
   plaidStatus?: string | null;
   plaidLastSyncedAt?: string | null;
-}
-
-function deployReadinessLabel(status: string): string {
-  switch (status) {
-    case "ready_pending_guardrails": return "Plan ready — awaiting guardrails";
-    case "partially_ready":          return "Partially ready";
-    case "no_items":                 return "No plan items";
-    case "blocked":                  return "Blocked";
-    case "all_suppressed":           return "All items suppressed";
-    case "all_informational":        return "Informational only";
-    case "not_ready":                return "Not ready";
-    default:                         return status.replace(/_/g, " ");
-  }
 }
 
 /**
@@ -113,8 +98,6 @@ export function buildDataHealthRows(input: DataHealthInput): DataHealthRow[] {
   const {
     intelSnapshotSource,
     intelFreshnessState,
-    deployReadinessStatus,
-    alertCandidateCount,
     pricesFresh,
     pricesStale,
     plaidStatus,
@@ -155,35 +138,6 @@ export function buildDataHealthRows(input: DataHealthInput): DataHealthRow[] {
       : UNAVAILABLE_DETAIL,
   });
 
-  // Deploy readiness
-  rows.push({
-    label: "Deploy readiness",
-    status:
-      deployReadinessStatus == null ? "unavailable"
-      : ["no_items", "blocked", "all_suppressed", "not_ready"].includes(deployReadinessStatus)
-        ? "unavailable"
-      : deployReadinessStatus === "ready_pending_guardrails" || deployReadinessStatus === "partially_ready"
-        ? "pending"
-      : "ok",
-    detail: deployReadinessStatus != null
-      ? deployReadinessLabel(deployReadinessStatus)
-      : UNAVAILABLE_DETAIL,
-  });
-
-  // Watchtower alerts
-  rows.push({
-    label: "Watchtower alerts",
-    status:
-      alertCandidateCount == null ? "unavailable"
-      : alertCandidateCount > 0 ? "ok"
-      : "pending",
-    detail:
-      alertCandidateCount == null ? UNAVAILABLE_DETAIL
-      : alertCandidateCount > 0
-        ? `${alertCandidateCount} candidate${alertCandidateCount !== 1 ? "s" : ""} available`
-      : "No active alert candidates",
-  });
-
   // Price data
   {
     const fresh = pricesFresh ?? null;
@@ -215,13 +169,6 @@ export function buildDataHealthRows(input: DataHealthInput): DataHealthRow[] {
       : plaidStatus === "connected"
         ? `Connected — last synced ${formatUpdatedAtSafe(plaidLastSyncedAt)}`
       : plaidStatus.replace(/_/g, " "),
-  });
-
-  // Email delivery safety — static honest current-state copy
-  rows.push({
-    label: "Email delivery safety",
-    status: "ok",
-    detail: "Dry-run mode — no emails sent",
   });
 
   return rows;

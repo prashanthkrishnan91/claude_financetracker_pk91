@@ -476,7 +476,16 @@ def test_entrypoint_single_pass_calls_worker(capsys):
     from app.services.alert.alert_email_delivery_worker_entrypoint import main
 
     mock_result = {"scanned": 0, "sent": 0, "failed": 0, "skipped": 0, "dry_run": True, "provider": "none"}
-    with patch.dict("os.environ", {"ALERT_EMAIL_DELIVERY_ENABLED": "true"}):
+    # Current contract: the entrypoint is additionally gated by the master
+    # background-workers kill switch (INTEL_BACKGROUND_WORKERS_ENABLED); both
+    # flags must be truthy for a delivery pass to run.
+    with patch.dict(
+        "os.environ",
+        {
+            "ALERT_EMAIL_DELIVERY_ENABLED": "true",
+            "INTEL_BACKGROUND_WORKERS_ENABLED": "true",
+        },
+    ):
         with patch(
             "app.services.alert.alert_email_delivery_worker_entrypoint._run_one_pass",
             return_value=mock_result,

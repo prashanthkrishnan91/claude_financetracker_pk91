@@ -286,3 +286,239 @@ async def test_endpoint_delegates_to_stage_12c_service_and_is_read_only(monkeypa
     assert result["allocation_summary"]["unallocated_cash"] >= 0
     assert "next_buy_candidates" not in result
     assert "current_portfolio" not in result
+
+
+# ── Consolidation: plan explanation buckets (Advisor cash-plan section) ───────
+
+
+def _evidence_aware_diagnostic() -> dict:
+    """Ready diagnostic with one selected stock and several blocked tickers,
+    mirroring the Stage 13A/13C production gate fields."""
+    diag = _ready_diagnostic()
+    diag["next_buy_candidates"] = diag["next_buy_candidates"] + [{
+        "ticker": "NVDA",
+        "dollar_amount": 500.0,
+        "gap_pct": 3.0,
+        "classification": "individual_stock",
+        "asset_type": "equity",
+        "candidate_source": "evidence_aware_stock_ranking_v1",
+        "confidence_label": "high_confidence_evidence",
+        "reason_codes": ["evidence_fresh_and_constructive", "positive_gap"],
+        "is_unknown_ticker": False,
+    }]
+    diag["cash_plan"] = {**diag["cash_plan"], "allocated_cash": 3237.5, "allocation_count": 3}
+    diag["input"] = {**diag["input"], "cash_to_deploy": 3237.5}
+    diag["target_vs_current"]["by_ticker"] = {
+        "MSFT": {
+            "ticker": "MSFT", "group": "individual_stock",
+            "gap_pct": 2.0, "eligible_for_buy": False,
+            "ineligibility_reason": "individual_stock_group_above_target",
+            "policy_ineligibility_reason": "individual_stock_group_above_target",
+            "evidence_gate_passed": True, "evidence_gate_codes": [],
+        },
+        "CRM": {
+            "ticker": "CRM", "group": "individual_stock",
+            "gap_pct": 1.0, "eligible_for_buy": False,
+            "ineligibility_reason": "evidence_gate_failed:evidence_signal_not_constructive",
+            "policy_ineligibility_reason": None,
+            "evidence_gate_passed": False,
+            "evidence_gate_codes": ["evidence_signal_not_constructive"],
+        },
+        "QQQ": {
+            "ticker": "QQQ", "group": "broad_index_etf",
+            "gap_pct": -1.0, "eligible_for_buy": False,
+            "ineligibility_reason": "etf_group_broad_index_etf_already_above_target",
+            "policy_ineligibility_reason": "etf_group_broad_index_etf_already_above_target",
+            "evidence_gate_passed": None, "evidence_gate_codes": [],
+        },
+    }
+    diag["stock_candidates"] = {
+        "status": "enabled",
+        "held_tickers": ["NVDA", "MSFT", "CRM"],
+        "selected_tickers": ["NVDA"],
+        "blocked_by_evidence_tickers": ["CRM"],
+        "blocked_by_policy_tickers": ["MSFT"],
+        "evidence_eligible_but_policy_blocked_tickers": ["MSFT"],
+        "policy_block_reason_codes": {"MSFT": "individual_stock_group_above_target"},
+    }
+    return diag
+
+
+def test_preview_includes_generated_at_and_explanations_keys():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_ready_diagnostic())
+    assert preview["generated_at"] == "2026-07-08T00:00:00Z"
+    assert set(preview["explanations"].keys()) == {"selected", "not_selected", "plan_notes"}
+
+
+def test_selected_entries_carry_amount_percent_reasons_and_role():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_ready_diagnostic())
+    sel = preview["explanations"]["selected"]
+    assert [e["ticker"] for e in sel] == ["VTI", "SPY"]
+    vti = sel[0]
+    assert vti["amount"] == 1737.5
+    assert vti["percent_of_deployable_cash"] == round(100 * 1737.5 / 2737.5, 2)
+    assert vti["policy_role"] == "Fills the 40% ETF allocation floor"
+    assert vti["raw_codes"] == ["etf_floor_not_met", "core_etf_preference", "preferred_vti_over_spy"]
+    assert all(isinstance(r, str) and "_" not in r[:1] for r in vti["reasons"])
+
+
+def test_selected_stock_carries_evidence_action_and_band():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_evidence_aware_diagnostic())
+    nvda = next(e for e in preview["explanations"]["selected"] if e["ticker"] == "NVDA")
+    assert nvda["evidence"] == {"action": "BUY", "evidence_band": "STRONG"}
+    assert nvda["asset_type"] == "equity"
+    assert nvda["policy_role"] is None
+
+
+def test_evidence_eligible_but_policy_blocked_bucket():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_evidence_aware_diagnostic())
+    msft = next(e for e in preview["explanations"]["not_selected"] if e["ticker"] == "MSFT")
+    assert msft["bucket"] == "evidence_eligible_policy_blocked"
+    assert "passed Intel evidence" in msft["plain_english"]
+    assert "individual_stock_group_above_target" in msft["raw_codes"]
+
+
+def test_evidence_blocked_bucket_translates_hold_gate():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_evidence_aware_diagnostic())
+    crm = next(e for e in preview["explanations"]["not_selected"] if e["ticker"] == "CRM")
+    assert crm["bucket"] == "evidence_blocked"
+    assert "HOLD" in crm["plain_english"]
+    assert "evidence_signal_not_constructive" in crm["raw_codes"]
+
+
+def test_group_cap_blocked_bucket_for_etf_above_target():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_evidence_aware_diagnostic())
+    qqq = next(e for e in preview["explanations"]["not_selected"] if e["ticker"] == "QQQ")
+    assert qqq["bucket"] == "group_cap_blocked"
+    assert "above its target" in qqq["plain_english"]
+
+
+def test_etf_only_plan_note_when_stocks_policy_blocked():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _evidence_aware_diagnostic()
+    diag["next_buy_candidates"] = [c for c in diag["next_buy_candidates"] if c["ticker"] != "NVDA"]
+    diag["stock_candidates"] = {
+        **diag["stock_candidates"],
+        "status": "blocked_by_policy_caps",
+        "selected_tickers": [],
+    }
+    preview = build_paycheck_plan_preview(diag)
+    notes = " ".join(preview["explanations"]["plan_notes"])
+    assert "ETF-only" in notes
+    assert "individual-stock sleeve is already above its policy target" in notes
+
+
+def test_etf_only_plan_note_when_evidence_insufficient():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _ready_diagnostic()
+    diag["stock_candidates"] = {
+        "status": "blocked_insufficient_evidence",
+        "held_tickers": ["NVDA"], "selected_tickers": [],
+        "blocked_by_evidence_tickers": ["NVDA"],
+        "blocked_by_policy_tickers": [],
+        "evidence_eligible_but_policy_blocked_tickers": [],
+        "policy_block_reason_codes": {},
+    }
+    preview = build_paycheck_plan_preview(diag)
+    notes = " ".join(preview["explanations"]["plan_notes"])
+    assert "ETF-only" in notes and "evidence" in notes
+
+
+def test_stale_and_missing_price_buckets():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _degraded_diagnostic()
+    diag["truth_dependency"]["missing_price_tickers"] = ["KLAR"]
+    preview = build_paycheck_plan_preview(diag)
+    buckets = {e["ticker"]: e["bucket"] for e in preview["explanations"]["not_selected"]}
+    assert buckets.get("VTI") == "stale_price_blocked"
+    assert buckets.get("KLAR") == "missing_truth_blocked"
+    # Degraded plans still explain themselves but select nothing.
+    assert preview["explanations"]["selected"] == []
+
+
+def test_max_positions_reached_bucket():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _ready_diagnostic()
+    diag["input"] = {**diag["input"], "max_positions": 2}
+    diag["target_vs_current"]["by_ticker"] = {
+        "SCHD": {
+            "ticker": "SCHD", "group": "dividend_etf", "gap_pct": 2.0,
+            "eligible_for_buy": True, "ineligibility_reason": None,
+            "policy_ineligibility_reason": None,
+            "evidence_gate_passed": None, "evidence_gate_codes": [],
+        },
+    }
+    preview = build_paycheck_plan_preview(diag)
+    schd = next(e for e in preview["explanations"]["not_selected"] if e["ticker"] == "SCHD")
+    assert schd["bucket"] == "max_positions_reached"
+    assert "maximum of 2 positions" in schd["plain_english"]
+
+
+def test_below_minimum_trade_bucket():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _ready_diagnostic()
+    diag["target_vs_current"]["by_ticker"] = {
+        "SCHD": {
+            "ticker": "SCHD", "group": "dividend_etf", "gap_pct": 2.0,
+            "eligible_for_buy": True, "ineligibility_reason": None,
+            "policy_ineligibility_reason": None,
+            "evidence_gate_passed": None, "evidence_gate_codes": [],
+        },
+    }
+    preview = build_paycheck_plan_preview(diag)
+    schd = next(e for e in preview["explanations"]["not_selected"] if e["ticker"] == "SCHD")
+    assert schd["bucket"] == "below_minimum_trade"
+    assert "$25 minimum trade" in schd["plain_english"]
+
+
+def test_no_eligible_candidates_note():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    diag = _ready_diagnostic()
+    diag["next_buy_candidates"] = []
+    diag["cash_plan"] = {**diag["cash_plan"], "allocated_cash": 0.0,
+                          "allocation_count": 0,
+                          "no_buy_reason": "no_eligible_buy_candidates"}
+    preview = build_paycheck_plan_preview(diag)
+    notes = " ".join(preview["explanations"]["plan_notes"])
+    assert "No holding is currently eligible" in notes
+
+
+def test_explanations_never_expose_untranslated_codes_in_plain_english():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_evidence_aware_diagnostic())
+    for entry in preview["explanations"]["not_selected"]:
+        # Raw codes live only in raw_codes; the visible sentence is prose.
+        assert "policy_ineligibility_reason" not in entry["plain_english"]
+        assert not entry["plain_english"].startswith("evidence_")
+        assert entry["raw_codes"] is not None
+
+
+def test_existing_stage_12d_contract_keys_unchanged():
+    from app.routers.paycheck_plan_preview import build_paycheck_plan_preview
+
+    preview = build_paycheck_plan_preview(_ready_diagnostic())
+    for key in ("preview_version", "cash_to_deploy", "trusted", "status", "planned_buys",
+                "allocation_summary", "data_freshness_status", "caveats",
+                "next_required_fix", "recommendations_trusted", "source_diagnostic_version"):
+        assert key in preview
+    for buy in preview["planned_buys"]:
+        assert set(buy.keys()) == {"ticker", "amount", "reason", "reason_codes"}

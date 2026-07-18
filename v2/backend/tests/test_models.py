@@ -14,7 +14,6 @@ from app.models.portfolio import SnapshotCreate, PortfolioSummary, TargetAllocat
 from app.models.transaction import TransactionCreate, TransactionImportResult
 from app.models.recommendation import RecommendationBase, InsightCard, DecisionLogCreate
 from app.models.price import PriceQuote, PriceHistoryPoint, BatchPriceRequest
-from app.models.deposit import DepositPlanCreate, DepositSchedule
 
 
 class TestUserModels:
@@ -213,12 +212,3 @@ class TestPriceModels:
         assert point.close_price == 875.22
 
 
-class TestDepositModels:
-    def test_deposit_plan_create(self):
-        plan = DepositPlanCreate(
-            deposit_date=date(2026, 4, 17),
-            amount=Decimal("900.00"),
-            allocation={"NVDA": 252.0, "VOO": 198.0, "VYM": 153.0, "QQQ": 153.0, "GOOGL": 144.0},
-            rotating_pick="GOOGL",
-        )
-        assert sum(plan.allocation.values()) == 900.0

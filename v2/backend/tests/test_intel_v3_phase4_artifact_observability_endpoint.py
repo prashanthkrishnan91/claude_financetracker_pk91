@@ -327,27 +327,74 @@ class TestEndpointStaticGuards:
                 lines.append(ast.unparse(node))
         return lines
 
-    def test_diagnostics_endpoint_does_not_import_decision_policy_v1(self):
-        """diagnostics.py must not import decision_policy_v1 — check only imports."""
-        import_lines = self._import_lines()
-        assert not any("decision_policy_v1" in line for line in import_lines), (
-            "diagnostics.py must not import decision_policy_v1"
-        )
+    # Current contract (Stage 6 governance diagnostics): decide() /
+    # decision_policy_v1 may only be used lazily inside the env-gated Stage 6
+    # governance endpoint (get_stage6_evidence_governance_diagnostics) — never
+    # at module level and never in the Phase 4 observability endpoint.
+    _DECIDE_ALLOWED_FUNCS = {"get_stage6_evidence_governance_diagnostics"}
 
-    def test_diagnostics_module_does_not_call_decide(self):
-        """diagnostics.py must not contain AST-level decide() function calls."""
+    def test_diagnostics_endpoint_does_not_import_decision_policy_v1(self):
+        """decision_policy_v1 imports confined to the Stage 6 governance endpoint."""
         import ast
         mod = importlib.import_module("app.routers.diagnostics")
         src = inspect.getsource(mod)
         tree = ast.parse(src)
-        decide_calls = [
-            node for node in ast.walk(tree)
+        # Never at module level.
+        for node in tree.body:
+            if isinstance(node, (ast.Import, ast.ImportFrom)):
+                assert "decision_policy_v1" not in ast.unparse(node), (
+                    "diagnostics.py must not import decision_policy_v1 at module level"
+                )
+        # Function-local imports only inside the allowed endpoint.
+        offending = []
+        for func in ast.walk(tree):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if func.name in self._DECIDE_ALLOWED_FUNCS:
+                    continue
+                for sub in ast.walk(func):
+                    if isinstance(sub, (ast.Import, ast.ImportFrom)) and (
+                        "decision_policy_v1" in ast.unparse(sub)
+                    ):
+                        offending.append(func.name)
+        assert offending == [], (
+            f"decision_policy_v1 imported outside the Stage 6 governance "
+            f"endpoint: {offending}"
+        )
+
+    def test_diagnostics_module_does_not_call_decide(self):
+        """decide() AST calls confined to the Stage 6 governance endpoint."""
+        import ast
+        mod = importlib.import_module("app.routers.diagnostics")
+        src = inspect.getsource(mod)
+        tree = ast.parse(src)
+        offending = []
+        for func in ast.walk(tree):
+            if isinstance(func, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if func.name in self._DECIDE_ALLOWED_FUNCS:
+                    continue
+                for sub in ast.walk(func):
+                    if isinstance(sub, ast.Call) and (
+                        (isinstance(sub.func, ast.Name) and sub.func.id == "decide")
+                        or (isinstance(sub.func, ast.Attribute) and sub.func.attr == "decide")
+                    ):
+                        offending.append(func.name)
+        # Also guard against decide() calls at module level (outside any function).
+        funcs_spans = [
+            (f.lineno, max(getattr(f, "end_lineno", f.lineno), f.lineno))
+            for f in ast.walk(tree)
+            if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        for node in ast.walk(tree):
             if isinstance(node, ast.Call) and (
                 (isinstance(node.func, ast.Name) and node.func.id == "decide")
                 or (isinstance(node.func, ast.Attribute) and node.func.attr == "decide")
-            )
-        ]
-        assert decide_calls == [], f"diagnostics.py makes decide() AST calls: {decide_calls}"
+            ):
+                inside_func = any(lo <= node.lineno <= hi for lo, hi in funcs_spans)
+                assert inside_func, "diagnostics.py must not call decide() at module level"
+        assert offending == [], (
+            f"diagnostics.py calls decide() outside the Stage 6 governance "
+            f"endpoint: {offending}"
+        )
 
     def test_observe_endpoint_docstring_states_no_decide(self):
         """Confirm the endpoint docstring explicitly states the decide() prohibition."""

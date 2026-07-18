@@ -130,12 +130,6 @@ describe("Stage 4D — data health rows render unavailable honestly", () => {
     }
   });
 
-  it("email delivery row is always ok with static dry-run copy — no Railway log ingestion", () => {
-    const rows = buildDataHealthRows({});
-    const emailRow = rows.find((r) => r.label === "Email delivery safety")!;
-    expect(emailRow.status).toBe("ok");
-    expect(emailRow.detail).toContain("Dry-run");
-  });
 
   it("DataHealthStatus type covers all 4 valid values", () => {
     const validStatuses: DataHealthStatus[] = ["ok", "pending", "unavailable", "blocked"];
@@ -168,8 +162,6 @@ describe("Stage 4D — no fake Stage 5/6 intelligence appears as live data", () 
     const rows = buildDataHealthRows({
       intelSnapshotSource: "worker_certified",
       intelFreshnessState: "certified_current",
-      deployReadinessStatus: "ready_pending_guardrails",
-      alertCandidateCount: 5,
       pricesFresh: 10,
       pricesStale: 0,
       plaidStatus: "connected",
@@ -262,14 +254,11 @@ describe("Stage 4D — data health canonical label set", () => {
   const CANONICAL_LABELS = [
     "Intel snapshot",
     "Evidence freshness",
-    "Deploy readiness",
-    "Watchtower alerts",
     "Price data",
     "Broker sync",
-    "Email delivery safety",
   ];
 
-  it("buildDataHealthRows returns exactly the canonical 7 labels", () => {
+  it("buildDataHealthRows returns exactly the canonical 4 labels", () => {
     const rows = buildDataHealthRows({});
     const labels = rows.map((r) => r.label);
     expect(labels).toHaveLength(CANONICAL_LABELS.length);

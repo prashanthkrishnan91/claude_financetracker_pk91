@@ -55,3 +55,6 @@ GEMINI.md
 # ── AI usage snapshots (local only, never committed) ─────────────────────────
 .ai/usage/
 **/.ai/usage/
+
+# Local runtime-proof artifacts — never commit process state
+*.pid

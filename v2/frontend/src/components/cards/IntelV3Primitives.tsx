@@ -2,9 +2,9 @@
 
 import { cn } from "@/lib/utils";
 import type { IntelV3Action, IntelV3Conviction, IntelV3EvidenceBand } from "@/lib/api";
-import { ACTION_TOKEN_STYLES, COMING_LATER_CANONICAL_CAPTION } from "./IntelV3PrimitivesData";
+import { ACTION_TOKEN_STYLES } from "./IntelV3PrimitivesData";
 
-export { ACTION_TOKEN_STYLES, COMING_LATER_CANONICAL_CAPTION };
+export { ACTION_TOKEN_STYLES };
 
 // ── ActionGlyph ───────────────────────────────────────────────────────────────
 export function ActionGlyph({
@@ -142,34 +142,5 @@ export function DataMissingPill({
     >
       {label}
     </span>
-  );
-}
-
-// ── ComingLaterPanel ──────────────────────────────────────────────────────────
-// Coming-Later chrome for future Stage 5/6 intelligence modules.
-// Renders exactly one calm caption — no fake content.
-export function ComingLaterPanel({
-  title,
-  caption,
-  className,
-}: {
-  title: string;
-  caption?: string;
-  className?: string;
-}) {
-  return (
-    <div
-      className={cn(
-        "rounded-lg border border-dashed border-border bg-surface/40 px-4 py-4",
-        className
-      )}
-    >
-      <p className="text-[10px] font-semibold uppercase tracking-widest text-text-muted">
-        {title}
-      </p>
-      <p className="text-xs text-text-muted mt-1 leading-snug">
-        {caption ?? COMING_LATER_CANONICAL_CAPTION}
-      </p>
-    </div>
   );
 }

@@ -468,11 +468,15 @@ def _make_republisher_client(
     client = MagicMock()
     uid = str(uuid.uuid4())
 
-    intel_payload = {
-        "snapshot_id": _SNAP_ID,
-        "generated_at": intel_generated_at,
+    # Migration 024: _fetch_latest_intel_snapshot reads flat metadata columns
+    # (payload_generated_at, contract booleans) instead of the payload JSONB.
+    intel_row = {
+        "source_hash": f"hash-{_SNAP_ID}",
         "snapshot_source": "worker_certified",
+        "payload_generated_at": intel_generated_at,
         "evidence_mapping_version": intel_mapping_version,
+        "stage7_contract_complete": True,
+        "stage8e_contract_complete": True,
     }
 
     def _make_chain(return_data: list[dict]):
@@ -484,7 +488,7 @@ def _make_republisher_client(
         chain.execute.return_value = MagicMock(data=return_data)
         return chain
 
-    intel_chain = _make_chain([{"payload": intel_payload}])
+    intel_chain = _make_chain([intel_row])
     portfolio_chain = _make_chain([{"id": uid, "snapshot_at": portfolio_snapshot_at}])
 
     def _table_router(table_name: str):
@@ -641,11 +645,15 @@ def _make_analyst_eligibility_client(
 ) -> MagicMock:
     """Build a minimal client mock for republish_after_analyst_eligibility tests."""
     client = MagicMock()
-    intel_payload = {
-        "snapshot_id": _SNAP_ID,
-        "generated_at": intel_generated_at,
+    # Migration 024: _fetch_latest_intel_snapshot reads flat metadata columns
+    # (payload_generated_at, contract booleans) instead of the payload JSONB.
+    intel_row = {
+        "source_hash": f"hash-{_SNAP_ID}",
         "snapshot_source": "worker_certified",
+        "payload_generated_at": intel_generated_at,
         "evidence_mapping_version": intel_mapping_version,
+        "stage7_contract_complete": True,
+        "stage8e_contract_complete": True,
     }
 
     chain = MagicMock()
@@ -653,7 +661,7 @@ def _make_analyst_eligibility_client(
     chain.eq.return_value = chain
     chain.order.return_value = chain
     chain.limit.return_value = chain
-    chain.execute.return_value = MagicMock(data=[{"payload": intel_payload}])
+    chain.execute.return_value = MagicMock(data=[intel_row])
     client.table.return_value = chain
     return client
 

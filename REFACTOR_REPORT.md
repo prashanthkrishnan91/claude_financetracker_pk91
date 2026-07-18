@@ -430,3 +430,72 @@ plain-English buckets (selected / evidence_eligible_policy_blocked / evidence_bl
 concentration_blocked / group_cap_blocked / stale_price_blocked / missing_truth_blocked /
 below_minimum_trade / max_positions_reached). No allocation math added or changed; Stage 12D keys
 untouched; raw codes preserved for expandable technical detail. 14 new tests.
+
+## Phase 3/4/5 (frontend) — the three views (record)
+
+Built by bounded parallel subagents against the existing design system (Obsidian tokens,
+`card-glass`/`data-card`/`action-badge-*`/`btn-*` classes, serif display + mono numerals), no new
+theme, no new dependencies:
+
+- **Positions** (`/dashboard/positions` + `lib/positions-view.ts`, `lib/tax-lots.ts`): summary band
+  (value, cost basis, unrealized G/L $/%, cash-or-unavailable, equities/ETF/crypto split, top
+  concentration, snapshot freshness + stale-price warning), honest degraded totals (P&L only over
+  the priced subset), keyboard-operable holding expansion with per-holding Intel action/evidence/
+  freshness or "No certified Intel", lazily-loaded reconciliation-gated tax lots with the exact
+  backend message when blocked, import/settings header links, loading/empty/auth/error/stale/
+  no-snapshot states. 42 helper tests.
+- **Advisor** (`/dashboard/advisor` + `lib/advisor-readiness.ts`, `lib/advisor-cash-plan.ts`,
+  `components/advisor/*`): Section A readiness + bounded Run Intel state machine
+  (idle/running/partial/complete/failed/queue_only; "Continue Intel run" on partial; retry on
+  failure; plain-English translation of every `next_required_action` code; job counters +
+  bounded-stop reason; aria-live progress; auto snapshot refetch; "Ready" impossible without a
+  certified fresh snapshot). Section B mounts the existing deterministic `IntelV3Cockpit`
+  unconditionally. Section C cash plan on the canonical preview endpoint with trusted badge +
+  exact blocker, per-allocation $/%/reasons/evidence-chips/policy-roles, allocated/unallocated,
+  `generated_at`, ETF-only plan notes, grouped plain-English buckets with raw codes confined to
+  technical-detail expanders, all ten required plan states. Section D collapsed trust/repair
+  drawer with exact repair actions. `?section=cash-plan` deep link. 58 tests.
+- **Watchlist** (`/dashboard/watchlist` + `lib/watchlist.ts`): add/edit/delete with validation,
+  duplicate 409 inline message, unknown-price state, migration-required 503 state, mobile-first.
+  Tests in `watchlist.test.ts`.
+
+## Phase 6 (frontend) — retirement (record)
+
+Nav reduced to exactly Positions/Advisor/Watchlist (mobile + desktop; Settings survives as a
+visually-secondary footer action); `/dashboard` → Positions; one redirect map
+(`lib/route-redirects.ts`) covers portfolio→positions, recommendations→advisor, deposits→advisor,
+paycheck-plan→advisor?section=cash-plan, alerts→advisor, journal→advisor, drip→positions,
+radar→watchlist. Deleted: the legacy LLM card stack (AgentInsightCard, AgentProgressTracker,
+PortfolioSynthesisPanel + runtime, DataQualityBanner, InsightCard), duplicate Deploy/Paycheck UI
+(DeployLedger, DeployV3 panels, PaycheckPlanPreviewCard), alerts/journal/today/portfolio-ledger
+libs, `/api/deposit-plan` proxy, and the `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` flag
+path. `api.ts`/`hooks.ts` trimmed of retired groups; `DataHealthDrawer`/`buildDataHealthRows`
+trimmed of retired Deploy/alert/email rows so no kept component calls a retired endpoint (found
+and fixed during integration review: the drawer originally kept `useDeployV3Plan` and
+`useAlertCandidates` against deleted endpoints). Kept legacy Intel contract tests modernized
+(fixture casts) so `tsc` is fully clean. New tests: 3-item nav contract, redirect-map contract,
+cert-secret safety scan.
+
+**Deleted frontend test files (each exclusively covered a deleted surface):**
+AgentInsightCard.renderingContract (4), AgentInsightCardThesisVisibility (42),
+DataQualityBanner (3), DeployV3Contract (49), DeployV3ReadinessContract (31),
+DeployV3TargetSetupContract (49), InsightCardThesis (16), PaycheckPlanPreviewContract (23 —
+cert-secret safety assertions recreated in `lib/cert-secret-safety.test.ts`),
+portfolioSynthesisRuntime (2), alert-capsules (24), alert-center (28), decision-log (11),
+deploy-ledger (62), deploy-v3-api-url (6), deploy-v3-decision-log (84), deploy-v3-step2-mapper
+(66), journal-ledger (47), portfolio-ledger (62 — the page it covered is now a redirect; the
+Positions view has its own `positions-view` helpers/tests), today-command-center (67).
+**Total: 676 tests / 19 files.**
+
+## Test-count reconciliation (final)
+
+| Suite | Baseline (main) | Final (branch) | Accounting |
+|---|---|---|---|
+| Backend | 9,003 collected (93 failed / 8,910 passed) | **8,288 passed / 0 failed** | −807 deleted with retired surfaces (790 in 27 files + 17 trimmed from 4 mixed files, enumerated above) + ~92 added (25 policy-ticker parity, 14 paycheck explanations, 16 watchlist, 36 tax lots, +1 net fixture-modernization) |
+| Frontend | 1,050 passing (28 files; +18 in 3 suites that failed to compile on main) | **511 passing / 0 failed, 16 suites** | −676 deleted with retired surfaces (19 files, enumerated above) −7 retired data-health row tests trimmed from kept suites + ~126 added (42 positions/watchlist helpers, 58 advisor, nav/redirect/cert-secret + misc) |
+| tsc | 12 errors (main) | **0 errors** | legacy test files deleted or their stale casts modernized |
+| next build | green | **green** | final route map: 3 views + import/settings/position-detail/login + redirect stubs |
+
+Every material reduction is enumerated file-by-file with the deleted production surface it
+exclusively covered (Phase 2 and Phase 6 records above); behavior that moved (cert-secret safety
+scan, positions helpers) has replacement coverage named beside it.

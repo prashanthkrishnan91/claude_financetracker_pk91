@@ -97,6 +97,75 @@ async def list_positions(
     return [_enrich_position(r, prices) for r in rows]
 
 
+@router.get("/tax-lots")
+async def get_tax_lots(
+    user: AuthenticatedUser = Depends(get_current_user),
+):
+    """Per-ticker open tax lots derived from transaction history (FIFO).
+
+    Each lot carries cost basis, holding period, short/long-term status,
+    days-until-long-term countdown, and unrealized gain + estimated tax
+    impact at the configured rates. Registered before /{ticker} so the
+    literal path wins route matching.
+    """
+    from ..services.tax_lot_engine import (
+        build_tax_lots,
+        enrich_lots_with_market,
+        summarize_ticker_lots,
+    )
+
+    settings = get_settings()
+    client = get_supabase_client()
+
+    tx_result = (
+        client.table("transactions")
+        .select("ticker,tx_type,quantity,price,tx_date")
+        .eq("user_id", str(user.id))
+        .order("tx_date")
+        .limit(10_000)
+        .execute()
+    )
+    transactions = tx_result.data or []
+
+    lots_by_ticker = build_tax_lots(
+        transactions,
+        long_term_days=settings.long_term_holding_days,
+    )
+
+    prices: dict[str, float] = {}
+    if lots_by_ticker:
+        try:
+            ps = _make_price_service()
+            price_results = await ps.fetch_prices(list(lots_by_ticker.keys()))
+            for t, pr in price_results.items():
+                if pr.is_valid:
+                    prices[t] = pr.mid_price
+        except Exception:
+            pass  # Degrade gracefully — lots render without market fields
+
+    enriched = enrich_lots_with_market(
+        lots_by_ticker,
+        prices,
+        short_term_rate=settings.tax_rate_short_term,
+        long_term_rate=settings.tax_rate_long_term,
+    )
+
+    return {
+        "tickers": {
+            ticker: {
+                "lots": lots,
+                "summary": summarize_ticker_lots(lots),
+            }
+            for ticker, lots in sorted(enriched.items())
+        },
+        "tax_rates": {
+            "short_term": settings.tax_rate_short_term,
+            "long_term": settings.tax_rate_long_term,
+        },
+        "long_term_holding_days": settings.long_term_holding_days,
+    }
+
+
 @router.get("/{ticker}", response_model=PositionWithPrice)
 async def get_position(
     ticker: str,

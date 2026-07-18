@@ -47,6 +47,15 @@ class Settings(BaseSettings):
     # ── Rate Limiting ─────────────────────────────────────────────────────────
     rate_limit_per_minute: int = 60
 
+    # ── Tax settings (tax-lot view + recommendation rationale) ───────────────
+    # Marginal rates used for the *estimated* tax impact shown in the UI.
+    # Estimates only — never tax advice. Override via env for your bracket.
+    tax_rate_short_term: float = 0.32
+    tax_rate_long_term: float = 0.15
+    long_term_holding_days: int = 365
+    # Profit-taking threshold referenced by recommendation rationale lines.
+    profit_taking_threshold_pct: float = 25.0
+
     # ── External API defaults (per-user keys stored encrypted in DB) ─────────
     # These are optional fallback keys for development/testing
     finnhub_api_key: Optional[str] = None

@@ -49,8 +49,9 @@ from ..intelligence import (
 from ..intelligence.score_schema import ScoreCard
 from ..intelligence.thesis_engine import score_thesis
 from ..intelligence.thesis_mapper import map_to_thesis_inputs
-from ..recommendation_engine import invalidate_recommendations_aggregate_cache
 from ..agent_run_status import assert_db_status
+from ..policy_tickers import benchmark_symbol as _policy_benchmark_symbol
+from ..policy_tickers import ticker_set as _policy_ticker_set
 from ..market_data.system_mode import SystemMode, get_system_mode_manager
 from ..http_retry import run_with_retry_sync
 from .data_sources import get_provider_status
@@ -1192,8 +1193,9 @@ class AgentOrchestrator:
         if not snapshots:
             return {}
 
+        bench = _policy_benchmark_symbol()
         try:
-            benchmark = await fetch_benchmark_price_action("SPY")
+            benchmark = await fetch_benchmark_price_action(bench)
         except Exception as exc:  # noqa: BLE001 — benchmark is best-effort
             logger.warning("benchmark fetch raised (swallowed): %s", exc)
             benchmark = {}
@@ -1202,7 +1204,7 @@ class AgentOrchestrator:
             snapshots,
             bundle=bundle,
             benchmark=benchmark,
-            benchmark_symbol="SPY",
+            benchmark_symbol=bench,
         )
 
         regime_counts: dict[str, int] = {}
@@ -1243,16 +1245,10 @@ class AgentOrchestrator:
 
     # ── Asset-type classification ─────────────────────────────────────────────
 
-    # Known ETF tickers — fallback when snapshot/position metadata is absent.
-    _ETF_TICKERS: frozenset[str] = frozenset({
-        "VOO", "VTI", "SPY", "QQQ", "VGT", "VIG", "VYM", "SCHD", "JEPI",
-        "JEPQ", "DIVO", "VXUS", "VEA", "VWO", "BND", "AGG", "TLT", "GLD",
-        "IAU", "SLV", "DBC", "USO", "IWM", "EFA", "ARKG", "ARKK",
-    })
-    _CRYPTO_TICKERS: frozenset[str] = frozenset({
-        "BTC", "ETH", "XRP", "SOL", "ADA", "DOGE", "AVAX", "MATIC",
-        "BTC-USD", "ETH-USD", "XRP-USD",
-    })
+    # Known ETF/crypto tickers — fallback when snapshot/position metadata is
+    # absent. Membership lives in app/policy_tickers.json, not in code.
+    _ETF_TICKERS: frozenset[str] = _policy_ticker_set("orchestrator_etf_tickers")
+    _CRYPTO_TICKERS: frozenset[str] = _policy_ticker_set("orchestrator_crypto_tickers")
 
     @staticmethod
     def _classify_asset_type(
@@ -1998,13 +1994,9 @@ class AgentOrchestrator:
                 ).neq("agent_run_id", state.run_id).execute())
         except Exception as exc:
             logger.warning("Failed to expire old recommendations: %s", exc)
-        finally:
-            # Recommendations / insights changed; drop aggregate cache now so
-            # the next GET /recommendations immediately reflects this run.
-            invalidate_recommendations_aggregate_cache(
-                state.user_id,
-                reason="orchestrator_persisted_new_run",
-            )
+        # The legacy recommendation read layer (and its aggregate cache) was
+        # removed with the forbidden second decision engine; rows written here
+        # are consumed only as labeled advisory evidence by Intel v3 adapters.
 
     async def _update_run(
         self,
@@ -2067,11 +2059,6 @@ class AgentOrchestrator:
                 status,
                 run_id,
                 matched_rows,
-            )
-        if status in ("completed", "failed"):
-            invalidate_recommendations_aggregate_cache(
-                self.user_id,
-                reason="orchestrator_run_marked_failed",
             )
 
     def _run_agent_runs_update(self, run_id: str, patch: dict) -> int:

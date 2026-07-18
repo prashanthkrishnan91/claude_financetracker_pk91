@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routers import action_feedback, ai, alert_candidates, alert_delivery_outbox, allocation, analytics, auth, decision_logs, decisions, deposits, deploy_v3, diagnostics, drip, intel_v3, paycheck_plan_preview, portfolio, positions, prices, recommendations, sync
+from .routers import auth, intel_v3, portfolio, positions, prices, recommendations_panel, sync, watchlist
 
 
 def _configure_yfinance_cache() -> None:
@@ -87,27 +87,17 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
-    # Register routers
+    # Register routers — lean product surface: positions (books + tax lots),
+    # recommendations (deterministic Intel v3 + rationale panel), watchlist,
+    # plus the untouched ingestion pipeline (sync/prices) and auth.
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(portfolio.router, prefix="/api/v1")
     app.include_router(positions.router, prefix="/api/v1")
     app.include_router(prices.router, prefix="/api/v1")
-    app.include_router(recommendations.router, prefix="/api/v1")
     app.include_router(sync.router, prefix="/api/v1")
-    app.include_router(deposits.router, prefix="/api/v1")
-    app.include_router(drip.router, prefix="/api/v1")
-    app.include_router(ai.router, prefix="/api/v1")
-    app.include_router(decisions.router, prefix="/api/v1")
-    app.include_router(decision_logs.router, prefix="/api/v1")
-    app.include_router(analytics.router, prefix="/api/v1")
-    app.include_router(allocation.router, prefix="/api/v1")
-    app.include_router(diagnostics.router, prefix="/api/v1")
-    app.include_router(paycheck_plan_preview.router, prefix="/api/v1")
     app.include_router(intel_v3.router, prefix="/api/v1")
-    app.include_router(deploy_v3.router, prefix="/api/v1")
-    app.include_router(action_feedback.router, prefix="/api/v1")
-    app.include_router(alert_candidates.router, prefix="/api/v1")
-    app.include_router(alert_delivery_outbox.router, prefix="/api/v1")
+    app.include_router(recommendations_panel.router, prefix="/api/v1")
+    app.include_router(watchlist.router, prefix="/api/v1")
 
     @app.get("/health")
     async def health_check():

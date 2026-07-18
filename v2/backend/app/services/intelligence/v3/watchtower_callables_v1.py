@@ -102,18 +102,3 @@ def build_default_intel_republish_callable(client: Any) -> Any:
     return _republish
 
 
-def build_default_alert_candidate_hook_callable(client: Any) -> Any:
-    """Return a coroutine callable that generates alert candidates after Intel republish.
-
-    Called after a successful worker_certified snapshot publish. Injected into
-    compare_and_republish() / republish_after_analyst_eligibility() to preserve
-    the Watchtower worker boundary (alert service may import decide-adjacent code;
-    the worker must not).
-    """
-    async def _hook(user_id: UUID) -> dict:
-        from ...alert.watchtower_alert_candidate_hook_v1 import (
-            run_alert_candidate_generation,
-        )
-        return await run_alert_candidate_generation(user_id, client)
-
-    return _hook

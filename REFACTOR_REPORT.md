@@ -353,3 +353,80 @@ reconciliation, build output, runtime proof, screenshots, semantic review findin
 - **PR #471 behavior confirmed:** `test_allocation_policy_v1.py` +
   `test_allocation_policy_v1_router.py` + `test_paycheck_plan_preview_router.py` +
   kernel policy suites = 315 passed after the change.
+
+## Phase 2 — backend legacy-surface retirement (record)
+
+Deletion executed exactly per the §4 table, after import-graph verification (grep sweeps recorded
+below). App verified importable and serving after the sweep: 62 OpenAPI paths across
+`advisor(1) auth(4) diagnostics(36) intel(3) portfolio(6) positions(2) prices(4) sync(5) health(1)`.
+
+**Import-graph proofs (deletion gate):**
+- `recommendation_engine` imported by protected `routers/diagnostics.py`, `agents/orchestrator.py`,
+  6 `intelligence/v3` valuation/shadow modules and 6 `research_workers` modules → **KEPT** (internal).
+- `services/agents/*` (`job_runner.run_agent_pipeline`) imported by `routers/diagnostics.py:22` → KEPT.
+- `services/alert/*` lazily imported by protected
+  `intelligence/v3/watchtower_callables_v1.py:114` (`watchtower_alert_candidate_hook_v1`) → KEPT
+  (worker + services; only the two read routers were retired).
+- `services/deploy/*` consumed only by deleted `routers/deploy_v3.py` / `routers/allocation.py`
+  (and gates K–L of `test_stage_2_5b`) → deleted.
+- `decision_engine` + `decision_history_service` consumed only via
+  `portfolio_service.get_deposit_plan()` whose sole caller was deleted `routers/deposits.py` →
+  method + services deleted.
+- `simulation_engine` had no app importers (comment-only mention) → deleted.
+- `agent_run_status`, `reasoning_contract`, `history_service`, `models/recommendation` verified
+  in use by kept modules → KEPT.
+
+**Deleted test files (each exclusively covered a deleted surface; test counts):**
+test_action_feedback_service (27), test_adaptive_deployment (15), test_ai_service (2),
+test_allocation_engine (34), test_decision_delta (2), test_decision_log_service (2),
+test_decision_performance (6), test_decision_step3_semantics (2), test_decision_logs_models (2),
+test_deployment_engine (32), test_deployment_wiring (18), test_regime_engine (9),
+test_recommendations_workflow_v2 (13 — legacy `/recommendations` refresh workflow),
+test_deploy_cash_guardrail_v1 (24), test_deploy_dollar_math_v1 (31), test_deploy_finalization_v1 (37),
+test_deploy_foundation_v1 (87), test_deploy_new_cash_sleeve_v1 (27), test_deploy_plan_rollup_v1 (31),
+test_deploy_policy_allocation_bridge (55), test_deploy_readiness_diagnostic_v1 (42),
+test_deploy_sizing_input_contract (119), test_deploy_sizing_source_adapter_v1 (39),
+test_deploy_stage_2_5c_readiness_hardening (36), test_deploy_tax_wash_pending_v1 (27),
+test_deploy_v3_amount_aware (27), test_deploy_v3_router (44). **Total deleted: 790 tests / 27 files.**
+
+**Mixed files trimmed (deleted-surface classes only):** `test_sync.py` −8 (drip dividend-date
+wrapper), `test_stage_2_5b_snapshot_market_values.py` −7 (deploy sizing adapter consumer gates K–L;
+snapshot-contract gates A–J/M–P all kept), `test_finance_runtime_certification.py` −1 (deleted
+route's auth check), `test_models.py` −1 (deposit models).
+
+**Stale-fixture cleanup (test-only, 21 files):** cleared all 41 remaining pre-existing baseline
+failures (Migration-024 flat columns, cost-guard flag, Stage 9F lane, Stage 13 freshness
+annotation, kernel BUY guardrail, worker kill-switch gating, static-guard modernization).
+**Backend suite after Phase 2/3/5 backend work: `8288 passed, 0 failed`** (baseline: 93 failed /
+8910 passed).
+
+## Phase 3 (backend) — tax lots (record)
+
+Tax-lot truth decision: SHIPPED, reconciliation-gated per ticker. `app/services/tax_lot_engine.py`
+classifies the full production tx vocabulary (Buy/Sell/CDIV/DRIP/SPL/ACH/RTP/Other) into
+share-increasing / share-decreasing / non-share-affecting / unsupported-unknown; splits without
+ratios, share-carrying cash codes, unknown share events, DRIP-without-basis, and dateless share
+events are surfaced in diagnostics and block authoritative display. FIFO lots; oversold ledgers
+block. Long-term = day after calendar anniversary (Feb-29 → Mar-1), tested across leap years.
+Reconciliation tolerances: shares within max(0.0001, 0.1%), basis within 2.0% (matches books
+reconciliation). Unreconciled tickers render exactly "Tax-lot details need reconciliation before
+they can be relied on." No dollar tax estimates anywhere; explicit US-federal estimates-only
+labeling. `GET /api/v1/positions/tax-lots` (36 new tests).
+
+## Phase 5 (backend) — Watchlist (record)
+
+`v2/database/025_watchlist.sql` (additive, idempotent, RLS + owner policy + user index +
+updated_at + unique (user_id, ticker, criteria_type)); `/api/v1/watchlist` GET/POST/PATCH/DELETE
+with auth, user-scoping, validation, duplicate 409, batched price enrichment, unknown-price state,
+and a deliberate 503 `watchlist_migration_required` state until the migration is applied. 16 tests
+incl. cross-user isolation (404, no existence leak) and product-boundary guards (no advisor
+coupling, no LLM, no alerts).
+
+## Advisor backend contract (record)
+
+`POST /api/v1/advisor/paycheck-plan/preview` extended ADDITIVELY with `generated_at` and
+`explanations {selected, not_selected, plan_notes}` mapping existing diagnostic gate fields into
+plain-English buckets (selected / evidence_eligible_policy_blocked / evidence_blocked /
+concentration_blocked / group_cap_blocked / stale_price_blocked / missing_truth_blocked /
+below_minimum_trade / max_positions_reached). No allocation math added or changed; Stage 12D keys
+untouched; raw codes preserved for expandable technical detail. 14 new tests.

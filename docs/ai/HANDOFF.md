@@ -1,767 +1,112 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-10 (Stage 13C — connect Paycheck Advisor to the real production Intel v3 snapshot contract; backend only; no SQL, no new model/endpoint).
-
-**Product architecture note (read this first):** Paycheck Plan (`POST /api/v1/advisor/paycheck-plan/preview`) is the canonical user-facing answer to "I have $X to invest — what should I buy now, how much, and why?" Intel v3 is an evidence *input signal* into that policy, not a competing UI. Deploy v3 is a legacy/internal readiness surface pending nav cleanup — it is not expanded and is not treated as a user-facing recommendation path. As of Stage 13C, `allocation_policy_v1.py` reads Intel v3 evidence from the actual production snapshot shape — held cards live under `current_holdings` (see `snapshot_builder.build_snapshot`), not `cards`. Paycheck Advisor remains the only user-facing recommendation surface.
-
-**Stage 13C — Fix Paycheck Advisor production Intel snapshot contract (current PR #471, includes a same-PR patch):** Backend-only bugfix. No new model, no new endpoint, no parallel recommendation path, no Paycheck Plan UI change, no SQL/providers/LLM calls/background workers/recommendation writes, no cash-allocation invariant change, no Deploy v3 expansion.
-- **Root cause:** `snapshot_builder.build_snapshot()` (the real production contract, used by both the `POST /intel/v3/run` worker path and `IntelV3Service.get_latest_snapshot()`) serializes held cards under `current_holdings` — it never writes a `cards` key. `allocation_policy_v1.py`'s Stage 13A adapter (`_parse_intel_v3_overlay`, `_parse_intel_v3_stock_evidence`) only read `payload.get("cards")`, so every certified production snapshot (34/34 certified, 7 BUY/26 HOLD/1 TRIM/0 SELL in the live evidence for this PR) was invisible to Paycheck Advisor: `next-buy-policy-diagnostic` reported `intel_v3_overlay_used=false`, `intel_v3_overlay_warning="intel_v3_snapshot_has_no_cards"`, and every stock ticker was blocked with `evidence_missing_for_ticker` even though certified evidence existed.
-- **Fix — shared extraction helper (`_extract_intel_v3_cards`):** New helper used by both `_parse_intel_v3_overlay` and `_parse_intel_v3_stock_evidence`. Unwraps `intel_snapshot["payload"]` when a wrapped database-row shape is supplied (the direct `intel_v3_snapshots` table query shape used by `run_next_buy_policy_diagnostic`), uses `current_holdings` as the canonical production card list, falls back to `cards` only when `current_holdings` is absent/empty (documented legacy/test compatibility — never combined with `current_holdings`, so cards are never duplicated), and returns `[]` only when neither key holds a non-empty list. Also handles the unwrapped payload shape (`IntelV3Service.get_latest_snapshot()`'s return value, which has no `payload` key).
-- **Fix — freshness fallback (`_intel_v3_snapshot_fallback_timestamp`):** Order is now `card.updated_at` → `payload.generated_at` (the production snapshot's own generation time) → `intel_snapshot.created_at` (the wrapped row's write time, for wrapped/legacy rows) → fail closed (`hours_since_update=None` → `evidence_freshness_unknown`). Previously only fell back to the row's `created_at`, skipping the production snapshot's own `generated_at`.
-- **Evidence vocabulary unchanged:** STRONG/PARTIAL still pass the evidence-band gate, THIN/SUPPRESSED still block, `OK` remains a legacy-only alias for PARTIAL, only `action=="BUY"` is constructive — none of Stage 13A's gate logic changed, only what cards it sees.
-- **Individual-stock sleeve policy guardrail (`_compute_gaps`), corrected in a same-PR patch:** The first cut of this guardrail set the group-level block (`policy_ineligibility_reason="individual_stock_group_above_target"`) *before* the per-ticker Stage 13A evidence gate, and the evidence gate only ever ran when no policy blocker existed — so whenever the sleeve was overweight (the live portfolio is ~52.31% individual stocks vs. its 40% target, i.e. the exact production path), evidence was never evaluated for any stock in that sleeve, and every ticker — BUY/STRONG, HOLD, THIN, stale, or missing-evidence alike — collapsed into one undifferentiated policy-blocked bucket.
-  - **Policy eligibility and evidence eligibility are now independent gates**, both always evaluated for every individual-stock ticker: `policy_ineligibility_reason` (cap/group checks, computed exactly as before) and `evidence_gate_passed`/`evidence_gate_codes` (Stage 13A's evidence gate) are computed unconditionally — a policy blocker never short-circuits evidence evaluation, and passing evidence never overrides a policy blocker. Final `eligible_for_buy` requires both. `ineligibility_reason` still exposes the primary policy reason when policy-blocked (frontend-compatible), while `policy_ineligibility_reason`/`evidence_gate_passed`/`evidence_gate_codes` remain independently populated on every ticker-gap entry.
-  - **"At or above" is now a direct numeric comparison** (`current_stock_weight_pct >= individual_stock_target_pct`) rather than relying on the `group_gaps[...]["status"] == "over"` >0.5pct band, which would have incorrectly passed a sleeve sitting exactly at its 40% target. Covered by an exact-boundary test.
-  - **`stock_candidates` diagnostics gained a fourth bucket, `evidence_eligible_but_policy_blocked_tickers`** (the intersection of `blocked_by_policy_tickers` and evidence-passed), alongside the existing `blocked_by_evidence_tickers`/`blocked_by_policy_tickers`/`policy_block_reason_codes`. `status` is `"enabled"` if any stock is selected, `"blocked_by_policy_caps"` if at least one stock passed evidence but every such stock was policy-blocked, `"blocked_insufficient_evidence"` if no stock passed evidence at all, else the existing no-stock-held behavior — this reuses the same `blocked_by_policy_caps`/`blocked_insufficient_evidence` status values the Stage 12D preview mapper (`paycheck_plan_preview.py`) already handles, so no preview-router changes were needed.
-- **ETF baseline preserved unchanged:** ETF floor stays 40%, VTI>VOO>SPY>QQQ preference order unchanged, ETF floor priority still dominates stock candidates, cash invariants (`allocated_cash <= cash_to_deploy`, `unallocated_cash >= 0`) unchanged and still enforced by the same `_allocate_cash`/defensive-guard code path.
-- **Tests:** `v2/backend/tests/test_allocation_policy_v1.py` — `TestProductionIntelV3SnapshotContract` (11 tests: production-shape fixture with `current_holdings`/no `cards`/`generated_at`, mirroring `snapshot_builder.build_snapshot`'s exact returned contract; `current_holdings` consumed with no `intel_v3_snapshot_has_no_cards` warning; BUY+STRONG and BUY+PARTIAL pass; HOLD and THIN blocked; `generated_at` freshness fallback fresh-passes/stale-still-blocks; `generated_at` takes priority over row `created_at`; `cards` still accepted as legacy compatibility; both keys present → no duplication; neither key → empty list) and `TestStockSleevePolicyGuardrail` (6 tests: overweight sleeve + BUY/STRONG → evidence passes independently, ticker lands in `evidence_eligible_but_policy_blocked_tickers` and NOT `blocked_by_evidence_tickers`, no dollars; overweight sleeve + HOLD/STRONG → both gates report it, `evidence_signal_not_constructive`, excluded from `evidence_eligible_but_policy_blocked_tickers`; overweight sleeve + BUY/THIN → `evidence_confidence_insufficient` still reported under a policy block; exact-40%-boundary sleeve still blocks new dollars despite passing evidence; sleeve below target + valid evidence → stock still receives dollars; ETF plan cash invariants hold throughout). One pre-existing Stage 13A test (`test_etf_only_case_still_works_without_evidence`) updated: with no Intel v3 snapshot at all, no stock's evidence ever passes, so status is correctly `blocked_insufficient_evidence`, not `blocked_by_policy_caps` — this is the intended corrected behavior, not a regression. All existing Stage 13A tests (legacy `cards` shape) still pass unchanged. 148/148 pass across `test_allocation_policy_v1.py` + `test_allocation_policy_v1_router.py` + `test_paycheck_plan_preview_router.py`. Full suite shows the same 2 pre-existing failures as `main` (`test_intel_v3_router_service.py` — FastAPI route-introspection + an unrelated `evidence_freshness_state` assertion, confirmed via `git stash` diff, unrelated to this change).
-- **Non-goals honored:** no new model, no new endpoint, no parallel recommendation path, no Paycheck Plan UI change, no SQL/providers/LLM calls/background workers/recommendation writes, no cash-allocation invariant change, no Deploy v3 expansion.
-- **Files changed:** `v2/backend/app/services/allocation_policy_v1.py` (`_extract_intel_v3_cards`, `_intel_v3_snapshot_fallback_timestamp`, independent policy/evidence gates, exact-boundary sleeve check, diagnostic fields), `v2/backend/tests/test_allocation_policy_v1.py` (19 new/updated tests), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-- **Supabase SQL:** None. No migration in this PR.
-
-**Stage 13B — Restore Run Intel as a bounded on-demand evidence builder (prior PR):** Backend + minimal UI-copy fix for the gap Stage 13A's live validation exposed: `POST /intel/v3/run` returned 202 and enqueued `analyst_refresh_jobs`, but `GET /intel/v3/snapshot` stayed `404 no_snapshot` forever because the only consumer of that queue, `AnalystRefreshWorker`, is a separate polling Railway service that is not deployed/enabled — Run Intel enqueues jobs but does **not** wake it (documented, pre-existing behavior; see `docs/ai/INTEL_V3_ANALYST_REFRESH_WORKER.md`). No new recommendation model, no competing Paycheck endpoint, no Deploy expansion, no Railway start-command change.
-- **New bounded on-demand drain (`analyst_refresh_on_demand_drain_v1.py`):** Reuses the existing `AnalystRefreshWorker.run_once()` unchanged — no new job-processing logic. Runs up to `MAX_BATCHES_PER_RUN=3` batches (`MAX_JOBS_PER_BATCH=10` each), capped at `MAX_RUNTIME_SECONDS=90.0` wall-clock, and stops the instant a batch claims zero jobs or the worker reports fully drained (`run_resumable=False`) — no infinite loop, no polling. A 34-holding portfolio typically needs 1-2 Run Intel clicks to fully drain (10-30 tickers per click) rather than requiring the separate always-on worker service.
-- **New flag `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` (default `false`, `app/config.py`):** Preserves the existing cost-guard posture — Run Intel stays queue-only (as it always has been) unless this is explicitly turned on. The separately-deployed `analyst_refresh_worker_v1` Railway service (`--loop`) is unchanged and remains fully optional; either path (or both) can drain the same durable queue.
-- **`POST /intel/v3/run` response gains operational-truth fields** (router-level augmentation in `app/routers/intel_v3.py`, `_augment_with_on_demand_status` / `_next_required_action` — `enqueue_run_v3()` itself is untouched): `on_demand_processing_enabled`, `on_demand_jobs_attempted/succeeded/failed`, `snapshot_available_after_run`, `next_required_action` (e.g. `queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_analyst_refresh_worker_entrypoint_separately`, `reclick_run_intel_or_run_worker_entrypoint_to_continue_draining`, `on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false`, `none_certified_snapshot_current`). Honest by design: even if the drain fully processes the queue, `next_required_action` still calls out `INTEL_V3_SNAPSHOT_WRITES_ENABLED=false` (the separate cost-guard snapshot-write kill switch from the earlier Cost Guard PR) as the reason no certified snapshot appears, rather than looking like a stuck drain. Augmentation failures are caught in the router and fall back to honest defaults — a failure here never breaks the underlying enqueue response.
-- **Minimal UI copy (`intel-v3-banner.ts` — new `onDemandDrainNote()`, `IntelV3Cockpit.tsx`):** Additive-only; does not change the existing 6-state `deriveIntelV3UIStatus`/`buildStatusPillState`/`buildBannerState` contract or tone. Renders one extra plain-English line under the status pill when relevant: queue-only ("on-demand processing is disabled..."), drain-in-progress ("N/M holdings refreshed this run... Click Run Intel again to continue"), or nothing once a certified snapshot exists after the run. No visual redesign.
-- **Tests:** `test_stage13b_analyst_refresh_on_demand_drain.py` (12 tests) — batch aggregation, stops on zero-claim/fully-drained, hard `max_batches` ceiling even when the worker always reports resumable work (no-infinite-loop regression), runtime-cap enforcement mid-drain, real-worker construction uses the drain's own caps not the standalone worker's larger defaults. `test_stage13b_run_intel_on_demand_status.py` (12 tests) — on-demand-disabled never invokes the drain and reports `queue_only...`, on-demand-enabled invokes the drain exactly once and wires its counts through, `next_required_action` honesty across no-holdings/certified/drain-incomplete/snapshot-writes-disabled cases, augmentation exceptions isolated from the enqueue response, no import coupling into `allocation_policy_v1`/`paycheck_plan_preview` from either the drain module or the router. `intel-v3-banner.test.ts` (+6 tests, 60/60 pass) covers `onDemandDrainNote`. Existing `test_intel_v3_stage_3_2_analyst_refresh_worker.py`, `test_cost_guard.py`, `test_allocation_policy_v1.py`, `test_paycheck_plan_preview_router.py` all still pass unchanged (218 tests total across the touched-adjacent suites) — `enqueue_run_v3()`, `AnalystRefreshWorker`, the worker entrypoint's env-var gating, and Paycheck Plan are all untouched by this PR.
-- **Non-goals honored:** no new recommendation model, no new/competing Paycheck endpoint, no Deploy v3 expansion, no Railway start-command change, no always-on-worker requirement for the manual Run Intel path (default stays off), no recommendation-row writes beyond what the existing worker/adapter chain already performs, no SQL migration.
-- **Supabase SQL:** None.
-- **Files changed:** `v2/backend/app/services/intelligence/v3/analyst_refresh_on_demand_drain_v1.py` (new), `v2/backend/app/routers/intel_v3.py` (augmentation + docstring), `v2/backend/app/config.py` (`intel_v3_on_demand_refresh_enabled` flag), `v2/backend/tests/test_stage13b_analyst_refresh_on_demand_drain.py` (new), `v2/backend/tests/test_stage13b_run_intel_on_demand_status.py` (new), `v2/frontend/src/lib/api.ts` (`IntelV3RunResult` new fields), `v2/frontend/src/lib/intel-v3-banner.ts` (`onDemandDrainNote`), `v2/frontend/src/lib/intel-v3-banner.test.ts` (+6 tests), `v2/frontend/src/components/cards/IntelV3Cockpit.tsx` (renders the note), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**Stage 13A — Canonical Paycheck Advisor: evidence-aware candidate ranking (prior PR, includes a same-PR vocabulary patch):** Backend-only upgrade to the existing Stage 12B/12C `allocation_policy_v1` service (no new model, no new endpoint, no fork). The endpoint, request/response contract, and ETF baseline behavior are unchanged; individual stocks can now become buy candidates when Intel v3 evidence for that ticker clears strict gates.
-- **No new model/endpoint (explicit product decision):** Still `POST /api/v1/advisor/paycheck-plan/preview`, still wraps `run_next_buy_policy_diagnostic` in `allocation_policy_v1.py`. `/allocation/plan` stays retired; Deploy v3 stays untouched and non-user-facing.
-- **Stock candidate gate (`_evaluate_stock_candidate_gate`, additive to existing caps):** A ticker in `GROUP_INDIVIDUAL_STOCK` only becomes an eligible candidate if it passes the pre-existing concentration/group-cap checks in `_compute_gaps` AND a new evidence gate: an Intel v3 card exists for the ticker, `action == "BUY"` (not HOLD-by-fallback), `evidence_band` is `STRONG`/`PARTIAL` (not `THIN`/`SUPPRESSED`), the card's `updated_at` (or the snapshot row's `created_at` when the card omits it) is within `STOCK_EVIDENCE_STALE_HOURS` (24h, same threshold as portfolio-snapshot staleness), and the card carries no blocking `flags`. Every check fails closed — missing/ambiguous evidence blocks the ticker (`evidence_missing_for_ticker`, `evidence_stale`, `evidence_freshness_unknown`, `evidence_signal_not_constructive`, `evidence_confidence_insufficient`, `evidence_has_blocking_gaps`); it never defaults to a fake pass.
-- **Evidence-band vocabulary (patched, correct as of this PR):** Production Intel v3 cards serialize the internal `AxisBand.OK` axis as the string `"PARTIAL"`, not `"OK"` — see `_EVIDENCE_QUALITY_TO_BAND` in `snapshot_builder.py` (`STRONG`→`"STRONG"`, `OK`→`"PARTIAL"`, `THIN`/`SUPPRESSED`→`"THIN"`) and the pre-existing `_STRONG_PARTIAL` positive-band set already used elsewhere in `intel_v3_service.py`. The initial version of this PR incorrectly used `{"OK", "STRONG"}` as the passing set, which would have kept real PARTIAL-evidence stocks blocked in production (Paycheck Plan staying ETF-only more often than intended). Fixed to `{"STRONG", "PARTIAL"}` via a new `_normalize_evidence_band()` helper (uppercases, maps legacy `"OK"` → `"PARTIAL"` as an alias — `"OK"` is not the production shape and is documented only as a legacy alias).
-- **Freshness fallback (patched):** `_parse_intel_v3_stock_evidence` now uses the card's own `updated_at` when present, falling back to the snapshot row's `created_at` when a card omits it. This only widens *where* the timestamp may come from — it never loosens the 24h staleness requirement; a ticker with neither timestamp still fails closed on `evidence_freshness_unknown`.
-- **ETF baseline preserved unchanged:** `_GROUP_PRIORITY` is untouched — broad/dividend/international/sector ETF groups still outrank `individual_stock` in the sort key regardless of evidence, so the ETF floor and VTI>VOO>SPY>QQQ preference order still dominate whenever the ETF floor is materially underweight. Cash invariants (`allocated_cash <= cash_to_deploy`, `unallocated_cash >= 0`, sum(planned buys) == allocated_cash within $0.02) are unchanged and still enforced by the same `_allocate_cash`/defensive-guard code path.
-- **New diagnostic-level fields (not exposed in the Stage 12D preview contract):** each candidate in `next_buy_candidates` now carries `asset_type`, `candidate_source` (`"evidence_aware_stock_ranking_v1"` for stocks, `"policy_v1"` otherwise), `confidence_label` (`high_confidence_evidence` for `STRONG`, `moderate_confidence_evidence` for `PARTIAL`). `ticker_gaps` entries carry `evidence_gate_codes`. A new top-level diagnostic section `stock_candidates: {status, held_tickers, selected_tickers, blocked_by_evidence_tickers}` reports `enabled` / `blocked_insufficient_evidence` / `blocked_by_policy_caps` / `no_stock_positions_held`. Honest by design: if Intel v3 fields are insufficient, this reports `blocked_insufficient_evidence` rather than faking confidence.
-- **Preview contract unchanged (Stage 12D/12E compatibility):** `build_paycheck_plan_preview` still returns exactly `{preview_version, cash_to_deploy, trusted, status, planned_buys, allocation_summary, data_freshness_status, caveats, next_required_fix, recommendations_trusted, source_diagnostic_version}`. `planned_buys` entries still map to exactly `{ticker, amount, reason, reason_codes}` (verified by the existing exact-key-set router test) — the new candidate-level fields are diagnostic-only and are dropped by the existing mapper, so no frontend changes are required or made. When stocks are excluded, `caveats` gains a plain-English line ("Individual stocks were not included in this plan — evidence data did not pass freshness or confidence checks...") explaining why, sourced from the new `stock_candidates.status` field.
-- **Overall plan `trusted`/`numeric_plan_trusted` unaffected by stock gating:** missing stock evidence downgrades only the stock portion (`stock_candidates.status`), never the ETF plan's trust — an ETF-only certified plan still reports `trusted=true` exactly as before Stage 13A.
-- **Tests:** `v2/backend/tests/test_allocation_policy_v1.py` — 13 tests in `TestStage13AEvidenceAwareStockCandidates` covering: ETF-only case unaffected by evidence gating (VTI-first, cash invariant), a fresh PARTIAL-evidence/underweight/uncapped stock becoming an allocated candidate ahead of an ETF slot that's already at cap (the main production-shape passing fixture), a STRONG-evidence stock also passing, legacy `"OK"`→`"PARTIAL"` normalization, snapshot-`created_at` freshness fallback (both fresh-passes and stale-still-blocks), stale evidence blocked, missing evidence blocked, HOLD-by-fallback blocked, overweight/over-cap stock blocked regardless of evidence, ETF floor priority still dominating a strongly-evidenced stock when the floor is materially underweight, no LLM/provider/write calls introduced, Stage 12D/12E preview-contract compatibility, and deterministic output across repeated runs. All 133 tests across `test_allocation_policy_v1.py` + `test_paycheck_plan_preview_router.py` + `test_allocation_policy_v1_router.py` pass. Full suite shows the same ~93 pre-existing failures as `main` (confirmed via `git stash` diff on `test_watchtower_build_1d.py` — pre-existing event-loop/test-isolation issue, unrelated to this change).
-- **Non-goals honored:** no UI changes, no new model name, no new/competing endpoint, no revived `/allocation/plan`, no LLM calls, no provider calls, no SQL migration, no writes, no recommendation rows, no trading/execution, no Railway start-command changes, no background-worker changes, no current-price-repair changes, Deploy tab untouched, Deploy v3 untouched, cash invariants unchanged.
-- **Files changed:** `v2/backend/app/services/allocation_policy_v1.py` (evidence gate + `_normalize_evidence_band` + freshness fallback + stock candidate transparency fields), `v2/backend/app/routers/paycheck_plan_preview.py` (caveat text for stock-blocked plans, reason text for the new stock reason code), `v2/backend/tests/test_allocation_policy_v1.py` (13 tests), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-- **Supabase SQL:** None. No migration in this PR.
-
-**Stage 12E.1 — Fix paycheck preview auth dependency crash (prior PR):** Backend-only bugfix. Live `/dashboard/paycheck-plan` calls were returning 500 because `_get_runtime_cert_user` (`v2/backend/app/routers/diagnostics.py`) called `get_current_user(request)` directly when an `Authorization` header was present. `get_current_user`'s `auth`/`settings` parameters only resolve through FastAPI's own dependency injection — calling it directly left them as unresolved `Depends(...)` objects, crashing with `AttributeError: 'Depends' object has no attribute 'credentials'`.
-- **Fix:** New `get_current_user_from_request(request)` helper in `v2/backend/app/middleware/auth.py` explicitly resolves the bearer credentials via the same `_bearer_scheme` `HTTPBearer` instance and the settings singleton, then delegates to `get_current_user`'s unchanged JWT validation logic — no duplicated validation. `_get_runtime_cert_user` now calls this helper instead of `get_current_user(request)` directly.
-- **Both cert-gated modes preserved:** cert secret + no `Authorization` → configured runtime-cert user (unchanged); cert secret + valid `Authorization` → real Supabase user via JWT validation (previously crashed, now works). Invalid/missing cert secret still 403/404. Invalid/malformed bearer token with a valid cert now returns a clean 401 instead of a 500.
-- **Tests:** `v2/backend/tests/test_runtime_cert_auth_header_path.py` (11 new tests) — no-auth fallback unchanged, auth-header path no longer crashes on an unresolved `Depends` object (explicit regression assertion for the exact `AttributeError` string), invalid/missing cert still 403/404 with or without an `Authorization` header, invalid/malformed bearer token returns clean 401 not 500, and the Stage 12D paycheck-plan-preview endpoint is reachable end-to-end through the auth-header path. All 33 tests across the touched test files pass; full suite shows the same 93 pre-existing failures as `main` (confirmed via `git stash` diff — unrelated to this change, environment/time-mocking issues in other stages).
-- **Runtime validation:** `TestClient` HTTP-level smoke test against the real FastAPI app confirms: no-`Authorization` + valid cert → 200 (runtime cert user); valid cert + wrong secret → 403; valid cert + `Authorization: Bearer <token>` → clean 401 (was 500 before this fix).
-- **Non-goals:** No UI, no SQL, no provider calls, no LLM calls, no writes, no allocation/policy changes, no paycheck-plan output changes, no Railway start-command changes, no background-worker changes, no current-price-repair changes.
-- **Files changed:** `v2/backend/app/middleware/auth.py` (new `get_current_user_from_request` helper), `v2/backend/app/routers/diagnostics.py` (`_get_runtime_cert_user` now calls the new helper), `v2/backend/tests/test_runtime_cert_auth_header_path.py` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**Stage 12E — Paycheck Plan Preview UI (current PR):** Frontend-only product surface for the Stage 12D preview contract. No new investment logic — pure UI over the existing read model.
-- **New page:** `/dashboard/paycheck-plan` (`v2/frontend/src/app/dashboard/paycheck-plan/page.tsx`), reachable from a new "Paycheck" desktop side-nav entry (`v2/frontend/src/components/navigation/BottomNav.tsx`, `SIDE_ONLY_NAV_ITEMS`).
-- **Component:** `v2/frontend/src/components/cards/PaycheckPlanPreviewCard.tsx` — cash input + "Preview plan" button; renders trusted/status badge, cash entered, planned buys (VTI always sorted ahead of SPY when both present), allocated/unallocated cash, data freshness, and the deterministic-guidance caveat. Shows a blocked/degraded state (with `next_required_fix`) instead of buy rows whenever `status !== "ready"` or `trusted !== true`; `recommendations_trusted` is never rendered as an approval signal.
-- **Cert-gated call, secret stays server-only:** The card calls the new Next.js Route Handler `POST /api/advisor/paycheck-plan/preview` (`v2/frontend/src/app/api/advisor/paycheck-plan/preview/route.ts`), which forwards the caller's `Authorization` header and attaches `X-Finance-Runtime-Cert-Secret` from a server-only env var (`FINANCE_RUNTIME_CERT_SECRET`, no `NEXT_PUBLIC_` prefix) read only inside the Route Handler (Node runtime, never bundled to the browser). No client code references the secret or the header name — see `PaycheckPlanPreviewContract.test.ts`.
-- **Reason copy mapping:** `v2/frontend/src/lib/paycheck-plan-helpers.ts` maps backend `reason_codes` to concise UI copy (`etf_floor_not_met`, `broad_index_etf_group_underweight`, `core_etf_preference`, `preferred_vti_over_spy`) instead of dumping the backend's semicolon-joined `reason` string; at most 2 bullets per planned buy.
-- **New env var required (deploy-time, not code):** `FINANCE_RUNTIME_CERT_SECRET` must be set in the frontend's server runtime environment (Vercel project settings — same value as the backend's `finance_runtime_cert_secret`) before this feature is usable in production. Documented in root `README.md` (Frontend local dev section). Never a `NEXT_PUBLIC_` var; read only inside `route.ts`, pinned to `export const runtime = "nodejs"`.
-- **Non-goals:** No new investment/allocation logic, no LLM, no SQL, no provider calls, no writes, no recommendation rows, no trading/execution, no revival of `/allocation/plan`, no backend/deposit_service/Railway/worker/current-price-repair changes.
-- **Tests:** `PaycheckPlanPreviewContract.test.ts` (23 new tests) — VTI-first ordering, allocation summary fields, no raw diagnostic payload exposure, `recommendations_trusted` never treated as approval, actionability gated on `status=ready AND trusted=true`, reason-code copy mapping, and no cert-secret/header string in client-bundled files.
-- **UI validation:** Rendered via a temporary local mock harness (not committed — deleted before push) with the exact validated Stage 12D response — confirmed VTI first at $2,065.00, SPY at $670.00, allocated $2,735.00, unallocated $2.50, "Plan ready" badge, and the deterministic-guidance caveat. Screenshot committed at `docs/ai/proof/stage_12e_paycheck_plan_preview_ui.png` for PR proof.
-- **Files changed:** `v2/frontend/src/lib/paycheck-plan-helpers.ts` (new), `v2/frontend/src/components/cards/PaycheckPlanPreviewCard.tsx` (new), `v2/frontend/src/components/cards/PaycheckPlanPreviewContract.test.ts` (new), `v2/frontend/src/app/api/advisor/paycheck-plan/preview/route.ts` (new, `runtime = "nodejs"` pinned), `v2/frontend/src/app/dashboard/paycheck-plan/page.tsx` (new), `v2/frontend/src/components/navigation/BottomNav.tsx` (nav entry added), `README.md` (env var doc), `docs/ai/proof/stage_12e_paycheck_plan_preview_ui.png` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**Stage 12D — Paycheck Plan Preview Read Model (prior PR):** Backend-only, product-facing, cert-gated, read-only endpoint that wraps the validated Stage 12C next-buy-policy diagnostic into a concise frontend-safe response. No allocation math is duplicated — it is a pure mapping over the Stage 12C diagnostic output.
-- **Endpoint:** `POST /api/v1/advisor/paycheck-plan/preview` (new router `v2/backend/app/routers/paycheck_plan_preview.py`, prefix `/advisor/paycheck-plan`). Cert-gated via the same `_get_runtime_cert_user` dependency reused from `diagnostics.py`. The Stage 12C diagnostic endpoint (`POST /api/v1/diagnostics/finance-intel/next-buy-policy-diagnostic`) is preserved unchanged for audit/debug use.
-- **Request:** `{cash_to_deploy: float (required, >0), max_positions: int (default 5), min_trade_amount: float (default 25.0)}` — same contract as the Stage 12C diagnostic.
-- **Response:** `{preview_version: "paycheck_plan_preview_v1", cash_to_deploy, trusted, status: "ready"|"degraded"|"blocked", planned_buys: [{ticker, amount, reason, reason_codes}], allocation_summary: {allocated_cash, unallocated_cash, allocation_count}, data_freshness_status, caveats: [...], next_required_fix, recommendations_trusted: false, source_diagnostic_version}`.
-- **Trust mapping:** `trusted` mirrors the diagnostic's `numeric_plan_trusted`. `status` is `"ready"` only when `policy_status == "ready"` AND `numeric_plan_trusted == true`; otherwise `"degraded"`/`"blocked"`, and `planned_buys` is emptied so a non-trusted plan never looks investable. `recommendations_trusted` is hard-coded `False` regardless of numeric trust.
-- **Output shaping:** Does not expose the full diagnostic (`next_buy_candidates`, `current_portfolio`, `target_vs_current`, `truth_dependency` are not in the response). Reason codes (`core_etf_preference`, `preferred_vti_over_spy`, `etf_floor_not_met`, `{group}_group_underweight`) are preserved verbatim and paired with a short plain-English `reason` string. `caveats` always states this is deterministic allocation guidance, not personalized investment advice.
-- **Non-goals:** No UI, no SQL migration, no provider calls, no LLM calls, no writes, no recommendation rows, no revival of the old `/allocation/plan` endpoint, no `deposit_service` changes, no Railway start-command changes, no background-worker changes, no `current_price_truth_repair` changes (`CURRENT_PRICE_TRUTH_REPAIR_ENABLED` stays `false`).
-- **Tests:** `v2/backend/tests/test_paycheck_plan_preview_router.py` (12 new tests) covering ready→ready mapping, trusted mirroring, `recommendations_trusted` always false, blocked/degraded non-actionability, concise output (no raw diagnostic payload), cash invariants, VTI-first ordering preservation, and read-only endpoint delegation. All pass alongside the existing 108 Stage 12C tests (120/120 total across the three suites).
-- **Validation command:** `POST /api/v1/advisor/paycheck-plan/preview` with `{"cash_to_deploy": 2737.5, "max_positions": 5, "min_trade_amount": 25}` — expect `status: "ready"`, `trusted: true`, `recommendations_trusted: false`, first `planned_buys[0].ticker == "VTI"`, `allocation_summary.allocated_cash <= 2737.50`, `allocation_summary.unallocated_cash >= 0`, no raw per-ticker diagnostic payload in the response.
-
-**Stage 12C — Core ETF Preference + Paycheck Allocation Output Polish (prior PR):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls, no provider calls, no writes. Refines the Stage 12B allocation policy so broad-market ETF purchases use a deterministic core ETF preference order rather than raw gap size.
-- **Why Stage 12B was refined:** Stage 12B ranked buy candidates by `(group_priority, conviction_rank, gap_pct)`. Within the `broad_index_etf` group, this caused SPY (largest gap) to rank above VTI (smaller gap) even though VTI is the preferred broad-market core holding. Stage 12C adds `core_preference_rank` as a tiebreaker before `gap_pct`.
-- **Core ETF preference order:** `VTI > VOO > SPY > QQQ` (ranks 4, 3, 2, 1). Defined as `BROAD_INDEX_CORE_PREFERENCE_ORDER` constant. Any held broad ETF not in this list gets rank=0 (falls through to gap-based tiebreak).
-- **Sort key change:** 3-tuple `(group_priority, conviction_rank, gap_pct)` → 4-tuple `(group_priority, core_preference_rank, conviction_rank, gap_pct)`. Sorted descending. Within `broad_index_etf`, core ETF preference rank overrides both conviction overlay and gap size.
-- **New candidate output fields:** `selection_policy` (`"core_etf_preference_v1"` for broad ETFs, `"policy_v1"` otherwise), `preference_rank` (int or null), `preference_reason` (`"preferred_core_broad_market_etf"` or null), `skipped_higher_preference_tickers` (list of held higher-preference ETFs that are already at/above target).
-- **New reason codes:** `"core_etf_preference"` (applied to all broad ETF candidates), `"preferred_vti_over_spy"` (added when VTI is selected and SPY is also an eligible candidate).
-- **ETF group eligibility invariant (unchanged):** All `broad_index_etf` tickers become ineligible when the GROUP weight exceeds 25% target. Stage 12C does not change this — it only changes the ranking order among eligible candidates.
-- **Numeric plan trust / recommendations_trusted:** Unchanged from Stage 12B. `recommendations_trusted` remains always False. `numeric_plan_trusted` conditions unchanged.
-- **Tests:** 95/95 pass (78 pre-existing + 14 new `TestCoreETFPreference` + 7 new `TestStage12CRegressionFixture` + 3 conviction-regression tests: QQQ HIGH vs VOO, QQQ HIGH vs SPY, full VTI>VOO>SPY>QQQ order with SPY+QQQ HIGH conviction). Regression fixture has AAPL+NVDA+MSFT dominant stocks (~85% of portfolio) with VTI having smaller gap than SPY — confirms VTI is selected first despite SPY's larger gap.
-- **Runtime validation:** `POST /api/v1/diagnostics/finance-intel/next-buy-policy-diagnostic` with `{"cash_to_deploy": 2737.50}` — first `next_buy_candidates` entry should show VTI with `selection_policy: "core_etf_preference_v1"` and `preference_rank: 4`, not SPY.
-- **No SQL migration.** No target_allocations writes. No recommendation rows created. No deposit_service changes. No Buy/Hold/Trim/Sell behavior changes. No worker/scheduler changes.
-- **Files changed:** `v2/backend/app/services/allocation_policy_v1.py` (preference policy added), `v2/backend/tests/test_allocation_policy_v1.py` (14+7 new tests), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**Stage 12A — Allocation & Rebalancing Reality Audit (prior PR):** Docs/audit only. No code, no SQL migration, no UI, no provider calls, no LLM calls, no writes.
-- **Audit doc:** `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md`
-- **Components found:** allocation_engine, legacy allocation router, recommendation_engine (deterministic + LLM paths), intel_v3_service (read path + worker), per_ticker_analyst, deploy_v3 router, deploy_sizing_source_adapter_v1, deploy_target_allocation_bridge, deployment_engine_v2, adaptive_deployment, deposit_service (schedule infra + hardcoded weights).
-- **Safe to reuse now:** `intel_v3_service` read path, `deploy_sizing_source_adapter_v1`, `deploy_target_allocation_bridge`.
-- **Safe after truth gate:** allocation_engine, legacy allocation router, recommendation_engine deterministic methods, per_ticker_analyst, deploy_v3 router, deployment_engine_v2, adaptive_deployment.
-- **Patch required:** deposit_service hardcoded weight formula (`_BREAKDOWN`); `portfolio_advisor()` LLM advisory label enforcement.
-- **Critical gap:** No target weight generator exists. `deploy_target_allocation_bridge.py` explicitly defers this. Stage 12B must build `allocation_policy_v1.py`.
-- **Stage 12B spec:** Conservative profile policy → generate target weights (no user input) → `GET /deploy/v3/next-buy?cash_to_deploy=X` endpoint → deterministic BUY ranking by conviction × gap → zero LLM, zero providers.
-- **No existing tests assert old unsafe behavior** requiring removal in this audit PR.
-- **Files changed:** `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**Stage 11B — Current Price Truth Repair (current PR):** Backend/tests/docs only. No UI, no SQL migration, no LLM calls. Repairs price_history for open-position tickers that are missing or stale so Stage 11A market_value_sum becomes non-null.
-- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/current-price-truth-repair` — cert-gated + feature-flag gated (`CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true` required, else 403).
-- **New service:** `v2/backend/app/services/current_price_truth_repair_v1.py` — async. Loads open positions (same semantics as Stage 11A: ticker present, shares > 0, category != SELL). Per-ticker price_history queries avoid Supabase 1000-row default-cap truncation.
-- **Providers:** yfinance (Yahoo Finance v8 chart API, 5-day window) for equities/ETFs; CoinGecko free API (no key) for supported crypto tickers. Crypto tickers not in `_CRYPTO_IDS` return `unsupported` (non-fatal). No paid providers.
-- **dry_run=true default:** No writes without explicit `dry_run=false`. Writes only to price_history (upsert on ticker+price_date). No snapshot, position, recommendation, or agent table writes.
-- **New config flag:** `current_price_truth_repair_enabled: bool = False`
-- **Per-ticker response fields:** `current_price_status` (recent/stale/missing/unsupported/provider_error), `latest_price_date`, `latest_price_value`, `business_days_old`, `provider_used`, `write_status` (skipped_dry_run/written/unchanged/failed/unsupported/skipped_fetch_failed).
-- **Summary fields:** `open_tickers_count`, `missing_before_count`, `stale_before_count`, `attempted_fetch_count`, `successful_fetch_count`, `unsupported_count`, `provider_error_count`, `rows_written`, `safe_to_rerun=True`, `next_step=rerun_financial_truth_baseline`.
-- **Truncation protection:** Per-ticker queries (limit=10) replace the bulk query pattern. `price_query_truncated` is False unless a per-ticker query hits the limit (anomalous). `_SUPABASE_DEFAULT_ROW_CAP=1000` constant documented for reference.
-- **Tests:** 41/41 pass (35 service + 6 router). Covers cert-gating, feature-flag gating, dry_run default, open-position exclusions, missing/stale detection, unsupported crypto, known crypto→CoinGecko routing, provider errors, no-writes invariant, no-recommendation-writes invariant, >1000-row truncation protection.
-- **Files changed:** `v2/backend/app/services/current_price_truth_repair_v1.py` (new), `v2/backend/app/routers/diagnostics.py` (endpoint added), `v2/backend/app/config.py` (flag added), `v2/backend/tests/test_current_price_truth_repair_v1.py` (new), `v2/backend/tests/test_current_price_truth_repair_router.py` (new), `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-- **To run repair:** Set `CURRENT_PRICE_TRUTH_REPAIR_ENABLED=true` + cert headers → `dry_run=true` to inspect → `dry_run=false` to write → re-run Stage 11A financial-truth-baseline to verify `market_value_sum` becomes non-null.
-
-**Stage 11A — Financial Truth Baseline Diagnostic (prior PR):** Backend/tests/docs only. No UI, no SQL migration, no provider calls, no LLM calls, no writes.
-- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/financial-truth-baseline` — cert-gated (X-Finance-Runtime-Cert-Secret required).
-- **New service:** `v2/backend/app/services/financial_truth_baseline_v1.py` — pure async, read-only. Inspects portfolio_snapshots, positions, price_history, transactions, recommendations, agent_runs, intel_snapshots (graceful if absent).
-- **7 output sections:** snapshot_truth, position_derived_truth, transaction_derived_truth, price_truth, intelligence_layer, reconciliation, verdict.
-- **Verdict fields:** `truth_status` (certified / degraded / blocked), `canonical_portfolio_value_source`, `canonical_cost_basis_source`, `unsafe_sources_to_ignore`, `next_required_fix`, `recommendations_trusted` (always False until certified).
-- **Reconciliation:** Compares portfolio_snapshots.total_equity vs position-derived market value (positions × price_history.close_price). Status: pass (≤1%), degraded (≤5%), blocked (>5%), unavailable (either source missing).
-- **Key invariants:** read-only (no writes), no provider calls, no LLM calls, no Buy/Hold/Trim/Sell changes. intel_snapshots query failure handled gracefully.
-- **Tests:** 38/38 pass (`test_financial_truth_baseline_v1.py`). Covers certified/degraded/blocked, stale snapshot, duplicate positions, missing prices, recommendations unsafe, no writes, no provider calls, empty DB, graceful DB failure.
-- **Advisor/recommendation UI remains blocked** until truth_status is certified or explicitly accepted as degraded.
-- **Schema limitation:** `intel_snapshots` table not in SQL migrations; query handled gracefully with `intel_snapshot_table_exists: false`. Position market value requires current prices in `price_history` — if stale/missing, reconciliation returns `unavailable`.
-- **Files changed:** `v2/backend/app/services/financial_truth_baseline_v1.py`, `v2/backend/app/routers/diagnostics.py`, `v2/backend/tests/test_financial_truth_baseline_v1.py`, `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-
-**ACTIVE EMERGENCY: Do not re-enable Intel background workers until cost-guard PR is merged and deployed. See `docs/deploy/RAILWAY_COST_GUARD.md`.**
-
-**Cost Guard PR (current):** Emergency cost-control response to Supabase storage overrun (~497.9 MB in intel_v3_snapshots) and Railway RAM cost (~$18 mid-cycle from always-on workers). No UI, no provider, no investment logic, no SQL migration changes.
-- **Master kill switch:** `INTEL_BACKGROUND_WORKERS_ENABLED=false` (new config field) — all three worker entrypoints check this first and exit 0 if off.
-- **Per-worker flags** (already existed, defaults verified): `INTEL_V3_WATCHTOWER_ENABLED=false`, `INTEL_V3_RESEARCH_WORKERS_ENABLED=false`, `ALERT_EMAIL_DELIVERY_ENABLED=false`.
-- **Interval clamping:** Watchtower min 6h, Analyst/research min 12h, Email delivery min 24h. Override: `COST_GUARD_ALLOW_AGGRESSIVE_POLLING=true`.
-- **Snapshot write guard:** `INTEL_V3_SNAPSHOT_WRITES_ENABLED=false` (new) — `_persist_snapshot()` logs COST_GUARD and returns without writing. Read paths unaffected.
-- **Retention SQL:** `v2/database/cost_guard_retention_cleanup.sql` — bounded DELETE (7-day retention) for all generated tables. No TRUNCATE CASCADE. Does not touch core user data.
-- **Diagnostic script:** `scripts/cost_guard_health.py` — reports all flag states, effective intervals, and approximate row counts.
-- **Tests:** `v2/backend/tests/test_cost_guard.py` — 17 tests covering all kill switches, interval clamping, snapshot write guard, and SQL safety.
-- **Railway start commands unchanged** — fix is entirely in application code and env flags.
-- **Files changed:** `app/config.py`, `watchtower_worker_entrypoint.py`, `analyst_refresh_worker_entrypoint.py`, `alert_email_delivery_worker_entrypoint.py`, `intel_v3_service.py` (`_persist_snapshot`).
-- **Validation:** After deploy, confirm `COST_GUARD ... Exiting cleanly.` in Railway logs for each worker. Confirm RAM drops near zero. Confirm `MAX(created_at)` in intel_v3_snapshots stops advancing.
-
-**Stage 10C.2 VTI benchmark row-truncation fix (current):** Backend-only patch. No UI, no SQL migration, no provider calls, no writes, no synthesis changes.
-- **Root cause:** `price_history` query in `vti_dca_benchmark_diagnostic_v1.py` had no date filter and no explicit `.limit()`, hitting Supabase's default 1000-row cap. After Stage 10C.1 wrote 1254 VTI rows, the oldest ~1000 rows were returned; contribution dates from ~2025-06-25 onward appeared as missing even though prices existed.
-- **Fix:** Replace unbounded query with a date-bounded query derived from contribution dates. Window = `min(contrib_dates) - 7 days` to `max(max(contrib_dates) + 7 days, today)`. Explicit `.limit(10_000)` prevents silent truncation. Two conditional `.gte()/.lte()` clauses filter to only the needed window.
-- **New constant:** `_VTI_PRICE_FETCH_LIMIT = 10_000` (well above any realistic contribution window).
-- **4 new diagnostic fields in response:** `vti_price_rows_loaded_count`, `vti_price_query_start_date`, `vti_price_query_end_date`, `vti_price_query_truncated`. Present in all responses including early-returns.
-- **Tests:** 48/48 pass (10 new: 5 in `TestVtiPriceQueryDiagnosticFields`, 5 in `TestVtiRowTruncationRegression`). Includes regression test with 143 contribution dates and truncated price shape. No live I/O.
-- **Files changed:** `v2/backend/app/services/vti_dca_benchmark_diagnostic_v1.py`, `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py`, `docs/ai/HANDOFF.md`, `docs/ai/USAGE_LEDGER.md`.
-- **Expected outcome after deploy:** Re-running Stage 10C benchmark with 1254 VTI rows in price_history should show `available_price_points_count=143`, `missing_price_points=[]`, `benchmark_status=computed` (if books gate=pass and portfolio snapshot exists).
-
-**Stage 10C.1 VTI price history repair (prior PR #457):** Cert-gated, feature-flag-gated on-demand endpoint to backfill VTI price history. Prerequisite for Stage 10C benchmark to unblock. No UI, no SQL migration, no synthesis, no Buy/Hold/Trim/Sell changes. Intel workers remain disabled.
-- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-price-history-repair` (cert + `VTI_PRICE_HISTORY_REPAIR_ENABLED=true` required, else 403)
-- **New service:** `v2/backend/app/services/vti_price_history_repair_v1.py` — writes ONLY VTI rows (ticker hardcoded), idempotent upsert, zero-close filter (no fabrication), dry_run=True default
-- **New public method:** `HistoryService.fetch_prices_from_provider(ticker, period)` — bypasses cache read/write, used by repair service
-- **New config flag:** `vti_price_history_repair_enabled: bool = False`
-- **Repair forensics returned:** contribution source mode (deposit_plans primary vs buy_transactions fallback), provider fetch counts, rows written, VTI row counts before/after, coverage check with sample missing dates
-- **Tests:** 13 fixture tests covering cert-gating, idempotency, no non-VTI writes, no fabrication, source mode, Stage 10C blocked/unblocked states
-- **To run repair:** Set `VTI_PRICE_HISTORY_REPAIR_ENABLED=true` → dry-run to verify fetch → `dry_run=false` to write → re-run Stage 10C benchmark
-- **Current blocker status:** `price_history` has 0 VTI rows → Stage 10C returns `benchmark_status=blocked`. After repair with `dry_run=false`, benchmark should reach `computed` or `degraded`.
-
-**Stage 10C VTI DCA benchmark diagnostic (prior PR #456):** Read-only backend diagnostic service for VTI-only DCA benchmark computation. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
-- **New service:** `v2/backend/app/services/vti_dca_benchmark_diagnostic_v1.py` — `run_vti_dca_benchmark_diagnostic()`. Pure async, no I/O except the DB client passed in. Books gate result is accepted as a parameter (not re-computed inline by default, but the endpoint runs books reconciliation first and passes the result).
-- **New endpoint:** `POST /api/v1/diagnostics/finance-intel/vti-dca-benchmark-diagnostic`. Cert-gated (same `X-Finance-Runtime-Cert-Secret` header). Runs books reconciliation inline (read-only) to get `benchmark_books_gate`, then runs VTI benchmark.
-- **Sample request body:** `{"start_date": null, "end_date": null, "include_position_breakdown": true}`
-- **Required runtime-cert header:** `X-Finance-Runtime-Cert-Secret: <FINANCE_RUNTIME_CERT_SECRET>`
-- **Data sources:** `deposit_plans` (executed=true, primary); `transactions` (Buy type, fallback); `price_history` (VTI close prices); `portfolio_snapshots` (total_equity for actual portfolio value).
-- **Historical VTI prices:** Read from `price_history` table (`ticker='VTI'`). If exact deposit date is missing, maps to next available trading day (up to 7 calendar days ahead), then previous (up to 7 days back). Mapping reason is explicit in every contribution record. If no VTI price history exists in the table, `benchmark_status=blocked`.
-- **Contribution detection:** Primary = `deposit_plans` executed=True. Fallback = buy transactions aggregated by date. If neither, `benchmark_status=blocked`. Buy-transaction fallback marks `benchmark_status=degraded`.
-- **Books gate integration:** If books gate = `pass` → can reach `benchmark_status=computed`. If `pass_with_exclusions` → degraded with flagged tickers listed. If `blocked` → benchmark blocked. If unavailable (exception or None) → degraded with warning `books_gate_runtime_not_available`.
-- **benchmark_status semantics:** `computed` = books gate pass + all prices present + portfolio value present. `degraded` = computation possible but with caveats. `blocked` = hard blocker prevents any meaningful computation. `not_evaluable` not used by this diagnostic.
-- **Invariants:** `diagnostics_only=true`, `writes_performed=0`, `policy_unchanged=true`, `visible_snapshot_unchanged=true`. No Buy/Hold/Trim/Sell changes.
-- **Tests:** `v2/backend/tests/test_vti_dca_benchmark_diagnostic_v1.py` — 48/48 pass (was 38; 10 new tests added in Stage 10C.2). All DB calls mocked. No live I/O, no providers, no Plaid.
-- **Fields to inspect after deploy:** `benchmark_status`, `deposits_detected_count`, `benchmark_contribution_count`, `vti_dca_units`, `vti_dca_cost_basis`, `vti_dca_current_value`, `vti_dca_return_pct`, `actual_portfolio_value`, `relative_vs_vti_abs`, `benchmark_blockers`, `benchmark_warnings`, `missing_price_points`.
-- **What unlocks UI work (Stage 10C UI):** If `benchmark_status=computed` or `benchmark_status=degraded` with acceptable caveats (no hard blockers), Stage 10D UI readout can proceed. If `missing_price_points` is non-empty, a price backfill PR is needed first. If deposits not found, a data-entry or deposit-import step is needed first.
-- **Next-PR sequence:** Stage 10C UI (read-only readout of this endpoint) → Stage 10D Deploy tax-lot/wash-sale source design+contract → Stage 10E readiness-flag read model.
-
-**Stage 10B.1 blocked-ticker forensics (prior PR):** Read-only extension to Stage 10B diagnostic explaining why 4 tickers (MSFT, NFLX, NVDA, XLE) blocked in the Stage 10B runtime result. No UI, no SQL, no provider/Plaid live calls, no artifact writes, no synthesis or decision-policy changes.
-- **Extended service:** `v2/backend/app/services/books_reconciliation_diagnostic_v1.py` — added `_compute_ticker_forensics()`, `_enrich_ticker_with_forensics()`, `_compute_benchmark_books_gate()`. Endpoint path unchanged.
-- **Per-ticker forensic fields (blocked/degraded only):** `transaction_type_counts`, `transaction_quantity_by_type`, `transaction_cost_basis_by_type`, `ignored_transaction_type_counts`, `ignored_transaction_quantity_by_type`, `ignored_transaction_cost_basis_by_type`, `first_transaction_date`, `last_transaction_date`, `possible_unmodeled_adjustment_detected`, `possible_unmodeled_adjustment_reason`, `cost_basis_matches_but_quantity_drift_detected`, `cost_basis_match_threshold_used`. `ticker_forensics=null` for facts_ready/not_evaluable tickers.
-- **New top-level fields:** `benchmark_books_gate` (`pass`|`pass_with_exclusions`|`blocked`|`unknown`), `benchmark_books_gate_reason`, `next_recommended_stage` (`stage10c_vti_benchmark`|`stage10b_books_repair`|`stage10b_manual_review`|`stage10b_forensics_needed`). Gate does NOT change `facts_ready` semantics.
-- **Gate logic:** `pass` → all non-crypto facts_ready or safe not_evaluable. `pass_with_exclusions` → blocked/degraded tickers have `cost_basis_matches_but_quantity_drift_detected=true` AND sane current position/cost-basis data. `blocked` → missing/negative position data OR cost basis drift >5% without the match pattern. `unknown` → insufficient evidence.
-- **Second DB query added (read-only):** All transaction types fetched (`ticker, tx_type, quantity, price, tx_date, amount, fees`) for forensic type distribution. Existing Buy/Sell query unchanged.
-- **New constants:** `COST_BASIS_MATCH_THRESHOLD_PCT=2.0`, `COST_BASIS_MATERIAL_DISAGREEMENT_PCT=5.0`.
-- **Tests:** `test_books_reconciliation_diagnostic_v1.py` — 63/63 pass (38 new tests in `TestTickerForensics`, `TestBenchmarkBooksGate`, `TestForensicsAndGateIntegration`). All DB calls mocked; no live I/O.
-- **Stage 10B runtime evidence (from PR #453):** `positions_checked=34`, `facts_ready=26`, `degraded=2`, `blocked=4`, `not_evaluable=2`. Blocked: MSFT (98.94% qty drift, 2.855% cb drift), NFLX (34.34% qty drift, 0.0008% cb drift), NVDA (44.24% qty drift, 0.0011% cb drift), XLE (37.82% qty drift, 0.0056% cb drift). NFLX/NVDA/XLE show large qty drift with matching cost basis — strong signal of unmodeled transfers/lot imports.
-- **How to run after merge:** `POST /api/v1/diagnostics/finance-intel/books-reconciliation-diagnostic` with `{"tickers": [], "include_not_evaluable": true}`. Inspect `benchmark_books_gate` and `next_recommended_stage`. For blocked/degraded tickers read `per_ticker[].ticker_forensics`.
-- **What unlocks Stage 10C:** If `benchmark_books_gate=pass_with_exclusions` and `next_recommended_stage=stage10b_manual_review`, Stage 10C VTI DCA benchmark may proceed with explicit caveats (VTI itself must be facts_ready; excluded tickers are set aside for books-repair). If gate is `blocked`, do Stage 10B books repair first.
-- **Next-PR sequence:** Stage 10C VTI-only DCA benchmark (read-only, deterministic) → Stage 10D Deploy tax-lot/wash-sale source design+contract → Stage 10E readiness-flag read model.
-
-**Stage 10A product spine reality audit (prior PR, merged #452):** Docs/audit only — no code, UI, SQL, provider migration, synthesis, or decision-policy changes. New `docs/ai/PRODUCT_SPINE_REALITY_AUDIT.md` maps the revised spine onto the actual v2 code.
-- **Implemented (not runtime-certified):** F1 Books of Record (positions/transactions/deposits/DRIP/Plaid/CSV, AVCO cost basis, 24h Plaid cache), F2 Data Backbone (concurrent price engine), Stage 1 Honest Intel (deterministic decision_policy_v1), Stage 4 labeled advisory analyst, Stage 2 Deploy exact-dollar math.
-- **True gaps:** (1) Tax/wash-sale safety absent. (2) VTI-only benchmark absent. Watchtower real-send parked.
-- **Proposed readiness flags (not implemented):** facts_ready, advisory_ready, deployment_safe (False — tax gap), decision_ready, canonical_ready. `safe_for_decision` semantics unchanged.
-
-**Stage 9O closeout (prior PR, merged #451):** Vanguard issuer-official holdings diagnostic — closed out after live runtime diagnostic confirmed 404 for all tested URLs. ETF provider matrix updated to `rejected_insufficient`. No Stage 9P Vanguard adapter.
-- **Runtime result** (diagnostic_version=stage9o_v1): VTI URL 404, VXUS URL 404, SCHD routed to Vanguard URL in error (SCHD is Schwab, not Vanguard). canonical_candidate_count=0, rejected_count=3. canonical_ready=False, safe_for_decision=False.
-- **Guard added**: `_VANGUARD_ELIGIBLE_TICKERS` frozenset in `vanguard_holdings_diagnostic_v1.py` — any ticker not in the set is rejected before network call with failure_reason=`unsupported_issuer_for_provider`. SCHD and non-Vanguard tickers can never produce a Vanguard URL.
-- **Matrix updated**: `issuer_official_vanguard` → `rejected_insufficient` in `etf_provider_decision_matrix_v1.py`. Runtime evidence, rejection reasons, and notes updated. `vanguard_etfs` and `international_etfs` ETF class next paths reflect no-proven-path state. `issuer_official_vanguard` stop reason added to `patch_loop_stop_reasons`.
-- **Tests**: `test_stage9o_vanguard_holdings_diagnostic.py` — 52 tests (39 original + 13 new O29–O36 for eligibility guard). `test_stage9n_etf_provider_decision_matrix.py` — 77 tests (71 original + 6 new N14b–N14d, N21f, N27b, N29 updated). **52/52 Stage 9O pass. 77/77 Stage 9N pass.**
-- **No canonical adapter, no artifact writes, no synthesis, no decision integration. No SQL, no UI, no policy changes. No Buy/Hold/Trim/Sell change.**
-- **Product-spine pivot (next stages):** Books of record first → data backbone → honest Intel with visible source/freshness/gaps → exact-dollar biweekly deployment → VTI-only benchmark truth → Claude as labeled advisory analyst → tax and behavioral guardrails before action. ETF holdings are enrichment/exposure evidence only — not a global gate for app usability. Do not build Stage 9P Vanguard adapter. Do not continue SEC NPORT patching for VTI/SCHD/VXUS without manual SEC research identifying correct filing entities.
-
-**Stage 10 (prior PR, merged):** Supabase PostgREST egress emergency fix. Root cause: `watchtower_intel_republisher_v1._fetch_latest_intel_snapshot()` returned a slim dict missing `stage8e_catalyst_explanation_contract_version`, so `is_snapshot_stage8e_complete()` always returned False → republisher always called `run_prewarm_snapshot()` every 60s → full read+write cycle on every Watchtower iteration. Migration 024 adds 5 flat metadata columns to `intel_v3_snapshots` (snapshot_source, payload_generated_at, evidence_mapping_version, stage7_contract_complete, stage8e_contract_complete). Republisher + evidence collector + technical artifacts now read only flat columns (no payload JSONB). `_persist_snapshot` skips deactivate+insert when source_hash is unchanged (idempotency). Minimal RETURNING on UPDATE/INSERT. Recommendations and agent_insights queries now have LIMIT 500. Contract fast paths added for stage7 and stage8e flat boolean keys. 14/14 regression tests pass. Supabase SQL: Migration 024 required before deploy. No visible behavior change.
-
-**Stage 9N (prior PR, merged):** ETF provider decision matrix — single source of truth for provider readiness, eliminating the SEC NPORT / AV / FMP patch loop.
-- **New module**: `etf_provider_decision_matrix_v1.py` (pure, no IO, no SQL, no UI) — classifies 8 provider paths as `canonical_ready`, `supplemental_only`, `manual_research_required`, `rejected_paywalled`, or `not_applicable`. Encodes runtime evidence from Stages 9F/9K/9L/9M.
-- **Patch loop stops**: sec_nport_vti_schd_vxus → `manual_research_required` (wrong CIKs confirmed). alpha_vantage_etf_profile → `supplemental_only` (date always absent). fmp_etf_holdings → `rejected_paywalled` (402 on free key). These three must not be retried automatically.
-- **Canonical ready**: sec_nport_spy_qqq ONLY — standalone trusts with proven identity, holdings, weights, date, and free entitlement.
-- **Next recommended paths**: Vanguard ETFs → issuer_official_vanguard (URL needs post-deploy confirmation). Schwab SCHD → issuer_official_schwab (URL not publicly stable). Sector XLE → issuer_official_ssga_spdr (URL needs confirmation). GLD → not_applicable (commodity trust). SPY/QQQ → sec_nport_spy_qqq (already canonical).
-- **`check_canonical_gate()`**: Pure function enforcing 6 S-grade criteria (identity + holdings + weights + date + authority + entitlement). Mirrors Stage 9K holdings-ready gate exactly. Not loosened.
-- **`build_provider_decision_matrix()`**: Returns complete JSON-serializable diagnostic dict including patch_loop_stop_reasons per problem provider.
-- **Tests (test_stage9n_etf_provider_decision_matrix.py, 71 tests):** N1–N4 SEC NPORT VTI/SCHD/VXUS manual_research_required + wrong CIK evidence. N5–N7 SPY/QQQ canonical_ready. N8–N10 AV supplemental_only + date absent. N11–N13 FMP rejected_paywalled + 402. N14–N16 issuer-official manual_research_required. N17 GLD not_applicable. N18–N20 gate criteria. N21 serializable output. N22 only SPY/QQQ canonical. N23 safe_for_decision=False everywhere. N24 Stage 9K gate unchanged. N25 patch-loop stop reasons. N26–N29 ETF class next paths. N30–N31 unknown lookups. N32–N33 version/criteria. N34–N37 gate independence. N38 AV classifier regression. N39 valid classifications.
-- **All 263 Stage 9F/9K/9L/9M/9N tests pass.** No SQL, no UI, no decision policy changes.
-- **Next action (manual):** Confirm issuer-official URLs for Vanguard (VTI/VXUS/VOO) and SSGA (XLE). Fetch one CSV, confirm fund name in metadata + weights column + as-of date row. If confirmed, promote provider to canonical_ready. Do NOT patch the decision matrix again until a live CSV fetch proves all 6 criteria.
-
-**Stage 9M (prior PR, merged on branch `claude/stage-9m-nport-resolver-8eqwV`):** Verifies SEC NPORT resolver CIKs for VTI/SCHD/VXUS from runtime evidence and adds bounded diagnostic proving why SEC NPORT is not currently viable for these tickers.
-- **Root cause confirmed (runtime evidence from Stage 9L deploy):**
-  - VTI (CIK 0000764180): 1000 forms in filings.recent, 0 NPORT-P; files page fetched, also 0 NPORT-P. CIK is the WRONG filing entity.
-  - SCHD (CIK 0001477379): 20 forms in filings.recent, 0 NPORT-P; no files pages. CIK is the WRONG filing entity.
-  - VXUS (CIK 0001004244): 127 forms in filings.recent, 0 NPORT-P; no files pages. CIK is the WRONG filing entity.
-  - EFTS discovery returned `[]` for all three — the same wrong CIK was deduped (already in static seeds) or EFTS returned 0 NPORT-P hits for those registrant names.
-- **Resolution (path B — bounded diagnostic):**
-  - New `resolver_limitation_reason` field on `NportProviderResult` — set on the `no_nport_filing` path when `expected_status="candidate"`, proving why the CIK is wrong with form count, files page detail, and a structured reason code.
-  - New `efts_entity_search_url` and `efts_series_search_url` fields — constructed (not fetched) EFTS search URLs for manual verification of the correct NPORT-P filer.
-  - Adapter `_build_no_data_result()` exposes these fields in the thin artifact payload.
-  - Diagnostic runner `_build_ticker_entry()` exposes `resolver_limitation_reason`, `efts_entity_search_url`, `efts_series_search_url`, `submissions_recent_form_count`, `submissions_has_files_pages`, `submissions_files_page_tried`, and `discovery_deduped_reason`.
-  - Static map provenance for VTI/SCHD/VXUS updated with "runtime evidence confirms CIK is WRONG" and recommended next path (issuer-official or Alpha Vantage supplemental).
-  - Stage 9L pagination fallback preserved, no regressions.
-- **Tests (test_stage9m_nport_resolver_verification.py, 52 tests):** M1–M2: candidate CIK + no_nport path sets resolver_limitation_reason with specific context. M3–M4: confirmed/success paths have no limitation reason. M5–M6: EFTS URLs constructed correctly. M7–M9: adapter payload includes all diagnostic fields. M10: diagnostic runner exposes new fields. M11–M12: discovery_deduped_reason covers EFTS-no-hits and all-candidates-already-tried. M13: no fake identity promotion. M15–M17: VTI/SCHD/VXUS shaped tests mirror runtime evidence. M18: Stage 9L regression guard. M19: no live SEC calls.
-- **All 262 Stage 9F/9K/9L/9M tests pass.** No SQL, no UI, no decision policy changes.
-- **Next action:** The correct NPORT-P filing entity for VTI/SCHD/VXUS must be found manually using the EFTS search URLs surfaced in the diagnostic output. After deploy, run `POST /api/v1/diagnostics/finance-intel/etf-nport-live-check` with `{"tickers": ["VTI", "SCHD", "VXUS"]}` to confirm `resolver_limitation_reason` is populated for all three and `efts_entity_search_url`/`efts_series_search_url` are returned per ticker. Use those URLs to find correct filers in SEC EDGAR. Recommended alternative: issuer-official CSV (vanguard.com/iShares) or Alpha Vantage supplemental (non-canonical). Do not add SEC NPORT as a canonical source until correct CIKs are confirmed.
-
-**Stage 9L (prior PR, merged or open on branch `claude/nport-etf-filing-lookup-Bt05B`):** Root-causes and partially fixes the `no_nport_filing` result for VTI, SCHD, VXUS.
-- **Fix 1 — Pagination fallback (nport_provider_v1.py):** When `filings.recent` has no NPORT-P, code now tries the first `filings.files[]` page (bounded: at most 1 extra HTTP call per candidate CIK).
-- **Fix 2 — Diagnostic fields (NportProviderResult):** Three new fields: `submissions_recent_form_count`, `submissions_has_files_pages`, `submissions_files_page_tried`.
-- **Fix 3 — Enhanced thin artifact (etf_nport_adapter_v1.py):** `_build_no_data_result()` includes `submissions_url`, `edgar_nport_search_url`, `parent_registrant_name`, `candidate_ciks_tried`, `submissions_recent_form_count`.
-- **26 tests (test_stage9l_nport_filing_fix.py).** No SQL, no UI, no policy changes.
-
-**Stage 9K diagnostic (prior PR):** Adds `POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness` to explain per-ticker why VTI/SCHD/VXUS remain "not yet wired" after deploy.
-- **`etf_stage9k_diagnostic_helper.py`** (new): pure module with `classify_stage9k_gate_failure(payload)` → `(gate_passed, reason_failed)` and `build_stage9k_ticker_entry(...)`. Mirrors the gate in `_get_etf_nport_provider_outputs` exactly.
-- **Config**: `intel_v3_stage9k_artifact_readiness_diagnostic_enabled: bool = False` added to `config.py`.
-- **Endpoint**: cert-gated, read-only SELECT only, no artifact writes, no provider calls. Queries `research_artifacts` twice (with/without `is_active=True`) to surface five failure modes: flag disabled, no_artifact_row, is_active=False, payload gate fail, gate passed.
-- **Tests**: 35 fixture tests in `test_stage9k_diagnostic.py` — all 5 gate criteria individually, combined failures, all 5 failure modes in `build_stage9k_ticker_entry`. No IO, no DB, no LLM.
-- To run: set `INTEL_V3_STAGE9K_ARTIFACT_READINESS_DIAGNOSTIC_ENABLED=true` + cert headers, then `POST /api/v1/diagnostics/finance-intel/etf-stage9k-artifact-readiness` with `{"tickers": ["VTI", "SCHD", "VXUS"]}`.
-
-**Stage 9K (prior PR):** Wires existing NPORT artifact payloads into `etf_provider_outputs` in `card_meta`, enabling ETF drawers to show "full holdings data available" when real SEC/NPORT evidence is present. Honest degradation preserved when it is not.
-- **`_get_etf_nport_provider_outputs()`**: New async method in `intel_v3_service.py` — queries `research_artifacts` for active NPORT ETF fund note artifacts, applies holdings-ready gate (fetch_status=success, holdings_count≥5, weights_available, report_period_date present), returns `{ticker: {"nport_output": {...}}}` map. Fail-soft; never raises.
-- **`run_v3` and `run_prewarm_snapshot`**: NPORT map queried before card loop (flag-gated: `intel_v3_etf_nport_evidence_enabled=True`). `etf_provider_outputs` populated in `card_metas.append()` in both paths.
-- **`snapshot_builder.py`**: Already extracted `etf_provider_outputs` from `card_meta` at lines 246-247 (Stage 9J TODO now resolved). No changes to snapshot_builder needed.
-- **Safety**: `safe_for_decision` always False; `synthesis_ready` always False; visible BUY/HOLD/TRIM/SELL never overridden. Flag off or no holdings-ready artifacts → `etf_provider_outputs=None` → honest "not yet wired" text preserved.
-- **Tests**: 45 fixture tests in `test_stage9k_etf_provider_wiring.py` — NPORT payload gate, holdings-ready wiring, AV missing-date stays profile_ready, FMP 402 not holdings_ready, lens regression (GLD=commodity_hedge_lens unchanged), stock/crypto unaffected, visible action preserved, schema integrity.
-- No new providers, no SQL, no LLM, no UI changes. AV supplemental-only unchanged. FMP paywalled unchanged.
-
-**Stage 9J (merged PR #441):** Wired portfolio-fit context and ETF evidence signals into Intel context.
-- **portfolio_current_pct → portfolio_weight_context**: adapter now emits fit-aware plain-English weight note. UNDERWEIGHT: "room to grow toward target." ON_TARGET: "at target allocation." OVERWEIGHT/BREACH: "above target." UNKNOWN: "no target allocation is set." Key absent (not null) when pct is None.
-- **ETF PROFILE_READY text**: changed from "requires provider data" to "not yet wired" (honest Stage 9K TODO state).
-- 69 tests in `test_stage9j_portfolio_fit_etf_evidence.py`. No SQL, no providers, no LLM.
-
-**Stage 9I.2 (PR pending):** Root-cause fix for SNOW still showing "asset type not recognized" after PR #439.
-- **Root cause traced**: `positions` DB table stores `category = "Other"` for SNOW. Python `or` short-circuit means `"Other" or "stock"` = `"Other"` (truthy string, fallback never fires). "Other" flows through `card_meta["category"]` into `build_intel_context(asset_type="Other")`. `_classify_asset_class("other")` → UNKNOWN; "other" is in `_AMBIGUOUS_CATEGORY_LABELS` so stock fallback is also blocked → UNKNOWN lens → "asset type not recognized."
-- **Fix**: Added `_resolve_intel_asset_type()` helper and `_AMBIGUOUS_POSITION_CATEGORIES` frozenset in `snapshot_builder.py`. Converts ambiguous category values ("Other", "Unknown", "", "n/a", "none") to "stock" before the `build_intel_context()` call in `_build_held_card()`. Known ETF/commodity tickers (GLD/VTI/SCHD/VXUS) still route correctly via ticker-map override inside `compose_asset_intelligence()` — passing "stock" for those is safe because the ticker-map override wins.
-- **Why this is durable**: Fix is at the snapshot_builder call site (the source/adapter boundary), not by adding more category label strings. Direct calls to `build_intel_context()` outside the snapshot builder still treat "Other" as UNKNOWN for truly unknown tickers (no double-routing).
-- 11 new tests in `TestStage9I2RuntimeOtherCategory`. 176 Stage 9I + 97 Stage 9G/9H pass.
-- No SQL, no providers, no LLM, no UI, no policy changes.
-
-**Stage 9I.1 (merged PR #439):** Two targeted correctness fixes after screenshot validation of PR #438.
-1. **SNOW "asset type not recognized"**: Added `cloud`, `data cloud`, `saas`, `enterprise software`, `application software`, `software infrastructure`, `consumer discretionary`, `consumer staples` to `_STOCK_CATEGORY_LABELS`. Added conservative stock fallback in `compose_asset_intelligence()`: non-ETF ticker with a non-empty, non-ambiguous, non-instrument category defaults to `ASSET_CLASS_STOCK`. Added `_NON_STOCK_INSTRUMENT_TYPES` exclusion set (`derivative`, `futures`, `option`, etc.) to preserve conservative behavior for those values.
-2. **ETF profile-ready grammar**: `"analysis require provider data"` → `"analysis requires provider data"` in `ETF_TIER_PROFILE_READY` driver.
-- 22 new tests in `TestStage9I1NormalizationFix`. 165 Stage 9I + 97 Stage 9G/9H pass.
-
-**Stage 9I cleanup (merged PR #438):** Five production correctness fixes to ETF/stock intelligence drawers.
-1. **ETF evidence language**: `buildSupportingEvidenceSentences`/`buildIncompleteEvidenceSentences` now accept optional `assetClassDisplay` param; ETF/commodity/crypto drawers show "Fund profile data" instead of "Company fundamentals." `IntelV3Drawer` passes `intelCtx?.asset_class_display`.
-2. **ETF_TIER_PROFILE_READY overclaim**: Driver text in `_compose_etf()` no longer claims "profile and cost data available" when no provider outputs are present; now says "role is identified from ETF classification; cost, holdings overlap... require provider data."
-3. **HOLD+BUY contradiction**: `_build_why_this_action()` now accepts `existing_action`; when HOLD, BUY-conflict phrases (e.g. "adding builds the intended portfolio sleeve") are filtered and a HOLD-compatible candidate note is appended. `_BUY_CONFLICT_PHRASES` constant controls the phrase list.
-4. **Asset type normalization**: `_classify_asset_class()` expanded to recognize real runtime `card_meta.category` values — sector names ("Technology", "Communication Services"), bucket labels ("Core"), and ETF substring patterns ("Broad Market ETF"). Ticker-map override in `compose_asset_intelligence()`: any ticker in `_KNOWN_ETF_MAP` routes to ETF lens regardless of category string. "Other" category without ticker-map evidence remains UNKNOWN (conservative).
-5. **Duplicate risk items**: `IntelV3Drawer` deduplicates `card.flags` entries whose text matches any `payload.blockers` entry (normalized whitespace/case); distinct risks are preserved.
-- 143 backend tests in `test_stage9i_intel_context_adapter.py` (126 original + 17 new in `TestAssetTypeNormalization`). 97 Stage 9G/9H tests unchanged.
-- Hard constraints preserved: safe_for_decision never True, existing action never overridden.
-
-**Stage 9I (merged PR #437):** Wires the Stage 9G/9H asset intelligence composer into the Intel card data flow.
-- `intel_context_adapter_v1.py` (new): pure adapter; calls `compose_asset_intelligence()` per card; returns a safe serializable dict (role_lens, why_this_action, add_more_trigger, trim_sell_trigger, evidence_caveat, lens_applied). Explanatory only — existing visible action never overridden.
-- `snapshot_builder.py` (modified): calls `build_intel_context()` in `_build_held_card()`; extracts `etf_provider_outputs` and `etf_upstream_signals` from card_meta when present (Stage 9F NPORT keys — not yet populated; context degrades to role-only today); embeds result as `asset_intelligence_context` in `detail_drawer_payload`.
-- Frontend: `IntelV3Card` shows role-lens compact line (ETF/commodity only); uses composer `why_this_action` when `why_text` is empty. `IntelV3Drawer` renders `AssetIntelSection` (Role/Lens, Why this action, Add more if, Trim/Sell if, evidence caveat). `api.ts` adds `asset_intelligence_context` optional field to `detail_drawer_payload`.
-- 105 backend tests in `test_stage9i_intel_context_adapter.py` (101 original + 4 provider-wiring honesty tests). No SQL, no providers, no LLM.
-- Hard constraints preserved: safe_for_decision never True, existing action never overridden, no raw metrics in UI.
-- **Provider wiring TODO:** populate `etf_provider_outputs`/`etf_upstream_signals` in `card_metas` inside `intel_v3_service.py` once Stage 9F NPORT lane (`intel_v3_nport_evidence_enabled=True`) is active and portfolio overlap/cost signals are computed. No adapter changes needed — snapshot_builder already extracts these keys.
-
-**Stage 9G/9H (merged PR #435):** ETF Intelligence Classifier + Unified Asset Decision Composer.
-- `etf_intelligence_classifier_v1.py`: pure classifier; maps ticker+provider_outputs to ETF type/role/evidence tier/safety flags. GLD = commodity_trust/not_applicable (not failed). AV no-date and FMP 402 cannot produce holdings_ready. Partial coverage not overlap-safe. Accepts real Stage 9F field names: NPORT `report_period_date`, FMP `as_of_date_or_date_field`.
-- `asset_intelligence_composer_v1.py`: unified lens router; routes stock→stock_fundamental_lens, ETF→etf_role_lens, GLD→commodity_hedge_lens, crypto→crypto_speculative_lens. HOLD always has explicit reason code. Weak data produces blocked_reason+None action, not silent HOLD.
-- 97 fixture tests (83 original + 14 real-shape Stage 9F compatibility). No SQL, no providers, no LLM, no UI changes.
-- See `docs/ai/intel/STAGE_9G_9H_ASSET_INTELLIGENCE_COMPOSER.md` for full spec.
-
-**Stage 9F summary (merged):** SEC NPORT safe but insufficient; issuer-official CSV URLs blocked; AV supplemental-only (no as-of date); FMP free tier paywalled (HTTP 402). No canonical ETF holdings provider. Provider proof loop complete — do not retry FMP or build a canonical AV/FMP adapter.
-
-**Live proof results (Stage 9F.3c):**
-
-| Ticker | holdings_count | weights | as-of date | coverage_quality |
-|---|---|---|---|---|
-| XLE | 24 | ✓ | absent | usable_supplemental |
-| VOO | 519 | ✓ | absent | usable_supplemental |
-| SCHD | 103 | ✓ | absent | usable_supplemental |
-| VXUS | 37 | ✓ | absent | partial_or_suspicious |
-
-First run (9F.3a) returned 0 holdings for all Vanguard + SCHD tickers — root cause was quota
-exhaustion or timing, not proven premium entitlement. Second run (after 9F.3b + quota reset)
-confirmed AV free/API key returns ETF_PROFILE data for VOO, SCHD, VXUS.
-
-**Provider decision (final):**
-- Alpha Vantage ETF_PROFILE is **not canonical** — every response is missing as-of date; VXUS returned only 37 holdings for a fund with thousands of positions; fund_name was null in several responses.
-- Accepted **only as supplemental exposure evidence** (non-canonical). Do NOT wire into visible decisions, synthesis, Deploy, or Watchtower.
-- Do not build a canonical AV adapter.
-
-**New files (Stage 9F.3c):**
-- `v2/backend/app/services/intelligence/research_workers/alpha_vantage_supplemental_classifier_v1.py`: `classify_av_etf_output()` — pure no-IO classifier; always returns `canonical_ready=False`, `safe_for_decision=False`.
-- `v2/backend/tests/test_stage9f3c_av_supplemental_classifier.py`: 25 fixture tests. All 82 tests pass.
-
-**Config flags (unchanged):**
-- `intel_v3_alpha_vantage_etf_profile_diagnostics_enabled` (default False)
-- `alpha_vantage_api_key` (Optional[str]) — never logged or returned
-
-**Invariants preserved:** `canonical_ready=False`, `safe_for_decision=False`, `artifact_writes=0`, `decision_policy_changed=False`, `synthesis_ready_changed=False`, `visible_snapshot_unchanged=True`. API key never in any returned field.
-
-**Next after PR #431 merges:** Run/merge FMP free-key entitlement proof. `FMP_API_KEY` is already in the main app service.
-
-## Purpose
-
-This file is **current operational state**, not a historical log. It is meant to be loaded into context every session, so it must stay compact. Do not append PR-by-PR history. When something changes, replace or summarize the affected section instead of adding new entries.
-
-## Current product stage
-
-- Roadmap stage: **Stage 12A** — Allocation & Rebalancing Reality Audit (PR open). Prior stage: Stage 11B certified financial truth (`truth_status=certified`, `reconciliation=pass`, `snapshot_portfolio_value=53796.87`, `position_derived_market_value=53759.82`, 33/33 tickers priced).
-- Current PR: Stage 12A audit doc only (no code changes, no SQL, no UI, no LLM calls).
-- Next: **Stage 12B** — Conservative profile allocation policy + "what should I buy next with $X?" endpoint. See `docs/ai/STAGE_12A_ALLOCATION_REBALANCING_REALITY_AUDIT.md` §6 for full spec. Key constraint: no user-defined manual target weights; policy is generated from conservative profile + Intel v3 certified snapshot.
-- North-star reminder: Intel → Deploy → Watchtower; deterministic backend policy owns visible Buy/Hold/Trim/Sell authority. See `docs/product/NORTH_STAR.md`.
-
-
-## Current architecture / runtime state
-
-- OS v4 is the canonical operating system. No v4.2 or v5 labels.
-- Visible decision authority is owned by the deterministic Intel v3 backend policy. LLMs / agents / research workers cannot own final visible action authority.
-- **Intel v3 all-or-nothing certified intelligence run contract (Stage 3.3).** `POST /intel/v3/run` (Run Intel button) now calls `service.enqueue_run_v3()` — it enqueues background jobs and returns `{status: "refresh_requested"}` immediately. It does NOT build a snapshot or call `decide()`. `GET /intel/v3/snapshot` (page load) returns the latest persisted snapshot with no LLM calls. After the worker completes a full run, `run_prewarm_snapshot()` calls `check_certified_intel_run_contract()` — a pure async read-only validator that checks all 10 conditions per holding (active recommendation, agent_run_id, matching agent_insight by run_id, agent_run completed, analyst_verdict fields non-empty non-template, freshness within SLA). Only if ALL active holdings pass does the snapshot get `snapshot_source="worker_certified"`; otherwise `"certification_failed"`. The frontend polls every 15s after clicking Run Intel until `snapshot_source=worker_certified` or 5-minute timeout. Green banner is shown ONLY when `snapshot_source=worker_certified` AND `certified_holding_count === total_holding_count`. Six UI states: `certified_current` (green), `latest_certified_new_refresh_running` (amber), `refreshing_analyst_intelligence` (grey), `blocked_certification_failed` (red), `unavailable_refresh_failed` (red), `unavailable_evidence_incomplete` (grey). Structured logs: `intel_v3_certified_contract_summary`, `intel_v3_run_request_received`, `intel_v3_full_refresh_enqueued`, `intel_v3_worker_certified_snapshot_published`, `intel_v3_worker_certified_snapshot_rejected`, `intel_v3_ui_status_summary`. Background worker still: `analyst_refresh_worker_v1.AnalystRefreshWorker` → `FullPortfolioAnalystRefreshAdapter` → `AgentOrchestrator` → `analyst_evidence_writer_v1` → `prewarm_intel_v3_snapshot()`. For broader architecture see Stage 3.1–3.2c notes below.
-- For long architecture references, read `artifacts/Intel_v3_Architecture_Plan_Draft2_*`, `artifacts/Intel_v3_Architecture_Plan_Draft3_*`, and `artifacts/Intel_v3_Living_Cockpit_Status_Reconciliation_*` rather than copying them here.
-- Runtime workflow guardrails: advisory `.claude/hooks/ai_os_advisory.py` reminds about contract / claim-safety / SQL / env paths. No blocking hooks.
-
-## Stage 8C PR 2.5 — Post-lane Stage 5J/5K readiness trigger (current PR, open)
-
-**Root cause:** Stage 5J/5K readiness logs never appeared after Run Intel because:
-1. The orchestrator gated Stage 5J behind `intel_v3_evidence_coverage_dispatch_log_enabled` (default False).
-2. Stage 5K (`compute_decision_input_readiness`) was never called from the orchestrator path.
-3. `snapshot_sentiment_readiness` was only emitted during snapshot building — skipped when the republisher returned `skipped_no_new_evidence` (existing SEC catalyst v2 artifacts predate the current snapshot timestamp).
-
-**Fix (one file):** `intel_v3_evidence_lane_orchestrator_v1.py` — replaced the flag-gated Stage 5J-only block with an unconditional post-lane Stage 5J + 5K evaluation:
-- Calls `compute_research_evidence_coverage` (Stage 5J) → emits `sec_catalyst_stage5j_readiness` per ticker.
-- Calls `compute_decision_input_readiness` (Stage 5K) → emits `sentiment_stage5k_source_selection` per ticker.
-- Emits `snapshot_sentiment_readiness` for usable sec_catalyst_sentiment lanes.
-- Reads the full `is_active=True` artifact set — idempotency-skipped existing artifacts are valid evidence inputs.
-- Fail-soft; never raises into the orchestrator path.
-- Runs after evidence lane completion, before the republisher check, so diagnostics appear regardless of republisher decision.
-
-**Tests:** 29 new backend tests in `test_stage8c2_5_post_lane_readiness.py` (structural source proofs, idempotency cases, Stage 5J LIMITED, Stage 5K source selection, log emission, ETF/crypto skip, no policy mutations). No SQL, no env vars, no providers, no LLM, no UI, no decision policy changes.
-
-**Expected Railway logs after merge (keep INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED=true):**
-- `sec_catalyst_stage5j_readiness ticker=<t> status=LIMITED is_usable=True artifact_id=<uuid>`
-- `sentiment_stage5k_source_selection ticker=<t> selected=sec_catalyst_sentiment suppressed_editorial_present=<bool>`
-- `snapshot_sentiment_readiness ticker=<t> status=LIMITED source=sec_catalyst_sentiment`
-- Editorial/yfinance sentiment stays suppressed (not selected over usable SEC catalyst).
-- ETF/BTC/XRP conservative skip behavior unchanged.
-
-## Stage 8C PR 2.4 — Certify SEC catalyst sentiment propagation into Stage 5J/5K and snapshot (merged PR #402)
-
-**Fix:** Stage 5J: added `artifact_id` to `sec_catalyst_stage5j_readiness` log. Stage 5K: added `_log_sentiment_source_selection()`. `intel_v3_service.py` (both paths): added `snapshot_sentiment_readiness` log when sentiment is usable. 17 new backend tests. No SQL.
-
-## Stage 8C PR 2.3 — SEC catalyst idempotency + lane isolation fix (merged PR #401)
-
-**Root cause:** `SEC_CATALYST_MODEL_VERSION` was `.v1` — same idempotency key as pre-PR400 THIN artifacts. Idempotency check skipped the write.
-
-**Fix:** Bumped to `sec_catalyst_sentiment_adapter.v2`; added skill_pack/model_version to write_ok/idempotency_skip/clean_replacement logs. 9 new tests.
-
-## Stage 8C PR 2 runtime fix — schema-valid fact_kind (PR #399, open)
-
-**Root cause:** `FactRecord.fact_kind="sec_catalyst_event"` violated `research_artifact_facts_fact_kind_check` (Supabase error 23514). Every MSFT/CRM/WMT/COST/QCOM catalyst write failed; `sentiment_catalyst_evidence_complete artifact_id=none reason=service_write_failed`.
-
-**Fix:** `fact_kind="catalyst_item"` — existing schema-valid value; `axis_hint="catalyst"` and all structured_payload fields preserved. 1-line change + 28-line test (`test_fact_kind_is_schema_valid_catalyst_item`). No SQL.
-
-## Stage 8C PR 2 — SEC Catalyst Sentiment Evidence Lane (merged PR #398)
-
-**Before:** `sentiment_event_adapter_v2.py` existed but no real free source produced LIMITED/READY sentiment artifacts.
-
-**After:** Flag-gated SEC/company catalyst evidence lane (`INTEL_V3_SENTIMENT_CATALYST_EVIDENCE_ENABLED`, default OFF). Writes honest `COMPANY_AUTHORED`/`PRIMARY_AUTHORITY` `sentiment_event` artifacts from SEC EDGAR filing metadata (10-K, 10-Q, 8-K). `sec_catalyst_sentiment` lane added to Stage 5J registry.
-
-**Key components:**
-- `sec_catalyst_sentiment_adapter_v1.py` — pure adapter: `SecEdgarProviderResult` → `WorkerOutput` with `artifact_type=sentiment_event`, `skill_pack=sec_catalyst_sentiment_evidence_v1`. Deterministic form_type→category/materiality/freshness mapping. No polarity.
-- `_FORM_ATTRIBUTES` map — 10-K → earnings/HIGH/COMPLETE/180d, 10-Q → earnings/MEDIUM/PARTIAL/90d, 8-K → corporate_action/HIGH/PARTIAL/30d.
-- `run_sec_catalyst_sentiment_evidence()` — runner in `evidence_lane_runner_v1.py`, reusing existing `sec_edgar_provider`. Equity-only guard via `classify_sec_metric_candidate`. Structured logs: `sentiment_catalyst_evidence_start`, `sentiment_catalyst_evidence_complete`, `sentiment_catalyst_evidence_skipped`.
-- `LANE_SEC_CATALYST_SENTIMENT` — added to `TICKER_LANE_REGISTRY` in `research_evidence_coverage_read_model_v1.py`.
-- Config: `intel_v3_sentiment_catalyst_evidence_enabled: bool = False`.
-
-**Tests:** 49 new tests in `test_stage8c2_sec_catalyst_sentiment.py`. Existing 333 related tests pass. No SQL, no LLM, no new paid provider, no UI, no policy changes.
-
-**Runtime validation:** After enabling flag in Railway, look for `sentiment_catalyst_evidence_complete` log key. Do not claim production success until at least one real eligible equity artifact or an honest all-skipped result appears in logs.
-
-## Stage 8C PR 1 — Sentiment Event v2 Provider-Agnostic Adapter (merged)
-
-`sentiment_event_adapter_v2.py` — provider-agnostic adapter normalizing SEC/company catalyst or vendor inputs into NOT_USABLE/LIMITED/READY/INELIGIBLE without adding a provider or changing decisions. Editorial promotion guard, ticker_match_confidence cap, catalyst_category/materiality/ticker_match normalization, dedupe key, ineligible-asset guard (crypto/ETF), safe URL filter. 76 new backend tests.
-
-## Stage 8B — Sentiment Evidence Quality Threshold (merged PR #396)
-
-**Root cause investigation:** Sentiment artifacts are ALWAYS SUPPRESSED_INCOMPLETE because yfinance news sources are assigned `EDITORIAL_CONTEXT` authority, which is hard-capped to `THIN` completeness band, which triggers `SUPPRESSED_INCOMPLETE` in the truth adapter. This is CORRECT behavior — editorial context is not decision-useful.
-
-**Gap fixed:** No explicit, auditable quality criteria existed for when sentiment could graduate to LIMITED/READY. The suppression was implicit in the `EDITORIAL_CONTEXT → THIN` cap.
-
-**Fix:**
-1. `sentiment_quality_threshold_v1.py` (new) — Explicit quality gate. Defines `evaluate_sentiment_quality()` with five deterministic criteria: freshness=FRESH, source authority NOT in `{EDITORIAL_CONTEXT, UNKNOWN}`, completeness NOT in `{THIN, NOT_EVALUABLE}`, not contradicted, at least one source+fact. Returns `NOT_USABLE` (with reason codes) or `LIMITED`/`READY`. Exports `SENTINEL_EDITORIAL_CONTEXT_REASON` constant.
-2. `research_evidence_coverage_read_model_v1.py` (Stage 5J) — New `_classify_sentiment_status()` function imported in `_build_lane_coverage()` when `lane == LANE_NEWS_SENTIMENT`. Sub-classifies SUPPRESSED reasons: `editorial_context_present_not_decision_useful` (SUPPRESSED_INCOMPLETE with EDITORIAL/UNKNOWN authority — correct by design) vs `suppressed_data_quality_issue` (other suppressions like contradictions).
-3. `intel-v3-explanation.ts` (frontend) — Updated MISSING sentiment copy from "thin or not available" → "not yet available for this ticker." to cleanly distinguish from INSUFFICIENT ("available but not yet strong enough").
-
-**Quality path confirmed:** USABLE_WITH_LIMITATIONS artifacts → STATUS_LIMITED in Stage 5J → READINESS_LIMITED in Stage 5K → `sentiment_status="LIMITED"` in snapshot → "Some news and sentiment data is available." in frontend. No code change needed for propagation — the path already existed.
-
-**Tests:** 36 new backend tests in `test_stage8b_sentiment_quality_threshold.py` covering: quality threshold criteria, Stage 5J sub-reasons, Stage 5K propagation (SUPPRESSED→INSUFFICIENT, MISSING→MISSING, LIMITED→LIMITED, READY→READY), crypto guardrails, non-sentiment lanes unaffected. 1 frontend test updated.
-
-## Stage 8A.3 — Post-evidence-lane deterministic snapshot republish (merged PR #395)
-
-**Root cause:** `enqueue_run_v3()` dispatches evidence lanes fire-and-forget via `asyncio.create_task`. After lanes write fresh technical artifacts to `research_artifacts`, nothing triggers snapshot republish — the Watchtower republisher's `compare_and_republish()` compares `portfolio_snapshots.snapshot_at` (price evidence timestamp), not `research_artifacts.generated_at`. So the certified snapshot stayed stale and the drawer regressed to legacy fallback.
-
-**Fix:**
-1. `watchtower_intel_republisher_v1.py` — new `compare_and_republish_after_evidence_lanes(user_id, client, *, intel_republish_callable)` queries `research_artifacts` for usable (`is_usable=True`) technical_signal artifacts per ticker and triggers republish if any are newer than the current snapshot by `_EVIDENCE_NEWER_THRESHOLD_SECONDS=10`. Emits `intel_v3_post_lane_republish_check` log. Idempotent: after republish, snapshot `generated_at` is NOW so pre-existing artifacts will be older on the next check → `skipped_no_new_evidence`.
-2. `intel_v3_service.py` — `_run_evidence_lanes_safe()` closure inside `enqueue_run_v3()` calls `compare_and_republish_after_evidence_lanes()` after successful lane completion. Failures are caught and logged as `intel_v3_post_lane_republish_failed` — lane failures skip the republish entirely.
-
-**After fix:** MSFT technical evidence completed FRESH after Run Intel → post-lane republish fires → certified snapshot rebuilt with `technical_signals_status=LIMITED` → drawer shows "Some market and price behavior data is available" instead of legacy placeholder. BTC/XRP conservative/blocked behavior preserved.
-
-**Tests:** 14 new backend tests in `test_stage8a3_post_lane_republish.py`; 12 new frontend tests in `intel-v3-drawer-clarity.test.ts`; no SQL, no providers, no LLM, no decision policy changes.
-
-## Stage 8 / 8A.2 — Technical evidence propagation (merged PRs #393, #394)
-
-- **Stage 8A.2 (PR #394):** `watchtower_evidence_collector_v1` queries `research_artifacts` for usable technical_signal artifacts per ticker. `intel_v3_service` always computes Stage 5J/5K shadow; `snapshot_builder` patches `technical_signals_status` from `research_axis_readiness` when Stage 6 off. 18 new tests.
-- **Stage 8 (PR #393):** Bumped `_TECHNICALS_MODEL_VERSION` v1 → v2 to force supersession of stale SUPPRESSED_UNKNOWN_SOURCE artifacts. Fixed `buildIncompleteEvidenceSentences` to distinguish INSUFFICIENT/STALE_OR_UNKNOWN (present but thin) from MISSING (no artifact). 6 backend + 19 frontend tests.
-
-## Stage 7 Plain-English Intelligence Surface (PRs #388, #389, #391, #392 merged)
-
-**Stage 7C (merged PR #392):** `_build_synthetic_evidence_explanation()` in `snapshot_builder.py` derives structured `evidence_explanation` from `evidence_quality` band when Stage 6 off. `STAGE7_EXPLANATION_CONTRACT_VERSION` → `stage7_explanation_v2`. Old snapshots with `evidence_explanation=null` trigger deterministic recertification. 49 backend + 93 frontend tests.
-
-**Stage 7B (merged PR #391):** 7 decision-specific drawer sections, `onceOnly()` dedup, `buildSupportingEvidenceSentences()`, `buildIncompleteEvidenceSentences()`, `buildWhyActionExplanation()`, `deduplicateTexts()`. All 5 ComingLaterPanel blocks removed.
-
-**Stages 7/7A (merged PRs #388, #389):** `_build_evidence_explanation()` from Stage 6 governance result; `stage7_snapshot_contract_v1.py` three-gate freshness guard; translation layer (`readinessToDisplay`, `governancePriorityToExplanation`, `convictionCapLabel`, `buildEvidenceLaneRows`, `buildSafetyDisplay`).
-
-**Stage 6 (merged):** `intel_v3_evidence_aware_governance_v1.py`. Flags: `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED` (default False). When enabled, per-ticker governance result replaces synthetic explanation with real per-axis readiness.
-
-**Production next steps (in order):**
-1. Merge Stage 8 PR (#393) — technicals artifacts re-enriched on next evidence run; INSUFFICIENT wording corrected immediately.
-2. Enable evidence lanes: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED=true`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED=true`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED=true`, `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT`. Keep `INTEL_V3_RESEARCH_WORKERS_ENABLED=true`.
-3. Run `POST /intel/v3/run` to populate evidence lanes.
-4. Enable `INTEL_V3_EVIDENCE_AWARE_POLICY_ENABLED=true` — Stage 6 governance result replaces synthetic explanation with real per-axis readiness (READY/LIMITED/MISSING per lane).
-
-## Previous evidence-readiness bridge (Stage 5K)
-
-**Stage 5K (merged):** Research Evidence Decision Input Adapter v1 — shadow-only, backend-only. Maps Stage 5J coverage lanes to four Intel v3 axis readiness signals: `company_fundamentals`, `technical_signals`, `sentiment`, `macro_context`. Readiness values: READY | LIMITED | INSUFFICIENT | MISSING | NOT_APPLICABLE. ETF/crypto: `sec_lane_applicable=False`, never penalized. `safe_for_decision=False` and `shadow_only=True` immutable. 39 tests. No SQL, no UI, no LLM, no providers, no decision changes.
-
-## Previous evidence-readiness bridge (Stage 5J)
-
-**Stage 5J (current PR):** Research Evidence Coverage Read Model v1 — deterministic, read-only summary over previously-written Stage 5A–5I research artifacts.
-
-**What landed in Stage 5J:**
-- `research_evidence_coverage_read_model_v1.py` (new) — `compute_research_evidence_coverage(user_id, tickers, db_client) -> ResearchEvidenceCoverageSummary`. Pure read. Per-ticker lanes: `sec_company_facts` (fundamental_quality + sec_companyfacts_evidence_v1), `fundamentals` (fundamental_quality + fundamentals_evidence_v1), `technicals` (technical_signal + technicals_evidence_v1), `news_sentiment` (sentiment_event + news_sentiment_evidence_v1). Portfolio-scope lane: `macro_context` (portfolio_exposure + fred_macro_evidence_v1). Coverage status set per (lane, ticker): READY / LIMITED / SUPPRESSED / NOT_EVALUABLE / STALE_OR_UNKNOWN / MISSING. Reads `truth_usability_assessment`, `source_credibility_assessment`, `contradiction_assessment`, `evidence_completeness_assessment` from artifact payload but never re-emits raw payload, source URLs, fact contents, or API keys. Defensive: picks latest active by `generated_at` if duplicates ever exist. Fail-soft on DB error.
-- `intel_v3_evidence_lane_orchestrator_v1.py` (modified) — after dispatch, when `intel_v3_evidence_coverage_dispatch_log_enabled=true`, emits one compact `research_evidence_coverage_summary` log via `log_coverage_summary()`. Fail-soft; default off.
-- `routers/diagnostics.py` (modified) — `POST /diagnostics/finance-intel/research-evidence-coverage` (cert-gated + `INTEL_V3_EVIDENCE_COVERAGE_DIAGNOSTICS_ENABLED=true`). Falls back to positions when no tickers supplied. Capped at 200 tickers per request. Read-only; never triggers an evidence run.
-- `config.py` (modified) — two new flags: `intel_v3_evidence_coverage_diagnostics_enabled` (default False) and `intel_v3_evidence_coverage_dispatch_log_enabled` (default False).
-- `test_stage5j_evidence_coverage_read_model.py` (new) — 14 tests: usable SEC counted per ticker; usable FRED macro counted at portfolio level; missing lanes honest; suppressed excluded from ready; duplicates pick latest active; read-only (no inserts/updates); no payload/secret leakage; safe_for_decision=False; USABLE_WITH_LIMITATIONS → LIMITED; STALE freshness overrides; NOT_EVALUABLE; ticker normalization/dedup; DB error fail-soft; compact log no payload leak.
-
-**Providers actually called**: none (read-only). **SQL required**: NO (no schema change). **UI**: none. **LLM**: none. **safe_for_decision**: False. **Page-load**: never (`GET /intel/v3/snapshot` does not call this). **Visible decision changes**: none.
-
-**Validation:** 380 stage 5A/5E/5H/5H.1/5H.2/5H.3/5I/5J tests pass.
-
-**Next stage:** Stage 5K (see above) has now consumed Stage 5J as its input — complete.
-
-## Previous evidence lane production wiring status (Stage 5I)
-
-**Stage 5I (merged):** FRED Official Macro Evidence Lane v1.
-
-**What changed in Stage 5I:**
-- `fred_provider_v1.py` (new) — typed, deterministic, sync FRED API client. Bounded per-session request budget; two requests per series (metadata + recent observations). Honest fail-closed on no_api_key / timeout / rate_limit / malformed / no_observations. Allowlisted series only: `FEDFUNDS`, `DFF`, `DGS10`, `DGS2`, `T10Y2Y`, `CPIAUCSL`, `UNRATE`, `PAYEMS`, `GDP`, `GDPC1`. Never raises.
-- `fred_macro_adapter_v1.py` (new) — pure, no-IO adapter. Converts `FredProviderResult` → portfolio-scope `WorkerOutput`. artifact_type=`portfolio_exposure` (existing DB enum; TODO documented to extend to `macro_context` in a future SQL migration), skill_pack=`fred_macro_evidence_v1`, model_version=`fred_official_macro_v1`. One `SourceRecord` per FRED series (provider_name=`fred`, source_url=`https://fred.stlouisfed.org/series/<id>`, source_kind=`other`). One `FactRecord` per observation, preserving `series_id`, `metric_label`, `value`, `unit`, `frequency`, `observation_date`, `realtime_start/end`, `fred_category`, `fred_last_updated`. Confidence band from successful-series count; freshness from latest observation date.
-- `evidence_lane_runner_v1.py` (modified) — added `_is_fred_macro_enabled()` + `run_fred_macro_evidence()` (portfolio-scope, ticker-agnostic; one artifact per explicit run). Compact logs: `fred_macro_evidence_start`, `fred_macro_series_fetched`, `fred_macro_series_skip`, `fred_macro_evidence_complete`. Router-consulted (must resolve to FRED FREE/OFFICIAL).
-- `evidence_provider_registry_v1.py` (modified) — FRED flipped to `default_enabled=True` with `requires_api_key=True`. priority=2 (above yfinance, below sec_edgar).
-- `intel_v3_evidence_lane_orchestrator_v1.py` (modified) — runs FRED macro lane once per explicit dispatch (not per ticker). Fail-soft: macro failure does not break per-ticker dispatch. Empty-ticker early-return removed so macro can still fire on empty portfolios. `macro_artifact_id` added to dispatch-complete log.
-- `config.py` (modified) — new flags `intel_v3_macro_evidence_enabled: bool = False` and `fred_api_key: Optional[str] = None`.
-- `test_stage5i_fred_macro_evidence.py` (new) — 80 tests: registry/router, provider client, adapter, WorkerOutput builder, runner integration through `ResearchArtifactServiceV1`, orchestrator wiring, safety/boundary invariants.
-
-**Providers actually called**: fred (Stage 5I) when flag on + api key set; sec_edgar (Stage 5H), yfinance (Stage 5F) — unchanged. Paid providers remain disabled.
-**SQL required**: NO. Used least-misleading existing `portfolio_exposure` artifact_type and existing `other` source_kind (TODO in adapter notes the future `macro_context` artifact_type + dedicated macro source_kind migration).
-**UI changes**: No.
-**Per-run cost**: at most 2 HTTP requests × 10 allowlisted series = 20 FRED requests per explicit Intel v3 run. Macro lane runs only on explicit `POST /intel/v3/run`, never on page load.
-**safe_for_decision**: stays False. Macro evidence is portfolio context, never visible Buy/Hold/Trim/Sell authority.
-**Stage 5I.1 patch (current PR):** Production activation of Stage 5I revealed two issues:
-1. `research_artifact_facts` inserts failed HTTP 400 on `research_artifact_facts_axis_hint_check` because Stage 5I emitted `axis_hint="macro"` while migration 017's CHECK constraint allows only `{evidence, risk, price, quality, catalyst, exposure}` or NULL. Result: artifact wrote, sources wrote, every fact insert failed, `fred_macro_evidence_complete artifact_id=none reason=service_write_failed`.
-2. Railway logs showed live `FRED_API_KEY` inside httpx `HTTP Request: GET …?api_key=…` lines.
-
-Fixes in `fred_macro_adapter_v1.py`:
-- `axis_hint=None` for all FRED FactRecords (writer already only sets the column when truthy). Macro identity preserved in `structured_payload`: `provider="fred"`, `macro_category`, `series_id`, `metric_name`, `observation_date`, `lane="macro"`. skill_pack `fred_macro_evidence_v1` remains the lane discriminator. No SQL.
-
-Fixes in `fred_provider_v1.py`:
-- Added `_ApiKeyRedactingFilter` (regex `api_key=…` → `api_key=[REDACTED]`) installed at module import time on `httpx`, `httpcore`, and this module's loggers. `httpx`/`httpcore` log level raised to WARNING to suppress the request-URL INFO line entirely. High-level runner logs (`fred_macro_series_fetched series_id=… observation_count=… latest_date=…`) are unchanged.
-
-Tests: existing `test_fact_axis_hint_is_macro` replaced with `test_fact_axis_hint_is_db_valid` + `test_fact_payload_preserves_macro_identity`. Added `TestFredMacroDbAxisHintConstraint` (worker-output, runner-persisted, full artifact+sources+facts written, usability label becomes `USABLE` / `USABLE_WITH_LIMITATIONS`) and `TestFredApiKeyLogRedaction` (filter scrubs msg + args, httpx/httpcore filter installed at level ≥ WARNING, end-to-end runner caplog contains no key). 103 Stage 5I tests pass; Stage 5B/5E/5F/5G/5H/5H2/5H3 suites still pass.
-
-**Next runtime validation:** rotate FRED key (the old leaked one), set the new `FRED_API_KEY` in Railway, keep `INTEL_V3_MACRO_EVIDENCE_ENABLED=true`, run `POST /intel/v3/run`, confirm in Railway logs:
-- `fred_macro_evidence_start series_count=10 worker_run_id=...`
-- `fred_macro_series_fetched series_id=DGS10 observation_count=12 latest_date=2026-05-...`
-- `fred_macro_evidence_complete series_attempted=10 series_written=N artifact_id=<uuid>` (UUID, not `none`)
-- `fred_macro_usability_summary observation_count=N strongest_authority=PRIMARY_AUTHORITY ... usability_label=USABLE|USABLE_WITH_LIMITATIONS provider_aware_override_count=N`
-- `intel_v3_evidence_lanes_dispatch_complete ... macro_artifact_id=<uuid>`
-- Exactly one new active `portfolio_exposure` row with `skill_pack='fred_macro_evidence_v1'` per explicit run.
-- No `api_key=…` strings anywhere in Railway logs.
-
-## Previous evidence lane wiring status (Stage 5H.3)
-
-**Stage 5H.3 fix (merged):** SEC CompanyFacts contradiction grouping and non-equity ticker eligibility guard.
-
-**Root cause of remaining false SUPPRESSED_CONTRADICTED after PR #378:** the generic contradiction detector groups by `(claim_key, fact_kind, period, as_of)` only. For SEC XBRL `metric_observation` facts that grouping is too coarse — it ignores `unit`, `fiscal_year`, `fiscal_period`, `period_start`, `period_end`, and `frame` structured-payload fields. Any combination of those that hashes into the same coarse group can produce a false contradiction when the parser legitimately keeps distinct XBRL observations (e.g., instant balance-sheet values with no `period_start`, or quarterly vs YTD durations under unusual `fy/fp` shapes). Separately, BTC and XRP were being mapped to unrelated SEC companies by ticker-symbol collision because no instrument guard ran before SEC EDGAR lookup.
-
-**Fix:**
-- `contradiction_detector_v1` adds a SEC-specific group key for `metric_observation` facts whose `structured_payload.provider == "sec_edgar"`. The key includes `provider + metric_name + unit + fiscal_year + fiscal_period + period_start + period_end + frame + filed`. Different metrics, units, fiscal periods, durations, or filings cannot collide. `accession_number` is intentionally excluded so two filings asserting different values for the same identity (restatement) still flag as a true contradiction.
-- `evidence_lane_runner_v1.run_sec_companyfacts_evidence()` runs `sec_metric_candidate_classifier.classify_sec_metric_candidate(ticker, category)` before any SEC lookup, using `holding_context` (`category` / `asset_type` / `security_type` / `instrument_type` / `asset_class`) when present. ETFs/funds/crypto are skipped — no provider call, no artifact, no fabricated SEC identity. Conservative fallback skips known portfolio crypto symbols (BTC, XRP) and ETFs when metadata is missing.
-- New structured log `sec_companyfacts_usability_summary ticker=... observation_count=... contradiction_count=... usability_label=... sample_group_keys=...` for runtime diagnosis. Plus `sec_companyfacts_skip_non_equity ticker=... classification=... category=... reason_codes=...` when the guard skips a ticker.
-
-**Next runtime validation:** Re-run Intel v3 (`POST /intel/v3/run`) and confirm in Railway:
-- SEC CompanyFacts written artifacts are mostly `usability_label=USABLE` or `USABLE_WITH_LIMITATIONS` (not `SUPPRESSED_CONTRADICTED`).
-- `sec_companyfacts_skip_non_equity ticker=BTC` and `ticker=XRP` appear; no SEC artifact rows are written for BTC/XRP.
-
-**Stage 5H.1 background:** `POST /intel/v3/run` dispatches all enabled evidence lanes via `run_enabled_evidence_lanes_for_portfolio()`. Fire-and-forget. Page-load contract preserved.
-
-**To confirm in Railway after enabling flags:**
-- `intel_v3_evidence_lanes_dispatch_start total_tickers=N user_id=... parent_intel_run_id=...`
-- `sec_companyfacts_artifact_written ticker=... observation_count=N tag_count=N confidence=... freshness=...`
-- `sec_companyfacts_skip_no_artifact ticker=... reason=no_cik/no_observations` (for ETFs/crypto)
-- `intel_v3_evidence_lanes_dispatch_complete tickers_attempted=N artifacts_written=N skipped=N`
-
-**Flags required:**
-- `INTEL_V3_RESEARCH_WORKERS_ENABLED=true` (global kill switch)
-- `INTEL_V3_SEC_COMPANYFACTS_EVIDENCE_ENABLED=true` + `SEC_EDGAR_USER_AGENT=<agent>` for SEC lane
-- `INTEL_V3_MACRO_EVIDENCE_ENABLED=true` + `FRED_API_KEY=<free key>` for FRED macro lane (Stage 5I)
-- Per-lane: `INTEL_V3_FUNDAMENTALS_EVIDENCE_ENABLED`, `INTEL_V3_TECHNICALS_EVIDENCE_ENABLED`, `INTEL_V3_NEWS_SENTIMENT_EVIDENCE_ENABLED`
-
-**Page-load contract preserved:** `GET /intel/v3/snapshot` does NOT call the orchestrator.
-
-## Recent meaningful PRs
-
-Keep this section small. Only entries that affect future work; replace older lines as they age out.
-
-- 2026-05-23 — **Stage 8F: SEC filing-type specificity** — `sec_filing_type_adapter_v1.py` (pure) maps section_reference values from research_artifact_sources to plain-English filing_type_label. `stage8f_filing_type_contract_v1.py` contract marker. `intel_v3_service.py`: `_get_sec_catalyst_artifact_data()` extends prior method with sources SELECT; stage8f added to recertification cascade. `snapshot_builder.py` embeds stage8f marker. Frontend: optional `filing_type_label` on `SecCatalystEvidenceDisplay` and `CatalystEvidenceItem`. 46 backend + 14 new frontend tests. No SQL migrations, no providers, no LLM.
-
-- 2026-05-22 — **Stage 8E: SEC catalyst plain-English explanation layer** — New `sec_catalyst_explanation_adapter_v1.py` (pure) converts existing artifact payload fields into safe display strings. `intel_v3_service.py` adds `_get_sec_catalyst_artifact_payloads()` (fail-soft SELECT on research_artifacts) and merges explanation fields into sec_catalyst_display when sec_catalyst_found=True. Frontend: `SecCatalystEvidenceDisplay` extended with optional explanation fields; `buildCatalystEvidenceDisplay()` uses them when available, falls back to generic Stage 8D copy; editorial_suppressed body clarified when both flags true. 25 backend + 15 new frontend tests. No SQL, no providers, no LLM.
-
-- 2026-05-22 — **Stage 8D: SEC/company catalyst evidence readiness UI surface** — `catalyst_display_adapter_v1.py` converts Stage 5K `AxisReadinessSignal` into three boolean display fields. `intel_v3_service.py` injects these into `research_axis_readiness`. `snapshot_builder` embeds `sec_catalyst_evidence` in `evidence_explanation`. Frontend: `SecCatalystEvidenceDisplay` type, `buildCatalystEvidenceDisplay()`, `CatalystEvidenceModule` in `IntelV3Drawer`. ETFs/crypto: sec_lane_applicable=False → hidden. 18 backend + 21 frontend tests. No SQL, no providers, no LLM.
-
-- 2026-05-18 — **Stage 5I: Add FRED official macro evidence lane v1** — New `fred_provider_v1.py` (typed sync FRED API client, allowlisted 10 macro series, fail-closed on no_api_key/timeout/rate_limit/no_observations) and `fred_macro_adapter_v1.py` (portfolio-scope adapter; artifact_type=`portfolio_exposure`, skill_pack=`fred_macro_evidence_v1`). Macro lane runner `run_fred_macro_evidence()` added to `evidence_lane_runner_v1.py` — one artifact per explicit run, not per ticker. Wired into `intel_v3_evidence_lane_orchestrator_v1.py` fire-and-forget dispatch (fail-soft; empty-ticker early-return removed so macro still fires). Provider registry flips FRED to `default_enabled=True` (requires `FRED_API_KEY`). Two new settings: `intel_v3_macro_evidence_enabled` (default False) + `fred_api_key`. 80 new tests; 109 Stage 5G tests updated to reflect FRED-enabled state (10 assertions retargeted). 724 stage 5A→5I tests pass. No SQL, no UI, no LLM calls, no paid providers, no visible decision changes, no page-load execution. safe_for_decision stays False.
-
-- 2026-05-18 — **Stage 5H.3: Fix SEC CompanyFacts contradiction grouping and ticker eligibility** — SEC-specific contradiction group key in `contradiction_detector_v1` (provider+metric+unit+fy+fp+start+end+frame+filed) prevents distinct XBRL observations from being flagged as contradictions while preserving true conflict detection across filings. Runner adds non-equity guard via `classify_sec_metric_candidate(ticker, category)` before SEC EDGAR lookup; ETF/crypto/fund skipped (BTC, XRP, SPY, etc.) with `sec_companyfacts_skip_non_equity` log. New `sec_companyfacts_usability_summary` runtime diagnostic log. **Patch (same PR):** plumb `holding_context_by_ticker` (`{ticker: {"category": ...}}`) from `IntelV3Service._get_active_holding_context_by_ticker()` → `run_enabled_evidence_lanes_for_portfolio()` → `run_evidence_lanes_for_ticker()` → SEC runner so the guard prefers actual portfolio metadata; the static BTC/XRP/ETF symbol fallback is now only a safety net. Skip log includes `skip_source=metadata|symbol_fallback`. 24 new tests (17 + 7 patch); 431 total stage 5C/5D/5F/5G/5H/5H.1/5H.2/5H.3 tests pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
-
-- 2026-05-18 — **Stage 5H.1: Wire enabled evidence lanes into Intel v3 run path** — `intel_v3_evidence_lane_orchestrator_v1.py` new; `intel_v3_service.enqueue_run_v3()` wired with fire-and-forget `create_task(to_thread(run_enabled_evidence_lanes_for_portfolio, ...))` dispatching after status computation. Runs for ALL tickers even when `analyst_evidence_current`. 28 new tests; 307 stage5e/5f/5g/5h tests still pass. No SQL, no UI, no LLM calls, no paid providers. Visible Intel decision unchanged.
-
-- 2026-05-16 — **Run Intel no-op/current UI fix** — Frontend state-machine bug: `handleRun()` always called `startPolling()`, but when backend returns `analyst_evidence_current` / `queued_ticker_count=0` / `existing_certified_snapshot=true` no new snapshot is created, so `isNewerThanClick` was never satisfied and the spinner ran until 5-min timeout. Fix: detect the no-op case and call `refetchSnapshot()` once instead of starting the polling loop. Added `analyst_evidence_current` to `IntelV3RunResult.status` type. 7 new banner tests; all 431 existing tests still pass.
-
-- 2026-05-16 — **Build 3 PR 2B root-cause fix: valuation context not visible in production (PR opened on branch claude/fix-valuation-context-kakJv)** — Production investigation confirmed root cause: `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED` env var not set in Railway (defaults `False`), so `_build_valuation_context_map()` returned `None` on every snapshot build and the bridge was never called. Fix: (1) `_build_valuation_context_map()` now logs `valuation_context_pr2b_summary flag_enabled=false/true bridge_not_called=true` on every snapshot build so Railway logs clearly show flag state; (2) `_build()` in `priceband_snapshot_context_v1.py` now emits `valuation_context_pr2b_aggregate_summary` with full counts (total_tickers, company_ticker_count, non_company_suppressed_count, eps_found_count, source_linked_eps_count, fresh_price_count, sector_found_count, priceband_computed_count, renderable_context_count, suppressed_context_count, per-reason suppression counts, fetch_errors) — fires even on the non-company early-return path; (3) 15 new observability tests (all passing). No raw EPS/price/ratios in logs. API contract unchanged. To enable: set `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` in Railway. After enabling, Railway logs will show `valuation_context_pr2b_aggregate_summary` on every prewarm/snapshot build explaining exactly what is/isn't renderable and why.
-
-- 2026-05-16 — **Build 3 PR 2B: Visible price/valuation context (merged PR #341)** — Grounded plain-English valuation context added to Intel v3 detail drawer (not card/list view). Feature-flagged via `intel_v3_priceband_visible_context_v1_enabled` (default False). 41 backend + 3 frontend contract tests. No SQL, no new providers.
-
-- 2026-05-16 — **Build 2.6: Tighten Intel research freshness SLA** — Recommendation SLA tightened from 24h → 8h; agent insight SLA from 48h → 24h. Changed in three places: `certified_intel_run_contract_v1.py` (RECOMMENDATION_FRESH_HOURS, AGENT_INSIGHT_FRESH_HOURS), `evidence_freshness_contract_v1.py` (SOURCE_SLAS), `watchtower_freshness_ledger_v1.py` (FRESHNESS_SLA_CONFIG). Worker certification now blocks when rec > 8h or insight > 24h. Fast freshness gate queues analyst jobs under new policy. Price refresh / Watchtower / Deploy behavior unchanged. 4 new boundary tests (7h fresh, 9h stale, 23h fresh, 25h stale) + updated comments for old 24h/48h assumptions. No SQL, no UI changes.
-
-- 2026-05-15 — **Build 2.5: Simplified user-facing Intel status** — Replaced large certification/debug banner in `IntelV3Cockpit` with compact `IntelStatusArea`: shows a "Portfolio Intelligence" label, a plain-English status pill (Ready / Updating / Needs Research / Blocked), and one short line. All technical details (agent run IDs, worker_certified, evidence class names) moved into a collapsible "Diagnostics" drawer. Added `buildStatusPillState()` to `intel-v3-banner.ts`; `buildBannerState()` unchanged (tests still green). Button/empty state copy simplified to "Run Intel". Backend certification contract intact.
-
-- 2026-05-15 — **Build 2: Evidence-grade certification + publish contract** — New `watchtower_intel_republisher_v1.py` wires Watchtower evidence freshness → Intel v3 snapshot re-certification. After Watchtower writes fresh `portfolio_snapshots`, `compare_and_republish()` compares timestamps and triggers `IntelV3Service.run_prewarm_snapshot()` (zero LLM calls, all-or-nothing contract re-checked). `get_latest_snapshot()` now embeds `evidence_freshness_state` (`certified_current` | `republish_pending`) in every API response. Worker boundary preserved — no `decide()` import in Watchtower worker. `build_default_intel_republish_callable()` in `watchtower_callables_v1.py` is the boundary-clean wiring. 28 new tests + 91 Build 1D tests green. No SQL.
-
-- 2026-05-15 — **Build 1D patch 3: urgent Watchtower refresh wired to production callables** — Root cause: `run_watchtower_cycle_for_user` in `enqueue_run_v3` passed no `price_refresh_callable`, so the urgent path collected freshness records but never actually refreshed or persisted prices. Fix: extracted `build_default_price_refresh_callable` and `build_default_analyst_enqueue_callable` into new `watchtower_callables_v1.py` (shared, no IO, no side effects at import). `watchtower_worker_entrypoint.py` now delegates to the shared module. `enqueue_run_v3` urgent `create_task` now passes both builders. 7 new tests (88 total, all pass). Key invariant: `price_refresh_callable` is never None in the urgent path.
-
-- 2026-05-15 — **Build 1D patch 2: Deploy strict freshness, price snapshot writer, urgent refresh** — Four remaining pre-merge blockers fixed: (1) **Deploy gate requires FRESH (not AGING)**: `is_deploy_eligible_strict()` added — requires FRESHNESS_FRESH only for deploy-critical types; `build_evidence_record()` now uses `is_deploy_eligible_strict`. A 7-min-old price (Deploy AGING) is now deploy_eligible=False. (2) **Position deploy SLA tightened to 5 min**: `DEPLOY_SLA_CONFIG[POSITION].fresh_seconds=300` — position freshness now tied to price certification cycle; `watchtower_evidence_collector_v1` uses `price_certs.get(t) or snap_at` for position evidence. (3) **Watchtower price refresh now durable**: new `watchtower_price_snapshot_writer_v1.py` — `persist_watchtower_price_snapshot()` reads positions, writes a new `portfolio_snapshots` row with `market_value_certified_at=now` for succeeded tickers, carries forward old values (without cert stamp) for failed tickers. Background worker calls writer after each price refresh. (4) **Run Intel triggers urgent price refresh**: `enqueue_run_v3()` fires `asyncio.create_task(run_watchtower_cycle_for_user(...))` when gate reports price/weight stale; `urgent_refresh_triggered` in response. (5) 22 new tests (81 total, all pass). Key rule: never set `market_value_certified_at` for tickers where price refresh failed.
-
-- 2026-05-15 — **Build 1D patch 1: Watchtower production-usable, gate-first enqueue, strict Deploy SLAs** — Five pre-merge blockers fixed: (1) `DEPLOY_SLA_CONFIG` added to freshness ledger — price/portfolio_weight deploy-fresh now 5 min; `classify_deploy_freshness_status()` uses these stricter thresholds; `build_evidence_record()` computes `deploy_eligible` from Deploy SLA. (2) Gate-first enqueue: `enqueue_run_v3()` runs fast freshness gate BEFORE enqueuing; `_stale_analyst_tickers_from_gate()` extracts only stale/missing analyst tickers. (3) Portfolio weight same Deploy SLA as price. (4) `watchtower_worker_entrypoint.py` created — `--loop`, `INTEL_V3_WATCHTOWER_WORKER_INTERVAL_SECONDS` env (default 60s), production callables wired. (5) 20 new tests (59 total). Key logs: `intel_v3_full_refresh_enqueued stale_analyst_count=N gate_succeeded=true/false`.
-
-- 2026-05-15 — **Build 1D: Watchtower Fresh Evidence Foundation** — New modules: `watchtower_freshness_ledger_v1.py`, `watchtower_refresh_planner_v1.py`, `watchtower_evidence_collector_v1.py`, `watchtower_deploy_gate_v1.py`, `intel_v3_fast_freshness_gate_v1.py`, `watchtower_background_refresh_worker_v1.py`. `enqueue_run_v3()` returns `freshness_gate` in response. 39 new tests. No SQL, no schema changes. Certification contract unchanged.
-
-- 2026-05-15 — **Build 1.5 (merged PR #328): Intel v3 sub-10-second user-facing experience + pre-merge patch** — Root cause of multi-minute UX: worker loop ran ONE batch per 60-second sleep. With 34 tickers / 10 per batch = 4 batches × 60s gap = minutes. Fix: (1) `_drain_cycle()` added to entrypoint — runs multiple batches in one cycle when `run_resumable=True` and budget allows (max 8 batches / 300s wall cap); (2) drain cycle stops immediately when `claimed_job_count=0` + `run_resumable=True` (retry backoff — nothing to do, don't spin); (3) `intel_v3.analyst_refresh_worker_drain_cycle_summary` log emits `worker_batches_drained`, `worker_drain_total_duration_ms`, `worker_idle_delay_skipped`, `time_to_worker_certified_snapshot_ms`; (4) backoff stop log: `intel_v3.analyst_refresh_worker_drain_cycle_stopped reason=backoff_or_no_due_jobs`; (5) `get_latest_snapshot()` emits `snapshot_response_ms`; (6) `enqueue_run_v3()` emits `run_click_response_ms`, `certified_snapshot_available_on_click`, `refresh_jobs_pending_count`, `refresh_jobs_remaining_count`; (7) banner `refreshing_analyst_intelligence` copy updated (removed false "60 seconds" claim); (8) `IntelV3Cockpit.tsx` polling guard: `stopPolling()` only fires when `new Date(snap.generated_at).getTime() > refreshStartedAt.current` — amber banner no longer collapses on pre-click certified snapshot. Build 1 trust guarantees intact: prewarm deferred until all jobs drained, certification contract unchanged, no fake freshness. 14 backend tests + 39 frontend banner tests. No SQL, no schema changes, no certification weakening.
-
-- 2026-05-15 — **Build 1 + pre-merge prewarm fix: analyst worker batching end-to-end + early certification guard** — Build 1 root cause: worker claimed 10 jobs but `default_full_portfolio_agent_orchestrator_backend` omitted `analyst_refresh_tickers`, so the LLM stage, `_persist_sync`, and the explicit writeback writer all operated on all 34 holdings. Three surgical scoping fixes. Pre-merge prewarm blocker: the adapter called `_trigger_snapshot_prewarm` after EVERY batch, not just the final one — the certification contract checks ALL active positions, so if the remaining 24 tickers had fresh rows from a prior run, `worker_certified` could publish mid-refresh. Fix: (1) `_trigger_snapshot_prewarm` renamed to `trigger_snapshot_prewarm` (public) with backward-compat alias; (2) per-batch prewarm call removed from `default_full_portfolio_agent_orchestrator_backend`; (3) worker tracks `users_with_successes` and calls `trigger_snapshot_prewarm` only when `run_resumable=False` (all pending/retryable jobs drained); (4) when jobs remain and the pass had successes, emits `intel_v3.analyst_refresh_worker_prewarm_deferred reason=jobs_remain` log. 5 new `TestEarlyPrewarmGuard` tests + updated `test_certification_not_published_until_all_34_pass`. Also fixed a pre-existing Stage 3.2c test compat issue: `_fake_write_sync` mocks now accept `scoped_tickers` kwarg. 42 Build 1 tests + 99 Stage 3.2 / 3.2c tests — all 141 green. No SQL, no schema changes, no frontend changes, no certification weakening.
-
-- 2026-05-14 — **Stage 3.3: All-or-nothing certified intelligence run contract** — Closes the production false-green bug (UI showed green when `claimed=0, llm_calls=0, analyst_refresh_status=not_attempted`). Root cause: `REFRESH_THEN_RUN + trusted` fired when only price was refreshed but analyst evidence was already fresh from a prior worker run, and the click implied agents ran. Fix: (1) `POST /intel/v3/run` now calls `enqueue_run_v3()` — returns `{status:"refresh_requested"}`, zero LLM calls, no snapshot built. (2) New `certified_intel_run_contract_v1.py` — pure async read validator checks 10 conditions per holding. (3) `run_prewarm_snapshot()` runs the contract; sets `snapshot_source="worker_certified"` only if all holdings pass, otherwise `"certification_failed"`. (4) Snapshot carries provenance fields: `snapshot_source`, `certified_holding_count`, `total_holding_count`, `failed_tickers_in_certification`, `certification_summary`. (5) `intel-v3-banner.ts` fully rewritten with 6-state status machine; green requires `worker_certified` + full coverage. (6) `IntelV3Cockpit.tsx` polls every 15s after Run Intel click; stops on `worker_certified` or 5-min timeout. GO decision: Intel v3 now satisfies the all-or-nothing certified intelligence run contract. Green means every active holding passed the evidence contract with matched fresh analyst evidence. No SQL, no schema changes. 17 new backend tests (140 total passing) + 13 new frontend banner tests.
-
-- 2026-05-14 — **Stage 3.2c: Remove double-click Run Intel + fix analyst rationale field loss** — (1) Worker now calls `prewarm_intel_v3_snapshot()` after writing evidence. (2) `_build_analyst_verdict_from_insight()` uses live `AnalystVerdict` objects directly from `orch._verdicts`. Structured logs: `analyst_refresh_snapshot_prewarm_*`. 25 acceptance tests; 169 existing pass.
-
-- 2026-05-14 — **Stage 3.2b + 3.2: Explicit analyst evidence writeback bridge + durable analyst refresh worker** — Stage 3.2b: `AgentOrchestrator._persist_sync` silently fails in Railway worker via thread isolation; `analyst_evidence_writer_v1.write_analyst_evidence()` is the explicit fallback using a fresh `get_supabase_client()`. Idempotent by `UNIQUE(run_id, ticker)`. Stage 3.2: background worker (`AnalystRefreshWorker`) + entrypoint (`--loop`, `INTEL_V3_ANALYST_REFRESH_WORKER_INTERVAL_SECONDS` default 60s) claims `analyst_refresh_jobs` rows (SQL migration `018_analyst_refresh_jobs.sql` — apply manually), drives `FullPortfolioAnalystRefreshAdapter` outside the HTTP request. Seam also updated to idempotently enqueue durable jobs so each stale ticker gets a real consumer. Post-run readback fixed: drops fragile ticker-casing filter; scopes by `run_id`/`created_at`; maps case-insensitively. Worker never imports `decide()`. Structured logs: `analyst_evidence_writer_persisted_count`, `intel_v3.analyst_refresh_worker_run_summary`, `intel_v3.analyst_refresh_worker_loop_summary`.
-
-- 2026-05-14 — **Stages 3.0a–3.1: Evidence Refresh Orchestrator + analyst refresh-request seam** — Stage 3.0b: `evidence_refresh_orchestrator_v1.py` classifies per-source freshness, optionally refreshes stale price under deterministic budgets, stamps `run_mode`/`trust_status`. Stage 3.0c: `FullPortfolioAnalystRefreshAdapter` replaces 6-ticker cap; runs AgentOrchestrator unscoped; post-refresh re-read of cards. Stage 3.1: `AnalystRefreshRequestSeam` decouples the synchronous HTTP path from LLM work. `IntelV3Service._build_analyst_refresh_callable()` wires the seam. Frontend amber banner for `refresh_requested` state (`analystRefreshRequestNote()` in `lib/intel-v3-banner.ts`).
-
-- 2026-05-13 — **Stages 2.5A–2.9: Deploy v3 pipeline** — Amount-aware Deploy v3 (new-cash sleeve sizing, certified sizing source adapter, readiness diagnostic, target-allocation + policy bridges, editable execution journal, decision-log history, journal accounting, rounding residual fix, sleeve ranking by Intel conviction). Full details in `docs/product/DECISION_LOG.md`.
-
-- 2026-05-10 — Repo cleanup: removed legacy Streamlit v1 app and added repo hygiene tooling. Full backend suite stabilized at 3,926 passed / 0 failed (before Stage 3 additions).
-
-## Active invariants / safety packs to remember
-
-Named packs in `docs/ai/SAFETY_PACKS_AND_ARCHETYPES.md` (Finance section) own the rules. The packs themselves are the source of truth — do not paste their contents elsewhere:
-
-- Deterministic Decision Authority Pack
-- Valuation Safety Pack
-- Data Truth / Evidence Suppression Pack
-- Deploy/Watchtower Boundary Pack
-- Backend-only Scaffold Pack / No Visible Behavior Change Pack / Test Tier Pack (cross-cutting)
-
-## Asset-class parity gate (hard requirement before synthesis)
-
-Stage 9E builds the equity valuation evidence lane. Before any synthesis can be gated across the portfolio, all three asset classes must have S-grade canonical datasets and valuation lanes through their own providers:
-- **Equity:** canonical dataset built (Stage 9D ✓) + valuation evidence lane built (Stage 9E ✓) + numeric valuation inputs scaffold built (Stage 9E.1 ✓, semantically correct — numeric_inputs_ready=True requires actual market_price_usd + fact records; valuation_ready=False pending thresholds) → synthesis blocked until ETF+crypto parity
-- **ETF:** canonical dataset scaffold built (Stage 9F ✓, `canonical_dataset_built=True`) — fund composition MISSING (no dedicated fund data provider). `etf_fund_intelligence_ready=False` always. Next: ETF fund data provider lane (holdings/sector/geography/concentration).
-- **Crypto:** crypto market context/provider lane missing — canonical crypto dataset not yet built
-
-The `AssetParityRoadmap` in forensics output (`asset_parity_roadmap` field) tracks this. `synthesis_gate` is SYNTHESIS_GATE_BLOCKED (ETF/crypto not ready) for portfolios where equity valuation is built. Do not open synthesis to any asset class until all three show `synthesis_gate` cleared.
-
-## Railway deploy cost control
-
-Per-service Watch Paths for all four Railway backend services are documented in
-`docs/deploy/RAILWAY_WATCH_PATHS.md`. Each service must have its Watch Paths configured in
-the Railway dashboard (**Settings → Source → Watch Paths**) to avoid unnecessary deployments
-on docs-only or frontend-only pushes. `PROCESS_TYPE` selects the runtime process only — it
-does not control whether a deployment is created. With one shared `v2/backend/railway.toml`,
-per-service watch rules must live in the Railway dashboard, not in the TOML file.
-
-**Action required (manual):** paste the exact Watch Paths from the doc into each service's
-Railway dashboard settings. See `docs/deploy/RAILWAY_WATCH_PATHS.md` for the checklist.
-
-## Known risks / unresolved issues
-
-- Deploy item pipeline (dollar math → cash guardrail → finalization → pending-reason) and plan-level rollup are wired backend-only. `tax_guardrail_status` and `wash_sale_guardrail_status` remain `not_evaluated_yet` placeholders — items reach `actionable_pending_tax` / plan reaches `ready_pending_guardrails` honestly, never `actionable`. No fully-actionable final status exists yet (rollup `actionable_count` is reserved at 0).
-- Target allocation canonical source (optimizer/service) is not wired — explicit-input only for now; source wiring is deferred to a future stage.
-- Watchtower background refresh loop is live in Railway (requires `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true`). Alert-based push trigger (real-time threshold alerts) is deferred.
-- SQL migration 020 has been applied in Supabase (`watchtower_alert_candidates` table + `cooldown_until` column on `action_feedback_events`).
-- SQL migration 021 applied — `alert_delivery_outbox` table is live (0 rows expected until eligible candidates flow through).
-- SQL migration 022 **applied** — `processing` status, `processing_started_at`/`delivery_attempt_count`/`last_attempt_at` columns, partial index on `alert_delivery_outbox`. Claim-before-send fully operational.
-- SQL migration 017 (`research_artifact_store_v1`) — **APPLIED** to Supabase. Creates `research_artifacts`, `research_artifact_sources`, `research_artifact_facts`, `worker_audit_events` tables with RLS, triggers, indexes.
-- SQL migration 023 (`023_research_artifact_store_stage5a_extend.sql`) — **APPLIED**. Extends `artifact_type` CHECK with Stage 5A types; adds active-lane uniqueness index and user-scoped replay index.
-- Research artifact UX is intentionally deferred until decision/action loop is stable.
-
-## Stage 5H — SEC CompanyFacts Official Fundamentals Adapter v1 (current PR)
-
-**Stage 5H** is the current PR #376 (branch `claude/sec-companyfacts-adapter-v1-ebkW4`).
-
-**What changed in Stage 5H:**
-- **`sec_companyfacts_adapter_v1.py`** (new) — Pure, no-IO adapter. Converts `SecEdgarProviderResult` (with parsed XBRL `CompanyFactsParseResult`) → `WorkerOutput`. artifact_type=`fundamental_quality` (existing constraint), skill_pack=`sec_companyfacts_evidence_v1`, model_version=`sec_xbrl_companyfacts_v1`. One `SourceRecord` per unique filing accession (with EDGAR URL, form type, date). One `FactRecord` per `MetricObservation` (preserving period/unit/fiscal_year/fiscal_period/filed/accession_number). Honest thin-evidence on no_cik/timeout/error/no_facts — no fabrication.
-- **`evidence_provider_registry_v1.py`** (modified) — Added `LANE_SEC_COMPANY_FACTS = "sec_company_facts"` to constants and `ALL_LANES`. Extended `sec_edgar` entry's `supported_lanes` to include `LANE_SEC_COMPANY_FACTS`. Provider distinction documented: yfinance=FREE/UNOFFICIAL baseline fundamentals; sec_edgar=FREE/OFFICIAL official company-facts lane.
-- **`evidence_lane_runner_v1.py`** (modified) — Added `_is_sec_companyfacts_enabled()`, `run_sec_companyfacts_evidence()` (injectable `_provider_fn` for tests; router-consulted; writes via `ResearchArtifactServiceV1`). Extended `run_all_evidence_lanes()` dispatcher with 4th lane + `_sec_companyfacts_provider_fn` parameter.
-- **`config.py`** (modified) — Added `intel_v3_sec_companyfacts_evidence_enabled: bool = False` (default OFF).
-- **`test_stage5h_sec_companyfacts_adapter.py`** (new) — **75 tests** covering: registry/router structure, adapter SourceRecord/FactRecord with period/unit/accession references, no-data honest paths (no_cik/no_facts/timeout), four enrichment layers in written artifacts, safe_for_decision=False, no intel_v3_snapshots/recommendations writes, kill-switch, dispatcher, paid providers disabled, no decide() import, no ArtifactStoreWriter bypass.
-
-**Providers actually called**: sec_edgar (via `sec_edgar_provider.fetch_for_ticker` when flag on), yfinance (three Stage 5F lanes, unchanged). Paid providers remain disabled.
-**SQL required**: NO. `fundamental_quality` already in artifact_type CHECK constraint (migrations 017+023 applied).
-**UI changes**: No.
-**Deferred XBRL concepts**: All 13 us-gaap allowlisted tags from existing `sec_companyfacts_parser.py` are reused. No new concepts added beyond what Phase 7A parser supports.
-**Next stage**: FRED macro lane OR analyst_revisions with richer consensus provider.
-
-## Stage 5G — Provider Registry v1 + Free-First Evidence Source Router (merged)
-
-**Stage 5G** merged (branch `claude/stage-5g-provider-registry-uqK9g`).
-
-**What landed in Stage 5G:**
-- **`evidence_provider_registry_v1.py`** — Six providers: `sec_edgar` (FREE/OFFICIAL), `yfinance` (FREE/UNOFFICIAL), `fred` (FREE/OFFICIAL, disabled), `fmp`/`eodhd`/`alpha_vantage` (disabled metadata-only). Registry summary always has `safe_for_decision=False`.
-- **`evidence_provider_router_v1.py`** — Deterministic free-first routing policy. `resolve_provider_for_lane(lane)` → `ProviderRouteResult`. Policy: FREE/OFFICIAL → FREE → LOW_COST → PAID → NO_PROVIDER.
-- **`evidence_lane_runner_v1.py`** — Router consulted before each Stage 5F lane run. Existing yfinance behavior unchanged.
-- **109 tests**. SQL: NO. UI: No.
-
-## Stage 5F — Multi-Lane Evidence Population Pack v1 (merged)
-
-**Stage 5A** merged PR #367. **Stage 5B** merged PR #369. **Stage 5C** merged PR #370. **Stage 5D** merged PR #371. **Stage 5E0** merged. **Stage 5E** merged (branch `claude/finance-tracker-intel-v3-eKyVW`). **Stage 5F** is the current PR (branch `claude/finance-tracker-intel-v3-VPlGv`).
-
-**What changed in Stage 5F:**
-- **`evidence_lane_adapter_v1.py`** (new) — Pure, no-IO shared adapter. Three lane adapters: `adapt_fundamentals` → `fundamental_quality` artifact (yfinance fundamentals sync); `adapt_technicals` → `technical_signal` artifact (yfinance history sync); `adapt_news_sentiment` → `sentiment_event` artifact (yfinance news sync). Shared `build_worker_output()` builder. `FEASIBLE_LANES` constant + `DEFERRED_LANES` dict with exact blockers for SEC filing (covered by earnings_reviewer), analyst_revisions (yfinance too thin), company_strategy (no extractor).
-- **`evidence_lane_runner_v1.py`** (new) — Dispatcher/registry. Three per-lane runner functions + `run_all_evidence_lanes()` dispatcher. Each lane is kill-switched by `intel_v3_research_workers_enabled` (global) + per-lane flag. All writes go through `ResearchArtifactServiceV1.write_artifact()` (never raw `ArtifactStoreWriter`). Injectable `_fetch_fn` for tests (no real HTTP in tests).
-- **`config.py`** — Three new flags: `intel_v3_fundamentals_evidence_enabled`, `intel_v3_technicals_evidence_enabled`, `intel_v3_news_sentiment_evidence_enabled` (all default False).
-- **`test_stage5f_multi_lane_evidence.py`** — **63 new tests** proving: all three lanes implemented, all four enrichment layers present in every artifact, safe_for_decision=False, no intel_v3_snapshots/recommendations writes, no decide() import, kill-switch behavior, no fabrication on empty/error data, dispatcher runs all lanes, earnings reviewer path unchanged.
-
-**Lanes inspected**: SEC filing (covered by earnings_reviewer), fundamentals (yfinance), technicals (yfinance), news/sentiment (yfinance), analyst_revisions (thin — deferred), company_strategy (no extractor — deferred).
-**Lanes implemented**: fundamentals (`fundamental_quality`), technicals (`technical_signal`), news_sentiment (`sentiment_event`).
-**Lanes deferred**: `sec_filing` (earnings_reviewer already covers as `catalyst_window`; a separate `filing_risk` adapter needs XBRL parsing work beyond current scope); `analyst_revisions` (yfinance only provides 2 thin scalars — needs richer consensus provider); `company_strategy` (no guidance/commentary extractor in repo).
-
-**SQL required**: NO. No new tables; existing artifact_type CHECK already supports `fundamental_quality`, `technical_signal`, `sentiment_event` (migration 023 applied).
-
-**Key invariants confirmed**: `safe_for_decision` remains `False`. No Buy/Hold/Trim/Sell authority. No LLM calls. No new external providers. Existing earnings reviewer path intact. No UI changes. ALERT_EMAIL_DRY_RUN untouched.
-
-**Stage 5H next**: SEC company facts lane expansion (wire sec_edgar XBRL company facts into a `sec_company_facts` evidence lane) OR analyst_revisions lane using EODHD or similar consensus provider.
-
-## Stage 5E — Deterministic Research Artifact Truth Adapter v1 (merged)
-
-**Stage 5E** merged (branch `claude/finance-tracker-intel-v3-eKyVW`). `artifact_truth_adapter_v1.py`: six usability labels, injected as Step 7 in `write_artifact()`. All four enrichment layers in every artifact. 37 tests. No SQL.
-
-## Stage 5C — Contradiction Detector v1 (merged PR #370)
-
-**What landed in Stage 5C:**
-- `contradiction_detector_v1.py` — Pure deterministic contradiction detector. Grouping key: `(claim_key/metric_name, fact_kind, period, as_of)`. Detects: numeric conflicts (1% tolerance), boolean, text-exact. No-fact → `not_evaluable_reason=no_facts_provided`. Non-comparable → `insufficient_comparable_facts`. `no_guessing=True` always.
-- `write_artifact()` Step 5 injects `contradiction_assessment` into payload. Stage 5B credibility (Step 4) intact.
-- **41 tests**. No SQL.
-
-## Stage 5B — Source Credibility Registry (merged PR #369)
-
-**What landed:** `source_credibility_registry_v1.py` — 10 source_kinds → 5 authority bands (no numeric scores). Injected into `write_artifact()` Step 4. 83 tests. No SQL.
-
-## Stage 5A — Research Artifact Store (merged PR #367, SQL migrations 017+023 pending Supabase)
-
-**Stage 4 is COMPLETE** (Stage 4H merged as PR #366 on 2026-05-17). **Stage 5A is COMPLETE** (merged PR #367 on 2026-05-18).
-
-**Stage 5A status**: Merged as PR #367 on 2026-05-18.
-
-**What landed in Stage 5A (3 commits):**
-- SQL migration `023_research_artifact_store_stage5a_extend.sql` — extends the `artifact_type` CHECK constraint (from migration 017) with 4 new Stage 5A worker types: `technical_signal`, `sentiment_event`, `company_strategy`, `journal_pattern`. Adds user-scoped replay idempotency index (`uq_research_artifacts_replay_user_active`), active-lane uniqueness index (`uq_research_artifacts_active_lane` on `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))` WHERE `is_active = TRUE`), drops global replay index, and adds a duplicate-lane guard. Migration 017 must be applied first (not yet applied to Supabase).
-- `v2/backend/app/services/intelligence/v3/research_artifact_service_v1.py` — narrow typed public API for Stage 5A. Wraps `ArtifactStoreWriter` with two explicit write policies:
-  - **Idempotency**: same `replay_idempotency_key` → skip, return existing artifact_id, no duplicate (user-scoped).
-  - **Scope-aware clean replacement**: new artifact for same evidence lane `(user_id, artifact_type, skill_pack, scope_kind, COALESCE(ticker, ''))` → deactivate prior active artifacts (`is_active=False, invalidated_at=now, invalidation_reason='superseded_by_new_write'`), insert new. Portfolio-scope (`scope_kind='portfolio'`, `ticker IS NULL`) uses IS NULL filter; ticker-scope uses `.eq("ticker", ticker)`. Always runs clean replacement (no ticker-only guard).
-  - `query_active_artifacts()` — safe read helper returning non-payload summary fields only.
-  - NEVER imports decide() or writes intel_v3_snapshots. safe_for_decision always False.
-- `v2/backend/app/services/intelligence/research_workers/contracts.py` — `WorkerOutput.ticker` changed `str` → `Optional[str]` to represent portfolio-scope artifacts (ticker IS NULL).
-- `v2/backend/tests/test_stage5a_research_artifact_store.py` — **60 tests** covering idempotency, scope-aware clean replacement (incl. portfolio-scope, IS NULL filter, cross-scope isolation), provenance, freshness/as_of/expires_at, schema_version, replay/run identity, forbidden key rejection, no Intel v3 decision mutation, all Stage 5A artifact_type values accepted, user-scoped idempotency, fetched_at provenance, migration 023 content.
-
-**SQL required**: YES — two migrations must be applied in order:
-1. `v2/database/017_research_artifact_store_v1.sql` — creates research_artifacts, research_artifact_sources, research_artifact_facts, worker_audit_events tables with RLS, triggers, indexes.
-2. `v2/database/023_research_artifact_store_stage5a_extend.sql` — extends artifact_type CHECK.
-
-**Existing infrastructure reused (not duplicated):**
-- `research_workers/contracts.py` — WorkerInput, WorkerOutput, SourceRecord, FactRecord, forbidden key validation, idempotency key computation.
-- `research_workers/artifact_store_writer.py` — DB writer with select-then-insert idempotency.
-- `research_workers/artifact_observability.py` — Phase 4 read-only observability.
-- `research_workers/artifact_truth_readiness.py` — Phase 5 truth adapter readiness contract.
-- `v3/evidence_artifact_contract_v1.py` — EvidenceArtifact mappers.
-
-**Stage 5B next**: Source credibility registry. Stage 5A schema fields (`confidence_or_trust_level`, `deterministic_inputs_allowed`, `safe_for_decision`) leave clean hooks for Stage 5B to fill in without schema churn.
-
-**Stage 4B — Today Command Center** merged as **PR #359** on 2026-05-17. 4 frontend files modified, 2 new files.
-
-What landed:
-- `src/app/dashboard/page.tsx`: `/dashboard` reframed as "Today". Above-the-fold: The Brief, Act Today, Risk Pulse, Deploy Ready, Watchtower Summary (all from existing data). "What I Learned Today" Coming-Later chrome (Stage 6E activates). Portfolio snapshot below fold. Hydration-safe `todayLabel` via `useEffect`. `ml-8` replaces fragile calc class.
-- `src/lib/today-command-center.ts`: 7 pure deterministic helpers (no LLM, no fabricated claims).
-- `src/lib/today-command-center.test.ts`: 49 unit tests, all pass.
-- `src/components/navigation/BottomNav.tsx`: `/dashboard` label "Portfolio" → "Today".
-
-**Stage 4A — Design System Foundation + App Shell Reset** merged as **PR #358** on 2026-05-17. Tokens: `tailwind.config.ts`, `globals.css`, `layout.tsx` (fonts), `BottomNav.tsx` (glass chrome).
-
-**Do not skip ahead.** The contract splits the overhaul into:
-- **Stage 4** — Quiet Atelier UX foundation + core current-data surfaces (Stage 4A–4H). Frontend only. Done-definition: §35.9.
-- **Stage 5** — S-grade Research Artifact + finance-agent intelligence backend (5A–5M). Backend / data only. Done-definition: §35.10.
-- **Stage 6** — Advanced evidence, learning, Radar, Journal, command-bar intelligence surfaces (6A–6H). Activates the Coming-Later chrome reserved by Stage 4. Done-definition: §35.11.
-
-Stage 4 must never fabricate Stage 5 / 6 intelligence. Every surface that anticipates a future intelligence module renders the **Coming-Later Pattern** (§28.4): chrome only, with a calm caption that the module is being prepared.
-
-**Execution discipline (contract §35).** Optimize for fast, safe completion: each stage is a meaningful product slice with a visible transformation; no cosmetic micro-builds, no patch loops, no redundant docs, no polish-only PRs (4H is the only exception). Completion target: a transformed, usable, beautiful app first; then deeper S-grade intelligence; then the mentor / learning surfaces.
-
-**Email delivery activation is out of scope for the entire design overhaul.** Email worker remains dry-run on Railway (`ALERT_EMAIL_DELIVERY_ENABLED=true`, `ALERT_EMAIL_DRY_RUN=true`, `ALERT_EMAIL_PROVIDER=resend`). Dry-run log confirmed: `scanned=0 sent=0 failed=0 skipped=0 dry_run=True provider=resend`. **Resend domain verification is still pending — `ALERT_EMAIL_DRY_RUN` must remain `true` until the domain is verified. Do not set `ALERT_EMAIL_DRY_RUN=false` yet. Do not perform real-send validation yet. Real-send activation is reserved as Stage 5M, a separate, non-design stage.**
-
-**Watchtower production requirements (unchanged):** `PROCESS_TYPE=watchtower` + `INTEL_V3_WATCHTOWER_ENABLED=true` on the Watchtower Railway service. `INTEL_V3_PRICEBAND_VISIBLE_CONTEXT_V1_ENABLED=true` on both main app and Watchtower services.
-
-## Handoff maintenance rule
-
-- This file is current state only. It is not an append-only log.
-- Keep under ~250–500 lines. If it grows past that, **compact before adding** — summarize older sections, do not extend them.
-- Every meaningful PR may update this file, but by **replacing or summarizing**, never by appending.
-- Move durable historical detail to `docs/ai/MISS_LEDGER.md` (workflow/process misses) or `docs/product/DECISION_LOG.md` (product decisions). Do not preserve old noise just because it exists.
-- Do not create new archive files for routine PRs. An archive is justified only when current-state value is being replaced and the original detail is still useful elsewhere.
-- `CLAUDE.md`, `docs/ai/AI_REPO_OPERATING_SYSTEM.md`, and `docs/ai/PROMPT_LIBRARY.md` enforce this rule.
-
-## Repo hygiene rule (per-PR)
-
-Every meaningful PR must explicitly answer: **"Did this make any source files or tests obsolete?"**
-
-- If yes: delete or rewrite them in the same PR, **or** add a tracked follow-up entry with a one-line reason.
-- Run `python3 scripts/repo_hygiene/audit_repo_hygiene.py` before opening the PR. Treat the report as a merge-gate aid, not mandatory CI.
-- Rules, allowlist conventions, and test-retirement criteria live in `docs/ai/REPO_HYGIENE.md`.
-- `v2/progress_log.md` follows the convention at the top of that file: ~150–250 lines, current state only, no PR-by-PR append.
+Last updated: 2026-07-18 (Lean Advisor Consolidation — Positions / Advisor / Watchlist; replaces
+the stage-by-stage log with a compact state summary. Full evidence for the consolidation lives in
+`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body.)
+
+## Product architecture (read this first)
+
+The authenticated app has exactly **three primary views**:
+
+1. **Positions** (`/dashboard/positions`) — certified portfolio truth: totals, allocation split,
+   freshness, per-holding detail with Intel v3 action/evidence labels, and
+   reconciliation-gated FIFO tax-lot estimates (`GET /api/v1/positions/tax-lots`).
+2. **Advisor** (`/dashboard/advisor`) — the **single user-facing recommendation surface**, four
+   sections: (A) system readiness + bounded Run Intel, (B) deterministic Intel v3 holding
+   actions (`IntelV3Cockpit`), (C) new-cash plan via the canonical Paycheck Advisor endpoint,
+   (D) collapsed trust/repair drawer.
+3. **Watchlist** (`/dashboard/watchlist`) — user-defined price_below/price_above criteria
+   (`/api/v1/watchlist`, table `watchlist_items`, migration `v2/database/025_watchlist.sql`,
+   RLS owner policy). The app never auto-selects watchlist stocks and they never enter the
+   Paycheck Advisor candidate set.
+
+Operational subpages (not primary nav): `/dashboard/import`, `/settings`,
+`/dashboard/position/[ticker]`, login. `/dashboard` redirects to Positions; all legacy product
+routes redirect (map in `v2/frontend/src/lib/route-redirects.ts`).
+
+## The decision spine (one spine, no competitors)
+
+1. Certified portfolio/transaction truth (`portfolio_service`, `import_service`, positions)
+2. Current-price truth (`price_engine`; repair: `current_price_truth_repair_v1`)
+3. Intel v3 evidence production (`services/intelligence/*`; agents/LLMs are **labeled evidence
+   producers only**, used by the protected refresh adapters and the cert harness)
+4. **Intel v3 deterministic policy** (`intelligence/v3/decision_policy_v1.decide()`) — the only
+   owner of visible Buy/Hold/Trim/Sell actions
+5. Allocation policy + guardrails (`allocation_policy_v1`: ETF floor 40%, stock sleeve target,
+   concentration/group caps, min-trade, VTI>VOO>SPY>QQQ, cash invariants
+   `allocated_cash <= cash_to_deploy`, `unallocated_cash >= 0`)
+6. **Paycheck Advisor** (`POST /api/v1/advisor/paycheck-plan/preview`, cert-gated via the
+   frontend Route Handler that attaches server-only `FINANCE_RUNTIME_CERT_SECRET`) — the
+   canonical answer to "I have $X — what should I buy, how much, and why"
+7. One Advisor view rendering both
+
+**Intel v3 and Paycheck Advisor are complementary layers, never competitors**: Intel v3 owns
+deterministic actions for existing holdings; Paycheck Advisor consumes certified truth +
+Intel v3 evidence + allocation policy to place new cash. The preview response carries additive
+`explanations` buckets (selected / evidence_eligible_policy_blocked / evidence_blocked /
+concentration / group-cap / stale-price / missing-truth / below-min-trade / max-positions)
+mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new allocation math.
+
+## Decisions that must NOT be re-litigated (historical context)
+
+- **Do not rebuild a visible LLM/agent recommendation surface.** The legacy
+  `recommendation_engine` insight-card path (`GET /recommendations/`, `AgentInsightCard`,
+  `PortfolioSynthesisPanel`, flag `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED`) was removed
+  in the consolidation because LLM output must never own visible Buy/Hold/Trim/Sell authority
+  (`KNOWN_FAILURE_MODES.md`). `recommendation_engine.py` + `services/agents/*` + `services/ai/`
+  survive ONLY as internal evidence producers for the Intel v3 refresh adapters and the
+  cert harness (`diagnostics.py`) — never re-expose them as a user surface.
+- **Do not rebuild a duplicate Deploy surface.** Deploy v3 (`routers/deploy_v3.py`,
+  `services/deploy/*`) and the legacy allocation engine chain (`allocation_engine`,
+  `deployment_engine`, `adaptive_deployment`, `regime_engine`, deposits schedule with hardcoded
+  weights, `decision_engine`, `personalized_decision_engine`, `strategy_engine`,
+  `simulation_engine`, decision logs/journal, AI rebalance) were deliberately retired
+  (2026-07-18). New-cash sizing belongs to Paycheck Advisor; holding actions to Intel v3.
+- **Do not build a separate/new Paycheck model or endpoint family.** The paycheck evolution
+  lineage (Stage 12B policy → 12C ETF preference → 12D preview read model → 12E UI → 13A
+  evidence-aware stock gating → 13C production `current_holdings` snapshot contract + independent
+  policy/evidence gates, PR #471) all lives in `allocation_policy_v1.py` behind the one endpoint.
+  Extend it additively there.
+- **Do not delete the Advisor allocation spine** (`allocation_policy_v1`,
+  `paycheck_plan_preview`) — rejected PR #472 did exactly that and was rejected for it.
+- **Run Intel is bounded on-demand, not worker-dependent** (Stage 13B): `POST /intel/v3/run`
+  enqueues and, when `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains up to 3 batches × 10
+  jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
+  clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
+  worker services remain optional and OFF.
+- **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
+  switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
+  background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.
+- **Truth/repair diagnostics are protected operator infrastructure** (Stage 10B/11A/11B/12C
+  lineage): `/diagnostics/finance-intel/*` (~36 cert-gated endpoints incl. financial-truth
+  baseline, books reconciliation, current-price repair, next-buy diagnostic). They are not
+  primary navigation and must not be deleted for looking unused.
+- **Policy tickers live in config** (`v2/backend/app/policy_tickers.json`, loader
+  `services/policy_tickers.py`, override `POLICY_TICKERS_FILE`) with exact-parity tests
+  (`test_policy_tickers.py`). Never re-hardcode ticker membership in policy modules; provider
+  symbol-translation maps stay in provider code.
+- **Tax lots are estimates, reconciliation-gated** (`tax_lot_engine.py`): every production
+  tx_type explicitly classified; unsupported/unknown share events block authoritative display;
+  calendar-anniversary long-term logic; shares tolerance max(0.0001, 0.1%), basis 2%;
+  no dollar tax-liability math anywhere; US-federal estimates-only labeling.
+- **`recommendations_trusted` is always False** in the preview contract; `numeric_plan_trusted`
+  gates investable presentation. Never render an untrusted plan as actionable.
+
+## Current test/build state (post-consolidation)
+
+- Backend: full suite green (`8288 passed, 0 failed` at consolidation; includes the conftest
+  event-loop guard and stale-fixture modernization — both test-only).
+- Frontend: full jest green; `tsc --noEmit` clean; `next build` green.
+- Baseline before consolidation (main @ PR #471): backend 93 failed / 8910 passed
+  (documented pre-existing failures), frontend 3 suites failing to compile.
+
+## SQL / env state
+
+- Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
+  endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
+- `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`
+  and cert user config (Railway) power the Advisor cash plan.
+- `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true` (Railway) recommended so Run Intel drains without
+  the optional worker. `INTEL_V3_SNAPSHOT_WRITES_ENABLED=true` needed for new snapshots.
+- `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` is no longer read by any code — safe to
+  remove from Vercel at leisure (documented cleanup, not required).

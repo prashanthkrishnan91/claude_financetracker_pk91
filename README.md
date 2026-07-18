@@ -1,6 +1,14 @@
 # Portfolio Intelligence Platform
 
-A personal investment intelligence and execution cockpit. Deterministic, auditable Buy/Hold/Trim/Sell decisions backed by sourced evidence, with a plain-English UI built for an amateur investor — not a quant terminal.
+A personal portfolio advisor. Deterministic, auditable Buy/Hold/Trim/Sell decisions backed by sourced evidence, and a deterministic new-cash plan ("I have $X — what should I buy now, how much, and why?"), with a plain-English UI built for an amateur investor — not a quant terminal.
+
+The authenticated app has exactly **three primary views**:
+
+- **Positions** (`/dashboard/positions`) — certified portfolio truth, per-holding Intel labels, reconciliation-gated tax-lot estimates
+- **Advisor** (`/dashboard/advisor`) — the single recommendation surface: system readiness + bounded Run Intel, deterministic Intel v3 holding actions, the Paycheck Advisor new-cash plan, and a trust/repair drawer
+- **Watchlist** (`/dashboard/watchlist`) — user-defined price criteria (the app never picks watchlist stocks)
+
+Import, settings, per-position detail, and login remain as operational subpages. Legacy product routes redirect to the canonical views.
 
 This is the **only active product**. The earlier Streamlit prototype has been retired.
 
@@ -19,7 +27,7 @@ Next.js 14 (Vercel)  ──▶  FastAPI (Railway)  ──▶  Supabase (PostgreS
   Mobile-first UI             Research artifacts (backend-only)
 ```
 
-Visible Buy/Hold/Trim/Sell authority is owned by the **deterministic Intel v3 backend policy**. LLMs, agents, and research workers may produce sourced artifacts but never own final visible action authority.
+Visible Buy/Hold/Trim/Sell authority is owned by the **deterministic Intel v3 backend policy**; new-cash dollars are owned by the **Paycheck Advisor allocation policy** (`POST /api/v1/advisor/paycheck-plan/preview`) — complementary layers, not competitors. LLMs, agents, and research workers may produce sourced artifacts but never own final visible action authority.
 
 See [`v2/docs/architecture.md`](v2/docs/architecture.md) for detailed system design and [`docs/product/NORTH_STAR.md`](docs/product/NORTH_STAR.md) for product direction.
 
@@ -97,7 +105,9 @@ Open `http://localhost:3000`.
 
 ### Database
 
-Apply SQL files in order from [`v2/database/`](v2/database/) (001 → 017) and any newer files in [`v2/backend/migrations/`](v2/backend/migrations/) using the Supabase SQL editor.
+Apply SQL files in order from [`v2/database/`](v2/database/) (001 → 025) and any newer files in [`v2/backend/migrations/`](v2/backend/migrations/) using the Supabase SQL editor.
+
+**`025_watchlist.sql` is required for the Watchlist view** — it is additive and idempotent; until it is applied, `/api/v1/watchlist` returns a deliberate 503 `watchlist_migration_required` state.
 
 ---
 

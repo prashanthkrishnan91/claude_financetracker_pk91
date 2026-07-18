@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .config import get_settings
-from .routers import action_feedback, ai, alert_candidates, alert_delivery_outbox, allocation, analytics, auth, decision_logs, decisions, deposits, deploy_v3, diagnostics, drip, intel_v3, paycheck_plan_preview, portfolio, positions, prices, recommendations, sync
+from .routers import auth, diagnostics, intel_v3, paycheck_plan_preview, portfolio, positions, prices, sync
 
 
 def _configure_yfinance_cache() -> None:
@@ -87,27 +87,20 @@ def create_app() -> FastAPI:
             allow_headers=["*"],
         )
 
-    # Register routers
+    # Register routers.
+    # The final supported API surface (see REFACTOR_REPORT.md): auth, portfolio,
+    # positions, prices, sync, Intel v3, Paycheck Advisor preview, cert-gated
+    # diagnostics/repair, and Watchlist. Legacy recommendation/deploy/deposit/
+    # journal/alert-read endpoints were deliberately retired in the lean-advisor
+    # consolidation and must not be re-registered.
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(portfolio.router, prefix="/api/v1")
     app.include_router(positions.router, prefix="/api/v1")
     app.include_router(prices.router, prefix="/api/v1")
-    app.include_router(recommendations.router, prefix="/api/v1")
     app.include_router(sync.router, prefix="/api/v1")
-    app.include_router(deposits.router, prefix="/api/v1")
-    app.include_router(drip.router, prefix="/api/v1")
-    app.include_router(ai.router, prefix="/api/v1")
-    app.include_router(decisions.router, prefix="/api/v1")
-    app.include_router(decision_logs.router, prefix="/api/v1")
-    app.include_router(analytics.router, prefix="/api/v1")
-    app.include_router(allocation.router, prefix="/api/v1")
     app.include_router(diagnostics.router, prefix="/api/v1")
     app.include_router(paycheck_plan_preview.router, prefix="/api/v1")
     app.include_router(intel_v3.router, prefix="/api/v1")
-    app.include_router(deploy_v3.router, prefix="/api/v1")
-    app.include_router(action_feedback.router, prefix="/api/v1")
-    app.include_router(alert_candidates.router, prefix="/api/v1")
-    app.include_router(alert_delivery_outbox.router, prefix="/api/v1")
 
     @app.get("/health")
     async def health_check():

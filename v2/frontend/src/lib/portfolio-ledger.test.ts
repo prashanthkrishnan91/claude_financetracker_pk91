@@ -1,7 +1,7 @@
 /**
  * Portfolio Ledger helper tests — Stage 4F.
  * Covers: empty holdings, top-5 ordering, category exposure, missing theme data,
- * Intel action/evidence mapping, drawer last-3 decisions, coming-later capsules.
+ * Intel action/evidence mapping, drawer stale-warnings, coming-later capsules.
  */
 
 import {
@@ -17,7 +17,7 @@ import {
   actionChipStyle,
   formatRelativeAge,
 } from "./portfolio-ledger";
-import type { Position, IntelV3HeldCard, IntelV3Snapshot, DecisionMemoryLog } from "./api";
+import type { Position, IntelV3HeldCard, IntelV3Snapshot } from "./api";
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -71,21 +71,6 @@ function makeIntelCard(overrides: Partial<IntelV3HeldCard> = {}): IntelV3HeldCar
     },
     ...overrides,
   } as IntelV3HeldCard;
-}
-
-function makeDecisionLog(overrides: Partial<DecisionMemoryLog> = {}): DecisionMemoryLog {
-  return {
-    id: "log-1",
-    user_id: "user-1",
-    source: "deploy",
-    status: "FULLY_EXECUTED",
-    recommendation_snapshot: {},
-    actual_decisions: [{ ticker: "AAPL", actual_action: "BUY" }],
-    notes: null,
-    created_at: "2026-05-10T12:00:00Z",
-    updated_at: "2026-05-10T12:00:00Z",
-    ...overrides,
-  } as DecisionMemoryLog;
 }
 
 // ── buildLedgerHoldings ───────────────────────────────────────────────────────
@@ -404,42 +389,16 @@ describe("buildSourceFreshnessSummary", () => {
 // ── buildHoldingDrawerData ────────────────────────────────────────────────────
 
 describe("buildHoldingDrawerData", () => {
-  it("returns no decision history when logs array is empty", () => {
-    const holdings = buildLedgerHoldings([makePosition()], [makeIntelCard()]);
-    const drawer = buildHoldingDrawerData(holdings[0], []);
-    expect(drawer.hasDecisionHistory).toBe(false);
-    expect(drawer.lastThreeDecisions).toHaveLength(0);
-  });
-
-  it("returns only decisions that include the holding's ticker", () => {
-    const holdings = buildLedgerHoldings([makePosition({ ticker: "AAPL" })], [makeIntelCard()]);
-    const msftLog = makeDecisionLog({
-      id: "log-2",
-      actual_decisions: [{ ticker: "MSFT", actual_action: "BUY" }],
-    });
-    const drawer = buildHoldingDrawerData(holdings[0], [msftLog]);
-    expect(drawer.lastThreeDecisions).toHaveLength(0);
-  });
-
-  it("returns at most 3 decisions", () => {
-    const holdings = buildLedgerHoldings([makePosition({ ticker: "AAPL" })], [makeIntelCard()]);
-    const logs = [1, 2, 3, 4, 5].map(i =>
-      makeDecisionLog({ id: `log-${i}`, created_at: `2026-05-0${i}T00:00:00Z` })
-    );
-    const drawer = buildHoldingDrawerData(holdings[0], logs);
-    expect(drawer.lastThreeDecisions).toHaveLength(3);
-  });
-
   it("sets isThesisStale=true for THIN evidence holding", () => {
     const holdings = buildLedgerHoldings([makePosition()], [makeIntelCard({ evidence_band: "THIN" })]);
-    const drawer = buildHoldingDrawerData(holdings[0], []);
+    const drawer = buildHoldingDrawerData(holdings[0]);
     expect(drawer.isThesisStale).toBe(true);
     expect(drawer.staleWarning).toBeTruthy();
   });
 
   it("sets isThesisStale=false for STRONG evidence holding", () => {
     const holdings = buildLedgerHoldings([makePosition()], [makeIntelCard({ evidence_band: "STRONG" })]);
-    const drawer = buildHoldingDrawerData(holdings[0], []);
+    const drawer = buildHoldingDrawerData(holdings[0]);
     expect(drawer.isThesisStale).toBe(false);
     expect(drawer.staleWarning).toBeUndefined();
   });
@@ -495,14 +454,14 @@ describe("Coming-Later contract", () => {
   it("buildLedgerData does not fabricate theme/sector data", () => {
     // Category exposure uses only existing 'category' field from Position
     const positions = [makePosition({ category: "Core" })];
-    const data = buildLedgerData(positions, undefined, []);
+    const data = buildLedgerData(positions, undefined);
     const row = data.categoryExposure[0];
     // Must render existing category only — not invented sector/theme labels
     expect(row.category).toBe("Core");
   });
 
   it("buildLedgerData marks hasIntelData=false when no snapshot", () => {
-    const data = buildLedgerData([makePosition()], undefined, []);
+    const data = buildLedgerData([makePosition()], undefined);
     expect(data.hasIntelData).toBe(false);
   });
 

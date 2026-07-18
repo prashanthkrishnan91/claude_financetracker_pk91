@@ -1,9 +1,14 @@
 "use client";
 
-import { QueryClient, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { ActualDecisionItem, AlertCandidate, AlertDeliveryOutbox, DeployV3PlanResponse, DeployV3ReadinessDiagnostic, IntelV3Snapshot, IntelV3RunResult } from "./api";
-import { DEPLOY_V3_PLAN_QUERY_KEY, DEPLOY_V3_READINESS_QUERY_KEY } from "./deploy-v3-helpers";
+import type {
+  IntelV3Snapshot,
+  RecommendationsPanelResponse,
+  TaxLotsResponse,
+  WatchlistCreate,
+  WatchlistItem,
+} from "./api";
 
 // ── Portfolio ────────────────────────────────────────────
 
@@ -38,14 +43,6 @@ export function useBackfillSnapshots() {
   });
 }
 
-export function useRebalance(cashToDeploy?: number) {
-  return useQuery({
-    queryKey: ["portfolio", "rebalance", cashToDeploy],
-    queryFn: () => api.portfolio.getRebalance(cashToDeploy),
-    enabled: false, // Manual trigger only
-  });
-}
-
 export function useTargets() {
   return useQuery({
     queryKey: ["portfolio", "targets"],
@@ -68,6 +65,15 @@ export function usePosition(ticker: string) {
     queryKey: ["positions", ticker],
     queryFn: () => api.positions.get(ticker),
     enabled: !!ticker,
+  });
+}
+
+/** Per-ticker tax lots with long/short-term status and countdowns. */
+export function useTaxLots() {
+  return useQuery<TaxLotsResponse>({
+    queryKey: ["positions", "tax-lots"],
+    queryFn: api.positions.getTaxLots,
+    staleTime: 60_000,
   });
 }
 
@@ -98,91 +104,41 @@ export function usePriceHealth() {
   });
 }
 
-// ── Recommendations ──────────────────────────────────────────
+// ── Recommendations panel ─────────────────────────────────
 
-export function invalidateRecommendationAggregateQueries(qc: QueryClient) {
-  qc.invalidateQueries({ queryKey: ["recommendations"] });
-  qc.invalidateQueries({ queryKey: ["recommendations", "insights"] });
-  qc.invalidateQueries({ queryKey: ["recommendations", "job"] });
-}
-
-export function useRecommendations(action?: string, enabled = true) {
-  return useQuery({
-    queryKey: ["recommendations", action],
-    queryFn: () => api.recommendations.list(action),
-    enabled,
-    staleTime: 20_000,
+/** Deterministic Intel v3 recommendations panel. Read-only; zero LLM calls. */
+export function useRecommendationsPanel() {
+  return useQuery<RecommendationsPanelResponse>({
+    queryKey: ["recommendations", "panel"],
+    queryFn: api.recommendations.getPanel,
+    staleTime: 60_000,
     refetchOnWindowFocus: false,
   });
 }
 
-export function useRefreshRecommendations() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (body?: { deposit_amount?: number; sale_proceeds?: number }) =>
-      api.recommendations.refresh(body),
-    onMutate: async () => {
-      // A fresh run was requested — don't wait for staleTime/TTL to elapse.
-      invalidateRecommendationAggregateQueries(qc);
-    },
-    onSuccess: () => {
-      invalidateRecommendationAggregateQueries(qc);
-    },
-  });
-}
+// ── Watchlist ─────────────────────────────────────────────
 
-// Polling interval (ms) while an agent run is in-flight. Matches the SEV-1
-// spec — 3s cadence strikes a balance between perceived responsiveness and
-// avoiding request storms on slow networks.
-export const AGENT_JOB_POLL_MS = 3000;
-// Max poll duration is 10 minutes.
-export const AGENT_JOB_MAX_POLLS = Math.ceil((10 * 60 * 1000) / AGENT_JOB_POLL_MS);
-const TERMINAL_AGENT_STATUSES = new Set(["completed", "failed", "cancelled"]);
-
-export function useAgentJob(jobId: string | null) {
-  return useQuery({
-    queryKey: ["recommendations", "job", jobId],
-    queryFn: async () => {
-      if (!jobId) return null;
-      return api.recommendations.getJob(jobId);
-    },
-    enabled: !!jobId,
-    // Poll on a 3s cadence until the run is terminal, capped at
-    // AGENT_JOB_MAX_POLLS attempts to prevent runaway polling.
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      // Terminal stop condition is explicit to avoid fetch storms:
-      // once completed/failed/cancelled, polling is permanently disabled.
-      const terminal = data?.status ? TERMINAL_AGENT_STATUSES.has(data.status) : false;
-      if (terminal) return false;
-      const attempts = query.state.dataUpdateCount ?? 0;
-      if (attempts >= AGENT_JOB_MAX_POLLS) return false;
-      return AGENT_JOB_POLL_MS;
-    },
-    refetchOnWindowFocus: false,
-  });
-}
-
-export function useLatestAgentInsights() {
-  return useQuery({
-    queryKey: ["recommendations", "insights", "latest"],
-    queryFn: api.recommendations.getLatestInsights,
+export function useWatchlist() {
+  return useQuery<WatchlistItem[]>({
+    queryKey: ["watchlist"],
+    queryFn: api.watchlist.list,
     staleTime: 30_000,
   });
 }
 
-export function useLatestAgentRun(enabled = true) {
-  return useQuery({
-    queryKey: ["recommendations", "job", "latest"],
-    queryFn: api.recommendations.getLatestJob,
-    enabled,
-    staleTime: 0,
-    refetchInterval: (query) => {
-      const data = query.state.data;
-      if (!data) return false;
-      return data.status === "running" || data.status === "queued" || data.status === "in_progress" ? 2000 : false;
-    },
-    refetchOnWindowFocus: false,
+export function useAddWatchlistItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (item: WatchlistCreate) => api.watchlist.add(item),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
+  });
+}
+
+export function useDeleteWatchlistItem() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => api.watchlist.remove(id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["watchlist"] }),
   });
 }
 
@@ -241,32 +197,6 @@ export function useImportPdf() {
   });
 }
 
-// ── DRIP ───────────────────────────────────────────────
-
-export function useDripSummary() {
-  return useQuery({
-    queryKey: ["drip", "summary"],
-    queryFn: api.drip.getSummary,
-    staleTime: 5 * 60_000,
-  });
-}
-
-export function useDripPositions() {
-  return useQuery({
-    queryKey: ["drip", "positions"],
-    queryFn: api.drip.getPositions,
-    staleTime: 5 * 60_000,
-  });
-}
-
-export function useDripHistory() {
-  return useQuery({
-    queryKey: ["drip", "history"],
-    queryFn: api.drip.getHistory,
-    staleTime: 10 * 60_000,
-  });
-}
-
 // ── Cash Override ─────────────────────────────────────────────
 
 export function useCashBalance() {
@@ -284,59 +214,6 @@ export function useSetCash() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["portfolio"] });
     },
-  });
-}
-
-// ── Recommendations Resolve & Decision Log ────────────────────────────
-
-export function useResolveRecommendation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      recId,
-      resolution,
-      notes,
-    }: {
-      recId: string;
-      resolution: string;
-      notes?: string;
-    }) => api.recommendations.resolve(recId, resolution, notes),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["recommendations"] }),
-  });
-}
-
-export function useDecisionLog(limit = 50, enabled = true) {
-  return useQuery({
-    queryKey: ["recommendations", "decisions", limit],
-    queryFn: () => api.recommendations.getDecisions(limit),
-    enabled,
-    staleTime: 30_000,
-    refetchOnWindowFocus: false,
-  });
-}
-
-export function useDecisionOutcomes() {
-  return useQuery({
-    queryKey: ["recommendations", "outcomes"],
-    queryFn: api.recommendations.getOutcomes,
-    staleTime: 60_000,
-  });
-}
-
-export function useLogDecision() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ snapshot }: { snapshot: Record<string, unknown> }) =>
-      api.decisionLogs.createDecisionLog(snapshot),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
-  });
-}
-
-export function useDepositPlan(cashToInvest = 0, portfolioBalance = 0) {
-  return useQuery({
-    queryKey: ["deposits", "plan", cashToInvest, portfolioBalance],
-    queryFn: () => api.deposits.getPlan(cashToInvest, portfolioBalance),
-    staleTime: 60_000,
   });
 }
 
@@ -366,83 +243,6 @@ export function useUpdateApiKeys() {
   });
 }
 
-// ── AI ──────────────────────────────────────────────────────
-
-export function useAiLatestAnalysis() {
-  return useQuery({
-    queryKey: ["ai", "latest"],
-    queryFn: api.ai.getLatest,
-    staleTime: 5 * 60_000,
-  });
-}
-
-export function useAiRebalance() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: api.ai.rebalance,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] });
-      qc.invalidateQueries({ queryKey: ["ai", "latest"] });
-    },
-  });
-}
-
-// ── Analytics ─────────────────────────────────────────────────
-
-export function useStrategyPerformance() {
-  return useQuery({
-    queryKey: ["analytics", "strategy-performance"],
-    queryFn: api.analytics.getStrategyPerformance,
-    staleTime: 5 * 60_000,
-  });
-}
-
-
-export function useDecisionMemoryLogs(limit = 10, enabled = true) {
-  return useQuery({
-    queryKey: ["decision-logs", limit],
-    queryFn: () => api.decisionLogs.listDecisionLogs(limit),
-    enabled,
-    staleTime: 30_000,
-  });
-}
-
-export function useCreateDecisionMemoryLog() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ snapshot, actualDecisions, notes, source }: { snapshot: Record<string, unknown>; actualDecisions?: ActualDecisionItem[]; notes?: string; source?: string }) =>
-      api.decisionLogs.createDecisionLog(snapshot, actualDecisions, { notes, source }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
-  });
-}
-
-export function useUpdateDecisionMemoryLog() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { actual_decisions?: ActualDecisionItem[]; notes?: string } }) =>
-      api.decisionLogs.updateDecisionLog(id, patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
-  });
-}
-
-export function useEvaluateDecisionMemoryLog() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (id: string) => api.decisionLogs.evaluateDecisionLog(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["decision-logs"] }),
-  });
-}
-
-export function useDecisionPerformanceInsights(enabled = true) {
-  return useQuery({
-    queryKey: ["decision-logs", "insights"],
-    queryFn: api.decisionLogs.getDecisionInsights,
-    enabled,
-    staleTime: 30_000,
-    refetchOnWindowFocus: false,
-  });
-}
-
 // ── Intel v3 snapshot ────────────────────────────────────────────
 
 /** Read the latest Intel v3 snapshot. Zero LLM calls on this path. */
@@ -457,113 +257,5 @@ export function useIntelV3Snapshot(enabled = true) {
       if (error instanceof Error && error.message.includes("404")) return false;
       return failureCount < 2;
     },
-  });
-}
-
-/**
- * Stage 3.3 — Enqueue an Intel v3 analyst refresh.
- * POST /intel/v3/run returns a refresh-enqueue status, NOT a snapshot.
- * On success, invalidates the snapshot query so the UI immediately re-fetches.
- * The cockpit polls the snapshot until snapshot_source=worker_certified appears.
- */
-export function useRunIntelV3() {
-  const qc = useQueryClient();
-  return useMutation<IntelV3RunResult>({
-    mutationFn: api.intelV3.runV3,
-    onSuccess: () => {
-      // Immediately refetch the snapshot (still shows old certified snapshot if any).
-      qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
-    },
-  });
-}
-
-/** Poll a v3 run status by run_id. */
-export function useIntelV3RunStatus(runId: string | null, enabled = true) {
-  return useQuery({
-    queryKey: ["intel_v3", "run", runId],
-    queryFn: () => api.intelV3.getRunStatus(runId!),
-    enabled: enabled && !!runId,
-    refetchInterval: 2_000,
-    staleTime: 0,
-  });
-}
-
-// ── Deploy v3 plan ────────────────────────────────────────────
-
-/**
- * Read the Deploy v3 plan from GET /api/v1/deploy/v3/plan.
- * When cashToDeploy > 0, passes cash_to_deploy query param for amount-aware new-cash sizing.
- * Returns 404 when no Intel v3 snapshot exists or the feature flag is off.
- * Does not call the legacy allocation plan endpoint.
- */
-export function useDeployV3Plan(enabled = true, cashToDeploy?: number) {
-  const amountKey = cashToDeploy != null && cashToDeploy > 0 ? cashToDeploy : undefined;
-  return useQuery<DeployV3PlanResponse>({
-    queryKey: amountKey != null ? [...DEPLOY_V3_PLAN_QUERY_KEY, amountKey] : DEPLOY_V3_PLAN_QUERY_KEY,
-    queryFn: () => api.deployV3.getPlan(cashToDeploy),
-    enabled,
-    staleTime: 60_000,
-    retry: (failureCount, error: unknown) => {
-      if (error instanceof Error && error.message.includes("404")) return false;
-      // No-snapshot returns a dict as detail, Error constructor produces "[object Object]"
-      if (error instanceof Error && error.message === "[object Object]") return false;
-      return failureCount < 2;
-    },
-  });
-}
-
-// ── Deploy v3 readiness diagnostic ──────────────────────────────────
-
-/**
- * Read the Deploy v3 exact-dollar readiness diagnostic from GET /api/v1/deploy/v3/readiness.
- * Returns 404 when the feature flag is off.
- * Does not call the legacy allocation plan endpoint.
- */
-export function useDeployV3Readiness(enabled = true) {
-  return useQuery<DeployV3ReadinessDiagnostic>({
-    queryKey: DEPLOY_V3_READINESS_QUERY_KEY,
-    queryFn: api.deployV3.getReadiness,
-    enabled,
-    staleTime: 60_000,
-    retry: (failureCount, error: unknown) => {
-      if (error instanceof Error && error.message.includes("404")) return false;
-      return failureCount < 2;
-    },
-  });
-}
-
-// ── Deploy v3 target allocation setup ─────────────────────────────────
-
-/**
- * Save portfolio target allocations and invalidate deploy v3 readiness + plan.
- * Wraps PUT /api/v1/portfolio/targets.
- */
-export function useSetDeployTargets() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: api.portfolio.setTargets,
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["portfolio", "targets"] });
-      qc.invalidateQueries({ queryKey: DEPLOY_V3_READINESS_QUERY_KEY });
-      qc.invalidateQueries({ queryKey: DEPLOY_V3_PLAN_QUERY_KEY });
-    },
-  });
-}
-
-// ── Alert Center ─────────────────────────────────────────────────────────────
-
-export function useAlertCandidates(limit = 50) {
-  return useQuery<AlertCandidate[]>({
-    queryKey: ["alertCenter", "candidates", limit],
-    queryFn: () => api.alertCenter.getCandidates(limit),
-    staleTime: 30_000,
-  });
-}
-
-export function useAlertOutbox(limit = 50) {
-  return useQuery<AlertDeliveryOutbox[]>({
-    queryKey: ["alertCenter", "outbox", limit],
-    queryFn: () => api.alertCenter.getOutbox(limit),
-    staleTime: 30_000,
   });
 }

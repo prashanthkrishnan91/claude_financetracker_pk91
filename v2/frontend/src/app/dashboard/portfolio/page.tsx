@@ -1,10 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
+import Link from "next/link";
 import { cn, formatCurrency } from "@/lib/utils";
-import { usePositions, useIntelV3Snapshot, useDecisionMemoryLogs } from "@/lib/hooks";
+import { usePositions, useIntelV3Snapshot } from "@/lib/hooks";
 import { InlineLoader } from "@/components/ui/Spinner";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { TaxLotList } from "@/components/holdings/TaxLotList";
 import { COMING_LATER_CANONICAL_CAPTION } from "@/components/cards/IntelV3PrimitivesData";
 import {
   buildLedgerData,
@@ -18,21 +20,17 @@ import {
   type ThesisHealthStatus,
   type SourceFreshnessStatus,
 } from "@/lib/portfolio-ledger";
-import { formatUpdatedAtSafe } from "@/lib/intel-v3-evidence";
-import type { DecisionMemoryLog } from "@/lib/api";
-
 // ── Portfolio Living Thesis Ledger ────────────────────────────────────────────
 
 export default function PortfolioPage() {
   const { data: positions, isLoading: posLoading, error: posError } = usePositions();
   const { data: intelSnapshot } = useIntelV3Snapshot();
-  const { data: decisionLogs } = useDecisionMemoryLogs(25);
 
   const [drawerTicker, setDrawerTicker] = useState<string | null>(null);
 
   const ledger: LedgerData | null =
     positions && positions.length > 0
-      ? buildLedgerData(positions, intelSnapshot, decisionLogs ?? [])
+      ? buildLedgerData(positions, intelSnapshot)
       : null;
 
   const openDrawer = useCallback((ticker: string) => setDrawerTicker(ticker), []);
@@ -48,16 +46,24 @@ export default function PortfolioPage() {
       <header className="sticky top-0 z-50 bg-background/80 backdrop-blur-xl border-b border-border px-4 py-3">
         <div className="max-w-7xl mx-auto flex items-center justify-between">
           <div>
-            <h1 className="text-xl font-display text-text-primary">Portfolio</h1>
+            <h1 className="text-xl font-display text-text-primary">Positions</h1>
             <p className="text-[10px] uppercase tracking-label text-text-muted opacity-50 leading-none mt-0.5">
               Living Thesis Ledger
             </p>
           </div>
-          {intelSnapshot && (
-            <span className="text-[10px] text-text-muted opacity-60">
-              Intel {formatRelativeAge(intelSnapshot.generated_at)}
-            </span>
-          )}
+          <div className="flex items-center gap-3">
+            {intelSnapshot && (
+              <span className="text-[10px] text-text-muted opacity-60">
+                Intel {formatRelativeAge(intelSnapshot.generated_at)}
+              </span>
+            )}
+            <Link
+              href="/dashboard/import"
+              className="text-[11px] px-2.5 py-1 rounded border border-border text-text-secondary hover:text-text-primary hover:border-border-strong transition-colors"
+            >
+              Import data
+            </Link>
+          </div>
         </div>
       </header>
 
@@ -98,6 +104,9 @@ export default function PortfolioPage() {
               />
             </section>
 
+            {/* ── Tax lots per ticker ───────────────────────────────────────── */}
+            <TaxLotList />
+
             {/* ── Concentration + Category (2-col on desktop) ───────────────── */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <ConcentrationPanel top5={ledger.concentrationTop5} />
@@ -117,11 +126,7 @@ export default function PortfolioPage() {
 
       {/* ── Holding detail drawer ─────────────────────────────────────────── */}
       {selectedHolding && (
-        <HoldingDrawer
-          holding={selectedHolding}
-          decisionLogs={decisionLogs ?? []}
-          onClose={closeDrawer}
-        />
+        <HoldingDrawer holding={selectedHolding} onClose={closeDrawer} />
       )}
     </>
   );
@@ -432,14 +437,12 @@ function ComingLaterCapsule({ title }: { title: string }) {
 
 function HoldingDrawer({
   holding,
-  decisionLogs,
   onClose,
 }: {
   holding: LedgerHolding;
-  decisionLogs: DecisionMemoryLog[];
   onClose: () => void;
 }) {
-  const drawerData = buildHoldingDrawerData(holding, decisionLogs);
+  const drawerData = buildHoldingDrawerData(holding);
   const chipClass = actionChipStyle(holding.intelAction);
 
   // Close on Esc
@@ -594,34 +597,6 @@ function HoldingDrawer({
               <p className="text-sm text-text-secondary leading-relaxed">{holding.thesisState}</p>
             </div>
           )}
-
-          {/* Last 3 decisions */}
-          <div>
-            <p className="text-[10px] uppercase tracking-label text-text-muted opacity-60 mb-2">
-              Recent Decisions
-            </p>
-            {!drawerData.hasDecisionHistory ? (
-              <p className="text-sm text-text-muted italic">
-                No decision history for this holding yet.
-              </p>
-            ) : (
-              <div className="divide-y divide-border/40">
-                {drawerData.lastThreeDecisions.map(d => (
-                  <div key={d.id} className="py-2.5 flex items-start justify-between gap-2">
-                    <div>
-                      <p className="text-xs text-text-primary font-medium">
-                        {formatUpdatedAtSafe(d.date)}
-                      </p>
-                      <p className="text-[10px] text-text-muted capitalize">{d.source}</p>
-                    </div>
-                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-elevated text-text-muted border border-border uppercase tracking-wide shrink-0">
-                      {d.status.replace(/_/g, " ")}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
 
           {/* Coming-Later: thesis timeline/sparkline */}
           <div className="opacity-50 pt-2 border-t border-border-subtle/40">

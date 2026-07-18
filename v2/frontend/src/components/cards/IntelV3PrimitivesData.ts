@@ -2,7 +2,8 @@
  * Pure data constants for the IntelV3 primitive design system.
  *
  * No JSX, no React — safe to import in Node test environments.
- * IntelV3Primitives.tsx imports and re-exports these.
+ * Used by the Positions ledger (portfolio page) for action tokens and the
+ * canonical Coming-Later caption.
  */
 
 import type { IntelV3Action } from "@/lib/api";

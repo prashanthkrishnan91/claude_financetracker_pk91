@@ -7,7 +7,7 @@
  * Missing data renders Coming-Later / unavailable — not fabricated.
  */
 
-import type { Position, IntelV3HeldCard, IntelV3Snapshot, DecisionMemoryLog } from "./api";
+import type { Position, IntelV3HeldCard, IntelV3Snapshot } from "./api";
 
 // ── Ledger holding ────────────────────────────────────────────────────────────
 
@@ -97,20 +97,10 @@ export interface SourceFreshnessSummary {
   evidenceFreshnessState: string | undefined;
 }
 
-// ── Drawer decision entry ─────────────────────────────────────────────────────
-
-export interface DrawerDecisionEntry {
-  id: string;
-  date: string;
-  status: string;
-  source: string;
-  actionCount: number;
-}
+// ── Drawer data ───────────────────────────────────────────────────────────────
 
 export interface HoldingDrawerData {
   holding: LedgerHolding;
-  lastThreeDecisions: DrawerDecisionEntry[];
-  hasDecisionHistory: boolean;
   isThesisStale: boolean;
   staleWarning: string | undefined;
 }
@@ -388,28 +378,9 @@ export function buildSourceFreshnessSummary(
 }
 
 /**
- * Build holding drawer data from a holding + decision logs.
- * Last 3 decision logs, stale-thesis warning if applicable.
+ * Build holding drawer data — stale-thesis warning if applicable.
  */
-export function buildHoldingDrawerData(
-  holding: LedgerHolding,
-  decisionLogs: DecisionMemoryLog[],
-): HoldingDrawerData {
-  const logsForHolding = (decisionLogs ?? [])
-    .filter(log =>
-      (log.actual_decisions ?? []).some(
-        d => d.ticker?.toUpperCase() === holding.ticker.toUpperCase()
-      )
-    )
-    .slice(0, 3)
-    .map(log => ({
-      id: log.id,
-      date: log.created_at ?? "",
-      status: log.status ?? "DRAFT",
-      source: log.source ?? "unknown",
-      actionCount: (log.actual_decisions ?? []).length,
-    }));
-
+export function buildHoldingDrawerData(holding: LedgerHolding): HoldingDrawerData {
   const isThesisStale = holding.isStaleOrThin && holding.hasIntel;
   const staleWarning = isThesisStale
     ? "Evidence is thin — thesis confidence is lower than holdings with strong signals."
@@ -417,8 +388,6 @@ export function buildHoldingDrawerData(
 
   return {
     holding,
-    lastThreeDecisions: logsForHolding,
-    hasDecisionHistory: logsForHolding.length > 0,
     isThesisStale,
     staleWarning,
   };
@@ -428,7 +397,6 @@ export function buildHoldingDrawerData(
 export function buildLedgerData(
   positions: Position[],
   intelSnapshot: IntelV3Snapshot | null | undefined,
-  decisionLogs: DecisionMemoryLog[],
 ): LedgerData {
   const allCards = [
     ...(intelSnapshot?.best_buys ?? []),

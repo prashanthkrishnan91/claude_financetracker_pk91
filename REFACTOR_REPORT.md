@@ -1,7 +1,7 @@
 # REFACTOR REPORT — Lean Advisor Consolidation (Positions, Advisor, Watchlist)
 
-Status: **Phase 0 — contract and baseline committed BEFORE any production code change.**
-Later sections are filled in as phases land; nothing below the Phase-0 line is deleted, only appended/updated.
+Status: **COMPLETE — all phases landed.** The Phase-0 contract below was committed before any
+production code change; phase records were appended as work landed. Final SHA is the PR head.
 
 This PR replaces rejected PR #472. PR #472 (`claude/finance-tracker-refactor-ldf1i2`, head `03f5ed78`)
 is **reference-only**: it is not continued, not branched from, not merged, and none of its repo-wide
@@ -397,7 +397,7 @@ route's auth check), `test_models.py` −1 (deposit models).
 **Stale-fixture cleanup (test-only, 21 files):** cleared all 41 remaining pre-existing baseline
 failures (Migration-024 flat columns, cost-guard flag, Stage 9F lane, Stage 13 freshness
 annotation, kernel BUY guardrail, worker kill-switch gating, static-guard modernization).
-**Backend suite after Phase 2/3/5 backend work: `8288 passed, 0 failed`** (baseline: 93 failed /
+**Backend suite after Phase 2/3/5 backend work: `8288 passed, 0 failed`** (final full run after all review fixes: **`8290 passed, 0 failed`**) (baseline: 93 failed /
 8910 passed).
 
 ## Phase 3 (backend) — tax lots (record)
@@ -499,3 +499,115 @@ Positions view has its own `positions-view` helpers/tests), today-command-center
 Every material reduction is enumerated file-by-file with the deleted production surface it
 exclusively covered (Phase 2 and Phase 6 records above); behavior that moved (cert-secret safety
 scan, positions helpers) has replacement coverage named beside it.
+
+## Semantic review (record)
+
+Ten dimensions reviewed by independent fresh-context read-only reviewers; all findings resolved
+in two fix rounds (commits "Semantic review round 1/2"):
+
+| Dimension | Verdict | Material findings → resolution |
+|---|---|---|
+| Product goal alignment + decision authority | PASS (5/5 questions) | 3 low hygiene items (dead DeployV3/AlertCandidate types, unused useRebalance hook) → removed |
+| Financial truth preservation | PASS | Medium: zero-price Buy could mint a zero-basis lot → now fail-closed unsupported (tested); "Stale prices" mislabel → "Missing prices" |
+| Allocation/cash invariants + contracts + deletion safety | PASS after fix | Blocker: dead `portfolio_service.get_deposit_plan()` importing deleted modules → removed; all frontend fetches map to registered routes; invariant code byte-identical to main |
+| Tax-lot correctness | PASS | (covered by financial-truth + contract reviewers) |
+| Authentication + user isolation + security | PASS | No new-code findings; pre-existing lows documented (login query-param binding, exception-echo details) — retained code untouched by design |
+| Runtime/cost behavior | PASS | "Net cost-reducing branch": no new polling/workers, batching verified, drain caps untouched |
+| Accessibility | Fixed to standard | aria-current, focus rings + 40px targets on Advisor, scoped aria-live, form Enter submit, focus management, DataHealthDrawer focus trap + restore, role=alert |
+| Deletion safety | PASS after fix | see contracts row |
+| Deployment readiness (SQL/env) | PASS | Watchlist create race → 409 backstop; HANDOFF env gaps (backend INTEL_V3_VISIBLE_SNAPSHOT_ENABLED must stay set; boot-required Supabase vars) documented; README env filename fixed |
+| Plain-English UI | PASS after fixes | 4 blockers fixed (env-var names out of visible copy, raw enum chips translated, reconciliation codes translated, promised technical-detail expander now exists) + risks R1/R4/R6/R7 |
+
+## Runtime proof (record)
+
+Production credentials are not available in this environment (verified external constraint), so
+end-to-end proof ran the REAL application locally over HTTP with fixtures injected only at the
+outermost boundaries — documented per capture in `docs/ai/proof/consolidation/RESPONSES.md`:
+
+- **Real and unmodified:** the FastAPI app with every registered router; JWT middleware
+  validating a real HS256 token (local GoTrue-shaped auth server + JWKS); the deterministic
+  allocation policy producing the plan; the tax-lot engine; Intel v3 snapshot read path; Run
+  Intel enqueue writing real `analyst_refresh_jobs` rows; watchlist CRUD incl. the 409 policy;
+  the Next.js **production build** incl. the server-only cert-secret route handler; the real
+  login flow; React Query.
+- **Fixture-injected:** in-memory Supabase client (same seam the test suite patches) seeded
+  with a 6-position portfolio whose Intel snapshot payload was built by calling the real
+  `snapshot_builder.build_snapshot()`; fixture `PriceService.fetch_prices` results; and, for the
+  two Run-Intel progress scenarios only, deterministic drain results staging the real response
+  contract.
+- **Verified flows:** login → `/dashboard` → Positions redirect; legacy-route redirects
+  (deposits→advisor, paycheck-plan→advisor?section=cash-plan); trusted plan via the frontend
+  route handler (`trusted: true` + explanations); degraded plan; Run Intel partial
+  ("Continue Intel run", jobs 6 queued/4 attempted/4 succeeded/0 failed/2 remaining) and
+  complete; snapshot 404 state; watchlist create/list/edit/delete + 409; tax lots reconciled
+  (long+short term) and blocked; backend-stopped error state; three-tab nav.
+- **19 screenshots** (desktop + mobile) + **13 sanitized API captures** in
+  `docs/ai/proof/consolidation/`.
+- **Not validated against live Railway/Supabase/Vercel production** (explicitly identified):
+  production data behavior, the applied Watchlist migration (production Watchlist stays
+  unavailable until `025_watchlist.sql` is applied), and the Vercel preview deployment (created
+  automatically by the Vercel GitHub integration when this PR opens; the preview URL appears in
+  the PR's Vercel comment). Four runtime bugs found during proof were fixed and re-verified
+  (snapshot-aware idle sentence, deep-link scroll, contradictory degraded totals, plus the
+  Decimal-string serialization noted as pre-existing backend behavior handled by the UI).
+
+## Final confirmations (record)
+
+- **No new recommendation model, engine, endpoint family, or visible LLM authority was
+  created.** The only recommendation surfaces are deterministic Intel v3 (holding actions) and
+  the pre-existing canonical Paycheck Advisor endpoint (new cash), rendered in one Advisor view.
+  LLM/agent code survives only as labeled internal evidence producers behind the protected
+  refresh adapters and the cert harness.
+- **The app answers "I have $X available to invest. What should I buy now, how much, and
+  why?"** — Advisor → Cash plan → deterministic dollar allocations with per-ticker reasons,
+  evidence chips, policy roles, allocated/unallocated totals, and plain-English explanations for
+  every non-selected holding, gated by `numeric_plan_trusted` with exact blockers and repair
+  actions when trust is degraded (screenshots: `advisor-cash-plan-trusted-desktop.png`,
+  `advisor-cash-plan-degraded-desktop.png`; capture: RESPONSES.md).
+
+## Deployment steps (record)
+
+1. Merge the PR. Vercel (frontend) and Railway (backend web service) redeploy automatically;
+   Railway start commands and worker services are unchanged (workers stay optional and off).
+2. Apply `v2/database/025_watchlist.sql` in the Supabase SQL editor (additive; validation
+   queries in the file). Until applied, Watchlist shows its explicit migration-required state.
+3. Confirm env: Railway — `FINANCE_RUNTIME_CERT_ENABLED=true`, `FINANCE_RUNTIME_CERT_SECRET`,
+   cert user id/email, `INTEL_V3_VISIBLE_SNAPSHOT_ENABLED=true` (must stay),
+   `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true` (recommended so Run Intel drains),
+   `INTEL_V3_SNAPSHOT_WRITES_ENABLED=true` (needed for new snapshots; cost-guard decision).
+   Vercel — `FINANCE_RUNTIME_CERT_SECRET` (server-only, same value), `NEXT_PUBLIC_API_URL`,
+   `NEXT_PUBLIC_SUPABASE_URL/ANON_KEY`. `NEXT_PUBLIC_INTEL_V3_VISIBLE_SNAPSHOT_ENABLED` is no
+   longer read — safe cleanup later, not required.
+4. Rollback: revert the merge commit; no data loss (no destructive SQL); an applied
+   `watchlist_items` table remains unused and harmless.
+
+## Unresolved external limitations
+
+- Production credentials (owner Supabase login, Railway/Vercel dashboards) are unavailable in
+  this environment: live-production runtime validation and the migration application itself are
+  manual post-merge steps, documented above. No other limitation remains; no product behavior
+  required by the consolidation contract was deferred.
+
+## Final test/build state and test-count reconciliation (record)
+
+- Backend final: `python3 -m pytest tests/ -q` → **8290 passed, 0 failed** (files: 197).
+  Baseline: 9,003 collected (93 failed / 8,910 passed) across 222 files.
+  Reconciliation: −807 tests deleted strictly with their exclusive deleted surfaces (27 files:
+  790 tests + 17 trimmed from 4 mixed files — enumerated in the Phase 2 record), +94 added
+  (25 policy-ticker parity, 14 preview explanations, 16 watchlist, 32 tax lots incl. review
+  fixes, 7 other). 9,003 − 807 + 94 = 8,290. Zero tests deleted to "get green" — every stale
+  fixture was updated, not removed.
+- Frontend final: `npx jest --runInBand` → **16 suites / 515 tests passed, 0 failed**.
+  Baseline: 28 files / 1,050 passing (3 further suites failed to compile on main).
+  Reconciliation: 17 test files deleted with their exclusive legacy surfaces (Agent*/
+  DataQuality/InsightCardThesis/portfolioSynthesis/DeployV3*/PaycheckPlanPreviewContract/
+  alert-*/decision-log/deploy-*/journal-ledger/today-command-center/portfolio-ledger — each
+  listed beside its deleted surface in the retirement record; the cert-secret safety assertions
+  from PaycheckPlanPreviewContract were re-created in `cert-secret-safety.test.ts`), and
+  ~200 new tests were added across positions-view, watchlist, tax-lots wiring,
+  advisor-readiness, advisor-cash-plan, nav, route-redirects, cert-secret safety.
+- `npx tsc --noEmit` → **0 errors** (baseline had 12). `npx next build` → green (20/20 pages;
+  three views + redirect stubs + import/settings/login/position/[ticker]).
+- Screenshots re-shot after the final fix batch through the same harness; all review copy
+  fixes verified rendering live (see advisor-cash-plan-degraded-desktop.png for the
+  plain-English blocker + technical-detail expander + "No trusted allocation totals" state).

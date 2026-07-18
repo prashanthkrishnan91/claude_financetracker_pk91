@@ -94,7 +94,7 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
 
 ## Current test/build state (post-consolidation)
 
-- Backend: full suite green (`8288 passed, 0 failed` at consolidation; includes the conftest
+- Backend: full suite green (`8290 passed, 0 failed` at consolidation; includes the conftest
   event-loop guard and stale-fixture modernization — both test-only).
 - Frontend: full jest green; `tsc --noEmit` clean; `next build` green.
 - Baseline before consolidation (main @ PR #471): backend 93 failed / 8910 passed

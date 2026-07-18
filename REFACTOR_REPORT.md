@@ -590,7 +590,7 @@ outermost boundaries — documented per capture in `docs/ai/proof/consolidation/
 
 ## Final test/build state and test-count reconciliation (record)
 
-- Backend final: `python3 -m pytest tests/ -q` → **8290 passed, 0 failed** (files: 197).
+- Backend final: `python3 -m pytest tests/ -q` → **8290 passed, 0 failed** (files: 199).
   Baseline: 9,003 collected (93 failed / 8,910 passed) across 222 files.
   Reconciliation: −807 tests deleted strictly with their exclusive deleted surfaces (27 files:
   790 tests + 17 trimmed from 4 mixed files — enumerated in the Phase 2 record), +94 added

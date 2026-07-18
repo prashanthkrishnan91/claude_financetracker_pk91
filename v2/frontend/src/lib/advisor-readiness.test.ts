@@ -684,3 +684,15 @@ describe("helpers", () => {
     expect(evidenceFreshnessLabel(null)).toBeNull();
   });
 });
+
+// The readiness pill describes Intel state, never whole-system readiness —
+// the panel renders the "Ready" pill as "Intel Ready" (see
+// AdvisorReadinessPanel), keeping financial-truth dimensions separate.
+it('panel renders the Ready pill as "Intel Ready" so it cannot read as system-wide readiness', () => {
+  const fs = require("fs");
+  const src = fs.readFileSync(
+    __dirname + "/../components/advisor/AdvisorReadinessPanel.tsx",
+    "utf8"
+  );
+  expect(src).toContain('"Intel Ready"');
+});

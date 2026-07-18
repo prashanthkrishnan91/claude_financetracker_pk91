@@ -79,7 +79,7 @@ export function AdvisorReadinessPanel({
                 PILL_TONE_CLASS[model.statusPillLabel] ?? PILL_TONE_CLASS["Needs Research"],
               )}
             >
-              {model.statusPillLabel}
+              {model.statusPillLabel === "Ready" ? "Intel Ready" : model.statusPillLabel}
             </span>
             <span className="text-[11px] text-text-secondary">{model.statusLine}</span>
           </div>

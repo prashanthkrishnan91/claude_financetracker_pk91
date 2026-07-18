@@ -611,3 +611,53 @@ outermost boundaries — documented per capture in `docs/ai/proof/consolidation/
 - Screenshots re-shot after the final fix batch through the same harness; all review copy
   fixes verified rendering live (see advisor-cash-plan-degraded-desktop.png for the
   plain-English blocker + technical-detail expander + "No trusted allocation totals" state).
+
+## Same-PR semantic correction (record)
+
+Five blockers patched in place on PR #473 (no architecture change, no backend change, no
+allocation/policy/worker/SQL change):
+
+1. **Single Run Intel controller.** `IntelV3Cockpit` (second snapshot query, second run
+   mutation, own run button, own lastRunResult, 15s polling lifecycle, status band) deleted;
+   holding actions now render via presentation-only `components/advisor/IntelV3HoldingsPanel`
+   fed by the page's single shared snapshot query. AdvisorPage owns the one query, one
+   mutation, bounded run state, and snapshot invalidation. Preserved: Investment Committee
+   summary, action filters, evidence summary, cards, What Changed, drawer, Data Health.
+   Grep-proof: `useRunIntelV3` appears only in hooks.ts (definition), advisor/page.tsx, tests.
+2. **Placeholder removal.** Opportunity Radar section, ComingLaterPanel component, and the
+   three ComingLater placeholders inside DataHealthDrawer removed; zero
+   "Coming Later"/"future stage"/placeholder panels across the three views (source-contract
+   test enforces).
+3. **Truth vocabulary separation.** New server-only `GET /api/advisor/readiness` route handler
+   (paycheck proxy pattern; secret never client-side — cert-secret safety test allowlists
+   exactly the two route handlers) over the existing read-only cert-gated
+   financial-truth-baseline diagnostic; returns a small mapped contract. Snapshot-derived
+   fields no longer labeled portfolio/price truth (renamed Intel certification / Snapshot
+   source health); Portfolio financial truth, Current-price truth, Books reconciliation are
+   endpoint-fed with honest Unknown; six distinct dimensions incl. Cash-plan trust
+   (numeric_plan_trusted remains authoritative after a plan request;
+   recommendations_trusted stays false). Trust panel healthy message requires the full
+   conjunction; unknown is never healthy; reconciliation failure surfaces the real repair
+   action with raw operator text behind technical detail. The readiness pill renders as
+   "Intel Ready" so Intel state can never read as whole-system readiness. useAdvisorTruth:
+   5-min staleTime, retry off, no polling.
+4. **No-rationale-no-render.** Canonical `extractHoldingRationale` (why_text →
+   asset_intelligence_context.why_this_action → action_text, trimmed) +
+   `partitionRenderableCards`; unexplained actions never render as cards and are reported as
+   "Not shown: N holding(s) — no explanation was available for their current action." with a
+   collapsible ticker list; filter counts count renderable cards only.
+5. **Runtime artifact.** Committed `v2/frontend/fakeauth.pid` removed; `*.pid` ignored; no PID
+   files, logs, tokens, ports, or fixture state tracked.
+
+**Validation after patch:** backend `8290 passed, 0 failed` (untouched); frontend
+`18 suites / 575 tests passed, 0 failed`; `tsc --noEmit` 0 errors; `next build` green
+(21/21 pages incl. `/api/advisor/readiness`). Affected screenshots re-shot through the same
+harness against the patched production build: one Run Intel control, no Radar/Coming-Later,
+honest truth labels ("Intel Ready" pill; new `advisor-truth-degraded-desktop.png` shows
+degraded Portfolio financial truth / stale Current-price truth / Books reconciliation with
+real disagreeing values 21,129.06 vs 20,633.85 and the repair action). Readiness proxy
+captures (baseline + degraded) appended to RESPONSES.md as labeled local contract proof.
+**Vercel preview:** deployment for the patch commit reports Ready (Vercel bot), but this
+sandbox's egress proxy blocks vercel.app (403 CONNECT), so in-environment preview HTTP
+verification was not possible; the readiness proxy consumes pre-existing production
+diagnostics, so no backend deploy is needed for preview parity.

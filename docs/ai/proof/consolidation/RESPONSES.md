@@ -657,3 +657,28 @@ the real `/login` page. See the proof report for the per-file description.
 - `/dashboard/paycheck-plan` → `/dashboard/advisor?section=cash-plan` (cash-plan section focused/scrolled)
 - Duplicate watchlist add shows the inline 409 message
   "VTI already has a price below entry. Edit that entry instead of adding a duplicate."
+
+---
+
+## Same-PR semantic patch — Advisor readiness proxy captures (local contract proof)
+
+Captured through the frontend server route `GET /api/advisor/readiness` (server-only cert
+secret; maps the cert-gated financial-truth-baseline diagnostic). Same harness provenance as
+above: real backend + real Next production build; fixture Supabase client.
+
+### baseline scenario (all truth dimensions healthy)
+```json
+{"portfolio_truth":"certified","price_truth":"ok","reconciliation":"pass","snapshot_value":20633.85,"position_derived_value":20633.85,"snapshot_stale":false,"next_required_repair":"No immediate fix required — financial truth is certified","as_of":"2026-07-18T19:31:47.013269+00:00"}
+```
+
+### degraded scenario (honest degraded truth with disagreeing values and repair action)
+```json
+{"portfolio_truth":"degraded","price_truth":"stale","reconciliation":"degraded","snapshot_value":21129.06,"position_derived_value":20633.85,"snapshot_stale":true,"next_required_repair":"Trigger a portfolio snapshot refresh to reduce snapshot age below 24h","as_of":"2026-07-18T19:31:59.766107+00:00"}
+```
+
+Vercel preview note: the preview deployment for this branch reports Ready (Vercel bot comment on
+PR #473), but this sandbox's egress proxy returns 403 CONNECT for vercel.app, so in-environment
+HTTP verification of the preview was not possible — preview checks are limited to the Vercel
+build/deploy status until verified from an unrestricted network. The readiness proxy targets
+pre-existing production diagnostics, so no backend deploy is required for it to function in
+preview once verified.

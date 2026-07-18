@@ -243,7 +243,8 @@ describe("deriveRunModel — state machine", () => {
     });
     expect(run.state).toBe("queue_only");
     expect(run.nextActionSentence).toBe(QUEUE_ONLY_SENTENCE);
-    expect(run.nextActionSentence).toContain("INTEL_V3_ON_DEMAND_REFRESH_ENABLED");
+    expect(run.nextActionSentence).toContain("paused on the server");
+    expect(run.nextActionSentence).not.toMatch(/[A-Z0-9_]{10,}/); // no env-var names in visible copy
     expect(run.boundedStopReason).toContain("on-demand processing is disabled");
   });
 
@@ -261,7 +262,8 @@ describe("deriveRunModel — state machine", () => {
     });
     expect(run.state).toBe("failed");
     expect(run.nextActionSentence).toBe(SNAPSHOT_WRITES_DISABLED_SENTENCE);
-    expect(run.nextActionSentence).toContain("INTEL_V3_SNAPSHOT_WRITES_ENABLED");
+    expect(run.nextActionSentence).toContain("temporarily paused on the server");
+    expect(run.nextActionSentence).not.toMatch(/INTEL_V3_[A-Z_]+/); // env-var name stays in technical detail only
   });
 
   it("no stale evidence to refresh → complete with honest no-op sentence", () => {

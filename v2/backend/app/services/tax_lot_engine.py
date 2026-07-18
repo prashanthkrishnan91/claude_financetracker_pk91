@@ -88,7 +88,14 @@ def classify_transaction(row: dict[str, Any]) -> str:
     has_qty = abs(qty) > _NEAR_ZERO
 
     if tx_type == "Buy":
-        return SHARE_INCREASING if has_qty else NON_SHARE_AFFECTING
+        if not has_qty:
+            return NON_SHARE_AFFECTING
+        # A share-adding Buy without a positive price cannot establish basis —
+        # fail closed (same rule as DRIP) instead of minting a zero-basis lot
+        # that would fabricate a 100% gain.
+        if price is None or float(price) <= 0:
+            return UNSUPPORTED_UNKNOWN
+        return SHARE_INCREASING
     if tx_type == "Sell":
         return SHARE_DECREASING if has_qty else NON_SHARE_AFFECTING
     if tx_type == "DRIP":

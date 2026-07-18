@@ -175,7 +175,24 @@ async def create_watchlist_item(
         "threshold": payload.threshold,
         "notes": payload.notes,
     }
-    result = client.table(_TABLE).insert(insert).execute()
+    try:
+        result = client.table(_TABLE).insert(insert).execute()
+    except Exception as exc:
+        # Concurrent duplicate: the DB unique constraint is the backstop for
+        # the check-then-insert race — surface it as the documented 409.
+        text = str(exc).lower()
+        if "watchlist_items_one_per_direction" in text or "duplicate key" in text or "23505" in text:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "error": "duplicate_watchlist_entry",
+                    "message": (
+                        f"{payload.ticker} already has a "
+                        f"{payload.criteria_type.replace('_', ' ')} entry."
+                    ),
+                },
+            )
+        raise
     if not result.data:
         raise HTTPException(status_code=500, detail="Failed to create watchlist entry")
     row = result.data[0]

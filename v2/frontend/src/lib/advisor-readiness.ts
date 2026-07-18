@@ -66,12 +66,21 @@ export interface AdvisorRunModel {
 // ── Plain-English sentences (exported for tests and UI reuse) ─────────────────
 
 export const QUEUE_ONLY_SENTENCE =
-  "On-demand processing is disabled on the server (INTEL_V3_ON_DEMAND_REFRESH_ENABLED). " +
-  "Jobs were queued but nothing will process them until it is enabled or the worker runs.";
+  "Analysis is paused on the server right now. Your holdings were queued, but nothing " +
+  "will process them until on-demand processing is switched back on.";
+
+/** Operator detail for QUEUE_ONLY (server flag name) — technical-detail only. */
+export const QUEUE_ONLY_TECHNICAL_DETAIL =
+  "Server flag INTEL_V3_ON_DEMAND_REFRESH_ENABLED is off; enable it or run the analyst " +
+  "refresh worker entrypoint separately.";
 
 export const SNAPSHOT_WRITES_DISABLED_SENTENCE =
-  "Analysis completed but snapshot writes are disabled by the cost guard " +
-  "(INTEL_V3_SNAPSHOT_WRITES_ENABLED).";
+  "Analysis finished, but the result could not be saved because snapshot updates are " +
+  "temporarily paused on the server.";
+
+/** Operator detail for the writes-paused state (server flag name) — technical-detail only. */
+export const SNAPSHOT_WRITES_DISABLED_TECHNICAL_DETAIL =
+  "Cost-guard flag INTEL_V3_SNAPSHOT_WRITES_ENABLED is off; new snapshots are not persisted.";
 
 export const CERTIFIED_CURRENT_SENTENCE = "Certified snapshot is current.";
 
@@ -474,7 +483,7 @@ export function deriveTruthRows(
       key: "portfolio_truth",
       label: "Portfolio truth",
       status: "pending",
-      detail: "A snapshot exists but it is not worker-certified.",
+      detail: "A snapshot exists but it has not passed certification yet.",
     };
   }
 

@@ -219,3 +219,18 @@ class TestPresentationSafety:
         assert rows[0]["current_value"] == 1300.0
         assert rows[0]["unrealized_gain"] == 300.0
         assert rows[0]["unrealized_gain_pct"] == 30.0
+
+
+class TestZeroPriceBuyFailsClosed:
+    def test_buy_with_shares_but_no_price_is_unsupported(self):
+        assert tle.classify_transaction(_tx("Buy", 10, None)) == tle.UNSUPPORTED_UNKNOWN
+        assert tle.classify_transaction(_tx("Buy", 10, 0)) == tle.UNSUPPORTED_UNKNOWN
+
+    def test_zero_price_buy_blocks_reconciliation_not_fake_gain(self):
+        ledger = tle.build_ticker_ledger(
+            [_tx("Buy", 10, None, "2025-01-10")], as_of=AS_OF
+        )["VTI"]
+        assert ledger["open_lots"] == []
+        assert ledger["unsupported_events"][0]["tx_type"] == "Buy"
+        recon = tle.reconcile_ledger(ledger, position_shares=10.0, position_cost_basis=None)
+        assert recon["status"] == tle.STATUS_BLOCKED_UNSUPPORTED

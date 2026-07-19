@@ -18,11 +18,24 @@ Contract under test (app/routers/intel_v3.py):
   8. Paycheck Plan / allocation_policy_v1 are untouched by this module (no
      import coupling — Intel v3 remains an evidence input, not a competing
      recommendation surface).
+
+Product-recovery Blockers 2/3 (this revision):
+  9. Every on-demand drain — including when queued_ticker_count > 0 — is
+     scoped to the current user's current active tickers, resolved BEFORE
+     any drain decision. An active-ticker lookup failure never falls back to
+     an unscoped drain; it returns an explicit retryable failure.
+  10. The router classifies the scoped durable-job state (due / backoff /
+      terminal / none) via analyst_refresh_job_store_v1.count_due_jobs and
+      only drains when jobs are immediately due. A backoff or terminal state
+      is reported honestly — never "complete," never "no stale evidence,"
+      never silently drained/looped, and never masked by a historical
+      certified snapshot.
 """
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -36,14 +49,98 @@ from app.services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
 USER_ID = uuid.UUID("00000000-0000-0000-0000-0000000000aa")
 
 
-class _FakeService:
-    """Minimal stand-in for IntelV3Service — only what the augmentation touches."""
+# ── Minimal in-memory fake for analyst_refresh_jobs (read-only: count_due_jobs) ──
+# run_on_demand_drain is always mocked in this file, so the fake client only
+# ever needs to satisfy count_due_jobs's select/eq/in_/execute chain.
 
-    def __init__(self, *, latest_snapshot=None):
+
+class _FakeJobsQuery:
+    def __init__(self, rows):
+        self._rows = rows
+        self._filters: list[tuple] = []
+
+    def select(self, *_a, **_kw):
+        return self
+
+    def eq(self, col, val):
+        self._filters.append(("eq", col, val))
+        return self
+
+    def in_(self, col, vals):
+        self._filters.append(("in", col, list(vals)))
+        return self
+
+    def order(self, *_a, **_kw):
+        return self
+
+    def _match(self, row) -> bool:
+        for kind, col, val in self._filters:
+            rv = row.get(col)
+            if kind == "eq" and rv != val:
+                return False
+            if kind == "in" and rv not in val:
+                return False
+        return True
+
+    def execute(self):
+        return SimpleNamespace(data=[r for r in self._rows if self._match(r)])
+
+
+class _FakeSupabaseForJobs:
+    def __init__(self, rows=None):
+        self._rows = list(rows or [])
+
+    def table(self, _name):
+        return _FakeJobsQuery(self._rows)
+
+
+def _due_job_row(
+    ticker: str = "VTI",
+    *,
+    user_id=USER_ID,
+    status: str = "pending",
+    attempts: int = 0,
+    max_attempts: int = 5,
+    next_retry_at=None,
+) -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "user_id": str(user_id),
+        "ticker": ticker,
+        "status": status,
+        "attempts": attempts,
+        "max_attempts": max_attempts,
+        "next_retry_at": next_retry_at,
+    }
+
+
+class _FakeService:
+    """Minimal stand-in for IntelV3Service — only what the augmentation touches.
+
+    ``active_tickers``/``due_jobs`` model the durable-job-store state the
+    Blocker 2/3 augmentation now always resolves; ``active_tickers_error``
+    lets a test prove the "never fall back to an unscoped drain" contract.
+    """
+
+    def __init__(
+        self,
+        *,
+        latest_snapshot=None,
+        active_tickers=("VTI",),
+        due_jobs=None,
+        active_tickers_error: Exception | None = None,
+    ):
         self.user_id = USER_ID
-        self.client = object()
+        self.client = _FakeSupabaseForJobs(due_jobs)
         self._latest_snapshot = latest_snapshot
         self.get_latest_snapshot = AsyncMock(return_value=latest_snapshot)
+        self._active_tickers = list(active_tickers) if active_tickers is not None else []
+        self._active_tickers_error = active_tickers_error
+
+    async def _get_active_tickers(self):
+        if self._active_tickers_error is not None:
+            raise self._active_tickers_error
+        return self._active_tickers
 
 
 @dataclass
@@ -89,17 +186,19 @@ class TestOnDemandDisabledReportsQueueOnly:
         assert out["next_required_action"] == "none_no_stale_evidence_to_refresh"
 
 
-# ── 3. On-demand processing enabled → bounded drain invoked ─────────────────
+# ── 3. On-demand processing enabled → bounded drain invoked, scoped ─────────
 
 
 class TestOnDemandEnabledInvokesBoundedDrain:
     @pytest.mark.asyncio
-    async def test_enabled_invokes_drain_exactly_once(self, monkeypatch):
+    async def test_enabled_invokes_drain_exactly_once_scoped_to_active_tickers(self, monkeypatch):
         """True completion: drain has no remaining work, snapshot writes are
         enabled, latest snapshot is worker_certified AND certified_current,
         AND its id differs from the pre-request existing certified snapshot
         (proof this request actually published) — snapshot_available_after_run
-        must be true and next action reports current."""
+        must be true and next action reports current. Also proves Blocker 2:
+        the drain call is scoped to (user_id, active_tickers), resolved even
+        though this click DID queue new work."""
         settings = _FakeSettings(
             intel_v3_on_demand_refresh_enabled=True,
             intel_v3_snapshot_writes_enabled=True,
@@ -117,7 +216,9 @@ class TestOnDemandEnabledInvokesBoundedDrain:
                 "snapshot_id": "new-snapshot-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            active_tickers=["VTI", "AAPL"],
+            due_jobs=[_due_job_row("VTI"), _due_job_row("AAPL")],
         )
         result = {
             "status": "refresh_requested",
@@ -128,6 +229,9 @@ class TestOnDemandEnabledInvokesBoundedDrain:
         out = await router_mod._augment_with_on_demand_status(service, result)
 
         drain_spy.assert_awaited_once()
+        _, kwargs = drain_spy.call_args
+        assert str(kwargs["user_id"]) == str(USER_ID)
+        assert kwargs["tickers"] == ["VTI", "AAPL"]
         assert out["on_demand_processing_enabled"] is True
         assert out["on_demand_jobs_attempted"] == 20
         assert out["on_demand_jobs_succeeded"] == 17
@@ -136,15 +240,15 @@ class TestOnDemandEnabledInvokesBoundedDrain:
         assert out["next_required_action"] == "none_certified_snapshot_current"
 
     @pytest.mark.asyncio
-    async def test_enabled_but_nothing_queued_skips_drain(self, monkeypatch):
-        """No infinite loop / no wasted work: an empty queue never triggers a
-        drain call, regardless of the flag."""
+    async def test_enabled_but_nothing_queued_and_no_durable_work_skips_drain(self, monkeypatch):
+        """No infinite loop / no wasted work: an empty queue AND no existing
+        durable work never triggers a drain call, regardless of the flag."""
         settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
         monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
         drain_spy = AsyncMock()
         monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
 
-        service = _FakeService(latest_snapshot=None)
+        service = _FakeService(latest_snapshot=None, active_tickers=["VTI"], due_jobs=[])
         result = {"status": "analyst_evidence_current", "queued_ticker_count": 0}
 
         await router_mod._augment_with_on_demand_status(service, result)
@@ -178,7 +282,8 @@ class TestOnDemandEnabledInvokesBoundedDrain:
                 "snapshot_id": "52c593c8-b5c2-447e-bbd5-194c3f634c96",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "republish_pending",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -224,7 +329,8 @@ class TestOnDemandEnabledInvokesBoundedDrain:
                 "snapshot_id": "historical-current-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -246,8 +352,8 @@ class TestOnDemandEnabledInvokesBoundedDrain:
     ):
         """Already-current no-op: zero stale jobs and an already-current
         certified snapshot retain the existing completed behavior — the
-        drain never runs (nothing queued) and completion is still reported
-        from the existing certified_current snapshot."""
+        drain never runs (nothing queued, nothing durable) and completion is
+        still reported from the existing certified_current snapshot."""
         settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
         monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
         drain_spy = AsyncMock()
@@ -257,7 +363,8 @@ class TestOnDemandEnabledInvokesBoundedDrain:
             latest_snapshot={
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[],
         )
         result = {"status": "analyst_evidence_current", "queued_ticker_count": 0}
 
@@ -266,6 +373,293 @@ class TestOnDemandEnabledInvokesBoundedDrain:
         drain_spy.assert_not_awaited()
         assert out["snapshot_available_after_run"] is True
         assert out["next_required_action"] == "none_certified_snapshot_current"
+
+
+# ── 9. Blocker 2 — active-ticker scoping, obsolete-job exclusion ────────────
+
+
+class TestActiveTickerScoping:
+    @pytest.mark.asyncio
+    async def test_obsolete_sold_ticker_job_is_never_claimed_alongside_active_ticker_work(
+        self, monkeypatch
+    ):
+        """Regression matrix: an older due job for a sold/closed ticker (no
+        longer in active_tickers) plus newly queued jobs for active tickers —
+        only current active tickers are claimed; the sold-ticker row is
+        excluded from the drain's scope and remains untouched."""
+        settings = _FakeSettings(
+            intel_v3_on_demand_refresh_enabled=True,
+            intel_v3_snapshot_writes_enabled=True,
+        )
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_result = OnDemandDrainResult(
+            batches_run=1, jobs_attempted=2, jobs_succeeded=2, jobs_failed=0,
+            duration_ms=100, run_resumable=False, stopped_reason=STOPPED_DRAINED,
+        )
+        drain_spy = AsyncMock(return_value=drain_result)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        sold_ticker_row = _due_job_row("KLAR", status="pending")  # sold — not in active_tickers
+        service = _FakeService(
+            latest_snapshot=None,
+            active_tickers=["VTI", "AAPL"],
+            due_jobs=[
+                sold_ticker_row,
+                _due_job_row("VTI"),
+                _due_job_row("AAPL"),
+            ],
+        )
+        result = {
+            "status": "refresh_requested",
+            "queued_ticker_count": 2,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_awaited_once()
+        _, kwargs = drain_spy.call_args
+        assert set(kwargs["tickers"]) == {"VTI", "AAPL"}
+        assert "KLAR" not in kwargs["tickers"]
+        # The obsolete row itself is never touched by this fake (run_on_demand_drain
+        # is mocked), but the scoping proof above is the contract: KLAR was never
+        # passed to the drain and count_due_jobs (tickers=["VTI","AAPL"]) never
+        # counted it either, matching claim_due_jobs/count_due_jobs's own
+        # user_id/tickers filtering (see test_run_intel_product_recovery.py for
+        # the job-store-level proof against a real claim_due_jobs call).
+        assert sold_ticker_row["status"] == "pending"
+        assert out["on_demand_jobs_attempted"] == 2
+
+    @pytest.mark.asyncio
+    async def test_active_ticker_lookup_failure_returns_explicit_retryable_failure(
+        self, monkeypatch
+    ):
+        """Blocker 2: if the active-ticker lookup fails, never fall back to
+        an unscoped drain — return an explicit retryable failure instead."""
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot=None,
+            active_tickers_error=RuntimeError("positions query failed"),
+        )
+        result = {
+            "status": "refresh_requested",
+            "queued_ticker_count": 12,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == router_mod._ACTION_ACTIVE_TICKERS_LOOKUP_FAILED
+        assert out["on_demand_jobs_attempted"] == 0
+
+    @pytest.mark.asyncio
+    async def test_no_active_holdings_never_triggers_active_ticker_lookup(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot=None,
+            active_tickers_error=RuntimeError("must never be called"),
+        )
+        result = {
+            "status": "no_active_holdings",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["next_required_action"] == "add_positions_before_running_intel"
+
+
+# ── 10. Blocker 3 — backoff / terminal durable-job-state classification ─────
+
+
+class TestDurableJobStateClassification:
+    @pytest.mark.asyncio
+    async def test_zero_queued_only_backoff_jobs_reports_backoff_not_complete_or_no_stale(
+        self, monkeypatch
+    ):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        future_retry = "2099-01-01T00:00:00+00:00"
+        service = _FakeService(
+            latest_snapshot=None,
+            active_tickers=["VTI"],
+            due_jobs=[
+                _due_job_row(
+                    "VTI", status="failed", attempts=2, max_attempts=5,
+                    next_retry_at=future_retry,
+                ),
+            ],
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == router_mod._ACTION_ANALYST_JOBS_BACKOFF
+        assert out["next_required_action"] != "none_no_stale_evidence_to_refresh"
+        assert out["earliest_retry_at"] == future_retry
+
+    @pytest.mark.asyncio
+    async def test_zero_queued_exhausted_job_reports_terminal_failure(self, monkeypatch):
+        settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_spy = AsyncMock()
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot=None,
+            active_tickers=["VTI"],
+            due_jobs=[
+                _due_job_row("VTI", status="failed", attempts=5, max_attempts=5),
+            ],
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": None,
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_not_awaited()
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == router_mod._ACTION_ANALYST_JOBS_TERMINAL
+        # Never silently deleted/reset — the fake row is untouched (this
+        # router path never writes to the job store).
+        assert service.client._rows[0]["attempts"] == 5
+
+    @pytest.mark.asyncio
+    async def test_historical_certified_snapshot_plus_backoff_never_reports_complete(
+        self, monkeypatch
+    ):
+        settings = _FakeSettings(
+            intel_v3_on_demand_refresh_enabled=True,
+            intel_v3_snapshot_writes_enabled=True,
+        )
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-current-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            },
+            active_tickers=["VTI"],
+            due_jobs=[
+                _due_job_row(
+                    "VTI", status="failed", attempts=1, max_attempts=5,
+                    next_retry_at="2099-01-01T00:00:00+00:00",
+                ),
+            ],
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "historical-current-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == router_mod._ACTION_ANALYST_JOBS_BACKOFF
+
+    @pytest.mark.asyncio
+    async def test_historical_certified_snapshot_plus_terminal_never_reports_complete(
+        self, monkeypatch
+    ):
+        settings = _FakeSettings(
+            intel_v3_on_demand_refresh_enabled=True,
+            intel_v3_snapshot_writes_enabled=True,
+        )
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "historical-current-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            },
+            active_tickers=["VTI"],
+            due_jobs=[
+                _due_job_row("VTI", status="failed", attempts=5, max_attempts=5),
+            ],
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "historical-current-1",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        assert out["snapshot_available_after_run"] is False
+        assert out["next_required_action"] == router_mod._ACTION_ANALYST_JOBS_TERMINAL
+
+    @pytest.mark.asyncio
+    async def test_due_work_outranks_backoff_and_terminal_rows_for_other_tickers(
+        self, monkeypatch
+    ):
+        """total_due > 0 still drains even when OTHER active-ticker rows are
+        in backoff/terminal — due work is not blocked by unrelated backlog."""
+        settings = _FakeSettings(
+            intel_v3_on_demand_refresh_enabled=True,
+            intel_v3_snapshot_writes_enabled=True,
+        )
+        monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
+        drain_result = OnDemandDrainResult(
+            batches_run=1, jobs_attempted=1, jobs_succeeded=1, jobs_failed=0,
+            duration_ms=50, run_resumable=False, stopped_reason=STOPPED_DRAINED,
+        )
+        drain_spy = AsyncMock(return_value=drain_result)
+        monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
+
+        service = _FakeService(
+            latest_snapshot={
+                "snapshot_id": "new-1",
+                "snapshot_source": "worker_certified",
+                "evidence_freshness_state": "certified_current",
+            },
+            active_tickers=["VTI", "AAPL"],
+            due_jobs=[
+                _due_job_row("VTI", status="pending"),
+                _due_job_row(
+                    "AAPL", status="failed", attempts=1, max_attempts=5,
+                    next_retry_at="2099-01-01T00:00:00+00:00",
+                ),
+            ],
+        )
+        result = {
+            "status": "analyst_evidence_current",
+            "queued_ticker_count": 0,
+            "existing_certified_snapshot_id": "old-0",
+        }
+
+        out = await router_mod._augment_with_on_demand_status(service, result)
+
+        drain_spy.assert_awaited_once()
+        assert out["snapshot_available_after_run"] is True
 
 
 # ── 5b. A historical worker_certified snapshot can only mask completion, ────
@@ -332,7 +726,8 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
                 "snapshot_id": "existing-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -367,7 +762,7 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
         drain_spy = AsyncMock(return_value=drain_result)
         monkeypatch.setattr(router_mod, "run_on_demand_drain", drain_spy)
 
-        service = _FakeService(latest_snapshot=None)
+        service = _FakeService(latest_snapshot=None, due_jobs=[_due_job_row("VTI")])
         result = {
             "status": "refresh_requested",
             "queued_ticker_count": 32,
@@ -412,7 +807,8 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
                 "snapshot_id": "unchanged-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -448,7 +844,8 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
                 "snapshot_id": "new-2",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -485,7 +882,8 @@ class TestHistoricalSnapshotCannotMaskUnpublishedOutcomes:
                 "snapshot_id": "first-ever-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[_due_job_row("VTI")],
         )
         result = {
             "status": "refresh_requested",
@@ -654,7 +1052,8 @@ class TestZeroQueuedStatusClassification:
                 "snapshot_id": "recertified-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[],
         )
         result = {
             "status": success_status,
@@ -681,7 +1080,8 @@ class TestZeroQueuedStatusClassification:
                 "snapshot_id": "current-1",
                 "snapshot_source": "worker_certified",
                 "evidence_freshness_state": "certified_current",
-            }
+            },
+            due_jobs=[],
         )
         result = {
             "status": "analyst_evidence_current",
@@ -705,7 +1105,7 @@ class TestZeroQueuedStatusClassification:
         monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
         monkeypatch.setattr(router_mod, "run_on_demand_drain", AsyncMock())
 
-        service = _FakeService(latest_snapshot=None)
+        service = _FakeService(latest_snapshot=None, due_jobs=[])
         result = {
             "status": "analyst_evidence_current",
             "queued_ticker_count": 0,
@@ -842,6 +1242,46 @@ class TestNextRequiredActionIsHonest:
         )
         assert action.startswith("queue_only")
 
+    def test_backoff_job_state_outranks_write_guard_and_continue_and_complete(self):
+        action = router_mod._next_required_action(
+            status_value="analyst_evidence_current",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=0,
+            drain_ran=False,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=True,
+            job_state=router_mod._JOB_STATE_BACKOFF,
+        )
+        assert action == router_mod._ACTION_ANALYST_JOBS_BACKOFF
+
+    def test_terminal_job_state_outranks_complete_and_no_stale_evidence(self):
+        action = router_mod._next_required_action(
+            status_value="analyst_evidence_current",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=0,
+            drain_ran=False,
+            drain_remaining=False,
+            snapshot_available_after_run=False,
+            snapshot_writes_enabled=True,
+            job_state=router_mod._JOB_STATE_TERMINAL,
+        )
+        assert action == router_mod._ACTION_ANALYST_JOBS_TERMINAL
+
+    def test_job_state_defaults_to_none_for_direct_callers(self):
+        """Backward compatibility: existing direct callers that omit
+        job_state must keep their exact prior behavior."""
+        action = router_mod._next_required_action(
+            status_value="refresh_requested",
+            on_demand_processing_enabled=True,
+            queued_ticker_count=34,
+            drain_ran=True,
+            drain_remaining=False,
+            snapshot_available_after_run=True,
+            snapshot_writes_enabled=True,
+        )
+        assert action == "none_certified_snapshot_current"
+
 
 # ── 7. Augmentation failures never break the enqueue response ───────────────
 
@@ -851,11 +1291,13 @@ class TestAugmentationIsBestEffort:
     async def test_augmentation_exception_does_not_propagate_from_endpoint(self, monkeypatch):
         """The endpoint wraps _augment_with_on_demand_status in try/except and
         fills honest defaults — this test exercises that fallback path
-        directly against the augmentation function raising."""
+        directly against the augmentation function raising. The active-ticker
+        lookup succeeds (empty fake client fails soft to zero counts), so
+        execution reaches get_latest_snapshot(), which is the mock that raises."""
         settings = _FakeSettings(intel_v3_on_demand_refresh_enabled=True)
         monkeypatch.setattr(router_mod, "get_settings", lambda: settings)
 
-        service = _FakeService(latest_snapshot=None)
+        service = _FakeService(latest_snapshot=None, due_jobs=[])
         service.get_latest_snapshot = AsyncMock(side_effect=RuntimeError("db down"))
         result = {"status": "refresh_requested", "queued_ticker_count": 34}
 

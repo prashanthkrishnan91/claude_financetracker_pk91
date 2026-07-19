@@ -85,14 +85,22 @@ def _build_caveats(
         caveats.append(
             "The numeric plan is not yet fully trusted — treat these figures as directional only."
         )
-    if preview_status != "ready":
+    if preview_status == "blocked":
         caveats.append(
             "No investable buy plan is confirmed until underlying portfolio data is fully refreshed."
+        )
+    elif preview_status == "degraded":
+        caveats.append(
+            "This plan is preserved from the last calculable run but is degraded, not fully "
+            "certified — some non-fatal price/provider limitations remain (see below)."
         )
     if missing_price_tickers:
         caveats.append("Some holdings are missing recent price data.")
     if stale_price_tickers:
-        caveats.append("Some holdings have stale price data.")
+        caveats.append(
+            "Some holdings have stale price data — none of them are eligible to receive new "
+            "cash (allocation_policy_v1 excludes both missing and stale prices from candidacy)."
+        )
     if stock_candidates_status == "blocked_insufficient_evidence":
         caveats.append(
             "Individual stocks were not included in this plan — evidence data did not pass "
@@ -136,15 +144,27 @@ def _policy_block_text(code: str) -> str:
         return "The alternatives group is already at or above its policy cap."
     if code == "no_price_available":
         return "No trusted current price is available for this ticker."
+    if code == "stale_price_not_eligible_for_new_cash":
+        return "This ticker's price is stale, so it cannot receive new cash right now."
     return code.replace("_", " ").capitalize()
 
 
 def _policy_block_bucket(code: str) -> str:
     if code == "no_price_available":
         return "missing_truth_blocked"
+    if code == "stale_price_not_eligible_for_new_cash":
+        return "stale_price_blocked"
     if code.startswith("at_or_above_") and "group" not in code:
         return "concentration_blocked"
     return "group_cap_blocked"
+
+
+# Codes whose plain-English "not selected" entry is built authoritatively by
+# the dedicated stale/missing-price loops below (using truth_dependency's own
+# ticker lists, which is the single source of truth for price-coverage
+# status) — never also appended here from ticker_gaps.policy_ineligibility_reason,
+# or the same ticker would appear twice in `not_selected`.
+_PRICE_TRUTH_CODES = frozenset({"no_price_available", "stale_price_not_eligible_for_new_cash"})
 
 
 def _evidence_summary_for_candidate(candidate: dict) -> dict | None:
@@ -244,6 +264,10 @@ def build_plan_explanations(diagnostic: dict[str, Any]) -> dict[str, Any]:
                 "raw_codes": gate_codes + ([policy_code] if policy_code else []),
             })
             continue
+        if policy_code and policy_code in _PRICE_TRUTH_CODES:
+            # Deferred to the dedicated stale/missing-price loops below —
+            # they are the authoritative source for these two codes.
+            continue
         if policy_code:
             not_selected.append({
                 "ticker": ticker,
@@ -342,12 +366,45 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
     else:
         preview_status = "ready"
 
-    candidates = diagnostic.get("next_buy_candidates", []) if preview_status == "ready" else []
+    # Only a genuinely blocked truth (no computable portfolio value,
+    # reconciliation beyond tolerance, or no total portfolio value to weight
+    # against — see allocation_policy_v1.run_next_buy_policy_diagnostic's
+    # can_run_policy gate) empties the plan. "degraded" already means the
+    # diagnostic ran the full allocator against certified-enough truth, so a
+    # stale/missing price on some OTHER (non-candidate) holding must never
+    # erase an already-calculated, priced buy plan.
+    candidates = [] if preview_status == "blocked" else (diagnostic.get("next_buy_candidates", []) or [])
+
+    # Defense-in-depth (product-recovery Blocker 1): a ticker with a missing
+    # OR stale price is never eligible to receive new cash — that gate now
+    # lives canonically at the allocation-policy boundary
+    # (`allocation_policy_v1._compute_gaps`'s `policy_ineligibility_reason`),
+    # not here. This router never re-filters or recomputes the diagnostic's
+    # own selection/cash-plan math. It DOES independently verify the
+    # resulting invariant before preserving a degraded plan — no selected
+    # candidate may itself appear in `missing_price_tickers`/
+    # `stale_price_tickers` — and suppresses the plan entirely rather than
+    # ever displaying unsafe dollar guidance if that invariant is violated
+    # (e.g. by a stale/hand-built diagnostic payload or a future allocator
+    # regression).
+    unsafe_price_tickers = set(truth_dependency.get("missing_price_tickers") or []) | set(
+        truth_dependency.get("stale_price_tickers") or []
+    )
+    invariant_violated = any(c.get("ticker") in unsafe_price_tickers for c in candidates)
+    if invariant_violated:
+        preview_status = "blocked"
+        candidates = []
+
     planned_buys = _build_planned_buys(candidates)
 
     next_required_fix = verdict.get("next_required_fix")
     if preview_status == "ready" and trusted:
         next_required_fix = None
+    if invariant_violated:
+        next_required_fix = (
+            "Safety check failed: a recommended ticker's price is not current. "
+            "Plan suppressed pending price-truth repair."
+        )
 
     return {
         "preview_version": PREVIEW_VERSION,
@@ -358,21 +415,33 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
         "planned_buys": planned_buys,
         # Additive (consolidation): plain-English selected/blocked explanations
         # for the Advisor cash-plan section. Presentation-only mapping — the
-        # Stage 12D keys above are unchanged. When the plan is not ready the
-        # selected list is empty (mirrors planned_buys) but blocked buckets
-        # still explain why.
+        # Stage 12D keys above are unchanged. Mirrors the same candidates as
+        # planned_buys above (empty only when blocked) so the cash-plan
+        # section never shows real dollar buys with no matching explanation.
         "explanations": (
-            build_plan_explanations(diagnostic)
-            if preview_status == "ready"
+            build_plan_explanations({**diagnostic, "next_buy_candidates": []})
+            if preview_status == "blocked"
+            else build_plan_explanations(diagnostic)
+        ),
+        # When the defense-in-depth invariant fires, the cash-plan totals must
+        # also reflect zero allocation — never show a nonzero allocated_cash
+        # figure alongside an empty planned_buys list.
+        "allocation_summary": (
+            {
+                "allocated_cash": 0.0,
+                "unallocated_cash": (
+                    diagnostic.get("input", {}).get("cash_to_deploy")
+                    or cash_plan.get("cash_to_deploy", 0.0)
+                ),
+                "allocation_count": 0,
+            }
+            if invariant_violated
             else {
-                **build_plan_explanations({**diagnostic, "next_buy_candidates": []}),
+                "allocated_cash": cash_plan.get("allocated_cash", 0.0),
+                "unallocated_cash": cash_plan.get("unallocated_cash", 0.0),
+                "allocation_count": cash_plan.get("allocation_count", 0),
             }
         ),
-        "allocation_summary": {
-            "allocated_cash": cash_plan.get("allocated_cash", 0.0),
-            "unallocated_cash": cash_plan.get("unallocated_cash", 0.0),
-            "allocation_count": cash_plan.get("allocation_count", 0),
-        },
         "data_freshness_status": truth_dependency.get("price_coverage_status", "unknown"),
         "caveats": _build_caveats(
             trusted,
@@ -387,6 +456,43 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _summarize_price_truth_repair(repair_result: dict[str, Any] | None) -> dict[str, Any]:
+    """Plain-English-friendly summary of the pre-diagnostic price-truth repair.
+
+    ``status``:
+      * ``refreshed``   — repair ran and every stale/missing ticker it
+                          attempted was fetched successfully (or there was
+                          nothing to fetch).
+      * ``partial``      — repair ran but at least one ticker's provider
+                          fetch failed or was unsupported.
+      * ``unavailable``  — the repair call itself could not be completed
+                          (see current_price_truth_repair_v1's own contract:
+                          it does not raise, so this is a defensive fallback).
+    """
+    if not repair_result:
+        return {
+            "status": "unavailable",
+            "attempted": 0,
+            "succeeded": 0,
+            "written": 0,
+            "unsupported": 0,
+            "provider_errors": 0,
+        }
+    attempted = int(repair_result.get("attempted_fetch_count") or 0)
+    succeeded = int(repair_result.get("successful_fetch_count") or 0)
+    unsupported = int(repair_result.get("unsupported_count") or 0)
+    provider_errors = int(repair_result.get("provider_error_count") or 0)
+    status = "refreshed" if (attempted == 0 or succeeded == attempted) else "partial"
+    return {
+        "status": status,
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "written": int(repair_result.get("rows_written") or 0),
+        "unsupported": unsupported,
+        "provider_errors": provider_errors,
+    }
+
+
 @router.post("/preview")
 async def paycheck_plan_preview(
     payload: PaycheckPlanPreviewRequest,
@@ -397,17 +503,40 @@ async def paycheck_plan_preview(
     Wraps the Stage 12C next-buy-policy diagnostic. Reuses its allocation
     policy logic verbatim; performs no additional allocation math.
 
+    Deploy Cash is an explicit, user-triggered action, so — unlike page-load
+    reads — it is allowed to refresh price truth before computing the plan:
+    it first runs the existing ``current_price_truth_repair_v1`` service
+    (``dry_run=False``) for stale/missing open-position prices, then runs the
+    allocation diagnostic against the refreshed ``price_history`` rows. The
+    repair only ever writes to ``price_history`` (Yahoo Finance / CoinGecko;
+    bounded concurrency) — no LLM calls, no recommendation/snapshot writes.
+
     Invariants:
-    - Read-only — no writes to any table
-    - No live provider calls
+    - No writes to any table other than price_history (via the repair step)
     - No LLM calls
     - No recommendation rows created
     - Cert-gated (X-Finance-Runtime-Cert-Secret required)
     - recommendations_trusted is always False
     """
     from ..services.allocation_policy_v1 import run_next_buy_policy_diagnostic
+    from ..services.current_price_truth_repair_v1 import run_current_price_truth_repair
 
     db_client = get_supabase_client()
+
+    repair_result: dict[str, Any] | None = None
+    try:
+        repair_result = await run_current_price_truth_repair(
+            db_client=db_client, user_id=str(user.id), dry_run=False,
+        )
+    except Exception as exc:
+        logger.warning(
+            "paycheck_plan_preview price_truth_repair_failed user=%s error=%s",
+            getattr(user, "email", "unknown"), exc,
+        )
+
+    # The allocation diagnostic must run AFTER the repair attempt above, not
+    # before, so it reads whatever refreshed price_history rows the repair
+    # just wrote.
     diagnostic = await run_next_buy_policy_diagnostic(
         db_client=db_client,
         user_id=str(user.id),
@@ -417,6 +546,7 @@ async def paycheck_plan_preview(
     )
 
     preview = build_paycheck_plan_preview(diagnostic)
+    preview["price_truth_repair"] = _summarize_price_truth_repair(repair_result)
 
     logger.info(
         "paycheck_plan_preview user=%s cash=%.2f status=%s trusted=%s buys=%d",

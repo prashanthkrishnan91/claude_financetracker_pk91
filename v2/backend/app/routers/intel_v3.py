@@ -15,6 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from ..config import get_settings
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..services.intelligence.v3.analyst_refresh_job_store_v1 import count_due_jobs
 from ..services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
     run_on_demand_drain,
 )
@@ -54,6 +55,29 @@ _ZERO_QUEUED_FAILURE_STATUSES = frozenset({
     "stage8f_contract_recertification_failed",
 })
 
+# Durable-job-state classification for the current user's current active
+# tickers (product-recovery Blocker 3). Derived from the existing
+# analyst_refresh_job_store_v1.count_due_jobs breakdown — no new queue, no
+# new table.
+#   due      — total_due > 0: immediately claimable, bounded drain runs.
+#   backoff  — only failed-but-retryable jobs remain, all in their backoff
+#              window (next_retry_at in the future) — nothing to claim yet.
+#   terminal — at least one job has exhausted its retry budget.
+#   none     — no due/backoff/terminal work for this user's active tickers.
+_JOB_STATE_NONE = "none"
+_JOB_STATE_DUE = "due"
+_JOB_STATE_BACKOFF = "backoff"
+_JOB_STATE_TERMINAL = "terminal"
+
+# Action strings for the two new durable-job states, plus the active-ticker
+# lookup failure. Deliberately NOT prefixed "reclick_" — the frontend's
+# existing "reclick_" -> partial/auto-continue classification must never
+# apply to these (backoff/terminal/lookup-failure must present as a stopped,
+# explicit Retry state, never an automatic continuation).
+_ACTION_ANALYST_JOBS_BACKOFF = "analyst_jobs_in_backoff_retry_after_window"
+_ACTION_ANALYST_JOBS_TERMINAL = "analyst_jobs_retry_budget_exhausted"
+_ACTION_ACTIVE_TICKERS_LOOKUP_FAILED = "active_tickers_lookup_failed_retry"
+
 
 def _next_required_action(
     *,
@@ -64,6 +88,7 @@ def _next_required_action(
     drain_remaining: bool,
     snapshot_available_after_run: bool,
     snapshot_writes_enabled: bool,
+    job_state: str = _JOB_STATE_NONE,
 ) -> str:
     """Derive an honest, operator-facing next step from the run outcome.
 
@@ -76,12 +101,19 @@ def _next_required_action(
       2. a zero-queued request-level failure (enqueue or deterministic
          recertification failed) -> retry, never "no stale evidence"
       3. queued jobs + on-demand processing disabled -> queue-only
-      4. drain ran + snapshot writes disabled -> write-guard (outranks
+      4. durable jobs in backoff (none due yet) -> explicit backoff retry
+      5. durable jobs with an exhausted retry budget -> terminal failure
+      6. drain ran + snapshot writes disabled -> write-guard (outranks
          "continue" — reclicking can never publish while writes are off)
-      5. drain ran + remaining resumable work -> continue draining
-      6. a newly/currently certified snapshot is available -> complete
-      7. nothing was queued -> no stale evidence to refresh
-      8. otherwise -> retry
+      7. drain ran + remaining resumable work -> continue draining
+      8. a newly/currently certified snapshot is available -> complete
+      9. nothing was queued AND no drain ran -> no stale evidence to refresh
+      10. otherwise -> retry
+
+    Branches 4/5 outrank 6-9 unconditionally: a historical certified snapshot
+    (branch 8) or a stale "nothing to do" read (branch 9) must never mask a
+    backlog of durable work still waiting on backoff or permanently blocked
+    by an exhausted retry budget for this user's active holdings.
     """
     if status_value == "no_active_holdings":
         return "add_positions_before_running_intel"
@@ -92,13 +124,23 @@ def _next_required_action(
             "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_"
             "analyst_refresh_worker_entrypoint_separately"
         )
+    if job_state == _JOB_STATE_BACKOFF:
+        return _ACTION_ANALYST_JOBS_BACKOFF
+    if job_state == _JOB_STATE_TERMINAL:
+        return _ACTION_ANALYST_JOBS_TERMINAL
     if drain_ran and not snapshot_writes_enabled:
         return "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false"
     if drain_ran and drain_remaining:
         return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
     if snapshot_available_after_run:
         return "none_certified_snapshot_current"
-    if queued_ticker_count == 0:
+    # Only a genuine no-op — nothing queued this click AND no drain of
+    # existing durable work was ever attempted — may report "nothing was
+    # stale." When a drain ran (because existing pending/retryable work was
+    # recognized even though this click queued zero new jobs) but did not
+    # produce a provably new certified snapshot, that is a retry, never a
+    # false "nothing needed doing."
+    if queued_ticker_count == 0 and not drain_ran:
         return "none_no_stale_evidence_to_refresh"
     return "reclick_run_intel_to_retry"
 
@@ -113,6 +155,19 @@ async def _augment_with_on_demand_status(
     manual Run Intel click can produce a certified snapshot without an
     always-on worker service — see analyst_refresh_on_demand_drain_v1.py.
     Read-only augmentation: never changes ``result``'s existing keys.
+
+    Product-recovery Blockers 2/3: ``queued_ticker_count`` alone never
+    decides whether/how to process work. Whenever on-demand processing is
+    enabled and this isn't a no-active-holdings or zero-queued-failure
+    status, this ALWAYS resolves the current user's current active tickers
+    first — including when this click queued new work — and scopes every
+    subsequent claim/count/drain to (user_id, active_tickers). If that
+    lookup itself fails, this never falls back to an unscoped drain; it
+    returns an explicit retryable failure instead. It then classifies the
+    scoped durable-job state (due / backoff / terminal / none) from the
+    existing ``count_due_jobs`` breakdown and only drains when jobs are
+    immediately due — a backoff or terminal state is reported honestly and
+    never silently drained, looped, or masked by a historical snapshot.
     """
     settings = get_settings()
     on_demand_enabled = settings.intel_v3_on_demand_refresh_enabled
@@ -124,16 +179,60 @@ async def _augment_with_on_demand_status(
     drain_ran = False
     drain_remaining = False
     jobs_attempted = jobs_succeeded = jobs_failed = 0
+    job_state = _JOB_STATE_NONE
+    earliest_retry_at: str | None = None
 
-    if on_demand_enabled and queued_ticker_count > 0:
-        drain_ran = True
-        drain_result = await run_on_demand_drain(
-            user_id=service.user_id, client=service.client,
+    should_resolve_job_state = (
+        on_demand_enabled
+        and status_value != "no_active_holdings"
+        and status_value not in _ZERO_QUEUED_FAILURE_STATUSES
+    )
+
+    if should_resolve_job_state:
+        try:
+            active_tickers = await service._get_active_tickers()
+        except Exception as exc:
+            logger.warning(
+                "intel_v3.active_tickers_lookup_failed user_id=%s error=%s",
+                service.user_id, exc,
+            )
+            # Never fall back to an unscoped drain on a lookup failure —
+            # return an explicit retryable failure so the single Run Intel
+            # control stays usable for a later retry.
+            result["on_demand_processing_enabled"] = on_demand_enabled
+            result["on_demand_jobs_attempted"] = 0
+            result["on_demand_jobs_succeeded"] = 0
+            result["on_demand_jobs_failed"] = 0
+            result["snapshot_available_after_run"] = False
+            result["next_required_action"] = _ACTION_ACTIVE_TICKERS_LOOKUP_FAILED
+            return result
+
+        due_counts = count_due_jobs(
+            service.client,
+            user_id=str(service.user_id),
+            tickers=active_tickers or None,
         )
-        jobs_attempted = drain_result.jobs_attempted
-        jobs_succeeded = drain_result.jobs_succeeded
-        jobs_failed = drain_result.jobs_failed
-        drain_remaining = drain_result.run_resumable
+        total_due = due_counts.get("total_due", 0)
+        failed_not_yet_due = due_counts.get("failed_not_yet_due", 0)
+        failed_terminal = due_counts.get("failed_terminal", 0)
+
+        if total_due > 0:
+            job_state = _JOB_STATE_DUE
+            drain_ran = True
+            drain_result = await run_on_demand_drain(
+                user_id=service.user_id, client=service.client, tickers=active_tickers,
+            )
+            jobs_attempted = drain_result.jobs_attempted
+            jobs_succeeded = drain_result.jobs_succeeded
+            jobs_failed = drain_result.jobs_failed
+            drain_remaining = drain_result.run_resumable
+        elif failed_not_yet_due > 0:
+            job_state = _JOB_STATE_BACKOFF
+            earliest_retry_at = due_counts.get("earliest_retry_at")
+        elif failed_terminal > 0:
+            job_state = _JOB_STATE_TERMINAL
+        else:
+            job_state = _JOB_STATE_NONE
 
     latest_snapshot = await service.get_latest_snapshot()
     latest_snapshot_id = (
@@ -145,17 +244,24 @@ async def _augment_with_on_demand_status(
         and latest_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
     )
 
-    if queued_ticker_count > 0:
-        # This request queued work, so completion requires proof THIS
-        # request actually published a new certified snapshot — not merely
-        # that an older worker_certified + certified_current snapshot still
-        # happens to be sitting there untouched. Requires the full chain
-        # (on-demand enabled, drain ran, nothing left resumable, writes
-        # enabled) AND a concrete latest snapshot id that differs from
-        # whatever certified snapshot (if any) existed before this request.
+    if job_state in (_JOB_STATE_BACKOFF, _JOB_STATE_TERMINAL):
+        # A historical certified-current snapshot must never mask a backlog
+        # of durable work still waiting on backoff or permanently blocked by
+        # an exhausted retry budget for this user's active holdings.
+        snapshot_available_after_run = False
+    elif drain_ran:
+        # A drain happened this request — either because this click queued
+        # new work, or because it recognized already-existing durable work
+        # left over from an earlier interrupted click. Either way, completion
+        # requires proof THIS request actually published a new certified
+        # snapshot — not merely that an older worker_certified +
+        # certified_current snapshot still happens to be sitting there
+        # untouched. Requires the full chain (on-demand enabled, nothing left
+        # resumable, writes enabled) AND a concrete latest snapshot id that
+        # differs from whatever certified snapshot (if any) existed before
+        # this request.
         snapshot_available_after_run = (
             on_demand_enabled
-            and drain_ran
             and not drain_remaining
             and snapshot_writes_enabled
             and latest_is_certified_current
@@ -180,6 +286,11 @@ async def _augment_with_on_demand_status(
     result["on_demand_jobs_succeeded"] = jobs_succeeded
     result["on_demand_jobs_failed"] = jobs_failed
     result["snapshot_available_after_run"] = snapshot_available_after_run
+    if job_state == _JOB_STATE_BACKOFF:
+        # Additive — only present in the backoff state, representing that
+        # durable-job state's own retry timing (small job-store extension;
+        # see analyst_refresh_job_store_v1.count_due_jobs's earliest_retry_at).
+        result["earliest_retry_at"] = earliest_retry_at
     result["next_required_action"] = _next_required_action(
         status_value=status_value,
         on_demand_processing_enabled=on_demand_enabled,
@@ -188,6 +299,7 @@ async def _augment_with_on_demand_status(
         drain_remaining=drain_remaining,
         snapshot_available_after_run=snapshot_available_after_run,
         snapshot_writes_enabled=snapshot_writes_enabled,
+        job_state=job_state,
     )
     return result
 

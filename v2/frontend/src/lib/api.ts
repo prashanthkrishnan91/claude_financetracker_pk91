@@ -135,8 +135,8 @@ export const api = {
   intelV3: {
     getSnapshot: () =>
       fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
-    runV3: () =>
-      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST" }),
+    runV3: (signal?: AbortSignal) =>
+      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST", signal }),
     getRunStatus: (runId: string) =>
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },
@@ -655,6 +655,10 @@ export interface IntelV3RunResult {
   on_demand_jobs_failed?: number;
   snapshot_available_after_run?: boolean;
   next_required_action?: string;
+  // Additive — only present when next_required_action reports the durable-job
+  // "backoff" state (a failed-but-retryable job's next_retry_at hasn't
+  // arrived yet). The earliest retry time among such jobs, if known.
+  earliest_retry_at?: string | null;
   // Legacy fields — kept for back-compat if old backend serves them
   snapshot_id?: string;
   run_id?: string;

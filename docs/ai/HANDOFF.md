@@ -1,9 +1,13 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-18 (Lean Advisor Consolidation — Positions / Advisor / Watchlist; replaces
-the stage-by-stage log with a compact state summary. Full evidence for the consolidation lives in
-`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body. Same-day follow-up: Run
-Intel completion-classification fix after PR #473 — see bullet below.)
+Last updated: 2026-07-19 (Advisor product recovery — Run Intel bounded automatic continuation +
+Deploy Cash price-truth refresh/degraded-plan preservation, after PR #473/#474 fixed only response
+wording. Same-day release-blocker patch on the same PR: (1) a stale ticker can never receive new
+cash — fixed canonically in `allocation_policy_v1`, not the router; (2) every on-demand drain,
+including when this click queued new work, is scoped to the current user's current active
+tickers; (3) the router classifies the full due/backoff/terminal durable-job state, not just
+`total_due`. Full evidence for the earlier consolidation lives in `REFACTOR_REPORT.md` at the
+repo root and in the consolidation PR body.)
 
 ## Product architecture (read this first)
 
@@ -70,27 +74,88 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   Extend it additively there.
 - **Do not delete the Advisor allocation spine** (`allocation_policy_v1`,
   `paycheck_plan_preview`) — rejected PR #472 did exactly that and was rejected for it.
-- **Run Intel is bounded on-demand, not worker-dependent** (Stage 13B): `POST /intel/v3/run`
-  enqueues and, when `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains up to 3 batches × 10
-  jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
-  clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
-  worker services remain optional and OFF. `snapshot_available_after_run` (in `routers/intel_v3.py
-  ::_augment_with_on_demand_status`) has three paths keyed on `queued_ticker_count` and `status`:
-  (1) jobs queued this request — completion requires proof THIS request published: on-demand
-  enabled, drain ran, nothing left resumable, snapshot writes enabled, latest snapshot is
-  `worker_certified` + `certified_current`, AND its `snapshot_id` differs from
-  `existing_certified_snapshot_id`; (2) zero queued with an allowlisted success status
-  (`analyst_evidence_current` or a `*_contract_recertified` zero-LLM deterministic recertification)
-  — an already-current `worker_certified` + `certified_current` snapshot legitimately means
-  "nothing to do"; (3) zero queued for any other reason (`no_active_holdings`, `enqueue_failed`, a
-  `*_recertification_failed` status, or anything unrecognized) always reports incomplete — a
-  stale/historical snapshot can never stand in for a request's own no-holdings or failed outcome.
-  `_next_required_action` checks in explicit priority order (no-active-holdings > zero-queued
-  failure > queue-only > write-guard > continue-draining > complete > no-stale-evidence > retry),
-  so a zero-queued failure never falls through to "no stale evidence to refresh," and the
-  snapshot-write guard always outranks "continue." Frontend: `advisor-readiness.ts::deriveRunModel`
-  classifies any `status` ending in `_recertification_failed` (alongside `enqueue_failed`/`failed`)
-  as the `failed` run state with the "Retry Intel run" label — no other frontend files changed.
+- **Deploy Cash refreshes price truth on the explicit click, a stale or missing price is never
+  eligible for new cash, and a degraded-but-calculable plan is preserved (not erased)** (product
+  recovery, patched same-day to close a release blocker): `POST /advisor/paycheck-plan/preview`
+  now runs `current_price_truth_repair_v1.run_current_price_truth_repair(dry_run=False)` for
+  stale/missing open-position prices BEFORE `run_next_buy_policy_diagnostic` — permitted only
+  because Deploy Cash is an explicit user action (never on page load/polling). The repair's own
+  fetch phase runs with bounded concurrency (`_MAX_CONCURRENT_FETCHES=5`, `asyncio.gather` under
+  a semaphore) instead of serial per-ticker waits; writes stay sequential and
+  price_history-only. The repair is best-effort — an unexpected exception never blocks the plan;
+  the response carries an additive `price_truth_repair` summary
+  (`refreshed`/`partial`/`unavailable` + counts). **Canonical fix (not a presentation filter):**
+  `allocation_policy_v1._compute_gaps` now excludes a ticker from candidacy on either a
+  **missing** price (`no_price_available`, unchanged) OR a **stale** price
+  (`stale_price_not_eligible_for_new_cash`, new) — a stale ticker can never itself receive new
+  cash, and when it's excluded the existing allocator automatically reranks/reallocates to
+  another fresh eligible candidate (no new allocator, no duplicated math). Cash bounds,
+  concentration rules, evidence gates, and the VTI>VOO>SPY>QQQ preference are unchanged.
+  `paycheck_plan_preview.build_paycheck_plan_preview()` (defense-in-depth) independently verifies
+  that invariant before preserving a degraded plan — no selected candidate may appear in
+  `missing_price_tickers`/`stale_price_tickers` — and suppresses the entire plan (forces
+  `status=blocked`, zeroes `allocation_summary`) rather than ever displaying unsafe dollar
+  guidance if it is ever violated (e.g. by a future allocator regression or a hand-built
+  diagnostic payload); this never re-filters or recomputes the diagnostic's own selection/cash-plan
+  math. Only `blocked` (no computable portfolio value, reconciliation beyond tolerance, no safe
+  candidate prices, or the defense-in-depth invariant firing) empties the plan — `degraded`
+  (non-fatal residual price/provider limitations on some OTHER, non-candidate holding) preserves
+  the diagnostic's own calculated candidates verbatim, keeping `trusted=false`/`status=degraded`
+  and the existing caveats. No new allocator, no policy/cap loosening, no fabricated candidates;
+  the decision spine (certified truth → repaired price truth → Intel v3 evidence →
+  `allocation_policy_v1` → `paycheck_plan_preview` → Advisor cash-plan section) is unchanged.
+- **Run Intel is bounded on-demand, not worker-dependent, and self-continues** (Stage 13B +
+  product recovery): `POST /intel/v3/run` enqueues and, when
+  `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains a small quantum
+  (`analyst_refresh_on_demand_drain_v1`: 1 batch × 3 jobs, ≤20s) per request — small enough that
+  one request can never materially exceed a production-safe wall-clock bound even if every
+  selected ticker's LLM call runs to the deadline. The drain's own bound is threaded into
+  `AnalystRefreshWorker`'s `max_adapter_seconds`, which clamps the analyst-refresh adapter's own
+  `wait_for()` budget — the prior gap (`FullPortfolioAnalystRefreshBudget` kept its 180s default
+  regardless of the caller's intended cap) is what let a nominal 90s cap become a ~148s hung
+  request in production. The router (`_augment_with_on_demand_status`) no longer decides whether
+  to drain solely from `queued_ticker_count`. Same-day patch (release blocker): the router now
+  ALWAYS resolves the current user's current active tickers first — via
+  `IntelV3Service._get_active_tickers()` — before any drain decision, including when this click
+  DID queue new work (previously only the zero-queued path fetched them). If that lookup itself
+  fails, the router never falls back to an unscoped drain; it returns an explicit retryable
+  failure (`_ACTION_ACTIVE_TICKERS_LOOKUP_FAILED`) instead. It then classifies the FULL durable-job
+  state for (user, active_tickers) via `analyst_refresh_job_store_v1.count_due_jobs`'s breakdown —
+  not just `total_due`: `total_due > 0` drains; only-`failed_not_yet_due` (backoff, nothing due
+  yet) reports an explicit backoff retry state and stops automatic continuation cleanly; any
+  `failed_terminal` (retry budget exhausted) reports a terminal analyst-job failure and never
+  auto-loops; only when none of these apply does the existing zero-work/current-snapshot logic
+  run. Both `total_due`-driven and existing-work-driven drains scope claiming to the current user
+  AND their current active tickers (`AnalystRefreshWorker.scope_user_id`/`scope_tickers`;
+  `claim_due_jobs`/`count_due_jobs` gained optional `user_id`/`tickers` filters) — an obsolete job
+  for a sold/closed ticker is never claimed by the manual Run Intel path, even though the
+  standalone always-on worker keeps its unscoped global-queue behavior unchanged.
+  `count_due_jobs` also gained a small extension, `earliest_retry_at` (earliest `next_retry_at`
+  among backoff rows), surfaced as an additive `earliest_retry_at` response field only in the
+  backoff state. A historical certified-current snapshot can never mask a backoff or terminal
+  durable-job state — both force `snapshot_available_after_run=False` unconditionally, ahead of
+  the drain/zero-queued-success checks. Otherwise, `snapshot_available_after_run` keys off
+  `drain_ran` (true whenever a `total_due`-driven drain ran) rather than `queued_ticker_count > 0`:
+  completion still requires proof THIS request published (on-demand enabled, nothing left
+  resumable, writes enabled, latest snapshot `worker_certified` + `certified_current` with a
+  `snapshot_id` different from `existing_certified_snapshot_id`); a zero-queued no-op success
+  status (`analyst_evidence_current` / `*_contract_recertified`) with no drain still means
+  "nothing to do"; anything else (no-holdings, enqueue/recert failure, or a drain that ran but
+  never produced a new snapshot) is an honest retry, never a false "nothing was stale."
+  Frontend: `useRunIntelV3` (`hooks.ts`) now drives bounded automatic continuation from the SAME
+  click — after each batch it derives the run state via `shouldAutoContinueRun`
+  (`advisor-readiness.ts`) and, while `partial`, fires another request itself (capped at
+  `RUN_INTEL_MAX_CONTINUATIONS=20` attempts / `RUN_INTEL_MAX_ELAPSED_MS=120s`), aborting in-flight
+  work via `AbortController` on unmount. The user never has to click "Continue Intel run"
+  themselves. `advisor-readiness.ts::deriveRunModel` gained three narrow explicit branches for the
+  new backoff/terminal/active-ticker-lookup-failure `next_required_action` values — all classify
+  as the existing `failed` state (Retry Intel run control, `buttonBusy=false`), placed ahead of
+  the generic `reclick_`-prefix "partial" bucket so they can never be misread as auto-continuing
+  progress; `shouldAutoContinueRun` naturally stops for `failed` (only continues on `partial`). No
+  new button/control. The rest of the state machine (partial/complete/failed/
+  queue_only classification, including any `status` ending in `_recertification_failed`) is
+  unchanged — only the trigger for firing the next request moved from a manual click to the hook.
+  Still exactly one control — `AdvisorReadinessPanel`/`page.tsx` are unchanged.
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.
@@ -116,6 +181,13 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
 - Frontend: full jest green; `tsc --noEmit` clean; `next build` green.
 - Baseline before consolidation (main @ PR #471): backend 93 failed / 8910 passed
   (documented pre-existing failures), frontend 3 suites failing to compile.
+- Advisor product-recovery PR (2026-07-19, initial + same-day release-blocker patch): focused
+  Tier 1 bundle (Intel v3 / paycheck / allocation-policy / price-truth / run-intel / deploy-cash /
+  advisor tests) — `3119 passed, 0 failed` backend; full frontend jest `608 passed, 0 failed`;
+  `tsc --noEmit` clean; `next build` green (locally requires placeholder
+  `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` env vars to prerender — no code path
+  change, sandbox-only). Full backend suite not run (Tier 3 criteria not met; see PR body
+  test-tier justification).
 
 ## SQL / env state
 

@@ -10,9 +10,23 @@ Hard bounds (no infinite loop, no always-on polling):
   * ``max_batches`` worker batches per call (each batch itself claims at most
     ``max_jobs_per_batch`` jobs — same claim/backoff/retry semantics as the
     standalone worker).
-  * ``max_runtime_seconds`` overall wall-clock cap.
+  * ``max_runtime_seconds`` overall wall-clock cap, also threaded into the
+    worker as its per-call adapter deadline (see ``max_adapter_seconds`` on
+    ``AnalystRefreshWorker``) so a single in-flight analyst-refresh call
+    cannot silently run to the adapter's own, much larger, default budget.
+    Production evidence: prior to this bound being threaded through, one
+    batch could block for the adapter's full 180s default regardless of the
+    on-demand cap the caller intended, turning a nominal 90s cap into a
+    ~148s+ hung HTTP request.
 Stops as soon as a batch claims zero jobs or the worker reports nothing left
 to resume — never loops waiting for more work to appear.
+
+Scoping: every call always scopes claiming to the requesting ``user_id``
+(and, when supplied, their current active ``tickers``) — an on-demand drain
+triggered by one user's explicit click must never claim or process another
+user's durable jobs, even though the underlying queue table is shared with
+the standalone always-on worker (which keeps its own unscoped, global
+claiming behavior — unchanged).
 
 This module must NOT import the deterministic Intel v3 decision policy —
 same boundary as ``analyst_refresh_worker_v1``. It only drives the existing
@@ -30,13 +44,20 @@ from .analyst_refresh_worker_v1 import AnalystRefreshWorker
 
 logger = logging.getLogger(__name__)
 
-# Small enough to fit inside one HTTP request's timeout, large enough to
-# clear a typical portfolio (34 holdings / 10 per batch ≈ 4 batches) across
-# 1-2 clicks. AnalystRefreshWorker's own per-batch runtime cap still applies
-# on top of this.
-MAX_BATCHES_PER_RUN = 3
-MAX_JOBS_PER_BATCH = 10
-MAX_RUNTIME_SECONDS = 90.0
+# Small enough that ONE HTTP request can never materially exceed a
+# production-safe wall-clock bound, even in the worst case where every
+# selected ticker's LLM call runs to the full deadline. A 34-holding
+# portfolio needs many bounded clicks/continuations (see Part A3's automatic
+# bounded continuation) rather than draining in 1-2 requests — trading a
+# single ~148s hang for many fast, resumable, ~20s-bounded requests.
+#
+# max_runtime_seconds is also threaded into AnalystRefreshWorker as its
+# per-call adapter deadline (max_adapter_seconds), so the underlying
+# analyst-refresh call's own wait_for() is bounded to this same cap rather
+# than the adapter's much larger 180s default — see module docstring.
+MAX_BATCHES_PER_RUN = 1
+MAX_JOBS_PER_BATCH = 3
+MAX_RUNTIME_SECONDS = 20.0
 
 STOPPED_DRAINED = "drained"
 STOPPED_NO_MORE_CLAIMABLE_JOBS = "no_more_claimable_jobs"
@@ -73,6 +94,7 @@ async def run_on_demand_drain(
     *,
     user_id: "UUID | str",
     client: Any,
+    tickers: Optional[list[str]] = None,
     worker: Optional[AnalystRefreshWorker] = None,
     max_batches: int = MAX_BATCHES_PER_RUN,
     max_jobs_per_batch: int = MAX_JOBS_PER_BATCH,
@@ -81,17 +103,24 @@ async def run_on_demand_drain(
     """Drain the durable job queue for a bounded number of batches.
 
     ``worker`` is injectable for tests; production callers omit it and get a
-    real ``AnalystRefreshWorker`` scoped to the given batch/runtime caps.
+    real ``AnalystRefreshWorker`` scoped to ``user_id`` (and ``tickers`` when
+    supplied) with the given batch/runtime caps. An explicitly injected
+    ``worker`` is used as-is (its own scoping, if any, is the test's
+    responsibility) — this keeps existing unit tests that inject a stub
+    worker unaffected.
 
-    The queue is global (not per-user — same as the standalone worker), so a
-    drain triggered by one user's click may also process other users' due
-    jobs. That matches existing ``AnalystRefreshWorker`` behavior and is not
-    a new risk introduced here.
+    Scoped to the requesting user: unlike the standalone always-on worker
+    (which claims globally across all users), an on-demand drain triggered by
+    one user's explicit Run Intel click only ever claims and processes that
+    user's own durable jobs.
     """
     active_worker = worker or AnalystRefreshWorker(
         client=client,
         max_jobs_per_run=max_jobs_per_batch,
         max_runtime_seconds=max_runtime_seconds,
+        scope_user_id=user_id,
+        scope_tickers=tickers,
+        max_adapter_seconds=max_runtime_seconds,
     )
     result = OnDemandDrainResult()
     started = time.monotonic()

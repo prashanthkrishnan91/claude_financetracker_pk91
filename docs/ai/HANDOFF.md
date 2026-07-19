@@ -2,7 +2,8 @@
 
 Last updated: 2026-07-18 (Lean Advisor Consolidation — Positions / Advisor / Watchlist; replaces
 the stage-by-stage log with a compact state summary. Full evidence for the consolidation lives in
-`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body.)
+`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body. Same-day follow-up: Run
+Intel completion-classification fix after PR #473 — see bullet below.)
 
 ## Product architecture (read this first)
 
@@ -73,7 +74,23 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   enqueues and, when `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains up to 3 batches × 10
   jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
   clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
-  worker services remain optional and OFF.
+  worker services remain optional and OFF. `snapshot_available_after_run` (in `routers/intel_v3.py
+  ::_augment_with_on_demand_status`) has three paths keyed on `queued_ticker_count` and `status`:
+  (1) jobs queued this request — completion requires proof THIS request published: on-demand
+  enabled, drain ran, nothing left resumable, snapshot writes enabled, latest snapshot is
+  `worker_certified` + `certified_current`, AND its `snapshot_id` differs from
+  `existing_certified_snapshot_id`; (2) zero queued with an allowlisted success status
+  (`analyst_evidence_current` or a `*_contract_recertified` zero-LLM deterministic recertification)
+  — an already-current `worker_certified` + `certified_current` snapshot legitimately means
+  "nothing to do"; (3) zero queued for any other reason (`no_active_holdings`, `enqueue_failed`, a
+  `*_recertification_failed` status, or anything unrecognized) always reports incomplete — a
+  stale/historical snapshot can never stand in for a request's own no-holdings or failed outcome.
+  `_next_required_action` checks in explicit priority order (no-active-holdings > zero-queued
+  failure > queue-only > write-guard > continue-draining > complete > no-stale-evidence > retry),
+  so a zero-queued failure never falls through to "no stale evidence to refresh," and the
+  snapshot-write guard always outranks "continue." Frontend: `advisor-readiness.ts::deriveRunModel`
+  classifies any `status` ending in `_recertification_failed` (alongside `enqueue_failed`/`failed`)
+  as the `failed` run state with the "Retry Intel run" label — no other frontend files changed.
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.

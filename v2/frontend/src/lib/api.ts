@@ -629,6 +629,12 @@ export interface IntelV3RunResult {
     | "analyst_evidence_current"  // backend: evidence fresh, no jobs queued
     | "mapping_version_recertified"  // stale mapping version recertified via zero-LLM prewarm
     | "mapping_version_recertification_failed"  // prewarm failed during mapping recertification
+    | "stage7_contract_recertified"  // Stage 7 explanation contract recertified via zero-LLM prewarm
+    | "stage7_contract_recertification_failed"
+    | "stage8e_contract_recertified"  // Stage 8E catalyst explanation contract recertified via zero-LLM prewarm
+    | "stage8e_contract_recertification_failed"
+    | "stage8f_contract_recertified"  // Stage 8F filing-type contract recertified via zero-LLM prewarm
+    | "stage8f_contract_recertification_failed"
     | "no_active_holdings"
     | "enqueue_failed"
     | "completed"   // legacy — may appear if backend version mismatch

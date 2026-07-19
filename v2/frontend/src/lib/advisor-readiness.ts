@@ -12,8 +12,9 @@
  * Run state machine:
  *   idle → running → partial (another bounded batch required)
  *        → complete (snapshot_available_after_run)
- *        → failed (jobs failed and none succeeded, or the request errored,
- *                  or snapshot writes are disabled by the cost guard)
+ *        → failed (jobs failed and none succeeded, the request errored,
+ *                  enqueue or deterministic recertification failed, or
+ *                  snapshot writes are disabled by the cost guard)
  *        → queue_only (on-demand processing disabled on the server)
  */
 
@@ -186,8 +187,15 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
   const next = lastRunResult.next_required_action ?? "";
   const status = lastRunResult.status;
 
-  // 4. Backend-reported enqueue/run failure.
-  if (status === "enqueue_failed" || status === "failed") {
+  // 4. Backend-reported enqueue/run failure, including a deterministic
+  //    recertification failure (mapping/Stage 7/8E/8F prewarm attempted and
+  //    failed) — no existing status/action value truthfully means "retry"
+  //    for these, so match the suffix rather than inventing a new one.
+  if (
+    status === "enqueue_failed" ||
+    status === "failed" ||
+    status.endsWith("_recertification_failed")
+  ) {
     return {
       ...base,
       state: "failed",

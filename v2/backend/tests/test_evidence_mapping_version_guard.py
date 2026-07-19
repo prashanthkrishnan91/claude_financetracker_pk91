@@ -413,6 +413,137 @@ class TestEnqueueRunV3MappingGuard:
         assert result["status"] == "mapping_version_recertification_failed"
         assert result["status"] != "analyst_evidence_current"
         assert result["queued_ticker_count"] == 0
+        assert result["message"] == (
+            "Deterministic recertification failed — evidence mapping version mismatch. "
+            "Retry Run Intel to recertify."
+        )
+        assert "evidence is current" not in result["message"]
+        assert "no refresh needed" not in result["message"]
+
+
+# ── Recertification-failure message accuracy (all four contract checks) ──────
+# The status is derived correctly by the sequential mapping/stage7/8e/8f
+# elif chain (unchanged by this fix). This proves the response *message* is
+# accurate for each failure — previously Stage 8E and 8F failures silently
+# fell through to "Analyst evidence is current — no refresh needed.", which
+# contradicts the failed/Retry state the frontend renders for these statuses.
+
+
+class TestEnqueueRunV3RecertificationFailureMessages:
+    def _make_service(self):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+        svc = IntelV3Service.__new__(IntelV3Service)
+        svc.user_id = USER_ID
+        svc.client = MagicMock()
+        return svc
+
+    def _make_current_snapshot(self, *, omit: str) -> dict:
+        """A snapshot current on every contract EXCEPT the one named by `omit`,
+        so the sequential elif chain in enqueue_run_v3() reaches exactly the
+        branch under test (mapping/stage7/stage8e/stage8f, checked in that
+        order) instead of an earlier one."""
+        from app.services.intelligence.v3.stage7_snapshot_contract_v1 import (
+            STAGE7_EXPLANATION_CONTRACT_VERSION,
+        )
+        from app.services.intelligence.v3.stage8e_catalyst_explanation_contract_v1 import (
+            STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+        )
+        from app.services.intelligence.v3.stage8f_filing_type_contract_v1 import (
+            STAGE8F_FILING_TYPE_CONTRACT_VERSION,
+        )
+
+        snap = {
+            "snapshot_id": str(uuid.uuid4()),
+            "snapshot_source": "worker_certified",
+            "evidence_mapping_version": EVIDENCE_MAPPING_VERSION,
+            "stage7_explanation_contract_version": STAGE7_EXPLANATION_CONTRACT_VERSION,
+            "stage8e_catalyst_explanation_contract_version": STAGE8E_CATALYST_EXPLANATION_CONTRACT_VERSION,
+            "stage8f_filing_type_contract_version": STAGE8F_FILING_TYPE_CONTRACT_VERSION,
+            "current_holdings": [],
+        }
+        omit_key = {
+            "mapping": "evidence_mapping_version",
+            "stage7": "stage7_explanation_contract_version",
+            "stage8e": "stage8e_catalyst_explanation_contract_version",
+            "stage8f": "stage8f_filing_type_contract_version",
+        }[omit]
+        del snap[omit_key]
+        return snap
+
+    async def _run_with_failing_prewarm(self, *, omit: str) -> dict:
+        svc = self._make_service()
+        svc.get_latest_snapshot = AsyncMock(
+            return_value=self._make_current_snapshot(omit=omit)
+        )
+
+        async def fake_prewarm_raising(*, prewarm_run_id: str) -> dict:
+            raise RuntimeError("contract_check_failed")
+
+        svc.run_prewarm_snapshot = fake_prewarm_raising
+        svc._get_active_tickers = AsyncMock(return_value=["AAPL", "MSFT"])
+
+        gate_result = MagicMock()
+        gate_result.intel_status = "current"
+        gate_result.deploy_status = "eligible"
+        gate_result.deploy_blockers = []
+        gate_result.refresh_plan = MagicMock(urgent_refresh_count=0, deploy_blockers=[])
+        gate_result.gate_check_ms = 5
+
+        with patch(
+            "app.services.intelligence.v3.intel_v3_fast_freshness_gate_v1.run_fast_freshness_gate",
+            new=AsyncMock(return_value=gate_result),
+        ), patch(
+            "app.services.intelligence.v3.intel_v3_service._stale_analyst_tickers_from_gate",
+            return_value=[],
+        ):
+            return await svc.enqueue_run_v3()
+
+    @pytest.mark.asyncio
+    async def test_stage7_recertification_failure_message_is_accurate(self):
+        result = await self._run_with_failing_prewarm(omit="stage7")
+        assert result["status"] == "stage7_contract_recertification_failed"
+        assert result["message"] == (
+            "Deterministic recertification failed — Stage 7 explanation contract missing. "
+            "Retry Run Intel to recertify."
+        )
+        assert "evidence is current" not in result["message"]
+        assert "no refresh needed" not in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_stage8e_recertification_failure_message_is_accurate(self):
+        result = await self._run_with_failing_prewarm(omit="stage8e")
+        assert result["status"] == "stage8e_contract_recertification_failed"
+        assert result["message"] == (
+            "Deterministic recertification failed — Stage 8E catalyst explanation contract missing. "
+            "Retry Run Intel to recertify."
+        )
+        assert "evidence is current" not in result["message"]
+        assert "no refresh needed" not in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_stage8f_recertification_failure_message_is_accurate(self):
+        result = await self._run_with_failing_prewarm(omit="stage8f")
+        assert result["status"] == "stage8f_contract_recertification_failed"
+        assert result["message"] == (
+            "Deterministic recertification failed — Stage 8F filing-type contract missing. "
+            "Retry Run Intel to recertify."
+        )
+        assert "evidence is current" not in result["message"]
+        assert "no refresh needed" not in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_mapping_version_recertification_failure_message_is_accurate(self):
+        """Same scenario as TestEnqueueRunV3MappingGuard's message assertion,
+        exercised via the shared omit-based fixture for direct comparison
+        with the other three failure statuses in this class."""
+        result = await self._run_with_failing_prewarm(omit="mapping")
+        assert result["status"] == "mapping_version_recertification_failed"
+        assert result["message"] == (
+            "Deterministic recertification failed — evidence mapping version mismatch. "
+            "Retry Run Intel to recertify."
+        )
+        assert "evidence is current" not in result["message"]
+        assert "no refresh needed" not in result["message"]
 
 
 # ── build_snapshot includes evidence_mapping_version ─────────────────────────

@@ -79,7 +79,6 @@ def _build_caveats(
     missing_price_tickers: list[str],
     stale_price_tickers: list[str],
     stock_candidates_status: str | None = None,
-    selected_tickers: list[str] | None = None,
 ) -> list[str]:
     caveats = [_ADVICE_CAVEAT]
     if not trusted:
@@ -98,18 +97,9 @@ def _build_caveats(
     if missing_price_tickers:
         caveats.append("Some holdings are missing recent price data.")
     if stale_price_tickers:
-        caveats.append("Some holdings have stale price data.")
-    # The diagnostic's own candidacy gate (allocation_policy_v1._compute_gaps
-    # `no_price_available`) only excludes a MISSING price from candidacy — a
-    # stale-but-present price still computes a market value/weight and can be
-    # selected. Call this out specifically (not just the generic "some
-    # holdings" caveat above) whenever one of THIS plan's own recommended
-    # buys carries a stale price, since Deploy Cash is real-money guidance.
-    stale_set = set(stale_price_tickers or [])
-    if stale_set and selected_tickers and stale_set.intersection(selected_tickers):
         caveats.append(
-            "At least one recommended buy amount above is based on a stale price — treat that "
-            "specific dollar amount as directional only until price truth is refreshed."
+            "Some holdings have stale price data — none of them are eligible to receive new "
+            "cash (allocation_policy_v1 excludes both missing and stale prices from candidacy)."
         )
     if stock_candidates_status == "blocked_insufficient_evidence":
         caveats.append(
@@ -154,15 +144,27 @@ def _policy_block_text(code: str) -> str:
         return "The alternatives group is already at or above its policy cap."
     if code == "no_price_available":
         return "No trusted current price is available for this ticker."
+    if code == "stale_price_not_eligible_for_new_cash":
+        return "This ticker's price is stale, so it cannot receive new cash right now."
     return code.replace("_", " ").capitalize()
 
 
 def _policy_block_bucket(code: str) -> str:
     if code == "no_price_available":
         return "missing_truth_blocked"
+    if code == "stale_price_not_eligible_for_new_cash":
+        return "stale_price_blocked"
     if code.startswith("at_or_above_") and "group" not in code:
         return "concentration_blocked"
     return "group_cap_blocked"
+
+
+# Codes whose plain-English "not selected" entry is built authoritatively by
+# the dedicated stale/missing-price loops below (using truth_dependency's own
+# ticker lists, which is the single source of truth for price-coverage
+# status) — never also appended here from ticker_gaps.policy_ineligibility_reason,
+# or the same ticker would appear twice in `not_selected`.
+_PRICE_TRUTH_CODES = frozenset({"no_price_available", "stale_price_not_eligible_for_new_cash"})
 
 
 def _evidence_summary_for_candidate(candidate: dict) -> dict | None:
@@ -261,6 +263,10 @@ def build_plan_explanations(diagnostic: dict[str, Any]) -> dict[str, Any]:
                 "plain_english": f"{ticker} is not eligible: " + " ".join(texts),
                 "raw_codes": gate_codes + ([policy_code] if policy_code else []),
             })
+            continue
+        if policy_code and policy_code in _PRICE_TRUTH_CODES:
+            # Deferred to the dedicated stale/missing-price loops below —
+            # they are the authoritative source for these two codes.
             continue
         if policy_code:
             not_selected.append({
@@ -367,25 +373,38 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
     # diagnostic ran the full allocator against certified-enough truth, so a
     # stale/missing price on some OTHER (non-candidate) holding must never
     # erase an already-calculated, priced buy plan.
-    #
-    # Caveat: allocation_policy_v1._compute_gaps's `no_price_available` gate
-    # only excludes a MISSING price from candidacy — a ticker with a STALE
-    # (but present) price still gets a computed market value/weight
-    # ("use stale but warn") and CAN be selected as a candidate. This router
-    # does not re-filter or recompute the diagnostic's own selection/cash-plan
-    # math (that would duplicate the single allocation-policy decision spine
-    # and could desync `planned_buys` from `cash_plan.allocated_cash`); instead
-    # `_build_caveats` below adds an explicit caveat whenever one of the
-    # PRESERVED candidates itself carries a stale price, so the user is told
-    # which specific dollar amount rests on stale data rather than only the
-    # generic "some holdings have stale price data" caveat.
     candidates = [] if preview_status == "blocked" else (diagnostic.get("next_buy_candidates", []) or [])
+
+    # Defense-in-depth (product-recovery Blocker 1): a ticker with a missing
+    # OR stale price is never eligible to receive new cash — that gate now
+    # lives canonically at the allocation-policy boundary
+    # (`allocation_policy_v1._compute_gaps`'s `policy_ineligibility_reason`),
+    # not here. This router never re-filters or recomputes the diagnostic's
+    # own selection/cash-plan math. It DOES independently verify the
+    # resulting invariant before preserving a degraded plan — no selected
+    # candidate may itself appear in `missing_price_tickers`/
+    # `stale_price_tickers` — and suppresses the plan entirely rather than
+    # ever displaying unsafe dollar guidance if that invariant is violated
+    # (e.g. by a stale/hand-built diagnostic payload or a future allocator
+    # regression).
+    unsafe_price_tickers = set(truth_dependency.get("missing_price_tickers") or []) | set(
+        truth_dependency.get("stale_price_tickers") or []
+    )
+    invariant_violated = any(c.get("ticker") in unsafe_price_tickers for c in candidates)
+    if invariant_violated:
+        preview_status = "blocked"
+        candidates = []
+
     planned_buys = _build_planned_buys(candidates)
-    selected_tickers = [c.get("ticker") for c in candidates if c.get("ticker")]
 
     next_required_fix = verdict.get("next_required_fix")
     if preview_status == "ready" and trusted:
         next_required_fix = None
+    if invariant_violated:
+        next_required_fix = (
+            "Safety check failed: a recommended ticker's price is not current. "
+            "Plan suppressed pending price-truth repair."
+        )
 
     return {
         "preview_version": PREVIEW_VERSION,
@@ -404,11 +423,25 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
             if preview_status == "blocked"
             else build_plan_explanations(diagnostic)
         ),
-        "allocation_summary": {
-            "allocated_cash": cash_plan.get("allocated_cash", 0.0),
-            "unallocated_cash": cash_plan.get("unallocated_cash", 0.0),
-            "allocation_count": cash_plan.get("allocation_count", 0),
-        },
+        # When the defense-in-depth invariant fires, the cash-plan totals must
+        # also reflect zero allocation — never show a nonzero allocated_cash
+        # figure alongside an empty planned_buys list.
+        "allocation_summary": (
+            {
+                "allocated_cash": 0.0,
+                "unallocated_cash": (
+                    diagnostic.get("input", {}).get("cash_to_deploy")
+                    or cash_plan.get("cash_to_deploy", 0.0)
+                ),
+                "allocation_count": 0,
+            }
+            if invariant_violated
+            else {
+                "allocated_cash": cash_plan.get("allocated_cash", 0.0),
+                "unallocated_cash": cash_plan.get("unallocated_cash", 0.0),
+                "allocation_count": cash_plan.get("allocation_count", 0),
+            }
+        ),
         "data_freshness_status": truth_dependency.get("price_coverage_status", "unknown"),
         "caveats": _build_caveats(
             trusted,
@@ -416,7 +449,6 @@ def build_paycheck_plan_preview(diagnostic: dict[str, Any]) -> dict[str, Any]:
             truth_dependency.get("missing_price_tickers", []),
             truth_dependency.get("stale_price_tickers", []),
             diagnostic.get("stock_candidates", {}).get("status"),
-            selected_tickers,
         ),
         "next_required_fix": next_required_fix,
         "recommendations_trusted": False,

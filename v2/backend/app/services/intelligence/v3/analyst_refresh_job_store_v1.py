@@ -629,7 +629,7 @@ def count_due_jobs(
     now: Optional[datetime] = None,
     user_id: "UUID | str | None" = None,
     tickers: Optional[list[str]] = None,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Count claimable jobs without claiming them.
 
     Returns a breakdown useful for production monitoring:
@@ -639,6 +639,10 @@ def count_due_jobs(
       failed_terminal    — failed jobs with exhausted attempt budget (permanently
                            blocked; never re-claimed by the worker).
       total_due          — pending + failed_retryable (claimable right now).
+      earliest_retry_at  — the soonest `next_retry_at` among failed_not_yet_due
+                           rows, or None when there are none. Small extension
+                           so a caller reporting a backoff state can tell the
+                           user roughly when to expect the next retry.
 
     ``user_id`` / ``tickers`` optionally scope the count to one user's
     current holdings — used by the Run Intel router to recognize existing
@@ -652,12 +656,13 @@ def count_due_jobs(
     if now.tzinfo is None:
         now = now.replace(tzinfo=timezone.utc)
 
-    zero: dict[str, int] = {
+    zero: dict[str, Any] = {
         "pending": 0,
         "failed_retryable": 0,
         "failed_not_yet_due": 0,
         "failed_terminal": 0,
         "total_due": 0,
+        "earliest_retry_at": None,
     }
     try:
         query = (
@@ -678,6 +683,7 @@ def count_due_jobs(
         return zero
 
     counts = dict(zero)
+    earliest_retry_at: Optional[str] = None
     for row in rows:
         status = str(row.get("status") or "")
         attempts = int(row.get("attempts") or 0)
@@ -696,6 +702,10 @@ def count_due_jobs(
                 counts["failed_retryable"] += 1
             else:
                 counts["failed_not_yet_due"] += 1
+                if isinstance(next_retry, str) and next_retry:
+                    if earliest_retry_at is None or next_retry < earliest_retry_at:
+                        earliest_retry_at = next_retry
 
     counts["total_due"] = counts["pending"] + counts["failed_retryable"]
+    counts["earliest_retry_at"] = earliest_retry_at
     return counts

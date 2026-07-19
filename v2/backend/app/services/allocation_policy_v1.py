@@ -392,9 +392,19 @@ def _compute_gaps(
     policy: dict[str, Any],
     total_mv: float,
     stock_evidence_map: dict[str, dict] | None = None,
+    stale_price_tickers: "list[str] | set[str] | None" = None,
 ) -> tuple[dict[str, dict], dict[str, dict]]:
-    """Compute target vs current gaps at group and ticker level."""
+    """Compute target vs current gaps at group and ticker level.
+
+    A ticker with a missing OR stale price is never eligible for new cash
+    (product-recovery Blocker 1 — the canonical allocation-policy boundary,
+    not a presentation-layer filter). Missing price already gates via
+    `market_value is None`; `stale_price_tickers` closes the remaining gap —
+    a stale-but-present price previously still computed a market value/weight
+    and could itself be selected as a candidate.
+    """
     group_targets = policy["group_targets"]
+    stale_ticker_set = set(stale_price_tickers or [])
 
     group_gaps: dict[str, dict] = {}
     for group, target_pct in group_targets.items():
@@ -440,6 +450,11 @@ def _compute_gaps(
         policy_ineligibility_reason: str | None = None
         if h["market_value"] is None:
             policy_ineligibility_reason = "no_price_available"
+        elif ticker in stale_ticker_set:
+            # Present but stale — a real market value/weight was computed
+            # ("use stale but warn" in _compute_portfolio) but the price is
+            # not current enough to base a new-cash dollar recommendation on.
+            policy_ineligibility_reason = "stale_price_not_eligible_for_new_cash"
         elif current_pct >= per_ticker_cap:
             policy_ineligibility_reason = f"at_or_above_{group}_cap_{per_ticker_cap}pct"
 
@@ -1118,6 +1133,7 @@ async def run_next_buy_policy_diagnostic(
     if can_run_policy:
         group_gaps, ticker_gaps = _compute_gaps(
             holdings, group_weights, policy, total_mv, stock_evidence_map,
+            stale_price_tickers=stale_price_tickers,
         )
         etf_floor_met = policy.get("etf_floor_met", False)
 

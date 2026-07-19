@@ -31,6 +31,7 @@ import pytest
 
 from app.routers import intel_v3 as router_mod
 from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
+    JOB_FAILED,
     JOB_PENDING,
     claim_due_jobs,
     count_due_jobs,
@@ -189,6 +190,30 @@ class TestJobStoreScoping:
         )
         assert [j.ticker for j in claimed] == ["VTI"]
         assert all(j.user_id == USER_A for j in claimed)
+
+    def test_count_due_jobs_reports_earliest_retry_at_for_backoff_rows(self):
+        """Small job-store extension (product-recovery Blocker 3): the
+        earliest next_retry_at among failed_not_yet_due rows is surfaced so a
+        caller reporting a backoff state can tell the user roughly when to
+        expect the next retry."""
+        fake = _FakeSupabase()
+        later = "2099-06-01T00:00:00+00:00"
+        earlier = "2099-01-01T00:00:00+00:00"
+        row_later = _job_row(USER_A, "VTI", status=JOB_FAILED, attempts=1)
+        row_later["next_retry_at"] = later
+        row_earlier = _job_row(USER_A, "AAPL", status=JOB_FAILED, attempts=1)
+        row_earlier["next_retry_at"] = earlier
+        fake.seed("analyst_refresh_jobs", [row_later, row_earlier])
+
+        counts = count_due_jobs(fake, now=_now(), user_id=USER_A)
+        assert counts["failed_not_yet_due"] == 2
+        assert counts["earliest_retry_at"] == earlier
+
+    def test_count_due_jobs_earliest_retry_at_is_none_with_no_backoff_rows(self):
+        fake = _FakeSupabase()
+        fake.seed("analyst_refresh_jobs", [_job_row(USER_A, "VTI")])
+        counts = count_due_jobs(fake, now=_now(), user_id=USER_A)
+        assert counts["earliest_retry_at"] is None
 
     def test_claim_due_jobs_unscoped_keeps_existing_global_behavior(self):
         """The standalone always-on worker omits user_id/tickers and keeps

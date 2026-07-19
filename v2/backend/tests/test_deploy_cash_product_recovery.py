@@ -307,15 +307,42 @@ class TestDegradedButCalculablePreservation:
             "reason_codes": ["etf_floor_not_met"],
         }]
 
-    def test_a_selected_candidates_own_stale_price_is_preserved_and_specifically_flagged(self):
-        """allocation_policy_v1's `no_price_available` candidacy gate only
-        excludes a MISSING price — a ticker with a stale (present, just old)
-        price still computes a market value and can itself be the selected
-        candidate. This preview layer does not re-filter or recompute the
-        diagnostic's own selection/cash-plan math (that would duplicate the
-        allocation-policy decision spine), so the candidate is preserved —
-        but the specific-dollar-amount caveat must call this out explicitly,
-        not just the generic "some holdings have stale price data" caveat."""
+    @pytest.mark.asyncio
+    async def test_stale_selected_ticker_receives_zero_dollars_canonical_gate(self):
+        """Blocker 1 (canonical allocation-policy fix): a ticker with a
+        missing or stale price is never eligible to receive new cash. Proven
+        at the real diagnostic level — not a hand-built dict — so this
+        exercises `allocation_policy_v1._compute_gaps`'s actual candidacy
+        gate: VTI is stale-priced and must never appear as a candidate, so
+        the fresh, eligible SPY (broad_index_etf, underweight) is reranked
+        and allocated instead."""
+        positions = [
+            _pos("VTI", shares=4.0, category="Core"),
+            _pos("SPY", shares=2.0, category="Core"),
+        ]
+        prices = {
+            "VTI": [_price("VTI", close=250.0, days_old=10)],  # stale (>3 business days)
+            "SPY": [_price("SPY", close=100.0, days_old=0)],
+        }
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=1200.0)
+        diagnostic = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id="user-1", cash_to_deploy=500.0,
+        )
+        assert "VTI" in diagnostic["truth_dependency"]["stale_price_tickers"]
+        assert "VTI" not in [c["ticker"] for c in diagnostic["next_buy_candidates"]]
+
+        preview = build_paycheck_plan_preview(diagnostic)
+        tickers_with_dollars = {b["ticker"] for b in preview["planned_buys"]}
+        assert "VTI" not in tickers_with_dollars
+        if preview["planned_buys"]:
+            assert "SPY" in tickers_with_dollars
+
+    def test_defense_in_depth_suppresses_plan_if_invariant_ever_violated(self):
+        """Even if a (hand-built or future-buggy) diagnostic payload ever
+        smuggled a stale/missing-priced ticker into next_buy_candidates,
+        build_paycheck_plan_preview()'s own invariant check must suppress the
+        entire plan rather than display unsafe dollar guidance — it must
+        never just add a caveat and keep showing the dollar amount."""
         diagnostic = {
             "diagnostic_version": "allocation_policy_v1",
             "generated_at": "2026-07-19T00:00:00Z",
@@ -323,7 +350,9 @@ class TestDegradedButCalculablePreservation:
             "truth_dependency": {
                 "price_coverage_status": "stale",
                 "missing_price_tickers": [],
-                # VTI is both the selected candidate AND the stale-priced ticker.
+                # VTI is both the selected candidate AND the stale-priced ticker —
+                # an invariant that should never happen post-Blocker-1, but this
+                # test proves the defense-in-depth check catches it anyway.
                 "stale_price_tickers": ["VTI"],
             },
             "next_buy_candidates": [
@@ -338,18 +367,33 @@ class TestDegradedButCalculablePreservation:
             "stock_candidates": {"status": "no_stock_positions_held"},
         }
         preview = build_paycheck_plan_preview(diagnostic)
-        # Preserved, not fabricated-excluded — this is real (not invented)
-        # diagnostic output; the router never overrides the allocation
-        # policy's own selection.
-        assert preview["planned_buys"] == [{
-            "ticker": "VTI", "amount": 1000.0,
-            "reason": "Overall ETF allocation floor is not yet met",
-            "reason_codes": ["etf_floor_not_met"],
-        }]
-        assert any(
-            "recommended buy amount above is based on a stale price" in c
-            for c in preview["caveats"]
+        assert preview["planned_buys"] == []
+        assert preview["explanations"]["selected"] == []
+        assert preview["status"] == "blocked"
+        assert preview["allocation_summary"]["allocated_cash"] == 0.0
+        assert preview["allocation_summary"]["unallocated_cash"] == 1000.0
+        assert "Safety check failed" in (preview["next_required_fix"] or "")
+
+    @pytest.mark.asyncio
+    async def test_every_candidate_stale_or_missing_yields_no_buys(self):
+        """If no fresh eligible candidate remains after excluding stale/missing
+        priced tickers, the plan must return no buys — never fabricate a
+        candidate to force a non-empty result."""
+        positions = [
+            _pos("VTI", shares=4.0, category="Core"),
+            _pos("SPY", shares=2.0, category="Core"),
+        ]
+        prices = {
+            "VTI": [_price("VTI", close=250.0, days_old=10)],  # stale
+            "SPY": [_price("SPY", close=100.0, days_old=10)],  # stale
+        }
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=1200.0)
+        diagnostic = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id="user-1", cash_to_deploy=500.0,
         )
+        preview = build_paycheck_plan_preview(diagnostic)
+        assert preview["planned_buys"] == []
+        assert preview["allocation_summary"]["allocated_cash"] == 0.0
 
     def test_blocked_status_still_empties_the_plan(self):
         diagnostic = {
@@ -397,6 +441,35 @@ class TestDegradedButCalculablePreservation:
 
 
 class TestCashToDeployContract:
+    @pytest.mark.asyncio
+    async def test_stale_unrelated_holding_plus_fresh_candidate_preserves_degraded_plan(self):
+        """Regression matrix: a stale unrelated holding (SCHD — held, over its
+        own dividend-ETF target, not a candidate either way) must not erase a
+        fresh, genuinely eligible candidate (VTI, underweight). Exercises the
+        real diagnostic end-to-end, not a hand-built dict."""
+        positions = [
+            _pos("VTI", shares=4.0, category="Core"),
+            _pos("SCHD", shares=120.0, category="Core"),
+        ]
+        prices = {
+            "VTI": [_price("VTI", close=250.0, days_old=0)],
+            "SCHD": [_price("SCHD", close=75.0, days_old=10)],  # stale, irrelevant to VTI's eligibility
+        }
+        db = _make_db(positions=positions, prices_by_ticker=prices, snapshot_value=10000.0)
+        diagnostic = await run_next_buy_policy_diagnostic(
+            db_client=db, user_id="user-1", cash_to_deploy=500.0,
+        )
+        assert diagnostic["verdict"]["policy_status"] == "degraded"
+        assert "SCHD" in diagnostic["truth_dependency"]["stale_price_tickers"]
+
+        preview = build_paycheck_plan_preview(diagnostic)
+        assert preview["status"] == "degraded"
+        assert preview["planned_buys"] == [{
+            "ticker": "VTI", "amount": 500.0,
+            "reason": "This asset group is underweight versus its target; Preferred as a core broad-market ETF",
+            "reason_codes": ["broad_index_etf_group_underweight", "core_etf_preference"],
+        }]
+
     @pytest.mark.asyncio
     async def test_realistic_multi_holding_plan_2737_50(self):
         """Realistic multi-holding fixture: VTI (broad-market ETF) held well

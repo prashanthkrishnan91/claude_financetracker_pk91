@@ -114,6 +114,31 @@ export function jobsFailedSentence(failed: number): string {
   return `${failed} job${failed === 1 ? "" : "s"} failed and none succeeded this run. Retry the Intel run.`;
 }
 
+// ── Durable-job state actions (product-recovery Blocker 3) ────────────────────
+// Backend next_required_action values for the two new durable-job states plus
+// the active-ticker lookup failure. Deliberately NOT "reclick_"-prefixed —
+// they must read as a stopped "failed" state (Retry control), never the
+// generic "reclick_" -> partial/auto-continue bucket below.
+
+export const ANALYST_JOBS_BACKOFF_ACTION = "analyst_jobs_in_backoff_retry_after_window";
+export const ANALYST_JOBS_TERMINAL_ACTION = "analyst_jobs_retry_budget_exhausted";
+export const ACTIVE_TICKERS_LOOKUP_FAILED_ACTION = "active_tickers_lookup_failed_retry";
+
+export const ANALYST_JOBS_TERMINAL_SENTENCE =
+  "Some holdings exhausted their analyst-refresh retry budget. Retry the Intel run to try again.";
+
+export function analystJobsBackoffSentence(earliestRetryAt: string | null | undefined): string {
+  if (!earliestRetryAt) {
+    return "Some holdings are waiting on a retry cooldown before they can refresh again. Retry shortly.";
+  }
+  const ts = new Date(earliestRetryAt).getTime();
+  if (Number.isNaN(ts)) {
+    return "Some holdings are waiting on a retry cooldown before they can refresh again. Retry shortly.";
+  }
+  const minutes = Math.max(1, Math.ceil((ts - Date.now()) / 60_000));
+  return `Some holdings are waiting on a retry cooldown (about ${minutes} minute${minutes === 1 ? "" : "s"}) before they can refresh again.`;
+}
+
 // ── Run model derivation ──────────────────────────────────────────────────────
 
 export interface AdvisorRunInput {
@@ -253,6 +278,42 @@ export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
       nextActionSentence: QUEUE_ONLY_SENTENCE,
       boundedStopReason:
         "Jobs were queued but on-demand processing is disabled — this batch did not process anything.",
+    };
+  }
+
+  // 5.5. Durable-job backoff/terminal/lookup-failure — must read as a
+  //      stopped "failed" state (Retry control usable again), never as
+  //      "partial" (which would auto-continue), and must outrank the
+  //      "complete" check below so a historical snapshot can never mask a
+  //      backlog of durable work still waiting on backoff or permanently
+  //      blocked by an exhausted retry budget.
+  if (next === ANALYST_JOBS_BACKOFF_ACTION) {
+    return {
+      ...base,
+      state: "failed",
+      buttonLabel: "Retry Intel run",
+      buttonBusy: false,
+      nextActionSentence: analystJobsBackoffSentence(lastRunResult.earliest_retry_at),
+      boundedStopReason: "Durable analyst-refresh jobs remain but are in backoff — none are due to retry yet.",
+    };
+  }
+  if (next === ANALYST_JOBS_TERMINAL_ACTION) {
+    return {
+      ...base,
+      state: "failed",
+      buttonLabel: "Retry Intel run",
+      buttonBusy: false,
+      nextActionSentence: ANALYST_JOBS_TERMINAL_SENTENCE,
+      boundedStopReason: "At least one durable analyst-refresh job exhausted its retry budget.",
+    };
+  }
+  if (next === ACTIVE_TICKERS_LOOKUP_FAILED_ACTION) {
+    return {
+      ...base,
+      state: "failed",
+      buttonLabel: "Retry Intel run",
+      buttonBusy: false,
+      nextActionSentence: RUN_REQUEST_FAILED_SENTENCE,
     };
   }
 

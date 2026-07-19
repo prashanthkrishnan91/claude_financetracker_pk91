@@ -6,7 +6,11 @@
 import type { IntelV3HeldCard, IntelV3RunResult, IntelV3Snapshot } from "@/lib/api";
 import type { AdvisorTruthContract } from "@/lib/advisor-truth";
 import {
+  ACTIVE_TICKERS_LOOKUP_FAILED_ACTION,
   ADD_POSITIONS_SENTENCE,
+  ANALYST_JOBS_BACKOFF_ACTION,
+  ANALYST_JOBS_TERMINAL_ACTION,
+  ANALYST_JOBS_TERMINAL_SENTENCE,
   CERTIFIED_CURRENT_SENTENCE,
   NO_STALE_EVIDENCE_SENTENCE,
   QUEUE_ONLY_SENTENCE,
@@ -269,6 +273,83 @@ describe("deriveRunModel — state machine", () => {
     expect(run.boundedStopReason).toContain("on-demand processing is disabled");
   });
 
+  it("durable jobs in backoff → failed with the backoff sentence, never partial/auto-continuing", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        queued_ticker_count: 0,
+        snapshot_available_after_run: false,
+        next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
+        earliest_retry_at: new Date(Date.now() + 5 * 60_000).toISOString(),
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.buttonBusy).toBe(false);
+    expect(run.nextActionSentence).toContain("cooldown");
+  });
+
+  it("durable job retry budget exhausted → failed, never complete or no-op", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        queued_ticker_count: 0,
+        snapshot_available_after_run: false,
+        next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.nextActionSentence).toBe(ANALYST_JOBS_TERMINAL_SENTENCE);
+  });
+
+  it("a historical certified-current snapshot cannot mask a backoff or terminal job state", () => {
+    const backoff = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        queued_ticker_count: 0,
+        snapshot_available_after_run: false, // backend already forces this false
+        next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
+      }),
+    });
+    expect(backoff.state).not.toBe("complete");
+
+    const terminal = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        queued_ticker_count: 0,
+        snapshot_available_after_run: false,
+        next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
+      }),
+    });
+    expect(terminal.state).not.toBe("complete");
+  });
+
+  it("active-ticker lookup failure → failed, not misread as partial via the reclick_/jobs.remaining path", () => {
+    const run = deriveRunModel({
+      isRunPending: false,
+      isRunError: false,
+      lastRunResult: makeRunResult({
+        // A click that DID queue new work but whose active-ticker lookup
+        // failed before any drain ran — jobs.remaining would be > 0, which
+        // must not fall through to "partial" for this action.
+        queued_ticker_count: 12,
+        on_demand_jobs_attempted: 0,
+        on_demand_jobs_succeeded: 0,
+        on_demand_jobs_failed: 0,
+        snapshot_available_after_run: false,
+        next_required_action: ACTIVE_TICKERS_LOOKUP_FAILED_ACTION,
+      }),
+    });
+    expect(run.state).toBe("failed");
+    expect(run.buttonLabel).toBe("Retry Intel run");
+    expect(run.buttonBusy).toBe(false);
+  });
+
   it("snapshot writes disabled by cost guard → failed with the cost-guard sentence", () => {
     const run = deriveRunModel({
       isRunPending: false,
@@ -446,6 +527,23 @@ describe("shouldAutoContinueRun — bounded automatic continuation (Part A3)", (
     queued_ticker_count: 0,
     next_required_action: "reclick_run_intel_to_retry",
   });
+  const BACKOFF_RESULT = makeRunResult({
+    queued_ticker_count: 0,
+    on_demand_jobs_attempted: 0,
+    on_demand_jobs_succeeded: 0,
+    on_demand_jobs_failed: 0,
+    snapshot_available_after_run: false,
+    next_required_action: ANALYST_JOBS_BACKOFF_ACTION,
+    earliest_retry_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+  });
+  const TERMINAL_RESULT = makeRunResult({
+    queued_ticker_count: 0,
+    on_demand_jobs_attempted: 0,
+    on_demand_jobs_succeeded: 0,
+    on_demand_jobs_failed: 0,
+    snapshot_available_after_run: false,
+    next_required_action: ANALYST_JOBS_TERMINAL_ACTION,
+  });
 
   it("continues while the run state machine reads partial and under both caps", () => {
     expect(shouldAutoContinueRun(PARTIAL_RESULT, 1, 1_000)).toBe(true);
@@ -457,6 +555,14 @@ describe("shouldAutoContinueRun — bounded automatic continuation (Part A3)", (
 
   it("never continues after a terminal failure", () => {
     expect(shouldAutoContinueRun(FAILED_RESULT, 1, 1_000)).toBe(false);
+  });
+
+  it("never continues while durable jobs are in backoff", () => {
+    expect(shouldAutoContinueRun(BACKOFF_RESULT, 1, 1_000)).toBe(false);
+  });
+
+  it("never continues once a durable job's retry budget is exhausted", () => {
+    expect(shouldAutoContinueRun(TERMINAL_RESULT, 1, 1_000)).toBe(false);
   });
 
   it("stops at the attempt cap even while still partial", () => {

@@ -118,11 +118,14 @@ def _blocked_diagnostic() -> dict:
 
 
 def _degraded_diagnostic() -> dict:
+    """Degraded but calculable: QQQ (held, per_ticker, but not a candidate)
+    carries the stale price — VTI/SPY (the actual candidates) are fresh, so
+    this fixture must never trip the stale-selected-candidate invariant."""
     diag = _ready_diagnostic()
     diag["truth_dependency"] = {
         **diag["truth_dependency"],
         "price_coverage_status": "stale",
-        "stale_price_tickers": ["VTI"],
+        "stale_price_tickers": ["QQQ"],
     }
     diag["verdict"] = {
         "policy_status": "degraded",
@@ -454,11 +457,11 @@ def test_stale_and_missing_price_buckets():
     diag["truth_dependency"]["missing_price_tickers"] = ["KLAR"]
     preview = build_paycheck_plan_preview(diag)
     buckets = {e["ticker"]: e["bucket"] for e in preview["explanations"]["not_selected"]}
-    # VTI is stale-priced in this fixture but is still one of the diagnostic's
-    # own next_buy_candidates (a *different* held ticker carries the stale
-    # flag) — the stale-price bucket documents the caveat without erasing
-    # VTI's own selected/priced entry.
+    # QQQ is stale-priced (a held ticker, not a candidate) and KLAR is
+    # missing — neither is one of the diagnostic's own next_buy_candidates
+    # (VTI/SPY), so the plan is preserved and both blockers are documented.
     assert buckets.get("KLAR") == "missing_truth_blocked"
+    assert buckets.get("QQQ") == "stale_price_blocked"
     assert [e["ticker"] for e in preview["explanations"]["selected"]] == ["VTI", "SPY"]
 
 

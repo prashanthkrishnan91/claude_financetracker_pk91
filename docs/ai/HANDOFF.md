@@ -1,9 +1,9 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-18 (Lean Advisor Consolidation — Positions / Advisor / Watchlist; replaces
-the stage-by-stage log with a compact state summary. Full evidence for the consolidation lives in
-`REFACTOR_REPORT.md` at the repo root and in the consolidation PR body. Same-day follow-up: Run
-Intel completion-classification fix after PR #473 — see bullet below.)
+Last updated: 2026-07-19 (Advisor product recovery — Run Intel bounded automatic continuation +
+Deploy Cash price-truth refresh/degraded-plan preservation, after PR #473/#474 fixed only response
+wording. Full evidence for the earlier consolidation lives in `REFACTOR_REPORT.md` at the repo root
+and in the consolidation PR body.)
 
 ## Product architecture (read this first)
 
@@ -70,27 +70,66 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   Extend it additively there.
 - **Do not delete the Advisor allocation spine** (`allocation_policy_v1`,
   `paycheck_plan_preview`) — rejected PR #472 did exactly that and was rejected for it.
-- **Run Intel is bounded on-demand, not worker-dependent** (Stage 13B): `POST /intel/v3/run`
-  enqueues and, when `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains up to 3 batches × 10
-  jobs / 90s via `analyst_refresh_on_demand_drain_v1`. A full portfolio may need multiple
-  clicks — the Advisor UI shows partial progress and "Continue Intel run". The separate Railway
-  worker services remain optional and OFF. `snapshot_available_after_run` (in `routers/intel_v3.py
-  ::_augment_with_on_demand_status`) has three paths keyed on `queued_ticker_count` and `status`:
-  (1) jobs queued this request — completion requires proof THIS request published: on-demand
-  enabled, drain ran, nothing left resumable, snapshot writes enabled, latest snapshot is
-  `worker_certified` + `certified_current`, AND its `snapshot_id` differs from
-  `existing_certified_snapshot_id`; (2) zero queued with an allowlisted success status
-  (`analyst_evidence_current` or a `*_contract_recertified` zero-LLM deterministic recertification)
-  — an already-current `worker_certified` + `certified_current` snapshot legitimately means
-  "nothing to do"; (3) zero queued for any other reason (`no_active_holdings`, `enqueue_failed`, a
-  `*_recertification_failed` status, or anything unrecognized) always reports incomplete — a
-  stale/historical snapshot can never stand in for a request's own no-holdings or failed outcome.
-  `_next_required_action` checks in explicit priority order (no-active-holdings > zero-queued
-  failure > queue-only > write-guard > continue-draining > complete > no-stale-evidence > retry),
-  so a zero-queued failure never falls through to "no stale evidence to refresh," and the
-  snapshot-write guard always outranks "continue." Frontend: `advisor-readiness.ts::deriveRunModel`
-  classifies any `status` ending in `_recertification_failed` (alongside `enqueue_failed`/`failed`)
-  as the `failed` run state with the "Retry Intel run" label — no other frontend files changed.
+- **Deploy Cash refreshes price truth on the explicit click, and degraded-but-calculable plans
+  are preserved, not erased** (product recovery): `POST /advisor/paycheck-plan/preview` now runs
+  `current_price_truth_repair_v1.run_current_price_truth_repair(dry_run=False)` for stale/missing
+  open-position prices BEFORE `run_next_buy_policy_diagnostic` — permitted only because Deploy
+  Cash is an explicit user action (never on page load/polling). The repair's own fetch phase runs
+  with bounded concurrency (`_MAX_CONCURRENT_FETCHES=5`, `asyncio.gather` under a semaphore)
+  instead of serial per-ticker waits; writes stay sequential and price_history-only. The repair
+  is best-effort — an unexpected exception never blocks the plan; the response carries an
+  additive `price_truth_repair` summary (`refreshed`/`partial`/`unavailable` + counts).
+  `build_paycheck_plan_preview()` (`paycheck_plan_preview.py`) no longer empties
+  `next_buy_candidates`/`explanations.selected` for every non-`ready` status — only `blocked`
+  (no computable portfolio value, reconciliation beyond tolerance, no safe candidate prices) does.
+  `degraded` (non-fatal residual price/provider limitations, e.g. some OTHER held ticker still
+  stale after repair) preserves the diagnostic's own calculated candidates verbatim, while
+  keeping `trusted=false`/`status=degraded` and the existing caveats. Correction from a
+  fresh-context review: `allocation_policy_v1._compute_gaps`'s `no_price_available` gate only
+  excludes a **missing** price from candidacy — a candidate with a **stale** (present, just old)
+  price still computes a market value and can be selected. The router does not re-filter or
+  recompute the diagnostic's selection/cash-plan math (that would duplicate the allocation-policy
+  decision spine and could desync `planned_buys` from `cash_plan.allocated_cash`); instead
+  `_build_caveats` adds an explicit caveat whenever one of the preserved candidates itself carries
+  a stale price, naming that specific risk rather than only the generic "some holdings have stale
+  price data" caveat. No new allocator, no policy/cap loosening, no fabricated candidates; the
+  decision spine
+  (certified truth → repaired price truth → Intel v3 evidence → `allocation_policy_v1` →
+  `paycheck_plan_preview` → Advisor cash-plan section) is unchanged.
+- **Run Intel is bounded on-demand, not worker-dependent, and self-continues** (Stage 13B +
+  product recovery): `POST /intel/v3/run` enqueues and, when
+  `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains a small quantum
+  (`analyst_refresh_on_demand_drain_v1`: 1 batch × 3 jobs, ≤20s) per request — small enough that
+  one request can never materially exceed a production-safe wall-clock bound even if every
+  selected ticker's LLM call runs to the deadline. The drain's own bound is threaded into
+  `AnalystRefreshWorker`'s `max_adapter_seconds`, which clamps the analyst-refresh adapter's own
+  `wait_for()` budget — the prior gap (`FullPortfolioAnalystRefreshBudget` kept its 180s default
+  regardless of the caller's intended cap) is what let a nominal 90s cap become a ~148s hung
+  request in production. The router (`_augment_with_on_demand_status`) no longer decides whether
+  to drain solely from `queued_ticker_count`: when a click queues zero new jobs, it also checks
+  `analyst_refresh_job_store_v1.count_due_jobs` for the current user's already-existing
+  claimable work (left over from an earlier interrupted click) and continues it if found — both
+  triggers scope claiming to the current user (`AnalystRefreshWorker.scope_user_id`/
+  `scope_tickers`; `claim_due_jobs`/`count_due_jobs` gained optional `user_id`/`tickers` filters)
+  so an on-demand click never claims another user's durable jobs, even though the standalone
+  always-on worker keeps its unscoped global-queue behavior unchanged.
+  `snapshot_available_after_run` now keys off `drain_ran` (true whenever ANY drain happened,
+  whichever trigger found the work) rather than `queued_ticker_count > 0`: completion still
+  requires proof THIS request published (on-demand enabled, nothing left resumable, writes
+  enabled, latest snapshot `worker_certified` + `certified_current` with a `snapshot_id`
+  different from `existing_certified_snapshot_id`); a zero-queued no-op success status
+  (`analyst_evidence_current` / `*_contract_recertified`) with no drain still means "nothing to
+  do"; anything else (no-holdings, enqueue/recert failure, or a drain that ran but never
+  produced a new snapshot) is an honest retry, never a false "nothing was stale."
+  Frontend: `useRunIntelV3` (`hooks.ts`) now drives bounded automatic continuation from the SAME
+  click — after each batch it derives the run state via `shouldAutoContinueRun`
+  (`advisor-readiness.ts`) and, while `partial`, fires another request itself (capped at
+  `RUN_INTEL_MAX_CONTINUATIONS=20` attempts / `RUN_INTEL_MAX_ELAPSED_MS=120s`), aborting in-flight
+  work via `AbortController` on unmount. The user never has to click "Continue Intel run"
+  themselves; `advisor-readiness.ts::deriveRunModel`'s state machine (partial/complete/failed/
+  queue_only classification, including any `status` ending in `_recertification_failed`) is
+  unchanged — only the trigger for firing the next request moved from a manual click to the hook.
+  Still exactly one control — `AdvisorReadinessPanel`/`page.tsx` are unchanged.
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.
@@ -116,6 +155,12 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
 - Frontend: full jest green; `tsc --noEmit` clean; `next build` green.
 - Baseline before consolidation (main @ PR #471): backend 93 failed / 8910 passed
   (documented pre-existing failures), frontend 3 suites failing to compile.
+- Advisor product-recovery PR (2026-07-19): focused Tier 1 bundle (Intel v3 / paycheck /
+  allocation-policy / price-truth / run-intel / deploy-cash / advisor tests) — `3102 passed, 0
+  failed` backend; full frontend jest `602 passed, 0 failed`; `tsc --noEmit` clean; `next build`
+  green (locally requires placeholder `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY`
+  env vars to prerender — no code path change, sandbox-only). Full backend suite not run
+  (Tier 3 criteria not met; see PR body test-tier justification).
 
 ## SQL / env state
 

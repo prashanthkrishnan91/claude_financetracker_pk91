@@ -29,6 +29,16 @@ export type PaycheckPlannedBuy = {
   reason_codes: string[];
 };
 
+/** Plain-English summary of the pre-diagnostic price-truth repair (Deploy Cash). */
+export type PaycheckPlanPriceTruthRepair = {
+  status: "refreshed" | "partial" | "unavailable" | string;
+  attempted: number;
+  succeeded: number;
+  written: number;
+  unsupported: number;
+  provider_errors: number;
+};
+
 export type PaycheckPlanPreviewResponse = {
   preview_version: string;
   cash_to_deploy: number;
@@ -45,6 +55,9 @@ export type PaycheckPlanPreviewResponse = {
   next_required_fix: string | null;
   recommendations_trusted: boolean;
   source_diagnostic_version: string;
+  /** Additive: outcome of the current-price-truth repair Deploy Cash runs
+   *  before computing this plan. Absent from older cached responses. */
+  price_truth_repair?: PaycheckPlanPriceTruthRepair;
 };
 
 // ── Reason code → plain-English UI copy ───────────────────────────────────────

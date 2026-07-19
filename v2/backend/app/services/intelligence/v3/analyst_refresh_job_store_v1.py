@@ -451,6 +451,8 @@ def claim_due_jobs(
     worker_run_id: "UUID | str",
     now: Optional[datetime] = None,
     limit: int = 50,
+    user_id: "UUID | str | None" = None,
+    tickers: Optional[list[str]] = None,
 ) -> list[AnalystRefreshJob]:
     """Claim up to ``limit`` due jobs for this worker run.
 
@@ -458,6 +460,12 @@ def claim_due_jobs(
       * status is pending or failed,
       * attempts < max_attempts (exhausted jobs are never re-claimed), and
       * next_retry_at is null or at/before ``now``.
+
+    ``user_id`` / ``tickers`` are optional scoping filters. The standalone
+    always-on worker omits them and claims globally (unchanged behavior). The
+    on-demand drain triggered by one user's explicit Run Intel click passes
+    both so it never claims — and never processes — another user's durable
+    jobs just because the underlying queue table is shared.
 
     Each claim is a guarded single-row UPDATE (``status`` must still equal the
     pre-claim status) so two concurrent workers cannot both grab the same row.
@@ -469,13 +477,16 @@ def claim_due_jobs(
     now_iso = now.isoformat()
 
     try:
-        res = (
+        query = (
             client.table(TABLE)
             .select("*")
             .in_("status", list(CLAIMABLE_STATUSES))
-            .order("requested_at")
-            .execute()
         )
+        if user_id is not None:
+            query = query.eq("user_id", str(user_id))
+        if tickers:
+            query = query.in_("ticker", [str(t).upper() for t in tickers])
+        res = query.order("requested_at").execute()
         candidates = _rows(res)
     except Exception as exc:
         logger.warning(
@@ -616,6 +627,8 @@ def count_due_jobs(
     client: Any,
     *,
     now: Optional[datetime] = None,
+    user_id: "UUID | str | None" = None,
+    tickers: Optional[list[str]] = None,
 ) -> dict[str, int]:
     """Count claimable jobs without claiming them.
 
@@ -626,6 +639,11 @@ def count_due_jobs(
       failed_terminal    — failed jobs with exhausted attempt budget (permanently
                            blocked; never re-claimed by the worker).
       total_due          — pending + failed_retryable (claimable right now).
+
+    ``user_id`` / ``tickers`` optionally scope the count to one user's
+    current holdings — used by the Run Intel router to recognize existing
+    durable work left over from an earlier bounded click without counting
+    (or later claiming) another user's jobs.
 
     Never raises — DB failure returns all-zero counts so the caller's log is
     degraded but the worker run is not interrupted.
@@ -642,12 +660,16 @@ def count_due_jobs(
         "total_due": 0,
     }
     try:
-        res = (
+        query = (
             client.table(TABLE)
             .select("status,attempts,max_attempts,next_retry_at")
             .in_("status", list(CLAIMABLE_STATUSES))
-            .execute()
         )
+        if user_id is not None:
+            query = query.eq("user_id", str(user_id))
+        if tickers:
+            query = query.in_("ticker", [str(t).upper() for t in tickers])
+        res = query.execute()
         rows = _rows(res)
     except Exception as exc:
         logger.warning(

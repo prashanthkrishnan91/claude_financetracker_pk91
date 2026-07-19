@@ -15,6 +15,7 @@ no snapshot mutations, no Buy/Hold/Trim/Sell policy changes.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -25,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 DIAGNOSTIC_VERSION = "current_price_truth_repair_v1"
 PRICE_STALE_BUSINESS_DAYS = 3   # same threshold as Stage 11A
+
+# Bounded concurrency for the missing/stale-ticker fetch phase. Fetches run
+# concurrently up to this limit instead of sequentially waiting up to
+# _HTTP_TIMEOUT (10s) per ticker one at a time — a multi-holding portfolio
+# with several stale tickers would otherwise serialize to tens of seconds
+# inside the explicit Deploy Cash click. Writes remain sequential (the
+# Supabase client is not proven thread/task-safe for concurrent writes).
+_MAX_CONCURRENT_FETCHES = 5
 
 # Per-ticker query limit — we only need the most recent row; 10 is a safe
 # ceiling that can never be mistaken for a 1000-row Supabase default-cap hit.
@@ -528,12 +537,22 @@ async def run_current_price_truth_repair(
             "fetch_error": None,
         })
 
-    for ticker in needs_fetch:
-        st = ticker_statuses[ticker]
-        category = category_by_ticker.get(ticker, "")
-        attempted_fetch += 1
+    # Fetch phase runs with bounded concurrency (network calls only — no DB
+    # writes yet) so N stale/missing tickers cost roughly one provider
+    # round-trip, not N sequential ones.
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_FETCHES)
 
-        fetch_result = await _fetch_price_for_ticker(ticker, category)
+    async def _bounded_fetch(ticker: str) -> dict[str, Any]:
+        async with semaphore:
+            return await _fetch_price_for_ticker(ticker, category_by_ticker.get(ticker, ""))
+
+    fetch_results = await asyncio.gather(*[_bounded_fetch(t) for t in needs_fetch])
+
+    # Write phase stays sequential — per-ticker, in the original needs_fetch
+    # order — preserving the exact per-ticker outcome contract below.
+    for ticker, fetch_result in zip(needs_fetch, fetch_results):
+        st = ticker_statuses[ticker]
+        attempted_fetch += 1
 
         if fetch_result.get("unsupported"):
             unsupported_count += 1

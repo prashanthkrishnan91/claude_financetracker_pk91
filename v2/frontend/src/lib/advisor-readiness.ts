@@ -139,6 +139,43 @@ export function deriveRunJobs(result: IntelV3RunResult | null | undefined): Advi
   };
 }
 
+// ── Bounded automatic continuation (Part A3) ──────────────────────────────────
+//
+// One Run Intel click may need several bounded server-side quanta to drain a
+// full portfolio (each POST /intel/v3/run request is capped to a small,
+// production-safe wall-clock bound — see analyst_refresh_on_demand_drain_v1).
+// Rather than requiring the user to repeatedly click "Continue Intel run",
+// the Run Intel hook in hooks.ts calls the endpoint again automatically
+// while `shouldAutoContinueRun` says so. This function is pure/no-timers so
+// the cap logic is unit-testable without mounting React or faking timers.
+
+/** Hard ceiling on automatic continuation requests for one Run Intel click. */
+export const RUN_INTEL_MAX_CONTINUATIONS = 20;
+
+/** Hard ceiling on total elapsed wall-clock time for one Run Intel click. */
+export const RUN_INTEL_MAX_ELAPSED_MS = 120_000;
+
+/**
+ * Whether the hook should automatically fire another continuation request
+ * without the user clicking again. True only while the run state machine
+ * reads "partial" (a bounded batch stopped short with resumable work) and
+ * neither the attempt cap nor the elapsed-time cap has been reached.
+ */
+export function shouldAutoContinueRun(
+  result: IntelV3RunResult | null | undefined,
+  attemptsSoFar: number,
+  elapsedMs: number,
+): boolean {
+  if (attemptsSoFar >= RUN_INTEL_MAX_CONTINUATIONS) return false;
+  if (elapsedMs >= RUN_INTEL_MAX_ELAPSED_MS) return false;
+  const { state } = deriveRunModel({
+    isRunPending: false,
+    isRunError: false,
+    lastRunResult: result,
+  });
+  return state === "partial";
+}
+
 export function deriveRunModel(input: AdvisorRunInput): AdvisorRunModel {
   const { isRunPending, isRunError, lastRunResult } = input;
   const jobs = deriveRunJobs(lastRunResult);

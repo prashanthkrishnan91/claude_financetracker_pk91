@@ -15,6 +15,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 
 from ..config import get_settings
 from ..middleware.auth import AuthenticatedUser, get_current_user
+from ..services.intelligence.v3.analyst_refresh_job_store_v1 import count_due_jobs
 from ..services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
     run_on_demand_drain,
 )
@@ -80,7 +81,7 @@ def _next_required_action(
          "continue" — reclicking can never publish while writes are off)
       5. drain ran + remaining resumable work -> continue draining
       6. a newly/currently certified snapshot is available -> complete
-      7. nothing was queued -> no stale evidence to refresh
+      7. nothing was queued AND no drain ran -> no stale evidence to refresh
       8. otherwise -> retry
     """
     if status_value == "no_active_holdings":
@@ -98,7 +99,13 @@ def _next_required_action(
         return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
     if snapshot_available_after_run:
         return "none_certified_snapshot_current"
-    if queued_ticker_count == 0:
+    # Only a genuine no-op — nothing queued this click AND no drain of
+    # existing durable work was ever attempted — may report "nothing was
+    # stale." When a drain ran (because existing pending/retryable work was
+    # recognized even though this click queued zero new jobs) but did not
+    # produce a provably new certified snapshot, that is a retry, never a
+    # false "nothing needed doing."
+    if queued_ticker_count == 0 and not drain_ran:
         return "none_no_stale_evidence_to_refresh"
     return "reclick_run_intel_to_retry"
 
@@ -113,6 +120,16 @@ async def _augment_with_on_demand_status(
     manual Run Intel click can produce a certified snapshot without an
     always-on worker service — see analyst_refresh_on_demand_drain_v1.py.
     Read-only augmentation: never changes ``result``'s existing keys.
+
+    ``queued_ticker_count`` alone never decides whether to process work
+    (production evidence: an earlier bounded click's leftover
+    pending/retryable durable jobs were silently never drained because a
+    later click's freshness gate queued zero *new* jobs). Whenever this
+    click itself queued nothing, this also checks for already-existing
+    claimable work for the current user's active holdings and continues it.
+    Every drain this function triggers — whichever path found the work — is
+    scoped to the current user (and their active tickers, when known) so an
+    on-demand click never claims another user's durable jobs.
     """
     settings = get_settings()
     on_demand_enabled = settings.intel_v3_on_demand_refresh_enabled
@@ -124,11 +141,44 @@ async def _augment_with_on_demand_status(
     drain_ran = False
     drain_remaining = False
     jobs_attempted = jobs_succeeded = jobs_failed = 0
+    scope_tickers: list[str] | None = None
 
-    if on_demand_enabled and queued_ticker_count > 0:
+    should_drain = False
+    if on_demand_enabled:
+        if queued_ticker_count > 0:
+            should_drain = True
+        elif (
+            status_value != "no_active_holdings"
+            and status_value not in _ZERO_QUEUED_FAILURE_STATUSES
+        ):
+            try:
+                scope_tickers = await service._get_active_tickers()
+            except Exception as exc:
+                logger.warning(
+                    "intel_v3.existing_work_active_tickers_lookup_failed "
+                    "user_id=%s error=%s",
+                    service.user_id, exc,
+                )
+                scope_tickers = None
+            if scope_tickers:
+                existing_due = count_due_jobs(
+                    service.client,
+                    user_id=str(service.user_id),
+                    tickers=scope_tickers,
+                )
+                if existing_due.get("total_due", 0) > 0:
+                    should_drain = True
+                    logger.info(
+                        "intel_v3.existing_durable_work_recognized user_id=%s "
+                        "total_due=%d — continuing without new jobs queued "
+                        "this click",
+                        service.user_id, existing_due.get("total_due", 0),
+                    )
+
+    if should_drain:
         drain_ran = True
         drain_result = await run_on_demand_drain(
-            user_id=service.user_id, client=service.client,
+            user_id=service.user_id, client=service.client, tickers=scope_tickers,
         )
         jobs_attempted = drain_result.jobs_attempted
         jobs_succeeded = drain_result.jobs_succeeded
@@ -145,17 +195,19 @@ async def _augment_with_on_demand_status(
         and latest_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
     )
 
-    if queued_ticker_count > 0:
-        # This request queued work, so completion requires proof THIS
-        # request actually published a new certified snapshot — not merely
-        # that an older worker_certified + certified_current snapshot still
-        # happens to be sitting there untouched. Requires the full chain
-        # (on-demand enabled, drain ran, nothing left resumable, writes
-        # enabled) AND a concrete latest snapshot id that differs from
-        # whatever certified snapshot (if any) existed before this request.
+    if drain_ran:
+        # A drain happened this request — either because this click queued
+        # new work, or because it recognized already-existing durable work
+        # left over from an earlier interrupted click. Either way, completion
+        # requires proof THIS request actually published a new certified
+        # snapshot — not merely that an older worker_certified +
+        # certified_current snapshot still happens to be sitting there
+        # untouched. Requires the full chain (on-demand enabled, nothing left
+        # resumable, writes enabled) AND a concrete latest snapshot id that
+        # differs from whatever certified snapshot (if any) existed before
+        # this request.
         snapshot_available_after_run = (
             on_demand_enabled
-            and drain_ran
             and not drain_remaining
             and snapshot_writes_enabled
             and latest_is_certified_current

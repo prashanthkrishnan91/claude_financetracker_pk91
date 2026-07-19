@@ -197,11 +197,29 @@ class AnalystRefreshWorker:
         adapter_factory: Optional[AnalystAdapterFactory] = None,
         max_jobs_per_run: int = DEFAULT_MAX_JOBS_PER_RUN,
         max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
+        scope_user_id: "UUID | str | None" = None,
+        scope_tickers: Optional[list[str]] = None,
+        max_adapter_seconds: Optional[float] = None,
     ):
         self.client = client
         self._adapter_factory = adapter_factory or _default_adapter_factory
         self.max_jobs_per_run = max_jobs_per_run
         self.max_runtime_seconds = max_runtime_seconds
+        # Scoping: when set, this worker instance only claims/counts jobs for
+        # one user (optionally further restricted to their current active
+        # tickers). The standalone always-on worker leaves these None and
+        # keeps its existing global-queue behavior; the on-demand drain
+        # (triggered by one user's explicit click) always sets scope_user_id
+        # so it can never process another user's durable jobs.
+        self.scope_user_id = scope_user_id
+        self.scope_tickers = scope_tickers
+        # Upper bound threaded into the analyst-refresh adapter's own budget
+        # so a single in-request batch cannot silently run to the adapter's
+        # much larger default (180s) regardless of this worker's own
+        # max_runtime_seconds — the root cause of the ~148s hang: the caller
+        # intended a small bound, but the adapter's independent default
+        # governed the actual wait_for() timeout.
+        self._max_adapter_seconds = max_adapter_seconds
 
     async def run_once(self, *, now: Optional[datetime] = None) -> WorkerRunResult:
         """Claim and process one batch of due analyst refresh jobs."""
@@ -213,7 +231,10 @@ class AnalystRefreshWorker:
         result = WorkerRunResult(worker_run_id=worker_run_id)
 
         # Count claimable jobs before claiming so the log reports full backlog.
-        due_counts = count_due_jobs(self.client, now=now)
+        due_counts = count_due_jobs(
+            self.client, now=now,
+            user_id=self.scope_user_id, tickers=self.scope_tickers,
+        )
         result.jobs_due = due_counts.get("total_due", 0)
 
         claimed = claim_due_jobs(
@@ -221,6 +242,8 @@ class AnalystRefreshWorker:
             worker_run_id=worker_run_id,
             now=now,
             limit=self.max_jobs_per_run,
+            user_id=self.scope_user_id,
+            tickers=self.scope_tickers,
         )
         result.claimed_job_count = len(claimed)
 
@@ -290,7 +313,10 @@ class AnalystRefreshWorker:
         # reflects the post-outcome state so run_resumable is True whenever any
         # future worker pass can make progress — not just when this pass had
         # retryable failures.
-        post_run_counts = count_due_jobs(self.client, now=now)
+        post_run_counts = count_due_jobs(
+            self.client, now=now,
+            user_id=self.scope_user_id, tickers=self.scope_tickers,
+        )
         remaining_actionable = (
             post_run_counts.get("total_due", 0)          # immediately claimable
             + post_run_counts.get("failed_not_yet_due", 0)  # in backoff, future pass
@@ -393,6 +419,21 @@ class AnalystRefreshWorker:
             )
             result.notes.append(f"adapter_build_error:{type(exc).__name__}")
             return
+
+        # Clamp the adapter's own internal wait_for() budget to this worker's
+        # bound, when one was supplied. Works against any injected factory —
+        # production or test — as long as it returns an object exposing
+        # ``budget.max_seconds`` (the production FullPortfolioAnalystRefreshBudget
+        # shape). Never widens a smaller adapter-supplied budget.
+        if self._max_adapter_seconds is not None:
+            budget = getattr(adapter, "budget", None)
+            if budget is not None and hasattr(budget, "max_seconds"):
+                try:
+                    budget.max_seconds = min(
+                        float(budget.max_seconds), float(self._max_adapter_seconds),
+                    )
+                except (TypeError, ValueError):
+                    pass
 
         try:
             refresh = await adapter(selected, priority_hints=hints, started_at=now)

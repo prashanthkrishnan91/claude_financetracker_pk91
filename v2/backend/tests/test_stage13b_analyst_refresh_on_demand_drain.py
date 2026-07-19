@@ -82,13 +82,19 @@ class TestBoundedDrainStopsHonestly:
 
     @pytest.mark.asyncio
     async def test_aggregates_counts_across_multiple_batches(self):
+        """Aggregation logic across batches, exercised with an explicit
+        max_batches override — the production default is intentionally a
+        single small batch per request (Part A2); a caller that wants more
+        than one batch in a single call still gets correct aggregation."""
         worker = _FakeWorker(
             [
                 _batch(claimed=10, succeeded=["AAPL"] * 8, failed=["TSLA", "NVDA"], resumable=True),
                 _batch(claimed=10, succeeded=["MSFT"] * 9, failed=["GOOG"], resumable=False),
             ]
         )
-        result = await run_on_demand_drain(user_id=USER_ID, client=object(), worker=worker)
+        result = await run_on_demand_drain(
+            user_id=USER_ID, client=object(), worker=worker, max_batches=2,
+        )
         assert result.batches_run == 2
         assert result.jobs_attempted == 20
         assert result.jobs_succeeded == 17
@@ -162,24 +168,51 @@ class TestOnDemandDrainResultShape:
     async def test_produces_a_real_worker_when_none_injected(self, monkeypatch):
         """Production path: no worker injected -> builds a real bounded
         AnalystRefreshWorker scoped to the drain's own caps, not the
-        standalone worker's larger 240s/10-job defaults reused blindly."""
+        standalone worker's larger 240s/10-job defaults reused blindly. Also
+        scoped to the requesting user and the on-demand deadline, so this
+        drain can never claim another user's jobs or let a single analyst
+        call outrun the caller's intended bound (Part A1/A2)."""
         from app.services.intelligence.v3 import analyst_refresh_on_demand_drain_v1 as mod
 
         built = {}
 
         class _CapturingWorker:
-            def __init__(self, *, client, max_jobs_per_run, max_runtime_seconds):
+            def __init__(
+                self, *, client, max_jobs_per_run, max_runtime_seconds,
+                scope_user_id=None, scope_tickers=None, max_adapter_seconds=None,
+            ):
                 built["client"] = client
                 built["max_jobs_per_run"] = max_jobs_per_run
                 built["max_runtime_seconds"] = max_runtime_seconds
+                built["scope_user_id"] = scope_user_id
+                built["scope_tickers"] = scope_tickers
+                built["max_adapter_seconds"] = max_adapter_seconds
 
             async def run_once(self, *_a, **_kw):
                 return _batch(claimed=0, resumable=True)
 
         monkeypatch.setattr(mod, "AnalystRefreshWorker", _CapturingWorker)
         fake_client = object()
-        result = await run_on_demand_drain(user_id=USER_ID, client=fake_client)
+        result = await run_on_demand_drain(
+            user_id=USER_ID, client=fake_client, tickers=["VTI", "AAPL"],
+        )
         assert built["client"] is fake_client
         assert built["max_jobs_per_run"] == mod.MAX_JOBS_PER_BATCH
         assert built["max_runtime_seconds"] == mod.MAX_RUNTIME_SECONDS
+        assert built["scope_user_id"] == USER_ID
+        assert built["scope_tickers"] == ["VTI", "AAPL"]
+        assert built["max_adapter_seconds"] == mod.MAX_RUNTIME_SECONDS
         assert result.stopped_reason == STOPPED_NO_MORE_CLAIMABLE_JOBS
+
+    @pytest.mark.asyncio
+    async def test_default_quantum_is_production_safe_and_small(self):
+        """Part A2: the on-demand quantum must be small enough that ONE
+        request cannot materially exceed a production-safe wall-clock bound,
+        even in the worst case — regression guard against the ~148s hang
+        (MAX_BATCHES_PER_RUN=3 x MAX_JOBS_PER_BATCH=10 x a 180s adapter
+        default that ignored the caller's intended cap)."""
+        from app.services.intelligence.v3 import analyst_refresh_on_demand_drain_v1 as mod
+
+        assert mod.MAX_BATCHES_PER_RUN == 1
+        assert mod.MAX_JOBS_PER_BATCH <= 5
+        assert mod.MAX_RUNTIME_SECONDS <= 30.0

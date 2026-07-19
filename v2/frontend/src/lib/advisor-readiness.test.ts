@@ -12,6 +12,8 @@ import {
   QUEUE_ONLY_SENTENCE,
   RUN_IDLE_CERTIFIED_SENTENCE,
   RUN_IDLE_SENTENCE,
+  RUN_INTEL_MAX_CONTINUATIONS,
+  RUN_INTEL_MAX_ELAPSED_MS,
   RUN_REQUEST_FAILED_SENTENCE,
   SNAPSHOT_WRITES_DISABLED_SENTENCE,
   continueSentence,
@@ -23,6 +25,7 @@ import {
   evidenceFreshnessLabel,
   formatSnapshotAge,
   isSnapshotMissingError,
+  shouldAutoContinueRun,
 } from "@/lib/advisor-readiness";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
@@ -417,6 +420,65 @@ describe("deriveRunJobs", () => {
       failed: 0,
       remaining: 0,
     });
+  });
+});
+
+describe("shouldAutoContinueRun — bounded automatic continuation (Part A3)", () => {
+  const PARTIAL_RESULT = makeRunResult({
+    queued_ticker_count: 6,
+    on_demand_jobs_attempted: 3,
+    on_demand_jobs_succeeded: 3,
+    on_demand_jobs_failed: 0,
+    snapshot_available_after_run: false,
+    next_required_action:
+      "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
+  });
+  const COMPLETE_RESULT = makeRunResult({
+    queued_ticker_count: 3,
+    on_demand_jobs_attempted: 3,
+    on_demand_jobs_succeeded: 3,
+    on_demand_jobs_failed: 0,
+    snapshot_available_after_run: true,
+    next_required_action: "none_certified_snapshot_current",
+  });
+  const FAILED_RESULT = makeRunResult({
+    status: "enqueue_failed",
+    queued_ticker_count: 0,
+    next_required_action: "reclick_run_intel_to_retry",
+  });
+
+  it("continues while the run state machine reads partial and under both caps", () => {
+    expect(shouldAutoContinueRun(PARTIAL_RESULT, 1, 1_000)).toBe(true);
+  });
+
+  it("never continues once complete", () => {
+    expect(shouldAutoContinueRun(COMPLETE_RESULT, 1, 1_000)).toBe(false);
+  });
+
+  it("never continues after a terminal failure", () => {
+    expect(shouldAutoContinueRun(FAILED_RESULT, 1, 1_000)).toBe(false);
+  });
+
+  it("stops at the attempt cap even while still partial", () => {
+    expect(
+      shouldAutoContinueRun(PARTIAL_RESULT, RUN_INTEL_MAX_CONTINUATIONS, 1_000),
+    ).toBe(false);
+    expect(
+      shouldAutoContinueRun(PARTIAL_RESULT, RUN_INTEL_MAX_CONTINUATIONS - 1, 1_000),
+    ).toBe(true);
+  });
+
+  it("stops at the elapsed-time cap even while still partial", () => {
+    expect(
+      shouldAutoContinueRun(PARTIAL_RESULT, 1, RUN_INTEL_MAX_ELAPSED_MS),
+    ).toBe(false);
+    expect(
+      shouldAutoContinueRun(PARTIAL_RESULT, 1, RUN_INTEL_MAX_ELAPSED_MS - 1),
+    ).toBe(true);
+  });
+
+  it("never continues for a null result (nothing to continue from)", () => {
+    expect(shouldAutoContinueRun(null, 0, 0)).toBe(false);
   });
 });
 

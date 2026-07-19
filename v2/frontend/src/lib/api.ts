@@ -135,8 +135,8 @@ export const api = {
   intelV3: {
     getSnapshot: () =>
       fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
-    runV3: () =>
-      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST" }),
+    runV3: (signal?: AbortSignal) =>
+      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST", signal }),
     getRunStatus: (runId: string) =>
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },

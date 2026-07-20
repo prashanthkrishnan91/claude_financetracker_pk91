@@ -38,6 +38,7 @@ certification path; it never decides Buy/Hold/Trim/Sell.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
@@ -53,6 +54,16 @@ from .full_portfolio_analyst_refresh_adapter_v1 import (
 from .watchtower_intel_republisher_v1 import PUBLISH_CERTIFIED_CURRENT
 
 logger = logging.getLogger(__name__)
+
+# Independent server-side budget for the finalization synthesis LLM call, so the
+# one-shot finalization request is code-bounded exactly like a ticker batch (the
+# per-request adapter deadline). This is what makes the whole-run wall-clock
+# proof enforceable rather than merely modelled: the synthesis that overran in
+# production is now bounded here too. Bounding it is SAFE — ticker evidence is
+# already durable and its jobs already succeeded before finalization runs, so a
+# synthesis timeout loses zero per-ticker work; it degrades to a retryable
+# finalization (and certification, which is deterministic + fast, still runs).
+DEFAULT_MAX_FINALIZATION_SYNTHESIS_SECONDS = 20.0
 
 CERTIFIED_SNAPSHOT_SOURCE = "worker_certified"
 
@@ -118,6 +129,7 @@ async def run_finalization_if_ready(
     synthesis_backend: SynthesisBackend = default_finalization_synthesis_backend,
     prewarm: PrewarmFn = trigger_snapshot_prewarm,
     snapshot_state_reader: SnapshotStateReader = _default_snapshot_state_reader,
+    max_synthesis_seconds: float = DEFAULT_MAX_FINALIZATION_SYNTHESIS_SECONDS,
 ) -> FinalizationResult:
     """Run the single finalization pass when — and only when — ready.
 
@@ -185,7 +197,13 @@ async def run_finalization_if_ready(
     synthesis_llm_calls = 1
     synth_status = "unknown"
     try:
-        synth = await synthesis_backend(uid) or {}
+        # Bounded independent budget: a slow/hung synthesis cannot make the
+        # finalization request exceed the per-request envelope. On timeout the
+        # ticker jobs stay succeeded (already durable) and certification still
+        # runs below.
+        synth = await asyncio.wait_for(
+            synthesis_backend(uid), timeout=max(1.0, float(max_synthesis_seconds)),
+        ) or {}
         synth_status = str(synth.get("status") or "unknown")
         synthesis_llm_calls = int(synth.get("synthesis_llm_calls", 1) or 0)
         if synth_status not in ("completed", "no_data"):
@@ -193,6 +211,12 @@ async def run_finalization_if_ready(
                 "intel_v3.finalization_synthesis_failed user_id=%s status=%s "
                 "(certification will still run)", uid, synth_status,
             )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "intel_v3.finalization_synthesis_timeout user_id=%s budget_s=%.1f "
+            "(certification will still run)", uid, float(max_synthesis_seconds),
+        )
+        synth_status = "timeout"
     except Exception as exc:
         logger.warning(
             "intel_v3.finalization_synthesis_raised user_id=%s err=%s "

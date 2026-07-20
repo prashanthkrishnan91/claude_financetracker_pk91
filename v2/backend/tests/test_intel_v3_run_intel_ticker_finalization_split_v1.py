@@ -635,6 +635,57 @@ class TestFinalizationFailureRetry:
         assert res2.certified is True
 
 
+class TestFinalizationSynthesisBounded:
+    @pytest.mark.asyncio
+    async def test_slow_synthesis_is_bounded_and_preserves_succeeded_jobs(self):
+        """The finalization synthesis has its own server-side budget: a slow /
+        hung synthesis cannot make the finalization request exceed the
+        per-request envelope, and it never reopens the already-succeeded ticker
+        jobs. This is what makes the whole-run wall-clock bound enforced rather
+        than merely modelled."""
+        import time as _time
+
+        from app.services.intelligence.v3.analyst_refresh_worker_v1 import AnalystRefreshWorker
+
+        fake = _FakeSupabase()
+        tickers = _portfolio_tickers(8)
+        enqueue_refresh_jobs(fake, user_id=str(USER_ID), tickers=tickers, now=_past())
+        harness = _FinalizationHarness(fake, tickers)
+        per_ticker_calls: dict[str, int] = {}
+        adapter = _SynthesisFreeTickerAdapter(fake, per_ticker_calls)
+        # Drive the worker directly so evidence is durable + jobs succeeded,
+        # WITHOUT triggering finalization (scoped worker defers it to the drain).
+        worker = AnalystRefreshWorker(
+            client=fake, adapter_factory=lambda _uid: adapter,
+            max_jobs_per_run=8, scope_user_id=USER_ID, scope_tickers=tickers,
+        )
+        await worker.run_once()
+
+        async def _slow_synthesis(user_id):
+            harness.synthesis_calls += 1
+            await asyncio.sleep(5.0)      # far longer than the 0.3s budget
+            return {"status": "completed", "synthesis_llm_calls": 1}
+
+        started = _time.monotonic()
+        res = await run_finalization_if_ready(
+            user_id=USER_ID, client=fake, tickers=tickers,
+            synthesis_backend=_slow_synthesis, prewarm=harness.prewarm,
+            snapshot_state_reader=harness.snapshot_reader,
+            max_synthesis_seconds=0.3,
+        )
+        elapsed = _time.monotonic() - started
+
+        # Bounded: returned well before the 5s synthesis would have finished.
+        assert elapsed < 2.0
+        # Ticker jobs remain succeeded — a synthesis timeout loses zero work.
+        succeeded = [r for r in fake.rows("analyst_refresh_jobs")
+                     if r["status"] == JOB_SUCCEEDED]
+        assert len(succeeded) == 8
+        assert sum(per_ticker_calls.values()) == 8
+        # Certification still ran despite the synthesis timeout (evidence complete).
+        assert res.certified is True
+
+
 class TestFinalizationGate:
     @pytest.mark.asyncio
     async def test_finalization_skipped_while_ticker_jobs_remain(self):

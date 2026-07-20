@@ -59,13 +59,18 @@ logger = logging.getLogger(__name__)
 # the batch to 8 tickers while keeping each request well under 20s.
 #
 # Continuation-budget proof for the full 32-holding portfolio:
-#   * ceil(32 / 8) = 4 ticker batches + 1 finalization request = 5 requests.
+#   * ceil(32 / 8) = 4 ticker batches; finalization runs in the same call as the
+#     last ticker batch, so 4 requests drain + certify (a finalization-only retry
+#     adds at most 1 more).
 #   * Frontend caps (advisor-readiness.ts): RUN_INTEL_MAX_CONTINUATIONS=20,
 #     RUN_INTEL_MAX_ELAPSED_MS=120_000.
-#   * 5 requests <= 20 continuation cap (huge margin), and even in the
-#     pathological case where every request runs to its full 20s bound,
-#     5 * 20s = 100s <= 120s elapsed cap — the complete run fits inside the
-#     frontend caps with margin to spare.
+#   * Each request is code-bounded to ~20s: ticker work by max_adapter_seconds
+#     (the worker's wait_for), and the finalization synthesis by its own
+#     independent budget (analyst_finalization_v1.DEFAULT_MAX_FINALIZATION_SYNTHESIS_SECONDS,
+#     also 20s). So even in the pathological case where every request runs to its
+#     full bound, 5 * 20s = 100s <= 120s elapsed cap — an ENFORCED bound, not a
+#     model. Certification (prewarm) is deterministic + fast (DB reads + decide()),
+#     so it does not materially extend the finalization request.
 #
 # max_runtime_seconds is also threaded into AnalystRefreshWorker as its
 # per-call adapter deadline (max_adapter_seconds), so the underlying

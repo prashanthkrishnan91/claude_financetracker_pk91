@@ -1,13 +1,26 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-19 (Advisor product recovery — Run Intel bounded automatic continuation +
-Deploy Cash price-truth refresh/degraded-plan preservation, after PR #473/#474 fixed only response
-wording. Same-day release-blocker patch on the same PR: (1) a stale ticker can never receive new
-cash — fixed canonically in `allocation_policy_v1`, not the router; (2) every on-demand drain,
-including when this click queued new work, is scoped to the current user's current active
-tickers; (3) the router classifies the full due/backoff/terminal durable-job state, not just
-`total_due`. Full evidence for the earlier consolidation lives in `REFACTOR_REPORT.md` at the
-repo root and in the consolidation PR body.)
+Last updated: 2026-07-20 (Run Intel v3 production recovery after merged PR #476 — ticker /
+finalization split. The bounded on-demand ticker batch previously invoked
+`AgentOrchestrator.run()`, which ran per-ticker analyst AND portfolio synthesis AND persistence
+inside one request budget, so a synthesis-stage timeout cancelled the run and discarded the
+already-completed ticker analyses — jobs were marked `full_portfolio_analyst_refresh_timeout`,
+the queue never drained, and 0/32 holdings certified. Fix separates the two units of work:
+**Phase 1** — each ticker batch runs `AgentOrchestrator.run(run_synthesis=False)` (per-ticker
+analyst + durable persist only, no synthesis, reaches an intentional `completed` state), so
+completed ticker evidence is credited and its job marked succeeded before synthesis is ever
+attempted and can never be reopened by a later portfolio-level failure. **Phase 2** — synthesis
+runs exactly once via the new `AgentOrchestrator.run_finalization()` (loads durable verdicts,
+zero per-ticker LLM, one synthesis call, terminal state), driven by
+`analyst_finalization_v1.run_finalization_if_ready` only after every active-ticker job has
+succeeded, followed by the existing deterministic certification + snapshot-publication (prewarm)
+path that publishes the `worker_certified + certified_current` snapshot. A finalization failure
+preserves succeeded ticker jobs, reruns zero per-ticker LLM calls, and returns an explicit
+retryable state (finalization-only retry). On-demand batch size 3→8 (synthesis removed from the
+batch frees the 20s window; 32 holdings = 4 ticker requests + finalization, inside the frontend
+`RUN_INTEL_MAX_CONTINUATIONS=20` / `RUN_INTEL_MAX_ELAPSED_MS=120s` caps with 5×20s=100s worst-case
+margin). Live Railway/Supabase production proof remains outstanding. Full evidence for the earlier
+consolidation lives in `REFACTOR_REPORT.md` at the repo root and in the consolidation PR body.)
 
 ## Product architecture (read this first)
 

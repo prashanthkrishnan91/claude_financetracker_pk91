@@ -233,6 +233,36 @@ async def _augment_with_on_demand_status(
             job_state = _JOB_STATE_TERMINAL
         else:
             job_state = _JOB_STATE_NONE
+            # Finalization-only continuation: every active-ticker analyst job
+            # has already succeeded (nothing due, in backoff, or terminal), but a
+            # prior finalization pass produced a non-certified snapshot (e.g. a
+            # holding failed the evidence contract). Run the bounded drain again:
+            # it claims zero ticker jobs (zero per-ticker LLM calls) and drives
+            # ``run_finalization_if_ready``, which retries ONLY the one-shot
+            # synthesis + certification + publish.
+            #
+            # Gated on an EXISTING non-certified snapshot: every finalization
+            # attempt publishes at least a ``certification_failed`` snapshot, so
+            # a prior attempt always leaves a row. When no snapshot exists at all
+            # there is genuinely nothing to finalize (no succeeded ticker work
+            # awaiting certification) — skip the drain, preserving the existing
+            # zero-queued no-op / no-stale-evidence behavior below.
+            pre_snapshot = await service.get_latest_snapshot()
+            pre_snapshot_exists = isinstance(pre_snapshot, dict)
+            pre_is_certified_current = (
+                pre_snapshot_exists
+                and pre_snapshot.get("snapshot_source") == "worker_certified"
+                and pre_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
+            )
+            if pre_snapshot_exists and not pre_is_certified_current:
+                drain_ran = True
+                drain_result = await run_on_demand_drain(
+                    user_id=service.user_id, client=service.client, tickers=active_tickers,
+                )
+                jobs_attempted = drain_result.jobs_attempted
+                jobs_succeeded = drain_result.jobs_succeeded
+                jobs_failed = drain_result.jobs_failed
+                drain_remaining = drain_result.run_resumable
 
     latest_snapshot = await service.get_latest_snapshot()
     latest_snapshot_id = (

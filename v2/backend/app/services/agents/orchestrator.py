@@ -396,8 +396,8 @@ class AgentOrchestrator:
         result = self._db("agent_runs.create", lambda: self.db.table("agent_runs").insert(row).execute())
         return result.data[0]["id"]
 
-    async def run(self, run_id: str) -> AgentPipelineResult:
-        """Execute the full pipeline for ``run_id`` with exactly one LLM call.
+    async def run(self, run_id: str, *, run_synthesis: bool = True) -> AgentPipelineResult:
+        """Execute the pipeline for ``run_id``.
 
         Terminal-status guarantee: the agent_runs row always transitions to
         'completed' or 'failed' before returning, even on unexpected errors.
@@ -405,8 +405,22 @@ class AgentOrchestrator:
         Execution DAG (each stage logs perf_counter timings):
           1. fetch_live_prices   — cache-backed IO layer (parallel)
           2. build_context       — pure transform, no IO
-          3. single_llm_call     — one Claude call behind LLM_SEMAPHORE
-          4. persist             — DB writes (agent_insights + recommendations)
+          3. per-ticker analyst  — bounded per-ticker Claude calls (scoped)
+          4. portfolio synthesis — ONE cross-ticker Claude call
+          5. persist             — DB writes (agent_insights + recommendations)
+
+        ``run_synthesis`` (Run Intel v3 recovery — ticker/finalization split):
+        when ``False`` the Phase 4 portfolio-synthesis LLM call is skipped
+        entirely. This is the *ticker-batch* path: it runs the per-ticker
+        analyst stage (Phase 3) and persists that durable ticker evidence
+        (Phase 5), then reaches a normal ``completed`` terminal state WITHOUT
+        the portfolio-level synthesis stage. Separating the two means a later
+        portfolio-synthesis timeout can never discard completed per-ticker
+        analysis (the production failure after PR #476): each bounded ticker
+        batch finishes and its evidence is durably credited before synthesis is
+        ever attempted. Synthesis then runs exactly once, later, via
+        :meth:`run_finalization`. ``True`` preserves the historical
+        full-portfolio behaviour for every existing caller (e.g. Run Agents).
         """
         terminal_status_set = False
         run_start = time.perf_counter()
@@ -519,10 +533,6 @@ class AgentOrchestrator:
                 (time.perf_counter() - t0) * 1000, 1
             )
 
-            await self._update_run(
-                run_id, current_agent="Portfolio synthesis", progress=70
-            )
-
             # Phase 4 — dedicated portfolio synthesis. Single LLM call
             # over the per-ticker verdicts + portfolio composition +
             # macro snapshot. Produces strictly-validated cross-ticker
@@ -530,29 +540,55 @@ class AgentOrchestrator:
             # overexposure_flags, rebalancing_suggestions). Deterministic
             # fallback guarantees the acceptance-gate minimums on LLM
             # failure.
-            t0 = time.perf_counter()
-            synthesis = await self._run_portfolio_synthesis(
-                context=context,
-            )
-            self._synthesis = synthesis
-            timings["llm_call_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+            #
+            # Skipped on the ticker-batch path (``run_synthesis=False``): the
+            # bounded per-ticker analyst evidence above is already persisted
+            # below, so a synthesis timeout can never discard it. Synthesis is
+            # instead run exactly once by :meth:`run_finalization` after every
+            # ticker batch has succeeded.
+            if run_synthesis:
+                await self._update_run(
+                    run_id, current_agent="Portfolio synthesis", progress=70
+                )
+                t0 = time.perf_counter()
+                synthesis = await self._run_portfolio_synthesis(
+                    context=context,
+                )
+                self._synthesis = synthesis
+                timings["llm_call_ms"] = round((time.perf_counter() - t0) * 1000, 1)
 
-            # Project the synthesis back onto the agent state so the
-            # existing persistence / allocation paths keep working:
-            # ``portfolio_advice`` preserves the raw dict the legacy
-            # code expects, ``pm_summary`` feeds the agent_runs row.
-            advice = {
-                "summary": synthesis.summary,
-                "portfolio_bias": synthesis.portfolio_bias,
-                "key_themes": synthesis.key_themes,
-                "risk_concentrations": synthesis.risk_concentrations,
-                "overexposure_flags": synthesis.overexposure_flags,
-                "rebalancing_suggestions": synthesis.rebalancing_suggestions,
-                "_used_fallback": synthesis.used_fallback,
-                "cards": [],  # analyst verdicts own per-ticker cards now
-            }
-            state.portfolio_advice = advice
-            state.pm_summary = synthesis.summary
+                # Project the synthesis back onto the agent state so the
+                # existing persistence / allocation paths keep working:
+                # ``portfolio_advice`` preserves the raw dict the legacy
+                # code expects, ``pm_summary`` feeds the agent_runs row.
+                advice = {
+                    "summary": synthesis.summary,
+                    "portfolio_bias": synthesis.portfolio_bias,
+                    "key_themes": synthesis.key_themes,
+                    "risk_concentrations": synthesis.risk_concentrations,
+                    "overexposure_flags": synthesis.overexposure_flags,
+                    "rebalancing_suggestions": synthesis.rebalancing_suggestions,
+                    "_used_fallback": synthesis.used_fallback,
+                    "cards": [],  # analyst verdicts own per-ticker cards now
+                }
+                state.portfolio_advice = advice
+                state.pm_summary = synthesis.summary
+            else:
+                # Ticker-batch path: no portfolio narrative this run. Leave a
+                # terse, honest summary so the completed agent_runs row is not
+                # blank; the certified snapshot's narrative comes from the
+                # single finalization synthesis pass.
+                self._synthesis = None
+                scoped = self._analyst_refresh_tickers
+                batch_n = (
+                    sum(1 for t in state.insights if t.upper() in scoped)
+                    if scoped is not None else len(state.insights)
+                )
+                state.pm_summary = (
+                    f"Analyst evidence refreshed for {batch_n} ticker(s); "
+                    "portfolio synthesis deferred to finalization."
+                )
+                state.portfolio_advice = {"summary": state.pm_summary, "cards": []}
 
             self._confidence_by_ticker = _extract_confidence_from_context(context)
 
@@ -733,6 +769,213 @@ class AgentOrchestrator:
                         run_id,
                         cleanup_exc,
                     )
+
+    # ── Finalization: one portfolio-synthesis pass ───────────────────────────
+
+    async def run_finalization(self, run_id: str) -> AgentPipelineResult:
+        """Run the single portfolio-synthesis pass over durable ticker evidence.
+
+        Run Intel v3 recovery — Phase 2 finalization. Called exactly once after
+        every active-ticker analyst job has succeeded (see
+        ``analyst_finalization_v1``). Guarantees:
+
+          * ZERO per-ticker analyst LLM calls — the per-ticker verdicts are
+            loaded from the durable ``agent_insights`` rows the ticker batches
+            already persisted, never regenerated.
+          * EXACTLY ONE portfolio-synthesis LLM call (Phase 4), with its own
+            independent request budget — a synthesis timeout here never touches
+            the already-succeeded ticker jobs.
+          * The ``agent_runs`` row reaches an intentional terminal state
+            (``completed`` / ``no_data`` / ``failed``) — never a forced-failed
+            LIFECYCLE VIOLATION on the healthy path.
+
+        This does NOT persist per-ticker ``agent_insights`` / ``recommendations``
+        (those are already durable); it only produces + persists the
+        portfolio-level synthesis metadata on the ``agent_runs`` row. The
+        deterministic certification + snapshot-publication path runs after this,
+        driven by the finalization caller.
+        """
+        terminal_status_set = False
+        run_start = time.perf_counter()
+        try:
+            logger.info("Finalization run started — id=%s user=%s", run_id, self.user_id)
+            await self._update_run(
+                run_id, status="running", current_agent="Loading evidence", progress=10
+            )
+
+            market_bundle = await self._fetch_market_bundle_for_user()
+            live_prices = dict(market_bundle.get("live_prices") or {})
+            context = build_portfolio_context(
+                user_id=str(self.user_id),
+                live_prices=live_prices,
+                market_data=market_bundle,
+            )
+
+            if not context.get("portfolio"):
+                await self._update_run(
+                    run_id, status="completed", current_agent="No positions",
+                    progress=100, summary="No positions in portfolio; nothing to finalize.",
+                )
+                terminal_status_set = True
+                return AgentPipelineResult(
+                    run_id=run_id, status="no_data",
+                    summary="No positions.", insights=[],
+                )
+
+            # Deterministic inputs (no LLM) so synthesis reasons over the same
+            # snapshot/feature shape the ticker batches used.
+            self._snapshots = await self._build_and_persist_snapshots(
+                run_id=run_id, context=context, bundle=market_bundle,
+            )
+            self._features = await self._build_and_persist_features(
+                run_id=run_id, bundle=market_bundle,
+            )
+            self._mode_decision = classify_run_mode(
+                getattr(self, "_snapshots", {}).values()
+            )
+            self._cost_tracker = RunCostTracker(mode=self._mode_decision.mode)
+
+            # Load durable per-ticker verdicts — NO per-ticker LLM calls.
+            active_tickers = [
+                p["ticker"] for p in context.get("portfolio") or [] if p.get("ticker")
+            ]
+            self._verdicts = await asyncio.to_thread(
+                self._load_durable_verdicts, active_tickers
+            )
+            logger.info(
+                "finalization.evidence_loaded run_id=%s active_tickers=%d "
+                "durable_verdicts=%d",
+                run_id, len(active_tickers), len(self._verdicts),
+            )
+
+            await self._update_run(
+                run_id, current_agent="Portfolio synthesis", progress=70
+            )
+            synthesis = await self._run_portfolio_synthesis(context=context)
+            self._synthesis = synthesis
+
+            final_summary = (synthesis.summary or "").strip() or (
+                f"Portfolio synthesis complete over {len(active_tickers)} holdings."
+            )
+            await self._update_run(
+                run_id,
+                status="completed",
+                current_agent="Finalization complete",
+                progress=100,
+                summary=final_summary,
+                synthesis=synthesis,
+                mode_decision=getattr(self, "_mode_decision", None),
+                cost_tracker=getattr(self, "_cost_tracker", None),
+            )
+            terminal_status_set = True
+            logger.info(
+                "Finalization run completed — id=%s synthesis_fallback=%s llm_calls=%d",
+                run_id, synthesis.used_fallback, self._llm_call_count,
+            )
+            return AgentPipelineResult(
+                run_id=run_id, status="completed",
+                summary=final_summary, insights=[],
+            )
+        except Exception as exc:
+            logger.exception("Finalization run failed for run %s", run_id)
+            await self._update_run(
+                run_id, status="failed", current_agent="Finalization failed",
+                progress=100, error_message=str(exc)[:500],
+                summary="Portfolio finalization temporarily unavailable — please retry.",
+            )
+            terminal_status_set = True
+            return AgentPipelineResult(
+                run_id=run_id, status="failed",
+                summary="Finalization failed.", insights=[],
+            )
+        finally:
+            if not terminal_status_set:
+                logger.warning(
+                    "LIFECYCLE VIOLATION: finalization run %s did not reach terminal "
+                    "state — forcing failed", run_id,
+                )
+                try:
+                    await self._update_run(
+                        run_id, status="failed", current_agent="Finalization failed",
+                        progress=100, error_message="Internal finalization error",
+                        summary="Portfolio finalization temporarily unavailable — please retry.",
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to mark finalization run %s failed: %s", run_id, cleanup_exc,
+                    )
+            timings_total = round((time.perf_counter() - run_start) * 1000, 1)
+            logger.info("finalization.total_ms run_id=%s total_ms=%s", run_id, timings_total)
+
+    def _load_durable_verdicts(self, tickers: list[str]) -> dict[str, "AnalystVerdict"]:
+        """Load the latest durable non-fallback ``AnalystVerdict`` per ticker.
+
+        Reads the persisted ``agent_insights.analyst_verdict`` rows the ticker
+        batches wrote. Unlike :meth:`_load_fresh_cached_verdicts` this is NOT
+        gated on the reuse TTL or input-fingerprint equivalence — finalization
+        wants whatever the durable evidence currently says for every active
+        holding, with zero LLM calls. Never raises: any read/parse error yields
+        a partial (possibly empty) map and synthesis degrades deterministically.
+        """
+        from ..intelligence.per_ticker_analyst import AnalystVerdict
+
+        if not tickers:
+            return {}
+        upper = [t.upper() for t in tickers]
+        try:
+            rows = (
+                self._db(
+                    "agent_insights.durable_verdicts",
+                    lambda: self.db.table("agent_insights")
+                    .select("ticker, analyst_verdict, created_at")
+                    .eq("user_id", str(self.user_id))
+                    .in_("ticker", upper)
+                    .order("created_at", desc=True)
+                    .execute(),
+                )
+            ).data or []
+        except Exception as exc:
+            logger.warning("durable_verdict_load failed (synthesis degrades): %s", exc)
+            return {}
+
+        out: dict[str, AnalystVerdict] = {}
+        for row in rows:
+            ticker = (row.get("ticker") or "").upper()
+            if not ticker or ticker in out:
+                continue
+            raw = row.get("analyst_verdict")
+            if not isinstance(raw, dict):
+                continue
+            try:
+                action = str(raw.get("action") or "INSUFFICIENT_DATA").upper()
+                out[ticker] = AnalystVerdict(
+                    ticker=ticker,
+                    action=action,
+                    conviction=float(raw.get("conviction") or 0.0),
+                    key_drivers=list(raw.get("key_drivers") or []),
+                    risks=list(raw.get("risks") or []),
+                    confidence=float(raw.get("confidence") or 0.0),
+                    summary=str(raw.get("summary") or ""),
+                    thesis=str(raw.get("thesis") or ""),
+                    reasoning=str(raw.get("reasoning") or ""),
+                    sentiment=raw.get("sentiment"),
+                    citations=list(raw.get("citations") or []),
+                    conviction_level=str(raw.get("conviction_level") or "LOW"),
+                    primary_driver=str(raw.get("primary_driver") or ""),
+                    risk_flag=str(raw.get("risk_flag") or ""),
+                    action_reason=str(raw.get("action_reason") or ""),
+                    differentiation=str(raw.get("differentiation") or ""),
+                    why_this_matters=str(raw.get("why_this_matters") or ""),
+                    what_could_go_wrong=str(raw.get("what_could_go_wrong") or ""),
+                    what_to_do_now=str(raw.get("what_to_do_now") or ""),
+                    used_fallback=bool(raw.get("used_fallback", False)),
+                    llm_attempted=True,
+                    analysis_source="durable_evidence",
+                    generation_version=str(raw.get("generation_version") or "compact_v1"),
+                )
+            except Exception:
+                continue
+        return out
 
     # ── Single LLM call ──────────────────────────────────────────────────────
 

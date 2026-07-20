@@ -325,20 +325,29 @@ class AnalystRefreshWorker:
         result.run_resumable = remaining_actionable > 0
 
         # Trigger prewarm only when the full refresh job set is drained.
-        # During a multi-batch refresh (e.g. 34 holdings / batch_size=10),
+        # During a multi-batch refresh (e.g. 34 holdings / batch_size=8),
         # prewarm must run only on the final pass when no pending or retryable
         # jobs remain — never after an intermediate batch, even when that batch
         # successfully wrote new evidence.  Triggering prewarm early could
         # publish worker_certified because the certification contract checks ALL
         # active positions, and the remaining tickers may have fresh rows from a
         # previous run.
-        if not result.run_resumable and users_with_successes:
+        #
+        # Scope guard (Run Intel v3 ticker/finalization split): the always-on
+        # standalone worker (``scope_user_id is None``) keeps owning prewarm.
+        # The scoped on-demand worker (one user's explicit click) does NOT
+        # prewarm here — finalization (portfolio synthesis + certification +
+        # publish) is owned by ``run_on_demand_drain`` → ``run_finalization_if_ready``
+        # so synthesis runs exactly once, with its own request budget, after all
+        # ticker jobs succeed. Prewarming here too would double the certification
+        # pass and run it before synthesis.
+        if self.scope_user_id is None and not result.run_resumable and users_with_successes:
             for uid_str in users_with_successes:
                 await trigger_snapshot_prewarm(
                     user_id=UUID(uid_str),
                     worker_run_id=result.worker_run_id,
                 )
-        elif users_with_successes:
+        elif self.scope_user_id is None and users_with_successes:
             logger.info(
                 "intel_v3.analyst_refresh_worker_prewarm_deferred "
                 "worker_run_id=%s remaining_pending_or_retryable=%d reason=jobs_remain",

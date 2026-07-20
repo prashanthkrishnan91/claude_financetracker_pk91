@@ -414,7 +414,12 @@ async def default_full_portfolio_agent_orchestrator_backend(
         agent_run_insight_count = 0
         result_insights: list[Any] = []
         try:
-            result = await orch.run(run_id)
+            # Ticker-batch path: run the per-ticker analyst stage + persist ONLY.
+            # ``run_synthesis=False`` skips Phase 4 portfolio synthesis so a
+            # later synthesis timeout can never discard the completed per-ticker
+            # analysis in this bounded batch (the production failure after PR
+            # #476). Synthesis runs exactly once at finalization instead.
+            result = await orch.run(run_id, run_synthesis=False)
             agent_run_status = str(getattr(result, "status", "unknown") or "unknown")
             result_insights = list(getattr(result, "insights", None) or [])
             agent_run_insight_count = len(result_insights)
@@ -853,3 +858,63 @@ async def trigger_snapshot_prewarm(
 # Backward-compat alias for tests and any existing code that references the
 # private name.  New call sites should use ``trigger_snapshot_prewarm``.
 _trigger_snapshot_prewarm = trigger_snapshot_prewarm
+
+
+# ── Finalization synthesis backend (Run Intel v3 recovery — Phase 2) ─────────
+
+async def default_finalization_synthesis_backend(
+    user_id: UUID,
+    *,
+    started_at: Optional[datetime] = None,
+) -> dict[str, Any]:
+    """Run the single portfolio-synthesis pass over durable ticker evidence.
+
+    Called by ``analyst_finalization_v1.run_finalization_if_ready`` once every
+    active-ticker analyst job has succeeded. Drives ``AgentOrchestrator.
+    run_finalization`` which:
+
+      * makes ZERO per-ticker analyst LLM calls (verdicts loaded from durable
+        ``agent_insights`` rows), and
+      * makes EXACTLY ONE portfolio-synthesis LLM call with its own request
+        budget, so a synthesis timeout/failure cannot reopen the succeeded
+        ticker jobs.
+
+    Returns ``{"status", "run_id", "synthesis_used_fallback"}``. Never raises
+    into the caller — a backend failure degrades to ``{"status": "failed"}`` so
+    finalization is reported as an explicit retryable failure, not a crash.
+    """
+    from ....config import get_settings
+    from ...agents.orchestrator import AgentOrchestrator
+    from ...price_engine import PriceService
+
+    settings = get_settings()
+    price_service = PriceService(
+        finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
+        alpaca_key=getattr(settings, "alpaca_api_key", "") or "",
+        alpaca_secret=getattr(settings, "alpaca_secret_key", "") or "",
+        polygon_key=getattr(settings, "polygon_api_key", "") or "",
+    )
+    try:
+        orch = AgentOrchestrator(
+            user_id=user_id,
+            price_service=price_service,
+            anthropic_api_key=getattr(settings, "anthropic_api_key", "") or "",
+            finnhub_key=getattr(settings, "finnhub_api_key", "") or "",
+            polygon_key=getattr(settings, "polygon_api_key", "") or "",
+            force_recompute=False,
+        )
+        run_id = await orch.create_run(tickers=[])
+        result = await orch.run_finalization(run_id)
+        status = str(getattr(result, "status", "unknown") or "unknown")
+        return {
+            "status": status,
+            "run_id": run_id,
+            "synthesis_used_fallback": bool(
+                getattr(getattr(orch, "_synthesis", None), "used_fallback", False)
+            ),
+        }
+    except Exception as exc:
+        logger.warning(
+            "finalization_synthesis_backend.failed user_id=%s error=%s", user_id, exc,
+        )
+        return {"status": "failed", "run_id": None, "error": f"{type(exc).__name__}"}

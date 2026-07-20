@@ -162,6 +162,11 @@ class TestOnDemandDrainResultShape:
             "duration_ms": 123,
             "run_resumable": False,
             "stopped_reason": STOPPED_DRAINED,
+            # Phase 2 finalization fields — defaults when finalization did not run.
+            "finalization_ran": False,
+            "finalization_status": None,
+            "synthesis_llm_calls": 0,
+            "certified_snapshot_id": None,
         }
 
     @pytest.mark.asyncio
@@ -179,6 +184,7 @@ class TestOnDemandDrainResultShape:
         class _CapturingWorker:
             def __init__(
                 self, *, client, max_jobs_per_run, max_runtime_seconds,
+                adapter_factory=None,
                 scope_user_id=None, scope_tickers=None, max_adapter_seconds=None,
             ):
                 built["client"] = client
@@ -206,13 +212,22 @@ class TestOnDemandDrainResultShape:
 
     @pytest.mark.asyncio
     async def test_default_quantum_is_production_safe_and_small(self):
-        """Part A2: the on-demand quantum must be small enough that ONE
-        request cannot materially exceed a production-safe wall-clock bound,
-        even in the worst case — regression guard against the ~148s hang
-        (MAX_BATCHES_PER_RUN=3 x MAX_JOBS_PER_BATCH=10 x a 180s adapter
-        default that ignored the caller's intended cap)."""
+        """Part A2 / Run Intel v3 ticker-finalization split: ONE request must
+        still be bounded to a production-safe wall-clock, even in the worst
+        case — regression guard against the original ~148s hang
+        (MAX_BATCHES_PER_RUN=3 x MAX_JOBS_PER_BATCH=10 x a 180s adapter default
+        that ignored the caller's intended cap).
+
+        The wall-clock guard is the single batch (MAX_BATCHES_PER_RUN==1) plus
+        the 20s per-request adapter deadline (MAX_RUNTIME_SECONDS threaded as
+        max_adapter_seconds) — NOT the batch's ticker count, which the adapter
+        bounds regardless. With portfolio synthesis removed from the ticker
+        batch (it moved to the one-shot finalization pass), the whole 20s window
+        belongs to bounded per-ticker analyst work, so the batch can safely hold
+        more tickers and still complete before the deadline. The batch cap stays
+        bounded to guard against runaway claiming."""
         from app.services.intelligence.v3 import analyst_refresh_on_demand_drain_v1 as mod
 
         assert mod.MAX_BATCHES_PER_RUN == 1
-        assert mod.MAX_JOBS_PER_BATCH <= 5
+        assert mod.MAX_JOBS_PER_BATCH <= 8
         assert mod.MAX_RUNTIME_SECONDS <= 30.0

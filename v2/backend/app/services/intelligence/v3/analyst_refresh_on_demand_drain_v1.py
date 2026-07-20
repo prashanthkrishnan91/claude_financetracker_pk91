@@ -40,23 +40,39 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
 
+from .analyst_finalization_v1 import (
+    FINALIZATION_COMPLETED,
+    FinalizationResult,
+    run_finalization_if_ready,
+)
 from .analyst_refresh_worker_v1 import AnalystRefreshWorker
 
 logger = logging.getLogger(__name__)
 
-# Small enough that ONE HTTP request can never materially exceed a
-# production-safe wall-clock bound, even in the worst case where every
-# selected ticker's LLM call runs to the full deadline. A 34-holding
-# portfolio needs many bounded clicks/continuations (see Part A3's automatic
-# bounded continuation) rather than draining in 1-2 requests — trading a
-# single ~148s hang for many fast, resumable, ~20s-bounded requests.
+# Batch sizing (Run Intel v3 ticker/finalization split).
+#
+# Now that portfolio synthesis is NO LONGER run inside a ticker batch (it moved
+# to the one-shot finalization pass), the whole per-request 20s budget belongs
+# to bounded per-ticker analyst work. Production proved that 3 ticker analyses
+# already completed comfortably before the 20s deadline — only the trailing
+# synthesis overran — so removing synthesis frees the window to safely double
+# the batch to 8 tickers while keeping each request well under 20s.
+#
+# Continuation-budget proof for the full 32-holding portfolio:
+#   * ceil(32 / 8) = 4 ticker batches + 1 finalization request = 5 requests.
+#   * Frontend caps (advisor-readiness.ts): RUN_INTEL_MAX_CONTINUATIONS=20,
+#     RUN_INTEL_MAX_ELAPSED_MS=120_000.
+#   * 5 requests <= 20 continuation cap (huge margin), and even in the
+#     pathological case where every request runs to its full 20s bound,
+#     5 * 20s = 100s <= 120s elapsed cap — the complete run fits inside the
+#     frontend caps with margin to spare.
 #
 # max_runtime_seconds is also threaded into AnalystRefreshWorker as its
 # per-call adapter deadline (max_adapter_seconds), so the underlying
 # analyst-refresh call's own wait_for() is bounded to this same cap rather
 # than the adapter's much larger 180s default — see module docstring.
 MAX_BATCHES_PER_RUN = 1
-MAX_JOBS_PER_BATCH = 3
+MAX_JOBS_PER_BATCH = 8
 MAX_RUNTIME_SECONDS = 20.0
 
 STOPPED_DRAINED = "drained"
@@ -77,6 +93,12 @@ class OnDemandDrainResult:
     duration_ms: int = 0
     run_resumable: bool = False
     stopped_reason: str = STOPPED_NOT_RUN
+    # Finalization (Phase 2) — populated only when no ticker work remains and
+    # finalization was attempted this call.
+    finalization_ran: bool = False
+    finalization_status: Optional[str] = None
+    synthesis_llm_calls: int = 0
+    certified_snapshot_id: Optional[str] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -87,7 +109,15 @@ class OnDemandDrainResult:
             "duration_ms": self.duration_ms,
             "run_resumable": self.run_resumable,
             "stopped_reason": self.stopped_reason,
+            "finalization_ran": self.finalization_ran,
+            "finalization_status": self.finalization_status,
+            "synthesis_llm_calls": self.synthesis_llm_calls,
+            "certified_snapshot_id": self.certified_snapshot_id,
         }
+
+
+# Finalization seam — async (user_id, client, tickers) -> FinalizationResult.
+FinalizerFn = Any
 
 
 async def run_on_demand_drain(
@@ -99,6 +129,8 @@ async def run_on_demand_drain(
     max_batches: int = MAX_BATCHES_PER_RUN,
     max_jobs_per_batch: int = MAX_JOBS_PER_BATCH,
     max_runtime_seconds: float = MAX_RUNTIME_SECONDS,
+    adapter_factory: Optional[Any] = None,
+    finalizer: Optional[FinalizerFn] = None,
 ) -> OnDemandDrainResult:
     """Drain the durable job queue for a bounded number of batches.
 
@@ -116,6 +148,7 @@ async def run_on_demand_drain(
     """
     active_worker = worker or AnalystRefreshWorker(
         client=client,
+        adapter_factory=adapter_factory,
         max_jobs_per_run=max_jobs_per_batch,
         max_runtime_seconds=max_runtime_seconds,
         scope_user_id=user_id,
@@ -145,11 +178,44 @@ async def run_on_demand_drain(
     else:
         result.stopped_reason = STOPPED_MAX_BATCHES_REACHED
 
+    # ── Phase 2: one finalization pass ────────────────────────────────────────
+    # Only when no ticker work remains resumable this call — either the final
+    # ticker batch just drained, or this was a finalization-only continuation
+    # (zero ticker jobs claimed, all already succeeded). ``run_finalization_if_ready``
+    # is itself gated: it no-ops unless every active-ticker job has succeeded and
+    # no certified-current snapshot exists yet, and it runs synthesis exactly once
+    # with its own budget. Skipped when a ``worker`` was injected (unit tests that
+    # script batch results drive finalization directly instead).
+    if worker is None and not result.run_resumable:
+        active_finalizer = finalizer or run_finalization_if_ready
+        try:
+            fin: FinalizationResult = await active_finalizer(
+                user_id=user_id, client=client, tickers=tickers,
+            )
+            result.finalization_ran = True
+            result.finalization_status = fin.status
+            result.synthesis_llm_calls = fin.synthesis_llm_calls
+            if fin.certified:
+                result.certified_snapshot_id = fin.published_snapshot_id
+            # A pending/failed finalization keeps the run resumable so the
+            # frontend fires another (finalization-only) continuation.
+            if fin.status != FINALIZATION_COMPLETED and fin.status != "already_certified":
+                result.run_resumable = True
+        except Exception as exc:  # never fail the drain on finalization
+            logger.warning(
+                "intel_v3.on_demand_drain_finalization_failed user_id=%s err=%s",
+                user_id, exc,
+            )
+            result.finalization_ran = True
+            result.finalization_status = "failed_retryable"
+            result.run_resumable = True
+
     result.duration_ms = int((time.monotonic() - started) * 1000)
     logger.info(
         "intel_v3.on_demand_drain_summary user_id=%s batches_run=%d "
         "jobs_attempted=%d jobs_succeeded=%d jobs_failed=%d "
-        "run_resumable=%s stopped_reason=%s duration_ms=%d",
+        "run_resumable=%s stopped_reason=%s finalization_ran=%s "
+        "finalization_status=%s synthesis_llm_calls=%d duration_ms=%d",
         user_id,
         result.batches_run,
         result.jobs_attempted,
@@ -157,6 +223,9 @@ async def run_on_demand_drain(
         result.jobs_failed,
         result.run_resumable,
         result.stopped_reason,
+        result.finalization_ran,
+        result.finalization_status,
+        result.synthesis_llm_calls,
         result.duration_ms,
     )
     return result

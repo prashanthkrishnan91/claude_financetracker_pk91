@@ -190,9 +190,8 @@ def _job_row(
     refresh_window: Optional[str] = None,
     next_retry_at: Optional[str] = None,
     max_attempts: int = 5,
-    run_session_id: Optional[str] = None,
 ) -> dict:
-    row = {
+    return {
         "id": str(uuid.uuid4()),
         "user_id": str(user_id),
         "ticker": ticker,
@@ -203,12 +202,6 @@ def _job_row(
         "next_retry_at": next_retry_at if next_retry_at is not None else _now().isoformat(),
         "requested_at": _now().isoformat(),
     }
-    if run_session_id is not None:
-        # Forward-compat seam: current production schema has no
-        # run_session_id column yet — seeding it here only lets fixtures
-        # tag which session a row conceptually belongs to.
-        row["run_session_id"] = run_session_id
-    return row
 
 
 def _snapshot_row(
@@ -393,6 +386,10 @@ class TestHistoricalSnapshotCannotCompleteNewSession:
 
 class TestOldQueueRowsCannotInterfereWithNewSession:
     def test_new_session_claims_only_its_own_session_scoped_rows(self):
+        # Migration-free design: a session-aware Run Intel click stores its
+        # run_session_id AS the existing refresh_window value — there is no
+        # separate database column. ``old_session_id`` / ``new_session_id``
+        # are themselves the refresh_window values seeded below.
         old_session_id = str(uuid.uuid4())
         new_session_id = str(uuid.uuid4())
         fake = _FakeSupabase()
@@ -401,51 +398,58 @@ class TestOldQueueRowsCannotInterfereWithNewSession:
             [
                 # Old session's own rows — VTI (still held today) and OLDX
                 # (a since-sold ticker sitting in the old backlog).
-                _job_row(USER_A, "VTI", refresh_window=_YESTERDAY, run_session_id=old_session_id),
-                _job_row(USER_A, "OLDX", refresh_window=_YESTERDAY, run_session_id=old_session_id),
+                _job_row(USER_A, "VTI", refresh_window=old_session_id),
+                _job_row(USER_A, "OLDX", refresh_window=old_session_id),
                 # The new session's own rows for its current active tickers.
-                _job_row(USER_A, "VTI", refresh_window=_TODAY, run_session_id=new_session_id),
-                _job_row(USER_A, "AAPL", refresh_window=_TODAY, run_session_id=new_session_id),
+                _job_row(USER_A, "VTI", refresh_window=new_session_id),
+                _job_row(USER_A, "AAPL", refresh_window=new_session_id),
             ],
         )
-        current_active_tickers = ["VTI", "AAPL"]  # OLDX was sold, no longer held
 
         # Contract requirement: queue counting/claiming must be scoped to the
-        # CURRENT run_session_id, not merely (user_id, tickers) — VTI exists
-        # in both an old-session row and a new-session row, and only the
-        # new-session row may ever count as this session's progress.
-        # count_due_jobs / claim_due_jobs accept no run_session_id parameter
-        # at all today, so this is expected to fail on current main with a
-        # TypeError — a legitimate missing-contract failure, not a solved
-        # behavior.
+        # CURRENT run_session_id (== refresh_window), not merely
+        # (user_id, tickers) — VTI exists in both an old-session row and a
+        # new-session row, and only the new-session row may ever count as
+        # this session's progress. count_due_jobs / claim_due_jobs accept no
+        # run_session_id parameter at all today — filtering
+        # refresh_window == run_session_id against the SAME existing column,
+        # never a new one — so this is expected to fail on current main with
+        # a TypeError, a legitimate missing-contract failure.
         counts = count_due_jobs(
-            fake, now=_now(), user_id=USER_A, tickers=current_active_tickers,
+            fake,
+            now=_now(),
+            user_id=USER_A,
+            tickers=["VTI", "AAPL"],
             run_session_id=new_session_id,
         )
         claimed = claim_due_jobs(
-            fake, worker_run_id=uuid.uuid4(), now=_now(),
-            user_id=USER_A, tickers=current_active_tickers,
+            fake,
+            worker_run_id=uuid.uuid4(),
+            now=_now(),
+            user_id=USER_A,
+            tickers=["VTI", "AAPL"],
             run_session_id=new_session_id,
         )
 
         # Once session-scoped queue operations exist: exactly the
         # current-session VTI and AAPL rows are counted and claimed.
         assert counts["total_due"] == 2
-        assert {j.ticker for j in claimed} == {"VTI", "AAPL"}
-        assert all(j.run_session_id == new_session_id for j in claimed)
+        assert {job.ticker for job in claimed} == {"VTI", "AAPL"}
+        assert all(job.refresh_window == new_session_id for job in claimed)
 
         # The old session's VTI row (same ticker, different session) is
         # never claimed as this session's own progress.
         assert not any(
-            j.ticker == "VTI" and j.run_session_id == old_session_id for j in claimed
+            job.ticker == "VTI" and job.refresh_window == old_session_id
+            for job in claimed
         )
         # The obsolete sold ticker in the old backlog is never processed.
-        assert not any(j.ticker == "OLDX" for j in claimed)
+        assert not any(job.ticker == "OLDX" for job in claimed)
 
-        # Both old-session rows remain unchanged.
+        # Both old-session rows remain pending and unchanged.
         old_rows = [
             r for r in fake.store["analyst_refresh_jobs"]
-            if r.get("run_session_id") == old_session_id
+            if r.get("refresh_window") == old_session_id
         ]
         assert len(old_rows) == 2
         assert all(r["status"] == JOB_PENDING for r in old_rows)

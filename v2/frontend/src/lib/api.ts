@@ -135,8 +135,17 @@ export const api = {
   intelV3: {
     getSnapshot: () =>
       fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
-    runV3: (signal?: AbortSignal) =>
-      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST", signal }),
+    runV3: (signal?: AbortSignal, runSessionId?: string | null) =>
+      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", {
+        method: "POST",
+        signal,
+        // The initial click sends no body (server mints a run_session_id);
+        // each automatic continuation sends the id it returned so the whole
+        // click + continuation sequence is one durable session.
+        ...(runSessionId
+          ? { body: JSON.stringify({ run_session_id: runSessionId }) }
+          : {}),
+      }),
     getRunStatus: (runId: string) =>
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },
@@ -655,6 +664,12 @@ export interface IntelV3RunResult {
   on_demand_jobs_failed?: number;
   snapshot_available_after_run?: boolean;
   next_required_action?: string;
+  // Durable Run Intel session id spanning one explicit click and all of its
+  // automatic continuations. The initial response mints it; the frontend
+  // sends it back on every continuation. `run_session_is_new` is true on the
+  // response that started a fresh session.
+  run_session_id?: string | null;
+  run_session_is_new?: boolean;
   // Additive — only present when next_required_action reports the durable-job
   // "backoff" state (a failed-but-retryable job's next_retry_at hasn't
   // arrived yet). The earliest retry time among such jobs, if known.

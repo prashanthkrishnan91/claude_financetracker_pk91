@@ -179,13 +179,15 @@ class TestOnDemandDrainResultShape:
         class _CapturingWorker:
             def __init__(
                 self, *, client, max_jobs_per_run, max_runtime_seconds,
-                scope_user_id=None, scope_tickers=None, max_adapter_seconds=None,
+                scope_user_id=None, scope_tickers=None, scope_session_id=None,
+                max_adapter_seconds=None,
             ):
                 built["client"] = client
                 built["max_jobs_per_run"] = max_jobs_per_run
                 built["max_runtime_seconds"] = max_runtime_seconds
                 built["scope_user_id"] = scope_user_id
                 built["scope_tickers"] = scope_tickers
+                built["scope_session_id"] = scope_session_id
                 built["max_adapter_seconds"] = max_adapter_seconds
 
             async def run_once(self, *_a, **_kw):
@@ -193,14 +195,19 @@ class TestOnDemandDrainResultShape:
 
         monkeypatch.setattr(mod, "AnalystRefreshWorker", _CapturingWorker)
         fake_client = object()
+        session_id = str(uuid.uuid4())
         result = await run_on_demand_drain(
             user_id=USER_ID, client=fake_client, tickers=["VTI", "AAPL"],
+            run_session_id=session_id,
         )
         assert built["client"] is fake_client
         assert built["max_jobs_per_run"] == mod.MAX_JOBS_PER_BATCH
         assert built["max_runtime_seconds"] == mod.MAX_RUNTIME_SECONDS
         assert built["scope_user_id"] == USER_ID
         assert built["scope_tickers"] == ["VTI", "AAPL"]
+        # The durable session key is threaded into the worker so the bounded
+        # drain only ever claims this session's own jobs.
+        assert built["scope_session_id"] == session_id
         assert built["max_adapter_seconds"] == mod.MAX_RUNTIME_SECONDS
         assert result.stopped_reason == STOPPED_NO_MORE_CLAIMABLE_JOBS
 

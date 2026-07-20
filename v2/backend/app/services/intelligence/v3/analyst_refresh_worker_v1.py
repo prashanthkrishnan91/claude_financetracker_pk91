@@ -54,6 +54,7 @@ from .analyst_refresh_adapter_v1 import (
     prioritize_stale_tickers,
 )
 from .analyst_refresh_job_store_v1 import (
+    JOB_SUCCEEDED,
     AnalystRefreshJob,
     claim_due_jobs,
     count_due_jobs,
@@ -123,8 +124,15 @@ class WorkerRunResult:
                                  will be picked up in a later iteration.
       run_resumable            — True when retryable failures remain and more
                                  worker iterations can make progress.
+      run_session_id           — the durable Run Intel session this pass
+                                 belongs to (== the scoped ``refresh_window``),
+                                 or None for the standalone always-on worker
+                                 which is not scoped to a single click. Lets a
+                                 bounded multi-batch run be proven to be one
+                                 explicit session's work.
     """
     worker_run_id: str
+    run_session_id: Optional[str] = None
     claimed_job_count: int = 0
     jobs_due: int = 0
     selected_tickers: list[str] = field(default_factory=list)
@@ -145,6 +153,7 @@ class WorkerRunResult:
     def to_dict(self) -> dict[str, Any]:
         return {
             "worker_run_id": self.worker_run_id,
+            "run_session_id": self.run_session_id,
             "jobs_due": self.jobs_due,
             "claimed_job_count": self.claimed_job_count,
             "selected_tickers": list(self.selected_tickers),
@@ -199,6 +208,7 @@ class AnalystRefreshWorker:
         max_runtime_seconds: float = DEFAULT_MAX_RUNTIME_SECONDS,
         scope_user_id: "UUID | str | None" = None,
         scope_tickers: Optional[list[str]] = None,
+        scope_session_id: "UUID | str | None" = None,
         max_adapter_seconds: Optional[float] = None,
     ):
         self.client = client
@@ -213,6 +223,14 @@ class AnalystRefreshWorker:
         # so it can never process another user's durable jobs.
         self.scope_user_id = scope_user_id
         self.scope_tickers = scope_tickers
+        # Durable Run Intel session key. When set, count/claim are scoped to
+        # this exact session (``refresh_window == scope_session_id``) so a
+        # bounded multi-batch run only ever touches the jobs the click that
+        # started this session enqueued — never an older session's or a
+        # historical date-window row. Surfaced on every WorkerRunResult.
+        self.scope_session_id = (
+            str(scope_session_id) if scope_session_id is not None else None
+        )
         # Upper bound threaded into the analyst-refresh adapter's own budget
         # so a single in-request batch cannot silently run to the adapter's
         # much larger default (180s) regardless of this worker's own
@@ -228,12 +246,15 @@ class AnalystRefreshWorker:
             now = now.replace(tzinfo=timezone.utc)
         worker_run_id = str(uuid.uuid4())
         started = time.monotonic()
-        result = WorkerRunResult(worker_run_id=worker_run_id)
+        result = WorkerRunResult(
+            worker_run_id=worker_run_id, run_session_id=self.scope_session_id,
+        )
 
         # Count claimable jobs before claiming so the log reports full backlog.
         due_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_session_id,
         )
         result.jobs_due = due_counts.get("total_due", 0)
 
@@ -244,11 +265,24 @@ class AnalystRefreshWorker:
             limit=self.max_jobs_per_run,
             user_id=self.scope_user_id,
             tickers=self.scope_tickers,
+            run_session_id=self.scope_session_id,
         )
         result.claimed_job_count = len(claimed)
 
         if not claimed:
             result.run_resumable = due_counts.get("failed_not_yet_due", 0) > 0
+            # Publication-only retry (session-aware / on-demand path only): the
+            # session's ticker work is already done (nothing left to claim) but
+            # a prior certification/publication may have failed. A user-scoped
+            # worker re-triggers deterministic certification/publication ONLY —
+            # zero per-ticker analyst calls, zero portfolio synthesis — so a
+            # failed snapshot publish has a same-session retry path that does
+            # not rerun any ticker's analysis. The standalone always-on worker
+            # (scope_user_id is None) keeps its legacy behavior and never does
+            # this.
+            await self._maybe_retry_publication_only(
+                now=now, worker_run_id=worker_run_id, result=result,
+            )
             result.duration_ms = int((time.monotonic() - started) * 1000)
             logger.info(
                 "intel_v3.analyst_refresh_worker_run_summary worker_run_id=%s "
@@ -316,6 +350,7 @@ class AnalystRefreshWorker:
         post_run_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_session_id,
         )
         remaining_actionable = (
             post_run_counts.get("total_due", 0)          # immediately claimable
@@ -374,6 +409,101 @@ class AnalystRefreshWorker:
             ",".join(result.notes) if result.notes else "none",
         )
         return result
+
+    async def _maybe_retry_publication_only(
+        self,
+        *,
+        now: datetime,
+        worker_run_id: str,
+        result: WorkerRunResult,
+    ) -> None:
+        """Re-trigger certification/publication ONLY when a session's ticker
+        work is already done but no snapshot was published for it yet.
+
+        This is the same-session publication-retry path: after every ticker
+        job succeeded, a certification/publication failure would otherwise
+        leave the session with no retry route (``run_once`` only publishes
+        right after a batch produces NEW successes). Here, a user-scoped
+        (on-demand) worker whose scoped queue has nothing left to claim, yet
+        has already-succeeded jobs and no certified snapshot published for the
+        session, re-invokes ``trigger_snapshot_prewarm`` — a zero-LLM
+        deterministic certification. It performs ZERO per-ticker analyst calls
+        and ZERO portfolio synthesis.
+
+        The standalone always-on worker (``scope_user_id is None``) never does
+        this — its legacy publication behavior is unchanged. Never raises.
+        """
+        if self.scope_user_id is None:
+            return
+        try:
+            # Are there already-succeeded jobs for this scope (ticker work
+            # done) — i.e. is there anything to certify at all?
+            q = (
+                self.client.table("analyst_refresh_jobs")
+                .select("ticker")
+                .eq("user_id", str(self.scope_user_id))
+                .eq("status", JOB_SUCCEEDED)
+            )
+            if self.scope_session_id is not None:
+                q = q.eq("refresh_window", str(self.scope_session_id))
+            elif self.scope_tickers:
+                q = q.in_("ticker", [str(t).upper() for t in self.scope_tickers])
+            succeeded_rows = [
+                r for r in _rows_from_result(q.execute())
+                # Exclude the router's session-anchor sentinel rows (also stored
+                # with status='succeeded' under this session's refresh_window) —
+                # they are not certified ticker work.
+                if not str(r.get("ticker") or "").startswith("__run_session")
+            ]
+            if not succeeded_rows:
+                return
+
+            # Skip when a certified snapshot for this session already exists —
+            # publication already succeeded, so there is nothing to retry.
+            if self._session_publication_already_certified():
+                return
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.analyst_refresh_worker_publication_retry_probe_failed "
+                "worker_run_id=%s err=%s",
+                worker_run_id, exc,
+            )
+            return
+
+        await trigger_snapshot_prewarm(
+            user_id=UUID(str(self.scope_user_id)),
+            worker_run_id=result.worker_run_id,
+        )
+        result.notes.append("publication_only_retry")
+        logger.info(
+            "intel_v3.analyst_refresh_worker_publication_only_retry "
+            "worker_run_id=%s user_id=%s run_session_id=%s",
+            result.worker_run_id, self.scope_user_id, self.scope_session_id,
+        )
+
+    def _session_publication_already_certified(self) -> bool:
+        """True when a worker_certified snapshot already exists for this scope
+        (session-linked when a session id is scoped), so publication need not
+        be retried. Defensive — any read failure returns False (retry-safe)."""
+        try:
+            rows = _rows_from_result(
+                self.client.table("intel_v3_snapshots")
+                .select("*")
+                .eq("user_id", str(self.scope_user_id))
+                .eq("is_active", True)
+                .execute()
+            )
+        except Exception:
+            return False
+        for row in rows:
+            payload = row.get("payload") or {}
+            if payload.get("snapshot_source") != "worker_certified":
+                continue
+            if self.scope_session_id is None:
+                return True
+            if str(payload.get("run_session_id") or "") == str(self.scope_session_id):
+                return True
+        return False
 
     async def _refresh_user_jobs(
         self,

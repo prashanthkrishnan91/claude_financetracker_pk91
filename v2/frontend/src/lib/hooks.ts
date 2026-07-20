@@ -258,13 +258,18 @@ export function useRunIntelV3(): UseRunIntelV3Result {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const startedAt = Date.now();
+    // A new manual click starts a brand-new durable session: begin with no id
+    // (the server mints one and returns it), then thread that SAME id through
+    // every automatic continuation of this click. A later manual click runs
+    // mutate() again with a fresh null id, so it never continues the old one.
+    let currentSessionId: string | null = null;
     setIsPending(true);
     setIsError(false);
 
     const step = async (attempt: number): Promise<void> => {
       let result: IntelV3RunResult;
       try {
-        result = await api.intelV3.runV3(controller.signal);
+        result = await api.intelV3.runV3(controller.signal, currentSessionId);
       } catch (err) {
         if (controller.signal.aborted || !mountedRef.current) return;
         setIsError(true);
@@ -273,6 +278,9 @@ export function useRunIntelV3(): UseRunIntelV3Result {
       }
       if (controller.signal.aborted || !mountedRef.current) return;
 
+      // Store the session id the initial click minted and reuse it for every
+      // continuation, so the whole sequence is one durable Run Intel session.
+      if (result.run_session_id) currentSessionId = result.run_session_id;
       setData(result);
       qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
 

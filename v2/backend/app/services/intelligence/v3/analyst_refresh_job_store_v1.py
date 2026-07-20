@@ -443,6 +443,75 @@ def enqueue_refresh_jobs(
     )
 
 
+# ── Session re-stamp (migration-free run_session_id) ──────────────────────────
+
+def restamp_jobs_to_session(
+    client: Any,
+    *,
+    user_id: "UUID | str",
+    from_window: str,
+    run_session_id: "UUID | str",
+    tickers: Optional[list[str]] = None,
+) -> int:
+    """Re-stamp this click's freshly-enqueued rows onto the durable session id.
+
+    The initial Run Intel click enqueues under the per-UTC-day
+    ``refresh_window``; once the router mints the click's ``run_session_id`` it
+    re-stamps exactly those rows (``refresh_window = run_session_id``, the same
+    existing column — no new column/table) so every later bounded batch and
+    the completion/count logic can be scoped to this one session.
+
+    Only claimable (pending/failed) rows in ``from_window`` for this user (and,
+    when supplied, this click's ``tickers``) are moved — never another
+    session's UUID-window rows and never a different day's window. A no-op when
+    ``from_window == run_session_id`` (a continuation already session-windowed).
+    Never raises — returns the number of rows re-stamped (0 on failure).
+    """
+    if str(from_window) == str(run_session_id):
+        return 0
+    try:
+        query = (
+            client.table(TABLE)
+            .select("id,ticker")
+            .eq("user_id", str(user_id))
+            .eq("refresh_window", str(from_window))
+            .in_("status", list(CLAIMABLE_STATUSES))
+        )
+        if tickers:
+            query = query.in_("ticker", [str(t).upper() for t in tickers])
+        rows = _rows(query.execute())
+    except Exception as exc:
+        logger.warning(
+            "intel_v3.analyst_refresh_job_restamp_read_failed user_id=%s "
+            "from_window=%s err=%s",
+            user_id, from_window, exc,
+        )
+        return 0
+
+    restamped = 0
+    for row in rows:
+        try:
+            (
+                client.table(TABLE)
+                .update({"refresh_window": str(run_session_id)})
+                .eq("id", row.get("id"))
+                .execute()
+            )
+            restamped += 1
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.analyst_refresh_job_restamp_row_failed id=%s err=%s",
+                row.get("id"), exc,
+            )
+    if restamped:
+        logger.info(
+            "intel_v3.analyst_refresh_jobs_restamped_to_session user_id=%s "
+            "from_window=%s run_session_id=%s count=%d",
+            user_id, from_window, run_session_id, restamped,
+        )
+    return restamped
+
+
 # ── Claim ─────────────────────────────────────────────────────────────────────
 
 def claim_due_jobs(
@@ -453,6 +522,7 @@ def claim_due_jobs(
     limit: int = 50,
     user_id: "UUID | str | None" = None,
     tickers: Optional[list[str]] = None,
+    run_session_id: "UUID | str | None" = None,
 ) -> list[AnalystRefreshJob]:
     """Claim up to ``limit`` due jobs for this worker run.
 
@@ -466,6 +536,14 @@ def claim_due_jobs(
     on-demand drain triggered by one user's explicit Run Intel click passes
     both so it never claims — and never processes — another user's durable
     jobs just because the underlying queue table is shared.
+
+    ``run_session_id`` is the durable Run Intel session key. When supplied it
+    is matched against the existing ``refresh_window`` column
+    (``refresh_window == run_session_id`` — a session-aware click stores its
+    UUID session id *as* the refresh_window; there is no separate column), so
+    a new session never claims an older session's or a historical date-window
+    row for the same ticker. Omitted (the standalone worker) preserves the
+    prior all-windows behavior.
 
     Each claim is a guarded single-row UPDATE (``status`` must still equal the
     pre-claim status) so two concurrent workers cannot both grab the same row.
@@ -486,6 +564,8 @@ def claim_due_jobs(
             query = query.eq("user_id", str(user_id))
         if tickers:
             query = query.in_("ticker", [str(t).upper() for t in tickers])
+        if run_session_id is not None:
+            query = query.eq("refresh_window", str(run_session_id))
         res = query.order("requested_at").execute()
         candidates = _rows(res)
     except Exception as exc:
@@ -629,6 +709,7 @@ def count_due_jobs(
     now: Optional[datetime] = None,
     user_id: "UUID | str | None" = None,
     tickers: Optional[list[str]] = None,
+    run_session_id: "UUID | str | None" = None,
 ) -> dict[str, Any]:
     """Count claimable jobs without claiming them.
 
@@ -648,6 +729,11 @@ def count_due_jobs(
     current holdings — used by the Run Intel router to recognize existing
     durable work left over from an earlier bounded click without counting
     (or later claiming) another user's jobs.
+
+    ``run_session_id`` scopes to one durable Run Intel session by matching the
+    existing ``refresh_window`` column (``refresh_window == run_session_id``),
+    so a new session never counts an older session's or a historical
+    date-window row. Omitted preserves the prior all-windows behavior.
 
     Never raises — DB failure returns all-zero counts so the caller's log is
     degraded but the worker run is not interrupted.
@@ -674,6 +760,8 @@ def count_due_jobs(
             query = query.eq("user_id", str(user_id))
         if tickers:
             query = query.in_("ticker", [str(t).upper() for t in tickers])
+        if run_session_id is not None:
+            query = query.eq("refresh_window", str(run_session_id))
         res = query.execute()
         rows = _rows(res)
     except Exception as exc:

@@ -194,6 +194,38 @@ describe("useRunIntelV3 — bounded automatic continuation", () => {
     container.remove();
   });
 
+  it("mints one session on the click and reuses it across continuations; a new click starts fresh", async () => {
+    // Initial click: no id sent, server returns run_session_id "sess-1".
+    // Continuation: hook must send "sess-1" back. Complete on the 2nd batch.
+    runV3
+      .mockResolvedValueOnce(partialResult({ run_session_id: "sess-1" }))
+      .mockResolvedValueOnce(completeResult({ run_session_id: "sess-1" }));
+
+    const { root, container } = mountHarness();
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+
+    expect(runV3).toHaveBeenCalledTimes(2);
+    // First request carries no session id (server mints it).
+    expect(runV3.mock.calls[0][1] ?? null).toBeNull();
+    // The continuation reuses the id the initial response returned.
+    expect(runV3.mock.calls[1][1]).toBe("sess-1");
+
+    // A brand-new manual click clears the previous session and starts fresh.
+    runV3.mockResolvedValueOnce(completeResult({ run_session_id: "sess-2" }));
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+    expect(runV3.mock.calls[2][1] ?? null).toBeNull();
+    expect(latestHook!.data?.run_session_id).toBe("sess-2");
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
   it("aborts in-flight work on unmount and issues no further requests", async () => {
     let capturedSignal: AbortSignal | undefined;
     let resolveFirst: ((v: IntelV3RunResult) => void) | undefined;

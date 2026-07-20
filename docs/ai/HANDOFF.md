@@ -1,13 +1,25 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-19 (Advisor product recovery — Run Intel bounded automatic continuation +
-Deploy Cash price-truth refresh/degraded-plan preservation, after PR #473/#474 fixed only response
-wording. Same-day release-blocker patch on the same PR: (1) a stale ticker can never receive new
-cash — fixed canonically in `allocation_policy_v1`, not the router; (2) every on-demand drain,
-including when this click queued new work, is scoped to the current user's current active
-tickers; (3) the router classifies the full due/backoff/terminal durable-job state, not just
-`total_due`. Full evidence for the earlier consolidation lives in `REFACTOR_REPORT.md` at the
-repo root and in the consolidation PR body.)
+Last updated: 2026-07-20 (Run Intel durable session identity. Every explicit Run Intel click now
+carries one durable `run_session_id` spanning enqueue → queue count/claim → bounded analyst
+batches → automatic continuations → interruption/resume → certification/publication retry →
+snapshot linkage → completion. Migration-free: the session UUID is stored in the EXISTING
+`analyst_refresh_jobs.refresh_window` text column (`refresh_window == run_session_id`), no new
+column/table/SQL. `count_due_jobs`/`claim_due_jobs` gained an optional `run_session_id` filter;
+`AnalystRefreshWorker` gained `scope_session_id`, surfaces `run_session_id` on every
+`WorkerRunResult`, and gained a publication-only retry (zero ticker analyst calls, zero synthesis)
+for a same-session snapshot-publish failure; `run_on_demand_drain` threads the session; the router
+mints a session on the initial click (a same-day second manual action gets a distinct one),
+reuses the in-flight session across continuations via a non-claimable session-anchor row, and
+gates completion on a snapshot whose payload embeds the same `run_session_id` — a historical
+certified snapshot can never complete a new session. `POST /intel/v3/run` accepts an optional
+`{run_session_id}` body and returns `run_session_id`; the `useRunIntelV3` hook stores the click's
+id and sends it on every continuation, clearing it before a later manual click. Run Intel still
+runs NO portfolio synthesis in its critical path. Acceptance: immutable
+`test_run_intel_session_contract_v1.py` (10/10) unchanged; +`test_run_intel_session_production_v1.py`
+(7). Full backend 8383 passed; frontend jest 609 passed; tsc + build green. Live Railway/Supabase
+validation still outstanding. Full evidence for the earlier consolidation lives in
+`REFACTOR_REPORT.md` at the repo root.)
 
 ## Product architecture (read this first)
 

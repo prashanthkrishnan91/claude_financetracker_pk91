@@ -751,8 +751,16 @@ class IntelV3Service:
 
     # ── Run Intel v3 enqueue (Stage 3.3 — all-or-nothing contract) ──────────
 
-    async def enqueue_run_v3(self) -> dict[str, Any]:
+    async def enqueue_run_v3(self, run_session_id: Optional[str] = None) -> dict[str, Any]:
         """Enqueue a full analyst refresh for all active holdings.
+
+        ``run_session_id`` is the durable Run Intel session key. When supplied
+        (an automatic continuation of an in-flight click), enqueued jobs are
+        stored under ``refresh_window = run_session_id`` — the same existing
+        text column, no new column/table — so the bounded worker only ever
+        claims this session's own jobs. When omitted (the initial click), the
+        default per-UTC-day window is used and the router re-stamps this
+        click's freshly-enqueued rows onto the session id it mints.
 
         This is the only action the Run Intel v3 button performs:
           1. Fetches all active tickers.
@@ -776,9 +784,15 @@ class IntelV3Service:
         Emits ``intel_v3_run_request_received`` and ``intel_v3_full_refresh_enqueued``.
         """
         import asyncio as _asyncio
-        from .analyst_refresh_job_store_v1 import enqueue_refresh_jobs
+        from .analyst_refresh_job_store_v1 import (
+            default_refresh_window,
+            enqueue_refresh_jobs,
+        )
 
         started_at = datetime.now(timezone.utc)
+        # Session-aware window: a continuation stores jobs under its session id;
+        # the initial click uses the per-day window (router re-stamps after).
+        enqueue_window = str(run_session_id) if run_session_id else default_refresh_window(started_at)
 
         logger.info(
             "intel_v3_run_request_received user_id=%s",
@@ -915,6 +929,7 @@ class IntelV3Service:
                     self.client,
                     user_id=self.user_id,
                     tickers=enqueue_tickers,
+                    window=enqueue_window,
                     now=started_at,
                 )
                 queued_count = (
@@ -1192,6 +1207,10 @@ class IntelV3Service:
             "total_holding_count": total_holding_count,
             "existing_certified_snapshot_id": existing_certified_snapshot_id,
             "existing_certified_snapshot": existing_certified,
+            # Window these jobs were enqueued under + the tickers, so the router
+            # can re-stamp a fresh click's rows onto the session id it mints.
+            "enqueue_refresh_window": enqueue_window,
+            "enqueued_tickers": list(enqueue_tickers),
             "run_click_response_ms": run_click_response_ms,
             "certified_snapshot_available_on_click": existing_certified,
             "refresh_jobs_pending_count": refresh_jobs_pending_count,
@@ -1581,6 +1600,14 @@ class IntelV3Service:
 
         # Embed provenance fields into snapshot payload before persisting.
         snapshot_payload["snapshot_source"] = snapshot_source
+        # Link the published snapshot to the durable Run Intel session whose
+        # ticker evidence it certifies (== the refresh_window of that session's
+        # jobs). Lets the router prove completion belongs to THIS session and
+        # never lets a historical snapshot satisfy a new one. None for legacy
+        # date-window runs, which carry no session identity.
+        _session_link = await self._latest_certified_run_session_id()
+        if _session_link is not None:
+            snapshot_payload["run_session_id"] = _session_link
         snapshot_payload["agents_ran_via_worker"] = True
         snapshot_payload["this_click_used_llm"] = False
         snapshot_payload["agents_ran_for_this_click"] = "No — background worker handles analysis"
@@ -1970,6 +1997,49 @@ class IntelV3Service:
                 self.user_id, exc,
             )
             return {"snapshot_at": None, "market_value_certified_ats": []}
+
+    async def _latest_certified_run_session_id(self) -> Optional[str]:
+        """The durable run_session_id (== refresh_window) of the most recently
+        certified analyst-refresh session for this user, or None for a legacy
+        date-window run. Read-only; never raises.
+
+        A session-aware Run Intel click stores its UUID session id as the
+        ``refresh_window`` of its jobs; on publication this links the snapshot
+        to that session. Legacy per-day windows (``YYYY-MM-DD``) are ignored so
+        no date string is ever emitted as a session id.
+        """
+        try:
+            rows = await asyncio.to_thread(
+                lambda: self.client.table("analyst_refresh_jobs")
+                .select("ticker,refresh_window,completed_at,updated_at,status")
+                .eq("user_id", str(self.user_id))
+                .eq("status", "succeeded")
+                .execute()
+            )
+            data = rows.data if isinstance(getattr(rows, "data", None), list) else []
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.latest_certified_session_read_failed user_id=%s error=%s",
+                self.user_id, exc,
+            )
+            return None
+
+        best_window: Optional[str] = None
+        best_key = ""
+        for row in data:
+            ticker = str(row.get("ticker") or "")
+            # Skip the router's session-anchor sentinel rows (also stored with
+            # status='succeeded' and a UUID refresh_window) — they are not a
+            # certified ticker job.
+            if ticker.startswith("__run_session"):
+                continue
+            window = str(row.get("refresh_window") or "")
+            if len(window) != 36 or window.count("-") != 4:
+                continue  # not a UUID session id (e.g. a legacy YYYY-MM-DD window)
+            key = str(row.get("completed_at") or row.get("updated_at") or "")
+            if best_window is None or key >= best_key:
+                best_window, best_key = window, key
+        return best_window
 
     async def _get_active_tickers(self) -> list[str]:
         try:

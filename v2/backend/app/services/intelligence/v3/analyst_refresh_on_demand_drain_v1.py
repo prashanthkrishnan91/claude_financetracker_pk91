@@ -95,6 +95,7 @@ async def run_on_demand_drain(
     user_id: "UUID | str",
     client: Any,
     tickers: Optional[list[str]] = None,
+    run_session_id: "UUID | str | None" = None,
     worker: Optional[AnalystRefreshWorker] = None,
     max_batches: int = MAX_BATCHES_PER_RUN,
     max_jobs_per_batch: int = MAX_JOBS_PER_BATCH,
@@ -120,6 +121,7 @@ async def run_on_demand_drain(
         max_runtime_seconds=max_runtime_seconds,
         scope_user_id=user_id,
         scope_tickers=tickers,
+        scope_session_id=run_session_id,
         max_adapter_seconds=max_runtime_seconds,
     )
     result = OnDemandDrainResult()

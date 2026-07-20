@@ -190,8 +190,9 @@ def _job_row(
     refresh_window: Optional[str] = None,
     next_retry_at: Optional[str] = None,
     max_attempts: int = 5,
+    run_session_id: Optional[str] = None,
 ) -> dict:
-    return {
+    row = {
         "id": str(uuid.uuid4()),
         "user_id": str(user_id),
         "ticker": ticker,
@@ -202,6 +203,12 @@ def _job_row(
         "next_retry_at": next_retry_at if next_retry_at is not None else _now().isoformat(),
         "requested_at": _now().isoformat(),
     }
+    if run_session_id is not None:
+        # Forward-compat seam: current production schema has no
+        # run_session_id column yet — seeding it here only lets fixtures
+        # tag which session a row conceptually belongs to.
+        row["run_session_id"] = run_session_id
+    return row
 
 
 def _snapshot_row(
@@ -364,9 +371,8 @@ class TestHistoricalSnapshotCannotCompleteNewSession:
         )
 
         latest = await service.get_latest_snapshot()
-        # Sanity: this reproduces today's actual behavior — the router
-        # reports completion using the pre-existing historical snapshot.
-        assert result.get("next_required_action") == "none_certified_snapshot_current"
+        # Sanity: no new snapshot was ever published for this click — the
+        # latest snapshot is still the pre-existing historical one.
         assert latest["snapshot_id"] == old_snapshot_id
 
         # Contract requirement: a new Run Intel session must receive its own
@@ -386,43 +392,63 @@ class TestHistoricalSnapshotCannotCompleteNewSession:
 
 
 class TestOldQueueRowsCannotInterfereWithNewSession:
-    def test_stale_window_row_is_claimed_as_the_new_sessions_own_progress(self):
+    def test_new_session_claims_only_its_own_session_scoped_rows(self):
+        old_session_id = str(uuid.uuid4())
+        new_session_id = str(uuid.uuid4())
         fake = _FakeSupabase()
         fake.seed(
             "analyst_refresh_jobs",
             [
-                # Leftover pending row from an OLDER session/window, same
-                # ticker the new session also cares about.
-                _job_row(USER_A, "VTI", refresh_window=_YESTERDAY),
-                # An obsolete sold ticker sitting in the old backlog.
-                _job_row(USER_A, "OLDX", refresh_window=_YESTERDAY),
+                # Old session's own rows — VTI (still held today) and OLDX
+                # (a since-sold ticker sitting in the old backlog).
+                _job_row(USER_A, "VTI", refresh_window=_YESTERDAY, run_session_id=old_session_id),
+                _job_row(USER_A, "OLDX", refresh_window=_YESTERDAY, run_session_id=old_session_id),
+                # The new session's own rows for its current active tickers.
+                _job_row(USER_A, "VTI", refresh_window=_TODAY, run_session_id=new_session_id),
+                _job_row(USER_A, "AAPL", refresh_window=_TODAY, run_session_id=new_session_id),
             ],
         )
-        new_session_active_tickers = ["VTI", "AAPL"]  # OLDX was sold, no longer held
+        current_active_tickers = ["VTI", "AAPL"]  # OLDX was sold, no longer held
 
-        counts = count_due_jobs(fake, now=_now(), user_id=USER_A, tickers=new_session_active_tickers)
+        # Contract requirement: queue counting/claiming must be scoped to the
+        # CURRENT run_session_id, not merely (user_id, tickers) — VTI exists
+        # in both an old-session row and a new-session row, and only the
+        # new-session row may ever count as this session's progress.
+        # count_due_jobs / claim_due_jobs accept no run_session_id parameter
+        # at all today, so this is expected to fail on current main with a
+        # TypeError — a legitimate missing-contract failure, not a solved
+        # behavior.
+        counts = count_due_jobs(
+            fake, now=_now(), user_id=USER_A, tickers=current_active_tickers,
+            run_session_id=new_session_id,
+        )
         claimed = claim_due_jobs(
             fake, worker_run_id=uuid.uuid4(), now=_now(),
-            user_id=USER_A, tickers=new_session_active_tickers,
+            user_id=USER_A, tickers=current_active_tickers,
+            run_session_id=new_session_id,
         )
 
-        # Sanity: today's (user_id, tickers) scoping already keeps the
-        # obsolete sold ticker out — that part of the contract is not broken.
-        assert counts["total_due"] == 1
-        assert [j.ticker for j in claimed] == ["VTI"]
-        oldx_row = next(r for r in fake.store["analyst_refresh_jobs"] if r["ticker"] == "OLDX")
-        assert oldx_row["status"] == JOB_PENDING  # old rows remain unchanged
+        # Once session-scoped queue operations exist: exactly the
+        # current-session VTI and AAPL rows are counted and claimed.
+        assert counts["total_due"] == 2
+        assert {j.ticker for j in claimed} == {"VTI", "AAPL"}
+        assert all(j.run_session_id == new_session_id for j in claimed)
 
-        # Contract requirement: claim_due_jobs/count_due_jobs have no
-        # session-scoping parameter at all — they scope only by
-        # (user_id, tickers) — so a leftover row from an OLDER
-        # refresh_window/session is silently claimed as this NEW session's
-        # own progress whenever the ticker overlaps.
-        assert claimed[0].refresh_window != _YESTERDAY, (
-            "the new session claimed a job row that belongs to an older "
-            "refresh_window/session — no run_session_id scoping exists to "
-            "prevent this"
+        # The old session's VTI row (same ticker, different session) is
+        # never claimed as this session's own progress.
+        assert not any(
+            j.ticker == "VTI" and j.run_session_id == old_session_id for j in claimed
         )
+        # The obsolete sold ticker in the old backlog is never processed.
+        assert not any(j.ticker == "OLDX" for j in claimed)
+
+        # Both old-session rows remain unchanged.
+        old_rows = [
+            r for r in fake.store["analyst_refresh_jobs"]
+            if r.get("run_session_id") == old_session_id
+        ]
+        assert len(old_rows) == 2
+        assert all(r["status"] == JOB_PENDING for r in old_rows)
 
 
 # ── 3. Continuations preserve one session identity ───────────────────────────
@@ -766,8 +792,8 @@ class TestSameDaySecondRunIntelActionCreatesNewSession:
         )
         latest = await service.get_latest_snapshot()
 
-        # Sanity: this reproduces today's actual (buggy) behavior.
-        assert result2.get("next_required_action") == "none_certified_snapshot_current"
+        # Sanity: the second action never published its own snapshot — the
+        # latest snapshot is still the first session's.
         assert latest["snapshot_id"] == "snap-1"  # session 2 never published its own snapshot
 
         # Contract requirements (all unmet today):

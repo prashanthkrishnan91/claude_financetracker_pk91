@@ -258,13 +258,18 @@ export function useRunIntelV3(): UseRunIntelV3Result {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const startedAt = Date.now();
+    // One durable session id per EXPLICIT manual click, minted in the
+    // browser. Every automatic continuation below reuses this exact id, so
+    // the backend resumes the same SQL-backed run session; a later manual
+    // click always mints a fresh id (a new session).
+    const runSessionId = crypto.randomUUID();
     setIsPending(true);
     setIsError(false);
 
     const step = async (attempt: number): Promise<void> => {
       let result: IntelV3RunResult;
       try {
-        result = await api.intelV3.runV3(controller.signal);
+        result = await api.intelV3.runV3(runSessionId, controller.signal);
       } catch (err) {
         if (controller.signal.aborted || !mountedRef.current) return;
         setIsError(true);

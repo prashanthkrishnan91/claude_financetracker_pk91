@@ -135,8 +135,18 @@ export const api = {
   intelV3: {
     getSnapshot: () =>
       fetchApi<IntelV3Snapshot>("/api/v1/intel/v3/snapshot"),
-    runV3: (signal?: AbortSignal) =>
-      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", { method: "POST", signal }),
+    /**
+     * One bounded request of a durable Run Intel session. The browser mints
+     * `runSessionId` (crypto.randomUUID()) once per manual click; every
+     * automatic continuation of that click sends the SAME id so the backend
+     * resumes the exact session instead of guessing from queue state.
+     */
+    runV3: (runSessionId: string, signal?: AbortSignal) =>
+      fetchApi<IntelV3RunResult>("/api/v1/intel/v3/run", {
+        method: "POST",
+        body: JSON.stringify({ run_session_id: runSessionId }),
+        signal,
+      }),
     getRunStatus: (runId: string) =>
       fetchApi<IntelV3RunStatus>(`/api/v1/intel/v3/runs/${runId}`),
   },
@@ -659,6 +669,20 @@ export interface IntelV3RunResult {
   // "backoff" state (a failed-but-retryable job's next_retry_at hasn't
   // arrived yet). The earliest retry time among such jobs, if known.
   earliest_retry_at?: string | null;
+  // ── Durable Run Intel session state (authoritative; explicit, no
+  //    client-side inference from batch counts) ──
+  run_session_id?: string;
+  session_status?: string;
+  expected_ticker_count?: number;
+  session_succeeded_ticker_count?: number;
+  session_remaining_ticker_count?: number;
+  publication_status?:
+    | "not_started"
+    | "pending"
+    | "retryable_failed"
+    | "completed";
+  completed_snapshot_id?: string | null;
+  retryable?: boolean;
   // Legacy fields — kept for back-compat if old backend serves them
   snapshot_id?: string;
   run_id?: string;

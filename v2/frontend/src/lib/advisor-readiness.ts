@@ -151,10 +151,27 @@ export interface AdvisorRunInput {
 }
 
 export function deriveRunJobs(result: IntelV3RunResult | null | undefined): AdvisorRunJobs {
-  const queued = result?.queued_ticker_count ?? 0;
   const attempted = result?.on_demand_jobs_attempted ?? 0;
-  const succeeded = result?.on_demand_jobs_succeeded ?? 0;
   const failed = result?.on_demand_jobs_failed ?? 0;
+
+  // Durable-session responses carry explicit cumulative session state — use
+  // it directly instead of reconstructing progress from one request's batch
+  // counts. Legacy responses (no session fields) keep the old derivation.
+  if (typeof result?.session_remaining_ticker_count === "number") {
+    const queued = result.expected_ticker_count ?? result.queued_ticker_count ?? 0;
+    const succeeded =
+      result.session_succeeded_ticker_count ?? result.on_demand_jobs_succeeded ?? 0;
+    return {
+      queued,
+      attempted,
+      succeeded,
+      failed,
+      remaining: Math.max(0, result.session_remaining_ticker_count),
+    };
+  }
+
+  const queued = result?.queued_ticker_count ?? 0;
+  const succeeded = result?.on_demand_jobs_succeeded ?? 0;
   return {
     queued,
     attempted,

@@ -99,6 +99,8 @@ async def run_on_demand_drain(
     max_batches: int = MAX_BATCHES_PER_RUN,
     max_jobs_per_batch: int = MAX_JOBS_PER_BATCH,
     max_runtime_seconds: float = MAX_RUNTIME_SECONDS,
+    run_session_id: "UUID | str | None" = None,
+    trigger_prewarm: bool = True,
 ) -> OnDemandDrainResult:
     """Drain the durable job queue for a bounded number of batches.
 
@@ -113,6 +115,12 @@ async def run_on_demand_drain(
     (which claims globally across all users), an on-demand drain triggered by
     one user's explicit Run Intel click only ever claims and processes that
     user's own durable jobs.
+
+    ``run_session_id`` additionally scopes claiming to exactly one durable
+    Run Intel session's jobs (legacy NULL-session rows are invisible), and
+    the session flow passes ``trigger_prewarm=False`` because it owns
+    snapshot publication explicitly — the legacy end-of-drain prewarm must
+    never publish an unlinked snapshot on the session path.
     """
     active_worker = worker or AnalystRefreshWorker(
         client=client,
@@ -121,6 +129,8 @@ async def run_on_demand_drain(
         scope_user_id=user_id,
         scope_tickers=tickers,
         max_adapter_seconds=max_runtime_seconds,
+        scope_run_session_id=run_session_id,
+        trigger_prewarm=trigger_prewarm,
     )
     result = OnDemandDrainResult()
     started = time.monotonic()

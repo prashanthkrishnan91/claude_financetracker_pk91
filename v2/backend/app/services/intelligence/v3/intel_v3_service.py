@@ -1210,8 +1210,25 @@ class IntelV3Service:
 
     # ── Deterministic prewarm (Stage 3.2c) ───────────────────────────────────
 
-    async def run_prewarm_snapshot(self, *, prewarm_run_id: str, skip_persist_on_fail: bool = False) -> dict[str, Any]:
+    async def run_prewarm_snapshot(
+        self,
+        *,
+        prewarm_run_id: str,
+        skip_persist_on_fail: bool = False,
+        run_session_id: Optional[str] = None,
+        scope_tickers: Optional[list[str]] = None,
+    ) -> dict[str, Any]:
         """Build and persist a snapshot from current persisted evidence. Zero LLM calls.
+
+        ``run_session_id`` (durable Run Intel sessions): when provided, the
+        published snapshot is explicitly linked to that exact session — the id
+        is written to BOTH the ``intel_v3_snapshots.run_session_id`` scalar
+        column and the JSON payload, and ``check_certified_intel_run_contract``
+        certifies over ``scope_tickers`` (the session's immutable captured
+        holdings scope) instead of the live positions table. The returned
+        payload carries ``snapshot_row_id`` (the inserted SQL row id) so the
+        caller can store it on the session row. Ownership is always passed
+        explicitly — never inferred from the latest job, window, or snapshot.
 
         Mirrors the decision-build + persist steps of ``run_v3()`` but intentionally
         skips ``_run_refresh_orchestrator``.  This means:
@@ -1531,6 +1548,7 @@ class IntelV3Service:
                 user_id=self.user_id,
                 client=self.client,
                 now=started_at,
+                scope_tickers=scope_tickers,
             )
         except Exception as exc:
             logger.error(
@@ -1580,6 +1598,10 @@ class IntelV3Service:
             )
 
         # Embed provenance fields into snapshot payload before persisting.
+        if run_session_id is not None:
+            # Durable session linkage in the payload — mirrored in the scalar
+            # SQL column by _persist_snapshot below.
+            snapshot_payload["run_session_id"] = str(run_session_id)
         snapshot_payload["snapshot_source"] = snapshot_source
         snapshot_payload["agents_ran_via_worker"] = True
         snapshot_payload["this_click_used_llm"] = False
@@ -1609,7 +1631,16 @@ class IntelV3Service:
                 snapshot_payload.get("snapshot_source"),
             )
             return snapshot_payload
-        await self._persist_snapshot(run_id=prewarm_run_id, payload=snapshot_payload)
+        snapshot_row_id = await self._persist_snapshot(
+            run_id=prewarm_run_id,
+            payload=snapshot_payload,
+            run_session_id=run_session_id,
+        )
+        if snapshot_row_id is not None:
+            # SQL row id of the persisted snapshot — added AFTER persist so it
+            # is returned to the caller without being stored inside the JSON
+            # payload itself.
+            snapshot_payload["snapshot_row_id"] = snapshot_row_id
 
         duration_ms = int((datetime.now(timezone.utc) - started_at).total_seconds() * 1000)
         action_counts = snapshot_payload.get("action_counts", {})
@@ -2446,7 +2477,8 @@ class IntelV3Service:
         *,
         run_id: str,
         payload: dict[str, Any],
-    ) -> None:
+        run_session_id: Optional[str] = None,
+    ) -> Optional[str]:
         """Persist snapshot to intel_v3_snapshots, deactivating old ones.
 
         Idempotent: skips the deactivate+insert cycle when the new payload's
@@ -2455,6 +2487,23 @@ class IntelV3Service:
 
         Skips all writes when INTEL_V3_SNAPSHOT_WRITES_ENABLED is not truthy
         (cost guard default). Read paths are never affected.
+
+        Session-linked publication (``run_session_id`` set):
+          * The exact session id is written to the ``run_session_id`` scalar
+            column (the payload already carries it — see run_prewarm_snapshot).
+          * The identical-source-hash shortcut is bypassed: a new session must
+            publish its OWN snapshot row even when content matches an older
+            snapshot — completion is proven by the session-linked row, never
+            by an older snapshot happening to look the same.
+          * Publication is idempotent per session: if a session-linked row
+            already exists (a retry after a partially-failed earlier attempt),
+            that row's id is returned and no duplicate is inserted. The unique
+            partial index ``uq_intel_v3_snapshots_run_session`` is the race
+            backstop; an insert conflict degrades to re-reading the winner.
+
+        Returns the SQL row id of the persisted (or adopted) snapshot row,
+        or None when the write was skipped (writes disabled / identical hash
+        on the legacy path).
         """
         _settings = get_settings()
         if not _settings.intel_v3_snapshot_writes_enabled:
@@ -2463,28 +2512,57 @@ class IntelV3Service:
                 "user_id=%s run_id=%s set INTEL_V3_SNAPSHOT_WRITES_ENABLED=true to persist",
                 self.user_id, run_id,
             )
-            return
+            return None
+
+        def _row_id(res: Any) -> Optional[str]:
+            rows = getattr(res, "data", None) or []
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                rid = rows[0].get("id")
+                return str(rid) if rid else None
+            return None
+
+        async def _find_session_linked_row() -> Optional[str]:
+            res = await asyncio.to_thread(
+                lambda: self.client.table("intel_v3_snapshots")
+                .select("id")
+                .eq("run_session_id", str(run_session_id))
+                .limit(1)
+                .execute()
+            )
+            return _row_id(res)
 
         try:
             source_hash = _hash_payload(payload)
 
-            # Idempotency check: read only source_hash of current active row.
-            existing = await asyncio.to_thread(
-                lambda: self.client.table("intel_v3_snapshots")
-                .select("source_hash")
-                .eq("user_id", str(self.user_id))
-                .eq("is_active", True)
-                .order("created_at", desc=True)
-                .limit(1)
-                .execute()
-            )
-            existing_rows = existing.data or []
-            if existing_rows and existing_rows[0].get("source_hash") == source_hash:
-                logger.info(
-                    "intel_v3.persist_snapshot_skipped_identical user_id=%s run_id=%s source_hash=%s",
-                    self.user_id, run_id, source_hash,
+            if run_session_id is not None:
+                # Publication retry idempotency: one snapshot row per session.
+                existing_id = await _find_session_linked_row()
+                if existing_id is not None:
+                    logger.info(
+                        "intel_v3.persist_snapshot_session_row_exists user_id=%s "
+                        "run_id=%s run_session_id=%s snapshot_row_id=%s",
+                        self.user_id, run_id, run_session_id, existing_id,
+                    )
+                    return existing_id
+            else:
+                # Legacy idempotency check: read only source_hash of current
+                # active row.
+                existing = await asyncio.to_thread(
+                    lambda: self.client.table("intel_v3_snapshots")
+                    .select("source_hash")
+                    .eq("user_id", str(self.user_id))
+                    .eq("is_active", True)
+                    .order("created_at", desc=True)
+                    .limit(1)
+                    .execute()
                 )
-                return
+                existing_rows = existing.data or []
+                if existing_rows and existing_rows[0].get("source_hash") == source_hash:
+                    logger.info(
+                        "intel_v3.persist_snapshot_skipped_identical user_id=%s run_id=%s source_hash=%s",
+                        self.user_id, run_id, source_hash,
+                    )
+                    return None
 
             # Compute flat column values from full payload (avoids payload reads on hot path).
             from .stage7_snapshot_contract_v1 import is_snapshot_stage7_complete as _s7_complete
@@ -2501,25 +2579,42 @@ class IntelV3Service:
                 .select("id")
                 .execute()
             )
-            # Insert new snapshot with flat metadata columns populated.
-            await asyncio.to_thread(
-                lambda: self.client.table("intel_v3_snapshots")
-                .insert({
-                    "user_id":                   str(self.user_id),
-                    "run_id":                    run_id,
-                    "schema_version":            payload.get("schema_version", "v3.1"),
-                    "payload":                   payload,
-                    "source_hash":               source_hash,
-                    "is_active":                 True,
-                    "snapshot_source":           payload.get("snapshot_source"),
-                    "payload_generated_at":      payload.get("generated_at"),
-                    "evidence_mapping_version":  payload.get("evidence_mapping_version"),
-                    "stage7_contract_complete":  _s7_complete(payload),
-                    "stage8e_contract_complete": _s8e_complete(payload),
-                })
-                .select("id,created_at")
-                .execute()
-            )
+            insert_row = {
+                "user_id":                   str(self.user_id),
+                "run_id":                    run_id,
+                "schema_version":            payload.get("schema_version", "v3.1"),
+                "payload":                   payload,
+                "source_hash":               source_hash,
+                "is_active":                 True,
+                "snapshot_source":           payload.get("snapshot_source"),
+                "payload_generated_at":      payload.get("generated_at"),
+                "evidence_mapping_version":  payload.get("evidence_mapping_version"),
+                "stage7_contract_complete":  _s7_complete(payload),
+                "stage8e_contract_complete": _s8e_complete(payload),
+            }
+            if run_session_id is not None:
+                insert_row["run_session_id"] = str(run_session_id)
+            try:
+                inserted = await asyncio.to_thread(
+                    lambda: self.client.table("intel_v3_snapshots")
+                    .insert(insert_row)
+                    .select("id,created_at")
+                    .execute()
+                )
+            except Exception as insert_exc:
+                if run_session_id is not None:
+                    # Unique-index race: a concurrent retry inserted the
+                    # session's snapshot first — adopt it.
+                    raced_id = await _find_session_linked_row()
+                    if raced_id is not None:
+                        logger.info(
+                            "intel_v3.persist_snapshot_session_insert_raced "
+                            "user_id=%s run_session_id=%s snapshot_row_id=%s",
+                            self.user_id, run_session_id, raced_id,
+                        )
+                        return raced_id
+                raise insert_exc
+            return _row_id(inserted)
         except Exception as exc:
             logger.warning(
                 "intel_v3.persist_snapshot_failed user_id=%s run_id=%s error=%s",

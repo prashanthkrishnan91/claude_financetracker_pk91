@@ -414,7 +414,16 @@ async def default_full_portfolio_agent_orchestrator_backend(
         agent_run_insight_count = 0
         result_insights: list[Any] = []
         try:
-            result = await orch.run(run_id)
+            # Analyst-only execution boundary: the Run Intel ticker-refresh
+            # path must never enter the full run() pipeline, whose
+            # unconditional Phase 4 portfolio synthesis previously consumed
+            # the remaining request deadline AFTER per-ticker analysis had
+            # succeeded — timing out the adapter and blanket-failing the
+            # batch. run_analyst_refresh_only() returns as soon as the
+            # selected tickers' evidence is durably persisted.
+            result = await orch.run_analyst_refresh_only(
+                run_id, tickers=list(selected_tickers),
+            )
             agent_run_status = str(getattr(result, "status", "unknown") or "unknown")
             result_insights = list(getattr(result, "insights", None) or [])
             agent_run_insight_count = len(result_insights)

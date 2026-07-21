@@ -123,6 +123,7 @@ class AnalystRefreshJob:
     weight_pct: Optional[float] = None
     evidence_age_hours_at_request: Optional[float] = None
     next_retry_at: Optional[str] = None
+    run_session_id: Optional[str] = None
 
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "AnalystRefreshJob":
@@ -138,6 +139,9 @@ class AnalystRefreshJob:
             weight_pct=row.get("weight_pct"),
             evidence_age_hours_at_request=row.get("evidence_age_hours_at_request"),
             next_retry_at=row.get("next_retry_at"),
+            run_session_id=(
+                str(row.get("run_session_id")) if row.get("run_session_id") else None
+            ),
         )
 
 
@@ -443,6 +447,183 @@ def enqueue_refresh_jobs(
     )
 
 
+# ── Session-aware enqueue (durable Run Intel sessions) ────────────────────────
+
+def enqueue_session_jobs(
+    client: Any,
+    *,
+    run_session_id: "UUID | str",
+    user_id: "UUID | str",
+    tickers: list[str],
+    hints_by_ticker: Optional[dict[str, dict[str, Any]]] = None,
+    now: Optional[datetime] = None,
+) -> EnqueueResult:
+    """Enqueue exactly one durable job per stale ticker for one Run Intel session.
+
+    Session identity is the ``run_session_id`` FK — never ``refresh_window``
+    (the window column is kept populated for diagnostics only). Idempotency is
+    per ``(run_session_id, ticker)`` (unique partial index
+    ``uq_analyst_refresh_jobs_session_ticker`` is the race backstop): a retry
+    of the session's first request never duplicates a row, and existing
+    session rows are left exactly as they are — a session job that already
+    succeeded stays succeeded; enqueue never reopens or resets session jobs.
+
+    Old jobs (other sessions or legacy NULL-session rows) are neither read,
+    touched, nor counted here.
+
+    Never raises — DB failure degrades to ``EnqueueResult.error`` so the
+    caller can report an explicit retryable failure.
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_iso = now.isoformat()
+    hints_by_ticker = hints_by_ticker or {}
+
+    seen: set[str] = set()
+    requested: list[str] = []
+    for raw in tickers or []:
+        t = str(raw or "").strip().upper()
+        if t and t not in seen:
+            seen.add(t)
+            requested.append(t)
+    if not requested:
+        return EnqueueResult(requested_tickers=[])
+
+    try:
+        existing_res = (
+            client.table(TABLE)
+            .select("id,ticker,status")
+            .eq("run_session_id", str(run_session_id))
+            .execute()
+        )
+        existing_tickers = {
+            str(r.get("ticker") or "").upper() for r in _rows(existing_res)
+        }
+    except Exception as exc:
+        logger.warning(
+            "intel_v3.session_job_enqueue_read_failed run_session_id=%s err=%s",
+            run_session_id, exc,
+        )
+        return EnqueueResult(requested_tickers=requested, error=str(exc))
+
+    to_insert: list[dict[str, Any]] = []
+    touched = 0
+    for t in requested:
+        if t in existing_tickers:
+            touched += 1
+            continue
+        hint = hints_by_ticker.get(t) or {}
+        to_insert.append({
+            "user_id": str(user_id),
+            "ticker": t,
+            "run_session_id": str(run_session_id),
+            # Diagnostics only — session identity is run_session_id, never
+            # the window.
+            "refresh_window": default_refresh_window(now),
+            "status": JOB_PENDING,
+            "attempts": 0,
+            "prior_action": hint.get("prior_action"),
+            "weight_pct": hint.get("weight_pct"),
+            "evidence_age_hours_at_request": hint.get("evidence_age_hours"),
+            "requested_at": now_iso,
+            "next_retry_at": now_iso,
+            "updated_at": now_iso,
+        })
+
+    error: Optional[str] = None
+    created = 0
+    if to_insert:
+        try:
+            res = client.table(TABLE).insert(to_insert).execute()
+            inserted = _rows(res)
+            created = len(inserted) if inserted else len(to_insert)
+        except Exception as exc:
+            error = str(exc)
+            logger.warning(
+                "intel_v3.session_job_enqueue_insert_failed run_session_id=%s err=%s",
+                run_session_id, exc,
+            )
+
+    logger.info(
+        "intel_v3.session_jobs_enqueued run_session_id=%s user_id=%s requested=%d "
+        "created=%d already_present=%d tickers=%s",
+        run_session_id, user_id, len(requested), created, touched,
+        ",".join(requested),
+    )
+    return EnqueueResult(
+        requested_tickers=requested,
+        created_count=created,
+        touched_count=touched,
+        error=error,
+    )
+
+
+def make_session_failed_jobs_due(
+    client: Any,
+    *,
+    run_session_id: "UUID | str",
+    now: Optional[datetime] = None,
+) -> int:
+    """Make this session's failed-but-retryable jobs claimable immediately.
+
+    The session's bounded continuation requests are all part of ONE explicit
+    user action, so the worker-backoff timer (built for the unattended
+    background worker) must not stall an in-flight click. Attempt budgets are
+    PRESERVED — a genuinely failing ticker still exhausts ``max_attempts`` and
+    becomes terminal. Succeeded jobs are never touched. Returns how many jobs
+    were made due (0 on DB failure).
+    """
+    now = now or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    now_iso = now.isoformat()
+    try:
+        res = (
+            client.table(TABLE)
+            .select("id,attempts,max_attempts,next_retry_at")
+            .eq("run_session_id", str(run_session_id))
+            .eq("status", JOB_FAILED)
+            .execute()
+        )
+        rows = _rows(res)
+    except Exception as exc:
+        logger.warning(
+            "intel_v3.session_jobs_make_due_read_failed run_session_id=%s err=%s",
+            run_session_id, exc,
+        )
+        return 0
+
+    made_due = 0
+    for row in rows:
+        attempts = int(row.get("attempts") or 0)
+        max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        if attempts >= max_attempts:
+            continue  # terminal — honest failure, never silently reopened
+        next_retry = row.get("next_retry_at")
+        if next_retry is None or _iso_lte(next_retry, now):
+            continue  # already due
+        try:
+            (
+                client.table(TABLE)
+                .update({"next_retry_at": now_iso, "updated_at": now_iso})
+                .eq("id", str(row.get("id")))
+                .execute()
+            )
+            made_due += 1
+        except Exception as exc:
+            logger.debug(
+                "intel_v3.session_job_make_due_failed job_id=%s err=%s",
+                row.get("id"), exc,
+            )
+    if made_due:
+        logger.info(
+            "intel_v3.session_jobs_made_due run_session_id=%s made_due=%d",
+            run_session_id, made_due,
+        )
+    return made_due
+
+
 # ── Claim ─────────────────────────────────────────────────────────────────────
 
 def claim_due_jobs(
@@ -453,6 +634,7 @@ def claim_due_jobs(
     limit: int = 50,
     user_id: "UUID | str | None" = None,
     tickers: Optional[list[str]] = None,
+    run_session_id: "UUID | str | None" = None,
 ) -> list[AnalystRefreshJob]:
     """Claim up to ``limit`` due jobs for this worker run.
 
@@ -466,6 +648,13 @@ def claim_due_jobs(
     on-demand drain triggered by one user's explicit Run Intel click passes
     both so it never claims — and never processes — another user's durable
     jobs just because the underlying queue table is shared.
+
+    ``run_session_id`` scopes claiming to EXACTLY one durable Run Intel
+    session's jobs: rows with a NULL or different ``run_session_id`` are
+    invisible to the query, so old jobs can neither block nor satisfy a new
+    session, and a sold/unrelated ticker outside the session scope is never
+    claimed (session jobs only exist for the session's captured stale set,
+    and the ``tickers`` filter enforces the scope again defensively).
 
     Each claim is a guarded single-row UPDATE (``status`` must still equal the
     pre-claim status) so two concurrent workers cannot both grab the same row.
@@ -486,6 +675,8 @@ def claim_due_jobs(
             query = query.eq("user_id", str(user_id))
         if tickers:
             query = query.in_("ticker", [str(t).upper() for t in tickers])
+        if run_session_id is not None:
+            query = query.eq("run_session_id", str(run_session_id))
         res = query.order("requested_at").execute()
         candidates = _rows(res)
     except Exception as exc:
@@ -629,6 +820,7 @@ def count_due_jobs(
     now: Optional[datetime] = None,
     user_id: "UUID | str | None" = None,
     tickers: Optional[list[str]] = None,
+    run_session_id: "UUID | str | None" = None,
 ) -> dict[str, Any]:
     """Count claimable jobs without claiming them.
 
@@ -674,6 +866,8 @@ def count_due_jobs(
             query = query.eq("user_id", str(user_id))
         if tickers:
             query = query.in_("ticker", [str(t).upper() for t in tickers])
+        if run_session_id is not None:
+            query = query.eq("run_session_id", str(run_session_id))
         res = query.execute()
         rows = _rows(res)
     except Exception as exc:

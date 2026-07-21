@@ -200,6 +200,8 @@ class AnalystRefreshWorker:
         scope_user_id: "UUID | str | None" = None,
         scope_tickers: Optional[list[str]] = None,
         max_adapter_seconds: Optional[float] = None,
+        scope_run_session_id: "UUID | str | None" = None,
+        trigger_prewarm: bool = True,
     ):
         self.client = client
         self._adapter_factory = adapter_factory or _default_adapter_factory
@@ -213,6 +215,14 @@ class AnalystRefreshWorker:
         # so it can never process another user's durable jobs.
         self.scope_user_id = scope_user_id
         self.scope_tickers = scope_tickers
+        # Durable-session scoping: when set, ONLY this session's jobs are
+        # counted/claimed — legacy NULL-session rows and other sessions' rows
+        # are invisible. The session flow owns snapshot publication, so it
+        # also passes trigger_prewarm=False: the legacy end-of-drain prewarm
+        # would publish a snapshot NOT linked to the session, which must never
+        # count as (or race with) the session's own publication.
+        self.scope_run_session_id = scope_run_session_id
+        self.trigger_prewarm = trigger_prewarm
         # Upper bound threaded into the analyst-refresh adapter's own budget
         # so a single in-request batch cannot silently run to the adapter's
         # much larger default (180s) regardless of this worker's own
@@ -234,6 +244,7 @@ class AnalystRefreshWorker:
         due_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         result.jobs_due = due_counts.get("total_due", 0)
 
@@ -244,6 +255,7 @@ class AnalystRefreshWorker:
             limit=self.max_jobs_per_run,
             user_id=self.scope_user_id,
             tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         result.claimed_job_count = len(claimed)
 
@@ -316,6 +328,7 @@ class AnalystRefreshWorker:
         post_run_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         remaining_actionable = (
             post_run_counts.get("total_due", 0)          # immediately claimable
@@ -332,7 +345,18 @@ class AnalystRefreshWorker:
         # publish worker_certified because the certification contract checks ALL
         # active positions, and the remaining tickers may have fresh rows from a
         # previous run.
-        if not result.run_resumable and users_with_successes:
+        if not self.trigger_prewarm:
+            # Session-scoped drains own their publication: the session flow
+            # publishes ONE snapshot explicitly linked to the session after
+            # certification. The legacy prewarm here would publish an
+            # unlinked snapshot that must never satisfy the session.
+            if users_with_successes:
+                logger.info(
+                    "intel_v3.analyst_refresh_worker_prewarm_disabled_for_session "
+                    "worker_run_id=%s run_session_id=%s",
+                    result.worker_run_id, self.scope_run_session_id,
+                )
+        elif not result.run_resumable and users_with_successes:
             for uid_str in users_with_successes:
                 await trigger_snapshot_prewarm(
                     user_id=UUID(uid_str),

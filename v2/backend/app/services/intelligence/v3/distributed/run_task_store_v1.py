@@ -626,10 +626,15 @@ def complete_task(
 ) -> bool:
     """Terminal-complete (succeeded/degraded/failed) or release-to-pending.
 
-    Guarded on (id, state='claimed', claim_owner) so a task can never be
-    completed twice and a stale worker can never overwrite a reclaimed task's
-    result. Retryable failures (attempts remaining) go back to ``pending``
-    with backoff instead of terminal ``failed``.
+    Guarded on (id, state='claimed', claim_owner, claim_token) so a task can
+    never be completed twice and a stale worker can never overwrite a
+    reclaimed task's result. Retryable failures (attempts remaining) go back
+    to ``pending`` with backoff instead of terminal ``failed``.
+
+    Production path: the transactional ``complete_intel_run_task`` RPC
+    (single guarded UPDATE, token-required). Fallback: the identical
+    guarded-UPDATE CAS when the RPC is unavailable (pre-migration
+    environments, in-memory test fakes).
     """
     now_dt = _now(now)
     task_id = str(task.get("id"))
@@ -644,6 +649,37 @@ def complete_task(
         else:
             state = TASK_PENDING
             next_retry_at = compute_task_retry_at(attempts, now_dt)
+
+    claim_token = task.get("claim_token")
+    rpc = getattr(client, "rpc", None)
+    if callable(rpc) and claim_token:
+        try:
+            res = rpc(
+                "complete_intel_run_task",
+                {
+                    "p_task_id": task_id,
+                    "p_worker_id": worker_id,
+                    "p_claim_token": str(claim_token),
+                    "p_final_state": state,
+                    "p_output_ref": output_ref,
+                    "p_output": output,
+                    "p_error_code": error_code,
+                    "p_error_detail": (
+                        str(error_detail)[:500] if error_detail else None
+                    ),
+                    "p_retry_at": next_retry_at,
+                },
+            ).execute()
+            data = getattr(res, "data", None)
+            if isinstance(data, bool):
+                return data
+            if isinstance(data, list) and data and isinstance(data[0], bool):
+                return data[0]
+        except Exception as exc:
+            logger.debug(
+                "run_task_store.complete_rpc_unavailable err=%s — CAS fallback",
+                exc,
+            )
 
     patch: dict[str, Any] = {
         "state": state,

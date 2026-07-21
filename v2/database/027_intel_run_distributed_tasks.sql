@@ -401,6 +401,7 @@ CREATE OR REPLACE FUNCTION public.complete_intel_run_task(
     p_claim_token  UUID,
     p_final_state  TEXT,
     p_output_ref   TEXT DEFAULT NULL,
+    p_output       JSONB DEFAULT NULL,
     p_error_code   TEXT DEFAULT NULL,
     p_error_detail TEXT DEFAULT NULL,
     p_retry_at     TIMESTAMPTZ DEFAULT NULL
@@ -416,6 +417,7 @@ BEGIN
     UPDATE public.intel_run_tasks
     SET state            = p_final_state,
         output_ref       = COALESCE(p_output_ref, output_ref),
+        output           = COALESCE(p_output, output),
         error_code       = p_error_code,
         error_detail     = p_error_detail,
         completed_at     = CASE WHEN p_final_state IN
@@ -440,11 +442,11 @@ $$ LANGUAGE plpgsql;
 REVOKE ALL ON FUNCTION public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID)
     FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_intel_run_task(
-    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
+    UUID, TEXT, UUID, TEXT, TEXT, JSONB, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID)
     TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_intel_run_task(
-    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
+    UUID, TEXT, UUID, TEXT, TEXT, JSONB, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
 
 -- ── 6. Specialist outputs — one row per (session, ticker, axis) ──────────────
 --
@@ -510,7 +512,7 @@ CREATE POLICY intel_run_specialist_outputs_service_only
 -- ── ROLLBACK (commented out by default) ──────────────────────────────────────
 -- DROP TABLE IF EXISTS public.intel_run_specialist_outputs CASCADE;
 -- DROP FUNCTION IF EXISTS public.complete_intel_run_task(
---     UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ);
+--     UUID, TEXT, UUID, TEXT, TEXT, JSONB, TEXT, TEXT, TIMESTAMPTZ);
 -- DROP FUNCTION IF EXISTS public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID);
 -- DROP TABLE IF EXISTS public.intel_run_tasks CASCADE;
 -- DROP FUNCTION IF EXISTS public.intel_run_task_owner_guard();

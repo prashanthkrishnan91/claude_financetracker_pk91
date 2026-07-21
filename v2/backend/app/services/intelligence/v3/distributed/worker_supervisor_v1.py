@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Optional
 
 from .....config import get_settings
@@ -364,6 +364,10 @@ class WorkerSupervisor:
         def _build() -> str:
             from ..intel_run_session_store_v1 import get_session
 
+            # Claim fence (adversarial audit D3): a stale reclaimed bundle
+            # worker must not (re)write the ticker's bundle.
+            if not store.owns_claim(self.client, task):
+                raise RuntimeError("claim_lost")
             session = get_session(self.client, session_id) or {"id": session_id}
             rows = store.list_ticker_rows(self.client, run_session_id=session_id)
             row = next(
@@ -563,11 +567,13 @@ async def recover_active_sessions_on_startup(client: Any = None) -> bool:
     seconds — no permanent polling cost.
     """
     try:
-        if client is None:
-            from .....database import get_supabase_client
-            client = get_supabase_client()
         logger.info("supervisor.startup_probe_starting")
-        return await ensure_supervisor_running(client=client)
+        # Client stays LAZY (constructed inside the supervisor's first pass):
+        # a boot-time client-construction failure then lands in the loop's
+        # outage handling instead of aborting recovery entirely.
+        if client is not None:
+            return await ensure_supervisor_running(client=client)
+        return await ensure_supervisor_running()
     except Exception as exc:
         logger.warning("supervisor.startup_recovery_failed err=%s", exc)
         return False

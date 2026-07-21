@@ -37,6 +37,7 @@ from .task_contracts_v1 import (
     TASK_TERMINAL_STATES,
     TASK_TICKER_DECISION,
     TICKER_ANALYSIS_COMPLETE,
+    TICKER_DECISION_READY,
     TICKER_EVIDENCE_READY,
     TICKER_TERMINAL_STATES,
     axes_for_asset,
@@ -281,11 +282,14 @@ def run_scheduler_pass(
             continue
 
         if state == TICKER_EVIDENCE_READY:
+            # CAS-fenced forward-only transition (adversarial audit D2): a
+            # concurrent decision/terminal transition always wins.
             store.update_ticker_row(
                 client,
                 run_session_id=session_id,
                 ticker=ticker,
                 patch={"state": TICKER_ANALYSIS_COMPLETE},
+                expected_states=[TICKER_EVIDENCE_READY],
                 now=now,
             )
 
@@ -326,6 +330,16 @@ def run_scheduler_pass(
                 now=now,
             ):
                 created["decisions"] += 1
+                # Deterministic decision input is now assembled/assembling —
+                # surface the decision_ready stage (CAS-fenced, forward-only).
+                store.update_ticker_row(
+                    client,
+                    run_session_id=session_id,
+                    ticker=ticker,
+                    patch={"state": TICKER_DECISION_READY},
+                    expected_states=[TICKER_ANALYSIS_COMPLETE],
+                    now=now,
+                )
 
     # ── Dead-end guards: a terminally-failed pipeline task must terminalize
     # its ticker (honest failure) instead of leaving the session unfinishable.
@@ -348,7 +362,9 @@ def run_scheduler_pass(
         ):
             stuck_reason = "ticker_decision_failed_terminally"
         if stuck_reason:
-            store.update_ticker_row(
+            # CAS-fenced (adversarial audit D2): can never clobber a ticker
+            # that reached a terminal state concurrently.
+            moved = store.update_ticker_row(
                 client,
                 run_session_id=session_id,
                 ticker=ticker,
@@ -356,9 +372,14 @@ def run_scheduler_pass(
                     "state": "failed",
                     "degradation_reasons": [stuck_reason],
                 },
+                expected_states=[
+                    "pending", TICKER_EVIDENCE_READY,
+                    TICKER_ANALYSIS_COMPLETE, TICKER_DECISION_READY,
+                ],
                 now=now,
             )
-            row["state"] = "failed"
+            if moved:
+                row["state"] = "failed"
 
     # ── Wave 5: portfolio join + publish ─────────────────────────────────────
     all_terminal = all(

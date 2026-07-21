@@ -137,10 +137,14 @@ def _load_latest_close_prices(
 
 
 def _load_prior_actions(client: Any, user_id: str) -> dict[str, str]:
+    # NOTE: the recommendations column is ``action`` (001_initial_schema.sql)
+    # — selecting a nonexistent ``suggested_action`` column 400s in
+    # production and silently collapsed prior-action priority (adversarial
+    # audit defect D1).
     try:
         res = (
             client.table("recommendations")
-            .select("ticker,suggested_action,is_active,created_at")
+            .select("ticker,action,is_active,created_at")
             .eq("user_id", user_id)
             .eq("is_active", True)
             .order("created_at", desc=True)
@@ -151,7 +155,7 @@ def _load_prior_actions(client: Any, user_id: str) -> dict[str, str]:
     actions: dict[str, str] = {}
     for row in _rows(res):
         ticker = str(row.get("ticker") or "").upper()
-        action = str(row.get("suggested_action") or "").upper()
+        action = str(row.get("action") or "").upper()
         if ticker and action and ticker not in actions:
             actions[ticker] = action
     return actions
@@ -612,8 +616,9 @@ def verify_seed_graph(
     scope_rows: list[dict[str, Any]],
 ) -> list[str]:
     """Read back the session graph and return every missing expected logical
-    key (empty list == complete). Raises on read failure — an unverifiable
-    graph is NOT a verified graph."""
+    key (empty list == complete). Fail-closed: a read failure surfaces as
+    everything-missing (``list_tasks`` degrades to []), so an unverifiable
+    graph can never verify."""
     actual = {
         store.logical_task_key(
             str(t.get("task_type")), t.get("lane"),

@@ -216,7 +216,7 @@ class TestLiveRegressionShape:
                 continue
             client.store.setdefault("recommendations", []).append({
                 "id": str(uuid.uuid4()), "user_id": USER, "ticker": ticker,
-                "suggested_action": "HOLD", "is_active": True,
+                "action": "HOLD", "is_active": True,
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
         assert len(tickers) == 32

@@ -390,6 +390,17 @@ def certify_session_snapshot(
         | set(coverage.get("failed_tickers") or [])
     )
     frozen = set(rows_by_ticker)
+    # Cross-check the frozen ticker rows against the session's own recorded
+    # holdings_scope — a manually deleted/lost ticker row can never silently
+    # shrink the certified scope.
+    recorded_scope = {
+        str(t) for t in (session.get("holdings_scope") or []) if t
+    }
+    if recorded_scope and recorded_scope != frozen:
+        result.errors.append(
+            "frozen_rows_diverge_from_session_holdings_scope:"
+            + ",".join(sorted(recorded_scope.symmetric_difference(frozen)))
+        )
     if accounted != frozen:
         result.errors.append(
             "coverage_does_not_account_full_frozen_scope:"

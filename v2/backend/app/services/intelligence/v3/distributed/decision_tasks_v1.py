@@ -20,14 +20,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from dataclasses import asdict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from ..decision_contracts import (
     AxisBand,
     DecisionInputV3,
-    FitBand,
     PriceBand,
     RiskBand,
 )

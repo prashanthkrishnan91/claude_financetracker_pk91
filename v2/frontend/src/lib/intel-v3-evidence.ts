@@ -113,12 +113,15 @@ export function buildDataHealthRows(input: DataHealthInput): DataHealthRow[] {
     label: "Intel snapshot",
     status:
       intelSnapshotSource === "worker_certified" ? "ok"
+      : intelSnapshotSource === "worker_certified_with_gaps" ? "pending"
       : intelSnapshotSource === "certification_failed" ? "blocked"
       : intelSnapshotSource != null ? "pending"
       : "unavailable",
     detail:
       intelSnapshotSource === "worker_certified"
         ? "Worker-certified snapshot available"
+      : intelSnapshotSource === "worker_certified_with_gaps"
+        ? "Certified snapshot available — some holdings couldn't be analyzed in the last run"
       : intelSnapshotSource != null
         ? intelSnapshotSource.replace(/_/g, " ")
       : UNAVAILABLE_DETAIL,

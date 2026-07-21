@@ -298,6 +298,9 @@ export type AdvisorSnapshotState =
   | "error"
   | "stale"
   | "uncertified"
+  /** Valid-but-caveated: certified over the decided subset, some holdings
+   *  couldn't be analyzed in the last run. Amber, never blocked/unavailable. */
+  | "certified_with_gaps"
   | "certified";
 
 export interface AdvisorReadinessModel {
@@ -392,6 +395,20 @@ function isCertifiedSnapshot(snapshot: IntelV3Snapshot): boolean {
     typeof snapshot.total_holding_count === "number" &&
     snapshot.total_holding_count > 0 &&
     snapshot.certified_holding_count === snapshot.total_holding_count
+  );
+}
+
+/**
+ * Distributed publication with gaps — certified over the decided subset; some
+ * holdings could not be analyzed in the last run. A valid-but-caveated state:
+ * NOT certification_failed, NOT blocked, NOT unavailable — but never "Ready".
+ */
+function isCertifiedWithGapsSnapshot(snapshot: IntelV3Snapshot): boolean {
+  return (
+    snapshot.snapshot_source === "worker_certified_with_gaps" &&
+    typeof snapshot.certified_holding_count === "number" &&
+    typeof snapshot.total_holding_count === "number" &&
+    snapshot.total_holding_count > 0
   );
 }
 
@@ -591,6 +608,16 @@ export function deriveTruthRows(
         ? `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings but is marked stale.`
         : `Certified snapshot covers ${snapshot.certified_holding_count}/${snapshot.total_holding_count} holdings.`,
     };
+  } else if (isCertifiedWithGapsSnapshot(snapshot)) {
+    // Valid-but-caveated — NOT certification_failed, NOT blocked.
+    const analyzed = snapshot.certified_holding_count!;
+    const total = snapshot.total_holding_count!;
+    intelCertification = {
+      key: "intel_certification",
+      label: "Intel certification",
+      status: "pending",
+      detail: `Recommendations are current for ${analyzed} of ${total} holdings — the rest couldn't be analyzed in the last run.`,
+    };
   } else if (snapshot.snapshot_source === "certification_failed") {
     intelCertification = {
       key: "intel_certification",
@@ -635,7 +662,7 @@ export function deriveAdvisorReadiness(
     snapshotState = isSnapshotMissingError(query.errorMessage) ? "missing" : "error";
   } else if (!snapshot) {
     snapshotState = "missing";
-  } else if (!isCertifiedSnapshot(snapshot)) {
+  } else if (!isCertifiedSnapshot(snapshot) && !isCertifiedWithGapsSnapshot(snapshot)) {
     snapshotState = "uncertified";
   } else if (
     snapshot.is_stale ||
@@ -643,6 +670,8 @@ export function deriveAdvisorReadiness(
     snapshot.evidence_freshness_state === "certification_blocked"
   ) {
     snapshotState = "stale";
+  } else if (isCertifiedWithGapsSnapshot(snapshot)) {
+    snapshotState = "certified_with_gaps";
   } else {
     snapshotState = "certified";
   }

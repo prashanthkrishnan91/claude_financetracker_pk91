@@ -3,11 +3,16 @@
  *
  * Stage 3.3 — all-or-nothing certified intelligence run contract.
  *
- * The UI must show exactly one of six states based on snapshot provenance
+ * The UI must show exactly one of seven states based on snapshot provenance
  * and refresh status. Green is only allowed when:
  *   - snapshot_source === "worker_certified"
  *   - certified_holding_count === total_holding_count
  *   - No pending refresh is in progress
+ *
+ * A distributed run may publish snapshot_source === "worker_certified_with_gaps"
+ * (certified over the decided subset; some holdings could not be analyzed this
+ * run). That renders as a distinct amber "certified_with_gaps" state — visibly
+ * NOT green, but NOT an error/blocked state either.
  *
  * A user who clicks "Run Intel v3" must see "Refreshing" immediately —
  * never green from a previous worker run dressed up as a fresh click.
@@ -18,6 +23,7 @@ import type { IntelV3Snapshot, IntelV3RunResult } from "@/lib/api";
 
 export type IntelV3UIStatus =
   | "certified_current"
+  | "certified_with_gaps"
   | "refreshing_analyst_intelligence"
   | "latest_certified_new_refresh_running"
   | "unavailable_refresh_failed"
@@ -72,11 +78,19 @@ export function deriveIntelV3UIStatus(
     freshness !== "republish_pending" &&
     freshness !== "certification_blocked";
 
+  // Distributed publication: certified over the decided subset — some holdings
+  // could not be analyzed this run. Honest amber state, NOT green, NOT an error.
+  const isCertifiedWithGaps =
+    hasSnapshot &&
+    snapshot!.snapshot_source === "worker_certified_with_gaps" &&
+    freshness !== "republish_pending" &&
+    freshness !== "certification_blocked";
+
   const isCertificationFailed =
     hasSnapshot && snapshot!.snapshot_source === "certification_failed";
 
   if (isRefreshing) {
-    if (isCertified) {
+    if (isCertified || isCertifiedWithGaps) {
       return "latest_certified_new_refresh_running";
     }
     return "refreshing_analyst_intelligence";
@@ -88,6 +102,10 @@ export function deriveIntelV3UIStatus(
 
   if (isCertified) {
     return "certified_current";
+  }
+
+  if (isCertifiedWithGaps) {
+    return "certified_with_gaps";
   }
 
   if (isCertificationFailed) {
@@ -107,6 +125,17 @@ export function deriveIntelV3UIStatus(
 }
 
 // ── Banner copy ───────────────────────────────────────────────────────────────
+
+/** Plain-English coverage sentence for a with-gaps snapshot. Never a raw enum. */
+function withGapsCoverageSentence(
+  certCount: number | null | undefined,
+  totalCount: number | null | undefined,
+): string {
+  if (typeof certCount === "number" && typeof totalCount === "number" && totalCount > 0) {
+    return `Recommendations are current for ${certCount} of ${totalCount} holdings — the rest couldn't be analyzed this run.`;
+  }
+  return "Recommendations are current for most holdings — some couldn't be analyzed this run.";
+}
 
 export function buildBannerState(
   snapshot: IntelV3Snapshot | null | undefined,
@@ -136,6 +165,23 @@ export function buildBannerState(
         tone: "green",
         showProvenance: true,
       };
+
+    case "certified_with_gaps": {
+      const gapReasons = (snapshot?.session_coverage?.gaps ?? [])
+        .map((gap) => gap.reason)
+        .filter(Boolean);
+      return {
+        status,
+        headline: "Current — Some Holdings Not Analyzed",
+        detail: [
+          withGapsCoverageSentence(certCount, totalCount),
+          ...gapReasons.slice(0, 3),
+          latestRunAt ? `Latest certified analyst run: ${latestRunAt}.` : null,
+        ].filter(Boolean).join(" "),
+        tone: "amber",
+        showProvenance: true,
+      };
+    }
 
     case "refreshing_analyst_intelligence":
       return {
@@ -201,7 +247,12 @@ export function buildBannerState(
 
 // ── User-facing status pill (Build 2.5) ──────────────────────────────────────
 
-export type IntelUserPill = "Ready" | "Updating" | "Needs Research" | "Blocked";
+export type IntelUserPill =
+  | "Ready"
+  | "Partly Ready"
+  | "Updating"
+  | "Needs Research"
+  | "Blocked";
 
 export interface IntelStatusPillState {
   pill: IntelUserPill;
@@ -210,7 +261,7 @@ export interface IntelStatusPillState {
 }
 
 /**
- * Maps the 6 internal UI states to 4 plain-English user-facing statuses.
+ * Maps the 7 internal UI states to 5 plain-English user-facing statuses.
  * buildBannerState() remains for the diagnostics drawer; this drives the
  * compact status area shown by default.
  */
@@ -235,6 +286,18 @@ export function buildStatusPillState(
         : "Up to date.";
       return { pill: "Ready", line, tone: "green" };
     }
+
+    case "certified_with_gaps":
+      return {
+        pill: "Partly Ready",
+        line: withGapsCoverageSentence(
+          snapshot?.certified_holding_count ??
+            snapshot?.certification_summary?.certified_holding_count,
+          snapshot?.total_holding_count ??
+            snapshot?.certification_summary?.total_holding_count,
+        ),
+        tone: "amber",
+      };
 
     case "latest_certified_new_refresh_running":
       return { pill: "Updating", line: "Refreshing portfolio intelligence…", tone: "amber" };

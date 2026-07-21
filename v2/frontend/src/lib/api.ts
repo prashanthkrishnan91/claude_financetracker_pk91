@@ -497,6 +497,29 @@ export interface IntelV3HeldCard {
   };
 }
 
+/** One holding the distributed run could not analyze (per-session gap). */
+export interface IntelV3SessionCoverageGap {
+  ticker: string;
+  state: string;
+  /** Plain-English reason — pre-sanitized by the backend, safe to render. */
+  reason: string;
+}
+
+/**
+ * Distributed Run Intel publication — per-session coverage of the FULL frozen
+ * holding scope. Present on snapshots published by the distributed workflow;
+ * for a with-gaps snapshot decided_count < frozen_holding_count.
+ */
+export interface IntelV3SessionCoverage {
+  frozen_holding_count: number;
+  decided_count: number;
+  no_call_count: number;
+  failed_count: number;
+  no_call_tickers: string[];
+  failed_tickers: string[];
+  gaps: IntelV3SessionCoverageGap[];
+}
+
 export interface IntelV3Snapshot {
   schema_version: string;
   snapshot_id: string;
@@ -528,7 +551,14 @@ export interface IntelV3Snapshot {
   legacy_path_used: false;
   diagnostics?: IntelV3SnapshotDiagnostics;
   // Stage 3.3 — provenance fields (set by worker prewarm, absent on HTTP-built snapshots)
-  snapshot_source?: "worker_certified" | "http_request" | "certification_failed" | "prewarm";
+  // "worker_certified_with_gaps": certified over the decided subset — some
+  // holdings could not be analyzed this run (certified < total).
+  snapshot_source?:
+    | "worker_certified"
+    | "worker_certified_with_gaps"
+    | "http_request"
+    | "certification_failed"
+    | "prewarm";
   agents_ran_via_worker?: boolean;
   agents_ran_for_this_click?: string;
   this_click_used_llm?: boolean;
@@ -545,6 +575,10 @@ export interface IntelV3Snapshot {
     agent_run_ids_used: string[];
     certification_errors: string[];
   };
+  // Distributed Run Intel publication — session outcome that published this
+  // snapshot ("completed" | "completed_with_gaps") plus per-holding coverage.
+  session_status?: "completed" | "completed_with_gaps" | string;
+  session_coverage?: IntelV3SessionCoverage;
   // Build 2 — evidence freshness state from watchtower republisher
   evidence_freshness_state?:
     | "certified_current"

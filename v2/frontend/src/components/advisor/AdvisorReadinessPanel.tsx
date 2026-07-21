@@ -28,6 +28,8 @@ const FOCUS_RING =
 
 const PILL_TONE_CLASS: Record<string, string> = {
   Ready: "bg-action-buy/10 text-action-buy border-action-buy/30",
+  // Amber valid-but-caveated state (completed with gaps) — not green, not red.
+  "Partly Ready": "bg-action-trim/10 text-action-trim border-action-trim/30",
   Updating: "bg-action-trim/10 text-action-trim border-action-trim/30",
   Blocked: "bg-action-sell/10 text-action-sell border-action-sell/30",
   "Needs Research": "bg-surface-elevated text-text-muted border-border",

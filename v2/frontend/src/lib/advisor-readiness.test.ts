@@ -686,6 +686,98 @@ describe("deriveAdvisorReadiness — snapshot states", () => {
   });
 });
 
+// ── worker_certified_with_gaps — valid-but-caveated (amber), never blocked ────
+
+function makeWithGapsSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot {
+  return makeSnapshot({
+    snapshot_source: "worker_certified_with_gaps",
+    certified_holding_count: 3,
+    total_holding_count: 4,
+    session_status: "completed_with_gaps",
+    session_coverage: {
+      frozen_holding_count: 4,
+      decided_count: 3,
+      no_call_count: 1,
+      failed_count: 0,
+      no_call_tickers: ["NVDA"],
+      failed_tickers: [],
+      gaps: [
+        {
+          ticker: "NVDA",
+          state: "no_call",
+          reason: "Not enough fresh evidence to make a call for NVDA.",
+        },
+      ],
+    },
+    ...overrides,
+  } as Partial<IntelV3Snapshot>);
+}
+
+describe("deriveAdvisorReadiness — completed-with-gaps snapshot", () => {
+  const NOW = new Date("2026-07-18T12:00:00Z");
+
+  it("classifies as certified_with_gaps — never uncertified, never error, never Ready", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeWithGapsSnapshot()), NO_RUN, null, NOW);
+    expect(model.snapshotState).toBe("certified_with_gaps");
+    expect(model.ready).toBe(false);
+    expect(model.statusPillLabel).toBe("Partly Ready");
+    expect(model.statusPillLabel).not.toBe("Ready");
+    expect(model.statusPillLabel).not.toBe("Blocked");
+    expect(model.statusLine).toContain("current for 3 of 4 holdings");
+  });
+
+  it("intel certification row is amber pending — NOT the certification_failed blocked branch", () => {
+    const rows = deriveTruthRows(makeWithGapsSnapshot(), "certified_with_gaps", null);
+    const certRow = rows.find((r) => r.key === "intel_certification");
+    expect(certRow?.status).toBe("pending");
+    expect(certRow?.status).not.toBe("blocked");
+    expect(certRow?.detail).toContain("3 of 4 holdings");
+    expect(certRow?.detail).not.toContain("failed certification");
+  });
+
+  it("with-gaps is distinct from certification_failed (which stays blocked)", () => {
+    const failedRows = deriveTruthRows(
+      makeSnapshot({ snapshot_source: "certification_failed" } as Partial<IntelV3Snapshot>),
+      "uncertified",
+      null,
+    );
+    expect(failedRows.find((r) => r.key === "intel_certification")?.status).toBe("blocked");
+  });
+
+  it("never renders the raw worker_certified_with_gaps enum anywhere user-visible", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeWithGapsSnapshot()), NO_RUN, null, NOW);
+    const visible = [
+      model.statusPillLabel,
+      model.statusLine,
+      model.run.nextActionSentence,
+      model.evidenceFreshnessLabel ?? "",
+      ...model.truthRows.flatMap((r) => [r.label, r.detail]),
+    ];
+    for (const text of visible) {
+      expect(text).not.toContain("worker_certified_with_gaps");
+      expect(text.toLowerCase()).not.toContain("worker certified with gaps");
+    }
+  });
+
+  it("clean certified snapshot behavior is unchanged (green Ready)", () => {
+    const model = deriveAdvisorReadiness(queryWith(makeSnapshot()), NO_RUN, null, NOW);
+    expect(model.snapshotState).toBe("certified");
+    expect(model.ready).toBe(true);
+    expect(model.statusPillLabel).toBe("Ready");
+  });
+
+  it("a stale with-gaps snapshot still reads stale, not certified_with_gaps", () => {
+    const model = deriveAdvisorReadiness(
+      queryWith(makeWithGapsSnapshot({ is_stale: true })),
+      NO_RUN,
+      null,
+      NOW,
+    );
+    expect(model.snapshotState).toBe("stale");
+    expect(model.ready).toBe(false);
+  });
+});
+
 // ── Truth-row vocabulary (six-dimension contract) ─────────────────────────────
 
 describe("deriveTruthRows — renamed Intel vocabulary + endpoint-fed truth rows", () => {

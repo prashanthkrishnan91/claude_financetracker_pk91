@@ -522,3 +522,110 @@ describe("terminal session statuses — no fake Updating state", () => {
     );
   });
 });
+
+// ── Distributed publication: worker_certified_with_gaps ───────────────────────
+// Honest completed-with-gaps rendering: visibly NON-GREEN but NOT an error.
+
+function makeWithGapsSnapshot(overrides: Partial<IntelV3Snapshot> = {}): IntelV3Snapshot {
+  return makeCertifiedSnapshot({
+    snapshot_source: "worker_certified_with_gaps",
+    certified_holding_count: 3,
+    total_holding_count: 5,
+    session_status: "completed_with_gaps",
+    evidence_freshness_state: "certified_current",
+    session_coverage: {
+      frozen_holding_count: 5,
+      decided_count: 3,
+      no_call_count: 1,
+      failed_count: 1,
+      no_call_tickers: ["AAPL"],
+      failed_tickers: ["NVDA"],
+      gaps: [
+        {
+          ticker: "AAPL",
+          state: "no_call",
+          reason: "Not enough fresh evidence to make a call for AAPL.",
+        },
+        {
+          ticker: "NVDA",
+          state: "failed",
+          reason: "Analysis for NVDA didn't finish this run.",
+        },
+      ],
+    },
+    ...overrides,
+  } as Partial<IntelV3Snapshot>);
+}
+
+describe("worker_certified_with_gaps — amber caveated state", () => {
+  it("derives the distinct certified_with_gaps status (not green, not blocked, not unavailable)", () => {
+    const status = deriveIntelV3UIStatus(makeWithGapsSnapshot(), false);
+    expect(status).toBe("certified_with_gaps");
+    expect(status).not.toBe("certified_current");
+    expect(status).not.toBe("unavailable_evidence_incomplete");
+    expect(status).not.toBe("blocked_certification_failed");
+  });
+
+  it("banner is amber — NOT green and NOT red", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.status).toBe("certified_with_gaps");
+    expect(banner.tone).toBe("amber");
+    expect(banner.tone).not.toBe("green");
+    expect(banner.tone).not.toBe("red");
+  });
+
+  it("banner copy is plain English N of M with the couldn't-be-analyzed caveat", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.detail).toContain(
+      "Recommendations are current for 3 of 5 holdings — the rest couldn't be analyzed this run.",
+    );
+  });
+
+  it("banner may include the backend's plain-English gap reasons", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    expect(banner.detail).toContain("Not enough fresh evidence to make a call for AAPL.");
+  });
+
+  it("pill is amber Partly Ready — never Ready, never Blocked", () => {
+    const pill = buildStatusPillState(makeWithGapsSnapshot(), false);
+    expect(pill.pill).toBe("Partly Ready");
+    expect(pill.tone).toBe("amber");
+    expect(pill.pill).not.toBe("Ready");
+    expect(pill.pill).not.toBe("Blocked");
+    expect(pill.line).toContain("current for 3 of 5 holdings");
+  });
+
+  it("never leaks the raw snapshot_source enum into any user-visible text", () => {
+    const banner = buildBannerState(makeWithGapsSnapshot(), false);
+    const pill = buildStatusPillState(makeWithGapsSnapshot(), false);
+    for (const text of [banner.headline, banner.detail ?? "", pill.pill, pill.line]) {
+      expect(text).not.toContain("worker_certified_with_gaps");
+      expect(text.toLowerCase()).not.toContain("worker certified with gaps");
+    }
+  });
+
+  it("while refreshing, a with-gaps snapshot shows the amber refresh state (not green)", () => {
+    expect(deriveIntelV3UIStatus(makeWithGapsSnapshot(), true)).toBe(
+      "latest_certified_new_refresh_running",
+    );
+    expect(buildBannerState(makeWithGapsSnapshot(), true).tone).toBe("amber");
+  });
+
+  it("missing session_coverage still yields honest amber copy (no crash, no green)", () => {
+    const snap = makeWithGapsSnapshot({ session_coverage: undefined });
+    const banner = buildBannerState(snap, false);
+    expect(banner.status).toBe("certified_with_gaps");
+    expect(banner.tone).toBe("amber");
+    expect(banner.detail).toContain("current for 3 of 5 holdings");
+  });
+
+  it("clean worker_certified behavior is unchanged (green Ready)", () => {
+    const clean = makeCertifiedSnapshot({
+      evidence_freshness_state: "certified_current",
+    } as any);
+    expect(deriveIntelV3UIStatus(clean, false)).toBe("certified_current");
+    expect(buildBannerState(clean, false).tone).toBe("green");
+    expect(buildStatusPillState(clean, false).pill).toBe("Ready");
+    expect(buildStatusPillState(clean, false).tone).toBe("green");
+  });
+});

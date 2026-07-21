@@ -183,3 +183,66 @@ describe("AdvisorReadinessPanel — exactly one Run Intel control per state", ()
     expect(calls.count).toBe(1);
   });
 });
+
+// ── worker_certified_with_gaps — amber caveated render, never a raw enum ──────
+
+function makeWithGapsSnapshot(): IntelV3Snapshot {
+  return {
+    ...makeSnapshot(),
+    snapshot_source: "worker_certified_with_gaps",
+    certified_holding_count: 1,
+    total_holding_count: 2,
+    session_status: "completed_with_gaps",
+    session_coverage: {
+      frozen_holding_count: 2,
+      decided_count: 1,
+      no_call_count: 1,
+      failed_count: 0,
+      no_call_tickers: ["AAPL"],
+      failed_tickers: [],
+      gaps: [
+        {
+          ticker: "AAPL",
+          state: "no_call",
+          reason: "Not enough fresh evidence to make a call for AAPL.",
+        },
+      ],
+    },
+  } as IntelV3Snapshot;
+}
+
+describe("AdvisorReadinessPanel — completed-with-gaps snapshot", () => {
+  it("renders the amber Partly Ready state with plain-English copy and no raw enum", () => {
+    const model = deriveAdvisorReadiness(
+      { snapshot: makeWithGapsSnapshot(), isLoading: false, isError: false },
+      IDLE_RUN,
+      null,
+    );
+    const client = new QueryClient();
+    act(() => {
+      root.render(
+        <QueryClientProvider client={client}>
+          <AdvisorReadinessPanel model={model} onRun={() => {}} lastRunResult={null} />
+        </QueryClientProvider>,
+      );
+    });
+
+    expect(model.snapshotState).toBe("certified_with_gaps");
+    const text = container.textContent ?? "";
+    // Amber caveated pill — not the green Intel Ready pill, not Blocked.
+    expect(text).toContain("Partly Ready");
+    expect(text).not.toContain("Intel Ready");
+    expect(text).toContain("current for 1 of 2 holdings");
+    // The raw enum value must never render to the user.
+    expect(text).not.toContain("worker_certified_with_gaps");
+    expect(text.toLowerCase()).not.toContain("worker certified with gaps");
+    // Amber pill styling (same tone family as Updating), not green/red.
+    const pill = Array.from(container.querySelectorAll("span")).find((s) =>
+      (s.textContent ?? "").trim() === "Partly Ready",
+    )!;
+    expect(pill).toBeDefined();
+    expect(pill.className).toContain("text-action-trim");
+    expect(pill.className).not.toContain("text-action-buy");
+    expect(pill.className).not.toContain("text-action-sell");
+  });
+});

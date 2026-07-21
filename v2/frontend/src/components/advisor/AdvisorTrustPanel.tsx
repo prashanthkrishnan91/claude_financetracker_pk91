@@ -49,6 +49,8 @@ function deriveRepairAction(
     return "Run Intel required";
   }
   if (model.snapshotState === "stale") return "Run Intel required";
+  // Completed with gaps — running Intel again is how the missing holdings get analyzed.
+  if (model.snapshotState === "certified_with_gaps") return "Run Intel required";
   // Plan-side repairs from the exact backend fix.
   const fromFix = repairActionFromFix(plan?.next_required_fix ?? null);
   if (fromFix) return fromFix;
@@ -71,6 +73,7 @@ export function AdvisorTrustPanel({
   const planBlocked = plan ? plan.status !== "ready" || plan.trusted !== true : null;
   const snapshotExists =
     model.snapshotState === "certified" ||
+    model.snapshotState === "certified_with_gaps" ||
     model.snapshotState === "stale" ||
     model.snapshotState === "uncertified";
   const reconcileSuspected =
@@ -98,6 +101,11 @@ export function AdvisorTrustPanel({
   }
   if (model.snapshotState === "uncertified") {
     problems.push("A snapshot exists but is not fully certified.");
+  }
+  if (model.snapshotState === "certified_with_gaps") {
+    problems.push(
+      "Some holdings couldn't be analyzed in the last Intel run — recommendations are current for the rest.",
+    );
   }
   if (model.run.state === "failed") {
     problems.push(model.run.nextActionSentence);

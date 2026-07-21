@@ -180,6 +180,7 @@ class TestOnDemandDrainResultShape:
             def __init__(
                 self, *, client, max_jobs_per_run, max_runtime_seconds,
                 scope_user_id=None, scope_tickers=None, max_adapter_seconds=None,
+                scope_run_session_id=None, trigger_prewarm=True,
             ):
                 built["client"] = client
                 built["max_jobs_per_run"] = max_jobs_per_run
@@ -187,6 +188,8 @@ class TestOnDemandDrainResultShape:
                 built["scope_user_id"] = scope_user_id
                 built["scope_tickers"] = scope_tickers
                 built["max_adapter_seconds"] = max_adapter_seconds
+                built["scope_run_session_id"] = scope_run_session_id
+                built["trigger_prewarm"] = trigger_prewarm
 
             async def run_once(self, *_a, **_kw):
                 return _batch(claimed=0, resumable=True)

@@ -14,6 +14,13 @@
  *   7. restore Retry state after a terminal or network failure;
  *   8. never start polling before the explicit click.
  *
+ * Durable-session contract (fix/run-intel-durable-sessions):
+ *   9. a manual click mints ONE browser UUID (crypto.randomUUID);
+ *  10. the first request sends it, and EVERY automatic continuation sends
+ *      the exact same id;
+ *  11. a second manual click always sends a DIFFERENT id;
+ *  12. no request (and therefore no session id) exists before the click.
+ *
  * Uses real DOM mount/unmount (react-dom/client + act), same pattern as
  * AdvisorReadinessPanel.render.test.tsx — no @testing-library/react in this
  * project's devDependencies.
@@ -39,6 +46,25 @@ jest.mock("./api", () => ({
 }));
 
 const runV3 = api.intelV3.runV3 as jest.Mock;
+
+// jsdom in some Node versions lacks crypto.randomUUID — the hook requires the
+// browser UUID API, so polyfill it from node:crypto for the test environment.
+beforeAll(() => {
+  const g = globalThis as Record<string, any>;
+  if (!g.crypto) g.crypto = {};
+  if (typeof g.crypto.randomUUID !== "function") {
+    const { randomUUID } = require("crypto");
+    g.crypto.randomUUID = randomUUID;
+  }
+});
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Session ids observed by the mocked endpoint, in call order. */
+function sentSessionIds(): string[] {
+  return runV3.mock.calls.map((c) => c[0] as string);
+}
 
 async function flush(ticks = 40): Promise<void> {
   for (let i = 0; i < ticks; i++) {
@@ -197,7 +223,7 @@ describe("useRunIntelV3 — bounded automatic continuation", () => {
   it("aborts in-flight work on unmount and issues no further requests", async () => {
     let capturedSignal: AbortSignal | undefined;
     let resolveFirst: ((v: IntelV3RunResult) => void) | undefined;
-    runV3.mockImplementationOnce((signal?: AbortSignal) => {
+    runV3.mockImplementationOnce((_sessionId: string, signal?: AbortSignal) => {
       capturedSignal = signal;
       return new Promise<IntelV3RunResult>((resolve) => {
         resolveFirst = resolve;
@@ -226,6 +252,93 @@ describe("useRunIntelV3 — bounded automatic continuation", () => {
     });
     expect(runV3).toHaveBeenCalledTimes(1);
 
+    container.remove();
+  });
+});
+
+describe("useRunIntelV3 — durable run-session identity", () => {
+  it("a manual click mints a browser UUID and the first request sends it", async () => {
+    runV3.mockResolvedValueOnce(completeResult());
+
+    const { root, container } = mountHarness();
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+
+    const ids = sentSessionIds();
+    expect(ids).toHaveLength(1);
+    expect(ids[0]).toMatch(UUID_RE);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("every automatic continuation of one click sends the SAME session id", async () => {
+    runV3
+      .mockResolvedValueOnce(partialResult())
+      .mockResolvedValueOnce(partialResult())
+      .mockResolvedValueOnce(partialResult())
+      .mockResolvedValueOnce(completeResult());
+
+    const { root, container } = mountHarness();
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(80);
+    });
+
+    const ids = sentSessionIds();
+    expect(ids).toHaveLength(4);
+    expect(new Set(ids).size).toBe(1);
+    expect(ids[0]).toMatch(UUID_RE);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("a second manual click always sends a DIFFERENT session id", async () => {
+    runV3.mockResolvedValue(completeResult());
+
+    const { root, container } = mountHarness();
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+
+    const ids = sentSessionIds();
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).toMatch(UUID_RE);
+    expect(ids[1]).toMatch(UUID_RE);
+    expect(ids[0]).not.toBe(ids[1]);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("a retry click after a failed run uses a fresh session id", async () => {
+    runV3
+      .mockRejectedValueOnce(new Error("network error"))
+      .mockResolvedValueOnce(completeResult());
+
+    const { root, container } = mountHarness();
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+    await act(async () => {
+      latestHook!.mutate();
+      await flush(20);
+    });
+
+    const ids = sentSessionIds();
+    expect(ids).toHaveLength(2);
+    expect(ids[0]).not.toBe(ids[1]);
+
+    act(() => root.unmount());
     container.remove();
   });
 });

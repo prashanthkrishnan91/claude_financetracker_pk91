@@ -527,7 +527,7 @@ class TestPrewarmIntelV3Snapshot(unittest.IsolatedAsyncioTestCase):
              patch.object(IntelV3Service, "_get_weight_map", new_callable=AsyncMock, return_value={}), \
              patch.object(IntelV3Service, "_get_sec_readiness_for_adapters", new_callable=AsyncMock, return_value=None), \
              patch.object(IntelV3Service, "_persist_snapshot", new_callable=AsyncMock,
-                          side_effect=lambda *, run_id, payload: persist_calls.append({"run_id": run_id})), \
+                          side_effect=lambda *, run_id, payload, run_session_id=None: persist_calls.append({"run_id": run_id})), \
              patch("app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter") as mock_adapter_cls, \
              patch("app.services.intelligence.v3.intel_v3_service.build_snapshot") as mock_build, \
              patch("app.services.intelligence.v3.intel_v3_service.build_diagnostics", return_value={}), \

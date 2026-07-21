@@ -383,7 +383,21 @@ class AgentOrchestrator:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    async def create_run(self, tickers: Optional[list[str]] = None) -> str:
+    async def create_run(
+        self,
+        tickers: Optional[list[str]] = None,
+        run_id: Optional[str] = None,
+    ) -> str:
+        """Insert the agent_runs row for this run.
+
+        ``run_id`` (optional): explicit UUID for the row. Session-scoped Run
+        Intel batches supply the durable ``analyst_refresh_jobs.worker_run_id``
+        here so ``agent_runs.id`` — and therefore ``agent_insights.run_id`` /
+        ``recommendations.agent_run_id`` — exactly equals the queue rows'
+        ``worker_run_id``. That makes evidence↔job ownership a durable, exact
+        SQL mapping instead of a timestamp inference. Callers that omit it
+        keep the historical DB-generated id behavior unchanged.
+        """
         row = {
             "user_id": str(self.user_id),
             "status": assert_db_status("queued"),
@@ -393,6 +407,8 @@ class AgentOrchestrator:
             "deposit_amount": self.deposit_amount,
             "sale_proceeds": self.sale_proceeds,
         }
+        if run_id is not None:
+            row["id"] = str(run_id)
         result = self._db("agent_runs.create", lambda: self.db.table("agent_runs").insert(row).execute())
         return result.data[0]["id"]
 

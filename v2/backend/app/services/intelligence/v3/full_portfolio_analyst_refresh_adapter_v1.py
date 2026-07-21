@@ -161,6 +161,7 @@ class FullPortfolioAnalystRefreshAdapter:
         *,
         priority_hints: Optional[list[TickerPriorityHint]] = None,
         started_at: Optional[datetime] = None,
+        worker_run_id: Optional[str] = None,
     ) -> AnalystRefreshResult:
         started_at = started_at or datetime.now(timezone.utc)
         started_monotonic = time.monotonic()
@@ -228,8 +229,17 @@ class FullPortfolioAnalystRefreshAdapter:
             )
 
         try:
+            # Session batches thread the durable worker_run_id into the
+            # backend as the explicit agent-run id (kwarg only when supplied
+            # so injected legacy/test backends keep their 3-arg signature).
+            if worker_run_id is not None:
+                backend_coro = self._run_backend(
+                    self.user_id, selected, started_at, run_id=str(worker_run_id),
+                )
+            else:
+                backend_coro = self._run_backend(self.user_id, selected, started_at)
             backend_results = await asyncio.wait_for(
-                self._run_backend(self.user_id, selected, started_at),
+                backend_coro,
                 timeout=max(1.0, self.budget.max_seconds - elapsed),
             )
         except asyncio.TimeoutError:
@@ -361,6 +371,7 @@ async def default_full_portfolio_agent_orchestrator_backend(
     user_id: UUID,
     selected_tickers: list[str],
     started_at: datetime,
+    run_id: Optional[str] = None,
 ) -> dict[str, Optional[dict[str, Any]]]:
     """Run ``AgentOrchestrator`` UNSCOPED on the full stale ticker list.
 
@@ -405,7 +416,15 @@ async def default_full_portfolio_agent_orchestrator_backend(
             # batch only.  Non-scope tickers keep their existing rows untouched.
             analyst_refresh_tickers=set(selected_tickers),
         )
-        run_id = await orch.create_run(tickers=list(selected_tickers))
+        # ``run_id`` (session batches): the caller supplies the durable
+        # analyst_refresh_jobs.worker_run_id, so the agent_runs row — and every
+        # agent_insights.run_id / recommendations.agent_run_id written for this
+        # batch — carries the EXACT id already stamped on the claimed queue
+        # rows. Evidence↔job ownership is then a durable SQL equality, never a
+        # timestamp inference. Legacy callers omit it (DB-generated id).
+        run_id = await orch.create_run(
+            tickers=list(selected_tickers), run_id=run_id,
+        )
         # Capture the orchestrator's run outcome so the post-run readback can
         # attribute a SPECIFIC failure reason when no durable rows appear —
         # raised / failed / no_data / completed-but-persisted-nothing — instead

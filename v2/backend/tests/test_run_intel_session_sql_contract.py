@@ -189,3 +189,119 @@ class TestIdempotencyAndSafety:
         assert "DROP COLUMN" not in sql
         drops = re.findall(r"DROP INDEX IF EXISTS (\w+)", sql)
         assert drops == ["uq_analyst_refresh_jobs_user_ticker_window"]
+
+
+RETENTION = MIGRATION.parent / "cost_guard_retention_cleanup.sql"
+
+
+def _retention_sql() -> str:
+    return RETENTION.read_text(encoding="utf-8")
+
+
+def _retention_stripped() -> str:
+    return "\n".join(
+        line for line in _retention_sql().splitlines()
+        if not line.strip().startswith("--")
+    )
+
+
+class TestFkDeleteActions:
+    """Blocker 5 — every session FK declares an explicit delete action so
+    retention cleanup can never fail on (or silently corrupt) references."""
+
+    def test_pre_session_snapshot_fk_sets_null_on_snapshot_delete(self):
+        assert re.search(
+            r"pre_session_snapshot_id\s+UUID NULL REFERENCES "
+            r"public\.intel_v3_snapshots\(id\)\s+ON DELETE SET NULL",
+            _stripped(),
+        )
+
+    def test_completed_snapshot_fk_sets_null_on_snapshot_delete(self):
+        assert re.search(
+            r"completed_snapshot_id\s+UUID NULL REFERENCES "
+            r"public\.intel_v3_snapshots\(id\)\s+ON DELETE SET NULL",
+            _stripped(),
+        )
+
+    def test_job_session_fk_cascades_on_session_delete(self):
+        assert re.search(
+            r"ALTER TABLE public\.analyst_refresh_jobs\s+"
+            r"ADD COLUMN IF NOT EXISTS run_session_id UUID NULL\s+"
+            r"REFERENCES public\.intel_run_sessions\(id\) ON DELETE CASCADE",
+            _stripped(),
+        )
+
+    def test_snapshot_session_fk_sets_null_on_session_delete(self):
+        assert re.search(
+            r"ALTER TABLE public\.intel_v3_snapshots\s+"
+            r"ADD COLUMN IF NOT EXISTS run_session_id UUID NULL\s+"
+            r"REFERENCES public\.intel_run_sessions\(id\) ON DELETE SET NULL",
+            _stripped(),
+        )
+
+
+class TestRetentionCleanupOrdering:
+    """Blocker 5 — cost_guard_retention_cleanup.sql handles the migration-026
+    schema: terminal-session pruning, active-session preservation, and a
+    snapshot cleanup that can never fail on a session reference."""
+
+    def test_deletes_only_terminal_sessions_older_than_retention(self):
+        sql = _retention_stripped()
+        m = re.search(
+            r"DELETE FROM public\.intel_run_sessions\s+"
+            r"WHERE status IN \('completed', 'failed'\)\s+"
+            r"AND created_at < NOW\(\) - INTERVAL '7 days'",
+            sql,
+        )
+        assert m, "terminal-session retention DELETE missing"
+        # Exactly one session DELETE, and it must never target active states.
+        deletes = re.findall(r"DELETE FROM public\.intel_run_sessions[^;]*;", sql)
+        assert len(deletes) == 1
+        for active in (
+            "created",
+            "ticker_refresh_in_progress",
+            "publishing",
+            "publication_retryable_failed",
+        ):
+            assert f"'{active}'" not in deletes[0]
+
+    def test_session_delete_runs_before_snapshot_delete(self):
+        sql = _retention_stripped()
+        session_pos = sql.index("DELETE FROM public.intel_run_sessions")
+        snapshot_pos = sql.index("DELETE FROM public.intel_v3_snapshots")
+        assert session_pos < snapshot_pos, (
+            "sessions must be pruned before snapshots so SET NULL clears "
+            "snapshot session links first"
+        )
+
+    def test_inactive_snapshot_cleanup_is_unchanged_and_present(self):
+        assert re.search(
+            r"DELETE FROM public\.intel_v3_snapshots\s+"
+            r"WHERE is_active = false\s+"
+            r"AND created_at < NOW\(\) - INTERVAL '7 days'",
+            _retention_stripped(),
+        )
+
+    def test_dependency_map_documents_all_four_session_fks(self):
+        sql = _retention_sql()
+        assert (
+            "analyst_refresh_jobs.run_session_id → intel_run_sessions(id) "
+            "ON DELETE CASCADE" in sql
+        )
+        assert (
+            "intel_v3_snapshots.run_session_id   → intel_run_sessions(id) "
+            "ON DELETE SET NULL" in sql
+        )
+        assert (
+            "intel_run_sessions.pre_session_snapshot_id → intel_v3_snapshots(id) "
+            "ON DELETE SET NULL" in sql
+        )
+        assert (
+            "intel_run_sessions.completed_snapshot_id   → intel_v3_snapshots(id) "
+            "ON DELETE SET NULL" in sql
+        )
+
+    def test_retention_never_touches_analyst_refresh_jobs_directly(self):
+        """Session jobs are removed ONLY via the session CASCADE; legacy
+        NULL-session jobs are not pruned by this script."""
+        assert "DELETE FROM public.analyst_refresh_jobs" not in _retention_stripped()

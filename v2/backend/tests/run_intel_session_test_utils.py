@@ -259,7 +259,9 @@ class RecordingAnalystAdapter:
         self.write_evidence = write_evidence
         self.mark_success = mark_success
 
-    async def __call__(self, tickers, *, priority_hints=None, started_at=None):
+    async def __call__(
+        self, tickers, *, priority_hints=None, started_at=None, worker_run_id=None,
+    ):
         from app.services.intelligence.v3.analyst_refresh_adapter_v1 import (
             AnalystRefreshResult,
             STATUS_FAILED,
@@ -268,7 +270,9 @@ class RecordingAnalystAdapter:
             TickerRefreshOutcome,
         )
 
-        agent_run_id = str(uuid.uuid4())
+        # Mirror the production backend's durable execution mapping: session
+        # batches persist evidence under the batch's exact worker_run_id.
+        agent_run_id = str(worker_run_id) if worker_run_id else str(uuid.uuid4())
         per_ticker = []
         successful = failed = 0
         for t in tickers:

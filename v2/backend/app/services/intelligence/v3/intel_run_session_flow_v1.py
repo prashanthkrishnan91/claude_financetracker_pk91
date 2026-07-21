@@ -673,16 +673,21 @@ async def _reconcile_claimed_session_jobs(
     BEFORE its session job was marked succeeded — or a transient DB read
     failure can mark a genuinely-persisted ticker failed. On resume:
 
-      * a claimed OR failed session job whose ticker has BOTH a fresh
-        ``agent_insights`` row AND a matching fresh ``recommendations`` row
-        (written since the session began, same agent run) is marked
-        succeeded — verified evidence is never regenerated, and a persisted
-        ticker can never exhaust its retry budget over readback failures;
-      * a claimed session job with NO such evidence whose claim is older than
-        the stale-claim timeout is reset to pending (the claiming request is
-        dead);
-      * an in-flight claim (younger than the timeout, no evidence yet) is
-        left alone — never stolen.
+      * a claimed OR failed session job is credited succeeded ONLY via the
+        exact durable execution mapping: the job carries a non-null
+        ``worker_run_id`` (stamped at claim time), the session batch created
+        its ``agent_runs`` row with that SAME id, and BOTH an
+        ``agent_insights`` row (``run_id == job.worker_run_id``) AND a
+        ``recommendations`` row (``agent_run_id == job.worker_run_id``) exist
+        for this user + ticker. Ownership is a durable SQL equality — never a
+        session-start timestamp inference, so two overlapping sessions for
+        the same user and ticker can NEVER cross-credit each other's
+        evidence (their worker_run_ids differ by construction);
+      * a claimed session job with NO such mapped evidence whose claim is
+        older than the stale-claim timeout is reset to pending (the claiming
+        request is dead);
+      * an in-flight claim (younger than the timeout, no mapped evidence
+        yet) is left alone — never stolen.
 
     Best-effort: any DB failure leaves the jobs as they are (the stale-claim
     timeout still recovers them later).
@@ -705,62 +710,64 @@ async def _reconcile_claimed_session_jobs(
         )
         return
 
-    session_started = str(session.get("created_at") or "")
     user_id = str(session.get("user_id"))
-    tickers = [
-        str(r.get("ticker") or "").upper()
-        for r in claimed_rows
-        if r.get("ticker")
-    ]
 
-    evidence_tickers: set[str] = set()
-    try:
-        insights_res = await asyncio.to_thread(
-            lambda: client.table("agent_insights")
-            .select("ticker,run_id,created_at")
-            .eq("user_id", user_id)
-            .gte("created_at", session_started)
-            .execute()
-        )
-        insight_by_ticker: dict[str, str] = {}
-        for r in getattr(insights_res, "data", None) or []:
-            tk = str(r.get("ticker") or "").upper()
-            if tk in tickers:
-                insight_by_ticker[tk] = str(r.get("run_id") or "")
-        if insight_by_ticker:
-            recs_res = await asyncio.to_thread(
-                lambda: client.table("recommendations")
-                .select("ticker,agent_run_id,created_at")
+    # (ticker, worker_run_id) pairs to verify — jobs without a worker_run_id
+    # were never claimed by any batch and can never be evidence-credited.
+    run_ids = sorted({
+        str(r.get("worker_run_id"))
+        for r in claimed_rows
+        if r.get("worker_run_id")
+    })
+
+    # Evidence keyed by (ticker, run_id) — the exact mapping, no timestamps.
+    credited_pairs: set[tuple[str, str]] = set()
+    if run_ids:
+        try:
+            insights_res = await asyncio.to_thread(
+                lambda: client.table("agent_insights")
+                .select("ticker,run_id")
                 .eq("user_id", user_id)
-                .gte("created_at", session_started)
+                .in_("run_id", run_ids)
                 .execute()
             )
-            rec_by_ticker: dict[str, str] = {}
-            for r in getattr(recs_res, "data", None) or []:
-                tk = str(r.get("ticker") or "").upper()
-                if tk in tickers:
-                    rec_by_ticker[tk] = str(r.get("agent_run_id") or "")
-            for tk, insight_run in insight_by_ticker.items():
-                rec_run = rec_by_ticker.get(tk)
-                if rec_run is None:
-                    continue
-                if insight_run and rec_run and insight_run != rec_run:
-                    continue
-                evidence_tickers.add(tk)
-    except Exception as exc:
-        logger.warning(
-            "intel_run_session.reconcile_evidence_read_failed session_id=%s err=%s",
-            session_id, exc,
-        )
-        evidence_tickers = set()
+            insight_pairs = {
+                (str(r.get("ticker") or "").upper(), str(r.get("run_id") or ""))
+                for r in getattr(insights_res, "data", None) or []
+                if r.get("ticker") and r.get("run_id")
+            }
+            if insight_pairs:
+                recs_res = await asyncio.to_thread(
+                    lambda: client.table("recommendations")
+                    .select("ticker,agent_run_id")
+                    .eq("user_id", user_id)
+                    .in_("agent_run_id", run_ids)
+                    .execute()
+                )
+                rec_pairs = {
+                    (
+                        str(r.get("ticker") or "").upper(),
+                        str(r.get("agent_run_id") or ""),
+                    )
+                    for r in getattr(recs_res, "data", None) or []
+                    if r.get("ticker") and r.get("agent_run_id")
+                }
+                credited_pairs = insight_pairs & rec_pairs
+        except Exception as exc:
+            logger.warning(
+                "intel_run_session.reconcile_evidence_read_failed session_id=%s err=%s",
+                session_id, exc,
+            )
+            credited_pairs = set()
 
     stale_claim_cutoff = now - timedelta(seconds=STALE_CLAIM_TIMEOUT_SECONDS)
     credited = 0
     recovered = 0
     for row in claimed_rows:
         ticker = str(row.get("ticker") or "").upper()
+        job_run_id = str(row.get("worker_run_id") or "")
         job = AnalystRefreshJob.from_row(row)
-        if ticker in evidence_tickers:
+        if job_run_id and (ticker, job_run_id) in credited_pairs:
             ok = await asyncio.to_thread(
                 lambda j=job: mark_job_succeeded(client, j, now=now)
             )
@@ -867,6 +874,25 @@ async def _publish_step(
             message=message,
         )
 
+    def _session_update_failed_response() -> dict[str, Any]:
+        # Blocker 2: the authoritative session row could NOT be updated to
+        # completed. Completion must never be reported from a locally
+        # constructed dict — return a retryable publication state instead.
+        # The snapshot row (if inserted) stays; the next continuation adopts
+        # it idempotently with ZERO analyst calls.
+        return _pub_response(
+            session_status=STATUS_PUBLICATION_RETRY,
+            status="refresh_in_progress",
+            publication_status=PUBLICATION_RETRYABLE_FAILED,
+            retryable=True,
+            action=ACTION_CONTINUE,
+            message=(
+                "The snapshot is published but the session record could not "
+                "be updated; completion will be re-verified on the next "
+                "continuation without re-running any analysis."
+            ),
+        )
+
     # Crash-recovery idempotency: adopt an existing session-linked snapshot.
     existing_row_id = await _find_session_snapshot_row_id(client, session_id)
     if existing_row_id is not None:
@@ -875,7 +901,7 @@ async def _publish_step(
             user_id=str(session.get("user_id")),
             snapshot_row_id=existing_row_id,
         )
-        await asyncio.to_thread(
+        updated = await asyncio.to_thread(
             lambda: update_session(
                 client, session_id,
                 status=STATUS_COMPLETED,
@@ -885,11 +911,8 @@ async def _publish_step(
                 now=now,
             )
         )
-        session = dict(
-            session,
-            status=STATUS_COMPLETED,
-            completed_snapshot_id=existing_row_id,
-        )
+        if not updated:
+            return _session_update_failed_response()
         return await _completed_response(
             service=service, session=session, session_id=session_id,
             attempted=attempted, succeeded_now=succeeded_now,
@@ -1005,7 +1028,7 @@ async def _publish_step(
             message="Snapshot publication did not persist a row; retrying.",
         )
 
-    await asyncio.to_thread(
+    updated = await asyncio.to_thread(
         lambda: update_session(
             client, session_id,
             status=STATUS_COMPLETED,
@@ -1015,11 +1038,8 @@ async def _publish_step(
             now=now,
         )
     )
-    session = dict(
-        session,
-        status=STATUS_COMPLETED,
-        completed_snapshot_id=str(snapshot_row_id),
-    )
+    if not updated:
+        return _session_update_failed_response()
     return await _completed_response(
         service=service, session=session, session_id=session_id,
         attempted=attempted, succeeded_now=succeeded_now, failed_now=failed_now,
@@ -1103,24 +1123,51 @@ async def _completed_response(
     continuation can change anything — the response must stop the client's
     bounded auto-continuation instead of looping it to its cap.
 
-    Verified from the durable rows, never from the globally-latest snapshot:
-      * session status is completed and a completed_snapshot_id is set;
+    Verified from the durable rows, never from the globally-latest snapshot
+    and never from a locally constructed session dict — the session row is
+    RE-READ from SQL and is the sole completion authority:
+      * the session row exists, belongs to this user, its SQL ``status`` is
+        ``completed``, and its SQL ``completed_snapshot_id`` is set;
       * that snapshot row's ``run_session_id`` column == this session;
       * its payload's ``run_session_id`` == this session;
       * its row id differs from the pre-session snapshot;
       * ``snapshot_source == "worker_certified"``;
-      * evidence freshness is ``certified_current``;
+      * the payload's PERSISTED ``evidence_freshness_state`` is
+        ``certified_current`` (stamped at certified publication);
+      * the LIVE freshness recomputation also returns ``certified_current`` —
+        and a freshness-read failure is a completion problem, never swallowed
+        (fail closed);
       * no required session job is pending/claimed/failed.
     """
     client = service.client
     holdings = _json_list(session.get("holdings_scope"))
     expected = int(session.get("expected_ticker_job_count") or 0)
-    completed_snapshot_id = session.get("completed_snapshot_id")
     counts = await asyncio.to_thread(
         lambda: count_session_job_states(client, run_session_id=session_id)
     )
 
     problems: list[str] = []
+
+    # Completion authority: the SQL session row, re-read now — never the
+    # in-memory dict the caller happened to hold (Blocker 2).
+    sql_session = await asyncio.to_thread(get_session, client, session_id)
+    completed_snapshot_id: Optional[str] = None
+    if sql_session is None:
+        problems.append("session_row_missing")
+    else:
+        if str(sql_session.get("user_id")) != str(service.user_id):
+            problems.append("session_owner_mismatch")
+        if str(sql_session.get("status") or "") != STATUS_COMPLETED:
+            problems.append(
+                f"session_sql_status={sql_session.get('status') or 'unknown'}"
+            )
+        completed_snapshot_id = sql_session.get("completed_snapshot_id")
+        # Prefer the durable row's scope/expectations too.
+        holdings = _json_list(sql_session.get("holdings_scope")) or holdings
+        expected = int(
+            sql_session.get("expected_ticker_job_count") or expected or 0
+        )
+        session = sql_session
     if not completed_snapshot_id:
         problems.append("no_completed_snapshot_id")
     unfinished = (
@@ -1163,11 +1210,22 @@ async def _completed_response(
             problems.append(
                 f"snapshot_source={payload.get('snapshot_source')}"
             )
-        try:
-            from .watchtower_intel_republisher_v1 import (
-                PUBLISH_CERTIFIED_CURRENT,
-                get_evidence_freshness_state,
+        # Blocker 3 — freshness fails CLOSED, on both layers:
+        # (a) the payload must carry the PERSISTED certified-current marker
+        #     stamped at certified publication time;
+        # (b) the live recomputation must agree; an exception, timeout, or
+        #     unknown value from it is a completion problem — never swallowed.
+        from .watchtower_intel_republisher_v1 import (
+            PUBLISH_CERTIFIED_CURRENT,
+            get_evidence_freshness_state,
+        )
+        stored_freshness = payload.get("evidence_freshness_state")
+        if stored_freshness != PUBLISH_CERTIFIED_CURRENT:
+            problems.append(
+                "payload_evidence_freshness_state="
+                f"{stored_freshness or 'missing'}"
             )
+        try:
             freshness = await get_evidence_freshness_state(
                 service.user_id,
                 client,
@@ -1179,6 +1237,9 @@ async def _completed_response(
             logger.warning(
                 "intel_run_session.freshness_check_failed session_id=%s err=%s",
                 session_id, exc,
+            )
+            problems.append(
+                f"freshness_check_failed:{type(exc).__name__}"
             )
 
     if problems:

@@ -25,6 +25,16 @@
 
 -- ── 1. intel_run_sessions — one row per explicit Run Intel click ─────────────
 --
+-- Retention/deletion semantics (kept in sync with
+-- cost_guard_retention_cleanup.sql):
+--   * Deleting an intel_v3_snapshots row NULLs any session pointer to it
+--     (pre_session_snapshot_id / completed_snapshot_id → ON DELETE SET NULL),
+--     so snapshot retention cleanup can never fail on a session reference.
+--   * Deleting a session CASCADE-deletes its own analyst_refresh_jobs rows
+--     (session jobs are that session's bookkeeping) and NULLs
+--     intel_v3_snapshots.run_session_id (the snapshot outlives the session
+--     record until its own retention window).
+--
 -- The id is supplied by the client (browser crypto.randomUUID() per manual
 -- click) so network retries and automatic continuations of the same click
 -- share one identity. gen_random_uuid() default covers legacy callers that
@@ -53,9 +63,11 @@ CREATE TABLE IF NOT EXISTS public.intel_run_sessions (
     expected_ticker_job_count INTEGER NOT NULL DEFAULT 0,
     -- Latest active snapshot ROW id (intel_v3_snapshots.id, UUID) at click
     -- time. Completion requires a DIFFERENT, session-linked snapshot row.
-    pre_session_snapshot_id   UUID NULL REFERENCES public.intel_v3_snapshots(id),
+    pre_session_snapshot_id   UUID NULL REFERENCES public.intel_v3_snapshots(id)
+                                  ON DELETE SET NULL,
     -- The snapshot row published for THIS session (set on completion).
-    completed_snapshot_id     UUID NULL REFERENCES public.intel_v3_snapshots(id),
+    completed_snapshot_id     UUID NULL REFERENCES public.intel_v3_snapshots(id)
+                                  ON DELETE SET NULL,
     -- Retryable error information (publication failures etc.).
     last_error                TEXT,
     publication_attempts      INTEGER NOT NULL DEFAULT 0,
@@ -91,7 +103,7 @@ CREATE POLICY intel_run_sessions_service_only
 -- and keep the legacy per-UTC-day idempotency behavior.
 ALTER TABLE public.analyst_refresh_jobs
     ADD COLUMN IF NOT EXISTS run_session_id UUID NULL
-        REFERENCES public.intel_run_sessions(id);
+        REFERENCES public.intel_run_sessions(id) ON DELETE CASCADE;
 
 -- Replace the old daily-window uniqueness so a second same-day session can
 -- coexist. The legacy rule is preserved for null-session rows only.
@@ -119,7 +131,7 @@ CREATE INDEX IF NOT EXISTS idx_analyst_refresh_jobs_session_status
 -- snapshots stay NULL.
 ALTER TABLE public.intel_v3_snapshots
     ADD COLUMN IF NOT EXISTS run_session_id UUID NULL
-        REFERENCES public.intel_run_sessions(id);
+        REFERENCES public.intel_run_sessions(id) ON DELETE SET NULL;
 
 -- Publication idempotency: retrying publication can never create a second
 -- snapshot row for the same session.

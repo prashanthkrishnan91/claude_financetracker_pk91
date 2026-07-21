@@ -194,8 +194,18 @@ export function deriveRunJobs(result: IntelV3RunResult | null | undefined): Advi
 /** Hard ceiling on automatic continuation requests for one Run Intel click. */
 export const RUN_INTEL_MAX_CONTINUATIONS = 20;
 
-/** Hard ceiling on total elapsed wall-clock time for one Run Intel click. */
-export const RUN_INTEL_MAX_ELAPSED_MS = 120_000;
+/**
+ * Hard ceiling on total elapsed wall-clock time for one Run Intel click.
+ *
+ * Sized to honestly accommodate the largest supported run under the server's
+ * per-request bounds: each bounded request drains at most 3 tickers in ≤ 20s
+ * (analyst_refresh_on_demand_drain_v1), so a 32-holding portfolio needs up to
+ * ceil(32/3) = 11 analyst batches plus a final publication request — 12
+ * requests ≈ 240s in the worst case where every batch runs to its 20s bound.
+ * 300s covers that with headroom while still being a real ceiling; the
+ * request-count cap (20) and the per-request 20s server bound are unchanged.
+ */
+export const RUN_INTEL_MAX_ELAPSED_MS = 300_000;
 
 /**
  * Whether the hook should automatically fire another continuation request

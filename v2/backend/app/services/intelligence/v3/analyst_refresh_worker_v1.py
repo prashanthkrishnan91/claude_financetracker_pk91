@@ -460,7 +460,23 @@ class AnalystRefreshWorker:
                     pass
 
         try:
-            refresh = await adapter(selected, priority_hints=hints, started_at=now)
+            if self.scope_run_session_id is not None:
+                # Session batch: thread THIS batch's worker_run_id (already
+                # stamped on every claimed job row) into the adapter so the
+                # agent run — and all durable evidence rows — carry the exact
+                # same id. Evidence↔job ownership becomes a durable SQL
+                # equality (job.worker_run_id == insights.run_id ==
+                # recommendations.agent_run_id), never timestamp inference.
+                # Legacy/unscoped batches keep the historical 3-arg call so
+                # injected test adapters are unaffected.
+                refresh = await adapter(
+                    selected,
+                    priority_hints=hints,
+                    started_at=now,
+                    worker_run_id=worker_run_id,
+                )
+            else:
+                refresh = await adapter(selected, priority_hints=hints, started_at=now)
         except Exception as exc:
             # The adapter is contracted not to raise, but the worker must never
             # crash on a misbehaving adapter — fail every ticker honestly.
@@ -508,6 +524,12 @@ class AnalystRefreshWorker:
                 user_id=user_id,
                 tickers=list(job_by_ticker.keys()),
                 started_at=now,
+                # Session batches: residual evidence only counts when it was
+                # written under THIS batch's exact agent-run id — never
+                # another session's (or the global worker's) rows.
+                required_run_id=(
+                    worker_run_id if self.scope_run_session_id is not None else None
+                ),
             )
             if residual:
                 success_set = residual
@@ -582,6 +604,7 @@ class AnalystRefreshWorker:
         user_id: str,
         tickers: list[str],
         started_at: datetime,
+        required_run_id: Optional[str] = None,
     ) -> set[str]:
         """After a timeout, check which tickers have durable evidence in the DB.
 
@@ -638,6 +661,14 @@ class AnalystRefreshWorker:
                 rec_run_id = rec_by_ticker.get(ticker)
                 if rec_run_id is None:
                     # agent_insights present but no recommendation — insufficient.
+                    insight_only.add(ticker)
+                    continue
+                # Session batches: ownership is the exact run-id equality —
+                # rows from any other run never credit this batch's jobs.
+                if required_run_id is not None and (
+                    insight_run_id != str(required_run_id)
+                    or rec_run_id != str(required_run_id)
+                ):
                     insight_only.add(ticker)
                     continue
                 # Both present; if run_ids are non-empty they must match.

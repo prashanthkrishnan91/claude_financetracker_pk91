@@ -1602,6 +1602,14 @@ class IntelV3Service:
             # Durable session linkage in the payload — mirrored in the scalar
             # SQL column by _persist_snapshot below.
             snapshot_payload["run_session_id"] = str(run_session_id)
+            if contract_certified:
+                # Persisted freshness marker for completion truth: session
+                # completion verification requires this stored value (fail
+                # closed) in addition to the live freshness recomputation.
+                # Stamped ONLY when deterministic certification passed.
+                snapshot_payload["evidence_freshness_state"] = (
+                    "certified_current"
+                )
         snapshot_payload["snapshot_source"] = snapshot_source
         snapshot_payload["agents_ran_via_worker"] = True
         snapshot_payload["this_click_used_llm"] = False

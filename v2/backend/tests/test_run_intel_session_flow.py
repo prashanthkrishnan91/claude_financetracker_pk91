@@ -213,6 +213,9 @@ def make_env(
         }
         if run_session_id is not None:
             payload["run_session_id"] = str(run_session_id)
+            # Mirrors the production certified-publication stamp (Blocker 3):
+            # completion truth requires this persisted value.
+            payload["evidence_freshness_state"] = "certified_current"
         row_id = await self._persist_snapshot(
             run_id=prewarm_run_id,
             payload=payload,
@@ -500,24 +503,26 @@ class TestInterruptionAndResume:
         }
         assert len(done_after_two) == 6
 
-        # Simulate an interrupted third request: it claimed 3 jobs, persisted
-        # durable evidence for TWO of them, then died before marking any job
-        # succeeded — and before its claims could be released.
+        # Simulate an interrupted third request: it claimed 3 jobs (stamping
+        # the batch's worker_run_id on them), persisted durable evidence for
+        # TWO of them UNDER THAT EXACT run id (the production execution
+        # mapping), then died before marking any job succeeded — and before
+        # its claims could be released.
         now = datetime.now(timezone.utc)
+        batch_run_id = str(uuid.uuid4())
         interrupted = claim_due_jobs(
             env.client,
-            worker_run_id=str(uuid.uuid4()),
+            worker_run_id=batch_run_id,
             now=now,
             limit=3,
             user_id=USER_A,
             run_session_id=sid,
         )
         assert len(interrupted) == 3
-        evidence_run = str(uuid.uuid4())
         persisted = [interrupted[0].ticker, interrupted[1].ticker]
         for t in persisted:
             write_ticker_evidence(
-                env.client, user_id=USER_A, ticker=t, agent_run_id=evidence_run,
+                env.client, user_id=USER_A, ticker=t, agent_run_id=batch_run_id,
             )
         # The third claimed ticker has NO evidence; age its claim past the
         # stale-claim timeout so resume recovers it (the request is dead).
@@ -953,3 +958,278 @@ class TestCertificationScopeOverride:
         assert result.certified is False  # no evidence rows exist
         assert set(result.failed_tickers) == {"AAPL", "MSFT"}
         assert "OTHER" not in result.failed_tickers
+
+
+# ═══ Release-blocker regressions (final patch) ════════════════════════════════
+
+
+class TestBlocker1ExactExecutionMapping:
+    @pytest.mark.asyncio
+    async def test_overlapping_sessions_cannot_cross_credit_evidence(
+        self, monkeypatch,
+    ):
+        """Blocker 1 adversarial case: session B (created BEFORE session A's
+        evidence is written) holds a claimed job under its own worker run id.
+        Session A's evidence — same user, same ticker, newer than B's
+        created_at — must NEVER credit B's job. Ownership is the exact
+        worker_run_id ↔ agent-run mapping, not timestamps."""
+        env = make_env(monkeypatch, tickers=["AAPL"], on_demand=False)
+
+        # Session B first (so A's evidence lands AFTER B.created_at).
+        sid_b = _sid()
+        rb = await env.request(sid_b)
+        assert rb["next_required_action"] == ACTION_QUEUE_ONLY
+
+        # Session A over the SAME ticker.
+        sid_a = _sid()
+        await env.request(sid_a)
+
+        # Claim time is after both sessions' jobs became due.
+        now = datetime.now(timezone.utc) + timedelta(seconds=1)
+
+        # B claims its job under worker run id WB…
+        wb = str(uuid.uuid4())
+        claimed_b = claim_due_jobs(
+            env.client, worker_run_id=wb, now=now, limit=3,
+            user_id=USER_A, run_session_id=sid_b,
+        )
+        assert [j.ticker for j in claimed_b] == ["AAPL"]
+        # …A claims its job under WA and persists evidence AFTER B began.
+        wa = str(uuid.uuid4())
+        claimed_a = claim_due_jobs(
+            env.client, worker_run_id=wa, now=now, limit=3,
+            user_id=USER_A, run_session_id=sid_a,
+        )
+        assert [j.ticker for j in claimed_a] == ["AAPL"]
+        write_ticker_evidence(
+            env.client, user_id=USER_A, ticker="AAPL", agent_run_id=wa,
+        )
+
+        # Resume B: its claimed job must NOT be credited from A's evidence.
+        resumed_b = await env.request(sid_b)
+        b_job = env.session_jobs(sid_b)[0]
+        assert b_job["status"] == JOB_CLAIMED  # untouched in-flight claim
+        assert resumed_b["session_succeeded_ticker_count"] == 0
+        assert resumed_b["session_status"] == STATUS_TICKER_REFRESH
+        assert resumed_b["snapshot_available_after_run"] is False
+
+        # Resume A: its OWN mapped evidence credits its OWN job.
+        resumed_a = await env.request(sid_a)
+        a_job = env.session_jobs(sid_a)[0]
+        assert a_job["status"] == JOB_SUCCEEDED
+        assert resumed_a["session_succeeded_ticker_count"] == 1
+
+        # B completes only after ITS mapped execution persists evidence.
+        write_ticker_evidence(
+            env.client, user_id=USER_A, ticker="AAPL", agent_run_id=wb,
+        )
+        resumed_b2 = await env.request(sid_b)
+        b_job = env.session_jobs(sid_b)[0]
+        assert b_job["status"] == JOB_SUCCEEDED
+        assert resumed_b2["session_succeeded_ticker_count"] == 1
+
+    @pytest.mark.asyncio
+    async def test_job_without_worker_run_id_is_never_evidence_credited(
+        self, monkeypatch,
+    ):
+        """A job that was never claimed by any batch has no execution mapping
+        and must never be credited from any evidence rows."""
+        env = make_env(monkeypatch, tickers=["AAPL"], on_demand=False)
+        sid = _sid()
+        await env.request(sid)
+        # Force the (unclaimed) job into failed state with NO worker_run_id.
+        for j in env.client.store["analyst_refresh_jobs"]:
+            if j.get("run_session_id") == sid:
+                j["status"] = "failed"
+                j["attempts"] = 1
+                assert not j.get("worker_run_id")
+        write_ticker_evidence(
+            env.client, user_id=USER_A, ticker="AAPL",
+            agent_run_id=str(uuid.uuid4()),
+        )
+        await env.request(sid)
+        job = env.session_jobs(sid)[0]
+        assert job["status"] != JOB_SUCCEEDED
+
+    @pytest.mark.asyncio
+    async def test_session_batch_threads_worker_run_id_into_evidence(
+        self, monkeypatch,
+    ):
+        """End-to-end through the REAL worker: the durable evidence rows a
+        session batch writes carry the batch's exact worker_run_id, which is
+        also stamped on the succeeded job rows."""
+        env = make_env(monkeypatch, tickers=["AAPL", "MSFT"])
+        sid = _sid()
+        last = await env.run_to_completion(sid)
+        assert last["session_status"] == STATUS_COMPLETED
+        jobs = env.session_jobs(sid)
+        assert all(j.get("worker_run_id") for j in jobs)
+        insight_runs = {
+            (str(r["ticker"]).upper(), str(r["run_id"]))
+            for r in env.client.rows("agent_insights")
+        }
+        for j in jobs:
+            assert (j["ticker"], str(j["worker_run_id"])) in insight_runs
+
+
+class TestBlocker2SessionUpdateFailure:
+    @pytest.mark.asyncio
+    async def test_failed_completed_update_never_reports_completion(
+        self, monkeypatch,
+    ):
+        """Ticker work succeeds, the snapshot inserts, but the FIRST SQL
+        update to status=completed fails: the response must NOT be complete;
+        the next continuation adopts the existing snapshot, the update
+        succeeds, and the SAME session completes with zero re-analysis and
+        exactly one snapshot row."""
+        from app.services.intelligence.v3.intel_run_session_store_v1 import (
+            update_session as real_update_session,
+        )
+
+        env = make_env(monkeypatch, tickers=["AAPL", "MSFT"])
+        fail_state = {"remaining": 1}
+
+        def flaky_update_session(client, session_id, **kw):
+            if kw.get("status") == STATUS_COMPLETED and fail_state["remaining"] > 0:
+                fail_state["remaining"] -= 1
+                return False  # simulated SQL failure — row NOT updated
+            return real_update_session(client, session_id, **kw)
+
+        monkeypatch.setattr(flow_mod, "update_session", flaky_update_session)
+
+        sid = _sid()
+        first = await env.request(sid)
+        # Snapshot row exists (publication succeeded)…
+        linked = [
+            s for s in env.snapshot_rows()
+            if str(s.get("run_session_id") or "") == sid
+        ]
+        assert len(linked) == 1
+        # …but completion must NOT be reported: the session row update failed.
+        assert first["status"] != "completed"
+        assert first["snapshot_available_after_run"] is False
+        assert first["publication_status"] == "retryable_failed"
+        assert first["retryable"] is True
+        assert str(first["next_required_action"]).startswith("reclick_")
+
+        analyst_calls_after_first = len(env.analyst_calls)
+        publish_calls_after_first = env.publish_calls["count"]
+
+        # Continuation: adoption path, update now succeeds → completed.
+        second = await env.request(sid)
+        assert second["status"] == "completed"
+        assert second["snapshot_available_after_run"] is True
+        assert second["run_session_id"] == sid
+        # Zero ticker re-analysis, no second publication build, one row.
+        assert len(env.analyst_calls) == analyst_calls_after_first
+        assert env.publish_calls["count"] == publish_calls_after_first
+        assert len([
+            s for s in env.snapshot_rows()
+            if str(s.get("run_session_id") or "") == sid
+        ]) == 1
+        # SQL row is the completion authority.
+        session = env.session_rows()[0]
+        assert session["status"] == STATUS_COMPLETED
+        assert session["completed_snapshot_id"] == linked[0]["id"]
+
+    @pytest.mark.asyncio
+    async def test_completed_response_requires_sql_row_agreement(
+        self, monkeypatch,
+    ):
+        """_completed_response re-reads the SQL session row: if the durable
+        row does not say completed, no locally constructed dict can make the
+        API report completion."""
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        await env.run_to_completion(sid)
+        # Corrupt the durable row back to publishing with no snapshot id —
+        # a stray re-report must adopt/repair via publication, and the fresh
+        # completion report must come from the (re-)updated SQL row.
+        session = env.session_rows()[0]
+        session["status"] = "publishing"
+        session["completed_snapshot_id"] = None
+        recovered = await env.request(sid)
+        assert recovered["status"] == "completed"
+        assert env.session_rows()[0]["status"] == STATUS_COMPLETED
+        assert env.session_rows()[0]["completed_snapshot_id"] is not None
+
+
+class TestBlocker3FreshnessFailsClosed:
+    @pytest.mark.asyncio
+    async def test_missing_payload_freshness_blocks_completion(self, monkeypatch):
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        await env.run_to_completion(sid)
+        for s in env.snapshot_rows():
+            if str(s.get("run_session_id") or "") == sid:
+                payload = dict(s["payload"])
+                payload.pop("evidence_freshness_state", None)
+                s["payload"] = payload
+        rereport = await env.request(sid)
+        assert rereport["snapshot_available_after_run"] is False
+        assert rereport["status"] != "completed"
+
+    @pytest.mark.asyncio
+    async def test_wrong_payload_freshness_blocks_completion(self, monkeypatch):
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        await env.run_to_completion(sid)
+        for s in env.snapshot_rows():
+            if str(s.get("run_session_id") or "") == sid:
+                s["payload"] = dict(
+                    s["payload"], evidence_freshness_state="republish_pending",
+                )
+        rereport = await env.request(sid)
+        assert rereport["snapshot_available_after_run"] is False
+
+    @pytest.mark.asyncio
+    async def test_live_freshness_exception_blocks_completion(self, monkeypatch):
+        """A freshness-read failure is a completion problem — never swallowed.
+        Once the read recovers, the same session completes."""
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        freshness_mock = AsyncMock(side_effect=RuntimeError("freshness DB down"))
+        monkeypatch.setattr(
+            repub_mod, "get_evidence_freshness_state", freshness_mock,
+        )
+        sid = _sid()
+        blocked = await env.run_to_completion(sid, max_requests=3)
+        # Publication happened, but completion was withheld (fail closed).
+        assert blocked["status"] != "completed"
+        assert blocked["snapshot_available_after_run"] is False
+
+        # Freshness read recovers → the SAME session completes, no re-analysis.
+        analyst_calls_before = len(env.analyst_calls)
+        freshness_mock.side_effect = None
+        freshness_mock.return_value = "certified_current"
+        recovered = await env.run_to_completion(sid)
+        assert recovered["status"] == "completed"
+        assert len(env.analyst_calls) == analyst_calls_before
+
+    @pytest.mark.asyncio
+    async def test_unknown_live_freshness_value_blocks_completion(
+        self, monkeypatch,
+    ):
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        monkeypatch.setattr(
+            repub_mod,
+            "get_evidence_freshness_state",
+            AsyncMock(return_value="some_unknown_state"),
+        )
+        sid = _sid()
+        blocked = await env.run_to_completion(sid, max_requests=3)
+        assert blocked["status"] != "completed"
+        assert blocked["snapshot_available_after_run"] is False
+
+    @pytest.mark.asyncio
+    async def test_valid_certified_current_session_completes(self, monkeypatch):
+        """Positive control: with the persisted marker AND a healthy live
+        check, completion is reported normally."""
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        last = await env.run_to_completion(sid)
+        assert last["status"] == "completed"
+        linked = next(
+            s for s in env.snapshot_rows()
+            if str(s.get("run_session_id") or "") == sid
+        )
+        assert linked["payload"]["evidence_freshness_state"] == "certified_current"

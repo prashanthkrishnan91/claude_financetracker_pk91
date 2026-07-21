@@ -11,9 +11,8 @@ config. One batched Claude request analyzes 1..N compatible tickers per
 (asset_type, axis) task; strict JSON is validated per ticker with one bounded
 repair retry; a malformed ticker degrades only itself.
 
-Boundary proof: this module intentionally imports NOTHING from
-``agents.data_sources``, ``ai.io_layer``, ``market_data`` or the research
-workers — the architecture-boundary test asserts that.
+Boundary proof: this module intentionally imports NO provider machinery of
+any kind — the architecture-boundary test asserts that.
 """
 from __future__ import annotations
 

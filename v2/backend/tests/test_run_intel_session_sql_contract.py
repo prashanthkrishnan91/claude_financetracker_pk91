@@ -45,7 +45,9 @@ class TestSessionTable:
     def test_migration_file_uses_next_sequential_number(self):
         assert MIGRATION.exists(), "v2/database/026_intel_run_sessions.sql missing"
         siblings = sorted(p.name for p in MIGRATION.parent.glob("0*.sql"))
-        assert siblings[-1] == "026_intel_run_sessions.sql"
+        # 027 (distributed Run Intel task graph) is the successor migration.
+        assert "026_intel_run_sessions.sql" in siblings
+        assert siblings[-1] == "027_intel_run_distributed_tasks.sql"
 
     def test_creates_session_table_with_required_columns(self):
         sql = _stripped()
@@ -247,9 +249,12 @@ class TestRetentionCleanupOrdering:
 
     def test_deletes_only_terminal_sessions_older_than_retention(self):
         sql = _retention_stripped()
+        # Terminal set extended by migration 027 (completed_with_gaps /
+        # superseded); active states must still never be targeted.
         m = re.search(
             r"DELETE FROM public\.intel_run_sessions\s+"
-            r"WHERE status IN \('completed', 'failed'\)\s+"
+            r"WHERE status IN \('completed', 'failed', 'completed_with_gaps', "
+            r"'superseded'\)\s+"
             r"AND created_at < NOW\(\) - INTERVAL '7 days'",
             sql,
         )

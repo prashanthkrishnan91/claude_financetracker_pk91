@@ -12,10 +12,12 @@
  *   D — Trust drawer (collapsible operational detail, closed by default)
  *
  * This page owns the SINGLE Intel v3 snapshot query and the SINGLE run
- * mutation: the readiness panel renders the only control that triggers
- * POST /intel/v3/run. No polling intervals exist on this page. Financial
- * truth (portfolio / current-price / books reconciliation) comes only from
- * useAdvisorTruth() — never from Intel snapshot fields.
+ * control (useRunIntelV3): the readiness panel renders the only control that
+ * triggers POST /intel/v3/run. The hook itself observes the durable backend
+ * session (status polling + page-return recovery); the page adds no polling
+ * of its own. Financial truth (portfolio / current-price / books
+ * reconciliation) comes only from useAdvisorTruth() — never from Intel
+ * snapshot fields.
  *
  * Deep link: /dashboard/advisor?section=cash-plan scrolls to and focuses the
  * cash-plan section on mount (useSearchParams inside <Suspense> as Next

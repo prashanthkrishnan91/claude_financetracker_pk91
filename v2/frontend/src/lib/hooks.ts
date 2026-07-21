@@ -3,8 +3,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "./api";
-import type { IntelV3Snapshot, IntelV3RunResult } from "./api";
-import { shouldAutoContinueRun } from "./advisor-readiness";
+import type { IntelV3Snapshot, IntelV3SessionStatus } from "./api";
+import { isTerminalSessionStatus } from "./advisor-readiness";
 
 // ── Portfolio ────────────────────────────────────────────
 
@@ -210,102 +210,164 @@ export function useIntelV3Snapshot(enabled = true) {
 }
 
 export interface UseRunIntelV3Result {
-  /** Starts (or restarts) one bounded Run Intel click — the single control. */
+  /** Starts one Run Intel session (or adopts the active one) — the single control. */
   mutate: () => void;
-  /** True from the initial request through every automatic continuation. */
+  /** True from the click (or recovered session) until the session is terminal. */
   isPending: boolean;
-  /** True once the request itself (network/HTTP/auth) failed. */
+  /** True once the create request itself (network/HTTP/auth) failed. */
   isError: boolean;
-  /** Most recent POST /intel/v3/run result (last continuation batch). */
-  data: IntelV3RunResult | null;
+  /** The create-request error, if any. */
+  error: Error | null;
+  /** Latest session-status payload (create response or poll result). */
+  data: IntelV3SessionStatus | null;
 }
 
+/** Poll cadence for GET /intel/v3/sessions/{id}/status while a run executes. */
+export const RUN_INTEL_POLL_INTERVAL_MS = 2_500;
+
 /**
- * Stage 3.3 / Part A3 — Enqueue an Intel v3 analyst refresh with automatic
- * bounded continuation.
+ * Distributed Run Intel workflow — create one durable session, then observe.
  *
- * POST /intel/v3/run returns a refresh-enqueue status, NOT a snapshot, and is
- * itself bounded to a small server-side quantum (see
- * analyst_refresh_on_demand_drain_v1) so one request never hangs. A full
- * portfolio needs several quanta to drain. Historically this required the
- * user to keep clicking "Continue Intel run"; this hook instead keeps firing
- * bounded continuation requests on the user's behalf — from the SAME single
- * click — while `shouldAutoContinueRun` (advisor-readiness.ts) says the run
- * is still "partial" and neither the attempt cap nor the elapsed-time cap has
- * been reached. It never polls before the click, never continues past a
- * terminal/failed/complete state, and aborts in-flight work on unmount.
+ * A click mints ONE browser UUID (crypto.randomUUID()) and sends ONE
+ * POST /intel/v3/run. The backend executes the whole run on its own; this
+ * hook then only polls GET /sessions/{id}/status every ~2.5s until the
+ * session reaches a terminal state. It NEVER re-POSTs /run automatically.
  *
- * On every successful batch, invalidates the snapshot query so the Advisor
- * page re-fetches — same as before this hook grew continuation logic.
+ * - Unmounting stops polling only — backend work continues untouched.
+ * - On mount, GET /sessions/active runs once; if a session is still live
+ *   (e.g. the user navigated away and back), polling resumes on that id.
+ * - A click while a session is active is safe: the backend adopts the
+ *   active session (adopted_active_session=true) and we poll the id it
+ *   returns.
+ * - When a terminal completed/completed_with_gaps status carries a
+ *   completed_snapshot_id, the ["intel_v3","snapshot"] query is invalidated
+ *   so the fresh snapshot loads.
  */
 export function useRunIntelV3(): UseRunIntelV3Result {
   const qc = useQueryClient();
   const [isPending, setIsPending] = useState(false);
   const [isError, setIsError] = useState(false);
-  const [data, setData] = useState<IntelV3RunResult | null>(null);
-  const abortControllerRef = useRef<AbortController | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [data, setData] = useState<IntelV3SessionStatus | null>(null);
   const mountedRef = useRef(true);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** Session id currently being observed; null when no observation is active. */
+  const observedSessionIdRef = useRef<string | null>(null);
+  /** Guards against double-invalidating for the same published snapshot. */
+  const invalidatedSnapshotIdRef = useRef<string | null>(null);
 
+  const stopPolling = useCallback(() => {
+    if (pollTimerRef.current !== null) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  }, []);
+
+  // Stable machinery via refs so mount-effect/mutate need no dep churn.
+  const handleStatusRef = useRef<(sessionId: string, status: IntelV3SessionStatus) => void>(() => {});
+
+  const pollOnce = useCallback(async (sessionId: string): Promise<void> => {
+    if (!mountedRef.current || observedSessionIdRef.current !== sessionId) return;
+    let status: IntelV3SessionStatus;
+    try {
+      status = await api.intelV3.getSessionStatus(sessionId);
+    } catch {
+      // Transient poll failure (network blip): the backend keeps working
+      // regardless, so keep observing rather than declaring the run failed.
+      if (!mountedRef.current || observedSessionIdRef.current !== sessionId) return;
+      pollTimerRef.current = setTimeout(() => {
+        void pollOnce(sessionId);
+      }, RUN_INTEL_POLL_INTERVAL_MS);
+      return;
+    }
+    if (!mountedRef.current || observedSessionIdRef.current !== sessionId) return;
+    handleStatusRef.current(sessionId, status);
+  }, []);
+
+  handleStatusRef.current = (sessionId: string, status: IntelV3SessionStatus) => {
+    setData(status);
+    if (isTerminalSessionStatus(status)) {
+      observedSessionIdRef.current = null;
+      stopPolling();
+      setIsPending(false);
+      const sessionStatus = status.session_status;
+      const snapshotId = status.completed_snapshot_id ?? null;
+      if (
+        (sessionStatus === "completed" || sessionStatus === "completed_with_gaps") &&
+        snapshotId &&
+        invalidatedSnapshotIdRef.current !== snapshotId
+      ) {
+        invalidatedSnapshotIdRef.current = snapshotId;
+        qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
+      }
+      return;
+    }
+    // Still executing — observe again shortly. Polling never advances work.
+    stopPolling();
+    pollTimerRef.current = setTimeout(() => {
+      void pollOnce(sessionId);
+    }, RUN_INTEL_POLL_INTERVAL_MS);
+  };
+
+  // Mount: rediscover an active backend session once and resume observing it.
+  // Unmount: stop polling only — no abort, backend work continues.
   useEffect(() => {
     mountedRef.current = true;
+    void (async () => {
+      let active;
+      try {
+        active = await api.intelV3.getActiveSession();
+      } catch {
+        return; // Recovery is best-effort; a later click still works.
+      }
+      if (!mountedRef.current || !active.active) return;
+      // A click that happened before recovery resolved wins.
+      if (observedSessionIdRef.current !== null) return;
+      const sessionId = active.run_session_id;
+      if (!sessionId) return;
+      observedSessionIdRef.current = sessionId;
+      setIsPending(true);
+      setIsError(false);
+      handleStatusRef.current(sessionId, active);
+    })();
     return () => {
       mountedRef.current = false;
-      abortControllerRef.current?.abort();
+      stopPolling();
+      observedSessionIdRef.current = null;
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const mutate = useCallback(() => {
-    // A new click supersedes any still-running continuation loop: abort it
-    // so two loops (two sessions) can never run concurrently.
-    abortControllerRef.current?.abort();
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const startedAt = Date.now();
-    // One durable session id per EXPLICIT manual click, minted in the
-    // browser. Every automatic continuation below reuses this exact id, so
-    // the backend resumes the same SQL-backed run session; a later manual
-    // click always mints a fresh id (a new session).
+    // ONE uuid per explicit manual click; a later click mints a fresh one.
     const runSessionId = crypto.randomUUID();
+    stopPolling();
+    observedSessionIdRef.current = runSessionId;
     setIsPending(true);
     setIsError(false);
-
-    const step = async (attempt: number): Promise<void> => {
-      let result: IntelV3RunResult;
+    setError(null);
+    void (async () => {
+      let result: IntelV3SessionStatus;
       try {
-        result = await api.intelV3.runV3(runSessionId, controller.signal);
+        result = await api.intelV3.runV3(runSessionId);
       } catch (err) {
-        if (controller.signal.aborted || !mountedRef.current) return;
+        if (!mountedRef.current || observedSessionIdRef.current !== runSessionId) return;
+        observedSessionIdRef.current = null;
         setIsError(true);
+        setError(err instanceof Error ? err : new Error(String(err)));
         setIsPending(false);
         return;
       }
-      if (controller.signal.aborted || !mountedRef.current) return;
+      if (!mountedRef.current || observedSessionIdRef.current !== runSessionId) return;
+      // The backend may adopt an already-active session — poll the id it
+      // reports, never a second POST.
+      const effectiveId = result.run_session_id || runSessionId;
+      observedSessionIdRef.current = effectiveId;
+      handleStatusRef.current(effectiveId, result);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stopPolling]);
 
-      setData(result);
-      qc.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
-
-      const elapsedMs = Date.now() - startedAt;
-      if (shouldAutoContinueRun(result, attempt, elapsedMs)) {
-        await step(attempt + 1);
-      } else {
-        setIsPending(false);
-      }
-    };
-
-    void step(1);
-  }, [qc]);
-
-  return { mutate, isPending, isError, data };
-}
-
-/** Poll a v3 run status by run_id. */
-export function useIntelV3RunStatus(runId: string | null, enabled = true) {
-  return useQuery({
-    queryKey: ["intel_v3", "run", runId],
-    queryFn: () => api.intelV3.getRunStatus(runId!),
-    enabled: enabled && !!runId,
-    refetchInterval: 2_000,
-    staleTime: 0,
-  });
+  return { mutate, isPending, isError, error, data };
 }
 

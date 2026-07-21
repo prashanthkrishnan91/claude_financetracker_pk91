@@ -6,11 +6,13 @@
  * Presentational over the pure readiness model from `advisor-readiness.ts`.
  * Shows trust rows, snapshot age / evidence freshness / certified coverage,
  * Buy/Hold/Trim/Sell chips, the Run Intel button (label driven by the run
- * state machine), and an aria-live progress line with honest job numbers.
+ * state machine), and an aria-live progress line rendering the backend's
+ * pre-sanitized plain-English run status — never task-table internals.
  *
- * When a run reports snapshot_available_after_run, this panel invalidates
- * the ["intel_v3","snapshot"] query so the fresh snapshot loads — no
- * navigation, no new polling interval, no infinite spinner.
+ * When a session status reports a published snapshot (completed /
+ * completed_with_gaps + completed_snapshot_id), this panel invalidates the
+ * ["intel_v3","snapshot"] query so the fresh snapshot loads — no
+ * navigation, no polling of its own, no infinite spinner.
  */
 
 import { useEffect, useRef } from "react";
@@ -19,7 +21,7 @@ import { cn } from "@/lib/utils";
 import { Spinner } from "@/components/ui/Spinner";
 import { TrustStatusRow } from "@/components/cards/TrustPrimitives";
 import type { AdvisorReadinessModel } from "@/lib/advisor-readiness";
-import type { IntelV3RunResult } from "@/lib/api";
+import type { IntelV3SessionStatus } from "@/lib/api";
 
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60";
@@ -45,25 +47,26 @@ export function AdvisorReadinessPanel({
 }: {
   model: AdvisorReadinessModel;
   onRun: () => void;
-  lastRunResult: IntelV3RunResult | null;
+  lastRunResult: IntelV3SessionStatus | null;
 }) {
   const queryClient = useQueryClient();
-  const refetchedForResult = useRef<IntelV3RunResult | null>(null);
+  const refetchedForSnapshotId = useRef<string | null>(null);
 
-  // Automatic snapshot refetch once per run result that produced a snapshot.
+  // Automatic snapshot refetch once per published snapshot id.
   useEffect(() => {
     if (!lastRunResult) return;
-    if (!lastRunResult.snapshot_available_after_run) return;
-    if (refetchedForResult.current === lastRunResult) return;
-    refetchedForResult.current = lastRunResult;
+    const status = lastRunResult.session_status;
+    if (status !== "completed" && status !== "completed_with_gaps") return;
+    const snapshotId = lastRunResult.completed_snapshot_id ?? null;
+    if (!snapshotId) return;
+    if (refetchedForSnapshotId.current === snapshotId) return;
+    refetchedForSnapshotId.current = snapshotId;
     queryClient.invalidateQueries({ queryKey: ["intel_v3", "snapshot"] });
   }, [lastRunResult, queryClient]);
 
   const { run } = model;
-  const jobs = run.jobs;
-  const hasJobNumbers =
-    jobs.queued > 0 || jobs.attempted > 0 || jobs.succeeded > 0 || jobs.failed > 0;
-  const showProgress = run.state !== "idle" || hasJobNumbers;
+  const { progress } = run;
+  const showTickerProgress = run.state === "running" && progress.totalTickers > 0;
 
   return (
     <section aria-labelledby="advisor-readiness-heading" className="data-card p-4 space-y-4">
@@ -140,17 +143,15 @@ export function AdvisorReadinessPanel({
         ))}
       </div>
 
-      {/* Run progress — polite live region so screen readers hear updates */}
+      {/* Run progress — polite live region so screen readers hear updates.
+          Only the backend's plain-English sentence plus a simple holdings
+          count — never task tables, queue metrics, or internal codes. */}
       <div aria-live="polite" className="space-y-1.5 border-t border-border/50 pt-3">
         <p className="text-xs text-text-secondary">{run.nextActionSentence}</p>
-        {showProgress && hasJobNumbers && (
+        {showTickerProgress && (
           <p className="text-[11px] text-text-muted font-mono tabular-nums">
-            Jobs: {jobs.queued} queued · {jobs.attempted} attempted · {jobs.succeeded}{" "}
-            succeeded · {jobs.failed} failed · {jobs.remaining} remaining
+            {progress.decidedTickers} of {progress.totalTickers} holdings analyzed
           </p>
-        )}
-        {run.boundedStopReason && (
-          <p className="text-[11px] text-text-muted">{run.boundedStopReason}</p>
         )}
       </div>
     </section>

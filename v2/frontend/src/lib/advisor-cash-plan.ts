@@ -316,7 +316,6 @@ export type CashPlanRepairAction =
   | "new portfolio snapshot required"
   | "current-price repair required"
   | "Run Intel required"
-  | "another bounded batch required"
   | null;
 
 export function repairActionFromFix(fix: string | null | undefined): CashPlanRepairAction {

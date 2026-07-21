@@ -95,9 +95,11 @@ export function deriveIntelV3UIStatus(
   }
 
   // Snapshot exists but not worker-certified or evidence not current.
-  const runEnqueued = lastRunResult?.status === "refresh_requested" ||
-    lastRunResult?.status === "refresh_in_progress";
-  if (runEnqueued) {
+  // A non-terminal distributed run session means the backend is still working.
+  const runActive =
+    lastRunResult?.session_status === "created" ||
+    lastRunResult?.session_status === "running";
+  if (runActive) {
     return "refreshing_analyst_intelligence";
   }
 
@@ -258,51 +260,6 @@ export function buildStatusPillState(
  * Honest note for the analyst refresh-request seam.
  * Kept for backward compatibility — the Stage 3.0b.6 amber banner.
  */
-// ── Stage 13B: on-demand evidence drain operational note ────────────────────
-
-/**
- * Honest note about whether Run Intel's queued evidence build is actually
- * draining or just sitting in the queue. Additive to buildStatusPillState /
- * buildBannerState — does not change their status literals or tone, only
- * surfaces the Stage 13B on-demand-drain fields when they materially change
- * what the user should expect (queued only / draining now / drain still
- * incomplete). Returns null when there is nothing extra worth saying (e.g. a
- * certified snapshot is already available after this run).
- */
-export function onDemandDrainNote(
-  lastRunResult?: IntelV3RunResult | null,
-): string | null {
-  if (!lastRunResult) return null;
-  if (lastRunResult.snapshot_available_after_run) return null;
-
-  const queuedCount = lastRunResult.queued_ticker_count ?? 0;
-  if (queuedCount === 0) return null;
-
-  if (lastRunResult.on_demand_processing_enabled === false) {
-    return (
-      "Evidence build is queued only right now — on-demand processing is " +
-      "disabled, so this can take longer to become available. An admin can " +
-      "enable on-demand processing or run the background analyst-refresh " +
-      "worker service."
-    );
-  }
-
-  const attempted = lastRunResult.on_demand_jobs_attempted ?? 0;
-  if (lastRunResult.on_demand_processing_enabled === true && attempted > 0) {
-    const succeeded = lastRunResult.on_demand_jobs_succeeded ?? 0;
-    const stillDraining =
-      lastRunResult.next_required_action ===
-      "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining";
-    return (
-      `On-demand evidence build started — ${succeeded}/${attempted} holdings ` +
-      `refreshed this run.` +
-      (stillDraining ? " Click Run Intel again to continue draining the rest." : "")
-    );
-  }
-
-  return null;
-}
-
 export function analystRefreshRequestNote(
   diag: IntelV3Snapshot["diagnostics"] | undefined,
 ): string | null {

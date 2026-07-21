@@ -4,9 +4,10 @@
  * Render-level single-controller contract for AdvisorReadinessPanel.
  *
  * The panel must render EXACTLY ONE control wired to onRun in every run
- * state (idle → "Run Intel", partial → "Continue Intel run", failed →
- * "Retry Intel run"), and one click must invoke onRun exactly once. These
- * are real DOM renders with real click dispatch — not source inspection.
+ * state (idle → "Run Intel", failed → "Retry Intel run"; running shows a
+ * disabled "Running…" control), and one click must invoke onRun exactly
+ * once. These are real DOM renders with real click dispatch — not source
+ * inspection.
  */
 
 import React from "react";
@@ -16,7 +17,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { AdvisorReadinessPanel } from "./AdvisorReadinessPanel";
 import { deriveAdvisorReadiness, type AdvisorRunInput } from "@/lib/advisor-readiness";
-import type { IntelV3RunResult, IntelV3Snapshot, IntelV3HeldCard } from "@/lib/api";
+import type { IntelV3SessionStatus, IntelV3Snapshot, IntelV3HeldCard } from "@/lib/api";
 
 // React 18 act() environment flag
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -47,43 +48,42 @@ function makeSnapshot(): IntelV3Snapshot {
   } as unknown as IntelV3Snapshot;
 }
 
-function makeRunResult(overrides: Partial<IntelV3RunResult> = {}): IntelV3RunResult {
+function makeSessionStatus(
+  overrides: Partial<IntelV3SessionStatus> = {},
+): IntelV3SessionStatus {
   return {
-    status: "refresh_requested",
-    queued_ticker_count: 0,
-    on_demand_processing_enabled: true,
-    on_demand_jobs_attempted: 0,
-    on_demand_jobs_succeeded: 0,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action: "reclick_run_intel_to_retry",
+    run_session_id: "3f0a26aa-8f5c-4a2e-9d7b-2f8f0a1b2c3d",
+    session_status: "running",
+    workflow_version: 2,
+    current_stage: "collecting_evidence",
+    total_tickers: 2,
+    evidence_complete_tickers: 1,
+    analysis_complete_tickers: 0,
+    decision_complete_tickers: 0,
+    decided_tickers: 0,
+    failed_or_degraded_tickers: 0,
+    completed_snapshot_id: null,
+    plain_status: "Gathering evidence — 1 of 2 holdings",
+    retryable: true,
+    terminal: false,
     ...overrides,
-  } as IntelV3RunResult;
+  };
 }
 
 const IDLE_RUN = { isRunPending: false, isRunError: false, lastRunResult: null };
-const PARTIAL_RUN = {
-  isRunPending: false,
+const RUNNING_RUN = {
+  isRunPending: true,
   isRunError: false,
-  lastRunResult: makeRunResult({
-    queued_ticker_count: 6,
-    on_demand_jobs_attempted: 4,
-    on_demand_jobs_succeeded: 4,
-    on_demand_jobs_failed: 0,
-    snapshot_available_after_run: false,
-    next_required_action:
-      "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining",
-  }),
+  lastRunResult: makeSessionStatus(),
 };
 const FAILED_RUN = {
   isRunPending: false,
   isRunError: false,
-  lastRunResult: makeRunResult({
-    queued_ticker_count: 4,
-    on_demand_jobs_attempted: 4,
-    on_demand_jobs_succeeded: 0,
-    on_demand_jobs_failed: 4,
-    snapshot_available_after_run: false,
+  lastRunResult: makeSessionStatus({
+    session_status: "failed",
+    plain_status: "This run could not finish. You can start a new run.",
+    terminal: true,
+    retryable: false,
   }),
 };
 
@@ -103,7 +103,7 @@ afterEach(() => {
 
 function renderPanel(
   runInput: AdvisorRunInput,
-  lastRunResult: IntelV3RunResult | null,
+  lastRunResult: IntelV3SessionStatus | null,
   onRun: () => void,
 ) {
   const model = deriveAdvisorReadiness(
@@ -144,13 +144,19 @@ describe("AdvisorReadinessPanel — exactly one Run Intel control per state", ()
     expect(controls[0].textContent).toContain("Run Intel");
   });
 
-  it("partial state renders one control labeled Continue Intel run", () => {
+  it("running state renders one disabled Running… control and the plain-English status", () => {
     const calls = { count: 0 };
-    const model = renderPanel(PARTIAL_RUN, PARTIAL_RUN.lastRunResult, () => { calls.count += 1; });
-    expect(model.run.state).toBe("partial");
-    const controls = clickableRunControls(calls);
-    expect(controls).toHaveLength(1);
-    expect(controls[0].textContent).toContain("Continue Intel run");
+    const model = renderPanel(RUNNING_RUN, RUNNING_RUN.lastRunResult, () => { calls.count += 1; });
+    expect(model.run.state).toBe("running");
+    // The single run control is disabled while the session executes.
+    const buttons = Array.from(container.querySelectorAll("button"));
+    const runButton = buttons.find((b) => (b.textContent ?? "").includes("Running…"))!;
+    expect(runButton).toBeDefined();
+    expect(runButton.disabled).toBe(true);
+    // Backend plain_status is rendered verbatim; no raw internals appear.
+    expect(container.textContent).toContain("Gathering evidence — 1 of 2 holdings");
+    expect(container.textContent).not.toContain("collecting_evidence");
+    expect(container.textContent).not.toContain("task_counts");
   });
 
   it("failed state renders one control labeled Retry Intel run (no second retry button)", () => {

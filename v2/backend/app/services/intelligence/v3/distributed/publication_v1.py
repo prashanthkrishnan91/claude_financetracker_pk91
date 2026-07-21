@@ -128,7 +128,11 @@ async def execute_publication_task(
         outcome.session_status = "failed"
         return outcome
 
-    has_gaps = bool(no_call or failed or degraded_lanes)
+    # Gap semantics: a session has gaps when one or more tickers could not be
+    # decided (NO CALL / failed). Deliberately disabled optional lanes degrade
+    # honestly at the lane level (recorded in metrics + ticker rows) without
+    # reclassifying an otherwise fully-decided session.
+    has_gaps = bool(no_call or failed)
     target_status = (
         SESSION_COMPLETED_WITH_GAPS if has_gaps else SESSION_COMPLETED
     )

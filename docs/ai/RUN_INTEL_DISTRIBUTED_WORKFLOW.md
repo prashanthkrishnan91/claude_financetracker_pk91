@@ -299,10 +299,11 @@ behavior); no LLM, agent or worker sets the visible action or allocation.
   attempts budget, default 3); zero collector/specialist re-execution. Exhausted
   publication budget → session `failed` (honest terminal).
 - Session terminal rules: `completed` (all tickers decided, published),
-  `completed_with_gaps` (published; some tickers no_call/failed or degraded
-  lanes), `failed` only for: scope cannot be loaded, task graph cannot be
-  created, deterministic policy cannot run at all, publication exhausted, or
-  ownership checks fail.
+  `completed_with_gaps` (published; one or more tickers no_call/failed —
+  lane-level degradation is recorded on ticker rows and session metrics
+  without reclassifying a fully-decided session), `failed` only for: scope
+  cannot be loaded, task graph cannot be created, deterministic policy cannot
+  run at all, publication exhausted, or ownership checks fail.
 
 ## 11. Deployment model
 

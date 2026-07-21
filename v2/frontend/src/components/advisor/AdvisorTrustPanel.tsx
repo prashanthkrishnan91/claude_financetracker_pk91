@@ -45,7 +45,6 @@ function deriveRepairAction(
 ): CashPlanRepairAction {
   // Run-side repairs take precedence — nothing downstream can be trusted
   // until a certified snapshot exists.
-  if (model.run.state === "partial") return "another bounded batch required";
   if (model.snapshotState === "missing" || model.snapshotState === "uncertified") {
     return "Run Intel required";
   }
@@ -100,10 +99,7 @@ export function AdvisorTrustPanel({
   if (model.snapshotState === "uncertified") {
     problems.push("A snapshot exists but is not fully certified.");
   }
-  if (model.run.state === "partial") {
-    problems.push(model.run.nextActionSentence);
-  }
-  if (model.run.state === "queue_only" || model.run.state === "failed") {
+  if (model.run.state === "failed") {
     problems.push(model.run.nextActionSentence);
   }
   // Financial-truth problems (degraded/blocked dimensions from the endpoint).
@@ -269,7 +265,6 @@ export function AdvisorTrustPanel({
                 {repairAction === "new portfolio snapshot required" && "New portfolio snapshot required."}
                 {repairAction === "current-price repair required" && "Current-price repair required."}
                 {repairAction === "Run Intel required" && "Run Intel required."}
-                {repairAction === "another bounded batch required" && "Another bounded Intel batch required — use Continue Intel run above."}
               </p>
             ) : (
               <DataUnavailableCallout label="No specific repair action reported yet." />

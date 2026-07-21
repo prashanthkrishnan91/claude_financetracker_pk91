@@ -45,6 +45,22 @@ async def lifespan(app: FastAPI):
     logger.info(f"Debug mode: {settings.debug}")
     _configure_yfinance_cache()
 
+    # Distributed Run Intel crash recovery: ONE cheap query for unfinished
+    # distributed sessions; the worker supervisor starts only when at least
+    # one exists and exits again once all sessions are terminal. No idle
+    # polling, no provider/LLM work on startup.
+    try:
+        from .services.intelligence.v3.intel_v3_service import is_intel_v3_enabled
+
+        if is_intel_v3_enabled():
+            from .services.intelligence.v3.distributed.worker_supervisor_v1 import (
+                recover_active_sessions_on_startup,
+            )
+
+            await recover_active_sessions_on_startup()
+    except Exception as exc:
+        logger.warning("distributed_run_intel_startup_recovery_failed %s", exc)
+
     yield
 
     logger.info("Shutting down")

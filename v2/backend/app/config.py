@@ -491,16 +491,26 @@ class Settings(BaseSettings):
     # env var is set to a short interval.
     cost_guard_allow_aggressive_polling: bool = False
 
-    # ── Stage 13B — bounded on-demand Intel v3 evidence drain ─────────────────
-    # When True, POST /intel/v3/run drains a bounded number of the
-    # analyst_refresh_jobs it just enqueued in-request (reusing
-    # AnalystRefreshWorker.run_once(), capped batches/runtime — see
-    # analyst_refresh_on_demand_drain_v1.py) so a manual Run Intel click can
-    # produce a certified snapshot without requiring the separate always-on
-    # analyst_refresh_worker_v1 Railway service. When False (default), Run
-    # Intel stays queue-only and the response says so honestly instead of
-    # implying a snapshot is being built.
+    # ── Stage 13B (legacy) — bounded on-demand Intel v3 evidence drain ────────
+    # RETIRED from Run Intel by the distributed workflow
+    # (docs/ai/RUN_INTEL_DISTRIBUTED_WORKFLOW.md): POST /intel/v3/run no
+    # longer drains anything in-request. The flag is kept only so existing
+    # deployments with the env var set do not fail settings validation; no
+    # code path reads it for Run Intel anymore.
     intel_v3_on_demand_refresh_enabled: bool = False
+
+    # ── Distributed Run Intel workflow (migration 027) ────────────────────────
+    # Cost/concurrency controls for the durable task-graph worker supervisor.
+    # The workflow itself is not flag-gated: it is THE Run Intel execution
+    # path (gated by INTEL_V3_VISIBLE_SNAPSHOT_ENABLED like the whole router)
+    # and degrades with an explicit retryable error until migration 027 is
+    # applied. All limits are execution details — they never redefine the
+    # portfolio scope of a run.
+    intel_v3_distributed_max_collector_concurrency: int = 4
+    intel_v3_distributed_max_llm_concurrency: int = 2
+    intel_v3_distributed_max_specialist_batch: int = 5
+    intel_v3_distributed_task_lease_seconds: int = 300
+    intel_v3_distributed_max_task_attempts: int = 3
 
 
 @lru_cache

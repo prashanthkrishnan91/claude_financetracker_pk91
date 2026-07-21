@@ -365,3 +365,69 @@ class TestConditionalReview:
         )
         assert "action" not in review_output
         assert review_output["stance"] in ("positive", "neutral", "negative")
+
+
+class TestDeadEndGuards:
+    """A terminally-failed pipeline task can never leave the session
+    unfinishable — tickers/session terminalize honestly."""
+
+    @pytest.mark.asyncio
+    async def test_terminally_failed_bundle_terminalizes_ticker(
+        self, monkeypatch
+    ):
+        client = FakeSupabase()
+        for ticker in ("AAPL", "MSFT"):
+            seed_position(client, USER, ticker)
+        session_id = str(uuid.uuid4())
+        await control.create_distributed_session(
+            client=client, user_id=USER, session_id=session_id,
+        )
+        session = client.rows("intel_run_sessions")[0]
+        # AAPL's bundle task exists and is terminally failed.
+        store.create_task(
+            client, run_session_id=session_id, user_id=USER,
+            task_type="build_evidence_bundle", ticker="AAPL",
+        )
+        client.table("intel_run_tasks").update({"state": "failed"}).eq(
+            "ticker", "AAPL"
+        ).eq("task_type", "build_evidence_bundle").execute()
+
+        scheduler.run_scheduler_pass(client, session=session)
+        row = next(
+            r for r in client.rows("intel_run_tickers")
+            if r["ticker"] == "AAPL"
+        )
+        assert row["state"] == "failed"
+        assert row["degradation_reasons"] == [
+            "evidence_bundle_failed_terminally"
+        ]
+        # MSFT is untouched — isolation preserved.
+        other = next(
+            r for r in client.rows("intel_run_tickers")
+            if r["ticker"] == "MSFT"
+        )
+        assert other["state"] == "pending"
+
+    @pytest.mark.asyncio
+    async def test_terminally_failed_publish_terminalizes_session(
+        self, monkeypatch
+    ):
+        client = FakeSupabase()
+        seed_position(client, USER, "AAPL")
+        session_id = str(uuid.uuid4())
+        await control.create_distributed_session(
+            client=client, user_id=USER, session_id=session_id,
+        )
+        client.table("intel_run_tickers").update({"state": "failed"}).eq(
+            "run_session_id", session_id
+        ).execute()
+        store.create_task(
+            client, run_session_id=session_id, user_id=USER,
+            task_type="portfolio_join_publish",
+        )
+        client.table("intel_run_tasks").update({"state": "failed"}).eq(
+            "task_type", "portfolio_join_publish"
+        ).execute()
+        session = client.rows("intel_run_sessions")[0]
+        scheduler.run_scheduler_pass(client, session=session)
+        assert client.rows("intel_run_sessions")[0]["status"] == "failed"

@@ -323,10 +323,61 @@ def run_scheduler_pass(
             ):
                 created["decisions"] += 1
 
+    # ── Dead-end guards: a terminally-failed pipeline task must terminalize
+    # its ticker (honest failure) instead of leaving the session unfinishable.
+    for row in ticker_rows:
+        ticker = str(row.get("ticker") or "")
+        state = str(row.get("state") or "")
+        if state in TICKER_TERMINAL_STATES:
+            continue
+        stuck_reason = None
+        bundle_task = bundle_tasks.get(ticker)
+        if (
+            bundle_task is not None
+            and str(bundle_task.get("state") or "") == "failed"
+        ):
+            stuck_reason = "evidence_bundle_failed_terminally"
+        decision_task = decision_tasks.get(ticker)
+        if (
+            decision_task is not None
+            and str(decision_task.get("state") or "") == "failed"
+        ):
+            stuck_reason = "ticker_decision_failed_terminally"
+        if stuck_reason:
+            store.update_ticker_row(
+                client,
+                run_session_id=session_id,
+                ticker=ticker,
+                patch={
+                    "state": "failed",
+                    "degradation_reasons": [stuck_reason],
+                },
+                now=now,
+            )
+            row["state"] = "failed"
+
     # ── Wave 5: portfolio join + publish ─────────────────────────────────────
     all_terminal = all(
         str(r.get("state") or "") in TICKER_TERMINAL_STATES for r in ticker_rows
     )
+    if (
+        publish_task is not None
+        and str(publish_task.get("state") or "") == "failed"
+        and str(session.get("status") or "") == SESSION_RUNNING
+    ):
+        # Publication budget exhausted but the session was left active (e.g.
+        # crash between task completion and session update) — honest terminal.
+        try:
+            client.table("intel_run_sessions").update({
+                "status": "failed",
+                "last_error": "publication_task_failed_terminally",
+            }).eq("id", session_id).eq("status", SESSION_RUNNING).execute()
+            session["status"] = "failed"
+        except Exception as exc:
+            logger.warning(
+                "scheduler.session_fail_mark_failed session=%s err=%s",
+                session_id, exc,
+            )
     if all_terminal and publish_task is None:
         if store.create_task(
             client,

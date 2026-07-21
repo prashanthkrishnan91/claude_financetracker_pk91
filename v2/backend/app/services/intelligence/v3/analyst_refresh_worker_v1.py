@@ -469,6 +469,12 @@ class AnalystRefreshWorker:
                 # recommendations.agent_run_id), never timestamp inference.
                 # Legacy/unscoped batches keep the historical 3-arg call so
                 # injected test adapters are unaffected.
+                # INVARIANT: a session-scoped run_once is single-user (the
+                # session drain always sets scope_user_id, and sessions are
+                # per-user), so one worker_run_id maps to exactly one
+                # agent_runs row. If multi-user session batches ever exist,
+                # each user's batch would need its own explicit run id or the
+                # second create_run(run_id=...) would hit a PK conflict.
                 refresh = await adapter(
                     selected,
                     priority_hints=hints,

@@ -2531,6 +2531,33 @@ class IntelV3Service:
             )
             return _row_id(res)
 
+        async def _adopt_session_row(row_id: str) -> str:
+            # Adoption must also RE-ACTIVATE the adopted row: a concurrent
+            # publication attempt (or the losing side of the unique-index
+            # race) may have flipped is_active=False on it while deactivating
+            # "previous" snapshots before its own insert. Without this, a
+            # completed session could point at an inactive snapshot that
+            # GET /intel/v3/snapshot (latest active) never serves.
+            def _reactivate():
+                self.client.table("intel_v3_snapshots").update(
+                    {"is_active": False}
+                ).eq("user_id", str(self.user_id)).eq(
+                    "is_active", True
+                ).neq("id", str(row_id)).execute()
+                self.client.table("intel_v3_snapshots").update(
+                    {"is_active": True}
+                ).eq("id", str(row_id)).execute()
+
+            try:
+                await asyncio.to_thread(_reactivate)
+            except Exception as exc:
+                logger.warning(
+                    "intel_v3.persist_snapshot_session_reactivate_failed "
+                    "user_id=%s snapshot_row_id=%s err=%s",
+                    self.user_id, row_id, exc,
+                )
+            return row_id
+
         try:
             source_hash = _hash_payload(payload)
 
@@ -2543,7 +2570,7 @@ class IntelV3Service:
                         "run_id=%s run_session_id=%s snapshot_row_id=%s",
                         self.user_id, run_id, run_session_id, existing_id,
                     )
-                    return existing_id
+                    return await _adopt_session_row(existing_id)
             else:
                 # Legacy idempotency check: read only source_hash of current
                 # active row.
@@ -2604,7 +2631,7 @@ class IntelV3Service:
             except Exception as insert_exc:
                 if run_session_id is not None:
                     # Unique-index race: a concurrent retry inserted the
-                    # session's snapshot first — adopt it.
+                    # session's snapshot first — adopt (and re-activate) it.
                     raced_id = await _find_session_linked_row()
                     if raced_id is not None:
                         logger.info(
@@ -2612,7 +2639,7 @@ class IntelV3Service:
                             "user_id=%s run_session_id=%s snapshot_row_id=%s",
                             self.user_id, run_session_id, raced_id,
                         )
-                        return raced_id
+                        return await _adopt_session_row(raced_id)
                 raise insert_exc
             return _row_id(inserted)
         except Exception as exc:

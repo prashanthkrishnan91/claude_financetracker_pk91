@@ -5,15 +5,16 @@ tickers under deterministic budgets. In production that cap left ~28 of 34
 positions HARD_STALE on every Run Intel v3 click, so the snapshot never moved
 out of ``BLOCKED_UNCERTIFIED`` even when LLM calls succeeded for the selected 6.
 
-Stage 3.0c replaces that path as the default. The existing ``AgentOrchestrator``
-in ``services/agents/orchestrator.py`` already supports a fast full-portfolio
-LLM pass (verified in production: recs=34 / cards=34 / insights=34, 35 LLM
-calls, ~5s). This adapter wraps that path UNSCOPED:
+Stage 3.0c replaced the capped path as the default; the durable-sessions
+recovery then changed WHAT the backend executes. The default backend now:
 
-  * No 6-ticker subset selection.
-  * No ``analyst_refresh_tickers`` scope filter passed into ``AgentOrchestrator``
-    (so the orchestrator's existing full-portfolio analyst phase, persistence,
-    and recommendation-expire steps execute over every active position).
+  * Scopes the orchestrator's analyst + persist phases to the selected batch
+    via ``analyst_refresh_tickers`` (non-scope tickers' rows stay untouched).
+  * Calls ``AgentOrchestrator.run_analyst_refresh_only()`` — the genuine
+    analyst-only production method. It must NEVER call the full ``run()``
+    pipeline: run()'s unconditional Phase 4 portfolio synthesis consumed the
+    remaining request deadline AFTER per-ticker analysis had already
+    succeeded, timing out this adapter and blanket-failing the batch.
   * Per-ticker accounting is read back from durable rows
     (``agent_insights.run_id`` and ``recommendations.agent_run_id``), so a
     successful refresh is only declared when the database actually has new

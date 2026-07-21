@@ -751,3 +751,141 @@ class TestWriterNonRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. Durable Run Intel sessions — real run_prewarm_snapshot session linkage
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestPrewarmSessionLinkage(unittest.IsolatedAsyncioTestCase):
+    """The REAL run_prewarm_snapshot must thread the exact session id into the
+    payload + persist call, certify over the immutable session scope (not the
+    live positions table), and return the persisted snapshot row id."""
+
+    def _patches(self, persist_mock, cards):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+
+        mock_adapter_cls = patch(
+            "app.services.intelligence.v3.intel_v3_service.ReadOnlyEvidenceAdapter"
+        )
+        return [
+            patch.object(IntelV3Service, "get_latest_snapshot",
+                         new_callable=AsyncMock, return_value=None),
+            patch.object(IntelV3Service, "_get_weight_map",
+                         new_callable=AsyncMock, return_value={"AAPL": 5.0}),
+            patch.object(IntelV3Service, "_get_sec_readiness_for_adapters",
+                         new_callable=AsyncMock, return_value=None),
+            patch.object(IntelV3Service, "_persist_snapshot", persist_mock),
+            mock_adapter_cls,
+            patch("app.services.intelligence.v3.intel_v3_service.build_snapshot"),
+            patch("app.services.intelligence.v3.intel_v3_service.build_diagnostics",
+                  return_value={}),
+            patch("app.services.intelligence.v3.intel_v3_service.certify_snapshot_cards"),
+            patch("app.services.intelligence.v3.intel_v3_service.decide",
+                  return_value=MagicMock(action="BUY", ticker="AAPL")),
+        ]
+
+    async def _run(self, *, certified: bool, skip_persist_on_fail: bool):
+        from app.services.intelligence.v3.intel_v3_service import IntelV3Service
+
+        user_id = _uid()
+        session_id = str(_uid())
+        prewarm_run_id = str(_uid())
+        cards = [_make_card("AAPL", primary_driver="Services moat.")]
+        persist_kwargs: list[dict] = []
+
+        async def _persist(self, *, run_id, payload, run_session_id=None):
+            persist_kwargs.append({
+                "run_id": run_id,
+                "payload": dict(payload),
+                "run_session_id": run_session_id,
+            })
+            return "snapshot-row-id-1"
+
+        contract_kwargs: list[dict] = []
+
+        async def _contract(*, user_id, client, now=None, scope_tickers=None):
+            contract_kwargs.append({"scope_tickers": scope_tickers})
+            result = MagicMock()
+            result.certified = certified
+            result.to_dict.return_value = {
+                "certified": certified,
+                "certified_holding_count": 1 if certified else 0,
+                "total_holding_count": 1,
+                "failed_holding_count": 0 if certified else 1,
+                "failed_tickers": [] if certified else ["AAPL"],
+                "certification_errors": [],
+                "agent_run_ids_used": [],
+                "latest_agent_run_at": None,
+                "latest_recommendation_at": None,
+            }
+            return result
+
+        patches = self._patches(_persist, cards)
+        with patches[0], patches[1], patches[2], patches[3], \
+             patches[4] as mock_adapter_cls, patches[5] as mock_build, \
+             patches[6], patches[7] as mock_cert, patches[8], \
+             patch(
+                 "app.services.intelligence.v3.certified_intel_run_contract_v1."
+                 "check_certified_intel_run_contract",
+                 side_effect=_contract,
+             ):
+            mock_adapter_instance = MagicMock()
+            mock_adapter_instance.load_cards = AsyncMock(return_value=(cards, {
+                "active_position_count": 1, "persisted_recommendation_count": 1,
+                "persisted_agent_insight_count": 1, "missing_recommendation_count": 0,
+                "missing_evidence_count": 0, "stale_or_missing_source_count": 0,
+                "recommendation_timestamps": [], "agent_insight_run_timestamps": [],
+            }))
+            mock_adapter_cls.return_value = mock_adapter_instance
+            mock_build.return_value = {
+                "snapshot_id": str(_uid()),
+                "current_holdings": [],
+                "action_counts": {},
+                "schema_version": "v3.1",
+                "warnings": [],
+                "diagnostics": {},
+            }
+            mock_cert.return_value = {
+                "hard_violations": 0, "spam_tickers": [], "generic_copy_count": 0,
+                "duplicate_reason_count": 0, "repeated_skeleton_count": 0,
+                "ticker_prefix_only_reason_count": 0, "weak_buy_rationale_count": 0,
+                "raw_metric_key_count": 0, "posture_label_count": 0,
+                "action_conflict_count": 0, "per_card_results": [], "examples": {},
+            }
+
+            svc = IntelV3Service.__new__(IntelV3Service)
+            svc.user_id = user_id
+            svc.client = MagicMock()
+            payload = await svc.run_prewarm_snapshot(
+                prewarm_run_id=prewarm_run_id,
+                skip_persist_on_fail=skip_persist_on_fail,
+                run_session_id=session_id,
+                scope_tickers=["AAPL"],
+            )
+        return session_id, payload, persist_kwargs, contract_kwargs
+
+    async def test_certified_session_prewarm_threads_session_id_and_scope(self):
+        session_id, payload, persist_kwargs, contract_kwargs = await self._run(
+            certified=True, skip_persist_on_fail=True,
+        )
+        # Certification ran over the IMMUTABLE session scope.
+        self.assertEqual(contract_kwargs, [{"scope_tickers": ["AAPL"]}])
+        # The exact session id is in the payload AND the persist call.
+        self.assertEqual(payload["run_session_id"], session_id)
+        self.assertEqual(len(persist_kwargs), 1)
+        self.assertEqual(persist_kwargs[0]["run_session_id"], session_id)
+        self.assertEqual(
+            persist_kwargs[0]["payload"]["run_session_id"], session_id,
+        )
+        self.assertEqual(payload["snapshot_source"], "worker_certified")
+        # Row id returned to the caller for the session's completed_snapshot_id.
+        self.assertEqual(payload["snapshot_row_id"], "snapshot-row-id-1")
+
+    async def test_failed_certification_with_skip_never_persists(self):
+        _, payload, persist_kwargs, _ = await self._run(
+            certified=False, skip_persist_on_fail=True,
+        )
+        self.assertEqual(payload["snapshot_source"], "certification_failed")
+        self.assertEqual(persist_kwargs, [])
+        self.assertNotIn("snapshot_row_id", payload)

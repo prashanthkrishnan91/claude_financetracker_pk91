@@ -90,6 +90,9 @@ ACTION_WRITES_DISABLED = (
 
 _OWNERSHIP_MISMATCH = "session_ownership_mismatch"
 
+# Strong references for fire-and-forget background tasks (evidence lanes).
+_BACKGROUND_TASKS: set = set()
+
 
 def _json_list(value: Any) -> list[str]:
     """Session JSONB columns come back as lists; be defensive about shape."""
@@ -216,7 +219,19 @@ async def _create_session(
 ) -> Any:
     client = service.client
 
-    holdings = await service._get_active_tickers()
+    raw_holdings = await service._get_active_tickers()
+    # Case-insensitive dedupe (first casing wins): the queue layer
+    # upper-cases and dedupes tickers on enqueue, so the session's expected
+    # job count MUST be computed over the same key space — otherwise a
+    # case-variant duplicate holding would make expected_ticker_job_count
+    # permanently unreachable and deadlock the session.
+    holdings: list[str] = []
+    _seen_upper: set[str] = set()
+    for t in raw_holdings:
+        key = str(t).strip().upper()
+        if key and key not in _seen_upper:
+            _seen_upper.add(key)
+            holdings.append(str(t).strip())
     if not holdings:
         return {
             "__response__": True,
@@ -250,6 +265,8 @@ async def _create_session(
             str(t).upper() for t in _stale_analyst_tickers_from_gate(gate_result)
         }
         stale = [t for t in holdings if str(t).upper() in gate_stale]
+        # holdings is already case-insensitively deduped, so stale (a subset)
+        # is too — expected_ticker_job_count == enqueued session job count.
     except Exception as gate_exc:
         logger.warning(
             "intel_run_session.freshness_gate_failed session_id=%s err=%s — "
@@ -274,6 +291,10 @@ async def _create_session(
             )
         )
     except Exception as exc:
+        logger.error(
+            "intel_run_session.create_session_failed session_id=%s user_id=%s err=%s",
+            session_id, user_id, exc,
+        )
         return {
             "__response__": True,
             "response": _build_response(
@@ -283,9 +304,12 @@ async def _create_session(
                 total_holding_count=len(holdings),
                 retryable=True,
                 next_required_action=ACTION_SESSION_CREATE_FAILED,
+                # Fixed copy — raw exception text stays in the server log,
+                # never in a user-facing message.
                 message=(
-                    "Could not create the durable run session "
-                    f"(apply migration 026_intel_run_sessions.sql?): {exc}"
+                    "Could not create the durable run session. If this "
+                    "persists, verify migration 026_intel_run_sessions.sql "
+                    "has been applied, then retry."
                 ),
             ),
         }
@@ -358,7 +382,11 @@ def _dispatch_evidence_lanes_safe(service: Any, tickers: list[str]) -> None:
                     _user_id, exc,
                 )
 
-        asyncio.create_task(_run())
+        task = asyncio.create_task(_run())
+        # Keep a strong reference so the fire-and-forget task cannot be
+        # garbage-collected mid-flight (documented asyncio footgun).
+        _BACKGROUND_TASKS.add(task)
+        task.add_done_callback(_BACKGROUND_TASKS.discard)
         logger.info(
             "intel_run_session.evidence_lanes_dispatch_scheduled user_id=%s "
             "total_tickers=%d lane_run_id=%s",
@@ -391,6 +419,7 @@ async def _continue_session(
     if session_status == STATUS_COMPLETED:
         return await _completed_response(
             service=service, session=session, session_id=session_id,
+            terminal=True,
         )
     if session_status == STATUS_FAILED:
         return _build_response(
@@ -641,12 +670,14 @@ async def _reconcile_claimed_session_jobs(
     """Credit interrupted-but-persisted tickers; recover abandoned claims.
 
     An HTTP request can die AFTER a ticker's durable evidence was written but
-    BEFORE its session job was marked succeeded. On resume:
+    BEFORE its session job was marked succeeded — or a transient DB read
+    failure can mark a genuinely-persisted ticker failed. On resume:
 
-      * a claimed session job whose ticker has BOTH a fresh ``agent_insights``
-        row AND a matching fresh ``recommendations`` row (written since the
-        session began, same agent run) is marked succeeded — verified evidence
-        is never regenerated;
+      * a claimed OR failed session job whose ticker has BOTH a fresh
+        ``agent_insights`` row AND a matching fresh ``recommendations`` row
+        (written since the session began, same agent run) is marked
+        succeeded — verified evidence is never regenerated, and a persisted
+        ticker can never exhaust its retry budget over readback failures;
       * a claimed session job with NO such evidence whose claim is older than
         the stale-claim timeout is reset to pending (the claiming request is
         dead);
@@ -661,7 +692,7 @@ async def _reconcile_claimed_session_jobs(
             lambda: client.table("analyst_refresh_jobs")
             .select("*")
             .eq("run_session_id", session_id)
-            .eq("status", JOB_CLAIMED)
+            .in_("status", [JOB_CLAIMED, "failed"])
             .execute()
         )
         claimed_rows = getattr(res, "data", None) or []
@@ -839,6 +870,11 @@ async def _publish_step(
     # Crash-recovery idempotency: adopt an existing session-linked snapshot.
     existing_row_id = await _find_session_snapshot_row_id(client, session_id)
     if existing_row_id is not None:
+        await _ensure_session_snapshot_active(
+            client,
+            user_id=str(session.get("user_id")),
+            snapshot_row_id=existing_row_id,
+        )
         await asyncio.to_thread(
             lambda: update_session(
                 client, session_id,
@@ -990,6 +1026,38 @@ async def _publish_step(
     )
 
 
+async def _ensure_session_snapshot_active(
+    client: Any,
+    *,
+    user_id: str,
+    snapshot_row_id: str,
+) -> None:
+    """Re-activate an adopted session snapshot row.
+
+    A concurrent publication attempt may have deactivated this row (the
+    losing side of the one-snapshot-per-session race deactivates "previous"
+    snapshots before its own insert fails). A session completing against an
+    inactive snapshot would be invisible to GET /intel/v3/snapshot.
+    Best-effort — failures are logged, and completion verification still
+    checks linkage from the durable row itself.
+    """
+    def _reactivate():
+        client.table("intel_v3_snapshots").update({"is_active": False}).eq(
+            "user_id", user_id
+        ).eq("is_active", True).neq("id", str(snapshot_row_id)).execute()
+        client.table("intel_v3_snapshots").update({"is_active": True}).eq(
+            "id", str(snapshot_row_id)
+        ).execute()
+
+    try:
+        await asyncio.to_thread(_reactivate)
+    except Exception as exc:
+        logger.warning(
+            "intel_run_session.snapshot_reactivate_failed snapshot_row_id=%s err=%s",
+            snapshot_row_id, exc,
+        )
+
+
 async def _find_session_snapshot_row_id(
     client: Any, session_id: str,
 ) -> Optional[str]:
@@ -1024,8 +1092,16 @@ async def _completed_response(
     attempted: int = 0,
     succeeded_now: int = 0,
     failed_now: int = 0,
+    terminal: bool = False,
 ) -> dict[str, Any]:
     """Report completion ONLY after re-verifying the full completion truth.
+
+    ``terminal`` distinguishes an idempotent re-report of an ALREADY-completed
+    session (a stray/late continuation) from the verification that runs
+    immediately after publication. When a terminal session fails
+    re-verification (e.g. evidence freshness drifted hours later), no further
+    continuation can change anything — the response must stop the client's
+    bounded auto-continuation instead of looping it to its cap.
 
     Verified from the durable rows, never from the globally-latest snapshot:
       * session status is completed and a completed_snapshot_id is set;
@@ -1108,9 +1184,36 @@ async def _completed_response(
     if problems:
         logger.warning(
             "intel_run_session.completion_verification_failed session_id=%s "
-            "problems=%s",
-            session_id, ",".join(problems),
+            "terminal=%s problems=%s",
+            session_id, terminal, ",".join(problems),
         )
+        if terminal:
+            # Already-terminal session that no continuation can change:
+            # stop the client's auto-continuation instead of looping it.
+            return _build_response(
+                session_id=session_id,
+                session_status=STATUS_COMPLETED,
+                status="failed",
+                expected_ticker_count=expected,
+                total_holding_count=len(holdings),
+                succeeded_total=counts["succeeded"],
+                remaining=max(0, expected - counts["succeeded"]),
+                attempted=attempted,
+                succeeded_now=succeeded_now,
+                failed_now=failed_now,
+                publication_status=PUBLICATION_COMPLETED,
+                completed_snapshot_id=(
+                    str(completed_snapshot_id) if completed_snapshot_id else None
+                ),
+                retryable=False,
+                next_required_action=ACTION_RETRY_NEW_CLICK,
+                snapshot_available_after_run=False,
+                message=(
+                    "This run finished earlier, but its snapshot can no "
+                    "longer be verified as current. Run Intel again for a "
+                    "fresh snapshot."
+                ),
+            )
         return _build_response(
             session_id=session_id,
             session_status=str(session.get("status") or STATUS_COMPLETED),
@@ -1131,7 +1234,7 @@ async def _completed_response(
             snapshot_available_after_run=False,
             message=(
                 "Completion could not be verified against the session's own "
-                f"snapshot ({'; '.join(problems)})."
+                "snapshot; it will be re-checked on the next continuation."
             ),
         )
 

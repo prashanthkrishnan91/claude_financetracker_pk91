@@ -255,6 +255,9 @@ export function useRunIntelV3(): UseRunIntelV3Result {
   }, []);
 
   const mutate = useCallback(() => {
+    // A new click supersedes any still-running continuation loop: abort it
+    // so two loops (two sessions) can never run concurrently.
+    abortControllerRef.current?.abort();
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const startedAt = Date.now();

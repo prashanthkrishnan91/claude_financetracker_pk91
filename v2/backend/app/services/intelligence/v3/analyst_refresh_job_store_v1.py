@@ -656,6 +656,12 @@ def claim_due_jobs(
     claimed (session jobs only exist for the session's captured stale set,
     and the ``tickers`` filter enforces the scope again defensively).
 
+    Conversely, when ``run_session_id`` is NOT passed (the legacy/standalone
+    worker path), session-linked rows are excluded post-fetch: a session's
+    jobs belong exclusively to that session's own bounded continuations, so
+    an unscoped background worker can never claim them — and can never burn
+    a session job's attempt budget from outside the session.
+
     Each claim is a guarded single-row UPDATE (``status`` must still equal the
     pre-claim status) so two concurrent workers cannot both grab the same row.
     Never raises — a read failure returns an empty list.
@@ -690,6 +696,15 @@ def claim_due_jobs(
     for row in candidates:
         if len(claimed) >= limit:
             break
+        # Session isolation both ways: an unscoped (legacy) claim never
+        # touches a session's rows; a session-scoped claim never touches
+        # another session's rows (defensive — the query already filters).
+        row_session = row.get("run_session_id")
+        if run_session_id is None:
+            if row_session is not None:
+                continue
+        elif row_session is not None and str(row_session) != str(run_session_id):
+            continue
         attempts = int(row.get("attempts") or 0)
         max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
         if attempts >= max_attempts:
@@ -857,9 +872,13 @@ def count_due_jobs(
         "earliest_retry_at": None,
     }
     try:
+        # select("*") rather than a column list: run_session_id is needed for
+        # the isolation filter below, but must not break deployments where
+        # migration 026 has not been applied yet (the column simply comes
+        # back absent there, exactly like the pre-session schema).
         query = (
             client.table(TABLE)
-            .select("status,attempts,max_attempts,next_retry_at")
+            .select("*")
             .in_("status", list(CLAIMABLE_STATUSES))
         )
         if user_id is not None:
@@ -879,6 +898,15 @@ def count_due_jobs(
     counts = dict(zero)
     earliest_retry_at: Optional[str] = None
     for row in rows:
+        # Mirror claim_due_jobs' session isolation: unscoped counts see only
+        # legacy NULL-session rows; session-scoped counts see only that
+        # session's rows.
+        row_session = row.get("run_session_id")
+        if run_session_id is None:
+            if row_session is not None:
+                continue
+        elif row_session is not None and str(row_session) != str(run_session_id):
+            continue
         status = str(row.get("status") or "")
         attempts = int(row.get("attempts") or 0)
         max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)

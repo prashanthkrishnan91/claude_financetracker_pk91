@@ -781,3 +781,175 @@ class TestCompletionTruth:
             s for s in env.snapshot_rows()
             if str(s.get("run_session_id") or "") == sid
         ]
+
+
+# ═══ Adversarial-audit hardening (post-review fixes) ══════════════════════════
+
+
+class TestGlobalWorkerCannotTouchSessionJobs:
+    @pytest.mark.asyncio
+    async def test_unscoped_legacy_claim_and_count_exclude_session_rows(
+        self, monkeypatch,
+    ):
+        """The unscoped standalone worker must never claim (or count) a
+        session's jobs — so it can never burn a session job's attempt budget
+        from outside the session."""
+        from app.services.intelligence.v3.analyst_refresh_job_store_v1 import (
+            count_due_jobs,
+        )
+
+        env = make_env(monkeypatch, tickers=["AAPL", "MSFT"])
+        sid = _sid()
+        await env.request(sid)  # creates session + jobs (first batch runs)
+
+        # Seed one legacy NULL-session pending job alongside the session rows.
+        legacy_id = str(uuid.uuid4())
+        env.client.store.setdefault("analyst_refresh_jobs", []).append({
+            "id": legacy_id, "user_id": USER_A, "ticker": "LEGACY",
+            "refresh_window": "2026-07-21", "status": JOB_PENDING,
+            "attempts": 0, "max_attempts": 5, "run_session_id": None,
+            "requested_at": "2026-07-21T00:00:00+00:00",
+            "next_retry_at": "2026-07-21T00:00:00+00:00",
+        })
+        # Reset any remaining session jobs to pending so they'd be claimable
+        # if the isolation filter were missing.
+        session_pending = [
+            j for j in env.session_jobs(sid) if j["status"] == JOB_PENDING
+        ]
+
+        claimed = claim_due_jobs(
+            env.client, worker_run_id=str(uuid.uuid4()), limit=50,
+        )
+        assert [j.ticker for j in claimed] == ["LEGACY"]
+        for j in env.session_jobs(sid):
+            assert j["status"] != JOB_CLAIMED or j.get("worker_run_id") != claimed[0].id
+
+        counts = count_due_jobs(env.client)
+        # Only the legacy row counts for the unscoped path (now claimed → 0 due).
+        assert counts["pending"] == 0
+        assert counts["total_due"] == 0
+        # Session-scoped count still sees the session's own jobs.
+        if session_pending:
+            from app.services.intelligence.v3.intel_run_session_store_v1 import (
+                count_session_job_states,
+            )
+            scoped = count_session_job_states(env.client, run_session_id=sid)
+            assert scoped["pending"] == len(session_pending)
+
+
+class TestReconcileCreditsFailedJobsWithEvidence:
+    @pytest.mark.asyncio
+    async def test_failed_session_job_with_durable_evidence_is_credited(
+        self, monkeypatch,
+    ):
+        """A transient readback failure can mark a genuinely persisted ticker
+        failed. Resume must credit it from its durable evidence — zero
+        re-analysis, no attempt-budget burn toward terminal failure."""
+        tickers = ["AAPL", "MSFT", "NVDA", "AMZN", "TSLA", "GOOG"]
+        env = make_env(monkeypatch, tickers=tickers)
+        sid = _sid()
+        await env.request(sid)  # batch 1: 3 of 6 succeed; session still open
+
+        # Rewrite one SUCCEEDED job (its durable evidence rows exist) as
+        # failed-with-attempts — the shape a readback failure would leave.
+        target = next(
+            j for j in env.session_jobs(sid) if j["status"] == JOB_SUCCEEDED
+        )
+        for j in env.client.store["analyst_refresh_jobs"]:
+            if j["id"] == target["id"]:
+                j["status"] = "failed"
+                j["attempts"] = 4  # one attempt away from terminal
+                j["next_retry_at"] = "2026-01-01T00:00:00+00:00"
+                j["last_error"] = "recommendations_read_failed:TimeoutError"
+
+        last = await env.run_to_completion(sid)
+        assert last["session_status"] == STATUS_COMPLETED
+        # Credited from evidence — never re-analysed (each ticker exactly once).
+        assert env.analyst_calls.count(target["ticker"]) == 1
+        assert len(env.analyst_calls) == len(tickers)
+        revived = next(
+            j for j in env.session_jobs(sid) if j["id"] == target["id"]
+        )
+        assert revived["status"] == JOB_SUCCEEDED
+        assert revived["attempts"] == 4
+
+
+class TestAdoptedSnapshotReactivation:
+    @pytest.mark.asyncio
+    async def test_recovered_session_snapshot_is_reactivated(self, monkeypatch):
+        """Crash-recovery adoption must re-activate a session snapshot that a
+        racing publication attempt deactivated — otherwise the completed
+        session points at a row GET /snapshot (latest active) never serves."""
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        await env.run_to_completion(sid)
+
+        linked = next(
+            s for s in env.snapshot_rows()
+            if str(s.get("run_session_id") or "") == sid
+        )
+        # Simulate the race aftermath: linked row deactivated, session stuck
+        # in publishing without its completed_snapshot_id.
+        linked_id = linked["id"]
+        for s in env.client.store["intel_v3_snapshots"]:
+            if s["id"] == linked_id:
+                s["is_active"] = False
+        session = env.session_rows()[0]
+        session["status"] = "publishing"
+        session["completed_snapshot_id"] = None
+
+        recovered = await env.request(sid)
+        assert recovered["session_status"] == STATUS_COMPLETED
+        row = next(
+            s for s in env.snapshot_rows() if s["id"] == linked_id
+        )
+        assert row["is_active"] is True
+        # Still exactly one session-linked row (no duplicate insert).
+        assert len([
+            s for s in env.snapshot_rows()
+            if str(s.get("run_session_id") or "") == sid
+        ]) == 1
+
+    @pytest.mark.asyncio
+    async def test_terminal_unverifiable_completion_stops_continuation(
+        self, monkeypatch,
+    ):
+        """An already-completed session whose snapshot can no longer be
+        verified must return a stopping (non-retryable) response — never an
+        auto-continue loop that no continuation can resolve."""
+        env = make_env(monkeypatch, tickers=["AAPL"])
+        sid = _sid()
+        await env.run_to_completion(sid)
+        for s in env.snapshot_rows():
+            if str(s.get("run_session_id") or "") == sid:
+                s["payload"] = dict(s["payload"], run_session_id=None)
+
+        rereport = await env.request(sid)
+        assert rereport["snapshot_available_after_run"] is False
+        assert rereport["retryable"] is False
+        assert not str(rereport["next_required_action"]).startswith("reclick_")
+
+
+class TestCertificationScopeOverride:
+    @pytest.mark.asyncio
+    async def test_contract_certifies_over_immutable_scope_not_positions(self):
+        """check_certified_intel_run_contract(scope_tickers=…) must use the
+        session's captured scope and never read the positions table."""
+        from app.services.intelligence.v3.certified_intel_run_contract_v1 import (
+            check_certified_intel_run_contract,
+        )
+
+        client = FakeSupabase()
+        # Positions table intentionally holds a DIFFERENT ticker — if the
+        # contract read positions, the totals would reflect it.
+        seed_positions(client, USER_A, ["OTHER"])
+
+        result = await check_certified_intel_run_contract(
+            user_id=UUID(USER_A),
+            client=client,
+            scope_tickers=["AAPL", "aapl", "MSFT"],  # case-dupe collapses
+        )
+        assert result.total_holding_count == 2
+        assert result.certified is False  # no evidence rows exist
+        assert set(result.failed_tickers) == {"AAPL", "MSFT"}
+        assert "OTHER" not in result.failed_tickers

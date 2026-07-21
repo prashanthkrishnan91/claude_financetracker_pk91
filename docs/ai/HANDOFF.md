@@ -173,16 +173,24 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
 - Frontend: full jest green; `tsc --noEmit` clean; `next build` green.
 - Baseline before consolidation (main @ PR #471): backend 93 failed / 8910 passed
   (documented pre-existing failures), frontend 3 suites failing to compile.
-- Advisor product-recovery PR (2026-07-19, initial + same-day release-blocker patch): focused
-  Tier 1 bundle (Intel v3 / paycheck / allocation-policy / price-truth / run-intel / deploy-cash /
-  advisor tests) — `3119 passed, 0 failed` backend; full frontend jest `608 passed, 0 failed`;
-  `tsc --noEmit` clean; `next build` green (locally requires placeholder
-  `NEXT_PUBLIC_SUPABASE_URL`/`NEXT_PUBLIC_SUPABASE_ANON_KEY` env vars to prerender — no code path
-  change, sandbox-only). Full backend suite not run (Tier 3 criteria not met; see PR body
-  test-tier justification).
+- Distributed Run Intel workflow PR (2026-07-21): full backend suite green (8400+ passed,
+  0 failed — Tier 3: broad architecture/schema change + mission-mandated), full frontend
+  jest green (596 passed), `tsc --noEmit` clean, `next build` green (placeholder
+  `NEXT_PUBLIC_*` env vars needed to prerender locally — sandbox-only).
 
 ## SQL / env state
 
+- Migration `v2/database/027_intel_run_distributed_tasks.sql` is REQUIRED (manual,
+  idempotent) for the distributed Run Intel workflow; until applied, POST /intel/v3/run
+  returns an explicit retryable `run_session_create_failed` (no legacy fallback). It also
+  marks unfinished legacy sessions `superseded`. Optional tuning env vars (defaults in
+  code, no manual action): `INTEL_V3_DISTRIBUTED_MAX_COLLECTOR_CONCURRENCY=4`,
+  `INTEL_V3_DISTRIBUTED_MAX_LLM_CONCURRENCY=2`,
+  `INTEL_V3_DISTRIBUTED_MAX_SPECIALIST_BATCH=5`,
+  `INTEL_V3_DISTRIBUTED_TASK_LEASE_SECONDS=300`,
+  `INTEL_V3_DISTRIBUTED_MAX_TASK_ATTEMPTS=3`.
+  `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` no longer affects Run Intel (kept only so set
+  deployments don't fail validation).
 - Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
   endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
 - `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`

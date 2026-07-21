@@ -1,13 +1,11 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-21 (Run Intel durable sessions — recovery replacing PR #480's approach.
-One manual Run Intel click now owns one SQL-backed `intel_run_sessions` row (browser-minted
-UUID, migration `v2/database/026_intel_run_sessions.sql`); session jobs and the published
-snapshot are FK-linked to that exact session, and the production ticker-refresh path executes
-`AgentOrchestrator.run_analyst_refresh_only()` — it can no longer reach portfolio synthesis,
-which was consuming the request deadline after per-ticker analysis had already succeeded and
-blanket-failing the batch. Deploy Cash work from 2026-07-19 unchanged; consolidation evidence
-remains in `REFACTOR_REPORT.md`.)
+Last updated: 2026-07-21 (Run Intel distributed workflow — the bounded-drain execution
+architecture is replaced by a durable SQL task graph executed by a backend worker
+supervisor; the browser only creates one session and polls status. Contract:
+`docs/ai/RUN_INTEL_DISTRIBUTED_WORKFLOW.md`; migration
+`v2/database/027_intel_run_distributed_tasks.sql`. Deploy Cash work from 2026-07-19
+unchanged; consolidation evidence remains in `REFACTOR_REPORT.md`.)
 
 ## Product architecture (read this first)
 
@@ -104,58 +102,52 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   and the existing caveats. No new allocator, no policy/cap loosening, no fabricated candidates;
   the decision spine (certified truth → repaired price truth → Intel v3 evidence →
   `allocation_policy_v1` → `paycheck_plan_preview` → Advisor cash-plan section) is unchanged.
-- **Run Intel is one durable SQL-backed session per click** (fix/run-intel-durable-sessions,
-  replacing the pre-session Stage 13B router augmentation and PR #480's rejected approaches —
-  no sentinel tickers, no window-as-identity, no completion inferred from the latest snapshot):
-  * Identity: the browser mints ONE UUID per manual click (`crypto.randomUUID()` in
-    `useRunIntelV3`); every bounded automatic continuation POSTs the same
-    `{"run_session_id"}` body; a later click always mints a different id. Legacy body-less
-    callers get a backend-minted id (`RunIntelV3Request`).
-  * Durable state: `public.intel_run_sessions` (migration
-    `v2/database/026_intel_run_sessions.sql`, service-role/deny-all RLS) stores status
-    (`created → ticker_refresh_in_progress → publishing → completed`, plus
-    `publication_retryable_failed` and terminal `failed`), the immutable holdings scope +
-    stale subset captured at click time, expected job count, pre-session snapshot row id,
-    completed snapshot row id, and retryable error info. `analyst_refresh_jobs.run_session_id`
-    and `intel_v3_snapshots.run_session_id` are nullable FKs; session jobs are unique per
-    `(run_session_id, ticker)`; legacy NULL-session rows keep the old
-    `(user_id, ticker, refresh_window)` uniqueness; at most one snapshot row per session
-    (publication idempotency index).
-  * Flow (`intel_run_session_flow_v1.run_intel_session_request`, called by the router):
-    first use of an id captures scope + enqueues one session job per stale ticker
-    (`enqueue_session_jobs`); continuations verify ownership (403 on mismatch), credit
-    interrupted-but-persisted tickers from durable evidence (never regenerate), lift worker
-    backoff for the click's own jobs, drain ONE bounded batch (1 × 3 jobs ≤ 20s via
-    `run_on_demand_drain` scoped by `run_session_id`, prewarm disabled), and when every
-    session job has succeeded run deterministic certification over the session's immutable
-    scope (`check_certified_intel_run_contract(scope_tickers=…)`) and publish ONE snapshot
-    carrying the session id in both the SQL column and the payload
-    (`run_prewarm_snapshot(run_session_id=…)` → `_persist_snapshot` returns the row id).
-    Publication failures keep every ticker job succeeded and retry publication only.
-    Completion is reported ONLY after re-verifying the session's own snapshot row (column +
-    payload linkage, differs from pre-session snapshot, `worker_certified`,
-    `certified_current`, zero unfinished session jobs).
-  * Analyst-only execution (the production fix): the default adapter backend
-    (`full_portfolio_analyst_refresh_adapter_v1.default_full_portfolio_agent_orchestrator_backend`)
-    calls `AgentOrchestrator.run_analyst_refresh_only(run_id, tickers=…)` — the real market/
-    context/snapshot/feature/analyst/persist stages with a hard structural stop before
-    Phase 4. It never invokes `_run_portfolio_synthesis` / narrative / allocation synthesis;
-    the full `AgentOrchestrator.run()` pipeline is untouched for other product features.
-    Root cause this fixes: production ticker analysis succeeded, then unconditional
-    portfolio synthesis consumed the remaining deadline, the adapter timed out, and the whole
-    batch was reported failed.
-  * Frontend: still exactly one button; `deriveRunJobs` prefers the explicit session fields
-    (`expected_ticker_count`/`session_succeeded_ticker_count`/`session_remaining_ticker_count`)
-    over per-request batch reconstruction; continuation/caps/abort behavior unchanged
-    (`RUN_INTEL_MAX_CONTINUATIONS=20` honestly covers ceil(32/3)+publication).
-  * Tests: `test_run_intel_session_sql_contract.py` (migration contract),
-    `test_run_intel_analyst_only_production_path.py` (real adapter seam with `run()` +
-    `_run_portfolio_synthesis` patched to raise, revert simulation, timeout regression),
-    `test_run_intel_session_flow.py` (isolation / 16-ticker interruption-resume /
-    publication-only retry / 32-ticker exact accounting over the REAL store+worker),
-    `test_run_intel_session_router.py` (endpoint seam; replaces the deleted
-    `test_stage13b_run_intel_on_demand_status.py`, whose router-augmentation architecture
-    was removed).
+- **Run Intel is a durable distributed task graph** (contract:
+  `docs/ai/RUN_INTEL_DISTRIBUTED_WORKFLOW.md`; migration
+  `v2/database/027_intel_run_distributed_tasks.sql`; replaces the bounded-drain
+  session flow, the browser continuation loop, and any Run Intel path through
+  `run_analyst_refresh_only()`):
+  * Control plane: `POST /intel/v3/run` (browser-minted UUID per click) freezes the
+    portfolio scope into `intel_run_tickers` (one row per ACTIVE holding — batch size can
+    never redefine run scope), seeds `intel_run_tasks` (generic durable queue: leases,
+    SKIP LOCKED claim RPC `claim_intel_run_tasks` + CAS fallback, idempotent logical task
+    identity), activates the in-process worker supervisor, returns fast. Zero provider/LLM/
+    policy/snapshot work in-request. One active session per user (partial unique index);
+    a click during an active run adopts it.
+  * Status plane: `GET /intel/v3/sessions/{id}/status` + `/sessions/active` — read-only,
+    plain-English `plain_status`; polling observes work, never performs it. Page close
+    never stops the run; returning rediscovers the active session.
+  * Worker: `distributed/worker_supervisor_v1` (in-process asyncio; started by /run,
+    app-startup crash recovery; exits when idle — no polling cost). Scheduler
+    (`run_scheduler_v1`) creates dependency waves: ticker-scoped lane collectors →
+    immutable evidence bundles → asset-compatible specialist batches (≤5, global LLM
+    semaphore) → deterministic conflict-triggered review → per-ticker deterministic
+    decision → portfolio join + certified publication (reuses `run_prewarm_snapshot`,
+    one session-linked snapshot, publication-only retry). Failure isolation: lane →
+    lane, specialist → batch/axis, ticker → ticker (`no_call` EVIDENCE INCOMPLETE, never
+    fabricated verdict rows); session terminal states `completed` /
+    `completed_with_gaps` / `failed`.
+  * Collectors reuse existing providers (data_sources fetchers + breakers/semaphores,
+    SEC/ETF/macro research-worker runners writing `research_artifacts`); lane TTL reuse +
+    specialist `input_fingerprint` reuse skip duplicate provider/LLM work. Specialists are
+    pure (bundle-only input, `LLMClient.ask_json`, strict JSON, one repair retry,
+    per-(ticker,axis) rows in `intel_run_specialist_outputs`). Deterministic
+    `decision_policy_v1.decide()` remains the only visible action authority; specialist
+    scores aggregate into an advisory signal only.
+  * Retired: `intel_run_session_flow_v1`, `analyst_refresh_on_demand_drain_v1`, the
+    browser auto-continuation in `useRunIntelV3`, session-scoped
+    `analyst_refresh_jobs` enqueue. Unfinished legacy (workflow_version=1) sessions were
+    marked `superseded` by migration 027. The legacy analyst-refresh worker Railway
+    service remains only for the flag-off background path and can never see distributed
+    sessions or claim session-linked jobs.
+  * Tests: `test_distributed_architecture_boundary.py` (static import/symbol fences),
+    `test_distributed_run_creation.py` (34-ticker fast create, forbidden seams),
+    `test_distributed_sql_contract.py` (migration 027 + retention),
+    `test_distributed_collectors_and_store.py` (ticker scoping, lane isolation, TTL,
+    atomic claims/leases/double-completion), `test_distributed_specialists_and_review.py`,
+    `test_distributed_decision_and_publication.py` (deterministic authority, NO CALL,
+    publication-only retry), `test_distributed_golden_run.py` (34-holding golden run with
+    exact provider/LLM accounting + 83f28044-shaped 32-ticker regression).
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.

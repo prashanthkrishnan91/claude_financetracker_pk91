@@ -133,12 +133,10 @@ def run_scheduler_pass(
 
     ticker_rows = store.list_ticker_rows(client, run_session_id=session_id)
     if not ticker_rows:
-        # Zombie-session backstop (defect D2): a create that crashed before
-        # freezing any scope leaves an unfinishable session. The adopt path
-        # repairs it on the next click; this guard terminalizes one that
-        # nobody re-clicks, after a grace window so an in-flight concurrent
-        # create is never killed mid-seed.
-        _terminalize_unseeded_session(client, session, now=now)
+        # A session without frozen scope is a crashed create. The supervisor
+        # repairs it via session_control.repair_session_graph (every partial
+        # shape, verified, no browser traffic required) — the scheduler never
+        # invents scope and never terminalizes a repairable session.
         return created
     tasks = store.list_tasks(client, run_session_id=session_id)
 
@@ -398,46 +396,6 @@ def run_scheduler_pass(
     # ── Stage bookkeeping (presentation only) ────────────────────────────────
     _update_stage(client, session, ticker_rows, all_terminal)
     return created
-
-
-_UNSEEDED_GRACE_SECONDS = 120
-
-
-def _terminalize_unseeded_session(
-    client: Any, session: dict[str, Any], *, now: Optional[datetime] = None,
-) -> None:
-    from datetime import datetime as _dt, timezone as _tz
-
-    now = now or _dt.now(_tz.utc)
-    if now.tzinfo is None:
-        now = now.replace(tzinfo=_tz.utc)
-    updated_at = str(session.get("updated_at") or session.get("created_at") or "")
-    try:
-        parsed = _dt.fromisoformat(updated_at.replace("Z", "+00:00"))
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=_tz.utc)
-    except (ValueError, TypeError):
-        return
-    if (now - parsed).total_seconds() < _UNSEEDED_GRACE_SECONDS:
-        return
-    try:
-        client.table("intel_run_sessions").update({
-            "status": "failed",
-            "last_error": "scope_freeze_incomplete_superseded_click_to_retry",
-            "updated_at": now.isoformat(),
-        }).eq("id", str(session.get("id"))).in_(
-            "status", ["created", "running"]
-        ).execute()
-        session["status"] = "failed"
-        logger.warning(
-            "scheduler.terminalized_unseeded_session session=%s",
-            session.get("id"),
-        )
-    except Exception as exc:
-        logger.debug(
-            "scheduler.unseeded_terminalize_failed session=%s err=%s",
-            session.get("id"), exc,
-        )
 
 
 def _update_stage(

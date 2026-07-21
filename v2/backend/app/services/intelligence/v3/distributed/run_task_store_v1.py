@@ -162,17 +162,28 @@ def update_ticker_row(
     run_session_id: str,
     ticker: str,
     patch: dict[str, Any],
+    expected_states: Optional[list[str]] = None,
     now: Optional[datetime] = None,
 ) -> bool:
+    """Patch one frozen ticker row.
+
+    ``expected_states`` is the claim fence for state transitions: when given,
+    the update matches only rows currently in one of those states — a stale
+    worker whose task was reclaimed (and whose rival already advanced the
+    ticker) matches zero rows and cannot overwrite the newer transition.
+    Returns False when nothing matched or on DB failure.
+    """
     try:
-        (
+        query = (
             client.table(TICKERS_TABLE)
             .update({**patch, "updated_at": _iso(_now(now))})
             .eq("run_session_id", run_session_id)
             .eq("ticker", ticker)
-            .execute()
         )
-        return True
+        if expected_states:
+            query = query.in_("state", list(expected_states))
+        res = query.execute()
+        return bool(_rows(res))
     except Exception as exc:
         logger.warning(
             "run_task_store.update_ticker_failed session=%s ticker=%s err=%s",
@@ -183,7 +194,53 @@ def update_ticker_row(
 
 # ── Task creation (idempotent) ───────────────────────────────────────────────
 
-def create_task(
+def logical_task_key(
+    task_type: str,
+    lane: Optional[str],
+    ticker: Optional[str],
+    batch_key: Optional[str],
+) -> tuple[str, str, str, str]:
+    """The migration-027 logical identity of a task (NULLs normalized)."""
+    return (
+        str(task_type),
+        str(lane or ""),
+        str(ticker or ""),
+        str(batch_key or ""),
+    )
+
+
+def find_task_by_logical_key(
+    client: Any,
+    *,
+    run_session_id: str,
+    task_type: str,
+    lane: Optional[str] = None,
+    ticker: Optional[str] = None,
+    batch_key: Optional[str] = None,
+) -> Optional[dict[str, Any]]:
+    """Read the exact task matching one logical identity (or None).
+
+    Raises on DB read failure — callers use this to VERIFY a suspected
+    duplicate, and an unverifiable duplicate must never be treated as one.
+    """
+    query = (
+        client.table(TASKS_TABLE)
+        .select("*")
+        .eq("run_session_id", run_session_id)
+        .eq("task_type", task_type)
+    )
+    rows = _rows(query.execute())
+    wanted = logical_task_key(task_type, lane, ticker, batch_key)
+    for row in rows:
+        if logical_task_key(
+            str(row.get("task_type")), row.get("lane"),
+            row.get("ticker"), row.get("batch_key"),
+        ) == wanted:
+            return row
+    return None
+
+
+def get_or_create_task(
     client: Any,
     *,
     run_session_id: str,
@@ -198,9 +255,19 @@ def create_task(
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
     input_fingerprint: Optional[str] = None,
     now: Optional[datetime] = None,
-) -> Optional[dict[str, Any]]:
-    """Insert one durable task. Returns None when the logical task already
-    exists (unique index absorbed the duplicate) — idempotent by design."""
+) -> tuple[dict[str, Any], bool]:
+    """Fail-closed idempotent task creation.
+
+    Contract (adversarial-completion item 3):
+      1. attempt the insert;
+      2. on ANY insert exception, VERIFY the suspected duplicate by reading
+         the exact logical identity back — if the row exists, return it
+         (``created=False``);
+      3. if no such row exists, the failure was NOT a duplicate — re-raise.
+         An unknown database error is never translated into "duplicate".
+
+    Returns (task_row, created).
+    """
     now_dt = _now(now)
     payload = {
         "id": str(uuid.uuid4()),
@@ -223,11 +290,64 @@ def create_task(
     try:
         res = client.table(TASKS_TABLE).insert(payload).execute()
         rows = _rows(res)
-        return rows[0] if rows else payload
-    except Exception:
-        # Logical duplicate (unique index) — the scheduler is safe to run
-        # repeatedly; an existing task is success, not an error.
-        return None
+        return (rows[0] if rows else payload), True
+    except Exception as insert_exc:
+        existing = find_task_by_logical_key(
+            client,
+            run_session_id=run_session_id,
+            task_type=task_type,
+            lane=lane,
+            ticker=ticker,
+            batch_key=batch_key,
+        )
+        if existing is not None:
+            return existing, False
+        logger.error(
+            "run_task_store.create_task_failed_not_duplicate session=%s "
+            "type=%s lane=%s ticker=%s err=%s",
+            run_session_id, task_type, lane, ticker, insert_exc,
+        )
+        raise
+
+
+def create_task(
+    client: Any,
+    *,
+    run_session_id: str,
+    user_id: str,
+    task_type: str,
+    ticker: Optional[str] = None,
+    batch_key: Optional[str] = None,
+    lane: Optional[str] = None,
+    asset_type: Optional[str] = None,
+    state: str = TASK_PENDING,
+    priority: int = 100,
+    max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    input_fingerprint: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Optional[dict[str, Any]]:
+    """Scheduler-facing wrapper over ``get_or_create_task``.
+
+    Returns the row when THIS call created it, None when the logical task
+    already existed. Raises on any non-duplicate database failure — a
+    transient error can never silently drop a task from the graph.
+    """
+    row, created = get_or_create_task(
+        client,
+        run_session_id=run_session_id,
+        user_id=user_id,
+        task_type=task_type,
+        ticker=ticker,
+        batch_key=batch_key,
+        lane=lane,
+        asset_type=asset_type,
+        state=state,
+        priority=priority,
+        max_attempts=max_attempts,
+        input_fingerprint=input_fingerprint,
+        now=now,
+    )
+    return row if created else None
 
 
 def list_tasks(
@@ -457,6 +577,10 @@ def _claim_tasks_cas(
         patch = {
             "state": TASK_CLAIMED,
             "claim_owner": worker_id,
+            # Claim-generation fence: a fresh token on EVERY claim. All
+            # task-owned side effects prove they still hold this exact token,
+            # so a stale worker whose task was reclaimed can never write.
+            "claim_token": str(uuid.uuid4()),
             "claimed_at": _iso(now_dt),
             "started_at": row.get("started_at") or _iso(now_dt),
             "lease_expires_at": lease_iso,
@@ -539,14 +663,20 @@ def complete_task(
         patch["next_retry_at"] = next_retry_at or _iso(now_dt)
 
     try:
-        res = (
+        query = (
             client.table(TASKS_TABLE)
             .update(patch)
             .eq("id", task_id)
             .eq("state", TASK_CLAIMED)
             .eq("claim_owner", worker_id)
-            .execute()
         )
+        # Claim-generation fence: completion requires the exact claim token
+        # issued at claim time — a stale worker whose task was reclaimed
+        # holds an old token and matches zero rows.
+        claim_token = task.get("claim_token")
+        if claim_token:
+            query = query.eq("claim_token", str(claim_token))
+        res = query.execute()
         return bool(_rows(res))
     except Exception as exc:
         logger.warning(
@@ -557,6 +687,41 @@ def complete_task(
 
 # Sentinel "final state" meaning: failed this attempt, retry if budget allows.
 TASK_FAILED_RETRYABLE = "__failed_retryable__"
+
+
+def owns_claim(client: Any, task: dict[str, Any]) -> bool:
+    """Does the caller still hold this task's CURRENT claim?
+
+    Verified against the durable row: state is 'claimed', and both the
+    claim_owner and the claim-generation token match the claim the caller was
+    issued. Executors call this immediately before every task-owned side
+    effect (specialist outputs, ticker transitions, decision/evidence writes,
+    publication) so a stale worker whose lease expired and whose task was
+    reclaimed refuses to write. Fail closed: unreadable ⇒ not owned.
+    """
+    try:
+        res = (
+            client.table(TASKS_TABLE)
+            .select("state,claim_owner,claim_token")
+            .eq("id", str(task.get("id")))
+            .limit(1)
+            .execute()
+        )
+        rows = _rows(res)
+        if not rows:
+            return False
+        row = rows[0]
+        if str(row.get("state") or "") != TASK_CLAIMED:
+            return False
+        if str(row.get("claim_owner") or "") != str(task.get("claim_owner") or ""):
+            return False
+        issued = task.get("claim_token")
+        current = row.get("claim_token")
+        if issued and str(current or "") != str(issued):
+            return False
+        return True
+    except Exception:
+        return False
 
 
 # ── Specialist outputs ───────────────────────────────────────────────────────

@@ -192,6 +192,21 @@ class TestClaimRpc:
         assert "AND state = 'claimed'" in block
         assert "AND claim_owner = p_worker_id" in block
 
+    def test_claim_generation_fence(self):
+        """Every claim mints a fresh claim_token; completion requires the
+        CURRENT token — a stale (reclaimed) worker matches zero rows."""
+        sql = _stripped()
+        assert re.search(r"^\s+claim_token\s+UUID", sql, re.M), (
+            "intel_run_tasks missing claim_token column"
+        )
+        claim_block = sql[sql.index("claim_intel_run_tasks"):sql.index(
+            "complete_intel_run_task"
+        )]
+        assert "claim_token      = gen_random_uuid()" in claim_block
+        complete_block = sql[sql.index("complete_intel_run_task"):]
+        assert "p_claim_token" in complete_block
+        assert "AND claim_token = p_claim_token" in complete_block
+
     def test_rpc_grants_are_service_role_only(self):
         sql = _stripped()
         assert re.search(r"REVOKE ALL ON FUNCTION public\.claim_intel_run_tasks", sql)

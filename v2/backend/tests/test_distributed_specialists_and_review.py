@@ -44,6 +44,7 @@ from app.services.intelligence.v3.distributed.task_contracts_v1 import (
 )
 from tests.distributed_run_intel_test_utils import (
     FakeLLM,
+    claim_task_row,
     FakeSupabase,
     ProviderRecorder,
     make_settings,
@@ -164,6 +165,7 @@ class TestSpecialistExecution:
             if t["task_type"] == TASK_SPECIALIST_ANALYSIS
             and t["lane"] == AXIS_FUNDAMENTAL
         )
+        task = claim_task_row(client, task)
         llm = FakeLLM()
         outcome = await execute_specialist_task(client, task=task, llm=llm)
         assert outcome.final_state == TASK_SUCCEEDED
@@ -191,6 +193,7 @@ class TestSpecialistExecution:
             and t["lane"] == AXIS_FUNDAMENTAL
         )
         # MSFT is malformed on the first AND the repair call.
+        task = claim_task_row(client, task)
         llm = FakeLLM(script={(AXIS_FUNDAMENTAL, "MSFT"): None})
         outcome = await execute_specialist_task(client, task=task, llm=llm)
         assert outcome.final_state == TASK_DEGRADED
@@ -216,6 +219,7 @@ class TestSpecialistExecution:
             t for t in client.rows("intel_run_tasks")
             if t["task_type"] == TASK_SPECIALIST_ANALYSIS
         )
+        task = claim_task_row(client, task)
         llm = FakeLLM(fail_all=True)
         outcome = await execute_specialist_task(client, task=task, llm=llm)
         assert outcome.final_state == store.TASK_FAILED_RETRYABLE
@@ -236,6 +240,7 @@ class TestSpecialistExecution:
             if t["task_type"] == TASK_SPECIALIST_ANALYSIS
             and t["lane"] == AXIS_FUNDAMENTAL
         )
+        task = claim_task_row(client, task)
         llm = FakeLLM()
         first = await execute_specialist_task(client, task=task, llm=llm)
         assert first.llm_calls == 1
@@ -266,6 +271,7 @@ class TestSpecialistExecution:
             and t["lane"] == AXIS_FUNDAMENTAL
             and t["run_session_id"] == session2
         )
+        task2 = claim_task_row(client, task2)
         second = await execute_specialist_task(client, task=task2, llm=llm)
         assert second.reused == ["AAPL"]
         assert second.llm_calls == 0, "unchanged fingerprint still called LLM"
@@ -277,6 +283,7 @@ class TestSpecialistExecution:
         client.table("intel_run_specialist_outputs").update(
             {"input_fingerprint": "sha256:old"}
         ).eq("run_session_id", session2).execute()
+        task2 = claim_task_row(client, task2)
         third = await execute_specialist_task(client, task=task2, llm=llm)
         assert third.llm_calls == 1
 
@@ -335,6 +342,7 @@ class TestConditionalReview:
                 })
             else:
                 task_llm = llm
+            task = claim_task_row(client, task)
             await execute_specialist_task(client, task=task, llm=task_llm)
             client.table("intel_run_tasks").update(
                 {"state": TASK_SUCCEEDED}
@@ -355,8 +363,9 @@ class TestConditionalReview:
 
         # Review executes, persists an advisory row, fetches nothing, and its
         # output shape carries NO action vocabulary field.
+        review_task = claim_task_row(client, review_tasks[0])
         outcome = await execute_review_task(
-            client, task=review_tasks[0], llm=FakeLLM(),
+            client, task=review_task, llm=FakeLLM(),
         )
         assert outcome.persisted == ["AAPL"]
         review_output = next(

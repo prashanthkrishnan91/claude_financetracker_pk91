@@ -58,10 +58,14 @@ _COLLECTOR_TASK_TYPES = (
 )
 
 # Supervisor pacing: short sleep between busy passes, longer when a pass did
-# nothing, exit after N consecutive passes with zero active sessions.
+# nothing, exit after N consecutive SUCCESSFUL zero-session queries.
 _BUSY_SLEEP_SECONDS = 0.5
 _IDLE_SLEEP_SECONDS = 2.0
 _EXIT_AFTER_IDLE_PASSES = 3
+# Database-outage backoff (discovery query failed): bounded exponential with
+# ±30% jitter. The supervisor is retained for the whole outage.
+_OUTAGE_BACKOFF_BASE_SECONDS = 1.0
+_OUTAGE_BACKOFF_MAX_SECONDS = 60.0
 
 
 def _rows(res: Any) -> list[dict[str, Any]]:
@@ -69,9 +73,21 @@ def _rows(res: Any) -> list[dict[str, Any]]:
     return data if isinstance(data, list) else []
 
 
+class ActiveSessionQueryFailed(Exception):
+    """The active-session discovery query itself failed (database outage).
+
+    Distinct from "zero active sessions" — the supervisor must NEVER equate
+    an unanswerable query with an idle workflow.
+    """
+
+
 def list_active_distributed_sessions(client: Any) -> list[dict[str, Any]]:
     """All users' non-terminal v2 sessions. Legacy (v1) sessions are invisible
-    by construction — the filter is on workflow_version."""
+    by construction — the filter is on workflow_version.
+
+    Raises :class:`ActiveSessionQueryFailed` on ANY query failure so callers
+    can distinguish outage from genuinely-idle.
+    """
     try:
         res = (
             client.table("intel_run_sessions")
@@ -82,8 +98,7 @@ def list_active_distributed_sessions(client: Any) -> list[dict[str, Any]]:
         )
         return _rows(res)
     except Exception as exc:
-        logger.warning("supervisor.list_active_failed err=%s", exc)
-        return []
+        raise ActiveSessionQueryFailed(str(exc)) from exc
 
 
 class WorkerSupervisor:
@@ -96,13 +111,11 @@ class WorkerSupervisor:
         settings: Any = None,
         llm: Any = None,
         worker_id: Optional[str] = None,
-        service_factory: Any = None,
     ):
         self._client = client
         self.settings = settings or get_settings()
         self._llm = llm
         self.worker_id = worker_id or store.default_worker_id()
-        self.service_factory = service_factory
         self.metrics_buffer: dict[str, dict[str, int]] = {}
 
     # ── Lazy dependencies (kept injectable for tests) ────────────────────────
@@ -124,7 +137,12 @@ class WorkerSupervisor:
 
     # ── One pass ─────────────────────────────────────────────────────────────
     async def run_pass(self) -> dict[str, int]:
-        """One full supervisor pass: schedule → claim → execute → flush."""
+        """One full supervisor pass: schedule → claim → execute → flush.
+
+        Raises :class:`ActiveSessionQueryFailed` when discovery itself fails —
+        the loop treats that as a database outage (backoff + retain), never as
+        an idle workflow.
+        """
         stats = {"sessions": 0, "claimed": 0, "executed": 0, "llm_calls": 0}
         sessions = await asyncio.to_thread(
             list_active_distributed_sessions, self.client
@@ -133,8 +151,30 @@ class WorkerSupervisor:
         if not sessions:
             return stats
 
-        # Defect-D1 sweep: a task stuck 'claimed' with an expired lease and
-        # zero attempts remaining (worker died on its final attempt) is
+        # Crashed-create repair (fail-closed graph contract): a session left
+        # in 'created' has an incomplete/unverified graph — compare against
+        # the expected graph, create only what's missing, verify, and only
+        # then transition it to running. No browser traffic required.
+        for session in sessions:
+            if str(session.get("status") or "") == "created":
+                try:
+                    from .session_control_v1 import repair_session_graph
+
+                    repaired = await repair_session_graph(
+                        client=self.client,
+                        user_id=str(session.get("user_id")),
+                        session=session,
+                    )
+                    if repaired:
+                        session["status"] = "running"
+                except Exception as exc:
+                    logger.warning(
+                        "supervisor.session_repair_failed session=%s err=%s",
+                        session.get("id"), exc,
+                    )
+
+        # Exhausted-claim sweep: a task stuck 'claimed' with an expired lease
+        # and zero attempts remaining (worker died on its final attempt) is
         # terminalized so its ticker/session can finish honestly instead of
         # wedging forever.
         await asyncio.to_thread(
@@ -354,11 +394,8 @@ class WorkerSupervisor:
         )
 
     async def _execute_publication(self, task: dict[str, Any]) -> None:
-        service = None
-        if self.service_factory is not None:
-            service = self.service_factory(str(task.get("user_id")))
         outcome = await execute_publication_task(
-            self.client, task=task, service=service,
+            self.client, task=task, settings=self.settings,
         )
         completed = await asyncio.to_thread(
             lambda: store.complete_task(
@@ -423,13 +460,43 @@ class WorkerSupervisor:
 
     # ── Loop ─────────────────────────────────────────────────────────────────
     async def run_until_idle(self) -> None:
+        """Loop until a SUCCESSFUL discovery query returns zero sessions.
+
+        Outage contract (completion item 4): a failed active-session query is
+        NEVER an idle signal. On query failure the supervisor is retained and
+        retries with bounded exponential backoff + jitter, performing zero
+        provider/LLM work; the idle-exit counter only advances after a query
+        that succeeded AND returned zero active sessions.
+        """
+        import random
+
         idle_passes = 0
+        outage_failures = 0
         while True:
             try:
                 stats = await self.run_pass()
+            except ActiveSessionQueryFailed as exc:
+                outage_failures += 1
+                delay = min(
+                    _OUTAGE_BACKOFF_MAX_SECONDS,
+                    _OUTAGE_BACKOFF_BASE_SECONDS * (2 ** (outage_failures - 1)),
+                )
+                delay = delay * (1.0 + random.uniform(-0.3, 0.3))
+                logger.warning(
+                    "supervisor.discovery_outage worker=%s failures=%d "
+                    "retry_in=%.1fs err=%s — retaining supervisor, workflow "
+                    "NOT idle",
+                    self.worker_id, outage_failures, delay, exc,
+                )
+                await asyncio.sleep(max(0.05, delay))
+                continue
             except Exception as exc:
+                # A pass crash after successful discovery: keep the loop, but
+                # never let it count toward idle exit.
                 logger.error("supervisor.pass_crashed err=%s", exc)
-                stats = {"sessions": 0, "claimed": 0}
+                await asyncio.sleep(_IDLE_SLEEP_SECONDS)
+                continue
+            outage_failures = 0
             if stats["sessions"] == 0:
                 idle_passes += 1
                 if idle_passes >= _EXIT_AFTER_IDLE_PASSES:
@@ -485,20 +552,21 @@ def _reset_supervisor_for_testing() -> None:
 
 
 async def recover_active_sessions_on_startup(client: Any = None) -> bool:
-    """One cheap startup query; start the supervisor only if unfinished
-    distributed sessions exist (crash recovery). Zero polling when idle."""
+    """Startup supervisor PROBE (crash recovery without browser traffic).
+
+    Starts one supervisor immediately on application startup. Its loop exits
+    only after a SUCCESSFUL zero-active-session query — so it survives a
+    transient database failure at boot (bounded backoff, zero provider/LLM
+    work) and resumes any unfinished distributed sessions without needing a
+    single browser request. When the workflow is genuinely idle, the probe's
+    first successful queries return zero sessions and it exits within a few
+    seconds — no permanent polling cost.
+    """
     try:
         if client is None:
             from .....database import get_supabase_client
             client = get_supabase_client()
-        active = await asyncio.to_thread(
-            list_active_distributed_sessions, client
-        )
-        if not active:
-            return False
-        logger.info(
-            "supervisor.startup_recovery active_sessions=%d", len(active),
-        )
+        logger.info("supervisor.startup_probe_starting")
         return await ensure_supervisor_running(client=client)
     except Exception as exc:
         logger.warning("supervisor.startup_recovery_failed err=%s", exc)

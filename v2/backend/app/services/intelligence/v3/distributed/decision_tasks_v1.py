@@ -197,17 +197,23 @@ def _write_durable_evidence(
     verdict: dict[str, Any],
     aggregate: dict[str, Any],
     outputs: list[dict[str, Any]],
+    final_action: str,
     now_iso: str,
 ) -> bool:
     """Idempotently write agent_runs + agent_insights + recommendations rows
-    with the SAME durable shapes the certification contract verifies.
+    as COMPATIBILITY PROJECTIONS of the final deterministic decision.
+
+    ``final_action`` is the canonical ``decide()`` output — these rows are
+    written AFTER policy determined it and carry that exact action. They are
+    never an independent advisory action that publication later reinterprets:
+    the distributed snapshot is built from the persisted session decision,
+    and these rows exist only for legacy surfaces (freshness recomputation,
+    evidence adapters) that still read them.
 
     Uses the caller's client (worker service-role client in production, the
     in-memory fake in tests) — never a second connection path.
     """
-    advisory_action = str(aggregate.get("advisory_action") or "HOLD")
-    suggested_action = {"REDUCE": "TRIM"}.get(advisory_action, advisory_action)
-    score = aggregate.get("aggregate_score")
+    suggested_action = str(final_action or "HOLD").upper()
     confidence = aggregate.get("mean_confidence")
     thesis = str(verdict.get("primary_driver") or "")
 
@@ -363,6 +369,42 @@ async def execute_ticker_decision_task(
         ]
         required_lanes_missing = list(bundle.get("required_lanes_missing") or [])
 
+        # Claim fence: refuse every side effect unless this worker still holds
+        # the task's CURRENT claim (state/owner/token verified on the row).
+        if not store.owns_claim(client, task):
+            outcome.error = "claim_lost"
+            return outcome
+
+        # Idempotent retry: the deterministic decision already persisted but a
+        # previous attempt died writing the compatibility projections. Rewrite
+        # ONLY the projections from the persisted final action — decide() is
+        # never re-run for an already-decided ticker.
+        existing_decision = row.get("decision") or {}
+        if (
+            str(row.get("state")) == TICKER_DECIDED
+            and existing_decision.get("agent_run_id")
+            and existing_decision.get("action")
+        ):
+            aggregate = aggregate_advisory_signal(outputs)
+            verdict = compose_analyst_verdict(ticker, non_review, aggregate)
+            evidence_ok = _write_durable_evidence(
+                client,
+                user_id=user_id,
+                ticker=ticker,
+                run_id=str(existing_decision["agent_run_id"]),
+                verdict=verdict,
+                aggregate=aggregate,
+                outputs=non_review,
+                final_action=str(existing_decision["action"]),
+                now_iso=now.isoformat(),
+            )
+            outcome.evidence_written = evidence_ok
+            outcome.final_ticker_state = TICKER_DECIDED
+            outcome.decision = existing_decision
+            if not evidence_ok:
+                outcome.error = "durable_evidence_write_failed"
+            return outcome
+
         # NO CALL: required analytical evidence is unavailable — suppress
         # honestly instead of fabricating a HOLD verdict from nothing.
         if not non_review or required_missing_axes == required_axes:
@@ -370,7 +412,7 @@ async def execute_ticker_decision_task(
                 [f"required_axis_missing:{a}" for a in required_missing_axes]
                 + [f"required_lane_missing:{l}" for l in required_lanes_missing]
             )
-            store.update_ticker_row(
+            moved = store.update_ticker_row(
                 client,
                 run_session_id=session_id,
                 ticker=ticker,
@@ -384,29 +426,30 @@ async def execute_ticker_decision_task(
                     },
                     "degradation_reasons": reasons,
                 },
+                # Fence: only a not-yet-terminal ticker can transition. A
+                # rival claim that already decided/terminalized it wins.
+                expected_states=[
+                    "pending", "evidence_ready", "analysis_complete",
+                    "decision_ready",
+                ],
                 now=now,
             )
+            if not moved:
+                outcome.error = "ticker_transition_lost"
+                return outcome
             outcome.final_ticker_state = TICKER_NO_CALL
             outcome.decision = {"outcome": "NO_CALL", "detail": reasons}
             return outcome
 
+        # ── SINGLE DECISION AUTHORITY ORDERING ──────────────────────────────
+        # 1. specialist aggregate → 2. canonical decision input →
+        # 3. decide() exactly once → 4. persist the full input+output on the
+        # session ticker row → 5. compatibility evidence rows carrying the
+        # FINAL deterministic action. No BUY/HOLD/TRIM/SELL row exists before
+        # canonical policy determined it.
         aggregate = aggregate_advisory_signal(outputs)
         verdict = compose_analyst_verdict(ticker, non_review, aggregate)
         run_id = str(uuid.uuid4())
-        evidence_ok = _write_durable_evidence(
-            client,
-            user_id=user_id,
-            ticker=ticker,
-            run_id=run_id,
-            verdict=verdict,
-            aggregate=aggregate,
-            outputs=non_review,
-            now_iso=now.isoformat(),
-        )
-        outcome.evidence_written = evidence_ok
-        if not evidence_ok:
-            outcome.error = "durable_evidence_write_failed"
-            return outcome
 
         suppression: dict[str, Any] = {}
         fit = compute_portfolio_fit(
@@ -429,8 +472,8 @@ async def execute_ticker_decision_task(
             suppression_reasons={
                 **suppression,
                 **(
-                    {"price_context": "Valuation banding is applied at "
-                     "certified snapshot publication."}
+                    {"price_context": "Price/valuation banding evidence is "
+                     "not available for this run."}
                 ),
             },
             primary_driver=verdict.get("primary_driver"),
@@ -441,28 +484,93 @@ async def execute_ticker_decision_task(
                 "stock" if asset_type == "equity" else asset_type
             ),
         )
+        # 3. Canonical policy runs EXACTLY ONCE per decided ticker — here.
+        # Publication rebuilds the visible card from this persisted record and
+        # never calls decide() again.
         decision = decide(decision_input)
         decision_record = {
             "outcome": "DECIDED",
+            # ── Complete deterministic OUTPUT (visible-card source of truth) ─
             "action": decision.action.value,
             "conviction": decision.conviction.value,
             "evidence_quality": decision.evidence_quality.value,
+            "attractiveness": decision.attractiveness.value,
+            "price_context": decision.price_context.value,
             "portfolio_fit": decision.portfolio_fit.value,
             "risk_band": decision.risk_band.value,
             "blockers": list(decision.blockers or []),
             "suppression_reasons": dict(decision.suppression_reasons or {}),
+            "rationale_plain_english": decision.rationale_plain_english,
+            "why_now": decision.why_now,
+            "why_not_now": decision.why_not_now,
+            "source_signal_summary": dict(decision.source_signal_summary or {}),
+            # ── Complete deterministic INPUT (replay/audit record) ──────────
+            "decision_input": {
+                "ticker": decision_input.ticker,
+                "evidence_quality": decision_input.evidence_quality.value,
+                "price_context": decision_input.price_context.value,
+                "portfolio_fit": decision_input.portfolio_fit.value,
+                "risk_band": decision_input.risk_band.value,
+                "raw_action": decision_input.raw_action,
+                "raw_analyst_action": decision_input.raw_analyst_action,
+                "upstream_conviction": decision_input.upstream_conviction,
+                "suppression_reasons": dict(
+                    decision_input.suppression_reasons or {}
+                ),
+                "primary_driver": decision_input.primary_driver,
+                "risk_flag_text": decision_input.risk_flag_text,
+                "action_reason": decision_input.action_reason,
+                "analyst_drivers": list(decision_input.analyst_drivers or []),
+                "asset_type_hint": decision_input.asset_type_hint,
+            },
             "advisory_signal": aggregate,
             "agent_run_id": run_id,
             "policy_schema_version": decision.schema_version,
             "decided_at": now.isoformat(),
         }
-        store.update_ticker_row(
+
+        # 4. Persist the final deterministic decision on the session ticker
+        # row (claim-fenced state transition — a reclaimed rival's decision
+        # can never be overwritten).
+        if not store.owns_claim(client, task):
+            outcome.error = "claim_lost"
+            return outcome
+        moved = store.update_ticker_row(
             client,
             run_session_id=session_id,
             ticker=ticker,
             patch={"state": TICKER_DECIDED, "decision": decision_record},
+            expected_states=[
+                "pending", "evidence_ready", "analysis_complete",
+                "decision_ready",
+            ],
             now=now,
         )
+        if not moved:
+            outcome.error = "ticker_transition_lost"
+            return outcome
+
+        # 5. Compatibility evidence rows — projections of the FINAL action.
+        evidence_ok = _write_durable_evidence(
+            client,
+            user_id=user_id,
+            ticker=ticker,
+            run_id=run_id,
+            verdict=verdict,
+            aggregate=aggregate,
+            outputs=non_review,
+            final_action=decision.action.value,
+            now_iso=now.isoformat(),
+        )
+        outcome.evidence_written = evidence_ok
+        if not evidence_ok:
+            # The deterministic decision is durable; only the compatibility
+            # projection failed. Retry rewrites projections idempotently.
+            outcome.error = "durable_evidence_write_failed"
+            outcome.final_ticker_state = TICKER_DECIDED
+            outcome.decision = decision_record
+            return outcome
+
         outcome.final_ticker_state = TICKER_DECIDED
         outcome.decision = decision_record
         return outcome

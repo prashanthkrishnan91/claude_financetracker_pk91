@@ -32,7 +32,6 @@ from app.services.intelligence.v3.distributed.worker_supervisor_v1 import (
 )
 from tests.distributed_run_intel_test_utils import (
     FakeLLM,
-    FakePublicationService,
     FakeSupabase,
     GOLDEN_34,
     GOLDEN_CRYPTO,
@@ -56,7 +55,7 @@ def _immediate_retries(monkeypatch):
     )
 
 
-def _make_supervisor(client, llm, publication_service, *, collector_limit=200):
+def _make_supervisor(client, llm, *, collector_limit=200):
     settings = make_settings(
         intel_v3_distributed_max_collector_concurrency=collector_limit,
         intel_v3_distributed_max_llm_concurrency=2,
@@ -67,7 +66,6 @@ def _make_supervisor(client, llm, publication_service, *, collector_limit=200):
         settings=settings,
         llm=llm,
         worker_id="test-worker",
-        service_factory=lambda user_id: publication_service,
     )
 
 
@@ -79,8 +77,7 @@ class TestGoldenRun:
         recorder = ProviderRecorder()
         patch_providers(monkeypatch, recorder)
         llm = FakeLLM()
-        publication = FakePublicationService(client, USER)
-        supervisor = _make_supervisor(client, llm, publication)
+        supervisor = _make_supervisor(client, llm)
 
         session_id = str(uuid.uuid4())
         result = await control.create_distributed_session(
@@ -168,9 +165,21 @@ class TestGoldenRun:
             }
             assert len(types) == 1
 
-        # ── Publication ran exactly once over the full decided scope ────────
-        assert len(publication.calls) == 1
-        assert publication.calls[0]["scope_tickers"] == sorted(GOLDEN_34)
+        # ── REAL session-native publication over the full decided scope ─────
+        payload = snapshots[0]["payload"]
+        assert payload["snapshot_source"] == "worker_certified"
+        assert payload["certified_holding_count"] == 34
+        assert payload["total_holding_count"] == 34
+        assert sorted(
+            payload["session_coverage"]["decided_tickers"]
+        ) == sorted(GOLDEN_34)
+        assert len(payload["current_holdings"]) == 34
+        # Visible action equals the persisted deterministic decision.
+        decisions_by_ticker = {
+            r["ticker"]: r["decision"]["action"] for r in ticker_rows
+        }
+        for card in payload["current_holdings"]:
+            assert card["action"] == decisions_by_ticker[card["ticker"]]
 
         # ── Cost metrics persisted ───────────────────────────────────────────
         metrics = session["metrics"]
@@ -222,11 +231,8 @@ class TestLiveRegressionShape:
         recorder = ProviderRecorder()
         patch_providers(monkeypatch, recorder)
         llm = FakeLLM()
-        publication = FakePublicationService(client, USER)
         # Small claim quantum: only the highest-priority work runs first.
-        supervisor = _make_supervisor(
-            client, llm, publication, collector_limit=10,
-        )
+        supervisor = _make_supervisor(client, llm, collector_limit=10)
         session_id = str(uuid.uuid4())
         result = await control.create_distributed_session(
             client=client, user_id=USER, session_id=session_id,
@@ -253,8 +259,7 @@ class TestLiveRegressionShape:
         )
         patch_providers(monkeypatch, recorder)
         llm = FakeLLM()
-        publication = FakePublicationService(client, USER)
-        supervisor = _make_supervisor(client, llm, publication)
+        supervisor = _make_supervisor(client, llm)
 
         session_id = str(uuid.uuid4())
         await control.create_distributed_session(
@@ -283,7 +288,16 @@ class TestLiveRegressionShape:
             if s.get("run_session_id") == session_id
         ]
         assert len(snapshots) == 1
-        assert publication.calls[-1]["scope_tickers"] == sorted(healthy)
+        payload = snapshots[0]["payload"]
+        # Non-green gap source; the three failed tickers appear ONLY as gaps,
+        # never as action cards.
+        assert payload["snapshot_source"] == "worker_certified_with_gaps"
+        assert sorted(payload["session_coverage"]["no_call_tickers"]) == [
+            "ALK", "GOOGL", "VHT",
+        ]
+        card_tickers = {c["ticker"] for c in payload["current_holdings"]}
+        assert card_tickers == set(healthy)
+        assert not ({"ALK", "GOOGL", "VHT"} & card_tickers)
 
     @pytest.mark.asyncio
     async def test_worker_restart_resumes_from_leases(self, monkeypatch):
@@ -291,7 +305,6 @@ class TestLiveRegressionShape:
         self._seed_32(client)
         recorder = ProviderRecorder()
         patch_providers(monkeypatch, recorder)
-        publication = FakePublicationService(client, USER)
 
         session_id = str(uuid.uuid4())
         await control.create_distributed_session(
@@ -303,7 +316,7 @@ class TestLiveRegressionShape:
         )
         assert dead
         # Worker B (fresh supervisor, new identity) finishes the whole run.
-        supervisor = _make_supervisor(client, FakeLLM(), publication)
+        supervisor = _make_supervisor(client, FakeLLM())
         await drive_supervisor_to_completion(supervisor)
         session = client.rows("intel_run_sessions")[0]
         assert session["status"] in (

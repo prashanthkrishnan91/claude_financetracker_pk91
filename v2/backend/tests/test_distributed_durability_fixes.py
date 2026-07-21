@@ -33,7 +33,6 @@ from app.services.intelligence.v3.distributed.worker_supervisor_v1 import (
 )
 from tests.distributed_run_intel_test_utils import (
     FakeLLM,
-    FakePublicationService,
     FakeSupabase,
     ProviderRecorder,
     drive_supervisor_to_completion,
@@ -110,7 +109,6 @@ class TestD1ExhaustedClaimSweep:
             seed_position(client, USER, ticker)
         recorder = ProviderRecorder()
         patch_providers(monkeypatch, recorder)
-        publication = FakePublicationService(client, USER)
         session_id = str(uuid.uuid4())
         await control.create_distributed_session(
             client=client, user_id=USER, session_id=session_id,
@@ -134,7 +132,6 @@ class TestD1ExhaustedClaimSweep:
             ),
             llm=FakeLLM(),
             worker_id="rescuer",
-            service_factory=lambda user_id: publication,
         )
         await drive_supervisor_to_completion(supervisor)
         session = client.rows("intel_run_sessions")[0]
@@ -187,20 +184,42 @@ class TestD2ZombieCreatedSession:
         assert result["total_tickers"] == 1
 
     @pytest.mark.asyncio
-    async def test_scheduler_terminalizes_stale_unseeded_session(self):
+    async def test_supervisor_repairs_zombie_without_browser_traffic(
+        self, monkeypatch
+    ):
+        """A crashed create is repaired by the SUPERVISOR pass alone — no
+        click, no poll, no POST required."""
+        from tests.distributed_run_intel_test_utils import (
+            ProviderRecorder, patch_providers,
+        )
+
         client = FakeSupabase()
-        zombie_id = self._zombie(client, age_seconds=600)
+        seed_position(client, USER, "AAPL")
+        self._zombie(client, age_seconds=600)
+        patch_providers(monkeypatch, ProviderRecorder())
+        supervisor = WorkerSupervisor(
+            client=client, settings=make_settings(), llm=FakeLLM(),
+            worker_id="repairer",
+        )
+        await supervisor.run_pass()
         session = client.rows("intel_run_sessions")[0]
-        scheduler.run_scheduler_pass(client, session=session)
-        assert client.rows("intel_run_sessions")[0]["status"] == "failed"
+        assert session["status"] == "running"
+        assert client.rows("intel_run_tickers")
 
     @pytest.mark.asyncio
-    async def test_scheduler_grace_protects_inflight_create(self):
+    async def test_repair_terminalizes_session_with_no_scope(self):
+        """When the portfolio scope no longer exists, repair terminalizes
+        honestly instead of looping forever."""
         client = FakeSupabase()
-        self._zombie(client, age_seconds=5)  # younger than the grace window
+        self._zombie(client, age_seconds=600)
+        supervisor = WorkerSupervisor(
+            client=client, settings=make_settings(), llm=FakeLLM(),
+            worker_id="repairer",
+        )
+        await supervisor.run_pass()
         session = client.rows("intel_run_sessions")[0]
-        scheduler.run_scheduler_pass(client, session=session)
-        assert client.rows("intel_run_sessions")[0]["status"] == "created"
+        assert session["status"] == "failed"
+        assert "scope_unavailable" in str(session.get("last_error"))
 
 
 class TestD4FingerprintStability:

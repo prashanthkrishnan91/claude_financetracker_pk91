@@ -398,43 +398,67 @@ def make_settings(**overrides: Any) -> Any:
     return SimpleNamespace(**base)
 
 
-class FakePublicationService:
-    """Stands in for IntelV3Service.run_prewarm_snapshot in worker tests."""
+def claim_task_row(
+    client: FakeSupabase,
+    task_row: dict,
+    *,
+    worker_id: str = "test-worker",
+) -> dict:
+    """Claim an EXISTING durable task row (owner + fresh claim token), exactly
+    as the store's claim path would, and return the updated row dict that an
+    executor would receive."""
+    token = str(uuid.uuid4())
+    client.table("intel_run_tasks").update({
+        "state": "claimed",
+        "claim_owner": worker_id,
+        "claim_token": token,
+        "claimed_at": now_utc().isoformat(),
+        "attempts": int(task_row.get("attempts") or 0) + 1,
+    }).eq("id", task_row["id"]).execute()
+    return next(
+        t for t in client.rows("intel_run_tasks") if t["id"] == task_row["id"]
+    )
 
-    def __init__(self, client: FakeSupabase, user_id: str, *, fail_times: int = 0):
-        self.client = client
-        self.user_id = user_id
-        self.fail_times = fail_times
-        self.calls: list[dict[str, Any]] = []
 
-    async def run_prewarm_snapshot(
-        self, *, prewarm_run_id: str, skip_persist_on_fail: bool = False,
-        run_session_id: Optional[str] = None,
-        scope_tickers: Optional[list[str]] = None,
-    ) -> dict[str, Any]:
-        self.calls.append({
-            "run_session_id": run_session_id,
-            "scope_tickers": sorted(scope_tickers or []),
-        })
-        if self.fail_times > 0:
-            self.fail_times -= 1
-            raise RuntimeError("simulated publication outage")
-        row = {
-            "id": str(uuid.uuid4()),
-            "user_id": self.user_id,
-            "run_session_id": run_session_id,
-            "is_active": True,
-            "payload": {
-                "run_session_id": run_session_id,
-                "snapshot_source": "worker_certified",
-            },
-            "created_at": now_utc().isoformat(),
-        }
-        self.client.table("intel_v3_snapshots").insert(row).execute()
-        return {
-            "snapshot_source": "worker_certified",
-            "snapshot_row_id": row["id"],
-        }
+def make_claimed_task(
+    client: FakeSupabase,
+    *,
+    run_session_id: str,
+    user_id: str,
+    task_type: str,
+    ticker: Optional[str] = None,
+    batch_key: Optional[str] = None,
+    lane: Optional[str] = None,
+    worker_id: str = "test-worker",
+    attempts: int = 1,
+    max_attempts: int = 3,
+) -> dict:
+    """Insert one durable task in the CLAIMED state (owner + claim token) —
+    the exact shape executors receive from the supervisor after a real claim.
+    Executors' claim fences (owns_claim / completion guards) verify against
+    this durable row."""
+    row = {
+        "id": str(uuid.uuid4()),
+        "run_session_id": run_session_id,
+        "user_id": user_id,
+        "task_type": task_type,
+        "ticker": ticker,
+        "batch_key": batch_key,
+        "lane": lane,
+        "state": "claimed",
+        "claim_owner": worker_id,
+        "claim_token": str(uuid.uuid4()),
+        "claimed_at": now_utc().isoformat(),
+        "lease_expires_at": None,
+        "attempts": attempts,
+        "max_attempts": max_attempts,
+        "priority": 50,
+        "next_retry_at": now_utc().isoformat(),
+        "created_at": now_utc().isoformat(),
+        "updated_at": now_utc().isoformat(),
+    }
+    client.table("intel_run_tasks").insert(row).execute()
+    return row
 
 
 async def drive_supervisor_to_completion(

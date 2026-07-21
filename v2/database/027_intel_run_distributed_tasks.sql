@@ -257,8 +257,12 @@ CREATE TABLE IF NOT EXISTS public.intel_run_tasks (
     priority            INTEGER NOT NULL DEFAULT 100,
     attempts            INTEGER NOT NULL DEFAULT 0,
     max_attempts        INTEGER NOT NULL DEFAULT 3,
-    -- Claiming / lease
+    -- Claiming / lease. claim_token is the claim-generation fence: a fresh
+    -- UUID minted on EVERY claim. Completion and every task-owned side effect
+    -- must present the current token, so a stale worker whose lease expired
+    -- and whose task was reclaimed can never overwrite the new claim's work.
     claim_owner         TEXT,
+    claim_token         UUID,
     claimed_at          TIMESTAMPTZ,
     lease_expires_at    TIMESTAMPTZ,
     next_retry_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -375,6 +379,7 @@ BEGIN
     UPDATE public.intel_run_tasks t
     SET state            = 'claimed',
         claim_owner      = p_worker_id,
+        claim_token      = gen_random_uuid(),
         claimed_at       = now(),
         started_at       = COALESCE(t.started_at, now()),
         lease_expires_at = now() + make_interval(secs => p_lease_seconds),
@@ -387,10 +392,13 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- Completion guard: a task can only be completed by its current claim owner
--- and only from 'claimed' — the same task can never be completed twice.
+-- presenting the CURRENT claim token, and only from 'claimed' — the same
+-- task can never be completed twice, and a stale (reclaimed) worker's late
+-- completion matches zero rows.
 CREATE OR REPLACE FUNCTION public.complete_intel_run_task(
     p_task_id      UUID,
     p_worker_id    TEXT,
+    p_claim_token  UUID,
     p_final_state  TEXT,
     p_output_ref   TEXT DEFAULT NULL,
     p_error_code   TEXT DEFAULT NULL,
@@ -420,7 +428,8 @@ BEGIN
         updated_at       = now()
     WHERE id = p_task_id
       AND state = 'claimed'
-      AND claim_owner = p_worker_id;
+      AND claim_owner = p_worker_id
+      AND claim_token = p_claim_token;
     GET DIAGNOSTICS updated_count = ROW_COUNT;
     RETURN updated_count > 0;
 END;
@@ -431,11 +440,11 @@ $$ LANGUAGE plpgsql;
 REVOKE ALL ON FUNCTION public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID)
     FROM PUBLIC;
 REVOKE ALL ON FUNCTION public.complete_intel_run_task(
-    UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID)
     TO service_role;
 GRANT EXECUTE ON FUNCTION public.complete_intel_run_task(
-    UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
+    UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ) TO service_role;
 
 -- ── 6. Specialist outputs — one row per (session, ticker, axis) ──────────────
 --
@@ -501,7 +510,7 @@ CREATE POLICY intel_run_specialist_outputs_service_only
 -- ── ROLLBACK (commented out by default) ──────────────────────────────────────
 -- DROP TABLE IF EXISTS public.intel_run_specialist_outputs CASCADE;
 -- DROP FUNCTION IF EXISTS public.complete_intel_run_task(
---     UUID, TEXT, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ);
+--     UUID, TEXT, UUID, TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ);
 -- DROP FUNCTION IF EXISTS public.claim_intel_run_tasks(TEXT, INTEGER, INTEGER, UUID);
 -- DROP TABLE IF EXISTS public.intel_run_tasks CASCADE;
 -- DROP FUNCTION IF EXISTS public.intel_run_task_owner_guard();

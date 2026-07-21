@@ -276,6 +276,10 @@ def build_evidence_bundle(
                 [f"required_lane_missing:{lane}" for lane in required_missing]
             ),
         },
+        # Claim fence: a bundle write may (re)build only a ticker that has not
+        # advanced past evidence_ready — a stale bundle task can never regress
+        # a ticker that specialists/decisions already moved forward.
+        expected_states=["pending", TICKER_EVIDENCE_READY],
         now=now,
     )
     if not updated:

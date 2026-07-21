@@ -336,6 +336,13 @@ async def create_distributed_session(
                 "027_intel_run_distributed_tasks.sql is applied"
             ) from exc
 
+    # ── Fail-closed seed + verify + transition (completion item 3) ──────────
+    # Seed the graph, then VERIFY the exact expected graph exists before the
+    # session may report itself running. Any incomplete shape leaves the
+    # session in the explicit retryable 'created' state with the error
+    # recorded — a healthy running session with a silently incomplete graph
+    # is impossible.
+    seed_error: Optional[str] = None
     try:
         await asyncio.to_thread(
             lambda: store.insert_ticker_rows(
@@ -356,26 +363,55 @@ async def create_distributed_session(
             )
         )
     except Exception as exc:
+        seed_error = f"task_graph_seed_failed:{exc}"[:400]
+
+    missing: list[str] = []
+    if seed_error is None:
+        missing = await asyncio.to_thread(
+            lambda: verify_seed_graph(
+                client,
+                run_session_id=str(session_id),
+                scope_rows=scope_rows,
+            )
+        )
+        if missing:
+            seed_error = (
+                "task_graph_incomplete:" + ",".join(missing[:10])
+            )[:400]
+
+    if seed_error is not None:
         await asyncio.to_thread(
             lambda: client.table(SESSIONS_TABLE)
             .update({
-                "status": SESSION_FAILED,
-                "last_error": f"task_graph_create_failed:{exc}"[:400],
+                "last_error": seed_error,
                 "updated_at": _now().isoformat(),
             })
             .eq("id", str(session_id))
             .execute()
         )
-        raise SessionScopeError(f"task_graph_create_failed: {exc}") from exc
+        logger.warning(
+            "distributed_session.create_incomplete session=%s err=%s — left "
+            "in retryable 'created' state for repair",
+            session_id, seed_error,
+        )
+        status = await get_session_status(
+            client=client, user_id=user_id, session_id=session_id
+        )
+        status["created"] = False
+        status["reason"] = "task_graph_incomplete_retryable"
+        status["retryable"] = True
+        return status
 
     await asyncio.to_thread(
         lambda: client.table(SESSIONS_TABLE)
         .update({
             "status": SESSION_RUNNING,
             "current_stage": STAGE_COLLECTING,
+            "last_error": None,
             "updated_at": _now().isoformat(),
         })
         .eq("id", str(session_id))
+        .eq("status", SESSION_CREATED)
         .execute()
     )
 
@@ -390,34 +426,48 @@ async def create_distributed_session(
     return status
 
 
-async def _repair_unseeded_session(
+async def repair_session_graph(
     *,
     client: Any,
     user_id: str,
     session: dict[str, Any],
-    now: datetime,
-) -> None:
-    """Repair a session whose create crashed between the row insert and the
-    scope freeze / task seeding (zombie 'created' session, defect D2).
+    now: Optional[datetime] = None,
+) -> bool:
+    """Repair EVERY partial-create shape of a 'created' session.
 
-    Idempotent and best-effort: a healthy session (any ticker rows exist, or
-    a non-'created' status) is untouched; a repair failure leaves the session
-    for the next retry rather than raising into the adopt path.
+    Handles (completion item 3): session row only; some ticker rows; all
+    ticker rows but no tasks; partial ticker rows; partial seed tasks. It
+    compares the ACTUAL scope + task keys against the exact expected graph,
+    creates only what is missing (idempotent get-or-create), VERIFIES again,
+    and transitions to running only when the graph is complete. A session
+    whose portfolio scope no longer exists is terminalized honestly.
+
+    Returns True when the session is running with a verified-complete graph.
+    Never raises into the adopt path — a repair failure leaves the session in
+    the explicit retryable 'created' state with the error recorded.
     """
     if str(session.get("status") or "") != SESSION_CREATED:
-        return
+        return str(session.get("status") or "") == SESSION_RUNNING
     session_id = str(session.get("id"))
+    now = now or _now()
     try:
-        existing_rows = await asyncio.to_thread(
-            lambda: store.list_ticker_rows(client, run_session_id=session_id)
-        )
-        if existing_rows:
-            return
         positions = await asyncio.to_thread(
             _load_active_positions, client, str(user_id)
         )
         if not positions:
-            return
+            # Scope no longer loadable — reserved honest terminal failure.
+            await asyncio.to_thread(
+                lambda: client.table(SESSIONS_TABLE)
+                .update({
+                    "status": SESSION_FAILED,
+                    "last_error": "scope_unavailable_no_active_holdings",
+                    "updated_at": _now().isoformat(),
+                })
+                .eq("id", session_id)
+                .eq("status", SESSION_CREATED)
+                .execute()
+            )
+            return False
         tickers = [str(p.get("ticker") or "").strip() for p in positions]
         prices = await asyncio.to_thread(
             _load_latest_close_prices, client, [t.upper() for t in tickers]
@@ -426,30 +476,69 @@ async def _repair_unseeded_session(
             _load_prior_actions, client, str(user_id)
         )
         scope_rows = build_frozen_scope_rows(positions, prices, prior_actions)
-        await asyncio.to_thread(
-            lambda: store.insert_ticker_rows(
-                client,
-                run_session_id=session_id,
-                user_id=str(user_id),
-                rows=scope_rows,
-                now=now,
+
+        # 1. Missing ticker rows only (existing frozen rows are immutable).
+        existing_rows = await asyncio.to_thread(
+            lambda: store.list_ticker_rows(client, run_session_id=session_id)
+        )
+        existing_tickers = {str(r.get("ticker") or "") for r in existing_rows}
+        missing_rows = [
+            r for r in scope_rows if str(r.get("ticker")) not in existing_tickers
+        ]
+        if missing_rows:
+            await asyncio.to_thread(
+                lambda: store.insert_ticker_rows(
+                    client,
+                    run_session_id=session_id,
+                    user_id=str(user_id),
+                    rows=missing_rows,
+                    now=now,
+                )
             )
+
+        # 2. Missing seed tasks only (get_or_create absorbs the rest). The
+        #    expected graph derives from the DURABLE frozen rows now present.
+        frozen_rows = await asyncio.to_thread(
+            lambda: store.list_ticker_rows(client, run_session_id=session_id)
         )
         await asyncio.to_thread(
             lambda: _seed_initial_tasks(
                 client,
                 run_session_id=session_id,
                 user_id=str(user_id),
-                scope_rows=scope_rows,
+                scope_rows=frozen_rows,
                 now=now,
             )
         )
+
+        # 3. Verify the complete expected graph, then (and only then) run.
+        missing = await asyncio.to_thread(
+            lambda: verify_seed_graph(
+                client, run_session_id=session_id, scope_rows=frozen_rows,
+            )
+        )
+        if missing:
+            await asyncio.to_thread(
+                lambda: client.table(SESSIONS_TABLE)
+                .update({
+                    "last_error": (
+                        "task_graph_incomplete:" + ",".join(missing[:10])
+                    )[:400],
+                    "updated_at": _now().isoformat(),
+                })
+                .eq("id", session_id)
+                .execute()
+            )
+            return False
         await asyncio.to_thread(
             lambda: client.table(SESSIONS_TABLE)
             .update({
                 "status": SESSION_RUNNING,
                 "current_stage": STAGE_COLLECTING,
-                "holdings_scope": [r["ticker"] for r in scope_rows],
+                "holdings_scope": [
+                    str(r.get("ticker")) for r in frozen_rows
+                ],
+                "last_error": None,
                 "updated_at": _now().isoformat(),
             })
             .eq("id", session_id)
@@ -457,14 +546,87 @@ async def _repair_unseeded_session(
             .execute()
         )
         logger.info(
-            "distributed_session.repaired_unseeded session=%s tickers=%d",
-            session_id, len(scope_rows),
+            "distributed_session.graph_repaired session=%s tickers=%d "
+            "rows_added=%d",
+            session_id, len(frozen_rows), len(missing_rows),
         )
+        return True
     except Exception as exc:
         logger.warning(
             "distributed_session.repair_failed session=%s err=%s",
             session_id, exc,
         )
+        try:
+            await asyncio.to_thread(
+                lambda: client.table(SESSIONS_TABLE)
+                .update({
+                    "last_error": f"repair_failed:{exc}"[:400],
+                    "updated_at": _now().isoformat(),
+                })
+                .eq("id", session_id)
+                .execute()
+            )
+        except Exception:
+            pass
+        return False
+
+
+# Backwards-compatible alias used by the adopt paths.
+async def _repair_unseeded_session(
+    *,
+    client: Any,
+    user_id: str,
+    session: dict[str, Any],
+    now: datetime,
+) -> None:
+    await repair_session_graph(
+        client=client, user_id=user_id, session=session, now=now,
+    )
+
+
+def expected_seed_task_keys(
+    scope_rows: list[dict[str, Any]],
+) -> set[tuple[str, str, str, str]]:
+    """The EXACT expected seed graph for a frozen scope: one portfolio-context
+    task, one macro-context task, and every (required + optional) collector
+    lane for every frozen ticker."""
+    keys: set[tuple[str, str, str, str]] = {
+        store.logical_task_key(TASK_COLLECT_PORTFOLIO_CONTEXT, None, None, None),
+        store.logical_task_key(TASK_COLLECT_MACRO_CONTEXT, None, None, None),
+    }
+    for row in scope_rows:
+        ticker = str(row.get("ticker") or "")
+        for lane in lanes_for_asset(str(row.get("asset_type"))):
+            keys.add(
+                store.logical_task_key(
+                    TASK_COLLECT_EVIDENCE_LANE, lane, ticker, None,
+                )
+            )
+    return keys
+
+
+def verify_seed_graph(
+    client: Any,
+    *,
+    run_session_id: str,
+    scope_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Read back the session graph and return every missing expected logical
+    key (empty list == complete). Raises on read failure — an unverifiable
+    graph is NOT a verified graph."""
+    actual = {
+        store.logical_task_key(
+            str(t.get("task_type")), t.get("lane"),
+            t.get("ticker"), t.get("batch_key"),
+        )
+        for t in store.list_tasks(client, run_session_id=run_session_id)
+    }
+    missing = [
+        ":".join(k) or "portfolio_context"
+        for k in sorted(expected_seed_task_keys(scope_rows))
+        if k not in actual
+    ]
+    return missing
 
 
 def _seed_initial_tasks(

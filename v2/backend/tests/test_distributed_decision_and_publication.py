@@ -1,18 +1,18 @@
-"""Deterministic decision authority + portfolio join / publication retry.
+"""Deterministic decision authority (single, final) + publication basics.
 
 Proves:
-  * final actions originate ONLY from decision_policy_v1.decide() — the
-    recorded action equals a from-scratch decide() replay over the same
-    persisted inputs, and LLM stance/score cannot override it;
-  * missing required evidence produces NO CALL (EVIDENCE INCOMPLETE), never a
-    fabricated verdict row;
-  * concentration (portfolio_fit) stays deterministic (BREACH → TRIM);
-  * durable evidence rows (agent_runs/agent_insights/recommendations) are
-    written idempotently and scoped to the decided ticker;
-  * publication retries publication ONLY (zero collector/specialist reruns),
-  * exactly one session-linked snapshot ever exists,
-  * completed vs completed_with_gaps is decided by ticker gaps,
-  * exhausted publication budget → honest terminal session failure.
+  * ``decide()`` runs exactly once per decided ticker, inside the ticker
+    decision task; the COMPLETE deterministic input and output are persisted
+    on the session ticker row;
+  * compatibility evidence rows (agent_runs/agent_insights/recommendations)
+    are projections of the FINAL deterministic action — no BUY/HOLD/TRIM/SELL
+    row exists before canonical policy determined it, and the recommendation
+    action equals the persisted decision action exactly;
+  * an LLM signal cannot override policy blockers (concentration BREACH);
+  * missing required evidence produces NO CALL with zero fabricated rows;
+  * publication marks completed vs completed_with_gaps from frozen-scope
+    accounting and is retry-isolated (deeper real-integration publication
+    proofs live in test_distributed_session_publication.py).
 """
 from __future__ import annotations
 
@@ -21,6 +21,7 @@ import uuid
 import pytest
 
 import app.services.intelligence.v3.distributed.run_task_store_v1 as store
+from app.services.intelligence.v3.distributed import decision_tasks_v1
 from app.services.intelligence.v3.distributed import session_control_v1 as control
 from app.services.intelligence.v3.distributed.decision_tasks_v1 import (
     aggregate_advisory_signal,
@@ -39,8 +40,9 @@ from app.services.intelligence.v3.distributed.task_contracts_v1 import (
     TICKER_NO_CALL,
 )
 from tests.distributed_run_intel_test_utils import (
-    FakePublicationService,
     FakeSupabase,
+    make_claimed_task,
+    make_settings,
     seed_position,
 )
 
@@ -98,52 +100,100 @@ def _seed_bundle(client: FakeSupabase, session_id: str, ticker: str, **extra):
 
 
 def _decision_task(client: FakeSupabase, session_id: str, ticker: str) -> dict:
-    return {
-        "id": str(uuid.uuid4()),
-        "run_session_id": session_id,
-        "user_id": USER,
-        "task_type": TASK_TICKER_DECISION,
-        "ticker": ticker,
-        "attempts": 1,
-        "max_attempts": 3,
-    }
+    return make_claimed_task(
+        client,
+        run_session_id=session_id,
+        user_id=USER,
+        task_type=TASK_TICKER_DECISION,
+        ticker=ticker,
+    )
 
 
 class TestDeterministicAuthority:
     @pytest.mark.asyncio
-    async def test_action_comes_only_from_decide_and_is_replayable(self):
+    async def test_decide_called_exactly_once_and_record_is_complete(
+        self, monkeypatch
+    ):
         client = FakeSupabase()
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
         _seed_specialist_outputs(client, session_id, "AAPL", score=0.9)
 
+        calls = {"n": 0}
+        real_decide = decision_tasks_v1.decide
+
+        def _counting_decide(inp):
+            calls["n"] += 1
+            return real_decide(inp)
+
+        monkeypatch.setattr(decision_tasks_v1, "decide", _counting_decide)
         outcome = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
         )
         assert outcome.final_ticker_state == TICKER_DECIDED
-        recorded = outcome.decision
-        assert recorded["policy_schema_version"] == "v3.1"
-        assert recorded["action"] in ("BUY", "HOLD", "TRIM", "SELL")
+        assert calls["n"] == 1, "decide() must run exactly once per ticker"
 
-        # Replay: rebuild the decision input from the SAME persisted rows and
-        # run the canonical kernel — the visible action must be identical.
-        outcome2 = await execute_ticker_decision_task(
-            client, task=_decision_task(client, session_id, "AAPL"),
+        record = outcome.decision
+        # Complete OUTPUT persisted.
+        for key in ("action", "conviction", "evidence_quality",
+                    "attractiveness", "price_context", "portfolio_fit",
+                    "risk_band", "blockers", "suppression_reasons",
+                    "rationale_plain_english", "why_now", "why_not_now",
+                    "policy_schema_version"):
+            assert key in record, f"decision record missing output field {key}"
+        # Complete INPUT persisted (replay/audit).
+        decision_input = record["decision_input"]
+        for key in ("ticker", "evidence_quality", "price_context",
+                    "portfolio_fit", "risk_band", "raw_action",
+                    "upstream_conviction", "asset_type_hint"):
+            assert key in decision_input
+        assert record["policy_schema_version"] == "v3.1"
+
+        # The durable ticker row carries the exact same record.
+        row = next(
+            r for r in client.rows("intel_run_tickers")
+            if r["ticker"] == "AAPL"
         )
-        assert outcome2.decision["action"] == recorded["action"]
-        assert outcome2.decision["conviction"] == recorded["conviction"]
+        assert row["decision"]["action"] == record["action"]
 
     @pytest.mark.asyncio
-    async def test_llm_score_cannot_override_policy_blockers(self):
-        """A maximally bullish LLM signal on an over-concentrated holding
-        still yields the deterministic TRIM/SELL side — policy wins."""
+    async def test_compat_rows_are_projections_of_final_action(self):
+        """No recommendation exists before decide(); the written action IS
+        the deterministic action (over-concentrated: bullish LLM → TRIM)."""
         client = FakeSupabase()
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
         _seed_specialist_outputs(
             client, session_id, "AAPL", score=1.0, confidence=1.0,
         )
-        # Concentration breach: 45% weight (cap*1.5 exceeded for any category).
+        client.table("intel_run_tickers").update(
+            {"portfolio_weight_pct": 45.0}
+        ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
+
+        assert client.rows("recommendations") == []
+        outcome = await execute_ticker_decision_task(
+            client, task=_decision_task(client, session_id, "AAPL"),
+        )
+        final_action = outcome.decision["action"]
+        assert final_action in ("TRIM", "SELL"), (
+            "bullish advisory must not survive a concentration breach"
+        )
+        recs = [r for r in client.rows("recommendations") if r["is_active"]]
+        assert len(recs) == 1
+        # The compatibility row carries the FINAL deterministic action — not
+        # the advisory BUY the specialists implied.
+        assert recs[0]["action"] == final_action
+        insight = client.rows("agent_insights")[0]
+        assert insight["suggested_action"] == final_action
+
+    @pytest.mark.asyncio
+    async def test_llm_score_cannot_override_policy_blockers(self):
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_specialist_outputs(
+            client, session_id, "AAPL", score=1.0, confidence=1.0,
+        )
         client.table("intel_run_tickers").update(
             {"portfolio_weight_pct": 45.0}
         ).eq("run_session_id", session_id).eq("ticker", "AAPL").execute()
@@ -151,9 +201,7 @@ class TestDeterministicAuthority:
         outcome = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
         )
-        assert outcome.decision["action"] in ("TRIM", "SELL"), (
-            "LLM bullishness overrode deterministic concentration policy"
-        )
+        assert outcome.decision["action"] in ("TRIM", "SELL")
         assert outcome.decision["portfolio_fit"] in ("BREACH", "OVERWEIGHT")
 
     @pytest.mark.asyncio
@@ -164,13 +212,11 @@ class TestDeterministicAuthority:
             client, session_id, "AAPL",
             required_lanes_missing=["fundamentals", "technicals"],
         )
-        # ZERO specialist outputs — nothing analyzable.
         outcome = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
         )
         assert outcome.final_ticker_state == TICKER_NO_CALL
         assert outcome.decision["outcome"] == "NO_CALL"
-        # NO fabricated durable verdict rows for a NO CALL ticker.
         assert client.rows("agent_insights") == []
         assert client.rows("recommendations") == []
         row = next(
@@ -188,20 +234,31 @@ class TestDeterministicAuthority:
         session_id = await _session(client, ["AAPL"])
         _seed_bundle(client, session_id, "AAPL")
         _seed_specialist_outputs(client, session_id, "AAPL")
-        outcome = await execute_ticker_decision_task(
+        first = await execute_ticker_decision_task(
             client, task=_decision_task(client, session_id, "AAPL"),
         )
-        assert outcome.evidence_written
+        assert first.evidence_written
+        # Retry (RE-claim of the same durable task): decide() is NOT re-run
+        # for a decided ticker; the projections rewrite idempotently from the
+        # persisted action.
+        from tests.distributed_run_intel_test_utils import claim_task_row
+
+        existing_task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_TICKER_DECISION and t["ticker"] == "AAPL"
+        )
+        second = await execute_ticker_decision_task(
+            client, task=claim_task_row(client, existing_task),
+        )
+        assert second.decision["action"] == first.decision["action"]
         assert len(client.rows("agent_runs")) == 1
-        assert client.rows("agent_runs")[0]["status"] == "completed"
-        insights = client.rows("agent_insights")
-        assert len(insights) == 1
-        verdict = insights[0]["analyst_verdict"]
+        assert len(client.rows("agent_insights")) == 1
+        recs = [r for r in client.rows("recommendations") if r["is_active"]]
+        assert len(recs) == 1
+        verdict = client.rows("agent_insights")[0]["analyst_verdict"]
         for key in ("primary_driver", "action_reason", "risk_flag",
                     "conviction_level"):
             assert verdict.get(key)
-        recs = [r for r in client.rows("recommendations") if r["is_active"]]
-        assert len(recs) == 1 and recs[0]["ticker"] == "AAPL"
 
     def test_advisory_aggregation_is_pure_deterministic_math(self):
         outputs = [
@@ -214,8 +271,31 @@ class TestDeterministicAuthority:
         assert first["advisory_action"] == "BUY"
         assert aggregate_advisory_signal([])["advisory_action"] is None
 
+    @pytest.mark.asyncio
+    async def test_unclaimed_task_cannot_decide(self):
+        """The claim fence: a fabricated/stale task cannot produce a decision."""
+        client = FakeSupabase()
+        session_id = await _session(client, ["AAPL"])
+        _seed_bundle(client, session_id, "AAPL")
+        _seed_specialist_outputs(client, session_id, "AAPL")
+        fake_task = {
+            "id": str(uuid.uuid4()),  # not a durable claimed task
+            "run_session_id": session_id,
+            "user_id": USER,
+            "task_type": TASK_TICKER_DECISION,
+            "ticker": "AAPL",
+        }
+        outcome = await execute_ticker_decision_task(client, task=fake_task)
+        assert outcome.error == "claim_lost"
+        row = next(
+            r for r in client.rows("intel_run_tickers")
+            if r["ticker"] == "AAPL"
+        )
+        assert row["state"] == "pending"
+        assert client.rows("recommendations") == []
 
-class TestPublication:
+
+class TestPublicationStatusSemantics:
     async def _terminal_session(
         self, client: FakeSupabase, tickers: list[str],
         *, no_call: list[str] = (),
@@ -235,23 +315,22 @@ class TestPublication:
                 assert outcome.final_ticker_state == TICKER_DECIDED
         return session_id
 
-    def _publish_task(self, session_id: str, attempts: int = 1) -> dict:
-        return {
-            "id": str(uuid.uuid4()),
-            "run_session_id": session_id,
-            "user_id": USER,
-            "task_type": TASK_PORTFOLIO_JOIN_PUBLISH,
-            "attempts": attempts,
-            "max_attempts": 3,
-        }
+    def _publish_task(self, client: FakeSupabase, session_id: str) -> dict:
+        return make_claimed_task(
+            client,
+            run_session_id=session_id,
+            user_id=USER,
+            task_type=TASK_PORTFOLIO_JOIN_PUBLISH,
+        )
 
     @pytest.mark.asyncio
-    async def test_clean_session_publishes_one_linked_snapshot(self):
+    async def test_clean_session_publishes_completed(self):
         client = FakeSupabase()
         session_id = await self._terminal_session(client, ["AAPL", "MSFT"])
-        service = FakePublicationService(client, USER)
         outcome = await execute_publication_task(
-            client, task=self._publish_task(session_id), service=service,
+            client,
+            task=self._publish_task(client, session_id),
+            settings=make_settings(),
         )
         assert outcome.final_state == "succeeded"
         assert outcome.session_status == "completed"
@@ -260,26 +339,33 @@ class TestPublication:
             if s.get("run_session_id") == session_id
         ]
         assert len(snapshots) == 1
+        assert snapshots[0]["payload"]["snapshot_source"] == "worker_certified"
         session = client.rows("intel_run_sessions")[0]
         assert session["status"] == "completed"
         assert session["completed_snapshot_id"] == snapshots[0]["id"]
-        assert service.calls[0]["scope_tickers"] == ["AAPL", "MSFT"]
 
     @pytest.mark.asyncio
-    async def test_gaps_yield_completed_with_gaps(self):
+    async def test_gaps_yield_completed_with_gaps_and_non_green_source(self):
         client = FakeSupabase()
         session_id = await self._terminal_session(
             client, ["AAPL", "MSFT", "GOOGL"], no_call=["GOOGL"],
         )
-        service = FakePublicationService(client, USER)
         outcome = await execute_publication_task(
-            client, task=self._publish_task(session_id), service=service,
+            client,
+            task=self._publish_task(client, session_id),
+            settings=make_settings(),
         )
         assert outcome.session_status == "completed_with_gaps"
-        assert outcome.gaps["no_call_tickers"] == ["GOOGL"]
-        # NO CALL ticker excluded from certification scope — no fabricated
-        # freshness for an evidence-incomplete holding.
-        assert service.calls[0]["scope_tickers"] == ["AAPL", "MSFT"]
+        snapshot = next(
+            s for s in client.rows("intel_v3_snapshots")
+            if s.get("run_session_id") == session_id
+        )
+        payload = snapshot["payload"]
+        # Visibly non-green, distinguishable source.
+        assert payload["snapshot_source"] == "worker_certified_with_gaps"
+        assert payload["certified_holding_count"] == 2
+        assert payload["total_holding_count"] == 3
+        assert payload["session_coverage"]["no_call_tickers"] == ["GOOGL"]
 
     @pytest.mark.asyncio
     async def test_publication_failure_retries_publication_only(self):
@@ -290,26 +376,34 @@ class TestPublication:
             len(client.rows("recommendations")),
             len(client.rows("intel_run_specialist_outputs")),
         )
-        service = FakePublicationService(client, USER, fail_times=1)
+
+        # Narrow error injection at the persistence seam only.
+        def _failing_persist(*args, **kwargs):
+            raise RuntimeError("simulated persistence outage")
+
         first = await execute_publication_task(
-            client, task=self._publish_task(session_id, attempts=1),
-            service=service,
+            client,
+            task=self._publish_task(client, session_id),
+            settings=make_settings(),
+            persist=_failing_persist,
         )
         assert first.final_state == store.TASK_FAILED_RETRYABLE
         assert client.rows("intel_v3_snapshots") == []
 
         second = await execute_publication_task(
-            client, task=self._publish_task(session_id, attempts=2),
-            service=service,
+            client,
+            task=make_claimed_task(
+                client, run_session_id=session_id, user_id=USER,
+                task_type=TASK_PORTFOLIO_JOIN_PUBLISH, batch_key="retry",
+            ),
+            settings=make_settings(),
         )
         assert second.final_state == "succeeded"
-        # Evidence and specialist outputs were NEVER regenerated.
         assert (
             len(client.rows("agent_insights")),
             len(client.rows("recommendations")),
             len(client.rows("intel_run_specialist_outputs")),
         ) == evidence_before
-        assert len(service.calls) == 2  # publication attempts only
         snapshots = [
             s for s in client.rows("intel_v3_snapshots")
             if s.get("run_session_id") == session_id
@@ -320,7 +414,6 @@ class TestPublication:
     async def test_crash_between_insert_and_session_update_adopts_snapshot(self):
         client = FakeSupabase()
         session_id = await self._terminal_session(client, ["AAPL"])
-        # Simulate: snapshot row inserted by a dead attempt.
         orphan_id = str(uuid.uuid4())
         client.table("intel_v3_snapshots").insert({
             "id": orphan_id, "user_id": USER, "run_session_id": session_id,
@@ -328,13 +421,18 @@ class TestPublication:
             "payload": {"run_session_id": session_id,
                         "snapshot_source": "worker_certified"},
         }).execute()
-        service = FakePublicationService(client, USER)
+
+        def _forbidden_build(*args, **kwargs):
+            raise AssertionError("adoption path must not rebuild the payload")
+
         outcome = await execute_publication_task(
-            client, task=self._publish_task(session_id), service=service,
+            client,
+            task=self._publish_task(client, session_id),
+            settings=make_settings(),
+            build_payload=_forbidden_build,
         )
         assert outcome.final_state == "succeeded"
         assert outcome.snapshot_row_id == orphan_id
-        assert service.calls == []  # adopted; no second publication build
         snapshots = [
             s for s in client.rows("intel_v3_snapshots")
             if s.get("run_session_id") == session_id
@@ -361,12 +459,13 @@ class TestPublication:
         session_id = await self._terminal_session(
             client, ["AAPL"], no_call=["AAPL"],
         )
-        service = FakePublicationService(client, USER)
         outcome = await execute_publication_task(
-            client, task=self._publish_task(session_id), service=service,
+            client,
+            task=self._publish_task(client, session_id),
+            settings=make_settings(),
         )
         assert outcome.final_state == "failed"
         assert outcome.error == "no_decided_tickers"
         session = client.rows("intel_run_sessions")[0]
         assert session["status"] == "failed"
-        assert service.calls == []
+        assert client.rows("intel_v3_snapshots") == []

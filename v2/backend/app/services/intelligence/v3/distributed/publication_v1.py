@@ -1,26 +1,40 @@
-"""Distributed Run Intel — portfolio join, certification and publication.
+"""Distributed Run Intel — portfolio join and SESSION-NATIVE publication.
 
-Runs once per session when every ticker is terminal
-(decided / no_call / failed). Reuses the existing zero-LLM deterministic
-certification + publication path (``IntelV3Service.run_prewarm_snapshot`` →
-``check_certified_intel_run_contract`` → ``_persist_snapshot``), publishing
-ONE snapshot explicitly linked to the session (unique index enforced).
+Runs once per session when every frozen ticker is terminal
+(decided / no_call / failed). The snapshot is built exclusively from this
+session's durable rows (``session_publication_v1``):
 
-Failure isolation: this task retries publication ONLY — it never re-runs
-collectors or specialists (it reads persisted evidence exclusively). Exhausting
-its retry budget is one of the few honest terminal session failures.
+  * decided cards come verbatim from the deterministic decisions persisted on
+    ``intel_run_tickers`` — publication NEVER runs ``decide()`` and NEVER
+    reads global active recommendations for actions;
+  * NO CALL / failed tickers are explicit coverage gaps — an older session's
+    action can never surface for them;
+  * the distributed certification contract proves the full frozen scope is
+    accounted for before anything persists;
+  * exactly ONE session-linked snapshot row exists (unique index + adopt).
+
+Failure isolation: this task retries publication ONLY — zero collector
+re-runs, zero specialist LLM calls, zero policy calls. Exhausting its retry
+budget is one of the few honest terminal session failures.
 """
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
+from .....config import get_settings
 from . import run_task_store_v1 as store
+from .session_publication_v1 import (
+    SessionPublicationError,
+    build_session_snapshot_payload,
+    certify_session_snapshot,
+    persist_session_snapshot,
+)
 from .task_contracts_v1 import (
     SESSION_COMPLETED,
     SESSION_COMPLETED_WITH_GAPS,
+    SESSION_RUNNING,
     STAGE_DONE,
     TICKER_DECIDED,
     TICKER_FAILED,
@@ -44,52 +58,49 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _find_existing_session_snapshot(
-    client: Any, session_id: str
-) -> Optional[str]:
-    import asyncio
-
-    def _read() -> Optional[str]:
-        try:
-            res = (
-                client.table("intel_v3_snapshots")
-                .select("id")
-                .eq("run_session_id", session_id)
-                .limit(1)
-                .execute()
-            )
-            rows = getattr(res, "data", None) or []
-            if rows and isinstance(rows[0], dict) and rows[0].get("id"):
-                return str(rows[0]["id"])
-            return None
-        except Exception:
-            return None
-
-    return await asyncio.to_thread(_read)
-
-
 async def execute_publication_task(
     client: Any,
     *,
     task: dict[str, Any],
-    service: Any = None,
+    settings: Any = None,
+    build_payload: Optional[Callable[..., dict[str, Any]]] = None,
+    persist: Optional[Callable[..., Optional[str]]] = None,
     now: Optional[datetime] = None,
 ) -> PublicationOutcome:
-    """Certify + publish the session snapshot; mark the session terminal.
+    """Certify + publish the session-native snapshot; mark the session
+    terminal.
 
-    ``service`` injection point exists for tests; production builds the real
-    ``IntelV3Service`` (zero-LLM prewarm path).
+    ``build_payload`` / ``persist`` are narrow error-injection seams for
+    tests; the real session-native builder and persistence run by default —
+    the primary semantic acceptance tests exercise the real path.
     """
     import asyncio
 
     now = now or _now()
+    settings = settings or get_settings()
+    build_payload = build_payload or build_session_snapshot_payload
+    persist = persist or persist_session_snapshot
     outcome = PublicationOutcome()
     session_id = str(task.get("run_session_id") or "")
     user_id = str(task.get("user_id") or "")
 
-    ticker_rows = await asyncio.to_thread(
-        lambda: store.list_ticker_rows(client, run_session_id=session_id)
+    def _read_state():
+        from ..intel_run_session_store_v1 import get_session
+
+        session = get_session(client, session_id)
+        rows = store.list_ticker_rows(client, run_session_id=session_id)
+        outputs = store.list_specialist_outputs(
+            client, run_session_id=session_id
+        )
+        return session, rows, outputs
+
+    session, ticker_rows, specialist_outputs = await asyncio.to_thread(
+        _read_state
     )
+    if session is None:
+        outcome.error = "session_row_missing"
+        return outcome
+
     decided = [
         str(r.get("ticker")) for r in ticker_rows
         if str(r.get("state")) == TICKER_DECIDED
@@ -102,20 +113,15 @@ async def execute_publication_task(
         str(r.get("ticker")) for r in ticker_rows
         if str(r.get("state")) == TICKER_FAILED
     ]
-    degraded_lanes = {
-        str(r.get("ticker")): list(r.get("degraded_lanes") or [])
-        for r in ticker_rows if r.get("degraded_lanes")
-    }
     outcome.gaps = {
         "decided_count": len(decided),
         "no_call_tickers": sorted(no_call),
         "failed_tickers": sorted(failed),
-        "degraded_lane_tickers": sorted(degraded_lanes.keys()),
     }
 
     if not decided:
-        # Deterministic policy could produce no decision at all — honest
-        # terminal failure (one of the reserved failure conditions).
+        # Deterministic join produced no decision at all — honest terminal
+        # failure (one of the reserved failure conditions).
         outcome.final_state = "failed"
         outcome.error = "no_decided_tickers"
         await _mark_session(
@@ -128,18 +134,15 @@ async def execute_publication_task(
         outcome.session_status = "failed"
         return outcome
 
-    # Gap semantics: a session has gaps when one or more tickers could not be
-    # decided (NO CALL / failed). Deliberately disabled optional lanes degrade
-    # honestly at the lane level (recorded in metrics + ticker rows) without
-    # reclassifying an otherwise fully-decided session.
+    # Idempotency / crash recovery: adopt an existing session-linked snapshot
+    # (an earlier attempt inserted it but died before the session update).
+    existing = await asyncio.to_thread(
+        lambda: _find_existing_session_snapshot(client, session_id)
+    )
     has_gaps = bool(no_call or failed)
     target_status = (
         SESSION_COMPLETED_WITH_GAPS if has_gaps else SESSION_COMPLETED
     )
-
-    # Idempotency / crash recovery: adopt an existing session-linked snapshot
-    # (an earlier attempt inserted it but died before the session update).
-    existing = await _find_existing_session_snapshot(client, session_id)
     if existing is not None:
         await _mark_session(
             client, session_id,
@@ -153,36 +156,62 @@ async def execute_publication_task(
         outcome.snapshot_row_id = existing
         return outcome
 
-    if service is None:
-        from ..intel_v3_service import IntelV3Service
-        from uuid import UUID as _UUID
-
-        service = IntelV3Service(user_id=_UUID(user_id))
-
+    # ── Session-native build + certification (zero policy, zero global reads).
     try:
-        payload = await service.run_prewarm_snapshot(
-            prewarm_run_id=str(uuid.uuid4()),
-            skip_persist_on_fail=True,
-            run_session_id=session_id,
-            scope_tickers=decided,
+        payload = await asyncio.to_thread(
+            lambda: build_payload(
+                session=session,
+                ticker_rows=ticker_rows,
+                specialist_outputs=specialist_outputs,
+                now=now,
+            )
         )
+    except SessionPublicationError as exc:
+        outcome.error = f"session_build_failed:{exc}"[:400]
+        outcome.final_state = TASK_FAILED_RETRYABLE
+        return outcome
     except Exception as exc:
         outcome.error = f"publication_failed:{type(exc).__name__}:{exc}"[:400]
         outcome.final_state = TASK_FAILED_RETRYABLE
         return outcome
 
-    if payload.get("snapshot_source") != "worker_certified":
-        summary = payload.get("certification_summary") or {}
+    certification = certify_session_snapshot(
+        payload=payload, session=session, ticker_rows=ticker_rows,
+    )
+    if not certification.certified:
         outcome.error = (
-            "certification_failed:failed_holdings="
-            f"{summary.get('failed_holding_count', '?')}"
-        )
+            "session_certification_failed:"
+            + ";".join(certification.errors[:8])
+        )[:400]
         outcome.final_state = TASK_FAILED_RETRYABLE
         return outcome
 
-    snapshot_row_id = payload.get("snapshot_row_id")
-    if not snapshot_row_id:
-        snapshot_row_id = await _find_existing_session_snapshot(client, session_id)
+    # Claim fence: only the current claim may persist and terminalize.
+    owns = await asyncio.to_thread(lambda: store.owns_claim(client, task))
+    if not owns:
+        outcome.error = "claim_lost"
+        outcome.final_state = TASK_FAILED_RETRYABLE
+        return outcome
+
+    if not getattr(settings, "intel_v3_snapshot_writes_enabled", False):
+        outcome.error = "snapshot_writes_disabled"
+        outcome.final_state = TASK_FAILED_RETRYABLE
+        return outcome
+
+    try:
+        snapshot_row_id = await asyncio.to_thread(
+            lambda: persist(
+                client,
+                settings=settings,
+                user_id=user_id,
+                session_id=session_id,
+                payload=payload,
+            )
+        )
+    except Exception as exc:
+        outcome.error = f"persist_failed:{type(exc).__name__}:{exc}"[:400]
+        outcome.final_state = TASK_FAILED_RETRYABLE
+        return outcome
     if not snapshot_row_id:
         outcome.error = "publication_no_snapshot_row_id"
         outcome.final_state = TASK_FAILED_RETRYABLE
@@ -197,7 +226,7 @@ async def execute_publication_task(
     )
     if not marked:
         # Snapshot row exists; next retry adopts it idempotently with zero
-        # collector/specialist work.
+        # collector/specialist/policy work.
         outcome.error = "session_update_failed"
         outcome.final_state = TASK_FAILED_RETRYABLE
         return outcome
@@ -207,11 +236,31 @@ async def execute_publication_task(
     outcome.snapshot_row_id = str(snapshot_row_id)
     logger.info(
         "distributed_publication.completed session=%s status=%s snapshot=%s "
-        "decided=%d no_call=%d failed=%d",
+        "decided=%d no_call=%d failed=%d source=%s",
         session_id, target_status, snapshot_row_id,
         len(decided), len(no_call), len(failed),
+        payload.get("snapshot_source"),
     )
     return outcome
+
+
+def _find_existing_session_snapshot(
+    client: Any, session_id: str
+) -> Optional[str]:
+    try:
+        res = (
+            client.table("intel_v3_snapshots")
+            .select("id")
+            .eq("run_session_id", session_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(res, "data", None) or []
+        if rows and isinstance(rows[0], dict) and rows[0].get("id"):
+            return str(rows[0]["id"])
+        return None
+    except Exception:
+        return None
 
 
 async def _mark_session(
@@ -257,10 +306,13 @@ async def _mark_session(
                 except Exception:
                     metrics = {}
                 patch["metrics"] = {**metrics, **metrics_patch}
+            # Terminalization fence: only an ACTIVE session can be completed —
+            # a stale worker can never re-terminalize or flip a terminal state.
             res = (
                 client.table("intel_run_sessions")
                 .update(patch)
                 .eq("id", session_id)
+                .in_("status", [SESSION_RUNNING, "created"])
                 .execute()
             )
             return bool(getattr(res, "data", None))

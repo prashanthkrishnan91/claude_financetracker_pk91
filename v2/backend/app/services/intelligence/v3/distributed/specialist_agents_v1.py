@@ -276,6 +276,11 @@ async def execute_specialist_task(
         outcome.error = "empty_batch_key"
         return outcome
 
+    # Claim fence (pre-work): don't even start LLM work on a lost claim.
+    if not store.owns_claim(client, task):
+        outcome.error = "claim_lost"
+        return outcome
+
     ticker_rows = {
         str(r.get("ticker") or ""): r
         for r in store.list_ticker_rows(client, run_session_id=session_id)
@@ -374,6 +379,13 @@ async def execute_specialist_task(
         outcome.error = "specialist_llm_call_failed"
         return outcome
 
+    # Claim fence (post-LLM, pre-write): the LLM call is the long-running
+    # stretch where a lease most plausibly expires. A stale worker whose task
+    # was reclaimed must not overwrite the rival claim's persisted outputs.
+    if not store.owns_claim(client, task):
+        outcome.error = "claim_lost"
+        return outcome
+
     valid_until = (now + timedelta(hours=OUTPUT_VALID_HOURS)).isoformat()
     model_name = getattr(llm, "primary_model", None) or getattr(
         llm, "model", None
@@ -446,6 +458,11 @@ async def execute_review_task(
     user_id = str(task.get("user_id") or "")
     ticker = str(task.get("ticker") or "").upper()
 
+    # Claim fence (pre-work).
+    if not store.owns_claim(client, task):
+        outcome.error = "claim_lost"
+        return outcome
+
     outputs = [
         {
             "axis": o.get("axis"),
@@ -478,6 +495,11 @@ async def execute_review_task(
     )
     if normalized is None:
         outcome.error = "review_llm_call_failed"
+        return outcome
+
+    # Claim fence (post-LLM, pre-write).
+    if not store.owns_claim(client, task):
+        outcome.error = "claim_lost"
         return outcome
 
     model_name = getattr(llm, "primary_model", None) or "claude"

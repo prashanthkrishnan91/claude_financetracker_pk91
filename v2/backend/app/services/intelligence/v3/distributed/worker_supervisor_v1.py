@@ -133,6 +133,14 @@ class WorkerSupervisor:
         if not sessions:
             return stats
 
+        # Defect-D1 sweep: a task stuck 'claimed' with an expired lease and
+        # zero attempts remaining (worker died on its final attempt) is
+        # terminalized so its ticker/session can finish honestly instead of
+        # wedging forever.
+        await asyncio.to_thread(
+            lambda: store.sweep_exhausted_expired_claims(self.client)
+        )
+
         max_batch = int(
             getattr(self.settings, "intel_v3_distributed_max_specialist_batch", 5)
         )

@@ -115,11 +115,24 @@ def insert_ticker_rows(
             inserted += 1
         except Exception as exc:  # unique violation → already frozen
             last_error = exc
-    if inserted == 0 and rows:
-        existing = list_ticker_rows(client, run_session_id=run_session_id)
-        if not existing:
+    # Honest scope check (adversarial-review defect D6): every requested
+    # ticker must now have a row — a transient per-row insert failure must
+    # surface as an explicit retryable error, never as a silently shrunken
+    # run scope. (Unique-violation absorption stays: on a retry the row
+    # already exists and is counted here.)
+    if rows:
+        existing = {
+            str(r.get("ticker") or "")
+            for r in list_ticker_rows(client, run_session_id=run_session_id)
+        }
+        missing = [
+            str(r.get("ticker")) for r in rows
+            if str(r.get("ticker")) not in existing
+        ]
+        if missing:
             raise RuntimeError(
-                f"intel_run_tickers scope freeze failed: {last_error}"
+                f"intel_run_tickers scope freeze incomplete — missing "
+                f"{missing}: {last_error}"
             )
     return inserted
 
@@ -274,6 +287,72 @@ def unblock_task(
     except Exception as exc:
         logger.warning("run_task_store.unblock_failed task=%s err=%s", task_id, exc)
         return False
+
+
+def sweep_exhausted_expired_claims(
+    client: Any,
+    *,
+    run_session_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> int:
+    """Terminalize tasks stuck in 'claimed' with an expired lease and NO
+    attempts remaining.
+
+    Claim paths only accept ``attempts < max_attempts``, so a worker that
+    crashes while holding the FINAL attempt would otherwise leave the task
+    claimed forever — never terminal, never reclaimable — wedging its
+    session permanently (adversarial-review defect D1). CAS-guarded on the
+    exact observed (state, lease_expires_at) so an in-flight worker that is
+    merely slow can never be terminalized underneath itself before its lease
+    truly expired. Returns how many tasks were failed.
+    """
+    now_dt = _now(now)
+    try:
+        query = (
+            client.table(TASKS_TABLE)
+            .select("*")
+            .eq("state", TASK_CLAIMED)
+        )
+        if run_session_id is not None:
+            query = query.eq("run_session_id", run_session_id)
+        rows = _rows(query.execute())
+    except Exception as exc:
+        logger.warning("run_task_store.sweep_read_failed err=%s", exc)
+        return 0
+    swept = 0
+    for row in rows:
+        attempts = int(row.get("attempts") or 0)
+        max_attempts = int(row.get("max_attempts") or DEFAULT_MAX_ATTEMPTS)
+        lease = _parse_iso(row.get("lease_expires_at"))
+        if attempts < max_attempts or lease is None or lease > now_dt:
+            continue
+        try:
+            res = (
+                client.table(TASKS_TABLE)
+                .update({
+                    "state": "failed",
+                    "error_code": "lease_expired_attempts_exhausted",
+                    "completed_at": _iso(now_dt),
+                    "lease_expires_at": None,
+                    "updated_at": _iso(now_dt),
+                })
+                .eq("id", str(row.get("id")))
+                .eq("state", TASK_CLAIMED)
+                .eq("lease_expires_at", str(row.get("lease_expires_at")))
+                .execute()
+            )
+            if _rows(res):
+                swept += 1
+        except Exception as exc:
+            logger.debug(
+                "run_task_store.sweep_cas_lost task=%s err=%s",
+                row.get("id"), exc,
+            )
+    if swept:
+        logger.info(
+            "run_task_store.swept_exhausted_expired_claims count=%d", swept,
+        )
+    return swept
 
 
 # ── Claiming ─────────────────────────────────────────────────────────────────

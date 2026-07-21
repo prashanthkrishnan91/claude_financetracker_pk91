@@ -247,7 +247,12 @@ async def create_distributed_session(
     if existing is not None:
         if str(existing.get("user_id")) != str(user_id):
             raise SessionOwnershipError(session_id)
-        # Idempotent retry of the same click (or a poll fallback): report state.
+        # Idempotent retry of the same click (or a poll fallback): repair a
+        # crashed create (zombie 'created' session with no frozen scope —
+        # adversarial-review defect D2), then report state.
+        await _repair_unseeded_session(
+            client=client, user_id=user_id, session=existing, now=now_dt,
+        )
         status = await get_session_status(
             client=client, user_id=user_id, session_id=session_id
         )
@@ -258,6 +263,9 @@ async def create_distributed_session(
     # active session instead of creating an overlapping one.
     active = await find_active_session(client=client, user_id=user_id)
     if active is not None and str(active.get("id")) != str(session_id):
+        await _repair_unseeded_session(
+            client=client, user_id=user_id, session=active, now=now_dt,
+        )
         status = await get_session_status(
             client=client, user_id=user_id, session_id=str(active.get("id"))
         )
@@ -302,10 +310,23 @@ async def create_distributed_session(
             lambda: client.table(SESSIONS_TABLE).insert(session_row).execute()
         )
     except Exception as exc:
-        # Duplicate-id race (same click retried) → adopt; anything else is an
-        # explicit retryable failure (e.g. migration 027 not applied).
+        # Duplicate-id race (same click retried) → adopt; a lost
+        # active-per-user race (two tabs) → adopt the winner's session;
+        # anything else is an explicit retryable failure (e.g. migration 027
+        # not applied).
         raced = await asyncio.to_thread(get_session, client, session_id)
         if raced is None or str(raced.get("user_id")) != str(user_id):
+            race_winner = await find_active_session(
+                client=client, user_id=user_id,
+            )
+            if race_winner is not None:
+                status = await get_session_status(
+                    client=client, user_id=user_id,
+                    session_id=str(race_winner.get("id")),
+                )
+                status["created"] = False
+                status["adopted_active_session"] = True
+                return status
             logger.error(
                 "distributed_session.create_failed session=%s err=%s",
                 session_id, exc,
@@ -367,6 +388,83 @@ async def create_distributed_session(
     )
     status["created"] = True
     return status
+
+
+async def _repair_unseeded_session(
+    *,
+    client: Any,
+    user_id: str,
+    session: dict[str, Any],
+    now: datetime,
+) -> None:
+    """Repair a session whose create crashed between the row insert and the
+    scope freeze / task seeding (zombie 'created' session, defect D2).
+
+    Idempotent and best-effort: a healthy session (any ticker rows exist, or
+    a non-'created' status) is untouched; a repair failure leaves the session
+    for the next retry rather than raising into the adopt path.
+    """
+    if str(session.get("status") or "") != SESSION_CREATED:
+        return
+    session_id = str(session.get("id"))
+    try:
+        existing_rows = await asyncio.to_thread(
+            lambda: store.list_ticker_rows(client, run_session_id=session_id)
+        )
+        if existing_rows:
+            return
+        positions = await asyncio.to_thread(
+            _load_active_positions, client, str(user_id)
+        )
+        if not positions:
+            return
+        tickers = [str(p.get("ticker") or "").strip() for p in positions]
+        prices = await asyncio.to_thread(
+            _load_latest_close_prices, client, [t.upper() for t in tickers]
+        )
+        prior_actions = await asyncio.to_thread(
+            _load_prior_actions, client, str(user_id)
+        )
+        scope_rows = build_frozen_scope_rows(positions, prices, prior_actions)
+        await asyncio.to_thread(
+            lambda: store.insert_ticker_rows(
+                client,
+                run_session_id=session_id,
+                user_id=str(user_id),
+                rows=scope_rows,
+                now=now,
+            )
+        )
+        await asyncio.to_thread(
+            lambda: _seed_initial_tasks(
+                client,
+                run_session_id=session_id,
+                user_id=str(user_id),
+                scope_rows=scope_rows,
+                now=now,
+            )
+        )
+        await asyncio.to_thread(
+            lambda: client.table(SESSIONS_TABLE)
+            .update({
+                "status": SESSION_RUNNING,
+                "current_stage": STAGE_COLLECTING,
+                "holdings_scope": [r["ticker"] for r in scope_rows],
+                "updated_at": _now().isoformat(),
+            })
+            .eq("id", session_id)
+            .eq("status", SESSION_CREATED)
+            .execute()
+        )
+        logger.info(
+            "distributed_session.repaired_unseeded session=%s tickers=%d",
+            session_id, len(scope_rows),
+        )
+    except Exception as exc:
+        logger.warning(
+            "distributed_session.repair_failed session=%s err=%s",
+            session_id, exc,
+        )
 
 
 def _seed_initial_tasks(

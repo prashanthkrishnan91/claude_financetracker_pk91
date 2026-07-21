@@ -170,15 +170,22 @@ providers). Lane names reuse the Stage-5G registry namespace.
 
 | Lane | equity | etf | crypto | Provider (existing) | Required? |
 |---|---|---|---|---|---|
-| price | ✓ | ✓ | ✓ | yfinance history/live (`fetch_yfinance_history_sync`), CoinGecko for crypto | required |
-| technicals | ✓ | ✓ | — | `run_technicals_evidence` (yfinance 3mo) | required (equity/etf) |
-| fundamentals | ✓ | — | — | `run_fundamentals_evidence` (yfinance .info) | required (equity) |
-| news_sentiment | ✓ | ✓ | — | `run_news_sentiment_evidence` (yfinance news) | optional |
-| sec_company_facts | ✓ | — | — | `run_sec_companyfacts_evidence` (SEC EDGAR XBRL) | optional |
-| sec_catalyst_sentiment | ✓ | — | — | `run_sec_catalyst_sentiment_evidence` | optional |
-| etf_fund_data | — | ✓ | — | `run_etf_nport_holdings_evidence` (SEC NPORT) | optional |
+| price | ✓ | ✓ | ✓ | `data_sources.fetch_price_action` (yfinance), CoinGecko for crypto | required |
+| technicals | ✓ | ✓ | — | `data_sources.fetch_price_action` (yfinance 3mo history + indicators) | required (equity/etf) |
+| fundamentals | ✓ | — | — | `data_sources.fetch_fundamentals` (yfinance .info) | required (equity) |
+| news_sentiment | ✓ | ✓ | — | `data_sources.fetch_yfinance_news` | optional |
+| sec_company_facts | ✓ | — | — | `run_sec_companyfacts_evidence` (SEC EDGAR XBRL, flag-gated runner → research_artifacts) | optional |
+| sec_catalyst_sentiment | ✓ | — | — | `run_sec_catalyst_sentiment_evidence` (flag-gated runner → research_artifacts) | optional |
+| etf_fund_data | — | ✓ | — | `run_etf_nport_holdings_evidence` (SEC NPORT, flag-gated runner → research_artifacts) | optional |
 | crypto_market | — | — | ✓ | `fetch_coingecko_market` (price, momentum, rank, sentiment votes, drawdown) | required (crypto) |
-| macro (session) | portfolio-scope | | | `run_fred_macro_evidence` (FRED) | optional |
+| macro (session) | portfolio-scope | | | `run_fred_macro_evidence` (FRED, flag-gated runner → research_artifacts) | optional |
+
+The price/technicals/fundamentals/news lanes call the shared `data_sources`
+fetchers directly (same breakers/semaphores as the rest of the app) and
+persist their normalized output durably on the task row (`intel_run_tasks.output`),
+with TTL reuse against prior succeeded task outputs; the SEC/ETF/macro lanes
+go through the existing flag-gated research-worker runners, which own their
+`research_artifacts` writes and artifact-level idempotency.
 
 Rules: a collector receives ONE task and touches ONLY that task's ticker (or
 the portfolio scope for session tasks). Optional-lane failure → `degraded`
@@ -232,9 +239,11 @@ models. Axes by asset type:
 - etf: `technical`, `sentiment`, `etf_exposure`.
 - crypto: `crypto_market` (momentum/volatility/liquidity/drawdown/regime/risk).
 
-Required axes (decision prerequisites): equity {fundamental, technical,
-sentiment}; etf {technical, etf_exposure}; crypto {crypto_market}. Optional
-axes that fail degrade only themselves.
+Required axes (decision prerequisites): equity {fundamental, technical};
+etf {technical, etf_exposure}; crypto {crypto_market}. Sentiment is optional
+for equities because its backing news lane is optional — a news-provider
+outage must not force NO CALL on an otherwise well-evidenced holding.
+Optional axes that fail degrade only themselves.
 
 Batching: scheduler groups evidence_ready tickers by (asset_type, axis) into
 batches of ≤ `INTEL_V3_DISTRIBUTED_MAX_SPECIALIST_BATCH` (default 5). One

@@ -76,6 +76,54 @@ def _artifact_summary(client: Any, artifact_id: Optional[str]) -> Optional[dict[
         return None
 
 
+# Volatile keys stripped recursively from the fingerprint source: timestamps
+# and cache markers change on every fetch even when the analytical substance
+# is identical, and would make cross-session LLM reuse (contract §14) dead.
+_VOLATILE_FINGERPRINT_KEYS = frozenset(
+    {"as_of", "cache_hit", "generated_at", "fetched_at"}
+)
+
+
+def _strip_volatile(value):
+    if isinstance(value, dict):
+        return {
+            key: _strip_volatile(item)
+            for key, item in value.items()
+            if key not in _VOLATILE_FINGERPRINT_KEYS
+        }
+    if isinstance(value, list):
+        return [_strip_volatile(item) for item in value]
+    return value
+
+
+def _fingerprint_source(bundle: dict[str, Any]) -> dict[str, Any]:
+    """The analytically-significant subset of the bundle.
+
+    Excluded: session identity, timestamps/cache markers (recursively), the
+    intraday `market` price section (its 15-minute TTL would invalidate every
+    fingerprint immediately — the technical lane's daily history carries the
+    price signal specialists reason over), and mark-to-market portfolio
+    values. Included portfolio context: weight rounded to the whole percent,
+    prior action and tax summary — the inputs that actually change analysis.
+    """
+    source = {
+        key: _strip_volatile(value)
+        for key, value in bundle.items()
+        if key not in (
+            "as_of", "run_session_id", "market", "portfolio_context",
+            "input_fingerprint",
+        )
+    }
+    context = bundle.get("portfolio_context") or {}
+    weight = context.get("portfolio_weight_pct")
+    source["portfolio_context"] = {
+        "weight_pct_rounded": round(float(weight)) if weight is not None else None,
+        "prior_action": context.get("prior_action"),
+        "tax_summary": context.get("tax_summary"),
+    }
+    return source
+
+
 def build_evidence_bundle(
     client: Any,
     *,
@@ -211,13 +259,9 @@ def build_evidence_bundle(
             "total_lane_count": len(states),
         },
     }
-    # Fingerprint excludes as_of so unchanged evidence yields the same
-    # fingerprint across runs (LLM reuse contract).
-    fingerprint_source = {
-        key: value for key, value in bundle.items()
-        if key not in ("as_of", "run_session_id")
-    }
-    bundle["input_fingerprint"] = stable_fingerprint(fingerprint_source)
+    bundle["input_fingerprint"] = stable_fingerprint(
+        _fingerprint_source(bundle)
+    )
 
     updated = store.update_ticker_row(
         client,

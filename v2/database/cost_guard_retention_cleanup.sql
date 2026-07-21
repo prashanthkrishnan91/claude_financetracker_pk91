@@ -25,6 +25,11 @@
 --   research_artifact_sources.artifact_id → research_artifacts(id) ON DELETE CASCADE  ⚠
 --   research_artifact_facts.source_id    → research_artifact_sources(id) ON DELETE SET NULL
 --   worker_audit_events.artifact_id → research_artifacts(id)    ON DELETE SET NULL
+--   analyst_refresh_jobs.run_session_id → intel_run_sessions(id) ON DELETE CASCADE  ⚠
+--   intel_v3_snapshots.run_session_id   → intel_run_sessions(id) ON DELETE SET NULL
+--   intel_run_sessions.pre_session_snapshot_id → intel_v3_snapshots(id) ON DELETE SET NULL
+--   intel_run_sessions.completed_snapshot_id   → intel_v3_snapshots(id) ON DELETE SET NULL
+--   (the four session FKs are added by migration 026_intel_run_sessions.sql)
 --
 -- ⚠ = CASCADE: if parent is deleted, child is deleted automatically.
 --     Explicit child deletion below prevents CASCADE from removing rows
@@ -116,19 +121,45 @@ WHERE created_at < NOW() - INTERVAL '7 days';
 DELETE FROM public.research_artifacts
 WHERE created_at < NOW() - INTERVAL '7 days';
 
--- ── 10. intel_v3_snapshots ────────────────────────────────────────────────────
--- No FK children in schema. Keep is_active=true rows (live read cache).
--- Only inactive (superseded) snapshots older than 7 days are removed.
+-- ── 10. intel_run_sessions (terminal sessions only; before intel_v3_snapshots) ─
+-- FKs (migration 026):
+--   analyst_refresh_jobs.run_session_id → intel_run_sessions(id) ON DELETE CASCADE  ⚠
+--   intel_v3_snapshots.run_session_id   → intel_run_sessions(id) ON DELETE SET NULL
+-- Only TERMINAL sessions ('completed' / 'failed') older than the retention
+-- window are removed. Active/in-progress sessions ('created',
+-- 'ticker_refresh_in_progress', 'publishing', 'publication_retryable_failed')
+-- are ALWAYS preserved regardless of age.
+-- The CASCADE here is deliberate and safe: a session's analyst_refresh_jobs
+-- rows are that session's own bookkeeping — when a terminal session ages out,
+-- its job rows are terminal bookkeeping by definition (no younger-than-window
+-- job can belong to an older-than-window session: session jobs are created at
+-- session start and only that session's continuations touch them). Jobs of
+-- preserved sessions and legacy NULL-session jobs are untouched.
+-- Deleting a session SET-NULLs intel_v3_snapshots.run_session_id, so the
+-- snapshot cleanup in step 11 can never fail on a session reference.
+DELETE FROM public.intel_run_sessions
+WHERE status IN ('completed', 'failed')
+  AND created_at < NOW() - INTERVAL '7 days';
+
+-- ── 11. intel_v3_snapshots (after intel_run_sessions) ─────────────────────────
+-- Keep is_active=true rows (live read cache). Only inactive (superseded)
+-- snapshots older than 7 days are removed.
+-- Session FKs cannot block this delete (migration 026):
+--   intel_run_sessions.pre_session_snapshot_id / completed_snapshot_id are
+--   ON DELETE SET NULL — deleting an old inactive snapshot NULLs any session
+--   pointer to it instead of failing;
+--   step 10 already removed old terminal sessions, so their snapshot links
+--   are gone before this runs.
 DELETE FROM public.intel_v3_snapshots
 WHERE is_active = false
   AND created_at < NOW() - INTERVAL '7 days';
 
--- ── 11. market_snapshots ──────────────────────────────────────────────────────
+-- ── 12. market_snapshots ──────────────────────────────────────────────────────
 -- No FK children in schema. Generated price/market data — safe to prune by age.
 DELETE FROM public.market_snapshots
 WHERE created_at < NOW() - INTERVAL '7 days';
 
--- ── 12. portfolio_snapshots (conditional) ────────────────────────────────────
+-- ── 13. portfolio_snapshots (conditional) ────────────────────────────────────
 -- Only uncomment after confirming this table contains generated/cached rows only.
 --
 -- DELETE FROM public.portfolio_snapshots

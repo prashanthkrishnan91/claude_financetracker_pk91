@@ -146,12 +146,17 @@ async def check_certified_intel_run_contract(
     user_id: UUID,
     client: Any,
     now: Optional[datetime] = None,
+    scope_tickers: Optional[list[str]] = None,
 ) -> CertifiedIntelRunContractResult:
     """Run the all-or-nothing certified intel run contract for a user.
 
     Reads ``positions``, ``recommendations``, ``agent_insights``, and
     ``agent_runs`` for the user. Never writes. Never raises into the caller —
     DB failures degrade to honest failure rows in the result.
+
+    ``scope_tickers`` overrides the active-positions read: a durable Run
+    Intel session certifies over its IMMUTABLE captured holdings scope, not
+    whatever the positions table happens to contain at publication time.
     """
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -160,25 +165,33 @@ async def check_certified_intel_run_contract(
     user_str = str(user_id)
     certification_errors: list[str] = []
 
-    # ── Step 1: fetch active positions ────────────────────────────────────────
+    # ── Step 1: fetch active positions (or use the explicit session scope) ────
     active_tickers: list[str] = []
-    try:
-        res = await asyncio.to_thread(
-            lambda: client.table("positions")
-            .select("ticker")
-            .eq("user_id", user_str)
-            .execute()
-        )
-        for row in (res.data or []):
-            t = row.get("ticker") if isinstance(row, dict) else None
-            if t:
-                active_tickers.append(str(t))
-    except Exception as exc:
-        certification_errors.append(f"positions_fetch_failed:{type(exc).__name__}")
-        logger.warning(
-            "certified_intel_run_contract.positions_fetch_failed user_id=%s err=%s",
-            user_id, exc,
-        )
+    if scope_tickers is not None:
+        seen: set[str] = set()
+        for t in scope_tickers:
+            t_str = str(t or "").strip()
+            if t_str and t_str.upper() not in seen:
+                seen.add(t_str.upper())
+                active_tickers.append(t_str)
+    else:
+        try:
+            res = await asyncio.to_thread(
+                lambda: client.table("positions")
+                .select("ticker")
+                .eq("user_id", user_str)
+                .execute()
+            )
+            for row in (res.data or []):
+                t = row.get("ticker") if isinstance(row, dict) else None
+                if t:
+                    active_tickers.append(str(t))
+        except Exception as exc:
+            certification_errors.append(f"positions_fetch_failed:{type(exc).__name__}")
+            logger.warning(
+                "certified_intel_run_contract.positions_fetch_failed user_id=%s err=%s",
+                user_id, exc,
+            )
 
     total_holding_count = len(active_tickers)
     if total_holding_count == 0:

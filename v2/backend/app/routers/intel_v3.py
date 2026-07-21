@@ -1,7 +1,8 @@
 """Intel v3 router — visible snapshot endpoints.
 
 GET  /intel/v3/snapshot        — read latest v3 snapshot (zero LLM calls)
-POST /intel/v3/run             — trigger a v3 decision run
+POST /intel/v3/run             — one bounded request of a durable Run Intel
+                                 session (see intel_run_session_flow_v1)
 GET  /intel/v3/runs/{run_id}   — placeholder for run status polling
 
 Feature flag: INTEL_V3_VISIBLE_SNAPSHOT_ENABLED
@@ -10,299 +11,33 @@ Feature flag: INTEL_V3_VISIBLE_SNAPSHOT_ENABLED
 from __future__ import annotations
 
 import logging
+import uuid as _uuid
+from typing import Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Body, Depends, HTTPException, status
+from pydantic import BaseModel
 
-from ..config import get_settings
 from ..middleware.auth import AuthenticatedUser, get_current_user
-from ..services.intelligence.v3.analyst_refresh_job_store_v1 import count_due_jobs
-from ..services.intelligence.v3.analyst_refresh_on_demand_drain_v1 import (
-    run_on_demand_drain,
+from ..services.intelligence.v3.intel_run_session_flow_v1 import (
+    SessionOwnershipError,
+    run_intel_session_request,
 )
 from ..services.intelligence.v3.intel_v3_service import IntelV3Service, is_intel_v3_enabled
-from ..services.intelligence.v3.watchtower_intel_republisher_v1 import (
-    PUBLISH_CERTIFIED_CURRENT,
-)
 
 router = APIRouter(prefix="/intel/v3", tags=["intel_v3"])
 logger = logging.getLogger(__name__)
 
-# Zero-queued statuses from IntelV3Service.enqueue_run_v3() that genuinely mean
-# the request succeeded without any analyst work — either evidence was already
-# current, or a zero-LLM deterministic recertification (prewarm) rebuilt the
-# snapshot from already-persisted evidence. Only these may let an existing
-# worker_certified + certified_current snapshot count as this request's own
-# completed outcome when nothing was queued.
-_ZERO_QUEUED_SUCCESS_STATUSES = frozenset({
-    "analyst_evidence_current",
-    "mapping_version_recertified",
-    "stage7_contract_recertified",
-    "stage8e_contract_recertified",
-    "stage8f_contract_recertified",
-})
 
-# Zero-queued statuses that mean the request itself failed — a historical
-# certified-current snapshot must never be allowed to paper over these, and
-# they must never fall through to "no stale evidence to refresh" (that value
-# implies nothing needed doing, which is false — recertification was
-# attempted and failed).
-_ZERO_QUEUED_FAILURE_STATUSES = frozenset({
-    "enqueue_failed",
-    "failed",
-    "mapping_version_recertification_failed",
-    "stage7_contract_recertification_failed",
-    "stage8e_contract_recertification_failed",
-    "stage8f_contract_recertification_failed",
-})
+class RunIntelV3Request(BaseModel):
+    """Body for POST /intel/v3/run.
 
-# Durable-job-state classification for the current user's current active
-# tickers (product-recovery Blocker 3). Derived from the existing
-# analyst_refresh_job_store_v1.count_due_jobs breakdown — no new queue, no
-# new table.
-#   due      — total_due > 0: immediately claimable, bounded drain runs.
-#   backoff  — only failed-but-retryable jobs remain, all in their backoff
-#              window (next_retry_at in the future) — nothing to claim yet.
-#   terminal — at least one job has exhausted its retry budget.
-#   none     — no due/backoff/terminal work for this user's active tickers.
-_JOB_STATE_NONE = "none"
-_JOB_STATE_DUE = "due"
-_JOB_STATE_BACKOFF = "backoff"
-_JOB_STATE_TERMINAL = "terminal"
-
-# Action strings for the two new durable-job states, plus the active-ticker
-# lookup failure. Deliberately NOT prefixed "reclick_" — the frontend's
-# existing "reclick_" -> partial/auto-continue classification must never
-# apply to these (backoff/terminal/lookup-failure must present as a stopped,
-# explicit Retry state, never an automatic continuation).
-_ACTION_ANALYST_JOBS_BACKOFF = "analyst_jobs_in_backoff_retry_after_window"
-_ACTION_ANALYST_JOBS_TERMINAL = "analyst_jobs_retry_budget_exhausted"
-_ACTION_ACTIVE_TICKERS_LOOKUP_FAILED = "active_tickers_lookup_failed_retry"
-
-
-def _next_required_action(
-    *,
-    status_value: str,
-    on_demand_processing_enabled: bool,
-    queued_ticker_count: int,
-    drain_ran: bool,
-    drain_remaining: bool,
-    snapshot_available_after_run: bool,
-    snapshot_writes_enabled: bool,
-    job_state: str = _JOB_STATE_NONE,
-) -> str:
-    """Derive an honest, operator-facing next step from the run outcome.
-
-    Never implies a snapshot is being built when it is not — the whole point
-    of Stage 13B is to stop the queue-only 202 from silently reading as
-    "in progress" when nothing will ever drain it.
-
-    Priority order (each branch outranks everything below it):
-      1. no active holdings
-      2. a zero-queued request-level failure (enqueue or deterministic
-         recertification failed) -> retry, never "no stale evidence"
-      3. queued jobs + on-demand processing disabled -> queue-only
-      4. durable jobs in backoff (none due yet) -> explicit backoff retry
-      5. durable jobs with an exhausted retry budget -> terminal failure
-      6. drain ran + snapshot writes disabled -> write-guard (outranks
-         "continue" — reclicking can never publish while writes are off)
-      7. drain ran + remaining resumable work -> continue draining
-      8. a newly/currently certified snapshot is available -> complete
-      9. nothing was queued AND no drain ran -> no stale evidence to refresh
-      10. otherwise -> retry
-
-    Branches 4/5 outrank 6-9 unconditionally: a historical certified snapshot
-    (branch 8) or a stale "nothing to do" read (branch 9) must never mask a
-    backlog of durable work still waiting on backoff or permanently blocked
-    by an exhausted retry budget for this user's active holdings.
+    ``run_session_id`` is minted by the browser (crypto.randomUUID()) once per
+    manual click; every bounded automatic continuation of that click sends the
+    SAME id. Legacy callers may omit the body entirely — the backend then
+    mints a session id and returns it, but the frontend always supplies one.
     """
-    if status_value == "no_active_holdings":
-        return "add_positions_before_running_intel"
-    if status_value in _ZERO_QUEUED_FAILURE_STATUSES:
-        return "reclick_run_intel_to_retry"
-    if queued_ticker_count > 0 and not on_demand_processing_enabled:
-        return (
-            "queue_only_enable_intel_v3_on_demand_refresh_enabled_or_run_"
-            "analyst_refresh_worker_entrypoint_separately"
-        )
-    if job_state == _JOB_STATE_BACKOFF:
-        return _ACTION_ANALYST_JOBS_BACKOFF
-    if job_state == _JOB_STATE_TERMINAL:
-        return _ACTION_ANALYST_JOBS_TERMINAL
-    if drain_ran and not snapshot_writes_enabled:
-        return "on_demand_drain_completed_but_intel_v3_snapshot_writes_enabled_is_false"
-    if drain_ran and drain_remaining:
-        return "reclick_run_intel_or_run_worker_entrypoint_to_continue_draining"
-    if snapshot_available_after_run:
-        return "none_certified_snapshot_current"
-    # Only a genuine no-op — nothing queued this click AND no drain of
-    # existing durable work was ever attempted — may report "nothing was
-    # stale." When a drain ran (because existing pending/retryable work was
-    # recognized even though this click queued zero new jobs) but did not
-    # produce a provably new certified snapshot, that is a retry, never a
-    # false "nothing needed doing."
-    if queued_ticker_count == 0 and not drain_ran:
-        return "none_no_stale_evidence_to_refresh"
-    return "reclick_run_intel_to_retry"
 
-
-async def _augment_with_on_demand_status(
-    service: IntelV3Service,
-    result: dict,
-) -> dict:
-    """Add Stage 13B operational-truth fields to the enqueue_run_v3() result.
-
-    Reuses the existing bounded ``run_on_demand_drain`` (Stage 13B) so a
-    manual Run Intel click can produce a certified snapshot without an
-    always-on worker service — see analyst_refresh_on_demand_drain_v1.py.
-    Read-only augmentation: never changes ``result``'s existing keys.
-
-    Product-recovery Blockers 2/3: ``queued_ticker_count`` alone never
-    decides whether/how to process work. Whenever on-demand processing is
-    enabled and this isn't a no-active-holdings or zero-queued-failure
-    status, this ALWAYS resolves the current user's current active tickers
-    first — including when this click queued new work — and scopes every
-    subsequent claim/count/drain to (user_id, active_tickers). If that
-    lookup itself fails, this never falls back to an unscoped drain; it
-    returns an explicit retryable failure instead. It then classifies the
-    scoped durable-job state (due / backoff / terminal / none) from the
-    existing ``count_due_jobs`` breakdown and only drains when jobs are
-    immediately due — a backoff or terminal state is reported honestly and
-    never silently drained, looped, or masked by a historical snapshot.
-    """
-    settings = get_settings()
-    on_demand_enabled = settings.intel_v3_on_demand_refresh_enabled
-    snapshot_writes_enabled = settings.intel_v3_snapshot_writes_enabled
-    queued_ticker_count = int(result.get("queued_ticker_count") or 0)
-    existing_certified_snapshot_id = result.get("existing_certified_snapshot_id")
-    status_value = str(result.get("status") or "")
-
-    drain_ran = False
-    drain_remaining = False
-    jobs_attempted = jobs_succeeded = jobs_failed = 0
-    job_state = _JOB_STATE_NONE
-    earliest_retry_at: str | None = None
-
-    should_resolve_job_state = (
-        on_demand_enabled
-        and status_value != "no_active_holdings"
-        and status_value not in _ZERO_QUEUED_FAILURE_STATUSES
-    )
-
-    if should_resolve_job_state:
-        try:
-            active_tickers = await service._get_active_tickers()
-        except Exception as exc:
-            logger.warning(
-                "intel_v3.active_tickers_lookup_failed user_id=%s error=%s",
-                service.user_id, exc,
-            )
-            # Never fall back to an unscoped drain on a lookup failure —
-            # return an explicit retryable failure so the single Run Intel
-            # control stays usable for a later retry.
-            result["on_demand_processing_enabled"] = on_demand_enabled
-            result["on_demand_jobs_attempted"] = 0
-            result["on_demand_jobs_succeeded"] = 0
-            result["on_demand_jobs_failed"] = 0
-            result["snapshot_available_after_run"] = False
-            result["next_required_action"] = _ACTION_ACTIVE_TICKERS_LOOKUP_FAILED
-            return result
-
-        due_counts = count_due_jobs(
-            service.client,
-            user_id=str(service.user_id),
-            tickers=active_tickers or None,
-        )
-        total_due = due_counts.get("total_due", 0)
-        failed_not_yet_due = due_counts.get("failed_not_yet_due", 0)
-        failed_terminal = due_counts.get("failed_terminal", 0)
-
-        if total_due > 0:
-            job_state = _JOB_STATE_DUE
-            drain_ran = True
-            drain_result = await run_on_demand_drain(
-                user_id=service.user_id, client=service.client, tickers=active_tickers,
-            )
-            jobs_attempted = drain_result.jobs_attempted
-            jobs_succeeded = drain_result.jobs_succeeded
-            jobs_failed = drain_result.jobs_failed
-            drain_remaining = drain_result.run_resumable
-        elif failed_not_yet_due > 0:
-            job_state = _JOB_STATE_BACKOFF
-            earliest_retry_at = due_counts.get("earliest_retry_at")
-        elif failed_terminal > 0:
-            job_state = _JOB_STATE_TERMINAL
-        else:
-            job_state = _JOB_STATE_NONE
-
-    latest_snapshot = await service.get_latest_snapshot()
-    latest_snapshot_id = (
-        latest_snapshot.get("snapshot_id") if isinstance(latest_snapshot, dict) else None
-    )
-    latest_is_certified_current = (
-        isinstance(latest_snapshot, dict)
-        and latest_snapshot.get("snapshot_source") == "worker_certified"
-        and latest_snapshot.get("evidence_freshness_state") == PUBLISH_CERTIFIED_CURRENT
-    )
-
-    if job_state in (_JOB_STATE_BACKOFF, _JOB_STATE_TERMINAL):
-        # A historical certified-current snapshot must never mask a backlog
-        # of durable work still waiting on backoff or permanently blocked by
-        # an exhausted retry budget for this user's active holdings.
-        snapshot_available_after_run = False
-    elif drain_ran:
-        # A drain happened this request — either because this click queued
-        # new work, or because it recognized already-existing durable work
-        # left over from an earlier interrupted click. Either way, completion
-        # requires proof THIS request actually published a new certified
-        # snapshot — not merely that an older worker_certified +
-        # certified_current snapshot still happens to be sitting there
-        # untouched. Requires the full chain (on-demand enabled, nothing left
-        # resumable, writes enabled) AND a concrete latest snapshot id that
-        # differs from whatever certified snapshot (if any) existed before
-        # this request.
-        snapshot_available_after_run = (
-            on_demand_enabled
-            and not drain_remaining
-            and snapshot_writes_enabled
-            and latest_is_certified_current
-            and latest_snapshot_id is not None
-            and latest_snapshot_id != existing_certified_snapshot_id
-        )
-    elif status_value in _ZERO_QUEUED_SUCCESS_STATUSES:
-        # Nothing was queued this request, but the status confirms it's a
-        # genuine no-op (evidence already current) or a successful zero-LLM
-        # deterministic recertification — an already-current certified
-        # snapshot legitimately means "nothing to do."
-        snapshot_available_after_run = latest_is_certified_current
-    else:
-        # Zero queued for any other reason (no_active_holdings, enqueue
-        # failure, a recertification failure, or an unrecognized status) must
-        # never borrow completeness from a historical snapshot — that
-        # snapshot did not come from this request succeeding.
-        snapshot_available_after_run = False
-
-    result["on_demand_processing_enabled"] = on_demand_enabled
-    result["on_demand_jobs_attempted"] = jobs_attempted
-    result["on_demand_jobs_succeeded"] = jobs_succeeded
-    result["on_demand_jobs_failed"] = jobs_failed
-    result["snapshot_available_after_run"] = snapshot_available_after_run
-    if job_state == _JOB_STATE_BACKOFF:
-        # Additive — only present in the backoff state, representing that
-        # durable-job state's own retry timing (small job-store extension;
-        # see analyst_refresh_job_store_v1.count_due_jobs's earliest_retry_at).
-        result["earliest_retry_at"] = earliest_retry_at
-    result["next_required_action"] = _next_required_action(
-        status_value=status_value,
-        on_demand_processing_enabled=on_demand_enabled,
-        queued_ticker_count=queued_ticker_count,
-        drain_ran=drain_ran,
-        drain_remaining=drain_remaining,
-        snapshot_available_after_run=snapshot_available_after_run,
-        snapshot_writes_enabled=snapshot_writes_enabled,
-        job_state=job_state,
-    )
-    return result
-
+    run_session_id: Optional[str] = None
 
 def _check_flag() -> None:
     """Raise 404 with clear message when the v3 feature flag is disabled."""
@@ -345,69 +80,66 @@ async def get_latest_v3_snapshot(
 
 @router.post("/run", status_code=status.HTTP_202_ACCEPTED)
 async def run_intel_v3(
+    body: Optional[RunIntelV3Request] = Body(default=None),
     user: AuthenticatedUser = Depends(get_current_user),
 ):
-    """Enqueue a full Intel v3 analyst refresh for all active holdings.
+    """Execute one bounded request of a durable Run Intel session.
 
-    Stage 3.3 — all-or-nothing certified intelligence run contract.
-    Stage 13B — bounded on-demand evidence drain (operational-truth fields).
+    One explicit manual click == one ``intel_run_sessions`` row, identified by
+    the browser-minted ``run_session_id`` sent in the body. The SAME id on
+    every bounded automatic continuation resumes that exact session — the
+    backend never creates a replacement session for an existing id, never
+    claims jobs outside the session, and never reports completion from the
+    globally-latest snapshot.
 
-    The Run Intel v3 button means "start a new certified intelligence run."
-    This endpoint:
+    Per-request behavior (see ``intel_run_session_flow_v1``):
+      * First use of an id: capture immutable holdings scope + stale subset +
+        pre-session snapshot, create the session, enqueue one durable job per
+        stale ticker (FK ``run_session_id``).
+      * Continuations: credit interrupted-but-persisted tickers, drain one
+        bounded batch of THIS session's jobs via the analyst-only
+        orchestrator path (zero portfolio synthesis), and, once every job has
+        succeeded, deterministically certify + publish ONE snapshot linked to
+        the session. Publication failures retry without re-running analysis.
+      * Completion is reported only when this session's own snapshot row
+        (scalar column AND payload carrying the session id) is published,
+        certified, and different from the pre-session snapshot.
 
-      1. Enqueues a durable ``analyst_refresh_jobs`` row for EVERY stale
-         active holding (idempotent — repeated clicks do not create
-         duplicate jobs).
-      2. Returns ``status=refresh_requested`` or ``refresh_in_progress``.
-      3. Does NOT build a snapshot, does NOT run any LLM analysis in-request
-         beyond the bounded drain in step 4.
-      4. If ``INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true``, drains a bounded
-         number of the jobs it just enqueued in-request (reusing
-         ``AnalystRefreshWorker`` — capped batches/runtime, see
-         ``analyst_refresh_on_demand_drain_v1.py``) so a manual click can
-         reach a certified snapshot without the separate always-on
-         ``analyst_refresh_worker_v1`` Railway service. When the flag is
-         false (default), the response says so explicitly instead of
-         implying a snapshot is being built.
-
-    Response carries operational-truth fields so the UI never overclaims:
-    ``on_demand_processing_enabled``, ``on_demand_jobs_attempted/succeeded/
-    failed``, ``snapshot_available_after_run``, ``next_required_action``.
-
-    The separately-deployed ``analyst_refresh_worker_v1`` Railway service
-    (polling, ``--loop``) remains available and optional — it will pick up
-    any jobs this request did not finish draining, regardless of whether
-    on-demand draining is enabled.
+    Legacy callers that omit the body get a backend-minted session id in the
+    response (``run_session_id``) and identical semantics.
     """
     _check_flag()
 
-    service = IntelV3Service(user_id=user.id)
+    raw_session_id = (body.run_session_id if body else None) or str(_uuid.uuid4())
     try:
-        result = await service.enqueue_run_v3()
-    except Exception as exc:
-        logger.error("intel_v3.enqueue_run_failed user_id=%s error=%s", user.id, exc)
+        session_id = str(_uuid.UUID(str(raw_session_id)))
+    except (ValueError, AttributeError, TypeError):
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Intel v3 enqueue failed: {exc}",
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"run_session_id must be a UUID, got: {raw_session_id!r}",
         )
 
     try:
-        result = await _augment_with_on_demand_status(service, result)
-    except Exception as exc:
-        # On-demand augmentation is best-effort operational truth-telling on
-        # top of an already-successful enqueue — never fail the whole click
-        # over it, but log so it's visible in Railway.
-        logger.warning(
-            "intel_v3.on_demand_status_augment_failed user_id=%s error=%s",
-            user.id, exc,
+        return await run_intel_session_request(
+            user_id=user.id, run_session_id=session_id,
         )
-        result.setdefault("on_demand_processing_enabled", get_settings().intel_v3_on_demand_refresh_enabled)
-        result.setdefault("on_demand_jobs_attempted", 0)
-        result.setdefault("on_demand_jobs_succeeded", 0)
-        result.setdefault("on_demand_jobs_failed", 0)
-        result.setdefault("snapshot_available_after_run", False)
-        result.setdefault("next_required_action", "reclick_run_intel_to_retry")
-    return result
+    except SessionOwnershipError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "code": "run_session_forbidden",
+                "message": "This run session belongs to another user.",
+            },
+        )
+    except Exception as exc:
+        logger.error(
+            "intel_v3.run_session_request_failed user_id=%s run_session_id=%s error=%s",
+            user.id, session_id, exc,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Intel v3 run failed: {exc}",
+        )
 
 
 @router.get("/runs/{run_id}")

@@ -586,6 +586,34 @@ describe("shouldAutoContinueRun — bounded automatic continuation (Part A3)", (
   it("never continues for a null result (nothing to continue from)", () => {
     expect(shouldAutoContinueRun(null, 0, 0)).toBe(false);
   });
+
+  it("a legitimate 32-ticker run (12 requests near the 20s server bound) is never stopped by the elapsed cap", () => {
+    // Fake-clock simulation of the worst legitimate case: 32 stale tickers,
+    // batches of 3, each request completing just under the server's 20s
+    // per-request bound. 11 analyst batches drain the queue; publication
+    // rides the 12th request. The elapsed cap must allow every continuation
+    // decision along the way — a valid run may never be abandoned mid-flight.
+    const REQUEST_MS = 19_900; // just under the 20s server-side request bound
+    const TOTAL_REQUESTS = 12; // ceil(32/3) analyst batches + publication
+    let clockMs = 0;
+    for (let attempt = 1; attempt < TOTAL_REQUESTS; attempt++) {
+      clockMs += REQUEST_MS; // request `attempt` just finished
+      // The hook decides whether to fire request `attempt + 1`.
+      expect(shouldAutoContinueRun(PARTIAL_RESULT, attempt, clockMs)).toBe(true);
+    }
+    // Sanity: the final (12th) request fits inside both caps too.
+    clockMs += REQUEST_MS;
+    expect(TOTAL_REQUESTS).toBeLessThanOrEqual(RUN_INTEL_MAX_CONTINUATIONS);
+    expect(clockMs).toBeLessThanOrEqual(RUN_INTEL_MAX_ELAPSED_MS);
+  });
+
+  it("the elapsed cap still stops a run that exceeds the legitimate worst case", () => {
+    // 300s is a real ceiling, not an unbounded loop: at ~20s per request the
+    // cap halts continuation shortly after the worst legitimate sequence.
+    expect(
+      shouldAutoContinueRun(PARTIAL_RESULT, 16, RUN_INTEL_MAX_ELAPSED_MS),
+    ).toBe(false);
+  });
 });
 
 // ── Snapshot-side readiness ───────────────────────────────────────────────────

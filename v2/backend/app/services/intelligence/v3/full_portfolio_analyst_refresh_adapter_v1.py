@@ -5,15 +5,16 @@ tickers under deterministic budgets. In production that cap left ~28 of 34
 positions HARD_STALE on every Run Intel v3 click, so the snapshot never moved
 out of ``BLOCKED_UNCERTIFIED`` even when LLM calls succeeded for the selected 6.
 
-Stage 3.0c replaces that path as the default. The existing ``AgentOrchestrator``
-in ``services/agents/orchestrator.py`` already supports a fast full-portfolio
-LLM pass (verified in production: recs=34 / cards=34 / insights=34, 35 LLM
-calls, ~5s). This adapter wraps that path UNSCOPED:
+Stage 3.0c replaced the capped path as the default; the durable-sessions
+recovery then changed WHAT the backend executes. The default backend now:
 
-  * No 6-ticker subset selection.
-  * No ``analyst_refresh_tickers`` scope filter passed into ``AgentOrchestrator``
-    (so the orchestrator's existing full-portfolio analyst phase, persistence,
-    and recommendation-expire steps execute over every active position).
+  * Scopes the orchestrator's analyst + persist phases to the selected batch
+    via ``analyst_refresh_tickers`` (non-scope tickers' rows stay untouched).
+  * Calls ``AgentOrchestrator.run_analyst_refresh_only()`` — the genuine
+    analyst-only production method. It must NEVER call the full ``run()``
+    pipeline: run()'s unconditional Phase 4 portfolio synthesis consumed the
+    remaining request deadline AFTER per-ticker analysis had already
+    succeeded, timing out this adapter and blanket-failing the batch.
   * Per-ticker accounting is read back from durable rows
     (``agent_insights.run_id`` and ``recommendations.agent_run_id``), so a
     successful refresh is only declared when the database actually has new
@@ -160,6 +161,7 @@ class FullPortfolioAnalystRefreshAdapter:
         *,
         priority_hints: Optional[list[TickerPriorityHint]] = None,
         started_at: Optional[datetime] = None,
+        worker_run_id: Optional[str] = None,
     ) -> AnalystRefreshResult:
         started_at = started_at or datetime.now(timezone.utc)
         started_monotonic = time.monotonic()
@@ -227,8 +229,17 @@ class FullPortfolioAnalystRefreshAdapter:
             )
 
         try:
+            # Session batches thread the durable worker_run_id into the
+            # backend as the explicit agent-run id (kwarg only when supplied
+            # so injected legacy/test backends keep their 3-arg signature).
+            if worker_run_id is not None:
+                backend_coro = self._run_backend(
+                    self.user_id, selected, started_at, run_id=str(worker_run_id),
+                )
+            else:
+                backend_coro = self._run_backend(self.user_id, selected, started_at)
             backend_results = await asyncio.wait_for(
-                self._run_backend(self.user_id, selected, started_at),
+                backend_coro,
                 timeout=max(1.0, self.budget.max_seconds - elapsed),
             )
         except asyncio.TimeoutError:
@@ -360,6 +371,7 @@ async def default_full_portfolio_agent_orchestrator_backend(
     user_id: UUID,
     selected_tickers: list[str],
     started_at: datetime,
+    run_id: Optional[str] = None,
 ) -> dict[str, Optional[dict[str, Any]]]:
     """Run ``AgentOrchestrator`` UNSCOPED on the full stale ticker list.
 
@@ -404,7 +416,15 @@ async def default_full_portfolio_agent_orchestrator_backend(
             # batch only.  Non-scope tickers keep their existing rows untouched.
             analyst_refresh_tickers=set(selected_tickers),
         )
-        run_id = await orch.create_run(tickers=list(selected_tickers))
+        # ``run_id`` (session batches): the caller supplies the durable
+        # analyst_refresh_jobs.worker_run_id, so the agent_runs row — and every
+        # agent_insights.run_id / recommendations.agent_run_id written for this
+        # batch — carries the EXACT id already stamped on the claimed queue
+        # rows. Evidence↔job ownership is then a durable SQL equality, never a
+        # timestamp inference. Legacy callers omit it (DB-generated id).
+        run_id = await orch.create_run(
+            tickers=list(selected_tickers), run_id=run_id,
+        )
         # Capture the orchestrator's run outcome so the post-run readback can
         # attribute a SPECIFIC failure reason when no durable rows appear —
         # raised / failed / no_data / completed-but-persisted-nothing — instead
@@ -414,7 +434,16 @@ async def default_full_portfolio_agent_orchestrator_backend(
         agent_run_insight_count = 0
         result_insights: list[Any] = []
         try:
-            result = await orch.run(run_id)
+            # Analyst-only execution boundary: the Run Intel ticker-refresh
+            # path must never enter the full run() pipeline, whose
+            # unconditional Phase 4 portfolio synthesis previously consumed
+            # the remaining request deadline AFTER per-ticker analysis had
+            # succeeded — timing out the adapter and blanket-failing the
+            # batch. run_analyst_refresh_only() returns as soon as the
+            # selected tickers' evidence is durably persisted.
+            result = await orch.run_analyst_refresh_only(
+                run_id, tickers=list(selected_tickers),
+            )
             agent_run_status = str(getattr(result, "status", "unknown") or "unknown")
             result_insights = list(getattr(result, "insights", None) or [])
             agent_run_insight_count = len(result_insights)

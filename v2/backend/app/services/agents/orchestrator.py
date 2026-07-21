@@ -383,7 +383,21 @@ class AgentOrchestrator:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    async def create_run(self, tickers: Optional[list[str]] = None) -> str:
+    async def create_run(
+        self,
+        tickers: Optional[list[str]] = None,
+        run_id: Optional[str] = None,
+    ) -> str:
+        """Insert the agent_runs row for this run.
+
+        ``run_id`` (optional): explicit UUID for the row. Session-scoped Run
+        Intel batches supply the durable ``analyst_refresh_jobs.worker_run_id``
+        here so ``agent_runs.id`` — and therefore ``agent_insights.run_id`` /
+        ``recommendations.agent_run_id`` — exactly equals the queue rows'
+        ``worker_run_id``. That makes evidence↔job ownership a durable, exact
+        SQL mapping instead of a timestamp inference. Callers that omit it
+        keep the historical DB-generated id behavior unchanged.
+        """
         row = {
             "user_id": str(self.user_id),
             "status": assert_db_status("queued"),
@@ -393,6 +407,8 @@ class AgentOrchestrator:
             "deposit_amount": self.deposit_amount,
             "sale_proceeds": self.sale_proceeds,
         }
+        if run_id is not None:
+            row["id"] = str(run_id)
         result = self._db("agent_runs.create", lambda: self.db.table("agent_runs").insert(row).execute())
         return result.data[0]["id"]
 
@@ -730,6 +746,219 @@ class AgentOrchestrator:
                 except Exception as cleanup_exc:
                     logger.warning(
                         "Failed to mark run %s failed in finally block: %s",
+                        run_id,
+                        cleanup_exc,
+                    )
+
+    async def run_analyst_refresh_only(
+        self,
+        run_id: str,
+        tickers: Optional[list[str]] = None,
+    ) -> AgentPipelineResult:
+        """Execute ONLY the per-ticker analyst evidence stages for ``run_id``.
+
+        Production seam for the Run Intel ticker-refresh path. Reuses the real
+        stages ``run()`` uses to produce durable per-ticker analyst evidence —
+        market bundle, context, MarketSnapshots, FeatureSets, thesis
+        scorecards, run-mode classification, the per-ticker analyst, and the
+        agent_insights / recommendations persist — and then returns.
+
+        Hard boundary — this method must NEVER invoke:
+          * ``_run_portfolio_synthesis`` (the Phase 4 cross-ticker LLM call)
+          * portfolio narrative generation
+          * allocation/reasoning synthesis extras attached in ``run()``
+
+        Production root cause this exists for: Run Intel batches previously
+        went through ``run()``, whose unconditional Phase 4 synthesis consumed
+        the remaining request deadline AFTER per-ticker analysis had already
+        succeeded, so the adapter timed out and the whole batch was reported
+        failed. Selected-ticker evidence must be durable the moment the
+        analyst + persist stages finish — nothing may run after them here.
+
+        ``tickers`` is informational (the selected batch); the analyst/persist
+        scope is governed by ``analyst_refresh_tickers`` passed to
+        ``__init__``, exactly as in the existing production adapter.
+
+        Terminal-status guarantee: the agent_runs row always transitions to
+        'completed' or 'failed' before returning, same as ``run()``.
+        """
+        terminal_status_set = False
+        run_start = time.perf_counter()
+        timings: dict[str, float] = {}
+        try:
+            logger.info(
+                "Analyst-only run started — id=%s user=%s tickers=%s",
+                run_id, self.user_id, ",".join(tickers or []) or "scope",
+            )
+            await self._update_run(
+                run_id, status="running", current_agent="Loading portfolio", progress=5
+            )
+
+            t0 = time.perf_counter()
+            market_bundle = await self._fetch_market_bundle_for_user()
+            live_prices = dict(market_bundle.get("live_prices") or {})
+            timings["fetch_live_prices_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            await self._update_run(run_id, current_agent="Building context", progress=25)
+            t0 = time.perf_counter()
+            context = build_portfolio_context(
+                user_id=str(self.user_id),
+                live_prices=live_prices,
+                market_data=market_bundle,
+            )
+            await self._attach_sec_filing_intelligence(context)
+            timings["build_context_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            t0 = time.perf_counter()
+            self._snapshots = await self._build_and_persist_snapshots(
+                run_id=run_id,
+                context=context,
+                bundle=market_bundle,
+            )
+            timings["snapshots_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            t0 = time.perf_counter()
+            self._features = await self._build_and_persist_features(
+                run_id=run_id,
+                bundle=market_bundle,
+            )
+            timings["features_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            t0 = time.perf_counter()
+            self._thesis_scorecards = self._compute_thesis_scorecards(market_bundle)
+            timings["thesis_v2_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            self._mode_decision = classify_run_mode(
+                getattr(self, "_snapshots", {}).values()
+            )
+            self._cost_tracker = RunCostTracker(mode=self._mode_decision.mode)
+
+            if not context.get("portfolio"):
+                await self._update_run(
+                    run_id,
+                    status="completed",
+                    current_agent="No positions",
+                    progress=100,
+                    summary="No positions in portfolio; nothing to analyse.",
+                )
+                logger.info("Analyst-only run completed (no_data) — id=%s", run_id)
+                terminal_status_set = True
+                return AgentPipelineResult(
+                    run_id=run_id,
+                    status="no_data",
+                    summary="No positions.",
+                    insights=[],
+                )
+
+            state = self._build_state(run_id, context, live_prices)
+
+            await self._update_run(
+                run_id, current_agent="Per-ticker analyst", progress=60
+            )
+            t0 = time.perf_counter()
+            self._verdicts = await self._run_per_ticker_analyst()
+            timings["per_ticker_analyst_ms"] = round(
+                (time.perf_counter() - t0) * 1000, 1
+            )
+
+            # NO Phase 4 here. state.portfolio_advice stays a deterministic
+            # stub so the persist path never depends on a synthesis result.
+            scope_count = (
+                len(self._analyst_refresh_tickers)
+                if self._analyst_refresh_tickers is not None
+                else len(state.insights)
+            )
+            final_summary = (
+                f"Analyst evidence refresh — {scope_count} selected ticker(s), "
+                "no portfolio synthesis on this path."
+            )
+            state.portfolio_advice = {"summary": final_summary, "cards": []}
+            state.pm_summary = final_summary
+
+            self._apply_verdicts_to_insights(state, self._verdicts)
+
+            await self._update_run(run_id, current_agent="Saving Insights", progress=90)
+            t0 = time.perf_counter()
+            persistence_warning: str | None = None
+            try:
+                await self._persist(state)
+            except Exception as persist_exc:  # noqa: BLE001
+                persistence_warning = str(persist_exc)[:220]
+                logger.warning(
+                    "analyst-only persist degraded run_id=%s err=%s -- completing with warnings",
+                    run_id,
+                    persistence_warning,
+                )
+            timings["persist_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+
+            if persistence_warning:
+                final_summary = (
+                    f"{final_summary} (Completed with warnings: persistence "
+                    "partially failed.)"
+                )[:900]
+            await self._update_run(
+                run_id,
+                status="completed",
+                current_agent=(
+                    "Completed with warnings" if persistence_warning else "Completed"
+                ),
+                progress=100,
+                summary=final_summary,
+                mode_decision=getattr(self, "_mode_decision", None),
+                cost_tracker=getattr(self, "_cost_tracker", None),
+            )
+            timings["total_ms"] = round((time.perf_counter() - run_start) * 1000, 1)
+            logger.info(
+                "Analyst-only run completed — id=%s insights=%d llm_calls=%d "
+                "synthesis_calls=0 timings=%s",
+                run_id, len(state.insights), self._llm_call_count, timings,
+            )
+            terminal_status_set = True
+            return AgentPipelineResult(
+                run_id=run_id,
+                status="completed",
+                summary=final_summary,
+                insights=list(state.insights.values()),
+            )
+
+        except Exception as exc:
+            logger.exception("Analyst-only run failed for run %s", run_id)
+            fallback_summary = "Analyst refresh temporarily unavailable — please retry."
+            await self._update_run(
+                run_id,
+                status="failed",
+                current_agent="Failed",
+                progress=100,
+                error_message=str(exc)[:500],
+                summary=fallback_summary,
+            )
+            terminal_status_set = True
+            return AgentPipelineResult(
+                run_id=run_id,
+                status="failed",
+                summary=fallback_summary,
+                insights=[],
+            )
+
+        finally:
+            if not terminal_status_set:
+                logger.warning(
+                    "LIFECYCLE VIOLATION: analyst-only run %s did not reach terminal "
+                    "state — forcing failed",
+                    run_id,
+                )
+                try:
+                    await self._update_run(
+                        run_id,
+                        status="failed",
+                        current_agent="Failed",
+                        progress=100,
+                        error_message="Internal orchestrator error",
+                        summary="Analyst refresh temporarily unavailable — please retry.",
+                    )
+                except Exception as cleanup_exc:
+                    logger.warning(
+                        "Failed to mark analyst-only run %s failed in finally block: %s",
                         run_id,
                         cleanup_exc,
                     )

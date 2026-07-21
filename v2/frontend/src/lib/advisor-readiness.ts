@@ -151,10 +151,27 @@ export interface AdvisorRunInput {
 }
 
 export function deriveRunJobs(result: IntelV3RunResult | null | undefined): AdvisorRunJobs {
-  const queued = result?.queued_ticker_count ?? 0;
   const attempted = result?.on_demand_jobs_attempted ?? 0;
-  const succeeded = result?.on_demand_jobs_succeeded ?? 0;
   const failed = result?.on_demand_jobs_failed ?? 0;
+
+  // Durable-session responses carry explicit cumulative session state — use
+  // it directly instead of reconstructing progress from one request's batch
+  // counts. Legacy responses (no session fields) keep the old derivation.
+  if (typeof result?.session_remaining_ticker_count === "number") {
+    const queued = result.expected_ticker_count ?? result.queued_ticker_count ?? 0;
+    const succeeded =
+      result.session_succeeded_ticker_count ?? result.on_demand_jobs_succeeded ?? 0;
+    return {
+      queued,
+      attempted,
+      succeeded,
+      failed,
+      remaining: Math.max(0, result.session_remaining_ticker_count),
+    };
+  }
+
+  const queued = result?.queued_ticker_count ?? 0;
+  const succeeded = result?.on_demand_jobs_succeeded ?? 0;
   return {
     queued,
     attempted,
@@ -177,8 +194,18 @@ export function deriveRunJobs(result: IntelV3RunResult | null | undefined): Advi
 /** Hard ceiling on automatic continuation requests for one Run Intel click. */
 export const RUN_INTEL_MAX_CONTINUATIONS = 20;
 
-/** Hard ceiling on total elapsed wall-clock time for one Run Intel click. */
-export const RUN_INTEL_MAX_ELAPSED_MS = 120_000;
+/**
+ * Hard ceiling on total elapsed wall-clock time for one Run Intel click.
+ *
+ * Sized to honestly accommodate the largest supported run under the server's
+ * per-request bounds: each bounded request drains at most 3 tickers in ≤ 20s
+ * (analyst_refresh_on_demand_drain_v1), so a 32-holding portfolio needs up to
+ * ceil(32/3) = 11 analyst batches plus a final publication request — 12
+ * requests ≈ 240s in the worst case where every batch runs to its 20s bound.
+ * 300s covers that with headroom while still being a real ceiling; the
+ * request-count cap (20) and the per-request 20s server bound are unchanged.
+ */
+export const RUN_INTEL_MAX_ELAPSED_MS = 300_000;
 
 /**
  * Whether the hook should automatically fire another continuation request

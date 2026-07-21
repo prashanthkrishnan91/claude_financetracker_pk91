@@ -200,6 +200,8 @@ class AnalystRefreshWorker:
         scope_user_id: "UUID | str | None" = None,
         scope_tickers: Optional[list[str]] = None,
         max_adapter_seconds: Optional[float] = None,
+        scope_run_session_id: "UUID | str | None" = None,
+        trigger_prewarm: bool = True,
     ):
         self.client = client
         self._adapter_factory = adapter_factory or _default_adapter_factory
@@ -213,6 +215,14 @@ class AnalystRefreshWorker:
         # so it can never process another user's durable jobs.
         self.scope_user_id = scope_user_id
         self.scope_tickers = scope_tickers
+        # Durable-session scoping: when set, ONLY this session's jobs are
+        # counted/claimed — legacy NULL-session rows and other sessions' rows
+        # are invisible. The session flow owns snapshot publication, so it
+        # also passes trigger_prewarm=False: the legacy end-of-drain prewarm
+        # would publish a snapshot NOT linked to the session, which must never
+        # count as (or race with) the session's own publication.
+        self.scope_run_session_id = scope_run_session_id
+        self.trigger_prewarm = trigger_prewarm
         # Upper bound threaded into the analyst-refresh adapter's own budget
         # so a single in-request batch cannot silently run to the adapter's
         # much larger default (180s) regardless of this worker's own
@@ -234,6 +244,7 @@ class AnalystRefreshWorker:
         due_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         result.jobs_due = due_counts.get("total_due", 0)
 
@@ -244,6 +255,7 @@ class AnalystRefreshWorker:
             limit=self.max_jobs_per_run,
             user_id=self.scope_user_id,
             tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         result.claimed_job_count = len(claimed)
 
@@ -316,6 +328,7 @@ class AnalystRefreshWorker:
         post_run_counts = count_due_jobs(
             self.client, now=now,
             user_id=self.scope_user_id, tickers=self.scope_tickers,
+            run_session_id=self.scope_run_session_id,
         )
         remaining_actionable = (
             post_run_counts.get("total_due", 0)          # immediately claimable
@@ -332,7 +345,18 @@ class AnalystRefreshWorker:
         # publish worker_certified because the certification contract checks ALL
         # active positions, and the remaining tickers may have fresh rows from a
         # previous run.
-        if not result.run_resumable and users_with_successes:
+        if not self.trigger_prewarm:
+            # Session-scoped drains own their publication: the session flow
+            # publishes ONE snapshot explicitly linked to the session after
+            # certification. The legacy prewarm here would publish an
+            # unlinked snapshot that must never satisfy the session.
+            if users_with_successes:
+                logger.info(
+                    "intel_v3.analyst_refresh_worker_prewarm_disabled_for_session "
+                    "worker_run_id=%s run_session_id=%s",
+                    result.worker_run_id, self.scope_run_session_id,
+                )
+        elif not result.run_resumable and users_with_successes:
             for uid_str in users_with_successes:
                 await trigger_snapshot_prewarm(
                     user_id=UUID(uid_str),
@@ -436,7 +460,29 @@ class AnalystRefreshWorker:
                     pass
 
         try:
-            refresh = await adapter(selected, priority_hints=hints, started_at=now)
+            if self.scope_run_session_id is not None:
+                # Session batch: thread THIS batch's worker_run_id (already
+                # stamped on every claimed job row) into the adapter so the
+                # agent run — and all durable evidence rows — carry the exact
+                # same id. Evidence↔job ownership becomes a durable SQL
+                # equality (job.worker_run_id == insights.run_id ==
+                # recommendations.agent_run_id), never timestamp inference.
+                # Legacy/unscoped batches keep the historical 3-arg call so
+                # injected test adapters are unaffected.
+                # INVARIANT: a session-scoped run_once is single-user (the
+                # session drain always sets scope_user_id, and sessions are
+                # per-user), so one worker_run_id maps to exactly one
+                # agent_runs row. If multi-user session batches ever exist,
+                # each user's batch would need its own explicit run id or the
+                # second create_run(run_id=...) would hit a PK conflict.
+                refresh = await adapter(
+                    selected,
+                    priority_hints=hints,
+                    started_at=now,
+                    worker_run_id=worker_run_id,
+                )
+            else:
+                refresh = await adapter(selected, priority_hints=hints, started_at=now)
         except Exception as exc:
             # The adapter is contracted not to raise, but the worker must never
             # crash on a misbehaving adapter — fail every ticker honestly.
@@ -484,6 +530,12 @@ class AnalystRefreshWorker:
                 user_id=user_id,
                 tickers=list(job_by_ticker.keys()),
                 started_at=now,
+                # Session batches: residual evidence only counts when it was
+                # written under THIS batch's exact agent-run id — never
+                # another session's (or the global worker's) rows.
+                required_run_id=(
+                    worker_run_id if self.scope_run_session_id is not None else None
+                ),
             )
             if residual:
                 success_set = residual
@@ -558,6 +610,7 @@ class AnalystRefreshWorker:
         user_id: str,
         tickers: list[str],
         started_at: datetime,
+        required_run_id: Optional[str] = None,
     ) -> set[str]:
         """After a timeout, check which tickers have durable evidence in the DB.
 
@@ -614,6 +667,14 @@ class AnalystRefreshWorker:
                 rec_run_id = rec_by_ticker.get(ticker)
                 if rec_run_id is None:
                     # agent_insights present but no recommendation — insufficient.
+                    insight_only.add(ticker)
+                    continue
+                # Session batches: ownership is the exact run-id equality —
+                # rows from any other run never credit this batch's jobs.
+                if required_run_id is not None and (
+                    insight_run_id != str(required_run_id)
+                    or rec_run_id != str(required_run_id)
+                ):
                     insight_only.add(ticker)
                     continue
                 # Both present; if run_ids are non-empty they must match.

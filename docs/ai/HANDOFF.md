@@ -1,13 +1,13 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-19 (Advisor product recovery — Run Intel bounded automatic continuation +
-Deploy Cash price-truth refresh/degraded-plan preservation, after PR #473/#474 fixed only response
-wording. Same-day release-blocker patch on the same PR: (1) a stale ticker can never receive new
-cash — fixed canonically in `allocation_policy_v1`, not the router; (2) every on-demand drain,
-including when this click queued new work, is scoped to the current user's current active
-tickers; (3) the router classifies the full due/backoff/terminal durable-job state, not just
-`total_due`. Full evidence for the earlier consolidation lives in `REFACTOR_REPORT.md` at the
-repo root and in the consolidation PR body.)
+Last updated: 2026-07-21 (Run Intel durable sessions — recovery replacing PR #480's approach.
+One manual Run Intel click now owns one SQL-backed `intel_run_sessions` row (browser-minted
+UUID, migration `v2/database/026_intel_run_sessions.sql`); session jobs and the published
+snapshot are FK-linked to that exact session, and the production ticker-refresh path executes
+`AgentOrchestrator.run_analyst_refresh_only()` — it can no longer reach portfolio synthesis,
+which was consuming the request deadline after per-ticker analysis had already succeeded and
+blanket-failing the batch. Deploy Cash work from 2026-07-19 unchanged; consolidation evidence
+remains in `REFACTOR_REPORT.md`.)
 
 ## Product architecture (read this first)
 
@@ -104,58 +104,58 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   and the existing caveats. No new allocator, no policy/cap loosening, no fabricated candidates;
   the decision spine (certified truth → repaired price truth → Intel v3 evidence →
   `allocation_policy_v1` → `paycheck_plan_preview` → Advisor cash-plan section) is unchanged.
-- **Run Intel is bounded on-demand, not worker-dependent, and self-continues** (Stage 13B +
-  product recovery): `POST /intel/v3/run` enqueues and, when
-  `INTEL_V3_ON_DEMAND_REFRESH_ENABLED=true`, drains a small quantum
-  (`analyst_refresh_on_demand_drain_v1`: 1 batch × 3 jobs, ≤20s) per request — small enough that
-  one request can never materially exceed a production-safe wall-clock bound even if every
-  selected ticker's LLM call runs to the deadline. The drain's own bound is threaded into
-  `AnalystRefreshWorker`'s `max_adapter_seconds`, which clamps the analyst-refresh adapter's own
-  `wait_for()` budget — the prior gap (`FullPortfolioAnalystRefreshBudget` kept its 180s default
-  regardless of the caller's intended cap) is what let a nominal 90s cap become a ~148s hung
-  request in production. The router (`_augment_with_on_demand_status`) no longer decides whether
-  to drain solely from `queued_ticker_count`. Same-day patch (release blocker): the router now
-  ALWAYS resolves the current user's current active tickers first — via
-  `IntelV3Service._get_active_tickers()` — before any drain decision, including when this click
-  DID queue new work (previously only the zero-queued path fetched them). If that lookup itself
-  fails, the router never falls back to an unscoped drain; it returns an explicit retryable
-  failure (`_ACTION_ACTIVE_TICKERS_LOOKUP_FAILED`) instead. It then classifies the FULL durable-job
-  state for (user, active_tickers) via `analyst_refresh_job_store_v1.count_due_jobs`'s breakdown —
-  not just `total_due`: `total_due > 0` drains; only-`failed_not_yet_due` (backoff, nothing due
-  yet) reports an explicit backoff retry state and stops automatic continuation cleanly; any
-  `failed_terminal` (retry budget exhausted) reports a terminal analyst-job failure and never
-  auto-loops; only when none of these apply does the existing zero-work/current-snapshot logic
-  run. Both `total_due`-driven and existing-work-driven drains scope claiming to the current user
-  AND their current active tickers (`AnalystRefreshWorker.scope_user_id`/`scope_tickers`;
-  `claim_due_jobs`/`count_due_jobs` gained optional `user_id`/`tickers` filters) — an obsolete job
-  for a sold/closed ticker is never claimed by the manual Run Intel path, even though the
-  standalone always-on worker keeps its unscoped global-queue behavior unchanged.
-  `count_due_jobs` also gained a small extension, `earliest_retry_at` (earliest `next_retry_at`
-  among backoff rows), surfaced as an additive `earliest_retry_at` response field only in the
-  backoff state. A historical certified-current snapshot can never mask a backoff or terminal
-  durable-job state — both force `snapshot_available_after_run=False` unconditionally, ahead of
-  the drain/zero-queued-success checks. Otherwise, `snapshot_available_after_run` keys off
-  `drain_ran` (true whenever a `total_due`-driven drain ran) rather than `queued_ticker_count > 0`:
-  completion still requires proof THIS request published (on-demand enabled, nothing left
-  resumable, writes enabled, latest snapshot `worker_certified` + `certified_current` with a
-  `snapshot_id` different from `existing_certified_snapshot_id`); a zero-queued no-op success
-  status (`analyst_evidence_current` / `*_contract_recertified`) with no drain still means
-  "nothing to do"; anything else (no-holdings, enqueue/recert failure, or a drain that ran but
-  never produced a new snapshot) is an honest retry, never a false "nothing was stale."
-  Frontend: `useRunIntelV3` (`hooks.ts`) now drives bounded automatic continuation from the SAME
-  click — after each batch it derives the run state via `shouldAutoContinueRun`
-  (`advisor-readiness.ts`) and, while `partial`, fires another request itself (capped at
-  `RUN_INTEL_MAX_CONTINUATIONS=20` attempts / `RUN_INTEL_MAX_ELAPSED_MS=120s`), aborting in-flight
-  work via `AbortController` on unmount. The user never has to click "Continue Intel run"
-  themselves. `advisor-readiness.ts::deriveRunModel` gained three narrow explicit branches for the
-  new backoff/terminal/active-ticker-lookup-failure `next_required_action` values — all classify
-  as the existing `failed` state (Retry Intel run control, `buttonBusy=false`), placed ahead of
-  the generic `reclick_`-prefix "partial" bucket so they can never be misread as auto-continuing
-  progress; `shouldAutoContinueRun` naturally stops for `failed` (only continues on `partial`). No
-  new button/control. The rest of the state machine (partial/complete/failed/
-  queue_only classification, including any `status` ending in `_recertification_failed`) is
-  unchanged — only the trigger for firing the next request moved from a manual click to the hook.
-  Still exactly one control — `AdvisorReadinessPanel`/`page.tsx` are unchanged.
+- **Run Intel is one durable SQL-backed session per click** (fix/run-intel-durable-sessions,
+  replacing the pre-session Stage 13B router augmentation and PR #480's rejected approaches —
+  no sentinel tickers, no window-as-identity, no completion inferred from the latest snapshot):
+  * Identity: the browser mints ONE UUID per manual click (`crypto.randomUUID()` in
+    `useRunIntelV3`); every bounded automatic continuation POSTs the same
+    `{"run_session_id"}` body; a later click always mints a different id. Legacy body-less
+    callers get a backend-minted id (`RunIntelV3Request`).
+  * Durable state: `public.intel_run_sessions` (migration
+    `v2/database/026_intel_run_sessions.sql`, service-role/deny-all RLS) stores status
+    (`created → ticker_refresh_in_progress → publishing → completed`, plus
+    `publication_retryable_failed` and terminal `failed`), the immutable holdings scope +
+    stale subset captured at click time, expected job count, pre-session snapshot row id,
+    completed snapshot row id, and retryable error info. `analyst_refresh_jobs.run_session_id`
+    and `intel_v3_snapshots.run_session_id` are nullable FKs; session jobs are unique per
+    `(run_session_id, ticker)`; legacy NULL-session rows keep the old
+    `(user_id, ticker, refresh_window)` uniqueness; at most one snapshot row per session
+    (publication idempotency index).
+  * Flow (`intel_run_session_flow_v1.run_intel_session_request`, called by the router):
+    first use of an id captures scope + enqueues one session job per stale ticker
+    (`enqueue_session_jobs`); continuations verify ownership (403 on mismatch), credit
+    interrupted-but-persisted tickers from durable evidence (never regenerate), lift worker
+    backoff for the click's own jobs, drain ONE bounded batch (1 × 3 jobs ≤ 20s via
+    `run_on_demand_drain` scoped by `run_session_id`, prewarm disabled), and when every
+    session job has succeeded run deterministic certification over the session's immutable
+    scope (`check_certified_intel_run_contract(scope_tickers=…)`) and publish ONE snapshot
+    carrying the session id in both the SQL column and the payload
+    (`run_prewarm_snapshot(run_session_id=…)` → `_persist_snapshot` returns the row id).
+    Publication failures keep every ticker job succeeded and retry publication only.
+    Completion is reported ONLY after re-verifying the session's own snapshot row (column +
+    payload linkage, differs from pre-session snapshot, `worker_certified`,
+    `certified_current`, zero unfinished session jobs).
+  * Analyst-only execution (the production fix): the default adapter backend
+    (`full_portfolio_analyst_refresh_adapter_v1.default_full_portfolio_agent_orchestrator_backend`)
+    calls `AgentOrchestrator.run_analyst_refresh_only(run_id, tickers=…)` — the real market/
+    context/snapshot/feature/analyst/persist stages with a hard structural stop before
+    Phase 4. It never invokes `_run_portfolio_synthesis` / narrative / allocation synthesis;
+    the full `AgentOrchestrator.run()` pipeline is untouched for other product features.
+    Root cause this fixes: production ticker analysis succeeded, then unconditional
+    portfolio synthesis consumed the remaining deadline, the adapter timed out, and the whole
+    batch was reported failed.
+  * Frontend: still exactly one button; `deriveRunJobs` prefers the explicit session fields
+    (`expected_ticker_count`/`session_succeeded_ticker_count`/`session_remaining_ticker_count`)
+    over per-request batch reconstruction; continuation/caps/abort behavior unchanged
+    (`RUN_INTEL_MAX_CONTINUATIONS=20` honestly covers ceil(32/3)+publication).
+  * Tests: `test_run_intel_session_sql_contract.py` (migration contract),
+    `test_run_intel_analyst_only_production_path.py` (real adapter seam with `run()` +
+    `_run_portfolio_synthesis` patched to raise, revert simulation, timeout regression),
+    `test_run_intel_session_flow.py` (isolation / 16-ticker interruption-resume /
+    publication-only retry / 32-ticker exact accounting over the REAL store+worker),
+    `test_run_intel_session_router.py` (endpoint seam; replaces the deleted
+    `test_stage13b_run_intel_on_demand_status.py`, whose router-augmentation architecture
+    was removed).
 - **Cost guard posture stays** (ACTIVE): `INTEL_BACKGROUND_WORKERS_ENABLED=false` master kill
   switch, `INTEL_V3_SNAPSHOT_WRITES_ENABLED` write guard, interval clamps. Do not re-enable
   background workers casually; see `docs/deploy/RAILWAY_COST_GUARD.md`.

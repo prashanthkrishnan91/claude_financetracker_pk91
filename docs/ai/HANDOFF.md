@@ -117,16 +117,31 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   * Status plane: `GET /intel/v3/sessions/{id}/status` + `/sessions/active` — read-only,
     plain-English `plain_status`; polling observes work, never performs it. Page close
     never stops the run; returning rediscovers the active session.
-  * Worker: `distributed/worker_supervisor_v1` (in-process asyncio; started by /run,
-    app-startup crash recovery; exits when idle — no polling cost). Scheduler
-    (`run_scheduler_v1`) creates dependency waves: ticker-scoped lane collectors →
-    immutable evidence bundles → asset-compatible specialist batches (≤5, global LLM
-    semaphore) → deterministic conflict-triggered review → per-ticker deterministic
-    decision → portfolio join + certified publication (reuses `run_prewarm_snapshot`,
-    one session-linked snapshot, publication-only retry). Failure isolation: lane →
-    lane, specialist → batch/axis, ticker → ticker (`no_call` EVIDENCE INCOMPLETE, never
+  * Worker: `distributed/worker_supervisor_v1` (in-process asyncio; started by /run
+    AND a startup probe that survives transient boot-time DB failures and exits only
+    after a successful zero-session query; DB outages are never treated as idle —
+    bounded backoff + jitter, zero provider/LLM work). Scheduler (`run_scheduler_v1`)
+    creates dependency waves: ticker-scoped lane collectors → immutable evidence
+    bundles → asset-compatible specialist batches (≤5, global LLM semaphore) →
+    deterministic conflict-triggered review → per-ticker deterministic decision →
+    session-native portfolio join + publication. Failure isolation: lane → lane,
+    specialist → batch/axis, ticker → ticker (`no_call` EVIDENCE INCOMPLETE, never
     fabricated verdict rows); session terminal states `completed` /
     `completed_with_gaps` / `failed`.
+  * ONE decision authority: `decide()` runs exactly once per ticker inside the
+    decision task; the complete input+output persist on `intel_run_tickers.decision`;
+    compat rows (`agent_runs`/`agent_insights`/`recommendations`) are written AFTER
+    with the final action (projections, not advisory inputs). Publication
+    (`session_publication_v1`) rebuilds cards verbatim from persisted decisions —
+    zero `decide()` calls, zero global-recommendation reads (test-fenced), full
+    frozen-scope accounting (decided / NO CALL / failed with plain-English gaps),
+    distributed certification (card action == persisted action, no foreign/stale
+    cards), snapshot_source `worker_certified` vs `worker_certified_with_gaps`
+    (non-green amber in UI). Task graph is fail-closed (get_or_create with verified
+    duplicates only, expected-graph verification before created→running,
+    supervisor-driven repair of every partial-create shape) and claim-token fenced
+    (fresh token per claim; completion + every side-effect write require current
+    ownership; stale reclaimed workers cannot mutate outputs).
   * Collectors reuse existing providers (data_sources fetchers + breakers/semaphores,
     SEC/ETF/macro research-worker runners writing `research_artifacts`); lane TTL reuse +
     specialist `input_fingerprint` reuse skip duplicate provider/LLM work. Specialists are

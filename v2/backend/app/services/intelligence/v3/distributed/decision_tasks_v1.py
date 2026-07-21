@@ -375,11 +375,17 @@ async def execute_ticker_decision_task(
             outcome.error = "claim_lost"
             return outcome
 
+        # Idempotent retry: an already NO CALL ticker needs nothing more.
+        existing_decision = row.get("decision") or {}
+        if str(row.get("state")) == TICKER_NO_CALL:
+            outcome.final_ticker_state = TICKER_NO_CALL
+            outcome.decision = existing_decision or {"outcome": "NO_CALL"}
+            return outcome
+
         # Idempotent retry: the deterministic decision already persisted but a
         # previous attempt died writing the compatibility projections. Rewrite
         # ONLY the projections from the persisted final action — decide() is
         # never re-run for an already-decided ticker.
-        existing_decision = row.get("decision") or {}
         if (
             str(row.get("state")) == TICKER_DECIDED
             and existing_decision.get("agent_run_id")

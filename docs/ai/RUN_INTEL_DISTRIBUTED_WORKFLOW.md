@@ -120,12 +120,33 @@ Logical idempotency: unique `(run_session_id, task_type, COALESCE(lane,''),
 COALESCE(ticker,''), COALESCE(batch_key,''))`.
 
 Claiming: SQL RPC `claim_intel_run_tasks(worker_id, limit, lease_seconds,
-run_session_id)` using `FOR UPDATE SKIP LOCKED`; completion via
-`complete_intel_run_task` guarded by `claim_owner` + `state='claimed'` (a task
-can never be completed twice). The Python store calls the RPC when available
-and falls back to the repository-consistent guarded-UPDATE compare-and-swap
-(same pattern as `analyst_refresh_job_store_v1.claim_due_jobs`) when the RPC
-is missing (pre-migration environments, in-memory test fakes).
+run_session_id)` using `FOR UPDATE SKIP LOCKED`; every claim mints a fresh
+`claim_token` UUID (the claim-generation fence). Completion via
+`complete_intel_run_task` guarded by `claim_owner` + `state='claimed'` +
+`claim_token` (a task can never be completed twice, and a stale worker whose
+task was reclaimed matches zero rows). The Python store calls the RPC when
+available and falls back to the repository-consistent guarded-UPDATE
+compare-and-swap (same pattern as `analyst_refresh_job_store_v1.claim_due_jobs`)
+when the RPC is missing (pre-migration environments, in-memory test fakes).
+
+Side-effect fencing: every task-owned side effect — specialist output writes,
+evidence-bundle/ticker-row transitions (state-CAS guarded), deterministic
+decision writes, compatibility evidence writes, publication/session
+completion — verifies the CURRENT claim (`owns_claim`: state/owner/token on
+the durable row) immediately before writing, and ticker-row transitions
+additionally CAS on the expected prior states. A stale leaseholder cannot
+overwrite a specialist output, change a ticker decision, attach an old
+bundle, alter session completion, or create/activate a competing snapshot
+(two-worker tests assert the side-effect rows themselves stay unchanged).
+
+Graph creation is fail-closed and self-repairing: `get_or_create_task`
+returns the exact existing task only on a VERIFIED logical-identity conflict
+and re-raises every other database error; session creation verifies the exact
+expected seed graph (portfolio context + macro + every collector lane for
+every frozen ticker) before `created → running`; incomplete shapes stay in
+the explicit retryable `created` state and `repair_session_graph` (run by the
+supervisor — no browser traffic required) converges every partial-create
+shape to exactly one complete graph.
 
 ### intel_run_specialist_outputs (new)
 
@@ -264,32 +285,65 @@ holding with weight ≥ 5%; or required-axis confidence < 0.3 on a ≥5% holding
 It consumes specialist outputs + cited refs, fetches nothing, and its output is
 one more advisory row (axis='review') — it cannot set actions.
 
-## 9. Deterministic join contract (authority boundary)
+## 9. ONE final deterministic decision authority + session-native publication
 
-Final visible Buy/Hold/Trim/Sell authority remains EXACTLY
-`decision_policy_v1.decide()` — unchanged. The distributed flow feeds it, never
-bypasses or overrides it:
+Final visible Buy/Hold/Trim/Sell authority is EXACTLY ONE call site:
+`decision_policy_v1.decide()` inside the `ticker_decision` task. Publication
+never runs policy again and never reloads global recommendation state.
 
-1. `ticker_decision` composes the durable analyst evidence rows the canonical
-   certification contract requires (`agent_runs` completed + `agent_insights`
-   with `analyst_verdict` + `recommendations`), deterministically derived from
-   persisted specialist outputs (LLM text is quoted as evidence; the advisory
-   `suggested_action` is a deterministic mapping of specialist scores and is
-   itself only an advisory input to `decide()`).
-2. `decide()` runs with the same truth-aware input assembly as today
-   (evidence quality, price band, portfolio fit, risk band, suppression);
-   missing axes suppress themselves (existing SUPPRESSED semantics). The
-   per-ticker deterministic outcome is recorded on `intel_run_tickers.decision`
-   for auditability.
-3. A ticker whose required evidence/axes are unavailable beyond retry budget →
-   `no_call` state (EVIDENCE INCOMPLETE), recorded honestly in session state,
-   status plane and snapshot gap metadata; it is excluded from the certified
-   scope rather than fabricating freshness.
-4. `portfolio_join_publish` runs the existing zero-LLM deterministic
-   certification + publication (`run_prewarm_snapshot(run_session_id=…,
-   scope_tickers=decided)` → `check_certified_intel_run_contract` →
-   `_persist_snapshot`), publishing ONE snapshot linked to the session (unique
-   index `uq_intel_v3_snapshots_run_session` guarantees at most one).
+Ordering inside `ticker_decision` (single-authority contract):
+
+1. specialist aggregate is built (pure confidence-weighted math);
+2. the canonical `DecisionInputV3` is built;
+3. `decide()` executes EXACTLY ONCE per decided ticker;
+4. the COMPLETE deterministic input and output are persisted on
+   `intel_run_tickers.decision` (action, conviction, all bands, blockers,
+   suppression, rationale/why texts, plus the full serialized decision
+   input — the replay/audit record);
+5. compatibility evidence rows (`agent_runs`/`agent_insights`/
+   `recommendations`) are written LAST, carrying the FINAL deterministic
+   action — they are projections of the decision for legacy surfaces, never
+   an independent advisory action that publication reinterprets. No
+   BUY/HOLD/TRIM/SELL row exists before canonical policy determined it.
+
+Session-native publication (`session_publication_v1` +
+`publication_v1.execute_publication_task`):
+
+- reads ONLY: the exact session row, its frozen `intel_run_tickers` rows,
+  their evidence bundles, specialist outputs, persisted deterministic
+  decisions and session-level context. The global `ReadOnlyEvidenceAdapter`,
+  `run_prewarm_snapshot` and active `recommendations` are NOT read (a test
+  fence fails publication on any read of recommendations/agent_insights/
+  agent_runs);
+- decided cards are rebuilt VERBATIM from the persisted decision record
+  (`rebuild_decision_output`) and formatted with the shared pure
+  `snapshot_builder.build_snapshot`; the visible card action always equals
+  `intel_run_tickers.decision.action`;
+- NO CALL / failed tickers never surface any action card (an older session's
+  BUY can never appear for them) — they exist ONLY as explicit coverage gaps
+  with ticker, state and a plain-English reason;
+- the snapshot carries: full frozen holding count, decided/no_call/failed
+  counts, explicit gap ticker lists, `run_session_id`, workflow version,
+  session status, and specialist/evidence provenance;
+- the distributed certification contract (`certify_session_snapshot`)
+  verifies before persist: every frozen ticker accounted exactly once, every
+  card belongs to THIS session, card action == persisted decision action,
+  gap tickers rendered as gaps only, no foreign/duplicate cards, counts
+  consistent — otherwise publication fails retryably;
+- persistence inserts the ONE session-linked snapshot row (unique index +
+  adopt-on-conflict; deactivate-then-insert; cost-guard write flag honored).
+
+Snapshot-source vocabulary (backward compatible):
+- `worker_certified` — all frozen tickers decided + certified (green,
+  meaning unchanged);
+- `worker_certified_with_gaps` — certified over the decided subset with
+  every gap explicitly accounted; visibly non-green (frontend renders an
+  honest amber completed-with-gaps state, never "fully certified").
+
+Session status truth: `completed` only when ALL frozen tickers decided and
+certification passed; `completed_with_gaps` when ≥1 ticker is NO CALL/failed
+but every frozen ticker is explicitly accounted; `failed` when publication or
+the deterministic join cannot produce a truthful result.
 
 An optional narrator may explain decisions after they are fixed (existing
 behavior); no LLM, agent or worker sets the visible action or allocation.
@@ -319,9 +373,15 @@ behavior); no LLM, agent or worker sets the visible action or allocation.
 One in-process worker supervisor (`run_worker_supervisor_v1`) in the existing
 Railway `web` service:
 
-- Activated by `POST /intel/v3/run` (`ensure_supervisor_running()`); also
-  reactivated on app startup by a single cheap query for non-terminal v2
-  sessions (crash recovery), guarded so it never polls when idle.
+- Activated by `POST /intel/v3/run` (`ensure_supervisor_running()`); a
+  startup PROBE supervisor also starts on every boot and exits only after a
+  SUCCESSFUL zero-active-session query — crash recovery never depends on
+  browser traffic and survives a transient boot-time database failure.
+- Database outages are never idle: a failed active-session discovery query
+  raises a distinct outcome; the supervisor is retained, retries with
+  bounded exponential backoff + jitter (1s → 60s, ±30%), performs zero
+  provider/LLM work during the outage, and the idle-exit counter advances
+  only after a successful query that returned zero active sessions.
 - Loop: while an active v2 session exists → scheduler pass → claim (≤N) →
   execute under semaphores → repeat; exits when no active sessions (zero idle
   provider/LLM/database polling afterwards).

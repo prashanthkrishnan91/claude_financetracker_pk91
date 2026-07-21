@@ -33,6 +33,18 @@ RETIRED_SYMBOLS = (
     "run_intel_session_request",
 )
 
+# Retired as distributed-publication authority: the session-native builder
+# reads only session rows — never the global prewarm/evidence adapters, never
+# IntelV3Service. (The router legitimately keeps IntelV3Service for the
+# zero-LLM GET /snapshot read path, so this fence applies to the distributed
+# package only.)
+PUBLICATION_AUTHORITY_SYMBOLS = (
+    "run_prewarm_snapshot",
+    "ReadOnlyEvidenceAdapter",
+    "IntelV3Service",
+    "check_certified_intel_run_contract",
+)
+
 
 def _source(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -78,7 +90,7 @@ class TestDistributedPackageBoundary:
     def test_no_module_references_retired_execution(self):
         for path in sorted(DISTRIBUTED.glob("*.py")):
             source = _source(path)
-            for symbol in RETIRED_SYMBOLS:
+            for symbol in RETIRED_SYMBOLS + PUBLICATION_AUTHORITY_SYMBOLS:
                 assert symbol not in source, (
                     f"{path.name} references retired symbol {symbol!r}"
                 )

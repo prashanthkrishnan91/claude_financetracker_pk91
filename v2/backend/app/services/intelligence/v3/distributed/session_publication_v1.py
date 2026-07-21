@@ -17,7 +17,8 @@ Publication:
   * certifies the assembled snapshot against the frozen scope before persist.
 
 Shared pure formatting is reused (``snapshot_builder.build_snapshot``); the
-global ``ReadOnlyEvidenceAdapter`` and ``run_prewarm_snapshot`` are NOT used.
+global evidence-adapter / prewarm publication path is NOT used anywhere in
+this module (enforced by the architecture-boundary test).
 
 Snapshot-source vocabulary (backward compatible):
   * ``worker_certified``            — every frozen ticker decided + certified

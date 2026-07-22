@@ -114,7 +114,12 @@ class WorkerSupervisor:
     ):
         self._client = client
         self.settings = settings or get_settings()
+        # Explicit override (tests, callers wiring a single fake): used for
+        # BOTH specialist and review tasks when set, exactly as before this
+        # class had separate model-routed clients.
         self._llm = llm
+        self._specialist_llm: Any = None
+        self._review_llm: Any = None
         self.worker_id = worker_id or store.default_worker_id()
         self.metrics_buffer: dict[str, dict[str, int]] = {}
 
@@ -127,13 +132,49 @@ class WorkerSupervisor:
         return self._client
 
     @property
-    def llm(self) -> Any:
-        if self._llm is None:
+    def specialist_llm(self) -> Any:
+        """Standard specialist analysis: configured Haiku model, no fallback.
+
+        A specialist task never auto-escalates to Sonnet — a failed call
+        exhausts the durable task retry budget on the same cheap model.
+        """
+        if self._llm is not None:
+            return self._llm
+        if self._specialist_llm is None:
             from ....agents.llm import LLMClient
-            self._llm = LLMClient(
-                api_key=getattr(self.settings, "anthropic_api_key", "") or ""
+            self._specialist_llm = LLMClient(
+                api_key=getattr(self.settings, "anthropic_api_key", "") or "",
+                model=getattr(
+                    self.settings,
+                    "intel_v3_distributed_specialist_model",
+                    "claude-haiku-4-5-20251001",
+                ),
+                fallback_model=None,
             )
-        return self._llm
+        return self._specialist_llm
+
+    @property
+    def review_llm(self) -> Any:
+        """Conditional conflict-review agent: configured Sonnet model with a
+        configured Haiku fallback."""
+        if self._llm is not None:
+            return self._llm
+        if self._review_llm is None:
+            from ....agents.llm import LLMClient
+            self._review_llm = LLMClient(
+                api_key=getattr(self.settings, "anthropic_api_key", "") or "",
+                model=getattr(
+                    self.settings,
+                    "intel_v3_distributed_review_model",
+                    "claude-sonnet-5",
+                ),
+                fallback_model=getattr(
+                    self.settings,
+                    "intel_v3_distributed_review_fallback_model",
+                    "claude-haiku-4-5-20251001",
+                ),
+            )
+        return self._review_llm
 
     # ── One pass ─────────────────────────────────────────────────────────────
     async def run_pass(self) -> dict[str, int]:
@@ -273,12 +314,13 @@ class WorkerSupervisor:
                 await self._execute_bundle(task)
             elif task_type == TASK_SPECIALIST_ANALYSIS:
                 outcome = await execute_specialist_task(
-                    self.client, task=task, llm=self.llm,
+                    self.client, task=task, llm=self.specialist_llm,
                 )
                 buffer["llm_calls"] = buffer.get("llm_calls", 0) + outcome.llm_calls
                 buffer["llm_reused"] = (
                     buffer.get("llm_reused", 0) + len(outcome.reused)
                 )
+                self._buffer_model_metrics(buffer, outcome.models_used)
                 stats["llm_calls"] += outcome.llm_calls
                 await asyncio.to_thread(
                     lambda: store.complete_task(
@@ -297,9 +339,10 @@ class WorkerSupervisor:
                 )
             elif task_type == TASK_REVIEW_CONFLICT:
                 outcome = await execute_review_task(
-                    self.client, task=task, llm=self.llm,
+                    self.client, task=task, llm=self.review_llm,
                 )
                 buffer["llm_calls"] = buffer.get("llm_calls", 0) + outcome.llm_calls
+                self._buffer_model_metrics(buffer, outcome.models_used)
                 stats["llm_calls"] += outcome.llm_calls
                 await asyncio.to_thread(
                     lambda: store.complete_task(
@@ -356,6 +399,16 @@ class WorkerSupervisor:
                     error_detail=f"{type(exc).__name__}: {exc}",
                 )
             )
+
+    @staticmethod
+    def _buffer_model_metrics(
+        buffer: dict[str, int], models_used: list[str],
+    ) -> None:
+        """Per-session LLM-call counts by model (observability only, never a
+        decision input) — reuses the existing metrics buffer/flush seam."""
+        for model in models_used:
+            key = f"llm_calls_model:{model}"
+            buffer[key] = buffer.get(key, 0) + 1
 
     async def _execute_bundle(self, task: dict[str, Any]) -> None:
         session_id = str(task.get("run_session_id") or "")

@@ -407,6 +407,37 @@ Env vars (all additive):
 - `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` becomes irrelevant to Run Intel
   (documented; retained for nothing new).
 
+### Model cost routing (specialist Haiku, conditional review Sonnet)
+
+`WorkerSupervisor` builds two separate `LLMClient` instances instead of one
+shared client — standard specialist analysis never auto-escalates to the
+more expensive review model:
+
+- `specialist_llm` (`TASK_SPECIALIST_ANALYSIS`) — `intel_v3_distributed_specialist_model`
+  (default `claude-haiku-4-5-20251001`), fallback disabled. A specialist
+  failure retries the durable task on the same model; it never falls back to
+  Sonnet.
+- `review_llm` (`TASK_REVIEW_CONFLICT`) — `intel_v3_distributed_review_model`
+  (default `claude-sonnet-5`), falling back once to
+  `intel_v3_distributed_review_fallback_model` (default
+  `claude-haiku-4-5-20251001`).
+- `decision_policy_v1.decide()` remains the only visible Buy/Hold/Trim/Sell
+  authority regardless of which model produced the advisory specialist/review
+  signal. `TASK_TICKER_DECISION` and publication never touch an LLM client.
+
+Env vars (all additive; existing deployments work unchanged without setting
+any of them):
+
+- `INTEL_V3_DISTRIBUTED_SPECIALIST_MODEL` (default `claude-haiku-4-5-20251001`)
+- `INTEL_V3_DISTRIBUTED_REVIEW_MODEL` (default `claude-sonnet-5`)
+- `INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL` (default `claude-haiku-4-5-20251001`)
+
+`LLMClient.fallback_model` is now `Optional[str]`: no fallback is attempted
+when it is `None`, empty, or identical to the primary model. Legacy callers
+(`services/agents/orchestrator.py` and everything else constructing
+`LLMClient()` with defaults) are unaffected — the default fallback stays
+Sonnet 4.6 → Haiku 4.5.
+
 ## 12. Migration & rollout
 
 1. Merge branch; deploy backend (safe pre-migration: session creation returns

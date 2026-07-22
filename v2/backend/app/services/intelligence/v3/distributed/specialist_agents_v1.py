@@ -228,6 +228,10 @@ class SpecialistBatchOutcome:
         self.malformed: list[str] = []
         self.llm_calls = 0
         self.error: Optional[str] = None
+        # Actual model(s) that answered each ask_json call (per-session cost
+        # metrics by model; best-effort observability only, never decision
+        # input). One entry per LLM call, in call order.
+        self.models_used: list[str] = []
 
     @property
     def final_state(self) -> str:
@@ -344,10 +348,14 @@ async def execute_specialist_task(
 
     async def _call(prompt: str) -> dict[str, Any]:
         outcome.llm_calls += 1
+        call_meta: dict[str, Any] = {"axis": axis, "run_session_id": session_id}
         response = await llm.ask_json(
             system, prompt, max_tokens=350 * max(1, len(requested)),
-            metadata={"axis": axis, "run_session_id": session_id},
+            metadata=call_meta,
         )
+        model_used = call_meta.get("model_used")
+        if model_used:
+            outcome.models_used.append(str(model_used))
         return response if isinstance(response, dict) else {}
 
     response = await _call(user_prompt)
@@ -387,9 +395,12 @@ async def execute_specialist_task(
         return outcome
 
     valid_until = (now + timedelta(hours=OUTPUT_VALID_HOURS)).isoformat()
-    model_name = getattr(llm, "primary_model", None) or getattr(
-        llm, "model", None
-    ) or "claude"
+    model_name = (
+        outcome.models_used[-1] if outcome.models_used
+        else getattr(llm, "primary_model", None)
+        or getattr(llm, "model", None)
+        or "claude"
+    )
     for bundle in to_analyze:
         ticker = str(bundle.get("ticker")).upper()
         result = validated.get(ticker)
@@ -483,13 +494,17 @@ async def execute_review_task(
         return outcome
 
     outcome.llm_calls += 1
+    call_meta: dict[str, Any] = {"axis": AXIS_REVIEW, "run_session_id": session_id}
     response = await llm.ask_json(
         REVIEW_SYSTEM_PROMPT,
         f"Ticker: {ticker}\nSpecialist outputs (JSON):\n"
         + json.dumps(outputs, default=str)[:30000],
         max_tokens=500,
-        metadata={"axis": AXIS_REVIEW, "run_session_id": session_id},
+        metadata=call_meta,
     )
+    model_used = call_meta.get("model_used")
+    if model_used:
+        outcome.models_used.append(str(model_used))
     normalized = validate_specialist_result(
         {**response, "ticker": ticker} if isinstance(response, dict) else None
     )
@@ -502,7 +517,10 @@ async def execute_review_task(
         outcome.error = "claim_lost"
         return outcome
 
-    model_name = getattr(llm, "primary_model", None) or "claude"
+    model_name = (
+        outcome.models_used[-1] if outcome.models_used
+        else getattr(llm, "primary_model", None) or "claude"
+    )
     persisted = store.upsert_specialist_output(
         client,
         run_session_id=session_id,

@@ -1,6 +1,9 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-21 (Run Intel distributed workflow — the bounded-drain execution
+Last updated: 2026-07-22 (distributed Run Intel model cost routing — standard specialist
+analysis moved to Haiku 4.5 with no Sonnet escalation, conditional conflict review stays
+on Sonnet 5 with a Haiku fallback; migration 027's owner-guard trigger variable bug
+corrected. 2026-07-21: Run Intel distributed workflow — the bounded-drain execution
 architecture is replaced by a durable SQL task graph executed by a backend worker
 supervisor; the browser only creates one session and polls status. Contract:
 `docs/ai/RUN_INTEL_DISTRIBUTED_WORKFLOW.md`; migration
@@ -192,6 +195,8 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   0 failed — Tier 3: broad architecture/schema change + mission-mandated), full frontend
   jest green (596 passed), `tsc --noEmit` clean, `next build` green (placeholder
   `NEXT_PUBLIC_*` env vars needed to prerender locally — sandbox-only).
+- Distributed Run Intel model cost routing PR (2026-07-22): full backend suite green
+  (8467 passed, 0 failed, includes 16 new focused tests); no frontend files changed.
 
 ## SQL / env state
 
@@ -205,7 +210,26 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   `INTEL_V3_DISTRIBUTED_TASK_LEASE_SECONDS=300`,
   `INTEL_V3_DISTRIBUTED_MAX_TASK_ATTEMPTS=3`.
   `INTEL_V3_ON_DEMAND_REFRESH_ENABLED` no longer affects Run Intel (kept only so set
-  deployments don't fail validation).
+  deployments don't fail validation). Migration 027's two owner-guard trigger functions
+  were corrected in place (source-file fix, not a new migration): the PL/pgSQL variable
+  `session_user` shadowed the reserved `SESSION_USER` builtin instead of holding the
+  local lookup, so the owner comparison silently checked the wrong value; renamed to
+  `v_session_user_id` with qualified table aliases and `IS DISTINCT FROM`.
+- Distributed Run Intel model cost routing (2026-07-22): `WorkerSupervisor` now builds
+  two separate `LLMClient` instances instead of one shared client — standard specialist
+  analysis (`TASK_SPECIALIST_ANALYSIS`) routes to `intel_v3_distributed_specialist_model`
+  (default `claude-haiku-4-5-20251001`) with fallback disabled (a specialist failure
+  retries the durable task on the same model, never auto-escalating to Sonnet); the
+  conditional conflict-review agent (`TASK_REVIEW_CONFLICT`) routes to
+  `intel_v3_distributed_review_model` (default `claude-sonnet-5`) with fallback to
+  `intel_v3_distributed_review_fallback_model` (default `claude-haiku-4-5-20251001`).
+  `decision_policy_v1.decide()` remains the only visible Buy/Hold/Trim/Sell authority;
+  `TASK_TICKER_DECISION`/publication still make zero LLM calls. `LLMClient.fallback_model`
+  is now `Optional[str]` — no fallback when null/empty/identical to the primary model;
+  unrelated legacy `LLMClient()` callers (orchestrator, etc.) keep their Sonnet 4.6 →
+  Haiku 4.5 default failover unchanged. Env vars (all additive, existing deployments
+  unaffected without setting them): `INTEL_V3_DISTRIBUTED_SPECIALIST_MODEL`,
+  `INTEL_V3_DISTRIBUTED_REVIEW_MODEL`, `INTEL_V3_DISTRIBUTED_REVIEW_FALLBACK_MODEL`.
 - Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
   endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
 - `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`

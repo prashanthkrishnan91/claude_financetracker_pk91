@@ -111,7 +111,8 @@ Output COMPACT JSON ONLY. Exceeding any limit below is INVALID output:
 - No markdown, no code fences, no commentary before or after the JSON.
 - Exactly one result object per requested ticker, using the exact requested
   ticker symbol — never abbreviate, expand, or invent a symbol.
-- key_findings: at most 2 items.
+- key_findings: 1-2 items — never empty, even for thin evidence (state the
+  strongest evidence-grounded observation, however limited).
 - risks: at most 2 items.
 - missing_evidence: at most 2 items.
 - limitations: at most 2 items.

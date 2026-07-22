@@ -88,8 +88,13 @@ class TestCompactPromptContract:
 
     def test_states_field_caps_and_string_length(self):
         prompt = SPECIALIST_SYSTEM_PROMPT
-        assert prompt.count("at most 2 items") == 4  # key_findings/risks/
-        # missing_evidence/limitations, each capped independently
+        # risks/missing_evidence/limitations are capped at 2, optionally empty.
+        assert prompt.count("at most 2 items") == 3
+        # key_findings has the same upper bound but must never be empty —
+        # the validator rejects an entry outright if key_findings is empty,
+        # so the prompt states a 1-2 range instead of a bare upper bound.
+        assert "key_findings: 1-2 items" in prompt
+        assert "never empty" in prompt
         assert "120 characters" in prompt
         assert "INVALID output" in prompt
 

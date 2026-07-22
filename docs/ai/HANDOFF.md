@@ -1,13 +1,19 @@
 # HANDOFF — Current Repo State
 
-Last updated: 2026-07-22 (Haiku specialist output completion fix — production failure:
-session 7c4069a1-cc07-4c1e-a7d4-3bea67dd206d froze 31 holdings but completed 14 decided /
-17 NO CALL / 22 terminal task failures because Haiku returned verbose/Markdown-fenced/
-truncated JSON at 5-ticker batches with an unbounded ~350 tokens/ticker budget, and the
-whole batch retried through the durable task's full attempt budget instead of repairing
-just the missing tickers. Fix landed entirely inside the existing specialist execution
-seam — no Run Intel architecture, collector, decision-policy, publication, or frontend
-change. Same-day: distributed Run Intel model cost routing — standard specialist
+Last updated: 2026-07-22 (Haiku specialist output completion fix, PR #484 — production
+failure: session 7c4069a1-cc07-4c1e-a7d4-3bea67dd206d froze 31 holdings but completed 14
+decided / 17 NO CALL / 22 terminal task failures because Haiku returned verbose/Markdown-
+fenced/truncated JSON at 5-ticker batches with an unbounded ~350 tokens/ticker budget, and
+the whole batch retried through the durable task's full attempt budget instead of
+repairing just the missing tickers. Release-blocker follow-up on the same PR:
+`LLMClient.ask_json()`'s own internal same-model truncation retry was still silently
+doubling an already-bounded specialist batch call, invisible to the specialist's call
+count and the 1800-token ceiling — `ask_json()` gained `retry_truncated_response` (default
+True; specialist calls pass False), and the quota/auth-only repair skip was widened to
+any actual provider-call failure (rate-limit/transient included) so it's never confused
+with a ticker-level JSON parse failure. Fix landed entirely inside the existing specialist
+execution seam — no Run Intel architecture, collector, decision-policy, publication, or
+frontend change. Same-day: distributed Run Intel model cost routing — standard specialist
 analysis moved to Haiku 4.5 with no Sonnet escalation, conditional conflict review stays
 on Sonnet 5 with a Haiku fallback; migration 027's owner-guard trigger variable bug
 corrected. 2026-07-21: Run Intel distributed workflow — the bounded-drain execution
@@ -215,11 +221,13 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   `NEXT_PUBLIC_*` env vars needed to prerender locally — sandbox-only).
 - Distributed Run Intel model cost routing PR (2026-07-22): full backend suite green
   (8467 passed, 0 failed, includes 16 new focused tests); no frontend files changed.
-- Haiku specialist output completion fix PR (2026-07-22): full backend suite green
-  (8494 passed, 0 failed, includes 27 new focused tests in
-  `test_specialist_output_completion_v1.py`; the 34-holding golden run's exact LLM-call
-  accounting moved from 22 to 49 calls to reflect the new default 2-ticker Haiku batch
-  cap, same complete coverage); no frontend files changed; no SQL.
+- Haiku specialist output completion fix PR #484 (2026-07-22): full backend suite green
+  (8498 passed, 0 failed, includes 31 new focused tests in
+  `test_specialist_output_completion_v1.py` — 27 from the initial patch plus 4 from the
+  release-blocker follow-up that counts actual provider requests against a real
+  `LLMClient`; the 34-holding golden run's exact LLM-call accounting moved from 22 to 49
+  calls to reflect the new default 2-ticker Haiku batch cap, same complete coverage); no
+  frontend files changed; no SQL.
 
 ## SQL / env state
 
@@ -276,6 +284,25 @@ mapped from the Stage 12C/13A/13C diagnostic — presentation only, no new alloc
   never exceed the unrelated `intel_v3_distributed_max_specialist_batch` ceiling; new
   per-task structured log line + 4 session metrics counters (additive to the existing
   JSONB `intel_run_sessions.metrics`, no schema change).
+  **Release-blocker follow-up (same PR #484):** the specialist repair loop above was
+  correctly bounded at the wrapper (`ask_json`) call-count level, but `LLMClient` itself
+  still silently repeated a truncated response against the SAME model/prompt/batch one
+  layer down (`_call_with_backoff` at a larger token budget) — invisible to the
+  specialist's own ≤3-calls bound and the 1800-token ceiling, since prior tests only
+  mocked `ask_json()` and never counted actual `_single_call()` provider requests.
+  `ask_json()` gained `retry_truncated_response: bool = True` (legacy default —
+  unrelated callers, including the review agent's Sonnet→Haiku fallback, keep the
+  internal retry); specialist calls pass `retry_truncated_response=False`, so a
+  detected truncation is still recorded in metadata but never silently repeated —
+  the specialist's own per-ticker repair owns it instead. Separately, the
+  quota/auth-only "skip repair" gate was widened: ANY actual provider-call failure
+  (an exhausted rate-limit/transient retry too, not just quota/auth) now skips the
+  per-ticker repair loop and returns a retryable task outcome — a parse/truncation
+  failure (provider answered, JSON was bad) has no classification and remains
+  repair-eligible; a genuine transport failure never gets reinterpreted as
+  ticker-level malformed JSON, and an already-validated peer ticker is never
+  discarded or re-requested. 4 new tests use a REAL `LLMClient` with only
+  `_single_call()` stubbed (never `ask_json()`) to count actual provider requests.
 - Migration `v2/database/025_watchlist.sql` is REQUIRED (manual, additive) for Watchlist;
   endpoints return 503 `watchlist_migration_required` until applied. Everything else unchanged.
 - `FINANCE_RUNTIME_CERT_SECRET` (Vercel, server-only) + `FINANCE_RUNTIME_CERT_ENABLED=true`

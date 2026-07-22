@@ -25,17 +25,31 @@ Proves:
     another ticker in the same batch keeps failing (including via quota);
   * a specialist output produced by one model remains reusable under a
     different model's routing (Sonnet output reused under Haiku routing);
-  * at scale, a malformed ticker never drags its batch peer into NO CALL.
+  * at scale, a malformed ticker never drags its batch peer into NO CALL;
+  * against a REAL LLMClient (only `_single_call` stubbed, never `ask_json`
+    itself): a fenced+truncated two-ticker batch never triggers LLMClient's
+    own hidden same-model retry (`retry_truncated_response=False`), the
+    complete batch is requested exactly once, every subsequent request is a
+    single-ticker repair, at most 3 actual provider requests are made, and
+    every max_tokens sent to the provider is within 700..1800; a legacy
+    caller using the default argument still gets the internal retry;
+  * an exhausted rate-limit/transient provider failure (not just
+    quota/authentication) is never reinterpreted as ticker-level malformed
+    JSON — it skips the repair loop and returns a retryable task outcome,
+    without discarding an already-validated peer ticker.
 """
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 
+import app.services.agents.llm as llm_module
 from app.services.agents.llm import (
     ERROR_CLASS_AUTHENTICATION,
     ERROR_CLASS_QUOTA,
+    LLMClient,
     _extract_json,
 )
 from app.services.intelligence.v3.distributed import run_scheduler_v1 as scheduler
@@ -252,7 +266,8 @@ class TestPartialSuccessAndScopedRepair:
 
         async def flaky_ask_json(self, system, user, max_tokens=1024,
                                   normalizer=None, metadata=None,
-                                  reject_prose=False):
+                                  reject_prose=False,
+                                  retry_truncated_response=True):
             state["n"] += 1
             if state["n"] == 1:
                 # Initial batch call: both tickers missing/truncated.
@@ -265,6 +280,7 @@ class TestPartialSuccessAndScopedRepair:
             return await real_ask_json(
                 self, system, user, max_tokens=max_tokens, normalizer=normalizer,
                 metadata=metadata, reject_prose=reject_prose,
+                retry_truncated_response=retry_truncated_response,
             )
 
         monkeypatch.setattr(FakeLLM, "ask_json", flaky_ask_json)
@@ -506,3 +522,217 @@ class TestPeerIsolationAtScale:
             r["state"] in ("decided", "no_call", "failed")
             for r in client.rows("intel_run_tickers")
         )
+
+
+class _SingleCallStub:
+    """Records every REAL `LLMClient._single_call` invocation (the actual
+    Anthropic provider-request seam) and replays a scripted sequence of
+    responses. A response entry that is an exception instance is raised
+    instead of returned. The last entry repeats for any call beyond the
+    scripted length (so a single exception can stand in for an exhausted
+    same-call backoff loop)."""
+
+    def __init__(self, responses: list):
+        self._responses = list(responses)
+        self.calls: list[dict[str, Any]] = []
+
+    async def __call__(self, model, system, user, max_tokens):
+        # Assigned directly as an instance attribute (not a class attribute),
+        # so no descriptor/self-binding applies — `self` here is the stub,
+        # and LLMClient's `self._single_call(model, system, user, max_tokens)`
+        # call site passes exactly these four positional args.
+        index = len(self.calls)
+        self.calls.append({"model": model, "user": user, "max_tokens": max_tokens})
+        item = self._responses[min(index, len(self._responses) - 1)]
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+
+def _patch_fast_backoff(monkeypatch):
+    """LLMClient's 429/rate-limit backoff sleeps real seconds — patch it to
+    a no-op so a test that exhausts the retry loop stays fast."""
+    async def _fast_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(llm_module.asyncio, "sleep", _fast_sleep)
+
+
+def _real_haiku_client() -> LLMClient:
+    return LLMClient(
+        api_key="test-key", model="claude-haiku-4-5-20251001",
+        fallback_model=None,
+    )
+
+
+class TestRealProviderCallCounting:
+    """Counts ACTUAL Anthropic provider requests (`LLMClient._single_call`),
+    never `ask_json()` wrapper invocations — proves LLMClient's internal
+    truncation retry cannot hide an extra full-batch provider call inside a
+    specialist task's bounded repair budget."""
+
+    @pytest.mark.asyncio
+    async def test_truncated_batch_never_retries_internally_and_stays_bounded(
+        self, monkeypatch
+    ):
+        client = FakeSupabase()
+        await _session_with_ready_bundles(client, monkeypatch, ["AAPL", "MSFT"])
+        session = client.rows("intel_run_sessions")[0]
+        scheduler.run_scheduler_pass(
+            client, session=session, max_specialist_batch=2,
+        )
+        task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_SPECIALIST_ANALYSIS
+            and t["lane"] == AXIS_FUNDAMENTAL
+        )
+        task = claim_task_row(client, task)
+
+        valid_aapl = (
+            '{"results": [{"ticker": "AAPL", "stance": "positive", '
+            '"score": 0.4, "confidence": 0.7, "key_findings": ["ok"], '
+            '"risks": [], "missing_evidence": [], "limitations": []}]}'
+        )
+        valid_msft = (
+            '{"results": [{"ticker": "MSFT", "stance": "neutral", '
+            '"score": 0.0, "confidence": 0.6, "key_findings": ["ok"], '
+            '"risks": [], "missing_evidence": [], "limitations": []}]}'
+        )
+        stub = _SingleCallStub([
+            # Fenced AND truncated — the exact production failure shape.
+            '```json\n{"results": [{"ticker": "AAPL"',
+            valid_aapl,
+            valid_msft,
+        ])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        outcome = await execute_specialist_task(client, task=task, llm=llm)
+
+        assert outcome.final_state == TASK_SUCCEEDED
+        assert sorted(outcome.persisted) == ["AAPL", "MSFT"]
+        assert outcome.repair_calls == 2
+        assert outcome.llm_calls == 3
+        assert len(stub.calls) == 3, (
+            "LLMClient's internal truncation retry must not add a hidden "
+            "4th actual provider request"
+        )
+        for call in stub.calls:
+            assert 700 <= call["max_tokens"] <= 1800, (
+                f"provider request max_tokens {call['max_tokens']} outside "
+                "the 700-1800 ceiling"
+            )
+
+        first_user = stub.calls[0]["user"]
+        assert "AAPL" in first_user and "MSFT" in first_user, (
+            "the complete batch must be requested exactly once, up front"
+        )
+        for call in stub.calls[1:]:
+            has_aapl = "AAPL" in call["user"]
+            has_msft = "MSFT" in call["user"]
+            assert has_aapl != has_msft, (
+                "every request after the first must be an individual "
+                "single-ticker repair, never both tickers again"
+            )
+
+    @pytest.mark.asyncio
+    async def test_legacy_caller_default_keeps_internal_truncation_retry(
+        self, monkeypatch
+    ):
+        stub = _SingleCallStub([
+            '{"ok": true, "value": "trunc',       # truncated first attempt
+            '{"ok": true, "value": "complete"}',  # succeeds on internal retry
+        ])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        result = await llm.ask_json("system", "user prompt", max_tokens=1000)
+
+        assert result == {"ok": True, "value": "complete"}
+        assert len(stub.calls) == 2, (
+            "the default retry_truncated_response=True must preserve the "
+            "existing internal retry for non-specialist callers"
+        )
+        assert stub.calls[1]["max_tokens"] > stub.calls[0]["max_tokens"]
+
+
+class TestProviderFailureRepairGuard:
+    """An exhausted rate-limit/transient provider failure — not just
+    quota/authentication — must never be reinterpreted as ticker-level
+    malformed JSON eligible for the specialist's per-ticker repair loop."""
+
+    @pytest.mark.asyncio
+    async def test_exhausted_rate_limit_skips_repair_and_returns_retryable(
+        self, monkeypatch
+    ):
+        _patch_fast_backoff(monkeypatch)
+        client = FakeSupabase()
+        await _session_with_ready_bundles(client, monkeypatch, ["AAPL"])
+        session = client.rows("intel_run_sessions")[0]
+        scheduler.run_scheduler_pass(client, session=session)
+        task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_SPECIALIST_ANALYSIS
+            and t["lane"] == AXIS_FUNDAMENTAL
+        )
+        task = claim_task_row(client, task)
+
+        stub = _SingleCallStub([
+            Exception("rate_limit_error: rate limited, slow down"),
+        ])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        outcome = await execute_specialist_task(client, task=task, llm=llm)
+
+        assert outcome.repair_calls == 0, (
+            "an exhausted rate-limit failure must never trigger a "
+            "ticker-level repair call"
+        )
+        assert outcome.llm_calls == 1
+        assert outcome.quota_or_auth_failures == 0
+        assert outcome.error == "specialist_provider_call_failed"
+        assert outcome.final_state == store.TASK_FAILED_RETRYABLE
+        assert client.rows("intel_run_specialist_outputs") == []
+
+    @pytest.mark.asyncio
+    async def test_provider_failure_during_repair_preserves_valid_peer(
+        self, monkeypatch
+    ):
+        _patch_fast_backoff(monkeypatch)
+        client = FakeSupabase()
+        await _session_with_ready_bundles(client, monkeypatch, ["AAPL", "MSFT"])
+        session = client.rows("intel_run_sessions")[0]
+        scheduler.run_scheduler_pass(
+            client, session=session, max_specialist_batch=2,
+        )
+        task = next(
+            t for t in client.rows("intel_run_tasks")
+            if t["task_type"] == TASK_SPECIALIST_ANALYSIS
+            and t["lane"] == AXIS_FUNDAMENTAL
+        )
+        task = claim_task_row(client, task)
+
+        valid_aapl_only = (
+            '{"results": [{"ticker": "AAPL", "stance": "positive", '
+            '"score": 0.4, "confidence": 0.7, "key_findings": ["ok"], '
+            '"risks": [], "missing_evidence": [], "limitations": []}]}'
+        )
+        rate_limit_exc = Exception("rate_limit_error: rate limited, slow down")
+        stub = _SingleCallStub([valid_aapl_only, rate_limit_exc])
+        llm = _real_haiku_client()
+        monkeypatch.setattr(llm, "_single_call", stub)
+
+        outcome = await execute_specialist_task(client, task=task, llm=llm)
+
+        assert outcome.persisted == ["AAPL"], "peer ticker's success is never lost"
+        assert outcome.malformed == ["MSFT"]
+        assert outcome.repair_calls == 1
+        assert outcome.llm_calls == 2
+        assert outcome.error is None
+        assert outcome.final_state == TASK_DEGRADED
+        assert outcome.quota_or_auth_failures == 0
+        # AAPL's already-valid result must never be re-requested by the
+        # MSFT repair's (failing) provider calls.
+        for call in stub.calls[1:]:
+            assert "AAPL" not in call["user"]

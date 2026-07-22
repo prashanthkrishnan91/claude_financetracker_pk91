@@ -100,6 +100,7 @@ class LLMClient:
         normalizer: Optional[Callable[[dict[str, Any]], dict[str, Any]]] = None,
         metadata: Optional[dict[str, Any]] = None,
         reject_prose: bool = False,
+        retry_truncated_response: bool = True,
     ) -> dict[str, Any]:
         """Run a single prompt, parse JSON reply, return `{}` on total failure.
 
@@ -123,6 +124,19 @@ class LLMClient:
         attempting. ``reject_prose=True`` uses the strict compact-JSON
         extractor (no prose-wrapped-object fallback) instead of the default
         prose-tolerant one.
+
+        ``retry_truncated_response`` (default True, legacy behavior): on a
+        truncated-looking parse failure, silently repeats the SAME prompt
+        against the SAME model at a larger token budget before giving up.
+        Callers whose OWN caller already owns a bounded, scoped repair
+        strategy (e.g. distributed specialists, which retry only the
+        missing/malformed ticker at its own bounded budget) must pass
+        ``False`` — otherwise this hidden retry would silently double an
+        already-oversized batch call, invisible to the caller's own call
+        count and token-budget bookkeeping. When False, a detected
+        truncation is recorded in ``metadata`` exactly as it always was,
+        but neither the prompt nor the batch is repeated — `{}` is
+        returned immediately for the caller's own repair logic to handle.
         """
         if not self.api_key:
             logger.warning("LLM call skipped — no anthropic_api_key configured")
@@ -152,7 +166,7 @@ class LLMClient:
                 })
                 return normalizer(parsed) if normalizer else parsed
             _log_parse_failure(self.model, text, debug)
-            if debug.get("truncated_response_detected"):
+            if debug.get("truncated_response_detected") and retry_truncated_response:
                 larger_budget = max(max_tokens + 256, int(max_tokens * 1.6))
                 logger.warning(
                     "LLM primary parse looks truncated; retrying once with larger max_tokens=%d",

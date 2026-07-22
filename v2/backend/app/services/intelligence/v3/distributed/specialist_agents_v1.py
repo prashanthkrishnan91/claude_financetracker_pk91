@@ -409,6 +409,12 @@ async def execute_specialist_task(
         response = await llm.ask_json(
             system, prompt, max_tokens=budget,
             metadata=call_meta, reject_prose=True,
+            # The specialist executor owns its OWN bounded, per-ticker repair
+            # strategy below — LLMClient must never silently repeat this same
+            # prompt/batch internally on a truncated response (that would
+            # double an already-budgeted call, invisible to outcome.llm_calls
+            # and to the ≤3-calls-per-two-ticker-task bound).
+            retry_truncated_response=False,
         )
         model_used = call_meta.get("model_used")
         if model_used:
@@ -435,11 +441,20 @@ async def execute_specialist_task(
     response, error_class = await _call(user_prompt, requested)
     validated: dict[str, dict[str, Any]] = _validate_batch(response, requested)
 
+    # Any ACTUAL provider-call failure — quota/authentication, or an
+    # exhausted rate-limit/transient retry inside LLMClient — is never
+    # reinterpreted as ticker-level malformed JSON. A parse/truncation
+    # failure (the provider answered, but the JSON was bad) has NO
+    # classification here and is eligible for the bounded per-ticker
+    # repair loop below; a genuine provider-call failure gets zero repair
+    # calls and an honest retryable task outcome instead.
     quota_or_auth = error_class in NON_RETRYABLE_PROVIDER_CLASSES
-    if quota_or_auth:
-        outcome.quota_or_auth_failures += 1
-        # Quota/authentication failures get exactly ONE provider call — never
-        # a repair call. The durable task retry backoff owns the retry.
+    provider_failure = bool(error_class)
+    if provider_failure:
+        if quota_or_auth:
+            outcome.quota_or_auth_failures += 1
+        # One provider call only — never a repair call. The durable task
+        # retry backoff owns the next attempt.
     else:
         # Retry only missing/malformed tickers, one call PER ticker (bounded:
         # a two-ticker batch never exceeds 1 initial + 2 individual = 3 total
@@ -459,18 +474,23 @@ async def execute_specialist_task(
             repair_response, repair_error_class = await _call(repair_prompt, [ticker])
             outcome.repair_calls += 1
             validated.update(_validate_batch(repair_response, [ticker]))
-            if repair_error_class in NON_RETRYABLE_PROVIDER_CLASSES:
-                outcome.quota_or_auth_failures += 1
-                quota_or_auth = True
-                break  # stop further per-ticker repairs; remainder stay missing
+            if repair_error_class:
+                quota_or_auth = repair_error_class in NON_RETRYABLE_PROVIDER_CLASSES
+                if quota_or_auth:
+                    outcome.quota_or_auth_failures += 1
+                provider_failure = True
+                break  # stop further per-ticker repairs on any provider failure
 
     if not validated and requested:
-        # Whole-call failure (LLM down / empty / quota-auth) — retry the
-        # durable task, keep nothing. Never fires once ANY ticker validated.
-        outcome.error = (
-            "specialist_provider_quota_or_auth_failure" if quota_or_auth
-            else "specialist_llm_call_failed"
-        )
+        # Whole-call failure (LLM down / empty / provider failure) — retry
+        # the durable task, keep nothing. Never fires once ANY ticker
+        # validated — a peer's success is never discarded.
+        if quota_or_auth:
+            outcome.error = "specialist_provider_quota_or_auth_failure"
+        elif provider_failure:
+            outcome.error = "specialist_provider_call_failed"
+        else:
+            outcome.error = "specialist_llm_call_failed"
         return outcome
 
     # Claim fence (post-LLM, pre-write): the LLM call is the long-running
